@@ -274,11 +274,16 @@ impl HeldDpiShifts {
         }
         info!(%low, "DPI shift held");
         let before = self.before.entry(device.clone()).or_default().clone();
+        // The active hold owns its restore value independently of the live
+        // cache: reconnect confirmation can invalidate that cache at any time.
+        if let Some(current) = current {
+            before.set(current);
+        }
         hold_dpi_in_background(
             executor.access.op(&route),
             executor.dpi_order.request(&route),
             low,
-            current.is_none().then(|| before.clone()),
+            before.clone(),
         );
         self.by_device.insert(
             device,
@@ -843,6 +848,37 @@ mod tests {
         assert_eq!(again.get(), Some(Dpi::new(1200)));
         before.clear();
         assert_eq!(again.get(), None, "a written restore forgets the reading");
+    }
+
+    #[test]
+    fn dpi_shift_keeps_a_known_restore_value_when_reapply_invalidates_current() {
+        let executor = dpi_shift_executor(Some(Dpi::new(1200)));
+        let first = PressToken::hook_for_test(1, ButtonId::G6);
+        let second = PressToken::hook_for_test(2, ButtonId::G7);
+        let mut shifts = HeldDpiShifts::default();
+        shifts.start(&executor, &first, Some("mouse"));
+        let route = shifts.by_device.values().next().unwrap().route.clone();
+        executor
+            .dpi_cycle
+            .write()
+            .unwrap()
+            .invalidate_current(&route);
+        shifts.start(&executor, &second, Some("mouse"));
+        shifts.end(&executor, &first);
+        let held = shifts.by_device.values().next().unwrap();
+        assert_eq!(held.presses, 1);
+        assert_eq!(
+            held.restore_to(&executor.dpi_cycle.read().unwrap()),
+            Some(Dpi::new(1200))
+        );
+        shifts.end(&executor, &second);
+        // No channel exists in this harness, so the pending restore is still owed.
+        shifts.start(&executor, &first, Some("mouse"));
+        let held = shifts.by_device.values().next().unwrap();
+        assert_eq!(
+            held.restore_to(&executor.dpi_cycle.read().unwrap()),
+            Some(Dpi::new(1200))
+        );
     }
 
     #[test]
