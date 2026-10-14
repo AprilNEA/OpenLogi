@@ -123,10 +123,15 @@ async fn native_departure_switches_mouse_after_keyboard_leaves_without_keyboard_
     };
 
     const NATIVE_INDEX: u8 = 9;
+    const HOSTS_INFO_INDEX: u8 = 10;
     const RECEIVER: &str = "native-host-receiver";
-    for stop_reason in [
-        HostSwitchStopReason::DeviceLost,
-        HostSwitchStopReason::Graceful,
+    for (stop_reason, read_succeeds, bounds_available) in [
+        (HostSwitchStopReason::DeviceLost, true, true),
+        (HostSwitchStopReason::Graceful, true, true),
+        (HostSwitchStopReason::DeviceLost, false, true),
+        (HostSwitchStopReason::Graceful, false, true),
+        (HostSwitchStopReason::DeviceLost, true, false),
+        (HostSwitchStopReason::DeviceLost, false, false),
     ] {
         let report = |device: u8, feature: u8, function: u8, payload: [u8; 3]| {
             vec![
@@ -140,7 +145,9 @@ async fn native_departure_switches_mouse_after_keyboard_leaves_without_keyboard_
             ]
         };
         let exchange = |request: Vec<u8>, response| CassetteExchange {
-            required: request[1] == 1 || stop_reason == HostSwitchStopReason::DeviceLost,
+            required: request[1] == 1 && (request[2] != HOSTS_INFO_INDEX || bounds_available)
+                || (stop_reason == HostSwitchStopReason::DeviceLost
+                    && (read_succeeds || bounds_available)),
             request_match: RequestMatch::Hidpp20,
             request,
             response,
@@ -183,8 +190,52 @@ async fn native_departure_switches_mouse_after_keyboard_leaves_without_keyboard_
                             Some(report(1, 0, 0, [NATIVE_INDEX, 0, 2])),
                         ),
                         exchange(
+                            report(1, 0, 0, [0x18, 0x15, 0]),
+                            Some(report(
+                                1,
+                                0,
+                                0,
+                                [
+                                    if bounds_available {
+                                        HOSTS_INFO_INDEX
+                                    } else {
+                                        0
+                                    },
+                                    0,
+                                    2,
+                                ],
+                            )),
+                        ),
+                        CassetteExchange {
+                            required: bounds_available,
+                            request_match: RequestMatch::Hidpp20,
+                            request: report(1, HOSTS_INFO_INDEX, 0, [0, 0, 0]),
+                            response: Some(vec![
+                                0x11,
+                                1,
+                                HOSTS_INFO_INDEX,
+                                0,
+                                0x07,
+                                0,
+                                3,
+                                1,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                            ]),
+                        },
+                        exchange(
                             keyboard_host_read.clone(),
-                            Some(report(1, NATIVE_INDEX, 0, [3, 1, 0])),
+                            read_succeeds.then(|| report(1, NATIVE_INDEX, 0, [3, 1, 0])),
                         ),
                         exchange(report(2, 0, 1, [0, 0, 0]), Some(report(2, 0, 1, [4, 0, 0]))),
                         exchange(
@@ -289,18 +340,24 @@ async fn native_departure_switches_mouse_after_keyboard_leaves_without_keyboard_
         };
         let (outcome, ()) = tokio::join!(session, leave_keyboard);
         drop(observer);
-        if stop_reason == HostSwitchStopReason::DeviceLost {
+        if stop_reason == HostSwitchStopReason::DeviceLost && (read_succeeds || bounds_available) {
             assert!(matches!(
                 outcome.unwrap(),
                 HostSwitchSessionOutcome::NativeDeparture
             ));
-        } else {
+        } else if read_succeeds || stop_reason == HostSwitchStopReason::Graceful && bounds_available
+        {
             assert!(matches!(
                 outcome.unwrap(),
                 HostSwitchSessionOutcome::Restored {
                     requested_host: None
                 }
             ));
+        } else {
+            assert!(
+                outcome.is_err(),
+                "unreadable host bounds must not authorize a switch"
+            );
         }
         let completion = backend.channel_completion(RECEIVER).unwrap();
         let keyboard_requests: Vec<_> = completion
@@ -310,10 +367,10 @@ async fn native_departure_switches_mouse_after_keyboard_leaves_without_keyboard_
             .collect();
         assert_eq!(
             keyboard_requests.len(),
-            3,
-            "keyboard gets only initial ping, feature lookup and host read"
+            if bounds_available { 5 } else { 4 },
+            "keyboard gets ping, two feature lookups, host bounds and current host read"
         );
-        if stop_reason == HostSwitchStopReason::DeviceLost {
+        if stop_reason == HostSwitchStopReason::DeviceLost && (read_succeeds || bounds_available) {
             assert_eq!(
                 &completion.written_reports.last().unwrap()[..3],
                 &[0x10, 2, NATIVE_INDEX]
@@ -323,7 +380,7 @@ async fn native_departure_switches_mouse_after_keyboard_leaves_without_keyboard_
         } else {
             assert_eq!(
                 completion.written_reports.len(),
-                3,
+                if bounds_available { 5 } else { 4 },
                 "graceful stop cancels queued departure without target writes"
             );
         }
@@ -390,6 +447,11 @@ async fn native_forwarding_stops_during_target_preparation() {
         exchange(
             report(1, 0, 0, [0x18, 0x14, 0]),
             Some(report(1, 0, 0, [NATIVE_INDEX, 0, 2])),
+            true,
+        );
+        exchange(
+            report(1, 0, 0, [0x18, 0x15, 0]),
+            Some(report(1, 0, 0, [0, 0, 0])),
             true,
         );
         let keyboard_read = report(1, NATIVE_INDEX, 0, [0; 3]);
@@ -516,7 +578,7 @@ async fn native_forwarding_stops_during_target_preparation() {
         let writes = completion.written_reports;
         assert_eq!(
             writes.iter().filter(|report| report[1] == 1).count(),
-            3,
+            4,
             "no keyboard writes: {case}"
         );
         assert_eq!(

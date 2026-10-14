@@ -13,7 +13,7 @@ use hidpp::{
     feature::{
         CreatableFeature,
         change_host::{ChangeHostFeature, ChangeHostInfo},
-        hosts_info::{HostIndex, HostSlotStatus, HostsInfoFeature},
+        hosts_info::{HostIndex, HostSlotStatus, HostsInfoFeature, HostsInfoFeatureInfo},
     },
     protocol::v20,
 };
@@ -153,19 +153,48 @@ pub async fn run_host_switch_session(
                 }
             }
         });
+        let bounds = keyboard_host_bounds(&mut device).await;
         let change_host = device.add_feature::<ChangeHostFeature>(feature.index);
-        let state = timed_hidpp("reading keyboard host", change_host.get_host_info()).await?;
-        info!(route = %keyboard, "native host switch link active");
-        if let Some(host) = monitor_native_departure(
-            &mut shutdown,
-            &mut departures,
-            registry,
-            &shared,
-            device_io.clone(),
-            state,
-        )
-        .await
-        {
+        let state = timed_hidpp("reading keyboard host", change_host.get_host_info()).await;
+        let departure = match state {
+            Ok(state) => {
+                info!(route = %keyboard, "native host switch link active");
+                monitor_native_departure(
+                    &mut shutdown,
+                    &mut departures,
+                    registry,
+                    &shared,
+                    device_io.clone(),
+                    state,
+                )
+                .await
+            }
+            Err(error) => {
+                // A native notification can arrive while getHostInfo waits for
+                // the departing keyboard. Only drain reports already queued;
+                // an unrelated read failure must still fail the session.
+                let Some(bounds) = bounds else {
+                    return Err(error.into());
+                };
+                let mut host = None;
+                while let Ok(hosts) = departures.try_recv() {
+                    // The final valid notification describes the destination
+                    // if multiple transitions were queued during the read.
+                    if let HostIndex::Slot(source) = bounds.current_host
+                        && let Some(target) =
+                            native_departure_host(hosts, bounds.host_count, source)
+                    {
+                        host = Some(target);
+                    }
+                }
+                let Some(host) = host else {
+                    return Err(error.into());
+                };
+                debug!(route = %keyboard, %error, "keyboard host read failed after native departure");
+                Some(host)
+            }
+        };
+        if let Some(host) = departure {
             // Departure already moved the keyboard. Only target routes may be
             // queried or written, even if inventory retired the keyboard.
             if !native_shutdown_requested(&shutdown) {
@@ -278,6 +307,23 @@ async fn run_diverted_host_switch(
     })
 }
 
+// Capture independent host bounds before ChangeHost can lose its reply on departure.
+async fn keyboard_host_bounds(device: &mut Device) -> Option<HostsInfoFeatureInfo> {
+    let feature = timed_hidpp(
+        "locating keyboard hosts-info feature",
+        device.root().get_feature(HostsInfoFeature::ID),
+    )
+    .await
+    .ok()??;
+    let hosts_info = device.add_feature::<HostsInfoFeature>(feature.index);
+    timed_hidpp(
+        "reading keyboard host bounds",
+        hosts_info.get_feature_info(),
+    )
+    .await
+    .ok()
+}
+
 fn native_departure(
     message: &v20::Message,
     device_index: u8,
@@ -299,12 +345,12 @@ fn native_departure(
     Some([payload[0], payload[1]])
 }
 
-fn native_departure_host(hosts: [u8; 2], state: ChangeHostInfo) -> Option<u8> {
-    let [source, target] = hosts;
-    (source < state.host_count
-        && target < state.host_count
-        && source == state.current_host
-        && target != source)
+fn native_departure_host(
+    [source, target]: [u8; 2],
+    host_count: u8,
+    current_host: u8,
+) -> Option<u8> {
+    (source < host_count && target < host_count && source == current_host && target != source)
         .then_some(target)
 }
 
@@ -328,7 +374,7 @@ async fn monitor_native_departure(
         // Device loss and inventory removal can accompany departure; only
         // graceful cancellation takes precedence over its queued notification.
         while let Ok(hosts) = departures.try_recv() {
-            if let Some(host) = native_departure_host(hosts, state) {
+            if let Some(host) = native_departure_host(hosts, state.host_count, state.current_host) {
                 return Some(host);
             }
         }
@@ -340,7 +386,7 @@ async fn monitor_native_departure(
 
             hosts = departures.recv() => {
                 let hosts = hosts?;
-                if let Some(host) = native_departure_host(hosts, state) {
+                if let Some(host) = native_departure_host(hosts, state.host_count, state.current_host) {
                     return Some(host);
                 }
             }

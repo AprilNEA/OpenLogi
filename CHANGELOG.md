@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- *(agent)* follow native MX Keys Mini Easy-Switch departure notifications so linked mice switch even after the keyboard leaves the source host.
+- *(agent)* follow native MX Keys Mini Easy-Switch departures even when the keyboard leaves before its initial host read answers.
 - *(agent)* preserve queued mouse follow when the keyboard goes offline, and cancel pending mouse switches after disabling the link or suspending device I/O.
 
 ## [0.8.13] - 2026-10-09
