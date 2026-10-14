@@ -186,6 +186,12 @@ pub struct AssetResolver {
 }
 
 impl AssetResolver {
+    /// Independent resolver for isolated test and native QA fixture worlds.
+    #[cfg(all(target_os = "macos", any(test, feature = "native-ui-qa")))]
+    pub(crate) fn fixture() -> Self {
+        Self::new()
+    }
+
     pub fn new() -> Self {
         let write_root = user_cache_root();
         let bundle = bundle_assets_root();

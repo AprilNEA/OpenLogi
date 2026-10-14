@@ -19,7 +19,7 @@ pub enum ConfigPersistence {
     ReadOnly(String),
     /// Keep changes in the in-memory [`Config`] only.
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "native-ui-qa")),
         expect(dead_code, reason = "test-only persistence boundary")
     )]
     MemoryOnly,

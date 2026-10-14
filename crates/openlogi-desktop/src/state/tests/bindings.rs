@@ -205,25 +205,64 @@ fn clearing_a_thumbwheel_override_drops_both_directions() {
 }
 
 #[test]
-fn gesture_mode_is_not_editable_from_inside_a_per_app_profile() {
-    // The trap this guards: `set_gesture_mode` writes the device's global
-    // bindings, so honouring it here would change every application from a
-    // panel labelled with one. A per-app entry is `Action`-valued and has no
-    // per-direction shape to promote into.
+fn app_gesture_edits_preserve_global_and_reset_to_inheritance() {
     let mut state = state_editing("com.apple.Safari");
-
+    let global = state.device_gesture_maps();
     let _ = state.commit_gesture_mode(ButtonId::DpiToggle, true);
-
+    let _ = state.commit_gesture_binding(ButtonId::DpiToggle, GestureDirection::Up, Action::Copy);
+    let custom = state.current_gesture_maps()[&ButtonId::DpiToggle].clone();
+    assert_eq!(custom[&GestureDirection::Up], Action::Copy);
+    assert_eq!(state.editing_app_override_count(), 1);
+    assert_eq!(state.device_gesture_maps(), global);
+    assert!(
+        state
+            .editing_app_gesture_overrides()
+            .unwrap()
+            .contains_key(&ButtonId::DpiToggle)
+    );
+    let _ = state.commit_gesture_mode(ButtonId::DpiToggle, false);
     assert!(
         !state
-            .config
-            .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::DpiToggle),
-        "a per-app profile must not promote a button globally"
+            .current_gesture_maps()
+            .contains_key(&ButtonId::DpiToggle)
     );
+    let _ = state.commit_gesture_mode(ButtonId::DpiToggle, true);
+    assert_eq!(state.current_gesture_maps()[&ButtonId::DpiToggle], custom);
+    let _ = state.clear_app_binding(ButtonId::DpiToggle);
+    assert_eq!(state.current_gesture_maps(), global);
+    assert!(state.editing_app_gesture_overrides().is_none());
+    assert_eq!(state.editing_app_override_count(), 0);
+    assert!(state.editing_app_overrides().is_none());
+}
+
+#[test]
+fn app_direction_edit_snapshots_inherited_map_and_other_apps_remain_unchanged() {
+    let mut state = state_with_a_known_mouse();
+    let _ =
+        state.commit_gesture_binding(ButtonId::GestureButton, GestureDirection::Up, Action::Copy);
+    let global = state.current_gesture_maps();
+    let _ = state.set_editing_app(Some("com.apple.Safari".into()));
+    let _ = state.commit_gesture_binding(
+        ButtonId::GestureButton,
+        GestureDirection::Click,
+        Action::Paste,
+    );
+    let custom = state.current_gesture_maps()[&ButtonId::GestureButton].clone();
+    assert_eq!(custom[&GestureDirection::Up], Action::Copy);
+    assert_eq!(custom[&GestureDirection::Click], Action::Paste);
+    let _ = state.set_editing_app(Some("com.example.Other".into()));
+    assert_eq!(state.current_gesture_maps(), global);
+    let _ = state.set_editing_app(None);
+    assert_eq!(state.current_gesture_maps(), global);
+    let _ = state.set_editing_app(Some("com.apple.Safari".into()));
+    let key = state.current_record().unwrap().device_key();
+    let _ = state.remove_all_app_profiles(&key, "com.apple.Safari");
     assert!(
-        state.current_gesture_maps().is_empty(),
-        "and no gesture menu is offered in that scope"
+        state.config.devices[KNOWN_MOUSE_KEY]
+            .per_app_gesture_bindings
+            .is_empty()
     );
+    assert_eq!(state.current_gesture_maps(), global);
 }
 
 #[test]
@@ -234,11 +273,11 @@ fn a_gesture_button_stays_one_when_the_scope_returns_to_the_default_profile() {
     assert!(global.contains_key(&ButtonId::DpiToggle));
 
     let _ = state.set_editing_app(Some("com.apple.Safari".into()));
-    assert!(state.current_gesture_maps().is_empty());
+    assert_eq!(state.current_gesture_maps(), global);
     assert_eq!(
         state.gesture_bindings(),
         &global,
-        "the inspector cache keeps inherited gestures while per-app editing hides their controls"
+        "the inspector exposes inherited gestures while app-specific edits stay scoped"
     );
     // The device still has its gestures — only the open profile cannot show
     // them, which is what the device card must keep reporting.
