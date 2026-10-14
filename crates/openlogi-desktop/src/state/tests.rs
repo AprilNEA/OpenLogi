@@ -52,6 +52,7 @@ pub(crate) mod device_list;
 mod device_names;
 mod dpi;
 mod fn_lock;
+mod host_switch;
 mod lighting;
 mod os_layout;
 mod profile_scope;

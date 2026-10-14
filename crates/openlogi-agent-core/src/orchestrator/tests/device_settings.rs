@@ -86,18 +86,18 @@ fn host_switch_links_keep_sleeping_targets_but_require_online_keyboard() {
         dev("offline", 3, false),
     ];
 
-    let links = host_switch_links(&config, &devices);
+    let publication = host_switch_links(&config, &devices);
 
-    assert_eq!(links.len(), 1);
+    assert_eq!(publication.active.len(), 1);
     assert_eq!(
-        links[0].keyboard,
+        publication.active[0].keyboard,
         DeviceRoute::Bolt {
             receiver_uid: "AA00".into(),
             slot: 1,
         }
     );
     assert_eq!(
-        links[0].targets,
+        publication.active[0].targets,
         vec![
             DeviceRoute::Bolt {
                 receiver_uid: "AA00".into(),

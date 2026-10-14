@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(gui)* opt-in Easy-Switch mouse-follow controls on the keyboard's Device tab.
+
+### Fixed
+
+- *(agent)* follow native MX Keys Mini Easy-Switch departures even when the keyboard leaves before its initial host read answers.
+- *(agent)* preserve queued mouse follow when the keyboard goes offline, and cancel pending mouse switches after disabling the link or suspending device I/O.
+- *(agent)* restore diverted Easy-Switch controls after a sleeping keyboard wakes on the same receiver, allowing mouse follow to rearm.
+
 ## [0.8.13] - 2026-10-09
 
 ### Added

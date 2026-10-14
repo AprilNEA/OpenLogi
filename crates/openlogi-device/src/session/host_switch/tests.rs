@@ -1,20 +1,21 @@
 use std::sync::Arc;
 
-use hidpp::channel::HidppChannel;
+use hidpp::{channel::HidppChannel, protocol::v20};
 
 use super::{
-    ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, PendingHostSwitchRestore,
-    ReportingMode, event_host, host_change_required, host_channel, prepare_host_change_on,
-    restoration_change, rollback_host_switch_start, shares_channel,
+    ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionOutcome,
+    HostSwitchStopReason, PendingHostSwitchRestore, ReportingMode, event_host,
+    host_change_required, host_channel, prepare_host_change_on, restoration_change,
+    rollback_host_switch_start, run_host_switch_session, shares_channel,
 };
-use crate::backend::NodeId;
+use crate::backend::{HidBackend, NodeId};
 use crate::channel::scripted::{
     ScriptedRawHidChannel, feature_error, scripted_channel as raw_scripted_channel,
 };
 use crate::reprog_controls::{
     AnalyticsKeyEvent, CidReporting, ControlId, CtrlIdInfo, ReprogControlsEvent,
 };
-use crate::{ChannelRegistry, DeviceRoute, SharedChannel, device_io_channel};
+use crate::{ChannelPool, ChannelRegistry, DeviceRoute, SharedChannel, device_io_channel};
 
 /// Feature index the scripted keyboard reports for `0x1814 ChangeHost`.
 const CHANGE_HOST_INDEX: u8 = 0x04;
@@ -103,6 +104,505 @@ fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>>
 async fn scripted_channel(responder: crate::channel::scripted::Responder) -> Arc<HidppChannel> {
     let (raw, _handle) = ScriptedRawHidChannel::with_responder(responder);
     crate::channel::scripted::scripted_channel(raw).await
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one receiver replay proves notification validation and departure ordering end to end"
+)]
+async fn native_departure_switches_mouse_after_keyboard_leaves_without_keyboard_writes() {
+    use openlogi_fixture::{
+        CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
+    };
+    use tokio::sync::{mpsc, watch};
+
+    use crate::replay::{
+        ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReceiverLinkState,
+        ReceiverSlot, ReceiverSlotState, ReplayBackend, ReplayChannel, ReplayNode, ReplayTopology,
+    };
+
+    const NATIVE_INDEX: u8 = 9;
+    const HOSTS_INFO_INDEX: u8 = 10;
+    const RECEIVER: &str = "native-host-receiver";
+    for (stop_reason, read_succeeds, bounds_available) in [
+        (HostSwitchStopReason::DeviceLost, true, true),
+        (HostSwitchStopReason::Graceful, true, true),
+        (HostSwitchStopReason::DeviceLost, false, true),
+        (HostSwitchStopReason::Graceful, false, true),
+        (HostSwitchStopReason::DeviceLost, true, false),
+        (HostSwitchStopReason::DeviceLost, false, false),
+    ] {
+        let report = |device: u8, feature: u8, function: u8, payload: [u8; 3]| {
+            vec![
+                0x10,
+                device,
+                feature,
+                function << 4,
+                payload[0],
+                payload[1],
+                payload[2],
+            ]
+        };
+        let exchange = |request: Vec<u8>, response| CassetteExchange {
+            required: request[1] == 1 && (request[2] != HOSTS_INFO_INDEX || bounds_available)
+                || (stop_reason == HostSwitchStopReason::DeviceLost
+                    && (read_succeeds || bounds_available)),
+            request_match: RequestMatch::Hidpp20,
+            request,
+            response,
+        };
+        let keyboard_host_read = report(1, NATIVE_INDEX, 0, [0, 0, 0]);
+        let mut node = crate::channel::scripted::scripted_node_info(RECEIVER);
+        node.product_id = 0xc548;
+        let node_id = node.id.clone();
+        let backend = Arc::new(
+            ReplayBackend::new(
+                ReplayTopology {
+                    nodes: vec![ReplayNode {
+                        info: node.clone(),
+                        presence: NodePresence::Present,
+                        open_outcome: OpenOutcome::Hidpp,
+                        channel: Some(RECEIVER.into()),
+                        raw_writer: RawWriterAvailability::Unavailable,
+                        receiver_slots: [1, 2]
+                            .map(|slot| ReceiverSlot {
+                                slot,
+                                state: ReceiverSlotState::Paired(ReceiverLinkState::Online),
+                            })
+                            .to_vec(),
+                    }],
+                    channels: vec![ReplayChannel {
+                        id: RECEIVER.into(),
+                        connection: ChannelConnection::Connected,
+                        report_support: ReportSupport::ShortAndLong,
+                    }],
+                },
+                vec![HidCassette {
+                    schema_version: FIXTURE_SCHEMA_VERSION,
+                    name: "native keyboard departure with mouse still reachable".into(),
+                    channel: RECEIVER.into(),
+                    report_support: ReportSupport::ShortAndLong,
+                    exchanges: vec![
+                        exchange(report(1, 0, 1, [0, 0, 0]), Some(report(1, 0, 1, [4, 0, 0]))),
+                        exchange(
+                            report(1, 0, 0, [0x18, 0x14, 0]),
+                            Some(report(1, 0, 0, [NATIVE_INDEX, 0, 2])),
+                        ),
+                        exchange(
+                            report(1, 0, 0, [0x18, 0x15, 0]),
+                            Some(report(
+                                1,
+                                0,
+                                0,
+                                [
+                                    if bounds_available {
+                                        HOSTS_INFO_INDEX
+                                    } else {
+                                        0
+                                    },
+                                    0,
+                                    2,
+                                ],
+                            )),
+                        ),
+                        CassetteExchange {
+                            required: bounds_available,
+                            request_match: RequestMatch::Hidpp20,
+                            request: report(1, HOSTS_INFO_INDEX, 0, [0, 0, 0]),
+                            response: Some(vec![
+                                0x11,
+                                1,
+                                HOSTS_INFO_INDEX,
+                                0,
+                                0x07,
+                                0,
+                                3,
+                                1,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                            ]),
+                        },
+                        exchange(
+                            keyboard_host_read.clone(),
+                            read_succeeds.then(|| report(1, NATIVE_INDEX, 0, [3, 1, 0])),
+                        ),
+                        exchange(report(2, 0, 1, [0, 0, 0]), Some(report(2, 0, 1, [4, 0, 0]))),
+                        exchange(
+                            report(2, 0, 0, [0x18, 0x14, 0]),
+                            Some(report(2, 0, 0, [NATIVE_INDEX, 0, 2])),
+                        ),
+                        exchange(
+                            report(2, NATIVE_INDEX, 0, [0, 0, 0]),
+                            Some(report(2, NATIVE_INDEX, 0, [3, 1, 0])),
+                        ),
+                        exchange(
+                            report(2, 0, 0, [0x18, 0x15, 0]),
+                            Some(report(2, 0, 0, [0, 0, 0])),
+                        ),
+                        exchange(report(2, NATIVE_INDEX, 1, [0, 0, 0]), None),
+                    ],
+                }],
+            )
+            .expect("native departure replay is valid"),
+        );
+        let held_host_read = backend
+            .hold_next_response(RECEIVER, RequestMatch::Hidpp20, &keyboard_host_read)
+            .expect("keyboard host read can be held after listener registration");
+        let channel = backend.open_hidpp(&node).await.unwrap().unwrap();
+        let keyboard = DeviceRoute::Bolt {
+            receiver_uid: "synthetic-native".into(),
+            slot: 1,
+        };
+        let mouse = DeviceRoute::Bolt {
+            receiver_uid: "synthetic-native".into(),
+            slot: 2,
+        };
+        let registry = ChannelRegistry::default();
+        registry.replace_node(
+            node_id.clone(),
+            [keyboard.clone(), mouse.clone()],
+            Arc::clone(&channel),
+        );
+        let pool = ChannelPool::with_backend(backend.clone());
+        let (_signal, gate) = device_io_channel();
+        let (shutdown, stopped) = watch::channel(None);
+        let (seen_tx, mut seen) = mpsc::unbounded_channel();
+        let observer = channel.add_msg_listener_guarded(move |raw, matched| {
+            if !matched
+                && super::native_departure(&v20::Message::from(raw), 1, NATIVE_INDEX)
+                    == Some([1, 0])
+            {
+                let _ = seen_tx.send(());
+            }
+        });
+        let targets = [mouse.clone()];
+        let session = run_host_switch_session(keyboard, stopped, &registry, gate, &targets, &pool);
+        let leave_keyboard = async {
+            held_host_read.request_written().await;
+            // Nonzero software IDs are responses. Avoid impersonating the held
+            // read's exact header, which would legitimately complete that request.
+            let request_software = backend
+                .channel_completion(RECEIVER)
+                .unwrap()
+                .written_reports
+                .last()
+                .unwrap()[3]
+                & 0x0f;
+            let foreign_software = if request_software == 0x0f { 1 } else { 0x0f };
+            // Invalid routes, headers, slots and current-host no-ops precede the
+            // recorded [source 1, target 0] notification. None may move the mouse.
+            for (device, feature, function_software, source, target) in [
+                (2, NATIVE_INDEX, 0, 1, 0),
+                (1, NATIVE_INDEX + 1, 0, 1, 0),
+                (1, NATIVE_INDEX, foreign_software, 1, 0),
+                (1, NATIVE_INDEX, 0x10, 1, 0),
+                (1, NATIVE_INDEX, 0, 3, 0),
+                (1, NATIVE_INDEX, 0, 1, 3),
+                (1, NATIVE_INDEX, 0, 0, 2),
+                (1, NATIVE_INDEX, 0, 1, 1),
+                (1, NATIVE_INDEX, 0, 1, 0),
+            ] {
+                let mut notification = vec![0; 20];
+                notification[..6].copy_from_slice(&[
+                    0x11,
+                    device,
+                    feature,
+                    function_software,
+                    source,
+                    target,
+                ]);
+                backend
+                    .emit_channel_report(RECEIVER, &notification)
+                    .unwrap();
+            }
+            seen.recv().await.expect("native departure was dispatched");
+            backend
+                .set_receiver_slot_state(
+                    &node_id,
+                    1,
+                    ReceiverSlotState::Paired(ReceiverLinkState::Offline),
+                )
+                .unwrap();
+            registry.replace_node(node_id.clone(), [mouse], Arc::clone(&channel));
+            shutdown.send_replace(Some(stop_reason));
+            held_host_read.release();
+        };
+        let (outcome, ()) = tokio::join!(session, leave_keyboard);
+        drop(observer);
+        if stop_reason == HostSwitchStopReason::DeviceLost && (read_succeeds || bounds_available) {
+            assert!(matches!(
+                outcome.unwrap(),
+                HostSwitchSessionOutcome::NativeDeparture
+            ));
+        } else if read_succeeds || stop_reason == HostSwitchStopReason::Graceful && bounds_available
+        {
+            assert!(matches!(
+                outcome.unwrap(),
+                HostSwitchSessionOutcome::Restored {
+                    requested_host: None
+                }
+            ));
+        } else {
+            assert!(
+                outcome.is_err(),
+                "unreadable host bounds must not authorize a switch"
+            );
+        }
+        let completion = backend.channel_completion(RECEIVER).unwrap();
+        let keyboard_requests: Vec<_> = completion
+            .written_reports
+            .iter()
+            .filter(|request| request[1] == 1)
+            .collect();
+        assert_eq!(
+            keyboard_requests.len(),
+            if bounds_available { 5 } else { 4 },
+            "keyboard gets ping, two feature lookups, host bounds and current host read"
+        );
+        if stop_reason == HostSwitchStopReason::DeviceLost && (read_succeeds || bounds_available) {
+            assert_eq!(
+                &completion.written_reports.last().unwrap()[..3],
+                &[0x10, 2, NATIVE_INDEX]
+            );
+            assert_eq!(completion.written_reports.last().unwrap()[3] >> 4, 1);
+            assert_eq!(&completion.written_reports.last().unwrap()[4..], &[0, 0, 0]);
+        } else {
+            assert_eq!(
+                completion.written_reports.len(),
+                if bounds_available { 5 } else { 4 },
+                "graceful stop cancels queued departure without target writes"
+            );
+        }
+        assert_eq!(
+            completion.channel_open_count, 1,
+            "target reuses receiver, not departed keyboard"
+        );
+        backend
+            .require_complete()
+            .expect("only planned target reads and host write occur");
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "cassette covers pending target read, both cancellation sources, and legitimate device loss"
+)]
+async fn native_forwarding_stops_during_target_preparation() {
+    use openlogi_fixture::{
+        CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
+    };
+    use tokio::sync::watch;
+
+    use crate::replay::{
+        ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReceiverLinkState,
+        ReceiverSlot, ReceiverSlotState, ReplayBackend, ReplayChannel, ReplayNode, ReplayTopology,
+    };
+
+    const RECEIVER: &str = "native-forwarding-cancel";
+    const NATIVE_INDEX: u8 = 9;
+    for case in [
+        "graceful",
+        "suspended",
+        "device_lost",
+        "escalated",
+        "between_targets",
+    ] {
+        let report = |device: u8, feature: u8, function: u8, payload: [u8; 3]| {
+            vec![
+                0x10,
+                device,
+                feature,
+                function << 4,
+                payload[0],
+                payload[1],
+                payload[2],
+            ]
+        };
+        let mut exchanges = Vec::new();
+        let mut exchange = |request: Vec<u8>, response: Option<Vec<u8>>, required: bool| {
+            exchanges.push(CassetteExchange {
+                required,
+                request_match: RequestMatch::Hidpp20,
+                request,
+                response,
+            });
+        };
+        exchange(
+            report(1, 0, 1, [0; 3]),
+            Some(report(1, 0, 1, [4, 0, 0])),
+            true,
+        );
+        exchange(
+            report(1, 0, 0, [0x18, 0x14, 0]),
+            Some(report(1, 0, 0, [NATIVE_INDEX, 0, 2])),
+            true,
+        );
+        exchange(
+            report(1, 0, 0, [0x18, 0x15, 0]),
+            Some(report(1, 0, 0, [0, 0, 0])),
+            true,
+        );
+        let keyboard_read = report(1, NATIVE_INDEX, 0, [0; 3]);
+        exchange(
+            keyboard_read.clone(),
+            Some(report(1, NATIVE_INDEX, 0, [3, 1, 0])),
+            true,
+        );
+        for device in [2, 3] {
+            let required = device == 2 || case == "device_lost" || case == "between_targets";
+            exchange(
+                report(device, 0, 1, [0; 3]),
+                Some(report(device, 0, 1, [4, 0, 0])),
+                required,
+            );
+            exchange(
+                report(device, 0, 0, [0x18, 0x14, 0]),
+                Some(report(device, 0, 0, [NATIVE_INDEX, 0, 2])),
+                required,
+            );
+            exchange(
+                report(device, NATIVE_INDEX, 0, [0; 3]),
+                Some(report(device, NATIVE_INDEX, 0, [3, 1, 0])),
+                required,
+            );
+            let forward = case == "device_lost" || (case == "between_targets" && device == 2);
+            exchange(
+                report(device, 0, 0, [0x18, 0x15, 0]),
+                Some(report(device, 0, 0, [0; 3])),
+                forward,
+            );
+            exchange(report(device, NATIVE_INDEX, 1, [0; 3]), None, forward);
+        }
+        let mut node = crate::channel::scripted::scripted_node_info(RECEIVER);
+        node.product_id = 0xc548;
+        let backend = Arc::new(
+            ReplayBackend::new(
+                ReplayTopology {
+                    nodes: vec![ReplayNode {
+                        info: node.clone(),
+                        presence: NodePresence::Present,
+                        open_outcome: OpenOutcome::Hidpp,
+                        channel: Some(RECEIVER.into()),
+                        raw_writer: RawWriterAvailability::Unavailable,
+                        receiver_slots: [1, 2, 3]
+                            .map(|slot| ReceiverSlot {
+                                slot,
+                                state: ReceiverSlotState::Paired(ReceiverLinkState::Online),
+                            })
+                            .to_vec(),
+                    }],
+                    channels: vec![ReplayChannel {
+                        id: RECEIVER.into(),
+                        connection: ChannelConnection::Connected,
+                        report_support: ReportSupport::ShortAndLong,
+                    }],
+                },
+                vec![HidCassette {
+                    schema_version: FIXTURE_SCHEMA_VERSION,
+                    name: format!("native forwarding interrupted during target read: {case}"),
+                    channel: RECEIVER.into(),
+                    report_support: ReportSupport::ShortAndLong,
+                    exchanges,
+                }],
+            )
+            .expect("forwarding cassette is valid"),
+        );
+        let keyboard_barrier = backend
+            .hold_next_response(RECEIVER, RequestMatch::Hidpp20, &keyboard_read)
+            .unwrap();
+        let pending_device = if case == "between_targets" { 3 } else { 2 };
+        let mouse_read = report(pending_device, NATIVE_INDEX, 0, [0; 3]);
+        let mouse_barrier = backend
+            .hold_next_response(RECEIVER, RequestMatch::Hidpp20, &mouse_read)
+            .unwrap();
+        let channel = backend.open_hidpp(&node).await.unwrap().unwrap();
+        let route = |slot| DeviceRoute::Bolt {
+            receiver_uid: "synthetic-native".into(),
+            slot,
+        };
+        let keyboard = route(1);
+        let targets = [route(2), route(3)];
+        let registry = ChannelRegistry::default();
+        registry.replace_node(
+            node.id.clone(),
+            [keyboard.clone(), targets[0].clone(), targets[1].clone()],
+            channel,
+        );
+        let pool = ChannelPool::with_backend(backend.clone());
+        let (signal, gate) = device_io_channel();
+        let (shutdown, stopped) = watch::channel(None);
+        let session = run_host_switch_session(keyboard, stopped, &registry, gate, &targets, &pool);
+        let interrupt = async {
+            keyboard_barrier.request_written().await;
+            let mut departure = vec![0; 20];
+            departure[..6].copy_from_slice(&[0x11, 1, NATIVE_INDEX, 0, 1, 0]);
+            backend.emit_channel_report(RECEIVER, &departure).unwrap();
+            keyboard_barrier.release();
+            mouse_barrier.request_written().await;
+            match case {
+                "graceful" => {
+                    shutdown.send_replace(Some(HostSwitchStopReason::Graceful));
+                }
+                "suspended" | "between_targets" => {
+                    assert!(signal.suspend());
+                }
+                "device_lost" => {
+                    shutdown.send_replace(Some(HostSwitchStopReason::DeviceLost));
+                }
+                "escalated" => {
+                    shutdown.send_replace(Some(HostSwitchStopReason::DeviceLost));
+                    shutdown.send_replace(Some(HostSwitchStopReason::Graceful));
+                }
+                _ => unreachable!(),
+            }
+            mouse_barrier.release();
+        };
+        let (outcome, ()) = tokio::join!(session, interrupt);
+        assert!(matches!(
+            outcome.unwrap(),
+            HostSwitchSessionOutcome::NativeDeparture
+        ));
+        let completion = backend.channel_completion(RECEIVER).unwrap();
+        let writes = completion.written_reports;
+        assert_eq!(
+            writes.iter().filter(|report| report[1] == 1).count(),
+            4,
+            "no keyboard writes: {case}"
+        );
+        assert_eq!(
+            writes.iter().filter(|report| report[1] == 2).count(),
+            if matches!(case, "device_lost" | "between_targets") {
+                5
+            } else {
+                3
+            },
+            "no write after cancellation: {case}"
+        );
+        assert_eq!(
+            writes.iter().filter(|report| report[1] == 3).count(),
+            match case {
+                "device_lost" => 5,
+                "between_targets" => 3,
+                _ => 0,
+            },
+            "remaining targets untouched: {case}"
+        );
+        backend
+            .require_complete()
+            .expect("cassette has no missing required requests");
+    }
 }
 
 #[tokio::test]
