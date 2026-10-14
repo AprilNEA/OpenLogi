@@ -4,7 +4,7 @@ mod catalog;
 mod picker;
 mod shell;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{App, Entity, ParentElement, Styled, Window, div};
@@ -263,7 +263,7 @@ pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
             .recent_app_name(app)
             .map_or_else(|| friendly_app_name(app), str::to_string)
     });
-    let override_count = state.editing_app_overrides().map_or(0, BTreeMap::len);
+    let override_count = state.editing_app_override_count();
     let summary = profile_summary(editing_app.as_deref(), override_count);
     let active = state
         .active_profile_name()

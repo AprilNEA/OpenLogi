@@ -29,7 +29,7 @@ pub(super) struct BindingState {
     active_button: Option<ButtonId>,
     /// Effective bindings for the selected device and open profile.
     button_bindings: BTreeMap<ButtonId, Action>,
-    /// Device-global per-direction gesture bindings.
+    /// Effective per-direction gesture bindings for the selected editor profile.
     gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Global keyboard F-key bindings (Esc + F1-F19).
     keyboard_bindings: BTreeMap<KeyTrigger, Action>,
@@ -74,7 +74,8 @@ impl BindingState {
     fn refresh_device(&mut self, config: &Config, persistent_key: Option<&str>) {
         let button_bindings =
             bindings_for(config, persistent_key, self.editing_app(persistent_key));
-        let gesture_bindings = gesture_maps_for(config, persistent_key);
+        let gesture_bindings =
+            gesture_maps_for(config, persistent_key, self.editing_app(persistent_key));
         self.button_bindings = button_bindings;
         self.gesture_bindings = gesture_bindings;
     }
@@ -88,12 +89,13 @@ impl BindingState {
 fn gesture_maps_for(
     config: &Config,
     persistent_key: Option<&str>,
+    app: Option<&str>,
 ) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
     let Some(key) = persistent_key else {
         return BTreeMap::new();
     };
-    let mut maps = hidpp_gesture_maps_for(config, Some(key), None);
-    maps.extend(oshook_gestures_for(config, Some(key), None));
+    let mut maps = hidpp_gesture_maps_for(config, Some(key), app);
+    maps.extend(oshook_gestures_for(config, Some(key), app));
     maps
 }
 
@@ -160,7 +162,7 @@ impl AppState {
         &self.bindings.button_bindings
     }
 
-    /// Device-global gesture direction maps for the selected device.
+    /// Effective gesture direction maps for the selected device and editor profile.
     #[must_use]
     pub fn gesture_bindings(&self) -> &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
         &self.bindings.gesture_bindings
@@ -211,12 +213,11 @@ impl AppState {
         };
         let app = self.editing_app().map(str::to_string);
         self.config.edit(|config| match app {
-            // A per-app entry is `Action`-valued, so an override always
-            // replaces the whole button — which is exactly what picking one
-            // action means, and why gesture mode is not offered in this scope.
+            // Picking one action suspends the app's direction map without changing global gestures.
             Some(app) => config.set_per_app_binding(&key, &app, button, Some(action)),
             None => config.set_binding(&key, button, Binding::Single(action)),
         });
+        self.refresh_binding_projections();
         // The agent owns the hook; have it rebuild its live map from config.
         self.persist_and_reload("binding");
         events
@@ -270,8 +271,9 @@ impl AppState {
                 return false;
             };
             let buttons = device.per_app_bindings.remove(app).is_some();
+            let gestures = device.per_app_gesture_bindings.remove(app).is_some();
             let ring = device.action_ring.per_app.remove(app).is_some();
-            buttons || ring
+            buttons || gestures || ring
         });
         if changed && !self.persist_and_reload("all application profiles") {
             return StateEvent::BindingsChanged(key.clone()).into();
@@ -326,6 +328,33 @@ impl AppState {
             .and_then(DeviceRecord::persistent_config_key)?;
         self.editing_app()
             .and_then(|app| self.config.per_app_overrides(key, app))
+    }
+
+    /// Count overridden buttons in the selected profile, including directional maps once.
+    #[must_use]
+    pub fn editing_app_override_count(&self) -> usize {
+        self.editing_app_overrides()
+            .into_iter()
+            .flat_map(|map| map.keys())
+            .chain(
+                self.editing_app_gesture_overrides()
+                    .into_iter()
+                    .flat_map(|map| map.keys()),
+            )
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
+
+    /// Directional overrides belonging to the selected application profile.
+    #[must_use]
+    pub fn editing_app_gesture_overrides(
+        &self,
+    ) -> Option<&BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>> {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)?;
+        self.editing_app()
+            .and_then(|app| self.config.per_app_gesture_overrides(key, app))
     }
 
     /// Apply one paired thumb-wheel preset atomically. Both directional
@@ -399,7 +428,7 @@ impl AppState {
         else {
             return BTreeMap::new();
         };
-        gesture_maps_for(&self.config, Some(key))
+        gesture_maps_for(&self.config, Some(key), None)
     }
 
     /// How many gesture directions the active device has bound, across every
@@ -409,21 +438,13 @@ impl AppState {
         self.device_gesture_maps().values().map(BTreeMap::len).sum()
     }
 
-    /// The gesture menus the panel offers: [`Self::device_gesture_maps`], or
-    /// nothing while a per-app profile is open.
-    ///
-    /// A per-app entry holds one `Action` and has no per-direction shape, so
-    /// there is nothing to edit in that scope: every button falls through to
-    /// the single-action picker, and overriding one is what stops it gesturing
-    /// in that app. Offering the gesture menu instead would edit the global
-    /// profile from a screen labelled with an application.
+    /// Direction menus for the selected editor profile, including inherited maps.
     #[must_use]
-    #[cfg(test)]
     pub fn current_gesture_maps(&self) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
-        if self.editing_app().is_some() {
-            return BTreeMap::new();
-        }
-        self.device_gesture_maps()
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key);
+        gesture_maps_for(&self.config, key, self.editing_app())
     }
 
     /// Turn gesture mode on or off for one button of the current device —
@@ -452,20 +473,15 @@ impl AppState {
         else {
             return events;
         };
-        // Gesture mode is a property of the device's global bindings — a
-        // per-app entry holds one `Action` and has no per-direction shape to
-        // promote into. The picker hides the entry point in a per-app profile;
-        // this is the backstop, because writing it here would silently change
-        // every app instead of the one on screen.
-        if self.editing_app().is_some() {
-            debug!(?button, "gesture mode is not editable in a per-app profile");
+        let app = self.editing_app().map(str::to_string);
+        let active = self.current_gesture_maps().contains_key(&button);
+        if active == enabled {
             return events;
         }
-        if self.config.is_gesture_mode(&key, button) == enabled {
-            return events;
-        }
-        self.config
-            .edit(|config| config.set_gesture_mode(&key, button, enabled));
+        self.config.edit(|config| match app {
+            Some(app) => config.set_per_app_gesture_mode(&key, &app, button, enabled),
+            None => config.set_gesture_mode(&key, button, enabled),
+        });
         // The mode change shuffles bindings between the single + gesture maps.
         self.refresh_binding_projections();
         self.persist_and_reload("gesture-mode change");
@@ -493,21 +509,10 @@ impl AppState {
             );
             return events;
         };
-        let is_gesture_mode = self.config.is_gesture_mode(&key, button);
+        let is_gesture_mode = self.current_gesture_maps().contains_key(&button);
         let is_stored_os_hook_gesture = button.is_os_hook_button() && is_gesture_mode;
         if !button.supports_gesture_mode() && !is_stored_os_hook_gesture {
             debug!(?button, "gestures are not supported for this control");
-            return events;
-        }
-        // Same backstop as `commit_gesture_mode`: direction maps live only in
-        // the global profile, so an edit arriving while a per-app one is open
-        // would change every app instead of the one on screen.
-        if self.editing_app().is_some() {
-            debug!(
-                ?button,
-                ?direction,
-                "gestures are not editable in a per-app profile"
-            );
             return events;
         }
         // A stray edit on a button not in gesture mode must NOT silently
@@ -528,8 +533,14 @@ impl AppState {
             .entry(button)
             .or_default()
             .insert(direction, action.clone());
-        self.config
-            .edit(|config| config.set_gesture_direction(&key, button, direction, action));
+        let app = self.editing_app().map(str::to_string);
+        self.config.edit(|config| match app {
+            Some(app) => {
+                config.set_per_app_gesture_direction(&key, &app, button, direction, action);
+            }
+            None => config.set_gesture_direction(&key, button, direction, action),
+        });
+        self.refresh_binding_projections();
         // The agent owns the gesture watcher; have it rebuild from config.
         self.persist_and_reload("gesture binding");
         events

@@ -210,6 +210,15 @@ pub struct DeviceConfig {
     /// action, never a per-direction gesture overlay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
+    /// App-specific gesture maps replace the whole button's global binding.
+    /// An explicit app single-action binding suspends its map without discarding the swipes.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "deserialize_button_maps_by_app"
+    )]
+    pub per_app_gesture_bindings:
+        BTreeMap<String, BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>>,
     /// Host-rendered Actions Ring settings and complete per-application layouts.
     #[serde(default, skip_serializing_if = "ActionRingConfig::is_default")]
     pub action_ring: ActionRingConfig,
@@ -387,6 +396,7 @@ impl Default for DeviceConfig {
             bindings: BTreeMap::new(),
             disabled_gestures: BTreeMap::new(),
             per_app_bindings: BTreeMap::new(),
+            per_app_gesture_bindings: BTreeMap::new(),
             action_ring: ActionRingConfig::default(),
             dpi_presets: Vec::new(),
             dpi: None,
@@ -495,6 +505,9 @@ struct RawDeviceConfig {
     gesture_bindings: BTreeMap<GestureDirection, Action>,
     #[serde(default, deserialize_with = "deserialize_button_maps_by_app")]
     per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
+    #[serde(default, deserialize_with = "deserialize_button_maps_by_app")]
+    per_app_gesture_bindings:
+        BTreeMap<String, BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>>,
     #[serde(default)]
     action_ring: ActionRingConfig,
     #[serde(default, deserialize_with = "deserialize_dpi_presets")]
@@ -573,6 +586,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             bindings,
             disabled_gestures: raw.disabled_gestures,
             per_app_bindings: raw.per_app_bindings,
+            per_app_gesture_bindings: raw.per_app_gesture_bindings,
             action_ring: raw.action_ring,
             dpi_presets: raw.dpi_presets,
             dpi: raw.dpi,

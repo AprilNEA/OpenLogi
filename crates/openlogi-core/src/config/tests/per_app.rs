@@ -163,3 +163,89 @@ fn windows_exe_selector_ignores_non_exe_identifiers() {
     );
     assert!(!cfg.has_app_override("2b042", "com.microsoft.VSCode"));
 }
+
+#[test]
+fn app_direction_maps_survive_single_mode_and_reset_without_changing_global() {
+    use crate::binding::GestureDirection;
+    let mut cfg = Config::default();
+    cfg.set_gesture_direction(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::Up,
+        Action::Copy,
+    );
+    let global = cfg.effective_bindings("2b042", None);
+    cfg.set_per_app_gesture_direction(
+        "2b042",
+        "com.example.Editor",
+        ButtonId::GestureButton,
+        GestureDirection::Click,
+        Action::Paste,
+    );
+    let custom = cfg.effective_bindings("2b042", Some("com.example.Editor"));
+    let Binding::Gesture(map) = &custom[&ButtonId::GestureButton] else {
+        panic!("app map missing")
+    };
+    assert_eq!(map[&GestureDirection::Up], Action::Copy);
+    cfg.set_per_app_gesture_mode(
+        "2b042",
+        "com.example.Editor",
+        ButtonId::GestureButton,
+        false,
+    );
+    assert_eq!(
+        cfg.effective_bindings("2b042", Some("com.example.Editor"))[&ButtonId::GestureButton],
+        Binding::Single(Action::Paste)
+    );
+    assert!(
+        cfg.per_app_gesture_overrides("2b042", "com.example.Editor")
+            .is_some()
+    );
+    cfg.set_per_app_gesture_mode("2b042", "com.example.Editor", ButtonId::GestureButton, true);
+    assert_eq!(
+        cfg.effective_bindings("2b042", Some("com.example.Editor")),
+        custom
+    );
+    assert_eq!(
+        cfg.effective_bindings("2b042", Some("com.example.Other")),
+        global
+    );
+    cfg.set_per_app_binding("2b042", "com.example.Editor", ButtonId::GestureButton, None);
+    assert_eq!(
+        cfg.effective_bindings("2b042", Some("com.example.Editor")),
+        global
+    );
+    assert!(cfg.app_profiles("2b042").next().is_none());
+}
+
+#[test]
+fn per_app_gesture_maps_roundtrip_without_changing_global_bindings() {
+    let mut config = Config::default();
+    config.set_binding(
+        "unit:12345678",
+        ButtonId::HapticPanel,
+        Binding::Single(Action::ShowActionsRing),
+    );
+    config.set_per_app_gesture_mode(
+        "unit:12345678",
+        "com.example.App",
+        ButtonId::HapticPanel,
+        true,
+    );
+    config.set_per_app_gesture_direction(
+        "unit:12345678",
+        "com.example.App",
+        ButtonId::HapticPanel,
+        GestureDirection::Up,
+        Action::Copy,
+    );
+    let reread = write_and_read(&config);
+    assert_eq!(
+        reread.devices["unit:12345678"].per_app_gesture_bindings,
+        config.devices["unit:12345678"].per_app_gesture_bindings
+    );
+    assert_eq!(
+        reread.devices["unit:12345678"].bindings,
+        config.devices["unit:12345678"].bindings
+    );
+}

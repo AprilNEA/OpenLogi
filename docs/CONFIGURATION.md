@@ -103,8 +103,8 @@ Common device fields are:
   under its Profile selector. After bringing an application to the foreground,
   choose it from Recent applications to use the identifier the agent observed.
   Identifiers differ between platforms, so a profile authored under one
-  namespace will not match under another. An overlay holds one action per
-  button; gesture-direction maps live in `bindings`
+  namespace will not match under another. An overlay holds one action per button
+- `per_app_gesture_bindings`: sparse per-application overlays of complete gesture-direction maps, using the same application selectors. The Buttons panel's Gesture mode and direction controls edit the selected application's map without changing the global map. Buttons without an override inherit their global binding
 - `action_ring`: default and complete per-application eight-slot layouts;
   `action_ring.per_app` takes the same selectors as `per_app_bindings`,
   including the Windows `exe:<filename>` fallback
@@ -172,6 +172,27 @@ Long-press pairs currently apply to global device `bindings` and are authored
 in TOML. The GUI presents their `short` action; changing that button in the GUI
 replaces the whole pair with the selected single action. `per_app_bindings` and
 `keyboard.bindings` remain single-action maps.
+
+## Application gestures and inheritance
+
+The effective binding for a button starts with its global `bindings` entry. A matching `per_app_gesture_bindings` entry replaces that button with its application direction map. A matching `per_app_bindings` single action takes precedence over both. Other buttons continue to inherit the global profile. Direction maps are snapshots of one button's effective map, not independent per-direction patches that track later global edits.
+
+In the Buttons panel, enabling Gesture mode in an application profile snapshots the inherited map before its first edit. Disabling Gesture mode selects its click action and retains the application's direction map as dormant state. Choosing another single action also leaves that map dormant; re-enabling Gesture mode restores it. Resetting a button to inheritance removes both its single-action override and its stored direction map. Resetting the whole Buttons profile removes both sections for that application while preserving the open editor and the global profile. The separate Actions Ring application layout has its own reset; Delete all profiles removes both Buttons and Ring profiles for the selected application.
+
+```toml
+[devices."unit:example".per_app_gesture_bindings."com.microsoft.VSCode".GestureButton]
+Click = { CustomShortcut = "Cmd+Shift+P" }
+Up = "MissionControl"
+Down = "AppExpose"
+Left = "PreviousDesktop"
+Right = "NextDesktop"
+
+# This single action suspends the map above until Gesture mode is re-enabled.
+[devices."unit:example".per_app_bindings."com.microsoft.VSCode"]
+GestureButton = { CustomShortcut = "Escape" }
+```
+
+`unit:example` is illustrative; use a physical key generated for your own device. Removing only the single action by hand reveals the stored gesture map. The GUI's Inherit action removes both overrides so inheritance is unambiguous.
 
 An Actions Ring entry wraps the action and may add an icon or literal label:
 

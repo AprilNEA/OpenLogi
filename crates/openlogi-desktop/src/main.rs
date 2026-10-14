@@ -28,6 +28,9 @@ mod app;
 mod app_assets;
 mod features;
 mod platform;
+#[cfg(any(test, feature = "native-ui-qa"))]
+#[cfg(target_os = "macos")]
+mod qa;
 mod runtime;
 mod services;
 mod state;
@@ -53,6 +56,16 @@ use crate::ui::theme;
 
 fn main() -> Result<()> {
     init_tracing();
+
+    #[cfg(all(feature = "native-ui-qa", target_os = "macos"))]
+    if cfg!(feature = "native-ui-qa") {
+        return qa::run();
+    }
+
+    #[cfg(all(feature = "native-ui-qa", not(target_os = "macos")))]
+    if cfg!(feature = "native-ui-qa") {
+        anyhow::bail!("Native UI QA requires the macOS Metal renderer");
+    }
 
     #[cfg(debug_assertions)]
     if std::env::var_os("OPENLOGI_COMPONENT_GALLERY").is_some_and(|value| value == "1") {

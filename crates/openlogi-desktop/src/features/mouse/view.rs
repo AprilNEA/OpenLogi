@@ -69,6 +69,7 @@ struct MouseWorkspaceData<'a> {
     dpi_gestures: bool,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
+    gesture_overridden: Option<&'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>>,
 }
 
 impl<'a> MouseWorkspaceData<'a> {
@@ -100,6 +101,7 @@ impl<'a> MouseWorkspaceData<'a> {
                     .map_or_else(|| friendly_app_name(app), str::to_string)
             }),
             overridden: state.editing_app_overrides(),
+            gesture_overridden: state.editing_app_gesture_overrides(),
         })
     }
 
@@ -118,6 +120,7 @@ impl<'a> MouseWorkspaceData<'a> {
             dpi_gestures: false,
             editing_app: None,
             overridden: None,
+            gesture_overridden: None,
         }
     }
 }
@@ -317,19 +320,13 @@ impl Render for MouseModelView {
             dpi_gestures,
             editing_app,
             overridden,
+            gesture_overridden,
         } = MouseWorkspaceData::read(cx)
             .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
 
         self.reset_for_device(device_key);
 
-        let gesture_buttons: Vec<ButtonId> = gesture_maps
-            .keys()
-            .copied()
-            .filter(|button| {
-                editing_app.is_none()
-                    || !overridden.is_some_and(|overrides| overrides.contains_key(button))
-            })
-            .collect();
+        let gesture_buttons: Vec<ButtonId> = gesture_maps.keys().copied().collect();
 
         let viewport_h = f32::from(window.viewport_size().height);
         let viewport_w = f32::from(window.viewport_size().width);
@@ -394,6 +391,7 @@ impl Render for MouseModelView {
                 dpi_gestures,
                 editing_app: editing_app.as_deref(),
                 overridden,
+                gesture_overridden,
             },
             ActionPickerContext {
                 open: self.action_picker_open,
@@ -784,3 +782,119 @@ impl RenderOnce for HotspotTrigger {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(feature = "native-ui-qa", target_os = "macos"))]
+pub(crate) fn render_native_profile_qa() -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    rust_i18n::set_locale("en");
+    let expected = Action::CustomShortcut("2".parse()?);
+    for (theme, name) in [
+        (gpui_component::ThemeMode::Light, "light"),
+        (gpui_component::ThemeMode::Dark, "dark"),
+    ] {
+        let mut cx = crate::qa::context(theme);
+        let _receiver = crate::qa::install_fixture(&mut cx)?;
+        cx.update(|cx| {
+            AppState::apply(cx, |state| {
+                state.set_editing_app(Some(crate::qa::APP.into()))
+            });
+        });
+        let (window, view) = crate::qa::open(&mut cx, 1280., 820., MouseModelView::new)?;
+        crate::qa::render(&mut cx, window)?;
+        cx.update(|cx| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                view.read(cx).current_device_key.is_some(),
+                "QA device frame did not initialize before selection"
+            );
+            Ok(())
+        })?;
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.select(MouseControlId::Button(ButtonId::HapticPanel));
+                view.set_gesture_selected_dir(Some(GestureDirection::Up));
+                cx.notify();
+            });
+        });
+        cx.update(|cx| -> anyhow::Result<()> {
+            let state = AppState::try_read(cx).context("QA state unavailable")?;
+            let directions = state
+                .gesture_bindings()
+                .get(&ButtonId::HapticPanel)
+                .context("App-specific direction map missing")?;
+            anyhow::ensure!(
+                directions.get(&GestureDirection::Up) == Some(&expected),
+                "Wrong app-specific direction action"
+            );
+            Ok(())
+        })?;
+        crate::qa::render(&mut cx, window)?;
+        cx.update_window(window, |_, window, cx| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                view.read(cx).selected == Some(MouseControlId::Button(ButtonId::HapticPanel)),
+                "QA selection was cleared before capture"
+            );
+            verify_native_direction_rows(window, cx)?;
+            anyhow::ensure!(
+                AppState::try_read(cx)
+                    .context("QA state missing")?
+                    .editing_app_override_count()
+                    == 1,
+                "Gesture-only profile header must show one override"
+            );
+            Ok(())
+        })??;
+        crate::qa::capture(&mut cx, window, &format!("ghostty-gestures-{name}.png"))?;
+        cx.update(|cx| {
+            AppState::apply(cx, |state| state.clear_app_binding(ButtonId::HapticPanel));
+        });
+        cx.update(|cx| -> anyhow::Result<()> {
+            let state = AppState::try_read(cx).context("QA state unavailable")?;
+            anyhow::ensure!(
+                !state
+                    .gesture_bindings()
+                    .contains_key(&ButtonId::HapticPanel),
+                "Reset did not restore the global Actions Ring"
+            );
+            Ok(())
+        })?;
+        crate::qa::render(&mut cx, window)?;
+        cx.update_window(window, |_, _window, cx| -> anyhow::Result<()> {
+            for direction in GestureDirection::ALL {
+                anyhow::ensure!(
+                    crate::qa::measured(cx, &format!("direction-{direction:?}")).is_none(),
+                    "Reset left painted direction rows"
+                );
+            }
+            anyhow::ensure!(
+                AppState::try_read(cx)
+                    .context("QA state missing")?
+                    .editing_app_override_count()
+                    == 0,
+                "Reset header must report inheritance"
+            );
+            Ok(())
+        })??;
+        crate::qa::capture(&mut cx, window, &format!("ghostty-inheritance-{name}.png"))?;
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "native-ui-qa", target_os = "macos"))]
+fn verify_native_direction_rows(window: &Window, cx: &App) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let viewport = gpui::Bounds {
+        origin: gpui::point(px(0.), px(0.)),
+        size: window.viewport_size(),
+    };
+    for direction in GestureDirection::ALL {
+        let bounds = crate::qa::measured(cx, &format!("direction-{direction:?}"))
+            .context("Five-direction editor row was not painted")?;
+        anyhow::ensure!(
+            bounds.size.height > px(0.)
+                && viewport.contains(&bounds.origin)
+                && viewport.contains(&bounds.bottom_right()),
+            "Direction row is outside the viewport"
+        );
+    }
+    Ok(())
+}

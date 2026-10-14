@@ -290,6 +290,59 @@ mod tests {
     }
 
     #[test]
+    fn app_only_haptic_panel_gesture_requests_raw_motion_and_restores_global_ring() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::HapticPanel,
+            Binding::Single(Action::ShowActionsRing),
+        );
+        cfg.devices
+            .get_mut("2b042")
+            .unwrap()
+            .per_app_gesture_bindings
+            .insert(
+                "com.mitchellh.ghostty".into(),
+                BTreeMap::from([(
+                    ButtonId::HapticPanel,
+                    BTreeMap::from([
+                        (GestureDirection::Click, Action::Copy),
+                        (GestureDirection::Up, Action::Paste),
+                    ]),
+                )]),
+            );
+        for app in [
+            None,
+            Some("com.mitchellh.ghostty"),
+            Some("com.example.Other"),
+        ] {
+            let active = app == Some("com.mitchellh.ghostty");
+            let plan = plan_for_device(&cfg, "2b042", route(), app, 0, false);
+            assert_eq!(
+                plan.dispatch
+                    .gesture_bindings
+                    .contains_key(&ButtonId::HapticPanel),
+                active
+            );
+            assert_eq!(
+                plan.target
+                    .spec
+                    .divert_gesture_sources
+                    .contains(&HAPTIC_PANEL_CID),
+                active
+            );
+            assert_eq!(
+                plan.target
+                    .spec
+                    .divert_buttons
+                    .iter()
+                    .any(|(cid, _)| *cid == HAPTIC_PANEL_CID),
+                !active
+            );
+        }
+    }
+
+    #[test]
     fn both_hidpp_sources_gesture_when_both_are_in_gesture_mode() {
         // On MX Master 4 the dedicated button and the haptic panel can gesture
         // at the same time: the plan arms a raw-XY divert for each and keeps

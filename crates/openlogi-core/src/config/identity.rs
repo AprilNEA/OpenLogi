@@ -395,6 +395,7 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
     fold_map_field!(bindings);
     fold_map_field!(disabled_gestures);
     fold_map_field!(per_app_bindings);
+    fold_map_field!(per_app_gesture_bindings);
     fold_map_field!(camera_profiles);
 }
 
