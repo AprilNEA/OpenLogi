@@ -464,12 +464,23 @@ impl AppState {
         self.device_gesture_maps()
     }
 
+    /// Whether this control has an attributable native press for gestures.
+    /// Spy reports have button edges only, so host-only remapping cannot
+    /// supply the motion a gesture needs.
+    #[must_use]
+    pub fn current_native_gesture_supported(&self, button: ButtonId) -> bool {
+        self.current_gaming_layout()
+            .is_none_or(|layout| !layout.needs_host_mode(button))
+    }
+
     /// Turn gesture mode on or off for one button of the current device —
     /// independently of every other button. Persists, tells the agent to
     /// rebuild, and refreshes the projected maps the UI reads.
     pub fn commit_gesture_mode(&mut self, button: ButtonId, enabled: bool) -> StateEvents {
         let events = self.for_current_device(StateEvent::BindingsChanged);
-        if enabled && !button.supports_gesture_mode() {
+        if enabled
+            && (!button.supports_gesture_mode() || !self.current_native_gesture_supported(button))
+        {
             debug!(?button, "gesture mode is not supported for this control");
             return events;
         }

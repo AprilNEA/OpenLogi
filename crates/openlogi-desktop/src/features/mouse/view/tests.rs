@@ -219,6 +219,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 bindings: &bindings,
                 gesture_maps: &gesture_maps,
                 dpi_gestures: false,
+                native_gestures: true,
                 editing_app: None,
                 overridden: None,
                 extra_actions: &[],

@@ -295,3 +295,36 @@ fn keyboard_spec_never_diverts_reserved_controls() {
         BTreeMap::from([(0x010a, ButtonId::control(0x010a))])
     );
 }
+
+#[test]
+fn dpi_restore_uses_the_active_route_override() {
+    let device = dev("mouse", 1, true);
+    let route_key = stable_id(&device).route_key();
+    let mut config = Config::default();
+    config.set_dpi("mouse", Dpi::new(1600));
+    config
+        .devices
+        .get_mut("mouse")
+        .unwrap()
+        .links
+        .entry(route_key)
+        .or_default()
+        .overrides
+        .dpi = Some(Dpi::new(800));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![device];
+    orch.rebuild();
+    {
+        let cycles = orch.shared.dpi_cycle.read().unwrap();
+        let state = &cycles.by_key["mouse"];
+        assert_eq!(state.committed, Some(Dpi::new(800)));
+        assert_eq!(state.current, Some(Dpi::new(800)));
+    }
+    orch.devices[0].route = Some(DeviceRoute::Bolt {
+        receiver_uid: "BB00".into(),
+        slot: 2,
+    });
+    orch.rebuild();
+    let cycles = orch.shared.dpi_cycle.read().unwrap();
+    assert_eq!(cycles.current("mouse"), Some(Dpi::new(1600)));
+}

@@ -167,6 +167,11 @@ pub(super) fn run_shell_command(cmd: &str) {
 }
 
 fn post_click(button: MouseButton) {
+    post_mouse_edge(button, KeyPhase::Down);
+    post_mouse_edge(button, KeyPhase::Up);
+}
+
+pub(super) fn post_mouse_edge(button: MouseButton, phase: KeyPhase) {
     let (down, up, data) = match button {
         MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
         MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
@@ -175,7 +180,8 @@ fn post_click(button: MouseButton) {
         MouseButton::Back => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON1),
         MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON2),
     };
-    send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
+    let flags = if phase == KeyPhase::Down { down } else { up };
+    send_inputs(&[mouse_input(flags, data)]);
 }
 
 fn post_key(vk: u16, modifiers: &[u16]) {

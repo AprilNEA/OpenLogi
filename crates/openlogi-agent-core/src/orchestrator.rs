@@ -425,6 +425,20 @@ impl Orchestrator {
                 gestures.remove(button);
             }
         }
+        if let Some(layout) = key
+            .and_then(|key| self.devices.iter().find(|dev| dev.config_key == key))
+            .and_then(|dev| GamingLayout::for_model_key(&dev.model_key))
+        {
+            // A saved gesture must not fall back to senderless native events.
+            gestures.retain(|button, _| {
+                if layout.needs_host_mode(*button) {
+                    bindings.remove(button);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         let shift_bindings = key
             .and_then(|key| self.config.gshift_overrides(key))
             .into_iter()
@@ -627,11 +641,14 @@ impl Orchestrator {
                     .map(Dpi::new)
                     .collect();
             }
-            let committed = self.config.dpi(&dev.config_key);
-            let previous = guard
-                .by_key
+            let committed = self
+                .config
+                .devices
                 .get(&dev.config_key)
-                .filter(|state| state.committed == committed);
+                .and_then(|device| device.effective_dpi(&stable_id(dev).route_key()));
+            let previous = guard.by_key.get(&dev.config_key).filter(|state| {
+                state.committed == committed && state.target.as_ref() == Some(&route)
+            });
             let current = previous.map_or(committed, |state| state.current);
             let nearest = current.and_then(|dpi| {
                 (0..presets.len())

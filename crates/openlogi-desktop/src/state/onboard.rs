@@ -76,6 +76,9 @@ impl AppState {
 
     pub fn commit_onboard_memory(&mut self, memory: OnboardMemory) -> StateEvents {
         let events = self.for_current_device(StateEvent::OnboardChanged);
+        if memory == OnboardMemory::Off && self.current_gaming_layout().is_none() {
+            return events;
+        }
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
@@ -91,6 +94,11 @@ impl AppState {
 
     pub fn commit_report_rate(&mut self, rate: ReportRate) -> StateEvents {
         let events = self.for_current_device(StateEvent::OnboardChanged);
+        if self.current_gaming_layout().is_none()
+            || self.current_onboard_active() != Some(OnboardMemory::Off)
+        {
+            return events;
+        }
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)

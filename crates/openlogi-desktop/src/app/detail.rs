@@ -402,6 +402,7 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
     };
     let memory = state.current_onboard_active();
     let host = memory == Some(OnboardMemory::Off);
+    let host_supported = state.current_gaming_layout().is_some();
     let rate_info = reading.as_ref().and_then(|r| r.report_rate.as_ref());
     // The mouse's own reading, so a rejected write never looks applied.
     let rate = rate_info
@@ -439,13 +440,13 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
                 .child(setting_row(
                     tr!("pointer.onboard_active"),
                     memory_description,
-                    onboard_memory_control(memory, profiles),
+                    onboard_memory_control(memory, profiles, host_supported),
                     pal,
                 ))
                 .child(setting_row(
                     tr!("pointer.report_rate"),
                     rate_description,
-                    report_rate_control(rate, rates, host),
+                    report_rate_control(rate, rates, host && host_supported),
                     pal,
                 )),
         )
@@ -482,6 +483,7 @@ fn setting_row(
 fn onboard_memory_control(
     selected: Option<OnboardMemory>,
     profiles: Vec<(OnboardMemory, String)>,
+    host_supported: bool,
 ) -> impl IntoElement {
     let choices: Vec<(OnboardMemory, String)> = std::iter::once((
         OnboardMemory::Off,
@@ -500,12 +502,15 @@ fn onboard_memory_control(
                     Button::new(("onboard-memory", index))
                         .flex_1()
                         .label(label)
-                        .selected(selected == Some(value)),
+                        .selected(selected == Some(value))
+                        .disabled(value == OnboardMemory::Off && !host_supported),
                 )
             },
         )
         .on_click(move |indices, _window, cx| {
-            if let Some(value) = indices.first().and_then(|i| values.get(*i)) {
+            if let Some(value) = indices.first().and_then(|i| values.get(*i))
+                && (*value != OnboardMemory::Off || host_supported)
+            {
                 AppState::apply(cx, |state| state.commit_onboard_memory(*value));
                 AppState::refresh_onboard_later(cx);
             }

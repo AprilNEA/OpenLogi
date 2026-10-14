@@ -508,3 +508,24 @@ fn two_mouse_hidpp_plans_are_device_scoped_while_hook_fallback_is_selected_devic
         "the passive Windows fallback is one selected-device map, not a per-source map"
     );
 }
+
+#[test]
+fn g603_stored_gestures_do_not_enter_unattributed_or_raw_xy_paths() {
+    let mut config = Config::default();
+    for button in [ButtonId::Back, ButtonId::Forward] {
+        config.set_gesture_mode("0b01c", button, true);
+    }
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("0b01c", 1, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+    let maps = orch.shared.hook_maps.read().unwrap();
+    for button in [ButtonId::Back, ButtonId::Forward] {
+        assert!(!maps.gestures.contains_key(&button));
+        assert!(!maps.bindings.contains_key(&button));
+    }
+    let plans = orch.capture_plans_for();
+    let plan = &plans[0];
+    assert!(plan.dispatch.side_gesture_bindings.is_empty());
+    assert!(plan.target.spec.divert_gesture_buttons.is_empty());
+}

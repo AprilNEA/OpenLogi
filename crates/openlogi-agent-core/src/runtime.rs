@@ -15,7 +15,7 @@ use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, Effect, MouseButton};
 use tracing::{debug, info, warn};
 
 use self::button::{
@@ -315,10 +315,49 @@ impl HeldDpiShifts {
     }
 }
 
+/// Mouse output retained by the same press tokens as held shortcuts.
+#[derive(Default)]
+struct HeldMousePresses<T> {
+    by_press: HashMap<PressToken, T>,
+}
+
+impl<T> HeldMousePresses<T> {
+    fn start(
+        &mut self,
+        press: &PressToken,
+        action: &Action,
+        create: impl FnOnce(MouseButton) -> T,
+    ) -> bool {
+        let Some(button) = held_mouse_button(action) else {
+            return false;
+        };
+        self.by_press
+            .entry(press.clone())
+            .or_insert_with(|| create(button));
+        true
+    }
+
+    fn end(&mut self, press: &PressToken) {
+        self.by_press.remove(press);
+    }
+}
+
+// Navigation keeps the existing Safari/shortcut dispatcher; primary and
+// middle click output follows the physical button lifecycle.
+fn held_mouse_button(action: &Action) -> Option<MouseButton> {
+    match action.effect() {
+        Effect::Click(button @ (MouseButton::Left | MouseButton::Right | MouseButton::Middle)) => {
+            Some(button)
+        }
+        _ => None,
+    }
+}
+
 struct ButtonEventHandler {
     executor: ActionExecutor,
     held: HeldShortcuts,
     held_dpi: HeldDpiShifts,
+    held_mouse: HeldMousePresses<openlogi_inject::HeldMouseButton>,
 }
 
 impl ButtonEventHandler {
@@ -327,6 +366,9 @@ impl ButtonEventHandler {
             executor,
             held: HeldShortcuts::default(),
             held_dpi: HeldDpiShifts::default(),
+            held_mouse: HeldMousePresses {
+                by_press: HashMap::new(),
+            },
         }
     }
 
@@ -342,6 +384,7 @@ impl ButtonEventHandler {
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
                 self.held.end(press.token());
+                self.held_mouse.end(press.token());
                 self.held_dpi.end(&self.executor, press.token());
                 if let EndReason::Canceled(reason) = reason {
                     match press.control() {
@@ -364,11 +407,19 @@ impl ButtonEventHandler {
         device_key: Option<&str>,
         target: ActionDispatchTarget,
     ) {
-        if action.held_chord().is_some() && target.resolve(action).is_none() {
+        if (action.held_chord().is_some() || held_mouse_button(action).is_some())
+            && target.resolve(action).is_none()
+        {
             return;
         }
         if matches!(action, Action::DpiShift) {
             self.held_dpi.start(&self.executor, press, device_key);
+            return;
+        }
+        if self
+            .held_mouse
+            .start(press, action, openlogi_inject::press_mouse)
+        {
             return;
         }
         if !self.held.start(press, action) {
@@ -655,6 +706,36 @@ fn dispatch_browser_navigation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_middle_output_lasts_until_release_or_owner_shutdown() {
+        struct Output(Arc<Mutex<Vec<&'static str>>>);
+        impl Drop for Output {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().push("up");
+            }
+        }
+        let edges = Arc::new(Mutex::new(Vec::new()));
+        let create = |button| {
+            assert_eq!(button, MouseButton::Middle);
+            edges.lock().unwrap().push("down");
+            Output(Arc::clone(&edges))
+        };
+        let press = PressToken::hook_for_test(1, ButtonId::MiddleClick);
+        let mut held = HeldMousePresses {
+            by_press: HashMap::new(),
+        };
+        assert!(held.start(&press, &Action::MiddleClick, create));
+        assert!(held.start(&press, &Action::MiddleClick, create));
+        assert_eq!(*edges.lock().unwrap(), ["down"]);
+        held.end(&press);
+        held.end(&press);
+        assert_eq!(*edges.lock().unwrap(), ["down", "up"]);
+        assert!(held.start(&press, &Action::MiddleClick, create));
+        drop(held);
+        assert_eq!(*edges.lock().unwrap(), ["down", "up", "down", "up"]);
+        assert_eq!(held_mouse_button(&Action::MouseBack), None);
+    }
 
     static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
