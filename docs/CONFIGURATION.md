@@ -113,6 +113,9 @@ Common device fields are:
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+
   does; `false` leaves the keyboard's layout to its own shortcuts
+- `report_rate` for mice with an adjustable report rate (HID++ `0x8060` or
+  `0x8061`), in hertz. The agent writes it when the mouse reconnects over a
+  connection that offers that rate; absent leaves the mouse's own rate
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or

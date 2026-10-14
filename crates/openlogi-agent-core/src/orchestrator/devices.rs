@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, ReportRate};
 
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
@@ -29,6 +29,16 @@ pub(super) fn configured_wheel_mode(config: &Config, dev: &AgentDevice) -> Optio
         .scroll_inversion
         .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
     WheelModeChange::new(resolution, inverted)
+}
+
+/// The saved report rate to push to `dev`: only to a device with a
+/// report-rate feature, so a rate saved for a mouse is never written to
+/// whatever later answers under the same key without one.
+pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Option<ReportRate> {
+    dev.capabilities
+        .is_some_and(|caps| caps.report_rate)
+        .then(|| config.report_rate(&dev.config_key))
+        .flatten()
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's

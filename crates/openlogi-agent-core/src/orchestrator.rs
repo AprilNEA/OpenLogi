@@ -52,9 +52,10 @@ mod devices;
 use devices::reapply_targets;
 use devices::{
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_wheel_mode,
-    host_switch_links, is_hidpp_device, keeps_os_layout, newly_kept_os_layouts, os_layout_appeared,
-    pick_current, plan_reapply, settings_moved, stable_id,
+    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_report_rate,
+    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout,
+    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply, settings_moved,
+    stable_id,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -832,6 +833,7 @@ impl Orchestrator {
         let settings = VolatileMouseSettings {
             wheel: configured_wheel_mode(&self.config, dev),
             dpi: device.and_then(|d| d.effective_dpi(&route_key)),
+            report_rate: configured_report_rate(&self.config, dev),
             smartshift: device
                 .and_then(|d| d.effective_smartshift(&route_key))
                 .map(openlogi_hid::SmartShiftStatus::from),

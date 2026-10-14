@@ -19,7 +19,8 @@ use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, HapticWaveform, HidppOperation,
-    LightCommand, ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
+    LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -268,6 +269,31 @@ impl Agent for AgentServer {
 
     async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {
         self.pairing.unpair(&route).await
+    }
+    async fn read_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ReportRateInfo, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadReportRate, |c| async move {
+                openlogi_hid::get_report_rate_info_on(&c).await
+            })
+            .await
+    }
+    async fn set_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::WriteReportRate, |c| async move {
+                openlogi_hid::set_report_rate_on(&c, rate).await
+            })
+            .await
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {

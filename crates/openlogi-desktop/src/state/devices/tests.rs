@@ -276,6 +276,7 @@ fn mouse_identity(name: &str) -> DeviceIdentity {
             dpi_gestures: false,
             fn_lock: false,
             os_layout: false,
+            report_rate: false,
         },
         light_capabilities: None,
         model_info: None,

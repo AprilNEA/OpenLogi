@@ -56,6 +56,7 @@ mod lighting;
 mod os_layout;
 mod profile_scope;
 mod reload;
+mod report_rate;
 mod smartshift;
 mod transient_identity;
 mod wheel_resolution;

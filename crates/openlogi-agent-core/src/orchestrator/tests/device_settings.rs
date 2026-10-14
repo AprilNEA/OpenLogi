@@ -51,6 +51,28 @@ fn configured_wheel_mode_leaves_unset_resolution_unmanaged() {
 }
 
 #[test]
+fn configured_report_rate_needs_the_feature_and_a_saved_rate() {
+    let mut config = Config::default();
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        report_rate: true,
+        ..Capabilities::default()
+    });
+    // Nothing saved: the device keeps its own rate.
+    assert_eq!(configured_report_rate(&config, &device), None);
+    config.set_report_rate("a", ReportRate::new(2000));
+    assert_eq!(
+        configured_report_rate(&config, &device),
+        Some(ReportRate::new(2000))
+    );
+    // A device without either report-rate feature is never written.
+    device.capabilities = Some(Capabilities::default());
+    assert_eq!(configured_report_rate(&config, &device), None);
+    device.capabilities = None;
+    assert_eq!(configured_report_rate(&config, &device), None);
+}
+
+#[test]
 fn host_switch_links_keep_sleeping_targets_but_require_online_keyboard() {
     let mut config = Config::default();
     config

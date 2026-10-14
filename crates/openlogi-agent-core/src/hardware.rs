@@ -26,8 +26,8 @@ use std::time::Duration;
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
     CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation, HostOs,
-    OsLayoutOutcome, ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel,
-    WriteError,
+    OsLayoutOutcome, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus,
+    WeakSharedChannel, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
@@ -540,6 +540,9 @@ pub struct VolatileMouseSettings {
     pub wheel: Option<WheelModeChange>,
     /// Sensor DPI.
     pub dpi: Option<Dpi>,
+    /// Report rate. Written only when the device lists it, and skipped when
+    /// the device already reports at it.
+    pub report_rate: Option<ReportRate>,
     /// SmartShift mode and thresholds.
     pub smartshift: Option<SmartShiftStatus>,
 }
@@ -570,6 +573,7 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
     let VolatileMouseSettings {
         wheel,
         dpi,
+        report_rate,
         smartshift,
     } = settings;
     let shared = match op.resolve() {
@@ -606,6 +610,15 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
                 .await;
                 log_outcome(index, "DPI write", result, |()| {
                     debug!(index, %dpi, "DPI written to device");
+                });
+            }
+            if let Some(rate) = report_rate {
+                let result = tokio::time::timeout(WRITE_TIMEOUT, async {
+                    openlogi_hid::set_report_rate_on(&shared, rate).await
+                })
+                .await;
+                log_outcome(index, "report-rate write", result, |info| {
+                    debug!(index, rate = %info.current, "report rate written to device");
                 });
             }
             if let Some(ss) = smartshift {

@@ -29,7 +29,7 @@ pub use devices::DeviceRecord;
 pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiLoad, FnLockLoad, SmartShiftLoad};
+pub use load::{DpiLoad, FnLockLoad, ReportRateLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +77,7 @@ mod lighting;
 mod load;
 mod os_layout;
 mod pointer;
+mod report_rate;
 mod scroll;
 mod settings;
 mod smartshift;
@@ -211,7 +212,7 @@ impl AppState {
         Self::global(cx).update(cx, update)
     }
 
-    /// Start any pending DPI/SmartShift read for the selected device. Called
+    /// Start any pending device-setting read for the selected device. Called
     /// after inventory or selection changes; render paths only consume caches.
     pub(crate) fn load_current_device_reads(cx: &mut App) {
         Self::update(cx, |state, cx| {
@@ -219,6 +220,7 @@ impl AppState {
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
             state.load_current_fn_lock(cx);
+            state.load_current_report_rate(cx);
         });
     }
 

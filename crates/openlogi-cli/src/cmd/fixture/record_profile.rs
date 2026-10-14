@@ -306,6 +306,16 @@ async fn capture_hidpp_settings(
             .await?
         }
     };
+    let report_rate = match capability_setting(device.online, capabilities.report_rate) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "report-rate",
+                agent::call(client.read_report_rate(context::current(), source_route.clone())),
+            )
+            .await?
+        }
+    };
 
     Ok(ProfileDeviceSettings {
         route: profile_route,
@@ -314,6 +324,7 @@ async fn capture_hidpp_settings(
         wheel,
         backlight,
         fn_lock,
+        report_rate,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
@@ -372,6 +383,7 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         wheel: ProfileSetting::Unsupported,
         backlight: ProfileSetting::Unsupported,
         fn_lock: ProfileSetting::Unsupported,
+        report_rate: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };

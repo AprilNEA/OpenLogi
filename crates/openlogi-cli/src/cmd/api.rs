@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
-use openlogi_core::hid::{DeviceRoute, Dpi, SmartShiftMode, WriteError};
+use openlogi_core::hid::{DeviceRoute, Dpi, ReportRate, SmartShiftMode, WriteError};
 use openlogi_ipc::{AgentClient, AgentSnapshot};
 use serde_json::{Value, json};
 use tarpc::context;
@@ -66,6 +66,16 @@ pub enum ApiCommand {
         /// switches layout; off leaves the keyboard's layout alone.
         #[arg(long, value_enum)]
         set: Switch,
+    },
+    /// Read the report rate, or set it immediately (add --save to persist).
+    ReportRate {
+        /// Exact opaque ID returned by `api devices`.
+        #[arg(long)]
+        device: String,
+        /// A rate in hertz that the device lists for its current connection.
+        /// Omit to read only.
+        #[arg(long)]
+        set: Option<u16>,
     },
 }
 
@@ -236,6 +246,15 @@ async fn execute(
                 "keep_os_layout": keep,
             }))
         }
+        ApiCommand::ReportRate { device, set } => {
+            report_rate(
+                client,
+                select_device(&snapshot, &device)?,
+                set,
+                save.as_mut(),
+            )
+            .await
+        }
     }?;
     if let Some(save) = save {
         save.commit(client).await?;
@@ -277,6 +296,44 @@ async fn dpi(
         "persistence": "not_saved",
         "current": info.current,
         "supported": info.capabilities.values(),
+    }))
+}
+
+async fn report_rate(
+    client: &AgentClient,
+    route: DeviceRoute,
+    set: Option<u16>,
+    save: Option<&mut Save>,
+) -> Result<Value, ApiError> {
+    let device = route.to_string();
+    let mut info =
+        agent::call(client.read_report_rate(context::current(), route.clone())).await??;
+    if let Some(value) = set {
+        let requested = ReportRate::new(value);
+        if !info.supports(requested) {
+            return Err(ApiError::new(
+                "invalid_value",
+                "report rate is not one the device lists for its current connection",
+            ));
+        }
+        if let Some(save) = save {
+            save.report_rate(requested);
+        }
+        info = agent::call(client.set_report_rate(context::current(), route, requested)).await??;
+        // A superseded agent request reads instead of writing; Ok alone does
+        // not guarantee that our requested rate won.
+        if info.current != requested {
+            return Err(ApiError::new(
+                "readback_mismatch",
+                "device report rate differs from the requested value after the write",
+            ));
+        }
+    }
+    Ok(json!({
+        "device": device,
+        "persistence": "not_saved",
+        "current": info.current,
+        "supported": info.supported,
     }))
 }
 
@@ -334,8 +391,12 @@ impl From<WriteError> for ApiError {
             WriteError::AmbiguousRawDevice => "ambiguous_device",
             // The agent's own checks report what `dpi` checks for itself, so
             // a caller sees one code whichever side caught it.
-            WriteError::DpiUnsupported { .. } => "invalid_value",
-            WriteError::DpiNotApplied { .. } => "readback_mismatch",
+            WriteError::DpiUnsupported { .. } | WriteError::ReportRateUnsupported { .. } => {
+                "invalid_value"
+            }
+            WriteError::DpiNotApplied { .. } | WriteError::ReportRateNotApplied { .. } => {
+                "readback_mismatch"
+            }
             _ => "device_error",
         };
         Self::new(code, error.to_string())

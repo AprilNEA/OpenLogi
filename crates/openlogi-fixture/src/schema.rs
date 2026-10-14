@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, FnLockState,
-    ScrollWheelMode, SmartShiftStatus,
+    ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -189,6 +189,10 @@ pub struct ProfileDeviceSettings {
     /// recorded before it existed keep loading.
     #[serde(default = "ProfileSetting::unsupported")]
     pub fn_lock: ProfileSetting<FnLockState>,
+    /// Report-rate read state. Defaults to unsupported so profiles recorded
+    /// before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub report_rate: ProfileSetting<ReportRateInfo>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -466,6 +470,9 @@ fn validate_setting_values(settings: &ProfileDeviceSettings) -> Result<(), Fixtu
     if let Some(backlight) = settings.backlight.value() {
         validate_backlight(&settings.route, *backlight)?;
     }
+    if let Some(report_rate) = settings.report_rate.value() {
+        validate_report_rate(&settings.route, report_rate)?;
+    }
     if settings.backlight.supports_feature() && settings.lighting.is_supported() {
         return Err(FixtureError::invalid(
             "device profile",
@@ -510,6 +517,41 @@ fn validate_dpi(route: &DeviceRoute, dpi: &DpiInfo) -> Result<(), FixtureError> 
     Ok(())
 }
 
+fn validate_report_rate(route: &DeviceRoute, info: &ReportRateInfo) -> Result<(), FixtureError> {
+    if info.supported.is_empty() {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} has an empty report-rate list"),
+        ));
+    }
+    if info.supported.iter().any(|rate| u16::from(*rate) == 0) {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} has a zero report rate"),
+        ));
+    }
+    if info
+        .supported
+        .array_windows::<2>()
+        .any(|[left, right]| left >= right)
+    {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} report rates must be sorted and unique"),
+        ));
+    }
+    if !info.supports(info.current) {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!(
+                "route {route} current report rate {} is not supported",
+                info.current
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_backlight(route: &DeviceRoute, backlight: BacklightState) -> Result<(), FixtureError> {
     if backlight.nb_levels == 0 {
         return Err(FixtureError::invalid(
@@ -545,6 +587,7 @@ fn validate_setting_support(
             || settings.smartshift.supports_feature()
             || settings.wheel.supports_feature()
             || settings.backlight.supports_feature()
+            || settings.report_rate.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -594,6 +637,12 @@ fn validate_setting_support(
                 "lighting",
                 settings.lighting.is_supported(),
                 capabilities.lighting,
+            )?;
+            validate_capability_support(
+                settings,
+                "report rate",
+                settings.report_rate.supports_feature(),
+                capabilities.report_rate,
             )?;
         }
     }

@@ -55,7 +55,7 @@ use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
     BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, PasskeyMethod,
-    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -881,6 +881,30 @@ impl Agent for MockAgent {
         let result = self.state.lock().await.unpair(&route);
         info!(%route, ok = result.is_ok(), "unpair_device");
         result
+    }
+    async fn read_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ReportRateInfo, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.report_rate, &route, 0x8061).cloned()
+    }
+    async fn set_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.report_rate, &route, 0x8061)?;
+        if !stored.supports(rate) {
+            return Err(WriteError::ReportRateUnsupported { requested: rate });
+        }
+        stored.current = rate;
+        info!(%route, %rate, "set_report_rate");
+        Ok(stored.clone())
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

@@ -26,6 +26,7 @@ mod lighting;
 mod litra;
 mod os_layout;
 mod pointer_scaling;
+mod report_rate;
 mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, set_backlight_enabled};
@@ -56,8 +57,12 @@ pub use litra::{
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
     litra_model_for_route, matches_litra,
 };
+pub use openlogi_core::hid::{ReportRate, ReportRateInfo};
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
 pub use pointer_scaling::{PointerScaling, get_pointer_scaling, set_pointer_scaling};
+pub use report_rate::{
+    get_report_rate_info, get_report_rate_info_on, set_report_rate, set_report_rate_on,
+};
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,

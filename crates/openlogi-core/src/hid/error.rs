@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::dpi::Dpi;
+use super::report_rate::ReportRate;
 
 /// Error returned by HID++ read/write operations.
 ///
@@ -125,6 +126,26 @@ pub enum WriteError {
         /// The waveform ID that was refused.
         waveform: u8,
     },
+    /// A report-rate write asked for a rate the device does not list for its
+    /// current connection.
+    ///
+    /// Nothing was written: the device layer checks the device-reported list
+    /// first, so the firmware never has to clamp or reject it.
+    #[error("report rate {requested} Hz is not one the device lists for this connection")]
+    ReportRateUnsupported {
+        /// The rejected rate.
+        requested: ReportRate,
+    },
+    /// The device acknowledged a report-rate write but reads back a
+    /// different rate — for instance a gaming mouse whose onboard profile
+    /// owns the rate.
+    #[error("device reports {actual} Hz after a write of {requested} Hz")]
+    ReportRateNotApplied {
+        /// The rate that was written.
+        requested: ReportRate,
+        /// The rate the device reports afterwards.
+        actual: ReportRate,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -175,6 +196,12 @@ pub enum HidppOperation {
     /// table and the current host's platform, and write it when it differs.
     /// Appended last — variant order is wire format.
     WriteOsLayout,
+    /// Read the `0x8060` / `0x8061` report rate and the rates the device
+    /// lists. Appended last — variant order is wire format.
+    ReadReportRate,
+    /// Write the `0x8060` / `0x8061` report rate. Appended last — variant
+    /// order is wire format.
+    WriteReportRate,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

@@ -22,6 +22,7 @@ use hidpp::feature::adc_measurement::AdcMeasurementFeature;
 use hidpp::feature::battery_status::BatteryStatusFeature;
 use hidpp::feature::battery_voltage::BatteryVoltageFeature;
 use hidpp::feature::extended_dpi::ExtendedDpiFeature;
+use hidpp::feature::extended_report_rate::ExtendedReportRateFeature;
 use hidpp::feature::fn_inversion::{
     FnInversionMultiHostFeature, FnInversionWithDefaultStateFeature,
 };
@@ -66,6 +67,9 @@ pub enum HidppEventSource {
     /// layout platform changing on the device, as a platform key combination
     /// does.
     MultiPlatform,
+    /// A mouse's `ExtendedAdjustableReportRate` (`0x8061`) feature reported
+    /// its report rate changing on the device.
+    ExtendedReportRate,
 }
 
 impl HidppEventSource {
@@ -74,7 +78,7 @@ impl HidppEventSource {
     const fn changes_settings(self) -> bool {
         matches!(
             self,
-            Self::FnInversion | Self::ExtendedDpi | Self::MultiPlatform
+            Self::FnInversion | Self::ExtendedDpi | Self::MultiPlatform | Self::ExtendedReportRate
         )
     }
 }
@@ -169,7 +173,8 @@ pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventOb
 /// unified `0x1004`, legacy `0x1000`, voltage `0x1001` and `0x1F20` ADC
 /// measurement — broadcasts its changes, so each has an index here. So do the
 /// settings a user can change on the device itself: Fn lock (`0x40a2`,
-/// `0x40a3`), extended DPI (`0x2202`) and the keyboard platform (`0x4531`).
+/// `0x40a3`), extended DPI (`0x2202`), the keyboard platform (`0x4531`) and
+/// the extended report rate (`0x8061`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct EventFeatureIndices {
     pub(super) wireless_status: Option<u8>,
@@ -181,6 +186,7 @@ pub(super) struct EventFeatureIndices {
     pub(super) fn_inversion_multi_host: Option<u8>,
     pub(super) extended_dpi: Option<u8>,
     pub(super) multi_platform: Option<u8>,
+    pub(super) extended_report_rate: Option<u8>,
 }
 
 impl EventFeatureIndices {
@@ -200,6 +206,7 @@ impl EventFeatureIndices {
                 0x40a3 => indices.fn_inversion_multi_host = Some(index),
                 0x2202 => indices.extended_dpi = Some(index),
                 0x4531 => indices.multi_platform = Some(index),
+                0x8061 => indices.extended_report_rate = Some(index),
                 _ => {}
             }
         }
@@ -263,6 +270,11 @@ impl EventFeatureIndices {
             && PlatformChange::decode(&payload).is_some()
         {
             return Some(HidppEventSource::MultiPlatform);
+        }
+        if self.extended_report_rate == Some(header.feature_index)
+            && ExtendedReportRateFeature::is_rate_broadcast(function_id)
+        {
+            return Some(HidppEventSource::ExtendedReportRate);
         }
         None
     }
@@ -470,6 +482,7 @@ mod tests {
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
                 multi_platform: None,
+                extended_report_rate: None,
             }
         );
     }
@@ -510,6 +523,7 @@ mod tests {
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
                 multi_platform: None,
+                extended_report_rate: None,
             },
         });
         state.receiver_snapshot_depth.store(1, Ordering::Release);
@@ -546,6 +560,7 @@ mod tests {
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
                 multi_platform: None,
+                extended_report_rate: None,
             },
         });
 
@@ -611,6 +626,7 @@ mod tests {
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
                 multi_platform: None,
+                extended_report_rate: None,
             },
         });
         let event = |function_id: u8, software_id: u8, bytes: [u8; 3]| {
@@ -860,6 +876,46 @@ mod tests {
         assert_eq!(state.decode(report(2, 0), true), None);
         assert_eq!(state.decode(report(2, 0xd), false), None);
         assert_eq!(handle.settings_revision(1), 2);
+    }
+
+    #[test]
+    fn report_rate_broadcasts_bump_the_revision() {
+        // A G502 X-shaped table: 0x8061 and, as the newer mice keep it, 0x8060.
+        let mouse =
+            EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x2202, 0x8060, 0x8061]);
+        assert_eq!(mouse.extended_report_rate, Some(5));
+
+        let state = state(Some(ReceiverProtocol::Bolt));
+        let handle = EventSubscriptionHandle {
+            state: Arc::clone(&state),
+        };
+        handle.register_device(1, mouse);
+        let report = |feature_index: u8, function_id: u8, software_id: u8| {
+            v20::Message::Short(
+                v20::MessageHeader {
+                    device_index: 1,
+                    feature_index,
+                    function_id: U4::from_lo(function_id),
+                    software_id: U4::from_lo(software_id),
+                },
+                [3, 0, 0],
+            )
+            .into()
+        };
+
+        // Options+ takes exactly function 0 for the rate broadcast.
+        assert_eq!(
+            state.decode(report(5, 0, 0), false),
+            Some(HidppEventSource::ExtendedReportRate)
+        );
+        assert_eq!(handle.settings_revision(1), 1);
+        assert_eq!(state.decode(report(5, 2, 0), false), None);
+        // A reply to our own request is not one.
+        assert_eq!(state.decode(report(5, 0, 0), true), None);
+        assert_eq!(state.decode(report(5, 0, 0xd), false), None);
+        // 0x8060 has no broadcast.
+        assert_eq!(state.decode(report(4, 0, 0), false), None);
+        assert_eq!(handle.settings_revision(1), 1);
     }
 
     #[test]
