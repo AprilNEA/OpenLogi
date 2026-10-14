@@ -19,7 +19,9 @@ pub mod route;
 pub mod scroll;
 pub mod smartshift;
 
-pub use backlight::{BacklightMode, BacklightState, BacklightStatus};
+pub use backlight::{
+    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
+};
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::FnLockState;

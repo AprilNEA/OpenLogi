@@ -8,8 +8,9 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
-    BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, FnLockState, LightCommand,
-    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    BacklightControls, BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, FnLockState,
+    LightCommand, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -386,6 +387,8 @@ fn fixture_agent() -> TestAgent {
         status: BacklightStatus::AlsAutomatic,
         current_level: 3,
         nb_levels: 8,
+        power_save: false,
+        controls: BacklightControls::default(),
     });
     profile.standalone[0].address.identity = RAW_STANDALONE_ID.to_string();
     profile.standalone[0].serial_number = Some("RAW-LIGHT-SERIAL".to_string());

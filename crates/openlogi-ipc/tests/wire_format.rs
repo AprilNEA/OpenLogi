@@ -41,11 +41,11 @@ use openlogi_core::device::{
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, Dpi, DpiCapabilities,
-    DpiInfo, FnLockState, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod,
-    ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget, ScrollWheelMode,
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
-    WriteError,
+    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
+    DeviceRoute, Dpi, DpiCapabilities, DpiInfo, FnLockState, HidppFeatureErrorKind, HidppOperation,
+    LightCommand, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
+    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -655,8 +655,15 @@ fn semantic_read_payloads() {
         status: BacklightStatus::AlsAutomatic,
         current_level: 4,
         nb_levels: 8,
+        power_save: true,
+        controls: BacklightControls {
+            automatic: true,
+            level: true,
+            power_save: false,
+        },
     });
-    assert_wire(&backlight, "000101020408");
+    // v36 appends `power_save` and `controls` after the level count.
+    assert_wire(&backlight, "00010102040801010100");
 
     let fn_lock: Result<FnLockState, WriteError> = Ok(FnLockState {
         fn_lock: true,
@@ -751,6 +758,26 @@ fn standalone_light_dtos_commands_and_errors() {
     assert_wire(
         &WriteError::HapticWaveformUnsupported { waveform: 1 },
         "1001",
+    );
+}
+
+#[test]
+fn backlight_changes_and_errors() {
+    assert_wire(&BacklightChange::Enabled(true), "0001");
+    assert_wire(&BacklightChange::Automatic(false), "0100");
+    assert_wire(&BacklightChange::Level(3), "0203");
+    assert_wire(&BacklightChange::PowerSave(true), "0301");
+    assert_wire(
+        &WriteError::BacklightChangeUnsupported {
+            change: BacklightChange::Level(8),
+        },
+        "130208",
+    );
+    assert_wire(
+        &WriteError::BacklightNotApplied {
+            change: BacklightChange::Automatic(true),
+        },
+        "140101",
     );
 }
 

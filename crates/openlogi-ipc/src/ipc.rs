@@ -89,7 +89,10 @@ pub use succession::Identity;
 ///      set_report_rate}`, `Capabilities::report_rate`,
 ///      `HidppOperation::{ReadReportRate, WriteReportRate}` and
 ///      `WriteError::{ReportRateUnsupported, ReportRateNotApplied}` appended —
-///      the `0x8061`/`0x8060` report rate in hertz.
+///      the `0x8061`/`0x8060` report rate in hertz; `BacklightState::{power_save,
+///      controls}` and `WriteError::{BacklightChangeUnsupported,
+///      BacklightNotApplied}` appended — `0x1982` battery saving and the
+///      backlight changes a keyboard offers.
 pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the

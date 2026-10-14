@@ -120,6 +120,14 @@ pub enum Switch {
     Off,
 }
 
+impl Switch {
+    /// Whether this asks for the setting to be on.
+    #[must_use]
+    pub fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
 /// Emit one JSON envelope and a matching process status, including runtime failures.
 pub async fn run(args: ApiArgs) -> Result<ExitCode> {
     let result = match agent::connect().await {
@@ -196,7 +204,7 @@ async fn execute(
             let route = select_device(&snapshot, &device)?;
             let state = match set {
                 Some(set) => {
-                    let requested = matches!(set, Switch::On);
+                    let requested = set.is_on();
                     if let Some(save) = save.as_mut() {
                         save.fn_lock(requested);
                     }
@@ -238,7 +246,7 @@ async fn execute(
                     "the keyboard does not let software set its key layout",
                 ));
             }
-            let keep = matches!(set, Switch::On);
+            let keep = set.is_on();
             save.keep_os_layout(keep);
             Ok(json!({
                 "device": device,
