@@ -2,14 +2,14 @@
 //! application, and how the application in front is matched to them.
 //!
 //! An override replaces a whole button with a single action or a direction map. Editing addresses
-//! a profile by its exact key; matching goes through [`overlay_for`], which
+//! a profile by its exact key; matching goes through [`overlay_pair_for`], which
 //! also falls back from a Windows executable path to that executable's
 //! `exe:<filename>` key.
 
 use std::collections::BTreeMap;
 
 use super::Config;
-use crate::app::overlay_for;
+use crate::app::overlay_pair_for;
 use crate::binding::{
     Action, Binding, ButtonId, GestureDirection, default_binding, default_binding_for,
 };
@@ -18,7 +18,9 @@ impl Config {
     /// Resolve the effective binding map for `device_key`, overlaying the
     /// per-app entry for `bundle_id` (if any) on top of the global per-device
     /// `bindings`. A per-app override replaces the whole button with a
-    /// [`Binding::Single`]; everything else falls through.
+    /// single action or directional map; everything else falls through. Exact
+    /// application selectors take precedence across both storage shapes before
+    /// a single action can suspend a gesture map in that selected profile.
     ///
     /// Returns an empty map when the device has no recorded bindings yet.
     /// Callers (the GUI / hook) layer their own defaults on top.
@@ -33,13 +35,18 @@ impl Config {
         };
         let mut out = device.bindings.clone();
         if let Some(bid) = bundle_id {
-            if let Some(overlay) = overlay_for(&device.per_app_gesture_bindings, bid) {
+            let (gestures, actions) = overlay_pair_for(
+                &device.per_app_gesture_bindings,
+                &device.per_app_bindings,
+                bid,
+            );
+            if let Some(overlay) = gestures {
                 for (button, directions) in overlay {
                     out.insert(*button, Binding::Gesture(directions.clone()));
                 }
             }
             // A single action suspends the app's map without discarding its swipes.
-            if let Some(overlay) = overlay_for(&device.per_app_bindings, bid) {
+            if let Some(overlay) = actions {
                 for (button, action) in overlay {
                     out.insert(*button, Binding::Single(action.clone()));
                 }
@@ -235,9 +242,10 @@ impl Config {
     #[must_use]
     pub fn has_app_override(&self, device_key: &str, app: &str) -> bool {
         self.devices.get(device_key).is_some_and(|d| {
-            overlay_for(&d.per_app_bindings, app).is_some_and(|overlay| !overlay.is_empty())
-                || overlay_for(&d.per_app_gesture_bindings, app)
-                    .is_some_and(|overlay| !overlay.is_empty())
+            let (actions, gestures) =
+                overlay_pair_for(&d.per_app_bindings, &d.per_app_gesture_bindings, app);
+            actions.is_some_and(|overlay| !overlay.is_empty())
+                || gestures.is_some_and(|overlay| !overlay.is_empty())
         })
     }
 }
