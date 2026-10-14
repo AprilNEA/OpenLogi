@@ -301,6 +301,13 @@ impl Runtime {
                     });
                 });
             }
+            ipc::GuiUpdate::BacklightWritten { key, route, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_backlight_written(&key, &route, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::DeviceUnpaired {
                 record_key,
                 route,

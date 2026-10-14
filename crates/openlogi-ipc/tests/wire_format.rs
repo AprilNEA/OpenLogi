@@ -281,6 +281,16 @@ fn semantic_read_requests() {
         },
         "200008463030444341464501fbe803",
     );
+    assert_wire(
+        &AgentRequest::SetBacklight {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            change: BacklightChange::Level(5),
+        },
+        "2100084630304443414645010205",
+    );
 }
 
 /// A chord crosses the wire as its modifier bits and the key's HID usage.
@@ -518,13 +528,14 @@ fn device_inventory() {
                 fn_lock: false,
                 os_layout: true,
                 report_rate: true,
+                backlight: true,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010107",
     );
 }
 

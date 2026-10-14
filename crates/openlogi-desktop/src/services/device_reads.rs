@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::{Context, Subscription};
 use openlogi_core::hid::{
-    DeviceRoute, DpiInfo, FnLockState, ReportRateInfo, SmartShiftStatus, WriteError,
+    BacklightState, DeviceRoute, DpiInfo, FnLockState, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use swr_core::{
     MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
@@ -16,9 +16,10 @@ use swr_core::{
 use swr_gpui::Query;
 use tokio::sync::mpsc;
 
-use super::ipc::{Command, ReadDpi, ReadFnLock, ReadReportRate, ReadSmartShift};
+use super::ipc::{Command, ReadBacklight, ReadDpi, ReadFnLock, ReadReportRate, ReadSmartShift};
 use crate::state::{
-    AppState, DeviceKey, DpiLoad, FnLockLoad, Load, ReportRateLoad, SmartShiftLoad, StateEvent,
+    AppState, BacklightLoad, DeviceKey, DpiLoad, FnLockLoad, Load, ReportRateLoad, SmartShiftLoad,
+    StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -26,6 +27,7 @@ const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
 const FN_LOCK: &str = "fn-lock";
 const REPORT_RATE: &str = "report-rate";
+const BACKLIGHT: &str = "backlight";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -61,6 +63,7 @@ pub(crate) struct DeviceReads {
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
     fn_lock: BTreeMap<DeviceKey, DeviceRead<FnLockState>>,
     report_rate: BTreeMap<DeviceKey, DeviceRead<ReportRateInfo>>,
+    backlight: BTreeMap<DeviceKey, DeviceRead<BacklightState>>,
 }
 
 impl DeviceReads {
@@ -450,9 +453,136 @@ impl DeviceReads {
         self.report_rate.get(key).map(|read| &read.load)
     }
 
+    /// Start the backlight query unless the same keyboard route is already
+    /// subscribed. A change answers through [`Self::set_backlight_ready`], or
+    /// [`Self::refresh_backlight`] when the keyboard refused it.
+    pub(crate) fn ensure_backlight(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .backlight
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_backlight(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(move |reply| ReadBacklight { route, reply }.into(), commands)
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !backlight_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(BACKLIGHT, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        read_through(&client, BACKLIGHT, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), backlight_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), backlight_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_backlight(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::BacklightChanged(observed_key.clone()));
+            }
+        });
+        self.backlight.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Show `state` as `key`'s backlight now: the change the GUI just asked
+    /// for, then what the keyboard read back. A local write supersedes a fetch
+    /// still in flight. Like [`Self::set_report_rate_ready`], only the read
+    /// subscribed on `route` — the connection `state` was read on — takes it.
+    /// Returns whether one did.
+    pub(crate) fn set_backlight_ready(
+        &mut self,
+        key: &DeviceKey,
+        route: &DeviceRoute,
+        state: BacklightState,
+    ) -> bool {
+        let Some(read) = self.backlight_on(key, route) else {
+            return false;
+        };
+        let value = Arc::new(state);
+        read.load = Load::Ready(value.clone());
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<BacklightState>, WriteError>(
+                query_key(BACKLIGHT, key),
+                Some(value),
+            );
+        }
+        true
+    }
+
+    /// Re-read `key`'s backlight from the keyboard, keeping the last value on
+    /// screen while it answers — when the read is still on `route`, the
+    /// connection a refused change went out on. Returns whether it was.
+    pub(crate) fn refresh_backlight(&mut self, key: &DeviceKey, route: &DeviceRoute) -> bool {
+        let Some(read) = self.backlight_on(key, route) else {
+            return false;
+        };
+        read.query.revalidate();
+        true
+    }
+
+    /// `key`'s backlight read, if it is subscribed on `route`.
+    fn backlight_on(
+        &mut self,
+        key: &DeviceKey,
+        route: &DeviceRoute,
+    ) -> Option<&mut DeviceRead<BacklightState>> {
+        self.backlight
+            .get_mut(key)
+            .filter(|read| read.route == *route)
+    }
+
+    /// Retry an exhausted backlight query.
+    pub(crate) fn retry_backlight(&mut self, key: &DeviceKey) {
+        let Some(read) = self.backlight.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
+    /// `key`'s backlight load, or `None` while nothing has subscribed to it.
+    #[must_use]
+    pub(crate) fn backlight_load(&self, key: &DeviceKey) -> Option<&BacklightLoad> {
+        self.backlight.get(key).map(|read| &read.load)
+    }
+
     /// Re-read `key`'s settings after the device reported changing one
     /// itself, keeping the shown values while it answers. Covers the settings
-    /// such a report can concern — DPI, Fn lock and report rate (see
+    /// such a report can concern — DPI, Fn lock, report rate and backlight (see
     /// [`PairedDevice::settings_revision`]); a read nothing subscribed to
     /// stays unsubscribed.
     ///
@@ -463,6 +593,9 @@ impl DeviceReads {
         }
         self.refresh_fn_lock(key);
         if let Some(read) = self.report_rate.get_mut(key) {
+            read.query.revalidate();
+        }
+        if let Some(read) = self.backlight.get_mut(key) {
             read.query.revalidate();
         }
     }
@@ -527,6 +660,7 @@ impl DeviceReads {
         self.remove_smartshift(key);
         self.remove_fn_lock(key);
         self.remove_report_rate(key);
+        self.remove_backlight(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -557,6 +691,13 @@ impl DeviceReads {
         }
     }
 
+    fn remove_backlight(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.backlight.remove(key) {
+            drop(read);
+            self.clear::<BacklightState>(BACKLIGHT, key);
+        }
+    }
+
     /// Forget every query whose device is no longer present.
     pub(crate) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
         let removed: BTreeSet<_> = self
@@ -565,6 +706,7 @@ impl DeviceReads {
             .chain(self.smartshift.keys())
             .chain(self.fn_lock.keys())
             .chain(self.report_rate.keys())
+            .chain(self.backlight.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -630,6 +772,21 @@ impl DeviceReads {
     fn update_report_rate(&mut self, key: &DeviceKey, flight: u64, load: ReportRateLoad) -> bool {
         let Some(read) = self
             .report_rate
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_backlight(&mut self, key: &DeviceKey, flight: u64, load: BacklightLoad) -> bool {
+        let Some(read) = self
+            .backlight
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {
@@ -737,6 +894,10 @@ fn fn_lock_error_is_permanent(error: &WriteError) -> bool {
 }
 
 fn report_rate_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+fn backlight_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 

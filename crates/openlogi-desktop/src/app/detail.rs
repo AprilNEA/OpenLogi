@@ -42,6 +42,8 @@ use crate::ui::theme::{
     self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
 };
 
+mod backlight;
+
 const CAMERA_PREVIEW_W: Rems = rems(32.125);
 const CAMERA_CONTROLS_W: Rems = rems(31.25);
 const LIGHT_CONTROLS_W: Rems = rems(25.);
@@ -649,6 +651,10 @@ fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
             .gap_3()
             .child(device_details_card(pal, cx))
             .when(keyboard, |column| column.child(keyboard_card(pal, cx)))
+            .children(backlight::backlight_card(
+                backlight::BacklightFacts::current(cx),
+                pal,
+            ))
             .child(configuration_card(pal, cx)),
     )
 }
@@ -670,19 +676,24 @@ struct KeyboardFacts {
 }
 
 /// One keyboard setting: a title and a caption on the left, its toggle on the
-/// right.
+/// right. The caption column shrinks and wraps, so a long translation cannot
+/// push the toggle out of the card. `selector` names the row for layout tests.
 fn keyboard_toggle_row(
+    selector: &'static str,
     pal: Palette,
     title: gpui::SharedString,
     description: gpui::SharedString,
     toggle: Toggle,
 ) -> impl IntoElement {
     h_flex()
+        .debug_selector(move || selector.into())
         .justify_between()
         .items_center()
         .gap_4()
         .child(
             v_flex()
+                .flex_1()
+                .min_w_0()
                 .child(div().text_body().text_color(pal.text_primary).child(title))
                 .child(
                     div()
@@ -691,7 +702,12 @@ fn keyboard_toggle_row(
                         .child(description),
                 ),
         )
-        .child(toggle)
+        .child(
+            div()
+                .debug_selector(move || format!("{selector}-control"))
+                .flex_shrink_0()
+                .child(toggle),
+        )
 }
 
 /// Keyboard card: the Fn-lock and keep-OS-layout toggles. Fn lock is written
@@ -712,6 +728,7 @@ fn keyboard_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         tr!("device.fn_lock_unsupported")
     };
     let fn_lock_row = keyboard_toggle_row(
+        "fn-lock-row",
         pal,
         tr!("device.fn_lock"),
         fn_lock_description,
@@ -729,6 +746,7 @@ fn keyboard_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         tr!("device.keep_os_layout_unsupported")
     };
     let os_layout_row = keyboard_toggle_row(
+        "keep-os-layout-row",
         pal,
         tr!("device.keep_os_layout"),
         os_layout_description,

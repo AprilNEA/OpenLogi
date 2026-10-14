@@ -49,6 +49,8 @@ pub(crate) enum StateEvent {
     FnLockChanged(DeviceKey),
     /// The mouse's report-rate read landed or changed.
     ReportRateChanged(DeviceKey),
+    /// The keyboard's backlight read landed or changed.
+    BacklightChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -82,6 +84,7 @@ impl StateEvent {
             | Self::SmartShiftChanged(key)
             | Self::FnLockChanged(key)
             | Self::ReportRateChanged(key)
+            | Self::BacklightChanged(key)
             | Self::LightingChanged(key)
             | Self::DeviceConfigChanged(key) => Some(key),
             Self::AgentChanged
@@ -227,6 +230,7 @@ impl AppState {
             | StateEvent::SmartShiftChanged(_)
             | StateEvent::FnLockChanged(_)
             | StateEvent::ReportRateChanged(_)
+            | StateEvent::BacklightChanged(_)
             | StateEvent::LightingChanged(_)
             | StateEvent::CameraChanged
             | StateEvent::CameraPermissionChanged

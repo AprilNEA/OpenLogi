@@ -644,6 +644,12 @@ fn validate_setting_support(
                 settings.report_rate.supports_feature(),
                 capabilities.report_rate,
             )?;
+            validate_capability_support(
+                settings,
+                "backlight",
+                settings.backlight.supports_feature(),
+                capabilities.backlight,
+            )?;
         }
     }
     Ok(())

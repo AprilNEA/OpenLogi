@@ -29,7 +29,7 @@ pub use devices::DeviceRecord;
 pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiLoad, FnLockLoad, ReportRateLoad, SmartShiftLoad};
+pub use load::{BacklightLoad, DpiLoad, FnLockLoad, ReportRateLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +61,7 @@ use crate::state::devices::{build_device_list, pick_initial_device};
 
 mod action_ring;
 mod agent;
+mod backlight;
 mod bindings;
 mod camera;
 mod config;
@@ -221,6 +222,7 @@ impl AppState {
             state.confirm_current_smartshift(cx);
             state.load_current_fn_lock(cx);
             state.load_current_report_rate(cx);
+            state.load_current_backlight(cx);
         });
     }
 

@@ -54,8 +54,9 @@ use openlogi_core::device::{
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, PasskeyMethod,
-    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand,
+    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -905,6 +906,22 @@ impl Agent for MockAgent {
         stored.current = rate;
         info!(%route, %rate, "set_report_rate");
         Ok(stored.clone())
+    }
+    async fn set_backlight(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.backlight, &route, 0x1982)?;
+        if !stored.accepts(change) {
+            return Err(WriteError::BacklightChangeUnsupported { change });
+        }
+        *stored = stored.changed(change);
+        info!(%route, %change, "set_backlight");
+        Ok(*stored)
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

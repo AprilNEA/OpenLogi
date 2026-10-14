@@ -282,18 +282,15 @@ async fn capture_hidpp_settings(
             .await?
         }
     };
-    // Schema v1 makes RGB lighting and keyboard backlight mutually exclusive,
-    // so observed RGB capability is a sufficient negative backlight fact.
-    let backlight = if capabilities.lighting {
-        ProfileSetting::Unsupported
-    } else if device.online {
-        semantic_read(
-            "backlight",
-            agent::call(client.read_backlight(context::current(), source_route.clone())),
-        )
-        .await?
-    } else {
-        return Err(unknown_offline_support("backlight"));
+    let backlight = match capability_setting(device.online, capabilities.backlight) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "backlight",
+                agent::call(client.read_backlight(context::current(), source_route.clone())),
+            )
+            .await?
+        }
     };
 
     let fn_lock = match capability_setting(device.online, capabilities.fn_lock) {

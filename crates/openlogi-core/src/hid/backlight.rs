@@ -183,6 +183,46 @@ impl BacklightState {
                     | BacklightStatus::AlsSaturated
             )
     }
+
+    /// The backlight this one becomes once the keyboard keeps `change`, as
+    /// far as the change alone decides — what software can show before the
+    /// keyboard reads back, and what a keyboard double answers.
+    ///
+    /// The firmware owns the rest and it is kept: a critical-battery shutoff
+    /// stays in force, and a status the mode did not change — a saturated
+    /// sensor, say — stands. Turning the backlight off always reads
+    /// [`BacklightStatus::DisabledBySoftware`], the status the keyboard
+    /// reports for it. `change` is not checked against [`Self::accepts`].
+    #[must_use]
+    pub fn changed(self, change: BacklightChange) -> Self {
+        let mut next = self;
+        match change {
+            BacklightChange::Enabled(on) => next.enabled = on,
+            BacklightChange::Automatic(true) => next.mode = BacklightMode::Automatic,
+            // The level shown now is the one held, as the device write does.
+            BacklightChange::Automatic(false) => next.mode = BacklightMode::PermanentManual,
+            BacklightChange::Level(level) => {
+                next.mode = BacklightMode::PermanentManual;
+                next.current_level = level;
+            }
+            BacklightChange::PowerSave(on) => next.power_save = on,
+        }
+        next.status = if !next.enabled {
+            BacklightStatus::DisabledBySoftware
+        } else if self.status == BacklightStatus::DisabledByCriticalBattery
+            || (self.enabled && next.mode == self.mode)
+        {
+            self.status
+        } else {
+            match next.mode {
+                BacklightMode::Automatic => BacklightStatus::AlsAutomatic,
+                BacklightMode::TemporaryManual => BacklightStatus::TemporaryManual,
+                BacklightMode::PermanentManual => BacklightStatus::PermanentManual,
+                BacklightMode::None => self.status,
+            }
+        };
+        next
+    }
 }
 
 #[cfg(test)]
@@ -291,5 +331,88 @@ mod tests {
             ..lit()
         };
         assert!(state.is_dark());
+    }
+
+    #[test]
+    fn turning_the_backlight_off_reads_as_a_software_disable() {
+        let off = lit().changed(BacklightChange::Enabled(false));
+        assert!(!off.enabled);
+        assert_eq!(off.status, BacklightStatus::DisabledBySoftware);
+        assert_eq!(
+            off.mode,
+            BacklightMode::Automatic,
+            "the mode is kept for later"
+        );
+    }
+
+    #[test]
+    fn turning_it_back_on_reports_the_kept_mode() {
+        let off = lit().changed(BacklightChange::Enabled(false));
+        assert_eq!(off.changed(BacklightChange::Enabled(true)), lit());
+        let manual = BacklightState {
+            mode: BacklightMode::PermanentManual,
+            ..off
+        };
+        assert_eq!(
+            manual.changed(BacklightChange::Enabled(true)).status,
+            BacklightStatus::PermanentManual
+        );
+    }
+
+    #[test]
+    fn leaving_automatic_holds_the_level_shown() {
+        let held = lit().changed(BacklightChange::Automatic(false));
+        assert_eq!(held.mode, BacklightMode::PermanentManual);
+        assert_eq!(held.status, BacklightStatus::PermanentManual);
+        assert_eq!(held.current_level, lit().current_level);
+        let back = held.changed(BacklightChange::Automatic(true));
+        assert_eq!(back.mode, BacklightMode::Automatic);
+        assert_eq!(back.status, BacklightStatus::AlsAutomatic);
+    }
+
+    #[test]
+    fn a_level_leaves_automatic_mode() {
+        let set = lit().changed(BacklightChange::Level(2));
+        assert_eq!(set.current_level, 2);
+        assert_eq!(set.mode, BacklightMode::PermanentManual);
+        assert_eq!(set.status, BacklightStatus::PermanentManual);
+    }
+
+    #[test]
+    fn battery_saving_changes_nothing_else() {
+        let saving_off = lit().changed(BacklightChange::PowerSave(false));
+        assert_eq!(
+            saving_off,
+            BacklightState {
+                power_save: false,
+                ..lit()
+            }
+        );
+    }
+
+    #[test]
+    fn firmware_owned_status_is_kept() {
+        let saturated = BacklightState {
+            status: BacklightStatus::AlsSaturated,
+            ..lit()
+        };
+        assert_eq!(
+            saturated.changed(BacklightChange::PowerSave(false)).status,
+            BacklightStatus::AlsSaturated,
+            "the sensor still reads bright"
+        );
+        let critical = BacklightState {
+            status: BacklightStatus::DisabledByCriticalBattery,
+            ..lit()
+        };
+        assert_eq!(
+            critical.changed(BacklightChange::Level(3)).status,
+            BacklightStatus::DisabledByCriticalBattery,
+            "a level does not override the battery shutoff"
+        );
+        assert_eq!(
+            critical.changed(BacklightChange::Enabled(false)).status,
+            BacklightStatus::DisabledBySoftware
+        );
     }
 }

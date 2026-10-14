@@ -149,6 +149,10 @@ pub struct Capabilities {
     /// Appended: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub report_rate: bool,
+    /// The keyboard's backlight can be switched and tuned — HID++ `0x1982
+    /// Backlight`. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub backlight: bool,
 }
 
 impl Capabilities {
@@ -159,7 +163,8 @@ impl Capabilities {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
         // Every family here is driven by `set_keyboard_color`, which tries
-        // effect engines before per-zone paths. Backlight (0x198x) stays out.
+        // effect engines before per-zone paths. The 0x198x backlight is not
+        // lighting: `backlight` below covers 0x1982.
         const LIGHTING: [u16; 4] = [0x8070, 0x8071, 0x8081, 0x8080];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
@@ -177,6 +182,7 @@ impl Capabilities {
             // platform; the feature table alone cannot say.
             os_layout: ids.contains(&0x4531),
             report_rate: ids.contains(&0x8060) || ids.contains(&0x8061),
+            backlight: ids.contains(&0x1982),
         }
     }
 
@@ -565,6 +571,7 @@ mod tests {
                     fn_lock: false,
                     os_layout: false,
                     report_rate: false,
+                    backlight: false,
                 }),
                 settings_revision: 0,
             }],
@@ -680,6 +687,7 @@ mod tests {
                 fn_lock: false,
                 os_layout: false,
                 report_rate: false,
+                backlight: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -700,6 +708,7 @@ mod tests {
                 fn_lock: false,
                 os_layout: false,
                 report_rate: false,
+                backlight: false,
             }
         );
         // No driving features → nothing offered.
@@ -714,6 +723,9 @@ mod tests {
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x8060]).report_rate);
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x8061]).report_rate);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x2202]).report_rate);
+        // Only the 0x1982 backlight is driven; the older 0x1981 is not.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1982]).backlight);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1981]).backlight);
     }
 
     #[test]

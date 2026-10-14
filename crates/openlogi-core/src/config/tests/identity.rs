@@ -25,6 +25,7 @@ fn device_identity_roundtrips_and_is_iterable() {
             fn_lock: false,
             os_layout: false,
             report_rate: false,
+            backlight: false,
         },
         light_capabilities: None,
         driver_id: None,

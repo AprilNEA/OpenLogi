@@ -23,8 +23,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, FnLockState,
-    HidppOperation, HostOs, ReportRate, ReportRateInfo, WriteError, is_reserved_keyboard_control,
+    BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
+    DeviceIoGate, DeviceRoute, FnLockState, HidppOperation, HostOs, ReportRate, ReportRateInfo,
+    SharedChannel, WriteError, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -135,6 +136,8 @@ pub struct SharedHandles {
     /// Orders the GUI's report-rate writes and the reconnect reapply's per
     /// mouse.
     report_rate_order: WriteOrder,
+    /// Orders the GUI's backlight writes per keyboard.
+    backlight_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -234,6 +237,25 @@ impl SharedHandles {
                 |c| async move { openlogi_hid::set_report_rate_on(&c, rate).await },
                 |c| async move { openlogi_hid::get_report_rate_info_on(&c).await },
             )
+            .await
+    }
+
+    /// Apply `change` to the backlight of the keyboard at `route` and return
+    /// what it reads back. Every change is applied, one at a time in request
+    /// order: each rewrites the whole configuration it read, so two that
+    /// overlapped would undo one another, and a newer change to another
+    /// control does not make an older one moot.
+    pub async fn set_backlight(
+        &self,
+        route: &DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError> {
+        let ticket = self.backlight_order.request(route);
+        let write = move |c: SharedChannel| async move {
+            openlogi_hid::update_backlight_on(&c, change).await
+        };
+        self.device(route)
+            .run_in_turn(HidppOperation::WriteBacklight, &ticket, write, write)
             .await
     }
 
@@ -381,6 +403,7 @@ impl Orchestrator {
             host_switch_links,
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
+            backlight_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {

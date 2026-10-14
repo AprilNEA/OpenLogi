@@ -29,12 +29,14 @@ fn test_state() -> State {
 
 fn test_state_with_backlight(backlight: ProfileSetting<BacklightState>) -> State {
     let mut profile = built_in_profile().expect("built-in profile should construct");
+    advertise_mouse_backlight(&mut profile);
     profile.settings[0].backlight = backlight;
     State::new(profile, MockClock::Test(Duration::ZERO)).expect("backlight profile should validate")
 }
 
 fn test_state_with_unavailable_reads() -> State {
     let mut profile = built_in_profile().expect("built-in profile should construct");
+    advertise_mouse_backlight(&mut profile);
     let settings = &mut profile.settings[0];
     settings.dpi = ProfileSetting::Unavailable;
     settings.smartshift = ProfileSetting::Unavailable;
@@ -42,6 +44,19 @@ fn test_state_with_unavailable_reads() -> State {
     settings.backlight = ProfileSetting::Unavailable;
     State::new(profile, MockClock::Test(Duration::ZERO))
         .expect("unavailable settings should preserve capability consistency")
+}
+
+/// Give the mouse slot (`settings[0]`) the backlight capability, so a profile
+/// that offers it a backlight setting stays consistent with its inventory.
+fn advertise_mouse_backlight(profile: &mut DeviceProfile) {
+    let capabilities = profile
+        .inventories
+        .iter_mut()
+        .flat_map(|inventory| inventory.paired.iter_mut())
+        .find(|device| device.slot == MOUSE_SLOT)
+        .and_then(|device| device.capabilities.as_mut())
+        .expect("the built-in profile has a probed mouse slot");
+    capabilities.backlight = true;
 }
 
 fn mouse_route() -> DeviceRoute {
@@ -203,6 +218,73 @@ async fn profile_backed_wheel_and_backlight_reads_return_exact_values() {
             .expect("backlight read should return exact profile state"),
         expected
     );
+}
+
+#[tokio::test]
+async fn backlight_changes_are_kept_and_unoffered_ones_refused() {
+    let manual = BacklightState {
+        enabled: true,
+        mode: openlogi_hid::BacklightMode::PermanentManual,
+        status: openlogi_hid::BacklightStatus::PermanentManual,
+        current_level: 3,
+        nb_levels: 8,
+        power_save: true,
+        controls: openlogi_hid::BacklightControls {
+            automatic: true,
+            level: false,
+            power_save: true,
+        },
+    };
+    let agent = MockAgent::new(test_state_with_backlight(ProfileSetting::Supported(manual)));
+    let automatic = agent
+        .clone()
+        .set_backlight(
+            tarpc::context::current(),
+            mouse_route(),
+            BacklightChange::Automatic(true),
+        )
+        .await
+        .expect("the keyboard offers automatic brightness");
+    assert_eq!(automatic, manual.changed(BacklightChange::Automatic(true)));
+    assert!(matches!(
+        agent
+            .clone()
+            .set_backlight(
+                tarpc::context::current(),
+                mouse_route(),
+                BacklightChange::Level(5),
+            )
+            .await,
+        Err(WriteError::BacklightChangeUnsupported {
+            change: BacklightChange::Level(5)
+        })
+    ));
+    assert_eq!(
+        agent
+            .clone()
+            .read_backlight(tarpc::context::current(), mouse_route())
+            .await
+            .expect("the backlight reads back"),
+        automatic,
+        "a refused change leaves the kept one in place"
+    );
+
+    let keyboard = DeviceRoute::Bolt {
+        receiver_uid: RECEIVER_UID.to_string(),
+        slot: KEYBOARD_SLOT,
+    };
+    assert!(matches!(
+        agent
+            .set_backlight(
+                tarpc::context::current(),
+                keyboard,
+                BacklightChange::Enabled(false),
+            )
+            .await,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x1982
+        })
+    ));
 }
 
 #[tokio::test]

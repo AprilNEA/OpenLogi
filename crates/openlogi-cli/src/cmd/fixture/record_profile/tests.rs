@@ -8,9 +8,9 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
-    BacklightControls, BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, FnLockState,
-    LightCommand, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus,
+    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Dpi,
+    DpiInfo, FnLockState, LightCommand, PasskeyMethod, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -186,6 +186,14 @@ impl Agent for TestAgent {
         _rate: ReportRate,
     ) -> Result<ReportRateInfo, WriteError> {
         unreachable!("profile capture must never write the report rate")
+    }
+    async fn set_backlight(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _change: BacklightChange,
+    ) -> Result<BacklightState, WriteError> {
+        unreachable!("profile capture must never write the backlight")
     }
 
     async fn read_dpi(self, _: TarpcContext, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
@@ -457,7 +465,8 @@ async fn receiver_capture_uses_agent_reads_and_writes_validated_profile_only() {
             ReadFamily::Dpi,
             ReadFamily::Smartshift,
             ReadFamily::Wheel,
-            ReadFamily::Backlight,
+            // A mouse has no `0x1982`, so its backlight is recorded
+            // unsupported without asking the agent.
             ReadFamily::Smartshift,
         ]
     );

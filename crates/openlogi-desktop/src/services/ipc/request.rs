@@ -18,8 +18,8 @@ use std::future::Future;
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, ReceiverSelector, ReportRate,
-    ReportRateInfo, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand,
+    ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
 use tarpc::client::RpcError;
@@ -193,6 +193,32 @@ impl Request for SetReportRate {
     }
 }
 
+/// Apply one backlight change to a keyboard now, answered as
+/// [`GuiUpdate::BacklightWritten`] with what the keyboard reads back.
+pub struct SetBacklight {
+    pub route: DeviceRoute,
+    pub change: BacklightChange,
+    pub key: DeviceKey,
+}
+
+impl Request for SetBacklight {
+    type Answer = Result<BacklightState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_backlight(context::current(), self.route.clone(), self.change)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::BacklightWritten {
+            key: self.key,
+            route: self.route,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
 /// Apply a SmartShift configuration now.
 pub struct SetSmartShift {
     pub route: DeviceRoute,
@@ -335,6 +361,26 @@ impl Request for ReadReportRate {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_report_rate(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a keyboard's backlight; the answer goes back over `reply`.
+pub struct ReadBacklight {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<BacklightState, WriteError>>,
+}
+
+impl Request for ReadBacklight {
+    type Answer = Result<BacklightState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_backlight(context::current(), self.route.clone())
             .await
     }
 
@@ -575,10 +621,12 @@ commands! {
     SetSmartShift,
     SetFnLock,
     SetReportRate,
+    SetBacklight,
     ReadDpi,
     ReadSmartShift,
     ReadFnLock,
     ReadReportRate,
+    ReadBacklight,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,

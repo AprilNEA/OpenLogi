@@ -18,9 +18,9 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, HapticWaveform, HidppOperation,
-    LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
-    WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, HapticWaveform,
+    HidppOperation, LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -289,6 +289,14 @@ impl Agent for AgentServer {
         rate: ReportRate,
     ) -> Result<ReportRateInfo, WriteError> {
         self.shared.set_report_rate(&route, rate).await
+    }
+    async fn set_backlight(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError> {
+        self.shared.set_backlight(&route, change).await
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {

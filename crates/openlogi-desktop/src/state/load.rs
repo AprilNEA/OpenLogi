@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use openlogi_core::hid::{DpiInfo, FnLockState, ReportRateInfo, SmartShiftStatus};
+use openlogi_core::hid::{BacklightState, DpiInfo, FnLockState, ReportRateInfo, SmartShiftStatus};
 
 /// State projected from an swr-backed device query: unqueried, in flight,
 /// resolved, transiently failed, or permanently unsupported.
@@ -43,3 +43,7 @@ pub type FnLockLoad = Load<Arc<FnLockState>>;
 /// its current connection, which change when it moves between a receiver and
 /// a cable.
 pub type ReportRateLoad = Load<Arc<ReportRateInfo>>;
+/// Per-keyboard backlight (`0x1982`) load state. See [`Load`]. The keyboard
+/// stores its backlight itself and changes it on its own — the backlight keys,
+/// the light sensor, a low battery — so the read is the only record.
+pub type BacklightLoad = Load<Arc<BacklightState>>;
