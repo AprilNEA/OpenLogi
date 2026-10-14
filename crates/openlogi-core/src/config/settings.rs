@@ -207,6 +207,11 @@ pub struct AppSettings {
     /// Takes effect on agent restart.
     #[serde(default = "default_true")]
     pub capture_mouse_events: bool,
+    /// Whether the agent selects the current operating system's keyboard
+    /// layout on supported Logitech keyboards. Off leaves the device's saved
+    /// layout unchanged; turning this off never restores a previous value.
+    #[serde(default)]
+    pub force_keyboard_os_layout: bool,
     /// Whether ordinary mouse-wheel input is replaced with a finite smooth
     /// scroll animation. **Off by default**: while enabled the OS hook
     /// suppresses eligible physical wheel events only after its non-blocking
@@ -470,6 +475,7 @@ impl Default for AppSettings {
             update_prompt_seen: false,
             show_in_menu_bar: true,
             capture_mouse_events: true,
+            force_keyboard_os_layout: false,
             smooth_scroll: false,
             vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
             auto_download_assets: true,

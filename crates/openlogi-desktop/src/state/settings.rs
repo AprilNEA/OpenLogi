@@ -291,6 +291,18 @@ impl AppState {
         self.persist_and_reload("mouse profile target");
         StateEvent::SettingsChanged.into()
     }
+    /// Persist whether supported keyboards should use this host's operating
+    /// system layout, then reload the agent. Disabling the preference leaves
+    /// the device's current layout untouched.
+    pub fn commit_force_keyboard_os_layout(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.force_keyboard_os_layout == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.force_keyboard_os_layout = enabled);
+        self.persist_and_reload("keyboard OS layout setting");
+        StateEvent::SettingsChanged.into()
+    }
     /// Toggle finite animation for traditional mouse-wheel input and persist
     /// it. The agent publishes the change to the scroll worker on config
     /// reload. An already-set value writes nothing and is still reported; disk

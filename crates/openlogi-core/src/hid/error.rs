@@ -171,6 +171,9 @@ pub enum HidppOperation {
     /// Write the `0x2205` pointer-motion scaling. Appended last — variant order
     /// is wire format.
     WritePointerScaling,
+    /// Read or set the host platform for a multi-platform keyboard. Appended
+    /// last — variant order is wire format.
+    SetKeyboardPlatform,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

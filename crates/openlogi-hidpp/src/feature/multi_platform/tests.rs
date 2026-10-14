@@ -1,6 +1,6 @@
 //! Unit tests for `MultiPlatform` descriptor parsing.
 
-use super::{OsMask, PlatformDescriptor};
+use super::{MultiPlatformFeature, OsMask, PlatformDescriptor};
 
 fn descriptor(mask: [u8; 2]) -> PlatformDescriptor {
     let mut payload = [0; 16];
@@ -60,4 +60,83 @@ fn decodes_the_rest_of_the_descriptor() {
 fn keeps_undefined_bits() {
     // Bits 1-7 are undefined; they survive decoding instead of being dropped.
     assert_eq!(descriptor([0x01, 0x82]).os_mask.bits(), 0x0182);
+}
+
+#[test]
+fn reads_multiplatform_capabilities_and_descriptor_count() {
+    use std::sync::Arc;
+
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::nibble::U4;
+    use crate::protocol::v20::{Message, MessageHeader};
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let feature = MultiPlatformFeature::new(channel, 3, 8);
+        let header = MessageHeader {
+            device_index: 3,
+            feature_index: 8,
+            function_id: U4::from_lo(0),
+            software_id: U4::from_lo(1),
+        };
+        let mut read = Box::pin(feature.get_feature_infos());
+        assert!(futures::poll!(read.as_mut()).is_pending());
+
+        let [request] = &handle.written_reports()[..] else {
+            panic!("one request");
+        };
+        assert_eq!(request[3] >> 4, 0);
+
+        let mut payload = [0; 16];
+        payload[..7].copy_from_slice(&[0x02, 0x00, 0x04, 0x04, 0x03, 0x01, 0x00]);
+        handle
+            .send_incoming(Message::Long(header, payload).into())
+            .await;
+        let info = read.await.expect("feature info response");
+        assert!(
+            info.capabilities
+                .contains(super::MultiPlatformCapabilities::SET_HOST_PLATFORM)
+        );
+        assert_eq!(info.descriptor_count, 4);
+    });
+}
+
+#[test]
+fn sets_platform_for_the_selected_host() {
+    use std::sync::Arc;
+
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::feature::hosts_info::HostIndex;
+    use crate::nibble::U4;
+    use crate::protocol::v20::{Message, MessageHeader};
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let feature = MultiPlatformFeature::new(channel, 3, 8);
+        let header = MessageHeader {
+            device_index: 3,
+            feature_index: 8,
+            function_id: U4::from_lo(3),
+            software_id: U4::from_lo(1),
+        };
+        let mut write = Box::pin(feature.set_host_platform(HostIndex::Current, 2));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+
+        let [request] = &handle.written_reports()[..] else {
+            panic!("one request");
+        };
+        assert_eq!(request[3] >> 4, 3);
+        assert_eq!(request[4..7], [0xff, 2, 0]);
+
+        handle
+            .send_incoming(Message::Long(header, [0; 16]).into())
+            .await;
+        write
+            .await
+            .expect("platform write should receive its response");
+    });
 }

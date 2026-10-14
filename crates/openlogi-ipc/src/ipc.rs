@@ -81,7 +81,9 @@ pub use succession::Identity;
 ///      `FnLockState::default_fn_lock` became `Option<bool>` — `None` for a
 ///      `0x40a0` keyboard, which reports no default;
 ///      `WriteError::HapticWaveformUnsupported` appended — a haptic play of a
-///      waveform the device does not advertise is refused before it is sent.
+///      waveform the device does not advertise is refused before it is sent;
+///      `HidppOperation::SetKeyboardPlatform` and `Capabilities::multi_platform`
+///      appended for OS-layout writes and measured `0x4531` support.
 pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the

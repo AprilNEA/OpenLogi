@@ -35,9 +35,9 @@ pub use host::{
     enumerate, enumerate_standalone, get_backlight, get_dpi, get_dpi_info, get_pointer_scaling,
     get_scroll_wheel_mode, get_smartshift_status, list_pairing_receivers, play_haptic,
     read_battery_raw, set_backlight_enabled, set_dpi, set_fn_lock, set_keyboard_color,
-    set_keyboard_color_with, set_pointer_scaling, set_scroll_inversion, set_scroll_resolution,
-    set_scroll_wheel_mode, set_smartshift, set_smartshift_sensitivity, toggle_smartshift,
-    watch_hotplug,
+    set_keyboard_color_with, set_platform_for_current_os_on, set_pointer_scaling,
+    set_scroll_inversion, set_scroll_resolution, set_scroll_wheel_mode, set_smartshift,
+    set_smartshift_sensitivity, toggle_smartshift, watch_hotplug,
 };
 pub use lighting::{set_keyboard_color_on, set_keyboard_color_with_on};
 pub use probe_cache::FileProbeCacheStore;

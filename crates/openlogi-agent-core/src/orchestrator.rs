@@ -828,6 +828,15 @@ impl Orchestrator {
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
+        if self.config.app_settings.force_keyboard_os_layout
+            && dev
+                .capabilities
+                .is_some_and(|capabilities| capabilities.multi_platform)
+        {
+            crate::hardware::set_keyboard_os_layout_in_background(
+                self.shared.keyboard_device(&route),
+            );
+        }
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
         {
@@ -1103,6 +1112,7 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_changed_keyboard_platform(&previous);
         self.reapply_light_settings();
     }
 
@@ -1125,6 +1135,30 @@ impl Orchestrator {
             if let Some(fn_lock) = fn_lock {
                 self.shared.write_fn_lock_in_background(&route, fn_lock);
             }
+        }
+    }
+
+    /// Apply the OS layout immediately when the user enables the preference.
+    /// Turning it off deliberately leaves each keyboard's saved profile as-is.
+    fn apply_changed_keyboard_platform(&self, previous: &Config) {
+        if !self.config.app_settings.force_keyboard_os_layout
+            || previous.app_settings.force_keyboard_os_layout
+        {
+            return;
+        }
+        for dev in self.devices.iter().filter(|dev| {
+            dev.online
+                && self.config.device_enabled(&dev.config_key)
+                && dev
+                    .capabilities
+                    .is_some_and(|capabilities| capabilities.multi_platform)
+        }) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
+            crate::hardware::set_keyboard_os_layout_in_background(
+                self.shared.keyboard_device(&route),
+            );
         }
     }
 

@@ -470,6 +470,14 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: FnLockTicket, on
     );
 }
 
+/// Apply the current host OS layout to a device that exposes writable
+/// `MultiPlatform`, using the agent's authoritative channel.
+pub(crate) fn set_keyboard_os_layout_in_background(op: DeviceOp) {
+    op.detach("keyboard OS layout", |channel| async move {
+        openlogi_hid::set_platform_for_current_os_on(&channel).await
+    });
+}
+
 /// The settings a mouse forgets when it power-cycles, as one reapply pushes
 /// them. `None` leaves that setting alone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

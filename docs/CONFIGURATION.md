@@ -48,6 +48,10 @@ optional physical device key.
 
 - startup, update, menu-bar / tray, input-capture, and asset-download toggles
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
+- `force_keyboard_os_layout` (default `false`): when enabled, sets the current
+  host OS layout on keyboards advertising writable HID++ `MultiPlatform` support
+  at connection and wake. When disabled, OpenLogi leaves the device's saved
+  layout unchanged; disabling it does not restore a previous profile.
 - `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius
 - `smooth_scroll` toggles finite animation for traditional mouse-wheel input. With it

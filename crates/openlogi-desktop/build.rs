@@ -31,6 +31,7 @@ fn main() {
     // unrelated change happens to recompile this crate.
     println!("cargo:rerun-if-changed=../openlogi-ui/locales");
 
+    set_windows_stack_reserve();
     embed_windows_resources();
 
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
@@ -56,6 +57,16 @@ fn main() {
     }
     generated.push_str("];\n");
     fs::write(out.join("builtin_themes.rs"), generated).expect("write builtin_themes.rs");
+}
+/// GPUI's Windows window/bootstrap path exceeds the MSVC default 1 MiB main
+/// thread stack. Reserve 8 MiB for the desktop process; other binaries keep
+/// the linker default.
+fn set_windows_stack_reserve() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-arg-bin=openlogi-desktop=/STACK:8388608");
+    }
 }
 
 /// Embed the Windows exe resources — the app icon and a VERSIONINFO block —

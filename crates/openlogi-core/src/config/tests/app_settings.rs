@@ -65,6 +65,17 @@ fn app_settings_smooth_scroll_is_opt_in_and_roundtrips() {
 }
 
 #[test]
+fn keyboard_os_layout_is_opt_in_and_roundtrips() {
+    let old_config: Config = toml::from_str("schema_version = 7").expect("parse defaults");
+    assert!(!old_config.app_settings.force_keyboard_os_layout);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.force_keyboard_os_layout = true;
+    let parsed = write_and_read(&cfg);
+    assert!(parsed.app_settings.force_keyboard_os_layout);
+}
+
+#[test]
 fn app_settings_vertical_scroll_sensitivity_defaults_and_roundtrips() {
     let default: Config = toml::from_str("schema_version = 5").expect("parse defaults");
     assert_eq!(

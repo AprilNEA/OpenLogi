@@ -139,6 +139,10 @@ pub struct Capabilities {
     /// identity.
     #[serde(default)]
     pub fn_lock: bool,
+    /// Keyboard OS layout can be selected by software — HID++ `0x4531`
+    /// MultiPlatform. Appended: crosses the IPC wire.
+    #[serde(default)]
+    pub multi_platform: bool,
 }
 
 impl Capabilities {
@@ -163,6 +167,7 @@ impl Capabilities {
             haptic_panel: false,
             dpi_gestures: false,
             fn_lock: ids.contains(&0x40a0) || ids.contains(&0x40a2) || ids.contains(&0x40a3),
+            multi_platform: ids.contains(&0x4531),
         }
     }
 
@@ -549,6 +554,7 @@ mod tests {
                     haptic_panel: false,
                     dpi_gestures: false,
                     fn_lock: false,
+                    multi_platform: false,
                 }),
                 settings_revision: 0,
             }],
@@ -662,6 +668,7 @@ mod tests {
                 haptic_panel: false,
                 dpi_gestures: false,
                 fn_lock: false,
+                multi_platform: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -680,6 +687,7 @@ mod tests {
                 haptic_panel: false,
                 dpi_gestures: false,
                 fn_lock: false,
+                multi_platform: false,
             }
         );
         // No driving features → nothing offered.
@@ -723,6 +731,7 @@ mod tests {
 
         assert!(!capabilities.hires_wheel);
         assert!(!capabilities.thumbwheel);
+        assert!(!capabilities.multi_platform);
         assert!(capabilities.scroll_inversion);
         Ok(())
     }
@@ -739,6 +748,12 @@ mod tests {
             Capabilities::presumed_from_kind(DeviceKind::Unknown),
             Capabilities::default()
         );
+    }
+
+    #[test]
+    fn multi_platform_capability_tracks_feature_4531() {
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x4531]).multi_platform);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x4530]).multi_platform);
     }
 
     #[test]

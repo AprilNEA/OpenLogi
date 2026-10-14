@@ -8,6 +8,9 @@ check_for_updates = false
 auto_install_updates = false
 show_in_menu_bar = true
 capture_mouse_events = true
+# Opt in to setting supported keyboards to this system's OS layout.
+# When false, OpenLogi leaves the device's saved layout unchanged.
+force_keyboard_os_layout = false
 # Mouse button profiles: "pointer" (default) or "focused".
 mouse_profile_target = "pointer"
 smooth_scroll = false

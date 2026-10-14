@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use hidpp::feature::multi_platform::OsMask;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{FnLockState, LightCommand, PairingError, WriteError};
 
@@ -26,7 +27,7 @@ use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
-use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
+use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute, SharedChannel};
 
 /// This host's HID stack.
 ///
@@ -141,6 +142,25 @@ pub async fn get_fn_lock(route: &DeviceRoute) -> Result<FnLockState, WriteError>
 /// Set the Fn-lock of the keyboard `route` reaches and read it back.
 pub async fn set_fn_lock(route: &DeviceRoute, on: bool) -> Result<FnLockState, WriteError> {
     device::set_fn_lock(&*native_backend(), route, on).await
+}
+
+/// Set the current host's operating-system layout on a multi-platform device.
+///
+/// Devices without writable `0x4531` support or a descriptor for this host OS
+/// are left unchanged.
+pub async fn set_platform_for_current_os_on(
+    shared: &SharedChannel,
+) -> Result<device::PlatformApply, WriteError> {
+    let os = if cfg!(target_os = "windows") {
+        OsMask::WINDOWS
+    } else if cfg!(target_os = "macos") {
+        OsMask::MACOS
+    } else if cfg!(target_os = "linux") {
+        OsMask::LINUX
+    } else {
+        return Ok(device::PlatformApply::Unsupported);
+    };
+    device::set_platform_for_os_on(shared, os).await
 }
 
 /// Read the backlight state of the keyboard `route` reaches.

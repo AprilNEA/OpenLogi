@@ -97,6 +97,24 @@ fn smooth_scroll_change_reloads_the_agent_once() {
     assert!(receiver.try_recv().is_err());
 }
 
+#[test]
+fn keyboard_os_layout_change_reloads_the_agent_once() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+
+    let _ = state.commit_force_keyboard_os_layout(true);
+
+    assert!(state.app_settings().force_keyboard_os_layout);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+
+    let _ = state.commit_force_keyboard_os_layout(true);
+    assert!(receiver.try_recv().is_err());
+}
+
 /// A live language switch runs inside `AppState::update`, and the menu rebuild
 /// it schedules reads the same entity (the Device menu lists devices). Rebuilt
 /// synchronously that read is re-entrant and panics ("cannot read … while it is

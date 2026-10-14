@@ -29,6 +29,7 @@ pub(super) fn general_page(
     } = sliders;
     let group = SettingGroup::new()
         .item(mouse_profile_target_item())
+        .item(force_keyboard_os_layout_item())
         .item(smooth_scrolling_item())
         .item(
             SettingItem::new(
@@ -122,6 +123,29 @@ fn mouse_profile_target_item() -> SettingItem {
     )
     .layout(gpui::Axis::Vertical)
     .description(tr!("pointer.mouse_profile_target_description"))
+}
+
+fn force_keyboard_os_layout_item() -> SettingItem {
+    let os = if cfg!(target_os = "windows") {
+        "Windows"
+    } else if cfg!(target_os = "macos") {
+        "macOS"
+    } else {
+        "Linux"
+    };
+    SettingItem::new(
+        tr!("app.force_keyboard_os_layout", os => os),
+        SettingField::switch(
+            |cx| {
+                AppState::try_read(cx)
+                    .is_some_and(|state| state.app_settings().force_keyboard_os_layout)
+            },
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_force_keyboard_os_layout(enabled));
+            },
+        ),
+    )
+    .description(tr!("app.force_keyboard_os_layout_description"))
 }
 
 /// The smooth-scrolling switch.
