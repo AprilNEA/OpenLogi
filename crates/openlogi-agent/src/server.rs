@@ -582,10 +582,14 @@ impl HapticBreaker {
 }
 
 /// Whether a failed play can succeed on a retry. A waveform the device does
-/// not advertise is refused before anything is sent, so retrying it would
+/// not advertise, and a play while the device reports a non-zero haptic
+/// status, are refused before anything is sent, so retrying either would
 /// only spend the budget the next interaction is waiting on.
 fn is_worth_retrying(error: &WriteError) -> bool {
-    !matches!(error, WriteError::HapticWaveformUnsupported { .. })
+    !matches!(
+        error,
+        WriteError::HapticWaveformUnsupported { .. } | WriteError::HapticsUnavailable { .. }
+    )
 }
 
 /// A wall-clock allowance shared by every attempt at one interaction.
@@ -766,9 +770,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unadvertised_waveform_is_not_retried_but_a_lost_reply_is() {
+    fn a_play_refused_before_sending_is_not_retried_but_a_lost_reply_is() {
         assert!(!is_worth_retrying(&WriteError::HapticWaveformUnsupported {
             waveform: 1
+        }));
+        assert!(!is_worth_retrying(&WriteError::HapticsUnavailable {
+            status: 2
         }));
         assert!(is_worth_retrying(&WriteError::DeviceUnreachable {
             index: 1

@@ -164,6 +164,17 @@ pub enum WriteError {
         /// The change that was written.
         change: BacklightChange,
     },
+    /// A haptic play refused because the device reports a non-zero `0x19b0`
+    /// haptic status.
+    ///
+    /// Nothing was sent: Logi Options+ plays only while the status is zero,
+    /// and the device layer applies the same gate, so a retry cannot succeed
+    /// until the device reports otherwise.
+    #[error("device reports haptic status {status}, so haptics cannot play")]
+    HapticsUnavailable {
+        /// The raw status byte the device reported.
+        status: u8,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.

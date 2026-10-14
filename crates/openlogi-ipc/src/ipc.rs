@@ -94,7 +94,9 @@ pub use succession::Identity;
 ///      BacklightNotApplied}` appended — `0x1982` battery saving and the
 ///      backlight changes a keyboard offers; `Agent::set_backlight` and
 ///      `Capabilities::backlight` appended — the keyboard backlight set from
-///      the settings app.
+///      the settings app; `WriteError::HapticsUnavailable` appended — a
+///      haptic play is refused before it is sent while the device reports a
+///      non-zero `0x19b0` haptic status.
 pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the

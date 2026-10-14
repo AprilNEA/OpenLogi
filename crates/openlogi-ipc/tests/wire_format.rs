@@ -770,6 +770,7 @@ fn standalone_light_dtos_commands_and_errors() {
         &WriteError::HapticWaveformUnsupported { waveform: 1 },
         "1001",
     );
+    assert_wire(&WriteError::HapticsUnavailable { status: 2 }, "1502");
 }
 
 #[test]
