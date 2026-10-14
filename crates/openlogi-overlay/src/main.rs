@@ -35,14 +35,6 @@ use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissa
 fn main() -> Result<()> {
     openlogi_core::logging::init_stderr();
 
-    // Before anything NSApplication-related, including gpui_platform's own
-    // setup below: AppKit only reliably suppresses the Dock icon when the
-    // activation policy is set before the app finishes launching, not after
-    // (#1630 — a later `-setActivationPolicy:` call, inside `app.run`'s
-    // closure, left the overlay showing a Dock icon anyway on some macOS
-    // versions despite LSUIElement already being set in Info.plist).
-    platform::configure_application();
-
     openlogi_core::locale::activate(None);
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
@@ -52,8 +44,17 @@ fn main() -> Result<()> {
     } = ipc::spawn();
 
     let mut app = gpui_platform::application().with_assets(openlogi_ui::action_icons::ActionIcons);
+    // Application construction establishes GPUI's NSApplication subclass.
+    // Asking AppKit for its singleton sooner creates a plain NSApplication,
+    // which lacks the `platform` ivar GPUI needs. Set Accessory policy now:
+    // GPUI owns the singleton, but `app.run` has not finished launching yet.
+    platform::configure_application();
     app = app.with_quit_mode(gpui::QuitMode::Explicit);
     app.run(move |cx| {
+        // GPUI's didFinishLaunching callback resets the policy to Regular.
+        // Reapply the helper policy after that reset, without constructing
+        // NSApplication before GPUI has installed its subclass.
+        platform::configure_application();
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         cx.spawn(async move |cx| {
