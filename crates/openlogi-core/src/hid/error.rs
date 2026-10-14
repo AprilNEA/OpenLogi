@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::backlight::BacklightChange;
 use super::dpi::Dpi;
 use super::report_rate::ReportRate;
 
@@ -145,6 +146,23 @@ pub enum WriteError {
         requested: ReportRate,
         /// The rate the device reports afterwards.
         actual: ReportRate,
+    },
+    /// A backlight change the keyboard does not offer — a level beyond its
+    /// level count, or a mode, level or battery-saving control its `0x1982`
+    /// capability bits leave out.
+    ///
+    /// Nothing was written: the device layer checks a fresh read first.
+    #[error("the keyboard does not offer {change}")]
+    BacklightChangeUnsupported {
+        /// The rejected change.
+        change: BacklightChange,
+    },
+    /// The keyboard acknowledged a backlight write but reads back a
+    /// configuration without the change.
+    #[error("keyboard does not report {change} after the write")]
+    BacklightNotApplied {
+        /// The change that was written.
+        change: BacklightChange,
     },
 }
 

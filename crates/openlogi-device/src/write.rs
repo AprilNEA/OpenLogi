@@ -29,7 +29,7 @@ mod pointer_scaling;
 mod report_rate;
 mod smartshift;
 
-pub use backlight::{get_backlight, get_backlight_on, set_backlight_enabled};
+pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
     dump_firmware_entities, dump_reprog_controls, read_battery_raw,
@@ -86,13 +86,23 @@ pub(crate) use error::classify_hidpp_error;
 pub(crate) async fn open_feature<F: CreatableFeature + 'static>(
     device: &mut Device,
 ) -> Result<Arc<F>, WriteError> {
+    open_feature_with_version::<F>(device)
+        .await
+        .map(|(feature, _)| feature)
+}
+
+/// [`open_feature`], also returning the feature version the device reports
+/// in the same root `getFeature` reply.
+pub(crate) async fn open_feature_with_version<F: CreatableFeature + 'static>(
+    device: &mut Device,
+) -> Result<(Arc<F>, u8), WriteError> {
     let info = device
         .root()
         .get_feature(F::ID)
         .await
         .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, F::ID))?
         .ok_or(WriteError::FeatureUnsupported { feature_hex: F::ID })?;
-    Ok(device.add_feature::<F>(info.index))
+    Ok((device.add_feature::<F>(info.index), info.version))
 }
 
 /// Boilerplate-eater: open the channel that reaches `route`, then run `f` once
