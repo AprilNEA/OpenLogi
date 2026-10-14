@@ -1141,9 +1141,7 @@ impl Orchestrator {
     /// Apply the OS layout immediately when the user enables the preference.
     /// Turning it off deliberately leaves each keyboard's saved profile as-is.
     fn apply_changed_keyboard_platform(&self, previous: &Config) {
-        if !self.config.app_settings.force_keyboard_os_layout
-            || previous.app_settings.force_keyboard_os_layout
-        {
+        if !self.config.app_settings.force_keyboard_os_layout {
             return;
         }
         for dev in self.devices.iter().filter(|dev| {
@@ -1153,6 +1151,9 @@ impl Orchestrator {
                     .capabilities
                     .is_some_and(|capabilities| capabilities.multi_platform)
         }) {
+            if !keyboard_platform_needs_apply(previous, &self.config, &dev.config_key) {
+                continue;
+            }
             let Some(route) = dev.route.clone() else {
                 continue;
             };
@@ -1181,6 +1182,11 @@ impl Orchestrator {
             }
         }
     }
+}
+
+fn keyboard_platform_needs_apply(previous: &Config, current: &Config, device_key: &str) -> bool {
+    current.app_settings.force_keyboard_os_layout
+        && (!previous.app_settings.force_keyboard_os_layout || !previous.device_enabled(device_key))
 }
 
 /// Replace the value behind an `RwLock`, logging (not panicking) on poison so a

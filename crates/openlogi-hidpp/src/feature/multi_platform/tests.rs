@@ -90,7 +90,7 @@ fn reads_multiplatform_capabilities_and_descriptor_count() {
         assert_eq!(request[3] >> 4, 0);
 
         let mut payload = [0; 16];
-        payload[..7].copy_from_slice(&[0x02, 0x00, 0x04, 0x04, 0x03, 0x01, 0x00]);
+        payload[..7].copy_from_slice(&[0x02, 0x00, 0x04, 0x05, 0x03, 0x01, 0x00]);
         handle
             .send_incoming(Message::Long(header, payload).into())
             .await;

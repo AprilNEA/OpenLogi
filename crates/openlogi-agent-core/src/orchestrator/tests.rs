@@ -3,8 +3,8 @@
 use super::{
     AgentDevice, InventoryHealth, Orchestrator, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, build_devices,
-    configured_wheel_mode, host_switch_links, pick_current, plan_reapply, reapply_targets,
-    stable_id,
+    configured_wheel_mode, host_switch_links, keyboard_platform_needs_apply, pick_current,
+    plan_reapply, reapply_targets, stable_id,
 };
 use crate::hardware::WheelModeChange;
 use openlogi_core::app::ForegroundApp;
@@ -35,6 +35,42 @@ mod reapply;
 /// than only in the running agent.
 fn orchestrator(config: Config) -> Orchestrator {
     Orchestrator::new(config, Arc::new(ObservableState::new("test".to_string())))
+}
+
+#[test]
+fn keyboard_platform_applies_when_global_preference_is_enabled() {
+    let previous = Config::default();
+    let mut current = Config::default();
+    current.app_settings.force_keyboard_os_layout = true;
+
+    assert!(keyboard_platform_needs_apply(
+        &previous, &current, "keyboard"
+    ));
+}
+
+#[test]
+fn keyboard_platform_applies_when_device_is_enabled_with_preference_on() {
+    let mut previous = Config::default();
+    previous.app_settings.force_keyboard_os_layout = true;
+    previous.set_device_enabled("keyboard", false);
+    let mut current = Config::default();
+    current.app_settings.force_keyboard_os_layout = true;
+
+    assert!(keyboard_platform_needs_apply(
+        &previous, &current, "keyboard"
+    ));
+}
+
+#[test]
+fn keyboard_platform_skips_unrelated_config_changes() {
+    let mut previous = Config::default();
+    previous.app_settings.force_keyboard_os_layout = true;
+    let mut current = Config::default();
+    current.app_settings.force_keyboard_os_layout = true;
+
+    assert!(!keyboard_platform_needs_apply(
+        &previous, &current, "keyboard"
+    ));
 }
 
 fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
