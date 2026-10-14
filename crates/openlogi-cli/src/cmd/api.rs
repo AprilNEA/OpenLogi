@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
-use openlogi_core::hid::{DeviceRoute, Dpi, SmartShiftMode, WriteError};
+use openlogi_core::hid::{DeviceRoute, Dpi, ReportRate, SmartShiftMode, WriteError};
 use openlogi_ipc::{AgentClient, AgentSnapshot};
 use serde_json::{Value, json};
 use tarpc::context;
@@ -57,6 +57,26 @@ pub enum ApiCommand {
         #[arg(long, value_enum)]
         set: Option<Switch>,
     },
+    /// Keep a keyboard on the host OS's key layout (requires --save).
+    OsLayout {
+        /// Exact opaque ID returned by `api devices`.
+        #[arg(long)]
+        device: String,
+        /// On sets the host OS's layout when the keyboard connects and after it
+        /// switches layout; off leaves the keyboard's layout alone.
+        #[arg(long, value_enum)]
+        set: Switch,
+    },
+    /// Read the report rate, or set it immediately (add --save to persist).
+    ReportRate {
+        /// Exact opaque ID returned by `api devices`.
+        #[arg(long)]
+        device: String,
+        /// A rate in hertz that the device lists for its current connection.
+        /// Omit to read only.
+        #[arg(long)]
+        set: Option<u16>,
+    },
 }
 
 /// A partial SmartShift update; omitted fields are read from the device.
@@ -94,9 +114,9 @@ impl From<WheelMode> for SmartShiftMode {
 /// An explicit state rather than a read/modify/write toggle.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Switch {
-    /// Enable Fn lock.
+    /// Turn the setting on.
     On,
-    /// Disable Fn lock.
+    /// Turn the setting off.
     Off,
 }
 
@@ -123,6 +143,17 @@ pub async fn run(args: ApiArgs) -> Result<ExitCode> {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    })
+}
+
+/// Whether the agent measured the device at `route` and found that software
+/// cannot set its key layout. Unmeasured capabilities are not a refusal.
+fn measured_without_os_layout(snapshot: &AgentSnapshot, route: &DeviceRoute) -> bool {
+    snapshot.inventory.iter().any(|inventory| {
+        inventory.paired.iter().any(|paired| {
+            DeviceRoute::for_slot(inventory, paired.slot).as_ref() == Some(route)
+                && paired.capabilities.is_some_and(|caps| !caps.os_layout)
+        })
     })
 }
 
@@ -191,6 +222,39 @@ async fn execute(
                 "default_fn_lock": state.default_fn_lock,
             }))
         }
+        ApiCommand::OsLayout { device, set } => {
+            let route = select_device(&snapshot, &device)?;
+            // An agent setting, not a device state: the agent writes the
+            // layout when it reloads the saved configuration.
+            let Some(save) = save.as_mut() else {
+                return Err(ApiError::new(
+                    "invalid_value",
+                    "os-layout changes an agent setting; add --save",
+                ));
+            };
+            if measured_without_os_layout(&snapshot, &route) {
+                return Err(ApiError::new(
+                    "unsupported_feature",
+                    "the keyboard does not let software set its key layout",
+                ));
+            }
+            let keep = matches!(set, Switch::On);
+            save.keep_os_layout(keep);
+            Ok(json!({
+                "device": device,
+                "persistence": "not_saved",
+                "keep_os_layout": keep,
+            }))
+        }
+        ApiCommand::ReportRate { device, set } => {
+            report_rate(
+                client,
+                select_device(&snapshot, &device)?,
+                set,
+                save.as_mut(),
+            )
+            .await
+        }
     }?;
     if let Some(save) = save {
         save.commit(client).await?;
@@ -232,6 +296,44 @@ async fn dpi(
         "persistence": "not_saved",
         "current": info.current,
         "supported": info.capabilities.values(),
+    }))
+}
+
+async fn report_rate(
+    client: &AgentClient,
+    route: DeviceRoute,
+    set: Option<u16>,
+    save: Option<&mut Save>,
+) -> Result<Value, ApiError> {
+    let device = route.to_string();
+    let mut info =
+        agent::call(client.read_report_rate(context::current(), route.clone())).await??;
+    if let Some(value) = set {
+        let requested = ReportRate::new(value);
+        if !info.supports(requested) {
+            return Err(ApiError::new(
+                "invalid_value",
+                "report rate is not one the device lists for its current connection",
+            ));
+        }
+        if let Some(save) = save {
+            save.report_rate(requested);
+        }
+        info = agent::call(client.set_report_rate(context::current(), route, requested)).await??;
+        // A superseded agent request reads instead of writing; Ok alone does
+        // not guarantee that our requested rate won.
+        if info.current != requested {
+            return Err(ApiError::new(
+                "readback_mismatch",
+                "device report rate differs from the requested value after the write",
+            ));
+        }
+    }
+    Ok(json!({
+        "device": device,
+        "persistence": "not_saved",
+        "current": info.current,
+        "supported": info.supported,
     }))
 }
 
@@ -289,8 +391,12 @@ impl From<WriteError> for ApiError {
             WriteError::AmbiguousRawDevice => "ambiguous_device",
             // The agent's own checks report what `dpi` checks for itself, so
             // a caller sees one code whichever side caught it.
-            WriteError::DpiUnsupported { .. } => "invalid_value",
-            WriteError::DpiNotApplied { .. } => "readback_mismatch",
+            WriteError::DpiUnsupported { .. } | WriteError::ReportRateUnsupported { .. } => {
+                "invalid_value"
+            }
+            WriteError::DpiNotApplied { .. } | WriteError::ReportRateNotApplied { .. } => {
+                "readback_mismatch"
+            }
             _ => "device_error",
         };
         Self::new(code, error.to_string())

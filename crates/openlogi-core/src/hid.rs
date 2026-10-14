@@ -14,6 +14,7 @@ pub mod error;
 pub mod fn_lock;
 pub mod light;
 pub mod pairing;
+pub mod report_rate;
 pub mod route;
 pub mod scroll;
 pub mod smartshift;
@@ -24,6 +25,7 @@ pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::FnLockState;
 pub use light::{LightCommand, commands_for_light_settings};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
+pub use report_rate::{ReportRate, ReportRateInfo};
 pub use route::{
     DIRECT_DEVICE_INDEX, DeviceRoute, LOGITECH_VENDOR_ID, RECEIVERS, ReceiverBrand,
     ReceiverDescriptor, ReceiverProtocol, find_receiver, is_receiver_pid, receiver_display_name,

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use openlogi_core::hid::{DpiInfo, FnLockState, SmartShiftStatus};
+use openlogi_core::hid::{DpiInfo, FnLockState, ReportRateInfo, SmartShiftStatus};
 
 /// State projected from an swr-backed device query: unqueried, in flight,
 /// resolved, transiently failed, or permanently unsupported.
@@ -37,3 +37,9 @@ pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
 /// read shows what the keyboard holds right now — it can differ from the
 /// persisted `fn_lock` after the user pressed Fn+Esc on the keyboard.
 pub type FnLockLoad = Load<Arc<FnLockState>>;
+
+/// Per-mouse report-rate (`0x8060` / `0x8061`) load state. See [`Load`]. The
+/// read carries the rate the mouse reports at now and the rates it offers on
+/// its current connection, which change when it moves between a receiver and
+/// a cable.
+pub type ReportRateLoad = Load<Arc<ReportRateInfo>>;

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, ReportRate};
 
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
@@ -29,6 +29,16 @@ pub(super) fn configured_wheel_mode(config: &Config, dev: &AgentDevice) -> Optio
         .scroll_inversion
         .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
     WheelModeChange::new(resolution, inverted)
+}
+
+/// The saved report rate to push to `dev`: only to a device with a
+/// report-rate feature, so a rate saved for a mouse is never written to
+/// whatever later answers under the same key without one.
+pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Option<ReportRate> {
+    dev.capabilities
+        .is_some_and(|caps| caps.report_rate)
+        .then(|| config.report_rate(&dev.config_key))
+        .flatten()
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's
@@ -81,6 +91,7 @@ pub(super) fn build_devices(
                 kind: paired.kind,
                 light_capabilities: None,
                 online: paired.online,
+                settings_revision: paired.settings_revision,
             });
         }
     }
@@ -109,6 +120,8 @@ pub(super) fn build_devices(
             kind: device.kind,
             light_capabilities: device.light_capabilities,
             online: device.online,
+            // A standalone device reports no device-side setting changes.
+            settings_revision: 0,
         });
     }
     // Order by the same canonical key the GUI carousel uses, so the
@@ -204,6 +217,68 @@ pub(super) fn reapply_targets(
         })
         .map(|(idx, _)| idx)
         .collect()
+}
+
+/// Indices into `next` of online devices whose settings revision moved since
+/// `prev`: the device reported a setting changed on it. A device is matched by
+/// [`stable_id`] and must keep its route, as the revision restarts when the
+/// device's channel is reopened.
+pub(super) fn settings_moved(prev: &[AgentDevice], next: &[AgentDevice]) -> Vec<usize> {
+    next.iter()
+        .enumerate()
+        .filter(|(_, dev)| dev.online && dev.route.is_some())
+        .filter(|(_, dev)| {
+            let id = stable_id(dev);
+            prev.iter().find(|p| stable_id(p) == id).is_some_and(|p| {
+                p.online && p.route == dev.route && p.settings_revision != dev.settings_revision
+            })
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Indices into `next` of online devices that report the `os_layout`
+/// capability on a route that was already online without it, such as a Bolt
+/// keyboard whose feature walk failed until after its reconnect reapply. A
+/// device that just came online or changed route is reapplied instead.
+pub(super) fn os_layout_appeared(prev: &[AgentDevice], next: &[AgentDevice]) -> Vec<usize> {
+    let has_os_layout = |dev: &AgentDevice| dev.capabilities.is_some_and(|caps| caps.os_layout);
+    next.iter()
+        .enumerate()
+        .filter(|(_, dev)| dev.online && dev.route.is_some() && has_os_layout(dev))
+        .filter(|(_, dev)| {
+            let id = stable_id(dev);
+            prev.iter()
+                .find(|p| stable_id(p) == id)
+                .is_some_and(|p| p.online && p.route == dev.route && !has_os_layout(p))
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Whether `config` keeps the key layout of the device under `key` on the
+/// host OS, whatever the device supports: enabled, with the setting on.
+pub(super) fn config_keeps_os_layout(config: &Config, key: &str) -> bool {
+    config.device_enabled(key) && config.keep_os_layout(key)
+}
+
+/// Whether `config` keeps `dev`'s key layout on the host OS: a keyboard whose
+/// platform software can set, enabled, with the setting on.
+pub(super) fn keeps_os_layout(config: &Config, dev: &AgentDevice) -> bool {
+    dev.capabilities.is_some_and(|caps| caps.os_layout)
+        && config_keeps_os_layout(config, &dev.config_key)
+}
+
+/// The devices whose "keep OS layout" takes effect going from `previous` to
+/// `config`: the setting turned on, or its device re-enabled.
+pub(super) fn newly_kept_os_layouts<'a>(
+    previous: &'a Config,
+    config: &'a Config,
+    devices: &'a [AgentDevice],
+) -> impl Iterator<Item = &'a AgentDevice> {
+    devices
+        .iter()
+        .filter(|dev| keeps_os_layout(config, dev) && !keeps_os_layout(previous, dev))
 }
 
 /// Whether this refresh invalidated any online device's volatile control

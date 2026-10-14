@@ -139,6 +139,16 @@ pub struct Capabilities {
     /// identity.
     #[serde(default)]
     pub fn_lock: bool,
+    /// The keyboard's key layout can be kept on the host OS — HID++ `0x4531
+    /// MultiPlatform`, when the probe also reads that it lets software set the
+    /// platform. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub os_layout: bool,
+    /// The device's report rate can be chosen — HID++ `0x8060
+    /// AdjustableReportRate` or `0x8061 ExtendedAdjustableReportRate`.
+    /// Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub report_rate: bool,
 }
 
 impl Capabilities {
@@ -163,6 +173,10 @@ impl Capabilities {
             haptic_panel: false,
             dpi_gestures: false,
             fn_lock: ids.contains(&0x40a0) || ids.contains(&0x40a2) || ids.contains(&0x40a3),
+            // The probe clears it unless the keyboard lets software set the
+            // platform; the feature table alone cannot say.
+            os_layout: ids.contains(&0x4531),
+            report_rate: ids.contains(&0x8060) || ids.contains(&0x8061),
         }
     }
 
@@ -549,6 +563,8 @@ mod tests {
                     haptic_panel: false,
                     dpi_gestures: false,
                     fn_lock: false,
+                    os_layout: false,
+                    report_rate: false,
                 }),
                 settings_revision: 0,
             }],
@@ -662,6 +678,8 @@ mod tests {
                 haptic_panel: false,
                 dpi_gestures: false,
                 fn_lock: false,
+                os_layout: false,
+                report_rate: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -680,6 +698,8 @@ mod tests {
                 haptic_panel: false,
                 dpi_gestures: false,
                 fn_lock: false,
+                os_layout: false,
+                report_rate: false,
             }
         );
         // No driving features → nothing offered.
@@ -687,6 +707,13 @@ mod tests {
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),
             Capabilities::default()
         );
+        // 0x4531 offers the OS layout until the probe reads it cannot be set.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x4531]).os_layout);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x40a3]).os_layout);
+        // Either report-rate feature offers the report rate.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8060]).report_rate);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8061]).report_rate);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x2202]).report_rate);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::services::ipc::{Command, SetFnLock};
 use openlogi_core::hid::FnLockState;
 
 /// An MX Keys Mini on a Bolt receiver, with or without an fn-inversion feature.
-fn keyboard_inventory(fn_lock: bool) -> DeviceInventory {
+pub(super) fn keyboard_inventory(fn_lock: bool) -> DeviceInventory {
     DeviceInventory {
         receiver: ReceiverInfo {
             name: "Bolt Receiver".to_string(),
@@ -47,7 +47,7 @@ fn keyboard_state(fn_lock: bool) -> (AppState, tokio::sync::mpsc::UnboundedRecei
     (state, receiver)
 }
 
-fn drain(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Vec<Command> {
+pub(super) fn drain(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Vec<Command> {
     std::iter::from_fn(|| receiver.try_recv().ok()).collect()
 }
 

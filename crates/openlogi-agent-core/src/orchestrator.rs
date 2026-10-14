@@ -24,7 +24,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
     CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, FnLockState,
-    HidppOperation, WriteError, is_reserved_keyboard_control,
+    HidppOperation, HostOs, ReportRate, ReportRateInfo, WriteError, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -35,7 +35,7 @@ use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
 use crate::hardware::{
-    DeviceAccess, DeviceOp, FnLockOrder, HardwareContext, VolatileMouseSettings,
+    DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
 };
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
@@ -52,8 +52,10 @@ mod devices;
 use devices::reapply_targets;
 use devices::{
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    is_hidpp_device, pick_current, plan_reapply, stable_id,
+    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_report_rate,
+    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout,
+    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply, settings_moved,
+    stable_id,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -77,6 +79,10 @@ struct AgentDevice {
     /// transition is a reconnect — the device may have power-cycled, so its
     /// volatile settings need re-applying (#189).
     online: bool,
+    /// [`PairedDevice::settings_revision`](openlogi_core::device::PairedDevice::settings_revision):
+    /// it moves when the device reports a setting changed on it. Comparable
+    /// only between snapshots of the same route.
+    settings_revision: u64,
 }
 
 /// Cheaply cloneable handles handed to hooks and background managers.
@@ -125,7 +131,10 @@ pub struct SharedHandles {
     /// Configured host-switch links with active and offline keyboard routes.
     pub host_switch_links: HostSwitchLinks,
     /// Orders every path's Fn-lock writes per keyboard.
-    fn_lock_order: FnLockOrder,
+    fn_lock_order: WriteOrder,
+    /// Orders the GUI's report-rate writes and the reconnect reapply's per
+    /// mouse.
+    report_rate_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -187,7 +196,8 @@ impl SharedHandles {
     /// Write `fn_lock` to the keyboard at `route` and return its echo. When a
     /// newer Fn-lock write for the keyboard is requested before this one gets
     /// its turn, this one reads the keyboard instead of writing a value that
-    /// is about to be replaced.
+    /// is about to be replaced. Waiting for the turn does not count against
+    /// the write's deadline.
     pub async fn set_fn_lock(
         &self,
         route: &DeviceRoute,
@@ -195,12 +205,35 @@ impl SharedHandles {
     ) -> Result<FnLockState, WriteError> {
         let ticket = self.fn_lock_order.request(route);
         self.keyboard_device(route)
-            .run(HidppOperation::WriteFnLock, |c| async move {
-                match ticket.turn().await {
-                    Some(_turn) => openlogi_hid::set_fn_lock_on(&c, fn_lock).await,
-                    None => openlogi_hid::get_fn_lock_on(&c).await,
-                }
-            })
+            .run_in_turn(
+                HidppOperation::WriteFnLock,
+                &ticket,
+                |c| async move { openlogi_hid::set_fn_lock_on(&c, fn_lock).await },
+                |c| async move { openlogi_hid::get_fn_lock_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write `rate` to the mouse at `route` and return what it reads back.
+    /// When a newer report-rate write for the mouse is requested before this
+    /// one gets its turn, this one reads the mouse instead of writing a rate
+    /// that is about to be replaced. A reconnect reapply numbers its write
+    /// when it is scheduled, so it never lands over a pick made after that,
+    /// and a pick queued behind a reapply still gets the whole deadline once
+    /// its turn comes.
+    pub async fn set_report_rate(
+        &self,
+        route: &DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        let ticket = self.report_rate_order.request(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteReportRate,
+                &ticket,
+                |c| async move { openlogi_hid::set_report_rate_on(&c, rate).await },
+                |c| async move { openlogi_hid::get_report_rate_info_on(&c).await },
+            )
             .await
     }
 
@@ -268,6 +301,10 @@ pub struct Orchestrator {
     /// Transient manual power choices for camera-linked lights. A camera-use
     /// transition clears them; they are never written to the config.
     manual_light_overrides: BTreeMap<String, bool>,
+    /// The keyboards whose "keep OS layout" is in effect, shared with the
+    /// layout writes queued for them so a write withdraws itself once a
+    /// reload turns the setting off or disables the device.
+    kept_os_layouts: Arc<KeptOsLayouts>,
     /// Whether the OS mouse hook is currently installed. Back/Forward gesture
     /// motion comes from HID++, but diversion is published only while the
     /// broader mouse-remapping path is available so losing the hook leaves the
@@ -343,7 +380,8 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
-            fn_lock_order: FnLockOrder::default(),
+            fn_lock_order: WriteOrder::default(),
+            report_rate_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
@@ -361,6 +399,7 @@ impl Orchestrator {
             reapply_followup: HashMap::new(),
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
+            kept_os_layouts: Arc::default(),
             os_mouse_hook_available: false,
             capture_plans_tx,
             keyboard_spec_tx,
@@ -719,6 +758,19 @@ impl Orchestrator {
         let followup = std::mem::take(&mut self.reapply_followup);
         let (targets, next_followup) = plan_reapply(&self.devices, &devices, &followup, forced);
         self.reapply_followup = next_followup;
+        // A keyboard switched to another platform on the device (a platform
+        // key combination) is put back, as Logi Options+ does on its
+        // platform-change report. So is one whose `0x4531` support shows up
+        // only after it came online. A reapply below already covers both.
+        let mut layout_checks = settings_moved(&self.devices, &devices);
+        layout_checks.extend(os_layout_appeared(&self.devices, &devices));
+        layout_checks.sort_unstable();
+        layout_checks.dedup();
+        for idx in layout_checks {
+            if !targets.contains(&idx) {
+                self.keep_os_layout(&devices[idx]);
+            }
+        }
         for idx in targets {
             self.reapply_volatile_settings(&devices[idx]);
         }
@@ -810,6 +862,7 @@ impl Orchestrator {
         let settings = VolatileMouseSettings {
             wheel: configured_wheel_mode(&self.config, dev),
             dpi: device.and_then(|d| d.effective_dpi(&route_key)),
+            report_rate: configured_report_rate(&self.config, dev),
             smartshift: device
                 .and_then(|d| d.effective_smartshift(&route_key))
                 .map(openlogi_hid::SmartShiftStatus::from),
@@ -818,6 +871,7 @@ impl Orchestrator {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
                 settings,
+                &self.shared.report_rate_order,
             );
         }
         // A disabled entry is re-applied too: it writes black, and a device
@@ -829,6 +883,7 @@ impl Orchestrator {
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
+        self.keep_os_layout(dev);
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
         {
@@ -836,6 +891,24 @@ impl Orchestrator {
                 .hardware
                 .set_light_in_background(Some(route), &light, capabilities);
         }
+    }
+
+    /// Put `dev`'s keyboard on the host OS's key layout when the config keeps
+    /// it there. Writes only when the current slot holds another platform.
+    fn keep_os_layout(&self, dev: &AgentDevice) {
+        if !dev.online || !keeps_os_layout(&self.config, dev) {
+            return;
+        }
+        self.kept_os_layouts.keep(&dev.config_key);
+        let (Some(route), Some(host)) = (dev.route.as_ref(), HostOs::current()) else {
+            return;
+        };
+        crate::hardware::keep_os_layout_in_background(
+            self.shared.device(route),
+            host,
+            Arc::clone(&self.kept_os_layouts),
+            dev.config_key.clone(),
+        );
     }
 
     /// Apply an aggregate camera-use transition to every opted-in online
@@ -1104,7 +1177,20 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_enabled_os_layouts(&previous);
         self.reapply_light_settings();
+    }
+
+    /// Put each keyboard whose "keep OS layout" just took effect — turned on,
+    /// or its device re-enabled — on the host OS's layout. Turning it off
+    /// leaves the keyboard's layout where it is, as in Logi Options+, and
+    /// withdraws a layout write still queued for it.
+    fn apply_enabled_os_layouts(&self, previous: &Config) {
+        self.kept_os_layouts
+            .retain(|key| config_keeps_os_layout(&self.config, key));
+        for dev in newly_kept_os_layouts(previous, &self.config, &self.devices) {
+            self.keep_os_layout(dev);
+        }
     }
 
     /// Push a changed Fn-lock setting to the online keyboard it belongs to.

@@ -1,6 +1,9 @@
-//! Unit tests for `MultiPlatform` descriptor parsing.
+//! Unit tests for `MultiPlatform` reply and event parsing.
 
-use super::{OsMask, PlatformDescriptor};
+use super::{
+    HostIndex, MultiPlatformCapabilities, MultiPlatformInfo, OsMask, PlatformChange,
+    PlatformDescriptor, PlatformSource,
+};
 
 fn descriptor(mask: [u8; 2]) -> PlatformDescriptor {
     let mut payload = [0; 16];
@@ -60,4 +63,76 @@ fn decodes_the_rest_of_the_descriptor() {
 fn keeps_undefined_bits() {
     // Bits 1-7 are undefined; they survive decoding instead of being dropped.
     assert_eq!(descriptor([0x01, 0x82]).os_mask.bits(), 0x0182);
+}
+
+#[test]
+fn set_host_platform_is_bit_one_of_byte_zero() {
+    // Options+ 2.8 reads the capability word big-endian and allows a
+    // software platform write only while 0x0200 is set.
+    let mut payload = [0; 16];
+    payload[0] = 0x02;
+    let info = MultiPlatformInfo::from_payload(&payload);
+    assert_eq!(
+        info.capabilities,
+        MultiPlatformCapabilities::SET_HOST_PLATFORM
+    );
+    assert_eq!(MultiPlatformCapabilities::SET_HOST_PLATFORM.bits(), 0x0200);
+
+    let mut payload = [0; 16];
+    payload[1] = 0x02;
+    let info = MultiPlatformInfo::from_payload(&payload);
+    assert!(
+        !info
+            .capabilities
+            .contains(MultiPlatformCapabilities::SET_HOST_PLATFORM)
+    );
+}
+
+#[test]
+fn decodes_the_feature_infos() {
+    let mut payload = [0; 16];
+    payload[..7].copy_from_slice(&[0x03, 0x00, 3, 4, 3, 1, 2]);
+    let info = MultiPlatformInfo::from_payload(&payload);
+    assert_eq!(
+        info.capabilities,
+        MultiPlatformCapabilities::OS_DETECTION | MultiPlatformCapabilities::SET_HOST_PLATFORM
+    );
+    assert_eq!(info.platform_count, 3);
+    assert_eq!(info.descriptor_count, 4);
+    assert_eq!(info.host_count, 3);
+    assert_eq!(info.current_host, HostIndex::Slot(1));
+    assert_eq!(info.current_host_platform, Some(2));
+
+    payload[6] = 0xff;
+    assert_eq!(
+        MultiPlatformInfo::from_payload(&payload).current_host_platform,
+        None
+    );
+}
+
+#[test]
+fn decodes_a_platform_change_report() {
+    assert_eq!(
+        PlatformChange::decode(&[1, 2, 2, 0, 0]),
+        Some(PlatformChange {
+            host_index: HostIndex::Slot(1),
+            platform_index: Some(2),
+            source: Some(PlatformSource::Manual),
+        })
+    );
+    // An undefined platform and an unknown source still announce a change.
+    assert_eq!(
+        PlatformChange::decode(&[0, 0xff, 9]),
+        Some(PlatformChange {
+            host_index: HostIndex::Slot(0),
+            platform_index: None,
+            source: None,
+        })
+    );
+}
+
+#[test]
+fn a_report_shorter_than_three_bytes_is_not_a_platform_change() {
+    assert_eq!(PlatformChange::decode(&[1, 2]), None);
+    assert_eq!(PlatformChange::decode(&[]), None);
 }

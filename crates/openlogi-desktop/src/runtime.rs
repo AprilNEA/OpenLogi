@@ -294,6 +294,13 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_fn_lock_written(&key, result));
                 });
             }
+            ipc::GuiUpdate::ReportRateWritten { key, route, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_report_rate_written(&key, &route, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::DeviceUnpaired {
                 record_key,
                 route,

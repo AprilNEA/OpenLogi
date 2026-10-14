@@ -18,7 +18,8 @@ use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, PairingError,
-    PasskeyMethod, ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
+    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -81,7 +82,14 @@ pub use succession::Identity;
 ///      `FnLockState::default_fn_lock` became `Option<bool>` — `None` for a
 ///      `0x40a0` keyboard, which reports no default;
 ///      `WriteError::HapticWaveformUnsupported` appended — a haptic play of a
-///      waveform the device does not advertise is refused before it is sent.
+///      waveform the device does not advertise is refused before it is sent;
+///      `Capabilities::os_layout` and `HidppOperation::WriteOsLayout`
+///      appended — a `0x4531` keyboard whose platform software can set is kept
+///      on the host OS's key layout; `Agent::{read_report_rate,
+///      set_report_rate}`, `Capabilities::report_rate`,
+///      `HidppOperation::{ReadReportRate, WriteReportRate}` and
+///      `WriteError::{ReportRateUnsupported, ReportRateNotApplied}` appended —
+///      the `0x8061`/`0x8060` report rate in hertz.
 pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -595,4 +603,16 @@ pub trait Agent {
     /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+    /// Read the report rate of the mouse on `route` and every rate it lists
+    /// for its current connection.
+    async fn read_report_rate(route: DeviceRoute) -> Result<ReportRateInfo, WriteError>;
+    /// Write the report rate of the mouse on `route` now and answer with what
+    /// it reads back. A rate the mouse does not list is refused with
+    /// [`WriteError::ReportRateUnsupported`] before anything is written; one
+    /// it acknowledges but does not keep — an onboard profile owns the rate —
+    /// with [`WriteError::ReportRateNotApplied`].
+    async fn set_report_rate(
+        route: DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError>;
 }

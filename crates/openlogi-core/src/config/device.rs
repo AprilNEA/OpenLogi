@@ -13,7 +13,7 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::Dpi;
+use crate::hid::{Dpi, ReportRate};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -287,6 +287,20 @@ pub struct DeviceConfig {
     /// means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Keep a multi-platform keyboard's key layout (HID++ `0x4531`) on the
+    /// host OS, the "keep keyboard in OS layout" setting of Logi Options+. The
+    /// agent writes the host's platform when the keyboard connects and again
+    /// whenever the keyboard reports a platform change (a platform key
+    /// combination). `None` means "never set", which is on, as in Options+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_os_layout: Option<bool>,
+    /// Report rate (HID++ `0x8060` / `0x8061`), in hertz. The agent re-applies
+    /// it when the device reconnects, like [`Self::dpi`], but only where the
+    /// device lists it for the connection it is on — a wired-only rate is
+    /// left alone while the mouse is wireless. `None` means "never set —
+    /// leave the device's rate alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_rate: Option<ReportRate>,
 }
 
 impl DeviceConfig {
@@ -387,6 +401,8 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            keep_os_layout: None,
+            report_rate: None,
         }
     }
 }
@@ -507,6 +523,10 @@ struct RawDeviceConfig {
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
+    #[serde(default)]
+    keep_os_layout: Option<bool>,
+    #[serde(default)]
+    report_rate: Option<ReportRate>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -567,6 +587,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            keep_os_layout: raw.keep_os_layout,
+            report_rate: raw.report_rate,
         }
     }
 }

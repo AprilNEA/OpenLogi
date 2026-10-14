@@ -18,8 +18,8 @@ use std::future::Future;
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, ReceiverSelector, SmartShiftStatus,
-    WriteError,
+    DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, ReceiverSelector, ReportRate,
+    ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
 use tarpc::client::RpcError;
@@ -167,6 +167,32 @@ impl Request for SetFnLock {
     }
 }
 
+/// Write a mouse's report rate now, answered as
+/// [`GuiUpdate::ReportRateWritten`] with what the mouse reads back.
+pub struct SetReportRate {
+    pub route: DeviceRoute,
+    pub rate: ReportRate,
+    pub key: DeviceKey,
+}
+
+impl Request for SetReportRate {
+    type Answer = Result<ReportRateInfo, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_report_rate(context::current(), self.route.clone(), self.rate)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::ReportRateWritten {
+            key: self.key,
+            route: self.route,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
 /// Apply a SmartShift configuration now.
 pub struct SetSmartShift {
     pub route: DeviceRoute,
@@ -289,6 +315,26 @@ impl Request for ReadSmartShift {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_smartshift(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a mouse's report rate; the answer goes back over `reply`.
+pub struct ReadReportRate {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<ReportRateInfo, WriteError>>,
+}
+
+impl Request for ReadReportRate {
+    type Answer = Result<ReportRateInfo, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_report_rate(context::current(), self.route.clone())
             .await
     }
 
@@ -528,9 +574,11 @@ commands! {
     SetLightManualPower,
     SetSmartShift,
     SetFnLock,
+    SetReportRate,
     ReadDpi,
     ReadSmartShift,
     ReadFnLock,
+    ReadReportRate,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,

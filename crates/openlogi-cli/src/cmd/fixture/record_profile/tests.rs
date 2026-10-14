@@ -9,7 +9,7 @@ use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
     BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, FnLockState, LightCommand,
-    PasskeyMethod, ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
+    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -40,6 +40,7 @@ enum ReadFamily {
     Wheel,
     Backlight,
     FnLock,
+    ReportRate,
 }
 
 #[derive(Clone)]
@@ -164,6 +165,26 @@ impl Agent for TestAgent {
         _route: DeviceRoute,
     ) -> Result<(), PairingFailure> {
         unreachable!("profile capture must never unpair a device")
+    }
+    async fn read_report_rate(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<ReportRateInfo, WriteError> {
+        self.read(
+            ReadFamily::ReportRate,
+            &route,
+            |settings| &settings.report_rate,
+            0x8061,
+        )
+    }
+    async fn set_report_rate(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        unreachable!("profile capture must never write the report rate")
     }
 
     async fn read_dpi(self, _: TarpcContext, route: DeviceRoute) -> Result<DpiInfo, WriteError> {

@@ -15,6 +15,7 @@ use openlogi_ipc::{AgentRequest, AgentResponse, AgentStatus, ForegroundApps, Inv
 use super::*;
 
 mod persistence;
+mod report_rate;
 
 type Step = Box<dyn FnOnce(AgentRequest) -> AgentResponse + Send>;
 
