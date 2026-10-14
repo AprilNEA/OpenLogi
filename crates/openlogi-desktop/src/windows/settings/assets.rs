@@ -194,8 +194,8 @@ pub(super) fn cache_size_description() -> SharedString {
 }
 
 /// A small bordered text button matching the permission rows' "Open" control.
-fn action_button(
-    id: &'static str,
+pub(super) fn action_button(
+    id: impl Into<gpui::ElementId>,
     label: SharedString,
     pal: Palette,
     on_click: impl Fn(&mut App) + 'static,

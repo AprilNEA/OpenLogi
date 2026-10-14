@@ -126,8 +126,18 @@ impl AppState {
         // both being swallowed here. Structural comparison also makes the
         // guard immune to new fields, which is what an allowlist can never
         // be.
+        // A receiver's slots can change while every card stays the same — a
+        // receiver plugged in with nothing on it, or a leftover pairing
+        // already gone from the list — so they are compared on their own.
+        let receivers = super::receivers::build_receivers(inventories, &merged_list);
+        let receivers_changed = receivers != self.receivers;
+        self.receivers = receivers;
         if merged_list == self.devices.records {
-            return StateEvents::none();
+            return if receivers_changed {
+                StateEvent::InventoryChanged.into()
+            } else {
+                StateEvents::none()
+            };
         }
 
         let previous_key = self.current_record().map(DeviceRecord::inventory_key);
@@ -483,19 +493,33 @@ impl super::AppState {
         let name = record.display_name.clone();
         let routes = record.stale_pairings.clone();
         for route in routes {
-            let sent = self.send_ipc(UnpairDevice {
-                route,
-                intent: UnpairIntent::StalePairing { name: name.clone() },
-            });
-            if !sent {
-                return StateEvent::StalePairingRemovalFailed {
-                    name,
-                    failure: UnpairFailure::AgentUnreachable,
-                }
-                .into();
+            let events = self.remove_stale_pairing(route, &name);
+            if !events.is_empty() {
+                return events;
             }
         }
         StateEvents::none()
+    }
+
+    /// Ask the receiver to drop one leftover slot of the device named `name`
+    /// — the Receivers page's per-slot action. Nothing local changes; the
+    /// agent's next inventory stops listing the slot.
+    pub(crate) fn remove_stale_pairing(&mut self, route: DeviceRoute, name: &str) -> StateEvents {
+        let sent = self.send_ipc(UnpairDevice {
+            route,
+            intent: UnpairIntent::StalePairing {
+                name: name.to_string(),
+            },
+        });
+        if sent {
+            StateEvents::none()
+        } else {
+            StateEvent::StalePairingRemovalFailed {
+                name: name.to_string(),
+                failure: UnpairFailure::AgentUnreachable,
+            }
+            .into()
+        }
     }
 
     /// The receiver's answer to an [`UnpairDevice`], dispatched on what the
