@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
+use super::gesture::SpyRestore;
 use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
 use crate::reprog_controls::{self, ReprogControlsV4};
@@ -146,6 +147,7 @@ pub(crate) enum CaptureStop {
 pub struct CaptureRestorePlan {
     reprog: Option<ReprogRestore>,
     thumb: Option<ThumbwheelRestore>,
+    spy: Option<SpyRestore>,
 }
 
 impl fmt::Debug for CaptureRestorePlan {
@@ -159,6 +161,7 @@ impl fmt::Debug for CaptureRestorePlan {
                     .map_or(0, |reprog| reprog.controls.len()),
             )
             .field("has_thumbwheel", &self.thumb.is_some())
+            .field("host_mode", &self.spy.is_some())
             .finish()
     }
 }
@@ -176,11 +179,14 @@ impl RestorePlan for CaptureRestorePlan {
             }
         }
         if let Some(thumb) = self.thumb {
-            let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
+            let thumbwheel = Thumbwheel::new(channel.clone(), device_index, thumb.feature_index);
             restored &= restore_result(
                 thumbwheel.undivert(thumb.native_direction).await,
                 "thumb wheel",
             );
+        }
+        if let Some(spy) = &self.spy {
+            restored &= spy.restore_on(&channel, device_index).await;
         }
         restored
     }
@@ -198,17 +204,20 @@ pub type CaptureSessionOutcome = RestoreOutcome<CaptureRestorePlan>;
 pub type CaptureSessionFailure = SessionFailure<CaptureError, CaptureRestorePlan>;
 
 impl PendingCaptureRestore {
-    /// The restore owed for `reprog` and the thumb wheel, or `None` when the
-    /// session diverted nothing.
+    /// The restore owed, or `None` when nothing was diverted.
     pub(crate) fn new(
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
         thumb: Option<ThumbwheelRestore>,
+        spy: Option<SpyRestore>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb.is_none() {
+        if reprog.is_none() && thumb.is_none() && spy.is_none() {
             return None;
         }
-        Some(Self::owing(retired, CaptureRestorePlan { reprog, thumb }))
+        Some(Self::owing(
+            retired,
+            CaptureRestorePlan { reprog, thumb, spy },
+        ))
     }
 }
 

@@ -37,7 +37,7 @@ pub(super) fn execute(action: &Action) {
         Effect::None => {}
         // Extra mouse buttons: BTN_SIDE/BTN_EXTRA are the evdev side
         // buttons ("back"/"forward") browsers handle natively.
-        Effect::Click(button) => click(mouse_button_code(button)),
+        Effect::Click(button) => click(button),
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
@@ -376,10 +376,15 @@ fn held_key_events(keys: &[KeyCode], phase: KeyPhase) -> Vec<InputEvent> {
     events
 }
 
+pub(super) fn post_mouse_edge(button: MouseButton, phase: KeyPhase) {
+    let value = i32::from(phase == KeyPhase::Down);
+    emit(&[key_ev(mouse_button_code(button), value), syn()]);
+}
+
 /// Inject a button-down in one SYN frame and button-up in a second.
-fn click(button: KeyCode) {
-    emit(&[key_ev(button, 1), syn()]);
-    emit(&[key_ev(button, 0), syn()]);
+fn click(button: MouseButton) {
+    post_mouse_edge(button, KeyPhase::Down);
+    post_mouse_edge(button, KeyPhase::Up);
 }
 
 pub(super) fn post_scroll(delta: ScrollDelta) {

@@ -18,7 +18,7 @@ use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::features::binding_editor::{
-    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
+    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_with, editor_section,
     gesture_direction_icon,
 };
 use crate::state::AppState;
@@ -35,8 +35,10 @@ pub(super) struct BindingInspectorData<'a> {
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     pub dpi_gestures: bool,
+    pub native_gestures: bool,
     pub editing_app: Option<&'a str>,
     pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
+    pub extra_actions: &'a [Action],
 }
 
 #[derive(Clone, Copy)]
@@ -142,6 +144,7 @@ fn button_inspector(
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
+    let offer_gestures = data.native_gestures && can_enable_gestures(button, data.editing_app);
     let gesture_map = data.gesture_maps.get(&button);
     let overridden = data
         .overridden
@@ -206,42 +209,58 @@ fn button_inspector(
                     }),
             )
         })
-        .when(can_enable_gestures(button, data.editing_app), |panel| {
-            let observer = picker.view.clone();
-            let unavailable = button == ButtonId::DpiToggle && !data.dpi_gestures;
-            panel
-                .child(
-                    control_button("inspector-use-gestures")
-                        .w_full()
-                        .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
-                        .label(tr!("actions.use_gestures"))
-                        .disabled(unavailable)
-                        .on_click(move |_, _, cx| {
-                            AppState::apply(cx, |state| state.commit_gesture_mode(button, true));
-                            observer.update(cx, |view, cx| {
-                                view.set_gesture_selected_dir(Some(GestureDirection::Click));
-                                cx.notify();
-                            });
-                        }),
-                )
-                .when(unavailable, |panel| {
-                    panel.child(
-                        div()
-                            .text_body()
-                            .text_color(pal.text_muted)
-                            .child(tr!("actions.dpi_gestures_unavailable")),
-                    )
-                })
+        .when(offer_gestures, |panel| {
+            panel.child(gesture_enable_control(
+                button,
+                data.dpi_gestures,
+                picker,
+                pal,
+            ))
         })
         .when(picker.open, |panel| {
             panel.child(action_library(
                 "inspector-action",
                 Some(&action),
                 picker,
+                data.extra_actions,
                 &on_pick,
                 pal,
                 cx,
             ))
+        })
+}
+
+fn gesture_enable_control(
+    button: ButtonId,
+    dpi_gestures: bool,
+    picker: ActionPickerContext<'_>,
+    pal: Palette,
+) -> impl IntoElement {
+    let observer = picker.view.clone();
+    let unavailable = button == ButtonId::DpiToggle && !dpi_gestures;
+    v_flex()
+        .gap_2()
+        .child(
+            control_button("inspector-use-gestures")
+                .w_full()
+                .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
+                .label(tr!("actions.use_gestures"))
+                .disabled(unavailable)
+                .on_click(move |_, _, cx| {
+                    AppState::apply(cx, |state| state.commit_gesture_mode(button, true));
+                    observer.update(cx, |view, cx| {
+                        view.set_gesture_selected_dir(Some(GestureDirection::Click));
+                        cx.notify();
+                    });
+                }),
+        )
+        .when(unavailable, |panel| {
+            panel.child(
+                div()
+                    .text_body()
+                    .text_color(pal.text_muted)
+                    .child(tr!("actions.dpi_gestures_unavailable")),
+            )
         })
 }
 
@@ -291,6 +310,7 @@ fn inherited_gesture_inspector(
                 "inspector-gesture-override",
                 None,
                 picker,
+                &[],
                 &on_pick,
                 pal,
                 cx,
@@ -352,6 +372,7 @@ fn gesture_inspector(
                 "inspector-gesture-action",
                 Some(&current),
                 picker,
+                &[],
                 &on_pick,
                 pal,
                 cx,
@@ -669,12 +690,13 @@ fn action_library(
     id_prefix: &'static str,
     current: Option<&Action>,
     picker: ActionPickerContext<'_>,
+    extra: &[Action],
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
     let query = picker.search.read(cx).value();
-    let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
+    let rows = action_rows_with(id_prefix, current, &query, extra, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()

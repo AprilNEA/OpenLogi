@@ -19,7 +19,7 @@ use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, HapticWaveform, HidppOperation,
-    LightCommand, ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
+    LightCommand, OnboardState, ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -244,6 +244,19 @@ impl Agent for AgentServer {
         fn_lock: bool,
     ) -> Result<FnLockState, WriteError> {
         self.shared.set_fn_lock(&route, fn_lock).await
+    }
+
+    async fn read_onboard(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardState, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadOnboard, |c| async move {
+                openlogi_hid::get_onboard_on(&c).await
+            })
+            .await
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

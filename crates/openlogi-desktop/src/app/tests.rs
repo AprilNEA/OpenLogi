@@ -430,6 +430,9 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         haptic_panel: false,
         dpi_gestures: false,
         fn_lock: false,
+        report_rate: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -458,6 +461,9 @@ fn tabs_follow_capabilities_not_kind() {
         haptic_panel: false,
         dpi_gestures: false,
         fn_lock: false,
+        report_rate: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -501,6 +507,9 @@ fn keyboard_without_asset_hides_buttons_tab() {
         haptic_panel: false,
         dpi_gestures: false,
         fn_lock: false,
+        report_rate: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -523,6 +532,9 @@ fn keyboard_with_buttons_shows_keys_tab() {
         haptic_panel: false,
         dpi_gestures: false,
         fn_lock: false,
+        report_rate: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));
@@ -545,6 +557,7 @@ fn keyboard_with_a_depot_but_no_capabilities_shows_keys_tab() {
         metadata: openlogi_assets::Metadata::default(),
         png_width: 1872,
         png_height: 728,
+        side_view: None,
     });
     assert!(DetailTab::tabs_for(&keyboard).contains(&DetailTab::Keys));
     assert!(!DetailTab::tabs_for(&record(DeviceKind::Keyboard, None)).contains(&DetailTab::Keys));
@@ -598,3 +611,40 @@ fn unprobed_unknown_device_shows_only_device_tab() {
 }
 
 mod corpus;
+
+/// A G-series mouse carries the gaming control tables and no `0x1b04`. The
+/// OS hook still remaps its middle/back/forward, and `ShowActionsRing`
+/// dispatches from those same buttons, so both panels appear, with or without
+/// a layout for the model (#392, #730, #877).
+#[test]
+fn a_mouse_without_reprogcontrols_still_gets_buttons_and_ring() {
+    let caps = Some(Capabilities::from_feature_ids(&[0x2201, 0x8100, 0x8110]));
+    let unknown_model = record(DeviceKind::Mouse, caps);
+    let g502 = DeviceRecord {
+        model_key: "0407f".to_string(),
+        ..record(DeviceKind::Mouse, caps)
+    };
+    for mouse in [unknown_model, g502] {
+        let tabs = DetailTab::tabs_for(&mouse);
+        assert!(tabs.contains(&DetailTab::Buttons));
+        assert!(tabs.contains(&DetailTab::ActionsRing));
+        assert!(tabs.contains(&DetailTab::Pointer));
+    }
+}
+
+/// The function-row remapper has no OS-hook fallback: it diverts every key
+/// over `0x1b04`. A gaming keyboard has the gaming tables and no
+/// ReprogControls, so Keys would open a panel whose capture session cannot
+/// start. The feature list is a real G713 dump (#886).
+#[test]
+fn a_gaming_keyboard_gets_no_keys_or_mouse_tabs() {
+    let g713 = Capabilities::from_feature_ids(&[
+        0x0000, 0x0001, 0x0003, 0x0005, 0x0020, 0x8071, 0x8081, 0x1bc0, 0x40a3, 0x4522, 0x4540,
+        0x8010, 0x8040, 0x8100, 0x8060, 0x00c2, 0x00d0,
+    ]);
+    assert!(g713.no_button_diversion());
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, Some(g713)));
+    assert!(!tabs.contains(&DetailTab::Keys));
+    assert!(!tabs.contains(&DetailTab::Buttons) && !tabs.contains(&DetailTab::ActionsRing));
+    assert!(tabs.contains(&DetailTab::Lighting));
+}

@@ -67,6 +67,14 @@ pub enum ButtonId {
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
     WheelTiltRight,
+    /// G-series button G6.
+    G6,
+    /// G-series button G7.
+    G7,
+    /// G-series button G8.
+    G8,
+    /// G-series button G9.
+    G9,
     /// A keyboard key, by the HID++ `0x1b04` control it reports as. Diverted
     /// over HID++ while bound (the OS hook never sees these keys); left on its
     /// native firmware function otherwise.
@@ -97,6 +105,9 @@ impl ButtonId {
         ButtonId::GestureButton,
         ButtonId::HapticPanel,
     ];
+
+    /// G-series buttons, kept out of [`Self::ALL`].
+    pub const G_BUTTONS: [ButtonId; 4] = [ButtonId::G6, ButtonId::G7, ButtonId::G8, ButtonId::G9];
 
     /// The keyboard key bound to `0x1b04` control `cid`.
     #[must_use]
@@ -164,7 +175,7 @@ impl ButtonId {
     /// string form read this one table; `unit_name` is a match without a
     /// wildcard over the unit variants, so a new variant that is missing here
     /// fails to compile rather than failing to parse.
-    const UNIT_NAMES: [(ButtonId, &'static str); 13] = [
+    const UNIT_NAMES: [(ButtonId, &'static str); 17] = [
         (ButtonId::LeftClick, "LeftClick"),
         (ButtonId::RightClick, "RightClick"),
         (ButtonId::MiddleClick, "MiddleClick"),
@@ -178,6 +189,10 @@ impl ButtonId {
         (ButtonId::HapticPanel, "HapticPanel"),
         (ButtonId::WheelTiltLeft, "WheelTiltLeft"),
         (ButtonId::WheelTiltRight, "WheelTiltRight"),
+        (ButtonId::G6, "G6"),
+        (ButtonId::G7, "G7"),
+        (ButtonId::G8, "G8"),
+        (ButtonId::G9, "G9"),
     ];
 
     /// The name a mouse button is persisted under. Keyboard controls have no
@@ -197,6 +212,10 @@ impl ButtonId {
             ButtonId::HapticPanel => Self::UNIT_NAMES[10].1,
             ButtonId::WheelTiltLeft => Self::UNIT_NAMES[11].1,
             ButtonId::WheelTiltRight => Self::UNIT_NAMES[12].1,
+            ButtonId::G6 => Self::UNIT_NAMES[13].1,
+            ButtonId::G7 => Self::UNIT_NAMES[14].1,
+            ButtonId::G8 => Self::UNIT_NAMES[15].1,
+            ButtonId::G9 => Self::UNIT_NAMES[16].1,
             ButtonId::Control(_) => return None,
         })
     }
@@ -227,6 +246,10 @@ impl ButtonId {
             ButtonId::ThumbwheelScrollDown => "Thumb Wheel Down",
             ButtonId::GestureButton => "Gesture Button",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::G6 => "G6",
+            ButtonId::G7 => "G7",
+            ButtonId::G8 => "G8",
+            ButtonId::G9 => "G9",
             ButtonId::Control(cid) => return cid.label(),
         })
     }
@@ -248,6 +271,10 @@ impl ButtonId {
             ButtonId::ThumbwheelScrollDown => "pointer.thumb_wheel_down",
             ButtonId::GestureButton => "actions.gesture_button",
             ButtonId::HapticPanel => "actions.haptic_panel",
+            ButtonId::G6 => "actions.g6",
+            ButtonId::G7 => "actions.g7",
+            ButtonId::G8 => "actions.g8",
+            ButtonId::G9 => "actions.g9",
             ButtonId::Control(cid) => cid.translation_key(),
         }
     }

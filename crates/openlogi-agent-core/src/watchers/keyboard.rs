@@ -164,6 +164,7 @@ fn dispatch_input(
                 None,
             );
         }
+        CapturedInput::Interrupted => dispatcher.cancel_hidpp_session(session),
         CapturedInput::Gesture(..)
         | CapturedInput::Scroll { .. }
         | CapturedInput::ThumbwheelDirection { .. } => {}

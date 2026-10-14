@@ -17,8 +17,8 @@ use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, PairingError,
-    PasskeyMethod, ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, OnboardState,
+    PairingError, PasskeyMethod, ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -82,6 +82,7 @@ pub use succession::Identity;
 ///      `0x40a0` keyboard, which reports no default;
 ///      `WriteError::HapticWaveformUnsupported` appended — a haptic play of a
 ///      waveform the device does not advertise is refused before it is sent.
+///      G-series capabilities, actions, `read_onboard` and `ReceiverFull` appended.
 pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -292,6 +293,8 @@ pub enum PairingFailure {
     UnknownDevice,
     /// There is no pairing session to receive this command.
     NoActiveSession,
+    /// The receiver has no free slot.
+    ReceiverFull,
 }
 
 /// Immediate command-acceptance failure for pairing RPCs.
@@ -347,6 +350,7 @@ impl From<PairingError> for PairingFailure {
             PairingError::MalformedNotification(what) => Self::Hid {
                 message: format!("malformed pairing notification ({what})"),
             },
+            PairingError::ReceiverFull => Self::ReceiverFull,
         }
     }
 }
@@ -595,4 +599,6 @@ pub trait Agent {
     /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+    /// Read a G-series mouse's onboard memory.
+    async fn read_onboard(route: DeviceRoute) -> Result<OnboardState, WriteError>;
 }

@@ -333,6 +333,25 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
     );
 }
 
+/// macOS hands Back/Forward gestures to HID++ raw XY, which a spy-only mouse
+/// cannot report, so its gestures must stay in the hook's maps.
+#[test]
+fn a_spy_only_mouse_keeps_its_side_gestures_in_the_os_hook() {
+    let mut config = Config::default();
+    config.set_gesture_mode("0407f", ButtonId::Back, true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("0407f", 1, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
+    assert!(hook_maps.gestures.contains_key(&ButtonId::Back));
+}
+
 #[test]
 fn keyboard_control_bindings_never_enter_the_mouse_capture_plan() {
     // The keyboard watcher owns `0x1b04` key diversion. The gesture watcher
@@ -488,4 +507,25 @@ fn two_mouse_hidpp_plans_are_device_scoped_while_hook_fallback_is_selected_devic
         hook_maps.gestures.contains_key(&ButtonId::Forward),
         "the passive Windows fallback is one selected-device map, not a per-source map"
     );
+}
+
+#[test]
+fn g603_stored_gestures_do_not_enter_unattributed_or_raw_xy_paths() {
+    let mut config = Config::default();
+    for button in [ButtonId::Back, ButtonId::Forward] {
+        config.set_gesture_mode("0b01c", button, true);
+    }
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("0b01c", 1, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+    let maps = orch.shared.hook_maps.read().unwrap();
+    for button in [ButtonId::Back, ButtonId::Forward] {
+        assert!(!maps.gestures.contains_key(&button));
+        assert!(!maps.bindings.contains_key(&button));
+    }
+    let plans = orch.capture_plans_for();
+    let plan = &plans[0];
+    assert!(plan.dispatch.side_gesture_bindings.is_empty());
+    assert!(plan.target.spec.divert_gesture_buttons.is_empty());
 }

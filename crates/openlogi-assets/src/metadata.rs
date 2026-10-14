@@ -95,6 +95,15 @@ impl Assignment {
         let (_, cid) = self.slot_id.rsplit_once("_c")?;
         cid.parse().ok()
     }
+
+    /// The G-number in a G-series slot id (`g502wireless_g7_m1` → 7). These
+    /// depots place markers in pixels, not percent.
+    #[must_use]
+    pub fn g_number(&self) -> Option<u8> {
+        let (rest, mode) = self.slot_id.rsplit_once('_')?;
+        mode.strip_prefix('m')?.parse::<u8>().ok()?;
+        rest.rsplit_once("_g")?.1.parse().ok()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq)]
@@ -122,6 +131,12 @@ impl Metadata {
         self.images.first().map(|i| i.origin)
     }
 
+    /// The image entry for `key`.
+    #[must_use]
+    pub fn image(&self, key: &str) -> Option<&ImageEntry> {
+        self.images.iter().find(|i| i.key == key)
+    }
+
     /// Raw assignment iterator over the `device_buttons_image` entry.
     /// Slot-name → application-button mapping is intentionally left to
     /// the consumer (the GUI owns the ButtonId enum).
@@ -142,6 +157,21 @@ mod tests {
     /// no `slotName` — and add fields like `assignmentOffset`. Parsing must
     /// not fail wholesale: the renderer still needs `origin`, and unknown
     /// slot names already degrade to "no hotspot" in the consumer.
+    #[test]
+    fn gaming_slot_ids_decode_their_g_number() {
+        let slot = |id: &str| super::Assignment {
+            slot_id: id.into(),
+            slot_name: String::new(),
+            marker: super::Point::default(),
+            label: super::Direction::default(),
+        };
+        assert_eq!(slot("g502wireless_g7_m1").g_number(), Some(7));
+        assert_eq!(slot("g502wireless_g11_m1").g_number(), Some(11));
+        assert_eq!(slot("g513_g1_m1").g_number(), Some(1));
+        assert_eq!(slot("mx-keys-mini-2b369_c266").g_number(), None);
+        assert_eq!(slot("g502wireless_g7").g_number(), None);
+    }
+
     #[test]
     fn slot_ids_decode_their_control_id() {
         let json = r#"{

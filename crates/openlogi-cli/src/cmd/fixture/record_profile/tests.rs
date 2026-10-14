@@ -158,6 +158,14 @@ impl Agent for TestAgent {
         unreachable!("profile capture must never write Fn-lock")
     }
 
+    async fn read_onboard(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::OnboardState, WriteError> {
+        unreachable!("profile capture does not read onboard memory")
+    }
+
     async fn unpair_device(
         self,
         _: TarpcContext,

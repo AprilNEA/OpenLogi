@@ -42,9 +42,10 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, Dpi, DpiCapabilities,
-    DpiInfo, FnLockState, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod,
-    ReceiverSelector, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
-    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    DpiInfo, FnLockState, HidppFeatureErrorKind, HidppOperation, LightCommand, OnboardMode,
+    OnboardProfile, OnboardState, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
+    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -107,6 +108,18 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 #[test]
 fn protocol_version_is_pinned() {
     assert_eq!(PROTOCOL_VERSION, 36);
+}
+
+/// Preserve upstream action indices when combining independently extended enums.
+#[test]
+fn switcher_and_gaming_action_variant_order() {
+    use openlogi_core::binding::Action;
+    let combo: KeyCombo = "Cmd+Tab".parse().expect("valid switcher shortcut");
+    assert_wire(&Action::TapKeyHoldingModifiers(combo), "35012b");
+    assert_wire(&Action::NextDpiPreset, "36");
+    assert_wire(&Action::PreviousDpiPreset, "37");
+    assert_wire(&Action::DpiShift, "38");
+    assert_wire(&Action::GShift, "39");
 }
 
 #[test]
@@ -493,13 +506,38 @@ fn device_inventory() {
                 haptic_panel: true,
                 dpi_gestures: true,
                 fn_lock: false,
+                report_rate: false,
+                onboard_profiles: false,
+                button_spy: false,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010007",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010000000007",
+    );
+}
+
+#[test]
+fn onboard_state() {
+    assert_wire(&HidppOperation::ReadOnboard, "12");
+    let rate = |ms| ReportRate::from_ms(ms).expect("valid rate");
+    assert_wire(
+        &OnboardState {
+            mode: OnboardMode::Onboard,
+            active_profile: Some(5),
+            profiles: vec![OnboardProfile {
+                index: 5,
+                name: Some("Stock".into()),
+                enabled: true,
+            }],
+            report_rate: Some(ReportRateInfo {
+                current: rate(1),
+                supported: vec![rate(1), rate(8)],
+            }),
+        },
+        "0001050105010553746f636b010101020108",
     );
 }
 

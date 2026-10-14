@@ -51,6 +51,7 @@ fn test_dispatcher() -> (
                 device_io: openlogi_hid::device_io_channel().1,
             },
             action_ring,
+            dpi_order: crate::hardware::WriteOrder::default(),
         },
         buttons: owner.input(),
     };
@@ -232,6 +233,48 @@ fn queued_key_action_retains_its_press_time_target() {
         queued.recv().expect("action should be queued"),
         (Action::BrowserBack, target)
     );
+    assert!(owner.shutdown());
+}
+
+/// A held action needs the key's release, which the one-shot action queue
+/// never delivers.
+#[test]
+fn dpi_shift_on_a_key_runs_as_a_held_press() {
+    use super::super::button::ButtonRuntimeEvent;
+
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let keycode = 0x7a;
+    let modifiers = KeyModifiers::default();
+    let bindings = Arc::new(RwLock::new(BTreeMap::from([(
+        KeyTrigger { keycode, modifiers },
+        Action::DpiShift,
+    )])));
+    let (actions, queued) = mpsc::sync_channel(1);
+    let key = |pressed| {
+        handle_key(
+            KeyEvent {
+                keycode,
+                pressed,
+                modifiers,
+            },
+            &bindings,
+            &actions,
+            &dispatcher,
+            ActionDispatchTarget::capture,
+        )
+    };
+
+    assert_eq!(key(true), EventDisposition::Suppress);
+    queued.try_recv().unwrap_err();
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)),
+        Ok(ButtonRuntimeEvent::Started(_))
+    ));
+    assert_eq!(key(false), EventDisposition::Suppress);
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)),
+        Ok(ButtonRuntimeEvent::Ended { .. })
+    ));
     assert!(owner.shutdown());
 }
 
@@ -585,4 +628,27 @@ fn resolve_gesture_click_falls_back_when_click_is_absent() {
         resolve_gesture_click(&empty, ButtonId::Forward),
         default_binding(ButtonId::Forward)
     );
+}
+
+#[test]
+fn held_gshift_replaces_a_gesture_button_with_its_shifted_binding() {
+    let mut maps = HookMaps {
+        selected_device: Some("g502".into()),
+        ..HookMaps::default()
+    };
+    maps.gestures.insert(ButtonId::Back, BTreeMap::new());
+    maps.shift_bindings
+        .insert(ButtonId::Back, Binding::Single(Action::Copy));
+
+    let (binding, is_gesture) = maps.press_binding(ButtonId::Back);
+    assert!(is_gesture && binding.is_none());
+
+    maps.shift_held.insert("g502".into());
+    let (binding, is_gesture) = maps.press_binding(ButtonId::Back);
+    assert!(!is_gesture);
+    assert_eq!(binding, Some(Binding::Single(Action::Copy)));
+
+    // A button with no shifted binding keeps its gestures under G-Shift.
+    maps.gestures.insert(ButtonId::Forward, BTreeMap::new());
+    assert!(maps.press_binding(ButtonId::Forward).1);
 }

@@ -130,15 +130,8 @@ pub(super) fn execute(action: &Action) {
 /// Synthesise a click for `button` at the cursor location. Extra buttons
 /// post the real button4/5 the OS treats as back/forward.
 fn dispatch_click(button: MouseButton) {
-    match button {
-        MouseButton::Left => post_click(CGMouseButton::Left),
-        MouseButton::Right => post_click(CGMouseButton::Right),
-        MouseButton::Middle => post_click(CGMouseButton::Center),
-        // Button numbers are 0-indexed (3 = back / "button 4", 4 = forward /
-        // "button 5").
-        MouseButton::Back => post_other_button(3),
-        MouseButton::Forward => post_other_button(4),
-    }
+    post_mouse_edge(button, KeyPhase::Down);
+    post_mouse_edge(button, KeyPhase::Up);
 }
 
 /// Shortcuts pressed as the frontmost app's menu item, so AppKit's remapping
@@ -281,64 +274,52 @@ fn nx_key(key: MediaKey) -> i32 {
     }
 }
 
-/// Post a mouse-down + mouse-up pair for `button` at the cursor's current
-/// location.
-///
-/// Posted at the HID tap location, so OpenLogi's own event tap sees the
-/// synthetic click too: a `LeftClick`/`RightClick` flows straight through
-/// (the tap never owns the primary buttons), and a `MiddleClick` is left
-/// alone unless the user has *also* remapped the middle button.
-fn post_click(button: CGMouseButton) {
+pub(super) fn post_mouse_edge(button: MouseButton, phase: KeyPhase) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-        tracing::warn!("CGEventSource::new failed for click");
-        return;
-    };
-    // A fresh event reports the current pointer location; mouse events need
-    // an explicit position or they land at (0, 0).
-    let location =
-        CGEvent::new(src.clone()).map_or_else(|()| CGPoint::new(0., 0.), |e| e.location());
-    let (down, up) = match button {
-        CGMouseButton::Left => (CGEventType::LeftMouseDown, CGEventType::LeftMouseUp),
-        CGMouseButton::Right => (CGEventType::RightMouseDown, CGEventType::RightMouseUp),
-        CGMouseButton::Center => (CGEventType::OtherMouseDown, CGEventType::OtherMouseUp),
-    };
-    for (kind, phase) in [(down, "down"), (up, "up")] {
-        if let Ok(ev) = CGEvent::new_mouse_event(src.clone(), kind, location, button) {
-            tag_synthetic(&ev);
-            ev.post(CGEventTapLocation::HID);
-        } else {
-            tracing::warn!(phase, "CGEvent::new_mouse_event failed");
-        }
-    }
-}
-
-/// Post a down + up pair for an "extra" mouse button by its raw button
-/// number (3 = back / "button 4", 4 = forward / "button 5"). These are the
-/// native events browsers and most apps interpret as back/forward.
-///
-/// `CGMouseButton` only names Left/Right/Center, so we create an
-/// `OtherMouse` event and override `MOUSE_EVENT_BUTTON_NUMBER` to address
-/// buttons ≥ 3. Tagged via [`tag_synthetic`] so OpenLogi's own event tap
-/// ignores it instead of re-translating it into a Back/Forward press.
-fn post_other_button(button_number: i64) {
-    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-        tracing::warn!("CGEventSource::new failed for extra mouse button");
+        tracing::warn!("CGEventSource::new failed for mouse edge");
         return;
     };
     let location =
         CGEvent::new(src.clone()).map_or_else(|()| CGPoint::new(0., 0.), |e| e.location());
-    for (kind, phase) in [
-        (CGEventType::OtherMouseDown, "down"),
-        (CGEventType::OtherMouseUp, "up"),
-    ] {
-        if let Ok(ev) = CGEvent::new_mouse_event(src.clone(), kind, location, CGMouseButton::Center)
-        {
-            ev.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button_number);
-            tag_synthetic(&ev);
-            ev.post(CGEventTapLocation::HID);
-        } else {
-            tracing::warn!(phase, "CGEvent::new_mouse_event failed for extra button");
-        }
+    let (cg_button, number, down, up) = match button {
+        MouseButton::Left => (
+            CGMouseButton::Left,
+            0,
+            CGEventType::LeftMouseDown,
+            CGEventType::LeftMouseUp,
+        ),
+        MouseButton::Right => (
+            CGMouseButton::Right,
+            1,
+            CGEventType::RightMouseDown,
+            CGEventType::RightMouseUp,
+        ),
+        MouseButton::Middle => (
+            CGMouseButton::Center,
+            2,
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+        ),
+        MouseButton::Back => (
+            CGMouseButton::Center,
+            3,
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+        ),
+        MouseButton::Forward => (
+            CGMouseButton::Center,
+            4,
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+        ),
+    };
+    let kind = if phase == KeyPhase::Down { down } else { up };
+    if let Ok(ev) = CGEvent::new_mouse_event(src, kind, location, cg_button) {
+        ev.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, number);
+        tag_synthetic(&ev);
+        ev.post(CGEventTapLocation::HID);
+    } else {
+        tracing::warn!(?phase, "CGEvent::new_mouse_event failed");
     }
 }
 

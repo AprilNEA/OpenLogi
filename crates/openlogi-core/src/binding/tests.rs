@@ -44,6 +44,14 @@ fn catalog_excludes_custom_shortcut() {
     }
 }
 
+/// One-shot sources (Actions Ring slots, swipes) pick from the catalog and
+/// cannot deliver a release.
+#[test]
+fn catalog_excludes_actions_that_last_as_long_as_their_press() {
+    assert!(Action::catalog().iter().all(|action| !action.is_held()));
+    assert!(Action::DpiShift.is_held() && Action::GShift.is_held());
+}
+
 #[test]
 fn hold_shortcut_has_distinct_lifecycle_semantics() {
     let combo: KeyCombo = "Alt+Space".parse().expect("valid shortcut failed");
@@ -63,6 +71,10 @@ fn tap_key_holding_modifiers_holds_only_the_modifiers() {
     let combo: KeyCombo = "Cmd+Tab".parse().expect("valid shortcut failed");
     let action = Action::TapKeyHoldingModifiers(combo.clone());
 
+    assert!(
+        action.is_held(),
+        "switcher shortcuts require a release edge"
+    );
     assert_eq!(action.label(), "Hold Cmd, tap Tab");
     assert_eq!(action.category(), Category::Editing);
     assert_eq!(action.held_chord(), Some((&combo, HeldKeys::ModifiersOnly)));
@@ -342,27 +354,18 @@ fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
     actions.extend([
         Action::SetDpiPreset(0),
-        Action::CustomShortcut(
-            "F1".parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
-        ),
+        Action::DpiShift,
+        Action::CustomShortcut("F1".parse().expect("valid shortcut")),
         Action::TypeText(String::new()),
         Action::RunAppleScript(String::new()),
         Action::RunShellCommand(String::new()),
         Action::Workflow(Vec::new()),
         Action::OpenApplication(
             ApplicationTarget::new("/Applications/OpenLogi.app", "OpenLogi")
-                .unwrap_or_else(|error| panic!("valid target failed: {error}")),
+                .expect("valid application target"),
         ),
-        Action::HoldShortcut(
-            "F2".parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
-        ),
-        Action::TapKeyHoldingModifiers(
-            "Cmd+Tab"
-                .parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
-        ),
+        Action::HoldShortcut("F2".parse().expect("valid shortcut")),
+        Action::TapKeyHoldingModifiers("Cmd+Tab".parse().expect("valid shortcut")),
     ]);
     let mut actual: Vec<String> = actions
         .into_iter()
@@ -389,6 +392,7 @@ fn persisted_action_variant_names_are_stable() {
         "CustomShortcut",
         "Cut",
         "CycleDpiPresets",
+        "DpiShift",
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
@@ -403,6 +407,7 @@ fn persisted_action_variant_names_are_stable() {
         "MuteVolume",
         "NewTab",
         "NextDesktop",
+        "NextDpiPreset",
         "NextTab",
         "NextTrack",
         "None",
@@ -412,6 +417,7 @@ fn persisted_action_variant_names_are_stable() {
         "PrevTab",
         "PrevTrack",
         "PreviousDesktop",
+        "PreviousDpiPreset",
         "Redo",
         "ReloadPage",
         "ReopenTab",
