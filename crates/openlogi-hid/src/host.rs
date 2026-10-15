@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::device::{DeviceInventory, LightState, StandaloneDevice};
 use openlogi_core::hid::{FnLockState, LightCommand, PairingError, WriteError};
 
 use crate::probe_cache::FileProbeCacheStore;
@@ -200,13 +200,23 @@ pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Resul
     device::play_haptic(&*native_backend(), route, waveform).await
 }
 
-/// Apply a light command to the Litra `route` reaches.
+/// Apply a light command to the Litra `route` reaches, returning the state
+/// it reports afterwards (`None` when only its raw report reaches it).
 pub async fn apply_litra(
     route: &DeviceRoute,
     model: LitraModel,
     command: LightCommand,
-) -> Result<(), WriteError> {
+) -> Result<Option<LightState>, WriteError> {
     device::apply_litra(&*native_backend(), route, model, command).await
+}
+
+/// Read the state of the Litra `route` reaches (`None` when only its raw
+/// report reaches it, which reads nothing back).
+pub async fn read_litra_state(
+    route: &DeviceRoute,
+    model: LitraModel,
+) -> Result<Option<LightState>, WriteError> {
+    device::read_litra_state(&*native_backend(), route, model).await
 }
 
 /// Walk the HID++ feature table of the device `route` reaches.

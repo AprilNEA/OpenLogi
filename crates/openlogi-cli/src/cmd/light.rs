@@ -1,18 +1,20 @@
 //! `openlogi light` — discovery and manual control for standalone lights.
 //!
-//! The CLI intentionally uses the same raw-HID driver as the agent. It is a
-//! small hardware-facing surface for validating discovery and report encoding
-//! before exercising the GPUI panel.
+//! The CLI intentionally uses the same Litra driver as the agent. It is a
+//! small hardware-facing surface for validating discovery, the HID++ `0x1990`
+//! read-back and the raw fallback before exercising the GPUI panel.
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
-use openlogi_core::device::{LightValueUnit, StandaloneDevice};
-use openlogi_hid::{LightCommand, find_litra};
+use openlogi_core::device::{LightState, LightValueUnit, StandaloneDevice};
+use openlogi_hid::{LightCommand, LitraModel, find_litra};
 
 #[derive(Debug, Subcommand)]
 pub enum LightCmd {
     /// List recognized standalone lights and their advertised controls.
     List,
+    /// Read a light's state back from the light itself.
+    Status(DeviceArgs),
     /// Turn a light on.
     On(DeviceArgs),
     /// Turn a light off.
@@ -55,6 +57,7 @@ impl LightCmd {
     pub async fn run(self) -> Result<()> {
         match self {
             Self::List => list().await,
+            Self::Status(args) => status(args.device.as_deref()).await,
             Self::On(args) => set_power(args.device.as_deref(), true).await,
             Self::Off(args) => set_power(args.device.as_deref(), false).await,
             Self::Brightness(args) => set_brightness(args).await,
@@ -109,6 +112,57 @@ async fn list() -> Result<()> {
     Ok(())
 }
 
+async fn status(query: Option<&str>) -> Result<()> {
+    let devices = standalone().await?;
+    let device = select(&devices, query)?;
+    let state = openlogi_hid::read_litra_state(&device.route(), litra_model(device)?)
+        .await
+        .context("failed to read the light")?;
+    print_state(device, state.as_ref());
+    Ok(())
+}
+
+/// Print what the light reports, or that it is reached only through its raw
+/// report, which reads nothing back.
+fn print_state(device: &StandaloneDevice, state: Option<&LightState>) {
+    match state {
+        Some(state) => {
+            println!("{}:", device.display_name);
+            for line in describe_state(state) {
+                println!("  {line}");
+            }
+        }
+        None => println!(
+            "{}: reached only through its raw report, which reads nothing back",
+            device.display_name
+        ),
+    }
+}
+
+/// One line per control of `state`.
+fn describe_state(state: &LightState) -> Vec<String> {
+    let mut lines = vec![format!("power: {}", if state.on { "on" } else { "off" })];
+    if let (Some(range), Some(value)) = (state.capabilities.brightness, state.brightness) {
+        let limit = state.brightness_limit.map_or_else(String::new, |limit| {
+            format!(", limited to {limit} lm right now")
+        });
+        lines.push(format!(
+            "brightness: {value} lm ({}–{} lm){limit}",
+            range.min(),
+            range.max()
+        ));
+    }
+    if let (Some(range), Some(value)) = (state.capabilities.temperature, state.temperature_kelvin) {
+        lines.push(format!(
+            "temperature: {value} K ({}–{} K step {})",
+            range.min(),
+            range.max(),
+            range.step()
+        ));
+    }
+    lines
+}
+
 async fn set_power(query: Option<&str>, enabled: bool) -> Result<()> {
     let devices = standalone().await?;
     let device = select(&devices, query)?;
@@ -149,8 +203,8 @@ async fn set_temperature(args: TemperatureArgs) -> Result<()> {
     apply(device, LightCommand::TemperatureKelvin(args.kelvin)).await
 }
 
-async fn apply(device: &StandaloneDevice, command: LightCommand) -> Result<()> {
-    let model = find_litra(
+fn litra_model(device: &StandaloneDevice) -> Result<LitraModel> {
+    find_litra(
         device.address.vendor_id,
         device.address.product_id,
         device.address.usage_page,
@@ -162,11 +216,15 @@ async fn apply(device: &StandaloneDevice, command: LightCommand) -> Result<()> {
             "unsupported light product {:04x}",
             device.address.product_id
         )
-    })?;
-    let route = device.route();
-    openlogi_hid::apply_litra(&route, model, command)
+    })
+}
+
+async fn apply(device: &StandaloneDevice, command: LightCommand) -> Result<()> {
+    let state = openlogi_hid::apply_litra(&device.route(), litra_model(device)?, command)
         .await
-        .context("failed to write the light command")
+        .context("failed to write the light command")?;
+    print_state(device, state.as_ref());
+    Ok(())
 }
 
 fn select<'a>(
@@ -204,8 +262,11 @@ fn select<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::select;
-    use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
+    use super::{describe_state, select};
+    use openlogi_core::device::{
+        DeviceKind, LightCapabilities, LightState, LightValueRange, LightValueUnit,
+        RawDeviceAddress, StandaloneDevice,
+    };
 
     fn device(name: &str) -> StandaloneDevice {
         StandaloneDevice {
@@ -246,6 +307,47 @@ mod tests {
                 .expect("single device")
                 .display_name,
             "Litra Glow"
+        );
+    }
+
+    #[test]
+    fn a_read_back_state_describes_each_control_and_the_limit() {
+        let brightness =
+            LightValueRange::new(20, 250, 1, LightValueUnit::Lumens).expect("valid range");
+        let temperature =
+            LightValueRange::new(2700, 6500, 100, LightValueUnit::Kelvin).expect("valid range");
+        let mut state = LightState {
+            capabilities: LightCapabilities {
+                power: true,
+                brightness: Some(brightness),
+                temperature: Some(temperature),
+                color: false,
+                zones: false,
+            },
+            on: true,
+            brightness: Some(136),
+            temperature_kelvin: Some(4600),
+            brightness_limit: None,
+        };
+        assert_eq!(
+            describe_state(&state),
+            [
+                "power: on",
+                "brightness: 136 lm (20–250 lm)",
+                "temperature: 4600 K (2700–6500 K step 100)",
+            ]
+        );
+
+        state.on = false;
+        state.brightness_limit = Some(150);
+        state.capabilities.temperature = None;
+        state.temperature_kelvin = None;
+        assert_eq!(
+            describe_state(&state),
+            [
+                "power: off",
+                "brightness: 136 lm (20–250 lm), limited to 150 lm right now",
+            ]
         );
     }
 }

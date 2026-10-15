@@ -10,7 +10,9 @@ use crate::hid::DeviceRoute;
 
 mod light;
 
-pub use light::{LightCapabilities, LightValueRange, LightValueRangeError, LightValueUnit};
+pub use light::{
+    LightCapabilities, LightState, LightValueRange, LightValueRangeError, LightValueUnit,
+};
 
 /// What a paired peripheral is. Mirrors `hidpp::receiver::bolt::BoltDeviceKind`
 /// but is owned by us so consumers don't depend on `hidpp`.

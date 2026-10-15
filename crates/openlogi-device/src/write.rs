@@ -60,7 +60,7 @@ pub(crate) use litra::litra_capabilities;
 pub use litra::{
     LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
-    litra_model_for_route, matches_litra,
+    litra_model_for_route, matches_litra, read_state as read_litra_state,
 };
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
