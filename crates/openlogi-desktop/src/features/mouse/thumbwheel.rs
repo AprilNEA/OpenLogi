@@ -128,6 +128,8 @@ impl ThumbwheelPreset {
 
 #[cfg(test)]
 mod tests {
+    use openlogi_core::binding::{ButtonId, default_binding};
+
     use super::*;
 
     #[test]
@@ -148,9 +150,33 @@ mod tests {
             (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
         ];
 
+        assert_eq!(expected.len(), ThumbwheelPreset::ALL.len());
         for (preset, (backward, forward)) in ThumbwheelPreset::ALL.into_iter().zip(expected) {
             assert_eq!(preset.pair(), ThumbwheelPair { backward, forward });
         }
+    }
+
+    #[test]
+    fn horizontal_scroll_presets_follow_native_defaults() {
+        let native = ThumbwheelPreset::HorizontalScroll.pair();
+        assert_eq!(
+            native.backward,
+            default_binding(ButtonId::ThumbwheelScrollDown),
+            "backward must stay the native down default so the plain preset does not divert"
+        );
+        assert_eq!(
+            native.forward,
+            default_binding(ButtonId::ThumbwheelScrollUp),
+            "forward must stay the native up default so the plain preset does not divert"
+        );
+
+        let reversed = ThumbwheelPreset::HorizontalScrollReversed.pair();
+        assert_eq!(reversed.backward, native.forward);
+        assert_eq!(reversed.forward, native.backward);
+        assert_eq!(
+            ThumbwheelPreset::recognize(&reversed.backward, &reversed.forward),
+            Some(ThumbwheelPreset::HorizontalScrollReversed)
+        );
     }
 
     #[test]
