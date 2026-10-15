@@ -320,16 +320,24 @@ fn wheel_scroll_to_invert(event: &HookEvent) -> bool {
 /// would have to choose a unit, and a hi-res wheel reports pixels in one field
 /// while a detented one reports lines in another — writing back the same
 /// fields sidesteps the choice entirely.
+///
+/// Order matters: writing the line field makes CoreGraphics recompute the
+/// fixed-point and point fields from it, so writing it last clobbered the
+/// negated point delta and shrank an inverted scroll by a fifth (a three-line
+/// notch's 30 px came out as 24). Every field is read before any is written,
+/// the line field goes first, and the finer two follow it — even a zero one,
+/// which the line write may have filled in.
 fn invert_scroll_event(event: &CGEvent) {
-    for field in [VERTICAL.point, VERTICAL.fixed] {
-        let value = event.get_double_value_field(field);
-        if value != 0.0 {
-            event.set_double_value_field(field, -value);
-        }
-    }
     let lines = event.get_integer_value_field(VERTICAL.line);
+    let finer =
+        [VERTICAL.fixed, VERTICAL.point].map(|field| (field, event.get_double_value_field(field)));
     if lines != 0 {
         event.set_integer_value_field(VERTICAL.line, -lines);
+    }
+    for (field, value) in finer {
+        if lines != 0 || value != 0.0 {
+            event.set_double_value_field(field, -value);
+        }
     }
 }
 
@@ -957,6 +965,29 @@ mod tests {
             let (seen, _, event) = dispatch_notch(false, disposition);
             assert_eq!(seen, Some(delta));
             assert_eq!(vertical_fields(&event), untouched);
+        }
+    }
+
+    /// Every vertical field comes out negated with its magnitude intact: a
+    /// line notch, and pixel scrolls with and without a whole line in them.
+    #[test]
+    fn invert_scroll_event_keeps_every_magnitude() {
+        for (unit, amount) in [
+            (ScrollEventUnit::LINE, 3),
+            (ScrollEventUnit::PIXEL, 40),
+            (ScrollEventUnit::PIXEL, 5),
+        ] {
+            let source = CGEventSource::new(CGEventSourceStateID::Private)
+                .expect("CGEventSourceCreate must succeed");
+            let event = CGEvent::new_scroll_event(source, unit, 1, amount, 0, 0)
+                .expect("CGEventCreateScrollWheelEvent must succeed");
+            let (line, point, fixed) = vertical_fields(&event);
+            invert_scroll_event(&event);
+            assert_eq!(
+                vertical_fields(&event),
+                (-line, -point, -fixed),
+                "unit {unit}, amount {amount}"
+            );
         }
     }
 }
