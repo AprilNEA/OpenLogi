@@ -1056,6 +1056,29 @@ fn reversal_cooldown_scales_by_time_since_the_departed_direction() {
 }
 
 #[test]
+fn jitter_during_a_committed_reversal_keeps_its_recovery() {
+    const EPSILON: f64 = 1.0e-9;
+    let base = Instant::now();
+    let at = |millis| base + Duration::from_millis(millis);
+    let mut steady = ReversalCooldown::default();
+    let mut jittered = ReversalCooldown::default();
+    for cooldown in [&mut steady, &mut jittered] {
+        cooldown.attenuate(8.0, at(0));
+        cooldown.attenuate(-8.0, at(40));
+    }
+    // A sub-commit tick back the old way is itself cooled, but the corrective
+    // direction resuming must still ramp from the original flip.
+    jittered.attenuate(0.2, at(60));
+    let expected = steady.attenuate(-8.0, at(80));
+    assert!((expected + 8.0 * 0.2).abs() < EPSILON, "{expected}");
+    let resumed = jittered.attenuate(-8.0, at(80));
+    assert!(
+        (resumed - expected).abs() < EPSILON,
+        "{resumed} vs {expected}"
+    );
+}
+
+#[test]
 fn reversal_compression_tames_the_corrective_burst_and_fades() {
     const EPSILON: f64 = 1.0e-9;
     let base = Instant::now();
