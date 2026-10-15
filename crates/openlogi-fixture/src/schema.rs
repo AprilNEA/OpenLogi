@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, FnLockState,
-    ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, EasySwitchHosts,
+    FnLockState, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -193,6 +193,10 @@ pub struct ProfileDeviceSettings {
     /// before it existed keep loading.
     #[serde(default = "ProfileSetting::unsupported")]
     pub report_rate: ProfileSetting<ReportRateInfo>,
+    /// Easy-Switch host-slot read state. Defaults to unsupported so profiles
+    /// recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub easy_switch: ProfileSetting<EasySwitchHosts>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -473,6 +477,9 @@ fn validate_setting_values(settings: &ProfileDeviceSettings) -> Result<(), Fixtu
     if let Some(report_rate) = settings.report_rate.value() {
         validate_report_rate(&settings.route, report_rate)?;
     }
+    if let Some(hosts) = settings.easy_switch.value() {
+        validate_easy_switch(&settings.route, hosts)?;
+    }
     if settings.backlight.supports_feature() && settings.lighting.is_supported() {
         return Err(FixtureError::invalid(
             "device profile",
@@ -552,6 +559,51 @@ fn validate_report_rate(route: &DeviceRoute, info: &ReportRateInfo) -> Result<()
     Ok(())
 }
 
+fn validate_easy_switch(route: &DeviceRoute, hosts: &EasySwitchHosts) -> Result<(), FixtureError> {
+    let invalid = |reason: String| {
+        Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} Easy-Switch {reason}"),
+        ))
+    };
+    if hosts.slots.is_empty() {
+        return invalid("has no host slots".to_owned());
+    }
+    if !hosts
+        .slots
+        .iter()
+        .zip(0u8..)
+        .all(|(slot, index)| slot.index == index)
+    {
+        return invalid("slots must be numbered 0, 1, 2, … in order".to_owned());
+    }
+    if hosts
+        .current
+        .is_some_and(|current| hosts.slot(current).is_none())
+    {
+        return invalid("current slot is not one of its slots".to_owned());
+    }
+    for slot in &hosts.slots {
+        if !slot.paired && (slot.name.is_some() || slot.os.is_some()) {
+            return invalid(format!(
+                "slot {} has a name or OS but no computer",
+                slot.index
+            ));
+        }
+        if let Some(name) = &slot.name
+            && (name.is_empty()
+                || name.contains('\0')
+                || name.len() > usize::from(slot.name_max_len))
+        {
+            return invalid(format!(
+                "slot {} name does not fit its {} bytes",
+                slot.index, slot.name_max_len
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_backlight(route: &DeviceRoute, backlight: BacklightState) -> Result<(), FixtureError> {
     if backlight.nb_levels == 0 {
         return Err(FixtureError::invalid(
@@ -588,6 +640,7 @@ fn validate_setting_support(
             || settings.wheel.supports_feature()
             || settings.backlight.supports_feature()
             || settings.report_rate.supports_feature()
+            || settings.easy_switch.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -649,6 +702,12 @@ fn validate_setting_support(
                 "backlight",
                 settings.backlight.supports_feature(),
                 capabilities.backlight,
+            )?;
+            validate_capability_support(
+                settings,
+                "Easy-Switch",
+                settings.easy_switch.supports_feature(),
+                capabilities.easy_switch,
             )?;
         }
     }

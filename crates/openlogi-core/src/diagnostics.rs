@@ -604,6 +604,7 @@ mod tests {
                         os_layout: false,
                         report_rate: false,
                         backlight: false,
+                        easy_switch: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),

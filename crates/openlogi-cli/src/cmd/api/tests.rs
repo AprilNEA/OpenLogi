@@ -14,6 +14,7 @@ use openlogi_ipc::{AgentRequest, AgentResponse, AgentStatus, ForegroundApps, Inv
 
 use super::*;
 
+mod easy_switch;
 mod persistence;
 mod report_rate;
 

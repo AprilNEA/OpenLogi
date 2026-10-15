@@ -18,9 +18,9 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, HapticWaveform,
-    HidppOperation, LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    HapticWaveform, HidppOperation, LightCommand, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -297,6 +297,31 @@ impl Agent for AgentServer {
         change: BacklightChange,
     ) -> Result<BacklightState, WriteError> {
         self.shared.set_backlight(&route, change).await
+    }
+
+    async fn read_easy_switch_hosts(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadHosts, |c| async move {
+                openlogi_hid::get_easy_switch_hosts_on(&c).await
+            })
+            .await
+    }
+
+    async fn rename_easy_switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        self.shared
+            .rename_easy_switch_host(&route, slot, name)
+            .await
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {

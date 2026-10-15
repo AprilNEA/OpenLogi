@@ -42,10 +42,11 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
-    DeviceRoute, Dpi, DpiCapabilities, DpiInfo, FnLockState, HidppFeatureErrorKind, HidppOperation,
-    LightCommand, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    DeviceRoute, Dpi, DpiCapabilities, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
+    HidppFeatureErrorKind, HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand,
+    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget,
+    ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+    SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -291,6 +292,26 @@ fn semantic_read_requests() {
         },
         "2100084630304443414645010205",
     );
+    assert_wire(
+        &AgentRequest::ReadEasySwitchHosts {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "220008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::RenameEasySwitchHost {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            slot: 1,
+            name: "Desk".into(),
+        },
+        "23000846303044434146450101044465736b",
+    );
 }
 
 /// A chord crosses the wire as its modifier bits and the key's HID usage.
@@ -529,13 +550,14 @@ fn device_inventory() {
                 os_layout: true,
                 report_rate: true,
                 backlight: true,
+                easy_switch: true,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010107",
     );
 }
 
@@ -771,6 +793,52 @@ fn standalone_light_dtos_commands_and_errors() {
         "1001",
     );
     assert_wire(&WriteError::HapticsUnavailable { status: 2 }, "1502");
+}
+
+#[test]
+fn easy_switch_hosts_and_errors() {
+    assert_wire(
+        &EasySwitchHosts {
+            current: Some(1),
+            slots: vec![
+                EasySwitchSlot {
+                    index: 0,
+                    paired: true,
+                    connection: HostConnection::Bluetooth,
+                    name: Some("Desk".into()),
+                    name_max_len: 24,
+                    os: Some(HostOsInfo {
+                        kind: HostOsKind::MacOs,
+                        major: 15,
+                        minor: 2,
+                        patch: 3,
+                    }),
+                },
+                EasySwitchSlot {
+                    index: 1,
+                    paired: false,
+                    connection: HostConnection::Unknown,
+                    name: None,
+                    name_max_len: 24,
+                    os: None,
+                },
+            ],
+            can_rename: true,
+        },
+        "01010200010301044465736b1801050f020301000000180001",
+    );
+    assert_wire(&HidppOperation::ReadHosts, "15");
+    assert_wire(&HidppOperation::RenameHost, "16");
+    assert_wire(&WriteError::HostRenameUnsupported, "16");
+    assert_wire(&WriteError::HostSlotEmpty { slot: 2 }, "1702");
+    assert_wire(&WriteError::HostNameRejected { max_len: 24 }, "1818");
+    assert_wire(
+        &WriteError::HostNameNotApplied {
+            requested: "Desk".into(),
+            actual: Some("Old".into()),
+        },
+        "19044465736b01034f6c64",
+    );
 }
 
 #[test]

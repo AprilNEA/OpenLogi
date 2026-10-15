@@ -54,9 +54,9 @@ use openlogi_core::device::{
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
-    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand,
-    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
-    WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    LightCommand, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -922,6 +922,33 @@ impl Agent for MockAgent {
         *stored = stored.changed(change);
         info!(%route, %change, "set_backlight");
         Ok(*stored)
+    }
+
+    async fn read_easy_switch_hosts(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.easy_switch, &route, 0x1815).cloned()
+    }
+
+    async fn rename_easy_switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.easy_switch, &route, 0x1815)?;
+        let name = stored.name_for(slot, &name)?.to_owned();
+        if let Some(host) = stored.slots.iter_mut().find(|host| host.index == slot) {
+            host.name = Some(name);
+        }
+        info!(%route, slot, "rename_easy_switch_host");
+        Ok(stored.clone())
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

@@ -57,6 +57,7 @@ fn configured_report_rate_needs_the_feature_and_a_saved_rate() {
     device.capabilities = Some(Capabilities {
         report_rate: true,
         backlight: false,
+        easy_switch: false,
         ..Capabilities::default()
     });
     // Nothing saved: the device keeps its own rate.

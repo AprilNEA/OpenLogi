@@ -45,7 +45,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v9 adds the extended report-rate `0x8061` event index and the
 /// `Capabilities::report_rate` flag.
 /// v10 adds the `0x1982` backlight event index.
-const SCHEMA_VERSION: u32 = 10;
+/// v11 adds the `Capabilities::easy_switch` flag (`0x1815` host slots).
+const SCHEMA_VERSION: u32 = 11;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.

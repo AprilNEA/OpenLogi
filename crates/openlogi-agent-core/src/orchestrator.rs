@@ -24,8 +24,8 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, FnLockState, HidppOperation, HostOs, ReportRate, ReportRateInfo,
-    WriteError, is_reserved_keyboard_control,
+    DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, ReportRate,
+    ReportRateInfo, WriteError, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -142,6 +142,8 @@ pub struct SharedHandles {
     report_rate_order: WriteOrder,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
+    /// Orders host renames per device.
+    host_name_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -263,6 +265,25 @@ impl SharedHandles {
                 ticket,
                 move |c| async move { openlogi_hid::update_backlight_on(&c, change).await },
             )
+            .await
+    }
+
+    /// Name the computer on Easy-Switch `slot` of the device at `route` and
+    /// return the slots it reads back. Renames run one at a time in request
+    /// order, so the name asked for last is the one the device keeps.
+    /// Waiting for the earlier renames does not count against the write's
+    /// deadline.
+    pub async fn rename_easy_switch_host(
+        &self,
+        route: &DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        let ticket = self.host_name_order.request(route);
+        self.device(route)
+            .run_in_order(HidppOperation::RenameHost, ticket, move |c| async move {
+                openlogi_hid::rename_easy_switch_host_on(&c, slot, &name).await
+            })
             .await
     }
 
@@ -413,6 +434,7 @@ impl Orchestrator {
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
+            host_name_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {

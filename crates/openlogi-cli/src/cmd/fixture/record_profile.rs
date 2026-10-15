@@ -313,6 +313,21 @@ async fn capture_hidpp_settings(
             .await?
         }
     };
+    let mut easy_switch = match capability_setting(device.online, capabilities.easy_switch) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "Easy-Switch",
+                agent::call(
+                    client.read_easy_switch_hosts(context::current(), source_route.clone()),
+                ),
+            )
+            .await?
+        }
+    };
+    if let Some(hosts) = easy_switch.value_mut() {
+        sanitize::easy_switch_hosts(hosts);
+    }
 
     Ok(ProfileDeviceSettings {
         route: profile_route,
@@ -322,6 +337,7 @@ async fn capture_hidpp_settings(
         backlight,
         fn_lock,
         report_rate,
+        easy_switch,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
@@ -381,6 +397,7 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         backlight: ProfileSetting::Unsupported,
         fn_lock: ProfileSetting::Unsupported,
         report_rate: ProfileSetting::Unsupported,
+        easy_switch: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };

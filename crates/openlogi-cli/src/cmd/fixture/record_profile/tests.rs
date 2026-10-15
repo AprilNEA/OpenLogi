@@ -9,8 +9,8 @@ use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Dpi,
-    DpiInfo, FnLockState, LightCommand, PasskeyMethod, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, HostConnection, LightCommand,
+    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -42,6 +42,7 @@ enum ReadFamily {
     Backlight,
     FnLock,
     ReportRate,
+    EasySwitch,
 }
 
 #[derive(Clone)]
@@ -348,6 +349,29 @@ impl Agent for TestAgent {
             0x40a3,
         )
     }
+
+    async fn read_easy_switch_hosts(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        self.read(
+            ReadFamily::EasySwitch,
+            &route,
+            |settings| &settings.easy_switch,
+            0x1815,
+        )
+    }
+
+    async fn rename_easy_switch_host(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _slot: u8,
+        _name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        unreachable!("profile capture must never rename a host")
+    }
 }
 
 /// The client end of an in-process agent, past the handshake `connect_as`
@@ -365,6 +389,12 @@ fn test_client(agent: TestAgent) -> AgentClient {
 }
 
 fn fixture_agent() -> TestAgent {
+    fixture_agent_with(|_| {})
+}
+
+/// [`fixture_agent`], with `edit` applied to the profile before the agent's
+/// snapshot is taken from it.
+fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
     let mut profile: DeviceProfile =
         serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile parses");
     profile.inventories[0]
@@ -400,6 +430,7 @@ fn fixture_agent() -> TestAgent {
     });
     profile.standalone[0].address.identity = RAW_STANDALONE_ID.to_string();
     profile.standalone[0].serial_number = Some("RAW-LIGHT-SERIAL".to_string());
+    edit(&mut profile);
 
     let snapshot = AgentSnapshot {
         status: AgentStatus {
@@ -828,4 +859,78 @@ fn profile_metadata_must_be_nonempty_before_agent_access() {
         })
         .expect_err("blank synthetic metadata must fail");
     }
+}
+
+#[tokio::test]
+async fn capture_replaces_every_easy_switch_computer_name() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = directory.path().join("profile.json");
+    let host = |index, name: Option<&str>, name_max_len| EasySwitchSlot {
+        index,
+        paired: name.is_some(),
+        connection: HostConnection::Bluetooth,
+        name: name.map(str::to_owned),
+        name_max_len,
+        os: None,
+    };
+    let agent = fixture_agent_with(|profile| {
+        let mouse = profile.inventories[0]
+            .paired
+            .iter_mut()
+            .find(|device| device.slot == 1)
+            .expect("mouse");
+        mouse
+            .capabilities
+            .as_mut()
+            .expect("mouse capabilities")
+            .easy_switch = true;
+        let settings = profile
+            .settings
+            .iter_mut()
+            .find(|settings| matches!(settings.route, DeviceRoute::Bolt { slot: 1, .. }))
+            .expect("mouse settings");
+        settings.easy_switch = ProfileSetting::Supported(EasySwitchHosts {
+            current: Some(0),
+            slots: vec![
+                host(0, Some("Alice's MacBook Pro"), 24),
+                // Too short for "Computer 2": the synthetic name is cut.
+                host(1, Some("Bob-PC"), 8),
+                host(2, None, 24),
+            ],
+            can_rename: true,
+        });
+    });
+    let inspection = agent.clone();
+    capture_connected(
+        args(output.clone(), Some("synthetic performance mouse")),
+        test_client(agent),
+    )
+    .await
+    .expect("semantic capture succeeds");
+
+    assert!(
+        inspection
+            .calls
+            .lock()
+            .expect("calls lock")
+            .iter()
+            .any(|(family, _)| *family == ReadFamily::EasySwitch)
+    );
+    let encoded = std::fs::read_to_string(&output).expect("profile output");
+    for secret in ["Alice", "Bob"] {
+        assert!(!encoded.contains(secret), "output leaked {secret}");
+    }
+    let profile: DeviceProfile = serde_json::from_str(&encoded).expect("typed profile");
+    profile.validate().expect("published profile validates");
+    let hosts = profile
+        .settings
+        .iter()
+        .find_map(|settings| settings.easy_switch.value())
+        .expect("captured hosts");
+    let names: Vec<_> = hosts
+        .slots
+        .iter()
+        .map(|slot| slot.name.as_deref())
+        .collect();
+    assert_eq!(names, [Some("Computer 1"), Some("Computer"), None]);
 }

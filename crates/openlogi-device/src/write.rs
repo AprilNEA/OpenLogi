@@ -18,6 +18,7 @@ use crate::channel::route::{DeviceRoute, open_route_channel};
 mod backlight;
 mod diagnostics;
 mod dpi;
+mod easy_switch;
 mod error;
 mod fn_lock;
 mod haptic;
@@ -36,6 +37,10 @@ pub use diagnostics::{
 };
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
+};
+pub use easy_switch::{
+    get_easy_switch_hosts, get_easy_switch_hosts_on, rename_easy_switch_host,
+    rename_easy_switch_host_on,
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
@@ -56,6 +61,9 @@ pub use litra::{
     LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
     litra_model_for_route, matches_litra,
+};
+pub use openlogi_core::hid::{
+    EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
 };
 pub use openlogi_core::hid::{ReportRate, ReportRateInfo};
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};

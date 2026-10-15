@@ -141,6 +141,35 @@ fn rejects_a_backlight_the_inventory_capabilities_do_not_advertise() {
 }
 
 #[test]
+fn rejects_easy_switch_hosts_the_inventory_capabilities_do_not_advertise() {
+    let (_temp, fixture) = copied_canonical_fixture();
+    let mut profile: serde_json::Value =
+        serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile JSON");
+    // Slot 1's measured capabilities have no `0x1815`.
+    profile["settings"][0]["easy_switch"] = serde_json::json!({
+        "support": "supported",
+        "value": {
+            "current": 0,
+            "slots": [{
+                "index": 0, "paired": true, "connection": "Bluetooth",
+                "name": "Computer 1", "name_max_len": 24, "os": null
+            }],
+            "can_rename": true
+        }
+    });
+    std::fs::write(
+        fixture.join(PROFILE_FILE),
+        serde_json::to_vec_pretty(&profile).expect("serialize profile"),
+    )
+    .expect("write contradicting hosts");
+    let error = Fixture::load(&fixture).expect_err("contradicting hosts must fail");
+    assert!(
+        format!("{error:#}").contains("Easy-Switch support does not match inventory capabilities"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn rejects_unknown_fields_as_schema_failures() {
     let (_temp, fixture) = copied_canonical_fixture();
     let mut profile: serde_json::Value =

@@ -153,6 +153,11 @@ pub struct Capabilities {
     /// Backlight`. Appended: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub backlight: bool,
+    /// The device has Easy-Switch host slots whose computers' names and OS
+    /// software can read — HID++ `0x1815 HostsInfo`. Appended: crosses the
+    /// IPC and the persisted identity.
+    #[serde(default)]
+    pub easy_switch: bool,
 }
 
 impl Capabilities {
@@ -183,6 +188,7 @@ impl Capabilities {
             os_layout: ids.contains(&0x4531),
             report_rate: ids.contains(&0x8060) || ids.contains(&0x8061),
             backlight: ids.contains(&0x1982),
+            easy_switch: ids.contains(&0x1815),
         }
     }
 
@@ -572,6 +578,7 @@ mod tests {
                     os_layout: false,
                     report_rate: false,
                     backlight: false,
+                    easy_switch: false,
                 }),
                 settings_revision: 0,
             }],
@@ -688,6 +695,7 @@ mod tests {
                 os_layout: false,
                 report_rate: false,
                 backlight: false,
+                easy_switch: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -709,6 +717,7 @@ mod tests {
                 os_layout: false,
                 report_rate: false,
                 backlight: false,
+                easy_switch: false,
             }
         );
         // No driving features → nothing offered.
@@ -726,6 +735,10 @@ mod tests {
         // Only the 0x1982 backlight is driven; the older 0x1981 is not.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x1982]).backlight);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1981]).backlight);
+        // 0x1815 HostsInfo offers the Easy-Switch hosts; 0x1814 ChangeHost
+        // alone switches channels but cannot name them.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1815]).easy_switch);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1814]).easy_switch);
     }
 
     #[test]
