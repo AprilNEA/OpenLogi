@@ -629,3 +629,53 @@ fn level_only_readings_never_invent_percentage_and_preserve_last_reported_value(
     assert_eq!(publisher.backend.live[key].status, BatteryStatus::Error);
     assert_eq!(publisher.backend.writes, 4);
 }
+
+#[tokio::test]
+async fn saved_widget_setting_is_reconciled_before_any_inventory_or_config_event() {
+    use std::sync::Arc;
+    use std::task::Poll;
+
+    let observable = Arc::new(ObservableState::new("test".into()));
+    let orchestrator = Orchestrator::new(enabled_config(), observable);
+    let mut sources = PowerSources::new();
+    sources.watch_config(orchestrator.subscribe_config_changes());
+
+    // This is Armed::run's subscription and first select-loop poll. There has
+    // been no inventory snapshot or configuration reload to wake the publisher.
+    assert!(
+        matches!(
+            futures::poll!(std::pin::pin!(sources.wake())),
+            Poll::Ready(())
+        ),
+        "the loaded setting must get an initial reconciliation without an inventory event"
+    );
+}
+
+#[tokio::test]
+async fn disabled_startup_consumes_initial_wake_then_stays_idle() {
+    use std::sync::Arc;
+    use std::task::Poll;
+
+    let observable = Arc::new(ObservableState::new("test".into()));
+    let orchestrator = Mutex::new(Orchestrator::new(
+        Config::default(),
+        Arc::clone(&observable),
+    ));
+    let mut sources = PowerSources::new();
+    sources.watch_config(orchestrator.lock().await.subscribe_config_changes());
+    assert!(matches!(
+        futures::poll!(std::pin::pin!(sources.wake())),
+        Poll::Ready(())
+    ));
+    // default_config_never_loads_spi checks backend preparation with FakeBackend.
+    // This test checks that startup consumes its wake without enabling retries.
+    sources.reconcile(&orchestrator, &observable).await;
+    assert_eq!(
+        observable.snapshot().status.battery_widget,
+        BatteryWidgetStatus::Disabled
+    );
+    assert!(matches!(
+        futures::poll!(std::pin::pin!(sources.wake())),
+        Poll::Pending
+    ));
+}
