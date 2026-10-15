@@ -39,6 +39,9 @@ pub(crate) const RING_APP_ID: &str = "openlogi-action-ring";
 const CANCEL_SIZE: f32 = CANCEL_DIAMETER;
 const SLOT_GLYPH: f32 = 20.0;
 const CANCEL_GLYPH_SIZE: f32 = 16.0;
+/// Widest the hover label's pill may grow. Nothing sits beside it under the
+/// ring, so it may run wider than the ring's slots; longer text is ellipsized.
+const LABEL_WIDTH: f32 = 240.0;
 
 /// How long the slots take to fly out from the cursor to their places on the
 /// ring. Short enough to read as the ring *appearing* rather than a transition
@@ -393,17 +396,20 @@ impl RingView {
                 // With the desktop showing through the ring, the label brings
                 // its own dark pill so it stays legible over anything. It sits
                 // under the ring: the centre is too tight for text now, and
-                // below the bottom slot it never covers a target.
+                // below the bottom slot it never covers a target. Only one
+                // line fits between the bottom slot and the window's edge, so
+                // a long label is ellipsized rather than wrapped and clipped.
                 ring.child(
                     div()
                         .absolute()
-                        .left(px(WINDOW_SIZE / 2.0 - 80.0))
+                        .left(px((WINDOW_SIZE - LABEL_WIDTH) / 2.0))
                         .top(px(WINDOW_SIZE / 2.0 + RADIUS + SLOT_SIZE / 2.0 + 6.0))
-                        .w(px(160.0))
+                        .w(px(LABEL_WIDTH))
                         .flex()
                         .justify_center()
                         .child(
                             div()
+                                .max_w_full()
                                 .px_3()
                                 .py_1()
                                 .rounded_full()
@@ -412,6 +418,7 @@ impl RingView {
                                 .text_center()
                                 .text_sm()
                                 .text_color(LABEL)
+                                .truncate()
                                 .child(label),
                         ),
                 )
