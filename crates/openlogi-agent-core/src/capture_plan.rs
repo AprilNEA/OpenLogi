@@ -67,7 +67,9 @@ pub struct DispatchPlan {
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
     /// Whether this device's wheel scrolls inverted, so a wheel-hold button's
     /// horizontal scroll follows it as Logi Options+ does. Read from the
-    /// device-level setting, as the hook's software inversion is.
+    /// inversion source the main wheel uses on the device's current link,
+    /// which [`plan_for_device`] cannot see: the orchestrator fills it in,
+    /// as it does [`Self::pointer_target`].
     pub invert_held_wheel: bool,
     /// Pointer identity used to select these mouse bindings; absent for the
     /// explicitly focused policy and keyboard input.
@@ -311,7 +313,7 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
-            invert_held_wheel: config.invert_scroll(config_key),
+            invert_held_wheel: false,
             pointer_target: None,
         },
     }
@@ -522,16 +524,6 @@ mod tests {
         let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
         assert!(plan.target.spec.divert_wheel_buttons.is_empty());
         assert!(diverts(&plan, ButtonId::MiddleClick));
-    }
-
-    #[test]
-    fn held_wheel_inversion_follows_the_device_scroll_inversion() {
-        let mut cfg = wheel_hold_config(true);
-        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
-        assert!(!plan.dispatch.invert_held_wheel);
-        cfg.set_invert_scroll("2b01a", true);
-        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
-        assert!(plan.dispatch.invert_held_wheel);
     }
 
     #[test]

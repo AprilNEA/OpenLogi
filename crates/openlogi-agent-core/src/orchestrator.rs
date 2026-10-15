@@ -54,9 +54,9 @@ use devices::reapply_targets;
 use devices::{
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
     any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply, settings_moved,
-    stable_id,
+    configured_wheel_mode, held_wheel_inverted, host_switch_links, is_hidpp_device,
+    keeps_os_layout, newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply,
+    settings_moved, stable_id,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -757,6 +757,7 @@ impl Orchestrator {
                 self.os_mouse_hook_available,
             );
             plan.dispatch.pointer_target = pointer_target;
+            plan.dispatch.invert_held_wheel = held_wheel_inverted(&self.config, dev);
             if let Some(keyboard) = keyboard
                 .as_ref()
                 .filter(|keyboard| keyboard.route == plan.target.route)

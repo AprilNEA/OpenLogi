@@ -39,6 +39,36 @@ fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
     })
 }
 
+/// The published plan carries the held-wheel inversion of the device's
+/// link, which `plan_for_device` alone cannot resolve.
+#[test]
+fn published_plans_carry_the_held_wheel_inversion_of_the_link() {
+    let mut config = Config::default();
+    config.set_invert_scroll("a", false);
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        scroll_inversion: true,
+        ..Capabilities::default()
+    });
+    let mut link = LinkConfig::default();
+    link.overrides.invert_scroll = Some(true);
+    config
+        .devices
+        .entry("a".to_owned())
+        .or_default()
+        .links
+        .insert(stable_id(&device).route_key(), link);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![device];
+    orch.rebuild();
+    let published = orch.shared.capture_plans.borrow();
+    let plan = published
+        .plans()
+        .first()
+        .expect("the online device is planned");
+    assert!(plan.dispatch.invert_held_wheel);
+}
+
 #[test]
 fn app_switch_republishes_capture_plans() {
     // HID++ dispatch reads `plan.dispatch.bindings` at event time, so a

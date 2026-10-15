@@ -55,6 +55,11 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
+/// v8 adds `{ click = ..., wheel = "HorizontalScroll" }` wheel-hold button
+/// bindings. Nothing older needs migrating; the bump makes a v7 build refuse
+/// a file that may hold one at the version check, instead of failing on the
+/// binding shape.
+///
 /// v7 aligns the thumb-wheel scroll defaults with its normalised physical
 /// direction. Pre-v7 explicit default pairs are migrated in device and
 /// per-application profiles so they remain native rather than becoming a
@@ -97,7 +102,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]

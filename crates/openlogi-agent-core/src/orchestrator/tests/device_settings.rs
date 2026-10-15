@@ -6,6 +6,45 @@ use openlogi_hid::reprog_controls::BACK_CIDS;
 
 use super::*;
 
+/// A wheel-hold button scrolls sideways the way its main wheel scrolls: with
+/// the native invert bit, as the link it is reached by is set; without it, as
+/// the hook reverses it from the device-level setting.
+#[test]
+fn held_wheel_inversion_follows_the_main_wheel_on_its_link() {
+    let mut config = Config::default();
+    config.set_invert_scroll("a", true);
+    let mut device = dev("a", 1, true);
+    assert!(
+        !held_wheel_inverted(&config, &device),
+        "unknown capabilities invert nothing"
+    );
+    device.capabilities = Some(Capabilities {
+        scroll_inversion: true,
+        ..Capabilities::default()
+    });
+    assert!(held_wheel_inverted(&config, &device));
+    let mut link = LinkConfig::default();
+    link.overrides.invert_scroll = Some(false);
+    config
+        .devices
+        .get_mut("a")
+        .expect("device entry")
+        .links
+        .insert(stable_id(&device).route_key(), link);
+    assert!(
+        !held_wheel_inverted(&config, &device),
+        "the link's override is what the firmware is written"
+    );
+    device.capabilities = Some(Capabilities {
+        scroll_inversion: false,
+        ..Capabilities::default()
+    });
+    assert!(
+        held_wheel_inverted(&config, &device),
+        "the hook reverses from the device-level setting"
+    );
+}
+
 #[test]
 fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
     let mut config = Config::default();

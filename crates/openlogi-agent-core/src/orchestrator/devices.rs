@@ -31,6 +31,23 @@ pub(super) fn configured_wheel_mode(config: &Config, dev: &AgentDevice) -> Optio
     WheelModeChange::new(resolution, inverted)
 }
 
+/// Whether a wheel-hold button's horizontal scroll on `dev` is reversed: the
+/// inversion its main wheel actually gets. A wheel with the native `0x2121`
+/// invert bit is written the value effective on the link `dev` is reached
+/// by ([`configured_wheel_mode`]); one without it is reversed by the hook
+/// from the device-level setting (`Orchestrator::publish_scroll_inversion`).
+/// Unknown capabilities write and reverse nothing, so nothing is inverted.
+pub(super) fn held_wheel_inverted(config: &Config, dev: &AgentDevice) -> bool {
+    match dev.capabilities {
+        Some(capabilities) if capabilities.scroll_inversion => config
+            .devices
+            .get(dev.config_key.as_str())
+            .is_some_and(|d| d.effective_invert_scroll(&stable_id(dev).route_key())),
+        Some(_) => config.invert_scroll(&dev.config_key),
+        None => false,
+    }
+}
+
 /// The saved report rate to push to `dev`: only to a device with a
 /// report-rate feature, so a rate saved for a mouse is never written to
 /// whatever later answers under the same key without one.
