@@ -45,8 +45,11 @@ impl PowerSources {
         }
     }
 
-    /// Reconcile after every adopted configuration change.
-    pub(crate) fn watch_config(&mut self, changes: watch::Receiver<()>) {
+    /// Reconcile the loaded configuration once, then every adopted change.
+    pub(crate) fn watch_config(&mut self, mut changes: watch::Receiver<()>) {
+        // A new subscriber has already seen the initial value. Schedule its
+        // reconciliation even when inventory never supplies a first snapshot.
+        changes.mark_changed();
         self.config_changes = Some(changes);
     }
 
