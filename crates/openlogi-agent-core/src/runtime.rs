@@ -571,6 +571,7 @@ pub(crate) fn test_dispatcher() -> (
                 registry: openlogi_hid::ChannelRegistry::default(),
                 receiver_access: crate::receiver_access::ReceiverAccess::default(),
                 device_io: openlogi_hid::device_io_channel().1,
+                transport_turns: crate::hardware::TransportTurns::default(),
             },
             action_ring,
         },
