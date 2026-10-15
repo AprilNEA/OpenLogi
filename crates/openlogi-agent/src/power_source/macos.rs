@@ -128,7 +128,7 @@ pub struct AccessoryPower {
     pub name: String,
     /// Category interpreted by macOS.
     pub category: AccessoryCategory,
-    /// Percentage reported or estimated by OpenLogi, bounded to 0..=100.
+    /// Percentage reported by OpenLogi, bounded to 0..=100.
     pub percentage: u8,
     /// Reported charging state, including fully charged external power.
     pub status: BatteryStatus,
@@ -467,7 +467,11 @@ fn online_accessories(
             let battery = paired
                 .battery
                 .as_ref()
-                .map(|battery| (battery.percentage.min(100), battery.status))
+                .and_then(|battery| {
+                    battery
+                        .percentage
+                        .map(|percentage| (percentage.min(100), battery.status))
+                })
                 .or_else(|| {
                     tracked
                         .get(&identifier)

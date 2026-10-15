@@ -75,12 +75,13 @@ fn inventory() -> DeviceInventory {
             kind: DeviceKind::Mouse,
             online: true,
             battery: Some(BatteryInfo {
-                percentage: 77,
+                percentage: Some(77),
                 level: BatteryLevel::Good,
                 status: BatteryStatus::Discharging,
             }),
             model_info: None,
             capabilities: None,
+            settings_revision: 0,
         }],
     }
 }
@@ -131,7 +132,7 @@ fn full_charge_transition_is_published_without_losing_external_power_state() {
     let config = enabled_config();
     let mut inv = inventory();
     let mut publisher = PowerSourcePublisher::new(FakeBackend::default());
-    inv.paired[0].battery.as_mut().unwrap().percentage = 100;
+    inv.paired[0].battery.as_mut().unwrap().percentage = Some(100);
     inv.paired[0].battery.as_mut().unwrap().status = BatteryStatus::Charging;
     publisher.reconcile(&config, std::slice::from_ref(&inv), now);
     inv.paired[0].battery.as_mut().unwrap().status = BatteryStatus::Full;
@@ -271,7 +272,7 @@ fn per_device_failure_preserves_successful_count_and_recovers_on_next_pass() {
     );
     assert_eq!(publisher.backend.writes, 3);
     publisher.backend.fail_write_slot = Some(1);
-    inv.paired[0].battery.as_mut().unwrap().percentage = 50;
+    inv.paired[0].battery.as_mut().unwrap().percentage = Some(50);
     publisher.reconcile(&config, &[inv], now);
     assert!(matches!(
         publisher.status(),
@@ -417,7 +418,7 @@ fn replacement_without_telemetry_does_not_inherit_previous_occupant_reading() {
             }
         );
         inv.paired[0].battery = Some(BatteryInfo {
-            percentage: 42,
+            percentage: Some(42),
             level: BatteryLevel::Good,
             status: BatteryStatus::Charging,
         });
@@ -473,7 +474,7 @@ fn replacement_publication_does_not_hide_same_pass_cleanup_failure() {
     publisher.reconcile(&config, std::slice::from_ref(&inv), now);
     publisher.backend.fail_remove = true;
     inv.paired[0].wpid = Some(0xb035);
-    inv.paired[0].battery.as_mut().unwrap().percentage = 42;
+    inv.paired[0].battery.as_mut().unwrap().percentage = Some(42);
     publisher.reconcile(&config, std::slice::from_ref(&inv), now);
     let failure = publisher.status();
     assert!(matches!(
@@ -587,4 +588,28 @@ fn serial_enrichment_without_telemetry_preserves_source_and_remembers_identity()
     publisher.reconcile(&config, &[inv], now);
     assert!(publisher.backend.live.is_empty());
     assert_eq!(publisher.backend.removals.get(), 1);
+}
+
+#[test]
+fn level_only_readings_never_invent_percentage_and_preserve_last_reported_value() {
+    let mut config = enabled_config();
+    let mut inv = inventory();
+    inv.paired[0].battery.as_mut().unwrap().percentage = None;
+    let mut publisher = PowerSourcePublisher::new(FakeBackend::default());
+    let now = Instant::now();
+    publisher.reconcile(&config, std::slice::from_ref(&inv), now);
+    assert!(publisher.backend.live.is_empty());
+    assert_eq!(publisher.backend.writes, 0);
+
+    inv.paired[0].battery.as_mut().unwrap().percentage = Some(0);
+    publisher.reconcile(&config, std::slice::from_ref(&inv), now);
+    let key = "receiver:test-receiver:slot:1";
+    assert_eq!(publisher.backend.live[key].percentage, 0);
+
+    inv.paired[0].battery.as_mut().unwrap().percentage = None;
+    config.set_device_custom_name(key, Some("Renamed Mouse".into()));
+    publisher.reconcile(&config, &[inv], now);
+    assert_eq!(publisher.backend.live[key].percentage, 0);
+    assert_eq!(publisher.backend.live[key].name, "Renamed Mouse");
+    assert_eq!(publisher.backend.writes, 2);
 }
