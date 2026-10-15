@@ -6,13 +6,14 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::Dpi;
+use crate::hid::{Dpi, ReportRate};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -61,7 +62,21 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
-    /// Remove per-unit identifiers before this model snapshot is persisted.
+    /// Drop the serial number and unit id from this model snapshot before it
+    /// is persisted, leaving the identity body with model-level fields only.
+    ///
+    /// This does **not** make the saved file free of per-unit identifiers.
+    /// Settings are keyed by what a device *is*, so [`canonical_device_key`]
+    /// makes the entry key itself a `serial:` or `unit:` fragment whenever the
+    /// device reported one, whatever transport it was reached by. Only a
+    /// device with no usable identity falls back to a route-derived key such
+    /// as `receiver:{uid}:slot:{n}`. The entry's `links` table, keyed by
+    /// [`route_key`], also persists receiver UIDs. `raw:` routes retain an
+    /// OS-node- or serial-derived identity; `unknown:` routes retain the
+    /// device's serial number or unit id.
+    ///
+    /// [`canonical_device_key`]: crate::config::canonical_device_key
+    /// [`route_key`]: crate::device_order::DeviceStableId::route_key
     #[must_use]
     pub fn without_unit_identifiers(mut self) -> Self {
         if let Some(model) = &mut self.model_info {
@@ -72,6 +87,58 @@ impl DeviceIdentity {
     }
 }
 
+/// One route a device has been seen on, plus what differs on it.
+///
+/// The key of the containing map is [`DeviceStableId::route_key`]. The set of
+/// keys doubles as the index that identifies a device while it is asleep and
+/// only its route is known, which is why it is persisted rather than
+/// recomputed.
+///
+/// [`DeviceStableId::route_key`]: crate::device_order::DeviceStableId::route_key
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LinkConfig {
+    /// Capabilities measured on this link. A device may genuinely expose
+    /// different features per transport — a G502 LIGHTSPEED publishes
+    /// `0x2121 HiResWheel` over its receiver and not over USB — so this is
+    /// recorded per link rather than per device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Capabilities>,
+    /// Settings the user deliberately made different on this link. Empty for
+    /// the overwhelmingly common case where a device behaves the same either
+    /// way.
+    #[serde(default, skip_serializing_if = "LinkOverrides::is_empty")]
+    pub overrides: LinkOverrides,
+}
+
+/// Per-link settings overrides. Each `Some` shadows the device-level value
+/// for as long as the device is reached by that route.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LinkOverrides {
+    /// Pointer resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dpi: Option<Dpi>,
+    /// Native wheel inversion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invert_scroll: Option<bool>,
+    /// Wheel resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_resolution: Option<ScrollResolution>,
+    /// Lighting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lighting: Option<Lighting>,
+    /// SmartShift.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smartshift: Option<SmartShift>,
+}
+
+impl LinkOverrides {
+    /// Whether nothing is overridden on this link.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Settings scoped to a single physical device.
 ///
 /// Deserialization goes through `RawDeviceConfig` (`#[serde(from)]`) so
@@ -79,7 +146,7 @@ impl DeviceIdentity {
 /// `gesture_bindings` — fold into the unified [`Self::bindings`] map. Only
 /// `bindings` is ever serialized, so a migrated file is rewritten to the v2
 /// shape on its next save.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "RawDeviceConfig")]
 pub struct DeviceConfig {
     /// Whether OpenLogi manages this device at all. `false` leaves the device
@@ -88,6 +155,12 @@ pub struct DeviceConfig {
     /// is only serialized when disabled.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    /// User-assigned name for this physical device. The persisted
+    /// [`DeviceIdentity::display_name`] remains the hardware model name so an
+    /// inventory refresh can never overwrite this alias or mistake it for
+    /// model metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
     /// Legacy owner-lock carrier, deserialize-only: the v3-and-older
     /// `gesture_owner` field, held here just long enough for the version-gated
     /// load migration (`Config::migrate_owner_locked_gestures`) to consume it.
@@ -110,8 +183,15 @@ pub struct DeviceConfig {
     /// `None` for configs written before this field existed or by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<DeviceIdentity>,
-    /// Every rebindable button's binding: a single [`Action`], or — for a
-    /// button in gesture mode — a [`Binding::Gesture`] per-direction map.
+    /// Routes this device has been seen on. Keys are
+    /// [`DeviceStableId::route_key`]; see [`LinkConfig`].
+    ///
+    /// [`DeviceStableId::route_key`]: crate::device_order::DeviceStableId::route_key
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub links: BTreeMap<String, LinkConfig>,
+    /// Every rebindable button's binding: a single [`Action`], an independent
+    /// short/long action pair, or — for a button in gesture mode — a
+    /// [`Binding::Gesture`] per-direction map.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bindings: BTreeMap<ButtonId, Binding>,
     /// Direction maps of buttons whose gesture mode is currently OFF, keyed by
@@ -122,11 +202,11 @@ pub struct DeviceConfig {
     /// button is a [`Binding::Single`] of its former `Click`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// Per-application binding overlays (P1.4). Keyed by bundle identifier
-    /// (e.g. `"com.microsoft.VSCode"` on macOS). When the foreground app's
-    /// id matches a key here, those bindings take precedence; anything not
-    /// listed falls through to `bindings`. Deliberately `Action`-valued (not
-    /// `Binding`): a per-app override replaces the whole button with one
+    /// Per-application binding overlays (P1.4). Keyed by the application
+    /// identifier defined by [`ForegroundApp::id`](crate::app::ForegroundApp::id).
+    /// When the foreground app's id matches a key here, these bindings take
+    /// precedence. Other buttons use `bindings`. Deliberately `Action`-valued
+    /// (not `Binding`): a per-app override replaces the whole button with one
     /// action, never a per-direction gesture overlay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
@@ -200,11 +280,98 @@ pub struct DeviceConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_switch_targets: Vec<String>,
     /// Keyboard Fn-lock state (HID++ fn inversion, `0x40a2`/`0x40a3`): `true`
-    /// means the F-row sends F1–F12 without holding Fn. The state lives in
-    /// device RAM per host, so the agent re-applies it on reconnect like
-    /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
+    /// means the F-row sends F1–F12 without holding Fn. Multi-host keyboards
+    /// store it per Easy-Switch slot and the user can flip it from the
+    /// keyboard (Fn+Esc), so the agent writes it on config reload and
+    /// re-applies it when the keyboard reconnects, like [`Self::dpi`]. `None`
+    /// means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Keep a multi-platform keyboard's key layout (HID++ `0x4531`) on the
+    /// host OS, the "keep keyboard in OS layout" setting of Logi Options+. The
+    /// agent writes the host's platform when the keyboard connects and again
+    /// whenever the keyboard reports a platform change (a platform key
+    /// combination). `None` means "never set", which is on, as in Options+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_os_layout: Option<bool>,
+    /// Report rate (HID++ `0x8060` / `0x8061`), in hertz. The agent re-applies
+    /// it when the device reconnects, like [`Self::dpi`], but only where the
+    /// device lists it for the connection it is on — a wired-only rate is
+    /// left alone while the mouse is wireless. `None` means "never set —
+    /// leave the device's rate alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_rate: Option<ReportRate>,
+}
+
+impl DeviceConfig {
+    /// Pointer resolution on `route_key`: the link's override when the user
+    /// set one there, else the device-level value.
+    #[must_use]
+    pub fn effective_dpi(&self, route_key: &str) -> Option<Dpi> {
+        self.link_overrides(route_key)
+            .and_then(|overrides| overrides.dpi)
+            .or(self.dpi)
+    }
+
+    /// Native wheel inversion on `route_key`: the link's override when the
+    /// user set one there, else the device-level value.
+    #[must_use]
+    pub fn effective_invert_scroll(&self, route_key: &str) -> bool {
+        self.link_overrides(route_key)
+            .and_then(|overrides| overrides.invert_scroll)
+            .unwrap_or(self.invert_scroll)
+    }
+
+    /// Wheel resolution on `route_key`: the link's override when the user set
+    /// one there, else the device-level value.
+    #[must_use]
+    pub fn effective_scroll_resolution(&self, route_key: &str) -> Option<ScrollResolution> {
+        self.link_overrides(route_key)
+            .and_then(|overrides| overrides.scroll_resolution)
+            .or(self.scroll_resolution)
+    }
+
+    /// Lighting on `route_key`: the link's override when the user set one
+    /// there, else the device-level value.
+    #[must_use]
+    pub fn effective_lighting(&self, route_key: &str) -> Option<&Lighting> {
+        self.link_overrides(route_key)
+            .and_then(|overrides| overrides.lighting.as_ref())
+            .or(self.lighting.as_ref())
+    }
+
+    /// SmartShift on `route_key`: the link's override when the user set one
+    /// there, else the device-level value.
+    #[must_use]
+    pub fn effective_smartshift(&self, route_key: &str) -> Option<SmartShift> {
+        self.link_overrides(route_key)
+            .and_then(|overrides| overrides.smartshift)
+            .or(self.smartshift)
+    }
+
+    fn link_overrides(&self, route_key: &str) -> Option<&LinkOverrides> {
+        self.links.get(route_key).map(|link| &link.overrides)
+    }
+
+    /// Whether this entry carries anything the *user* configured, as opposed
+    /// to nothing but the metadata OpenLogi writes on its own: the probed
+    /// [`Self::identity`] and the [`Self::links`] route index.
+    ///
+    /// This is what lets [`Config::resolve_device_key`] tell a bare entry
+    /// created by an identity probe from a pre-upgrade entry holding real
+    /// bindings and DPI. Comparing a stripped clone against [`Default`],
+    /// rather than testing fields one by one, keeps the answer honest as the
+    /// struct grows: a setting added tomorrow counts from the day it exists,
+    /// with nothing here to remember to update.
+    ///
+    /// [`Config::resolve_device_key`]: crate::config::Config::resolve_device_key
+    #[must_use]
+    pub fn holds_settings(&self) -> bool {
+        let mut stripped = self.clone();
+        stripped.identity = None;
+        stripped.links = BTreeMap::new();
+        stripped != Self::default()
+    }
 }
 
 impl Default for DeviceConfig {
@@ -213,8 +380,10 @@ impl Default for DeviceConfig {
             // A fresh entry (e.g. created by a first DPI write) must stay
             // managed — `enabled: false` is an explicit user choice only.
             enabled: true,
+            custom_name: None,
             gesture_owner: None,
             identity: None,
+            links: BTreeMap::new(),
             bindings: BTreeMap::new(),
             disabled_gestures: BTreeMap::new(),
             per_app_bindings: BTreeMap::new(),
@@ -232,6 +401,8 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            keep_os_layout: None,
+            report_rate: None,
         }
     }
 }
@@ -307,19 +478,22 @@ struct RawDeviceConfig {
     gesture_owner: Option<GestureOwner>,
     #[serde(default)]
     identity: Option<DeviceIdentity>,
-    /// v2 shape — present on already-migrated files; wins on any key collision.
+    /// See [`DeviceConfig::links`].
     #[serde(default)]
+    links: BTreeMap<String, LinkConfig>,
+    /// v2 shape — present on already-migrated files; wins on any key collision.
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     bindings: BTreeMap<ButtonId, Binding>,
     /// v4 stash of turned-off gesture maps (see [`DeviceConfig::disabled_gestures`]).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Legacy v1 per-button single bindings.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     button_bindings: BTreeMap<ButtonId, Action>,
     /// Legacy v1 flat gesture map (implicitly the gesture button's directions).
     #[serde(default)]
     gesture_bindings: BTreeMap<GestureDirection, Action>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_maps_by_app")]
     per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
     #[serde(default)]
     action_ring: ActionRingConfig,
@@ -349,8 +523,14 @@ struct RawDeviceConfig {
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
+    #[serde(default)]
+    keep_os_layout: Option<bool>,
+    #[serde(default)]
+    report_rate: Option<ReportRate>,
     #[serde(default = "default_true")]
     enabled: bool,
+    #[serde(default)]
+    custom_name: Option<String>,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -386,8 +566,10 @@ impl From<RawDeviceConfig> for DeviceConfig {
 
         DeviceConfig {
             enabled: raw.enabled,
+            custom_name: raw.custom_name,
             gesture_owner: raw.gesture_owner,
             identity: raw.identity.map(DeviceIdentity::without_unit_identifiers),
+            links: raw.links,
             bindings,
             disabled_gestures: raw.disabled_gestures,
             per_app_bindings: raw.per_app_bindings,
@@ -405,6 +587,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            keep_os_layout: raw.keep_os_layout,
+            report_rate: raw.report_rate,
         }
     }
 }

@@ -19,11 +19,10 @@ pub async fn run(_args: FeaturesArgs) -> Result<()> {
     for inv in &inventories {
         for paired in inv.paired.iter().filter(|p| p.online) {
             any = true;
-            let route =
-                DeviceRoute::device_route_for(inv, paired.slot).unwrap_or(DeviceRoute::Direct {
-                    vendor_id: inv.receiver.vendor_id,
-                    product_id: inv.receiver.product_id,
-                });
+            let route = DeviceRoute::for_slot(inv, paired.slot).unwrap_or(DeviceRoute::Direct {
+                vendor_id: inv.receiver.vendor_id,
+                product_id: inv.receiver.product_id,
+            });
             match paired.codename.as_deref() {
                 Some(name) => println!("device: {name} ({route})"),
                 None => println!("device: Slot {} ({route})", paired.slot),

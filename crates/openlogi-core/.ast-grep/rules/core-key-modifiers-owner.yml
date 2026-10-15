@@ -1,0 +1,19 @@
+# Owner: openlogi_core::config::KeyModifiers — the four modifier flags a key
+# trigger requires and a key event carries. One type, so no boundary converts.
+id: core-key-modifiers-owner
+language: rust
+severity: error
+message: The modifier state of a key event or trigger is openlogi_core::config::KeyModifiers (openlogi-hook re-exports it); do not define another.
+note: |
+  The hook crate once mirrored the four bools and the agent copied one struct
+  into the other field by field. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/**
+rule:
+  kind: struct_item
+  has:
+    field: name
+    regex: '^KeyModifiers$'

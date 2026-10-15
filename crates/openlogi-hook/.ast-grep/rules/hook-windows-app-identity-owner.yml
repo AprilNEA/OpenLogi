@@ -1,0 +1,11 @@
+# Owner: windows::hook::application_for_process — the normalized executable profile ID.
+id: hook-windows-app-identity-owner
+language: rust
+severity: error
+message: Use windows::hook::application_for_process so pointer and foreground profiles share executable-path normalization.
+files:
+  - crates/openlogi-hook/src/**/*.rs
+ignores:
+  - crates/openlogi-hook/src/windows/hook.rs
+rule:
+  pattern: QueryFullProcessImageNameW($$$ARGS)

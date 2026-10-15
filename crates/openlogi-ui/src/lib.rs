@@ -8,4 +8,3 @@
 
 pub mod action_icons;
 pub mod color;
-pub mod locale;

@@ -18,19 +18,28 @@ use crate::ring::RingView;
 
 pub(crate) struct ClickAwaySession(AtomicU64);
 
+/// Publication guard tied to the lifetime of one ring view.
+///
+/// Dropping an older view cannot clear a replacement's session: teardown uses
+/// a compare-and-exchange against the id this guard published.
+#[must_use = "the guard must live as long as its ring view"]
+pub(crate) struct ShowingRing {
+    live: Arc<ClickAwaySession>,
+    session_id: u64,
+}
+
 impl ClickAwaySession {
     pub(crate) const fn new() -> Self {
         Self(AtomicU64::new(0))
     }
 
-    /// Publish which ring is showing, or `0` while none is.
-    pub(crate) fn set(&self, session_id: u64) {
+    /// Publish `session_id` until the returned ring-lifetime guard is dropped.
+    pub(crate) fn showing(self: &Arc<Self>, session_id: u64) -> ShowingRing {
         self.0.store(session_id, Ordering::Release);
-    }
-
-    /// Forget the showing session so later clicks cannot name it.
-    pub(crate) fn clear(&self) {
-        self.set(0);
+        ShowingRing {
+            live: Arc::clone(self),
+            session_id,
+        }
     }
 
     /// Session id at click time, or `None` when no ring is showing.
@@ -40,6 +49,15 @@ impl ClickAwaySession {
             0 => None,
             session_id => Some(session_id),
         }
+    }
+}
+
+impl Drop for ShowingRing {
+    fn drop(&mut self) {
+        let _ =
+            self.live
+                .0
+                .compare_exchange(self.session_id, 0, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -146,29 +164,33 @@ mod tests {
 
     #[test]
     fn no_click_is_observed_when_no_ring_is_showing() {
-        let live = ClickAwaySession::new();
+        let live = Arc::new(ClickAwaySession::new());
         assert_eq!(live.observe(), None);
-        live.set(11);
-        live.clear();
+        let showing = live.showing(11);
+        assert_eq!(live.observe(), Some(11));
+        drop(showing);
         assert_eq!(live.observe(), None);
     }
 
     #[test]
     fn a_click_queued_before_a_new_ring_does_not_target_it() {
-        let live = ClickAwaySession::new();
-        live.set(11);
+        let live = Arc::new(ClickAwaySession::new());
+        let previous = live.showing(11);
         let queued = live.observe().expect("a showing ring is observable");
-        live.set(12);
+        let replacement = live.showing(12);
+        drop(previous);
         assert!(
             !click_away_targets(queued, live.observe().expect("replacement is showing")),
             "a click snapshotted against the previous session must not close the new ring"
         );
+        drop(replacement);
+        assert_eq!(live.observe(), None);
     }
 
     #[test]
     fn a_click_against_the_showing_ring_targets_it() {
-        let live = ClickAwaySession::new();
-        live.set(7);
+        let live = Arc::new(ClickAwaySession::new());
+        let _showing = live.showing(7);
         let queued = live.observe().expect("a showing ring is observable");
         assert!(click_away_targets(queued, 7));
     }

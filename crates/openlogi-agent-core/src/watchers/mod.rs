@@ -1,9 +1,11 @@
-//! Background watchers that poll external state — HID inventory, foreground
-//! app, Accessibility, device pairing — and forward changes over channels to a
-//! consumer (the agent's orchestrator, or the GUI).
+//! Background watchers that observe external state — event-first HID inventory
+//! and foreground app, polled permissions, device pairing — and forward changes
+//! over channels to a consumer (the agent's orchestrator, or the GUI).
 
 pub mod accessibility;
 pub mod camera;
+mod capture_manager;
+mod capture_session;
 pub mod foreground_app;
 pub mod gesture;
 pub mod host_switch;
@@ -11,4 +13,7 @@ pub mod input_monitoring;
 pub mod inventory;
 pub mod keyboard;
 pub mod pairing;
+pub mod pointer;
 mod poll;
+mod retry;
+pub mod shutdown;

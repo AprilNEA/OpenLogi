@@ -57,6 +57,10 @@ impl ReceiverDescriptor {
 pub const RECEIVERS: &[ReceiverDescriptor] = &[
     ReceiverDescriptor::logitech(0xc52b, ReceiverBrand::Unifying, ReceiverProtocol::Unifying),
     ReceiverDescriptor::logitech(0xc532, ReceiverBrand::Unifying, ReceiverProtocol::Unifying),
+    // Nano receiver bundled with budget wireless combos (e.g. MK270, MK295),
+    // limited to 2 paired devices — cross-checked against Solaar's
+    // NANO_RECEIVER_C534.
+    ReceiverDescriptor::logitech(0xc534, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
     // Nano receiver bundled with the G602.
     ReceiverDescriptor::logitech(0xc537, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
     // Lightspeed gaming receiver used by the G502, G Pro Wireless, G604, and
@@ -66,9 +70,21 @@ pub const RECEIVERS: &[ReceiverDescriptor] = &[
         ReceiverBrand::Lightspeed,
         ReceiverProtocol::Unifying,
     ),
+    // POWERPLAY wireless charging system's embedded Lightspeed receiver.
+    ReceiverDescriptor::logitech(
+        0xc53a,
+        ReceiverBrand::Lightspeed,
+        ReceiverProtocol::Unifying,
+    ),
     // Lightspeed nano receiver, verified with a G305 (WPID 0x4074).
     ReceiverDescriptor::logitech(
         0xc53f,
+        ReceiverBrand::Lightspeed,
+        ReceiverProtocol::Unifying,
+    ),
+    // Lightspeed receiver, verified with a G915 (WPID 0x407c).
+    ReceiverDescriptor::logitech(
+        0xc541,
         ReceiverBrand::Lightspeed,
         ReceiverProtocol::Unifying,
     ),
@@ -115,10 +131,34 @@ mod tests {
     }
 
     #[test]
+    fn powerplay_receiver_is_lightspeed_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc53a).expect("c53a receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
+    }
+
+    #[test]
+    fn g915_receiver_is_lightspeed_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc541).expect("c541 receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
+    }
+
+    #[test]
     fn superlight_dex_receiver_is_lightspeed_over_unifying_protocol() {
         let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc54d).expect("c54d receiver");
 
         assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
+    }
+
+    #[test]
+    fn mk270_mk295_nano_receiver_is_nano_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc534).expect("c534 receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Nano);
         assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
     }
 

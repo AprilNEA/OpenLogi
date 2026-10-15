@@ -29,8 +29,7 @@ fn mouse_event_clone_and_debug() {
             device: None,
         },
         MouseEvent::Scroll {
-            delta_x: 1.0,
-            delta_y: -1.5,
+            delta: ScrollDelta::wheel_ticks(1.0, -1.5),
             from_trackpad: false,
             device: None,
         },

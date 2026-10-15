@@ -1,16 +1,12 @@
 //! Categorized action, shortcut, path, and icon editor for one ring slot.
 
 use gpui::{
-    AnyElement, Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
+    Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _,
-    button::Button,
-    h_flex,
-    input::{Input, InputState},
-    scroll::ScrollableElement as _,
-    v_flex,
+    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
+    scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{
     Action, ActionRingEntry, ActionRingIcon, ActionRingSlot, ApplicationTarget, Category, KeyCombo,
@@ -18,9 +14,10 @@ use openlogi_core::binding::{
 };
 
 use super::action_icons::action_icon_path;
-use crate::features::mouse::picker::editor_section;
-use crate::state::{AppState, DeviceRecord, StateEvent};
-use crate::ui::components::MenuRow;
+use crate::features::binding_editor::editor_section;
+use crate::state::AppState;
+use crate::ui::action::localized_action_label;
+use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 pub(super) fn action_library(
@@ -32,10 +29,9 @@ pub(super) fn action_library(
     pal: Palette,
 ) -> impl IntoElement {
     let current_action = current.map(ActionRingEntry::action).cloned();
-    let current_label = current_action.as_ref().map_or_else(
-        || tr!("Empty slot").to_string(),
-        |action| rust_i18n::t!(action.label()).into_owned(),
-    );
+    let current_label = current_action
+        .as_ref()
+        .map_or_else(|| tr!("action_ring.empty_slot"), localized_action_label);
 
     v_flex()
         .flex_1()
@@ -58,11 +54,15 @@ pub(super) fn action_library(
                     h_flex()
                         .items_center()
                         .justify_between()
-                        .child(div().text_subheading().child(tr!("Actions Ring")))
+                        .child(
+                            div()
+                                .text_subheading()
+                                .child(tr!("action_ring.actions_ring")),
+                        )
                         .child(
                             Button::new("ring-clear-slot")
                                 .compact()
-                                .label(tr!("Clear slot"))
+                                .label(tr!("action_ring.clear_slot"))
                                 .on_click(move |_, _, cx| commit_slot(slot, None, cx)),
                         ),
                 )
@@ -86,21 +86,26 @@ pub(super) fn action_library(
                 })
                 .child(shortcut_editor(slot, shortcut_input, pal))
                 .child(path_editor(slot, application_input, pal))
-                .children(action_rows(slot, current_action.as_ref(), pal)),
+                .children(action_sections(slot, current_action.as_ref(), pal)),
             library_scroll,
         ))
 }
 
 fn action_rows_scroller(content: impl IntoElement, scroll: &ScrollHandle) -> impl IntoElement {
     div()
-        .id("ring-action-library")
+        .relative()
         .flex_1()
         .min_h_0()
-        .track_scroll(scroll)
-        .overflow_y_scroll()
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .id("ring-action-library")
+                .size_full()
+                .track_scroll(scroll)
+                .overflow_y_scroll()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .child(content),
+        )
         .vertical_scrollbar(scroll)
-        .child(content)
 }
 
 fn icon_editor(
@@ -113,7 +118,7 @@ fn icon_editor(
     let default = icon_button(
         "ring-default-icon",
         default_path,
-        tr!("Use action icon"),
+        tr!("action_ring.use_action_icon"),
         current.is_none(),
         pal,
     )
@@ -121,7 +126,7 @@ fn icon_editor(
 
     v_flex()
         .gap_1()
-        .child(editor_section(tr!("Icon"), pal))
+        .child(editor_section(tr!("action_ring.icon"), pal))
         .child(
             h_flex().flex_wrap().gap_1().child(default).children(
                 ActionRingIcon::ALL
@@ -131,7 +136,7 @@ fn icon_editor(
                         icon_button(
                             ("ring-custom-icon", index),
                             icon.asset_path(),
-                            rust_i18n::t!(icon.label()),
+                            rust_i18n::t!(icon.translation_key()),
                             current == Some(icon),
                             pal,
                         )
@@ -164,7 +169,7 @@ fn shortcut_editor(
     let submit_input = input.clone();
     v_flex()
         .gap_1()
-        .child(editor_section(tr!("Custom shortcut"), pal))
+        .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
         .child(
             h_flex()
                 .gap_2()
@@ -172,12 +177,12 @@ fn shortcut_editor(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(Input::new(input).small().cleanable(true)),
+                        .child(control_input(input).cleanable(true)),
                 )
                 .child(
                     Button::new("ring-add-shortcut")
                         .compact()
-                        .label(tr!("Add"))
+                        .label(tr!("common.add"))
                         .on_click(move |_, _, cx| {
                             let shortcut = submit_input.read(cx).value().to_string();
                             if let Ok(combo) = shortcut.parse::<KeyCombo>() {
@@ -192,7 +197,10 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
     let submit_input = input.clone();
     v_flex()
         .gap_1()
-        .child(editor_section(tr!("Open application or folder"), pal))
+        .child(editor_section(
+            tr!("action_ring.open_application_or_folder"),
+            pal,
+        ))
         .child(
             h_flex()
                 .gap_2()
@@ -200,12 +208,12 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(Input::new(input).small().cleanable(true)),
+                        .child(control_input(input).cleanable(true)),
                 )
                 .child(
                     Button::new("ring-add-path")
                         .compact()
-                        .label(tr!("Add"))
+                        .label(tr!("common.add"))
                         .on_click(move |_, _, cx| {
                             let path = submit_input.read(cx).value().to_string();
                             if let Ok(target) = ApplicationTarget::new(path, "") {
@@ -216,19 +224,25 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
         )
 }
 
-fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> Vec<AnyElement> {
+fn action_sections(
+    slot: ActionRingSlot,
+    current: Option<&Action>,
+    pal: Palette,
+) -> impl Iterator<Item = impl IntoElement> {
     let mut index = 0usize;
-    let mut rows = Vec::new();
-    for (category, actions) in ring_catalog() {
-        rows.push(editor_section(rust_i18n::t!(category.label()), pal));
-        for action in actions {
-            let selected = current == Some(&action);
-            let action_to_commit = action.clone();
-            let label = tr!(action.label());
-            let icon_path = action_icon_path(&action);
-            let row_index = index;
-            index += 1;
-            rows.push(
+    ring_catalog().into_iter().map(move |(category, actions)| {
+        v_flex()
+            .child(editor_section(
+                rust_i18n::t!(category.translation_key()),
+                pal,
+            ))
+            .children(actions.into_iter().map(|action| {
+                let selected = current == Some(&action);
+                let action_to_commit = action.clone();
+                let label = localized_action_label(&action);
+                let icon_path = action_icon_path(&action);
+                let row_index = index;
+                index += 1;
                 MenuRow::new(("ring-action", row_index))
                     .role(Role::MenuItem)
                     .aria_label(label.clone())
@@ -256,11 +270,8 @@ fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> 
                     .on_click(move |_, _, cx| {
                         commit_action(slot, action_to_commit.clone(), cx);
                     })
-                    .into_any_element(),
-            );
-        }
-    }
-    rows
+            }))
+    })
 }
 
 fn ring_catalog() -> Vec<(Category, Vec<Action>)> {
@@ -290,30 +301,18 @@ fn commit_action(slot: ActionRingSlot, action: Action, cx: &mut gpui::App) {
 }
 
 fn commit_slot(slot: ActionRingSlot, action: Option<RingAction>, cx: &mut gpui::App) {
-    AppState::update(cx, |state, cx| {
-        let key = state.current_record().map(DeviceRecord::device_key);
-        state.commit_action_ring_slot(slot, action);
-        if let Some(key) = key {
-            cx.emit(StateEvent::BindingsChanged(key));
-        }
-    });
+    AppState::apply(cx, |state| state.commit_action_ring_slot(slot, action));
 }
 
 fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui::App) {
-    AppState::update(cx, |state, cx| {
-        let key = state.current_record().map(DeviceRecord::device_key);
-        state.commit_action_ring_icon(slot, icon);
-        if let Some(key) = key {
-            cx.emit(StateEvent::BindingsChanged(key));
-        }
-    });
+    AppState::apply(cx, |state| state.commit_action_ring_icon(slot, icon));
 }
 
 #[cfg(test)]
 mod tests {
     use gpui::{
-        Context, PlatformInput, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-        TestAppContext, Window, point, size,
+        Context, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, TestAppContext, Window,
+        point, px,
     };
 
     use super::*;
@@ -327,16 +326,22 @@ mod tests {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .id("page-scroll")
-                .size_full()
+                .w(px(160.0))
+                .h(px(120.0))
                 .track_scroll(&self.page_scroll)
                 .overflow_y_scroll()
                 .child(
                     v_flex()
                         .h(px(300.0))
-                        .child(v_flex().h(px(100.0)).child(action_rows_scroller(
-                            div().h(px(240.0)),
-                            &self.sidebar_scroll,
-                        )))
+                        .child(
+                            v_flex()
+                                .w(px(160.0))
+                                .h(px(100.0))
+                                .child(action_rows_scroller(
+                                    div().h(px(240.0)),
+                                    &self.sidebar_scroll,
+                                )),
+                        )
                         .child(div().h(px(200.0))),
                 )
         }
@@ -347,7 +352,7 @@ mod tests {
         cx.update(gpui_component::init);
         let page_scroll = ScrollHandle::new();
         let sidebar_scroll = ScrollHandle::new();
-        let window = cx.open_window(size(px(160.0), px(120.0)), {
+        let (_, cx) = cx.add_window_view({
             let page_scroll = page_scroll.clone();
             let sidebar_scroll = sidebar_scroll.clone();
             move |_, _| NestedScrollView {
@@ -356,22 +361,62 @@ mod tests {
             }
         });
         cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
 
-        window
-            .update(cx, |_, window, cx| {
-                window.dispatch_event(
-                    PlatformInput::ScrollWheel(ScrollWheelEvent {
-                        position: point(px(80.0), px(50.0)),
-                        delta: ScrollDelta::Pixels(point(px(0.0), px(-20.0))),
-                        ..Default::default()
-                    }),
-                    cx,
-                );
-            })
-            .unwrap();
+        let overlay_before = cx
+            .debug_bounds("scrollbar-overlay")
+            .expect("scrollbar overlay should exist");
+        assert_eq!(overlay_before.origin, point(px(0.0), px(0.0)));
+        assert_eq!(overlay_before.size, gpui::size(px(160.0), px(100.0)));
 
+        // Scroll inside the sidebar scroller
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(80.0), px(50.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-20.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
+
+        // Sidebar scrolled, page did not
         assert_eq!(sidebar_scroll.offset().y, px(-20.0));
         assert_eq!(page_scroll.offset().y, px(0.0));
+
+        // Scrollbar overlay stays anchored to the scroller viewport
+        let overlay_after_sidebar_scroll = cx
+            .debug_bounds("scrollbar-overlay")
+            .expect("scrollbar overlay should exist");
+        assert_eq!(overlay_after_sidebar_scroll.origin, point(px(0.0), px(0.0)));
+        assert_eq!(
+            overlay_after_sidebar_scroll.size,
+            gpui::size(px(160.0), px(100.0))
+        );
+
+        // Click near the bottom of the scrollbar track (x: 155px, y: 80px) to jump
+        cx.simulate_click(point(px(155.0), px(80.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
+
+        // The sidebar scroller should have jumped further down
+        assert!(sidebar_scroll.offset().y < px(-20.0));
+        assert_eq!(page_scroll.offset().y, px(0.0));
+
+        // Now scroll the outer page from outside the sidebar (e.g. at y: 110px)
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(10.0), px(110.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-15.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
+
+        assert_eq!(page_scroll.offset().y, px(-15.0));
+
+        // The sidebar's scrollbar overlay moves together with the sidebar inside the page
+        let overlay_after_page_scroll = cx
+            .debug_bounds("scrollbar-overlay")
+            .expect("scrollbar overlay should exist");
+        assert_eq!(overlay_after_page_scroll.origin, point(px(0.0), px(-15.0)));
     }
 
     #[test]
