@@ -280,8 +280,12 @@ Direct Bluetooth devices are left to macOS. Lightspeed receivers, wired
 devices, and other accessory categories are outside this integration's scope.
 Battery percentages use OpenLogi's existing readings, including estimates
 for devices that only report voltage. Apple's widget cannot label those
-values as estimates. A missing reading is never converted into a zero-percent
-battery. Apple's widget controls its icons, ordering, and visible device count.
+values as estimates. Devices that report only a coarse level, or have no
+percentage reading yet, appear only after their first reported percentage.
+A missing percentage is never converted into a zero-percent battery. If a
+later reading omits the percentage, the last reported percentage is retained
+with the current charging state. Apple's widget controls its icons, ordering,
+and visible device count.
 
 After OpenLogi marks an accessory offline or absent, its last reading remains
 visible for five minutes. An online device without a new battery reading does

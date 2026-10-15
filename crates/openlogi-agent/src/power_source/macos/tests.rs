@@ -608,8 +608,24 @@ fn level_only_readings_never_invent_percentage_and_preserve_last_reported_value(
 
     inv.paired[0].battery.as_mut().unwrap().percentage = None;
     config.set_device_custom_name(key, Some("Renamed Mouse".into()));
+    for (ix, status) in [
+        BatteryStatus::Charging,
+        BatteryStatus::Full,
+        BatteryStatus::Error,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        inv.paired[0].battery.as_mut().unwrap().status = status;
+        publisher.reconcile(&config, std::slice::from_ref(&inv), now);
+        assert_eq!(publisher.backend.live[key].percentage, 0);
+        assert_eq!(publisher.backend.live[key].name, "Renamed Mouse");
+        assert_eq!(publisher.backend.live[key].status, status);
+        assert_eq!(publisher.backend.writes, ix + 2);
+    }
+    inv.paired[0].battery = None;
     publisher.reconcile(&config, &[inv], now);
     assert_eq!(publisher.backend.live[key].percentage, 0);
-    assert_eq!(publisher.backend.live[key].name, "Renamed Mouse");
-    assert_eq!(publisher.backend.writes, 2);
+    assert_eq!(publisher.backend.live[key].status, BatteryStatus::Error);
+    assert_eq!(publisher.backend.writes, 4);
 }
