@@ -477,7 +477,13 @@ fn online_accessories(
                         .get(&identifier)
                         .filter(|tracked| !tracked.identity.conflicts_with(&identity))
                         .and_then(|tracked| tracked.published.as_ref())
-                        .map(|published| (published.percentage, published.status))
+                        .map(|published| {
+                            let status = paired
+                                .battery
+                                .as_ref()
+                                .map_or(published.status, |battery| battery.status);
+                            (published.percentage, status)
+                        })
                 });
             let reading = battery.map(|(percentage, status)| AccessoryPower {
                 name: config_key
