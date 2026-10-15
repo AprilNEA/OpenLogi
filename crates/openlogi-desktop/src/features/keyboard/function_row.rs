@@ -956,6 +956,7 @@ fn panel_action_rows(
             .children(power_user_actions.iter().enumerate().map(
                 |(idx, (kind, label_key, icon_path))| {
                     let kind = *kind;
+                    let label = tr!(*label_key);
                     let view = view.clone();
                     let selected = matches!(
                         (current, kind),
@@ -976,7 +977,7 @@ fn panel_action_rows(
                     MenuRow::new(format!("panel-power-{idx}"))
                         .selected(selected)
                         .role(Role::MenuItem)
-                        .aria_label(*label)
+                        .aria_label(label.clone())
                         .child(
                             h_flex()
                                 .items_center()
@@ -988,7 +989,7 @@ fn panel_action_rows(
                                         .flex_none()
                                         .text_color(pal.text_muted),
                                 )
-                                .child(div().child(tr!(*label_key))),
+                                .child(div().child(label)),
                         )
                         .when(selected, |s| {
                             s.child(
