@@ -88,6 +88,9 @@ fn decode_name(bytes: &[u8]) -> Option<String> {
 }
 
 /// The `name_len` bytes of `slot`'s friendly name, read 14 bytes at a time.
+///
+/// A reply that names another slot or offset, such as a late answer to an
+/// earlier request, fails the read instead of joining this name.
 async fn read_name(
     feature: &HostsInfoFeature,
     slot: u8,
@@ -99,6 +102,9 @@ async fn read_name(
             .get_host_friendly_name(HostIndex::Slot(slot), offset)
             .await
         {
+            Ok(chunk) if chunk.host_index != HostIndex::Slot(slot) || chunk.offset != offset => {
+                return Err(Hidpp20Error::UnsupportedResponse);
+            }
             Ok(chunk) => bytes.extend_from_slice(&chunk.bytes),
             Err(error) if is_declined(&error) => return Ok(None),
             Err(error) => return Err(error),
@@ -108,9 +114,12 @@ async fn read_name(
     Ok(decode_name(&bytes))
 }
 
-/// The OS recorded for `slot`.
+/// The OS recorded for `slot`. A reply for another slot fails the read.
 async fn read_os(feature: &HostsInfoFeature, slot: u8) -> Result<Option<HostOsInfo>, Hidpp20Error> {
     match feature.get_host_os_version(HostIndex::Slot(slot)).await {
+        Ok(version) if version.host_index != HostIndex::Slot(slot) => {
+            Err(Hidpp20Error::UnsupportedResponse)
+        }
         Ok(version) => Ok(os_kind(version.os_type).map(|kind| HostOsInfo {
             kind,
             major: version.major,

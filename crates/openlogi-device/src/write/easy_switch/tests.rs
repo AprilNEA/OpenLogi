@@ -69,6 +69,10 @@ struct Keyboard {
     busy: Option<u8>,
     /// Whether a name write changes the stored name.
     takes_writes: bool,
+    /// A function, 3 or 7, whose replies name the next slot.
+    echoes_next_slot: Option<u8>,
+    /// Whether name replies name the next chunk's offset.
+    echoes_next_offset: bool,
     /// Every name read, as `(slot, offset)`.
     name_reads: Vec<(u8, u8)>,
     /// Every OS read, by slot.
@@ -96,6 +100,8 @@ impl Keyboard {
             declines: Vec::new(),
             busy: None,
             takes_writes: true,
+            echoes_next_slot: None,
+            echoes_next_offset: false,
             name_reads: Vec::new(),
             os_reads: Vec::new(),
             writes: Vec::new(),
@@ -146,8 +152,8 @@ impl Keyboard {
                 let (index, offset) = (request[4], request[5]);
                 self.name_reads.push((index, offset));
                 let slot = self.slots.get(usize::from(index))?;
-                payload[0] = index;
-                payload[1] = offset;
+                payload[0] = index + u8::from(self.echoes_next_slot == Some(0x03));
+                payload[1] = offset + 14 * u8::from(self.echoes_next_offset);
                 for (to, from) in payload[2..]
                     .iter_mut()
                     .zip(slot.name.iter().skip(offset.into()))
@@ -172,7 +178,7 @@ impl Keyboard {
             (HOSTS_INDEX, 0x07) => {
                 self.os_reads.push(request[4]);
                 let slot = self.slots.get(usize::from(request[4]))?;
-                payload[0] = request[4];
+                payload[0] = request[4] + u8::from(self.echoes_next_slot == Some(0x07));
                 payload[1..7].copy_from_slice(&slot.os);
             }
             _ => return None,
@@ -484,4 +490,35 @@ async fn a_current_slot_outside_the_slots_is_no_current_slot() {
 
     assert_eq!(hosts.current, None);
     assert_eq!(hosts.slots.len(), 3);
+}
+
+/// Reads whose replies answer another request: the name of the next slot,
+/// the next chunk of the name, and the OS of the next slot.
+#[tokio::test]
+async fn a_reply_for_another_slot_or_offset_fails_the_read() {
+    let keyboards = [
+        Keyboard {
+            echoes_next_slot: Some(0x03),
+            ..Keyboard::new()
+        },
+        Keyboard {
+            echoes_next_offset: true,
+            ..Keyboard::new()
+        },
+        Keyboard {
+            echoes_next_slot: Some(0x07),
+            ..Keyboard::new()
+        },
+    ];
+    for keyboard in keyboards {
+        let keyboard = Arc::new(Mutex::new(keyboard));
+        let shared = keyboard_channel(&keyboard).await;
+        assert_matches!(
+            get_easy_switch_hosts_on(&shared).await,
+            Err(WriteError::UnsupportedResponse {
+                operation: HidppOperation::ReadHosts,
+                feature_hex: 0x1815,
+            })
+        );
+    }
 }
