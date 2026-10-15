@@ -1152,3 +1152,71 @@ fn battery_preferences_survive_a_model_less_offline_placeholder() {
         );
     }
 }
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn battery_preferences_do_not_persist_for_a_transient_direct_device() {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
+    let mut inventory = direct_inventory([0; 4]);
+    inventory.paired[0].battery = Some(BatteryInfo {
+        percentage: Some(50),
+        level: BatteryLevel::Good,
+        status: BatteryStatus::Discharging,
+        freshness: openlogi_core::device::BatteryFreshness::Current,
+    });
+    let _ = state.refresh_inventories(&[inventory], &[], &resolver, &[]);
+    let record = &state.devices()[0];
+    assert!(!record.is_persistent());
+    assert!(record.battery.is_some());
+    let key = record.device_key();
+    let original = state.config.devices.clone();
+    let events = state.commit_battery_preferences(
+        &key,
+        openlogi_core::config::BatteryPreferences {
+            show_in_menu: false,
+            warn_low: false,
+        },
+    );
+    assert_eq!(state.config.devices, original);
+    assert!(events.is_empty());
+    assert!(!state.battery_preferences_available(&state.devices()[0]));
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn battery_preferences_address_the_record_after_selection_changes() {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
+    let _ = state.refresh_inventories(
+        &[
+            direct_inventory([1, 2, 3, 4]),
+            direct_inventory([5, 6, 7, 8]),
+        ],
+        &[],
+        &resolver,
+        &[],
+    );
+    let key = state.devices()[0].device_key();
+    let other = state.devices()[1].device_key();
+    let _ = state.select_device(1);
+    let preferences = openlogi_core::config::BatteryPreferences {
+        show_in_menu: false,
+        warn_low: false,
+    };
+    let _ = state.commit_battery_preferences(&key, preferences);
+    assert_eq!(state.battery_preferences(key.as_str()), preferences);
+    assert_eq!(
+        state.battery_preferences(other.as_str()),
+        openlogi_core::config::BatteryPreferences::default()
+    );
+    let original = state.config.devices.clone();
+    assert!(
+        state
+            .commit_battery_preferences(&DeviceKey::from("unit:missing"), preferences)
+            .is_empty()
+    );
+    assert_eq!(state.config.devices, original);
+}

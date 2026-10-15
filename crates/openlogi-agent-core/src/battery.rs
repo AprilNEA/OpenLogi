@@ -37,16 +37,20 @@ pub(super) fn observations(config: &Config, inventories: &[DeviceInventory]) -> 
             // A receiver slot identifies a route, not the device paired there.
             let history_key = identity.config_key();
             let session_key = format!("{}:{:?}", stable.runtime_key(), paired.wpid);
-            let key = config
-                .resolve_device_key(&stable, Some(&identity))
-                .map_or_else(|| stable.runtime_key(), PhysicalDeviceKey::into_string);
+            let resolved_key = config.resolve_device_key(&stable, Some(&identity));
+            let preferences = resolved_key
+                .as_ref()
+                .map_or_else(BatteryPreferences::default, |key| {
+                    config.battery_preferences(key.as_str())
+                });
+            let key =
+                resolved_key.map_or_else(|| stable.runtime_key(), PhysicalDeviceKey::into_string);
             let name = config
                 .devices
                 .get(&key)
                 .and_then(|device| device.custom_name.clone())
                 .or_else(|| paired.codename.clone())
                 .unwrap_or_else(|| "Logitech".to_owned());
-            let preferences = config.battery_preferences(&key);
             devices.push((
                 stable,
                 Observation {
@@ -206,6 +210,23 @@ mod tests {
         assert_eq!(rows[0].key, "direct:046d:b369:unit:00000000");
         assert_eq!(rows[0].history_key, None);
     }
+    #[test]
+    fn transient_direct_devices_ignore_previously_saved_battery_opt_outs() {
+        let mut config = Config::default();
+        let runtime_key = "direct:046d:b369:unit:00000000";
+        config.set_battery_preferences(
+            runtime_key,
+            BatteryPreferences {
+                show_in_menu: false,
+                warn_low: false,
+            },
+        );
+        let rows = observations(&config, &[inventory(0xb369, 0xff, [0; 4])]);
+        assert_eq!(rows[0].key, runtime_key);
+        assert_eq!(rows[0].preferences, BatteryPreferences::default());
+        assert!(!config.battery_preferences(runtime_key).show_in_menu);
+    }
+
     #[test]
     fn receiver_slot_is_not_a_durable_warning_identity() {
         for product in [0xc548, 0xc52b] {
