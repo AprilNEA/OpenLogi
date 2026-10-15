@@ -193,7 +193,7 @@ pub struct DeviceSelection {
     pub agent: Identity,
     /// Publication generation, also distinguishing repeated clicks on the same device.
     pub request_id: u64,
-    /// Physical navigation target shared by the device's transports.
+    /// Agent-supplied navigation key matching the GUI's device record.
     pub device_key: String,
 }
 
