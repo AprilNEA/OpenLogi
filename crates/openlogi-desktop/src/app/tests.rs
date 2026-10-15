@@ -473,6 +473,7 @@ fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
                 battery: None,
                 model_info: Some(model),
                 capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Keyboard)),
+                settings_revision: 0,
             }],
         };
         let resolver = AssetResolver::new();
@@ -654,6 +655,7 @@ fn keyboard_inventory_for_mode(
                 buttons: true,
                 ..Capabilities::default()
             }),
+            settings_revision: 0,
         }],
     }
 }
@@ -782,6 +784,52 @@ fn keyboard_mode_switches_keep_one_profile_and_update_the_icon() {
                 .iter()
                 .any(|(_, transport, ..)| *transport != ModelTransport::Equad);
             assert_keyboard_modes(&observations, has_direct_link.then_some(*last_icon));
+        }
+    }
+}
+
+#[test]
+fn incomplete_keyboard_probes_preserve_the_last_observed_connection() {
+    use openlogi_core::device::ModelTransport;
+
+    let mut model = model_with_pids(
+        DeviceTransports {
+            btle: true,
+            usb: true,
+            ..DeviceTransports::default()
+        },
+        &[0xb702, 0xc370],
+    );
+    model.unit_id = [1, 2, 3, 4];
+    let usb = keyboard_inventory_for_mode(&model, ModelTransport::Usb, 0xc370);
+    let bluetooth = keyboard_inventory_for_mode(&model, ModelTransport::Btle, 0xb702);
+
+    for (latest, expected) in [
+        (&usb, "action-icons/usb.svg"),
+        (&bluetooth, "action-icons/bluetooth.svg"),
+    ] {
+        for missing_model in [true, false] {
+            let mut incomplete = latest.clone();
+            incomplete.paired[0].capabilities = None;
+            incomplete.paired[0].model_info = if missing_model {
+                None
+            } else {
+                // The probe has an identity but cannot resolve the live PID.
+                let mut unknown = model.clone();
+                unknown.model_ids = [0; 3];
+                Some(unknown)
+            };
+            assert_keyboard_modes(
+                &[
+                    (vec![usb.clone()], "action-icons/usb.svg"),
+                    (vec![bluetooth.clone()], "action-icons/bluetooth.svg"),
+                    (vec![latest.clone()], expected),
+                    // Keep the existing best-effort live icon; only the
+                    // offline observation must survive the incomplete probe.
+                    (vec![incomplete], "action-icons/bluetooth.svg"),
+                ],
+                Some(expected),
+            );
         }
     }
 }
