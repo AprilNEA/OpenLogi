@@ -192,6 +192,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             registry,
             receiver_access: access.clone(),
             device_io,
+            transport_turns: crate::hardware::TransportTurns::default(),
         };
         let mut actions =
             crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring)

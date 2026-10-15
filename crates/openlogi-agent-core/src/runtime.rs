@@ -552,6 +552,7 @@ mod tests {
                 registry: openlogi_hid::ChannelRegistry::default(),
                 receiver_access: crate::receiver_access::ReceiverAccess::default(),
                 device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
             },
             action_ring,
         };

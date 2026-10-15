@@ -129,6 +129,10 @@ pub struct SharedHandles {
     /// Receiver access shared by HID++ sessions and pairing. Pairing/host
     /// transitions are exclusive; capture sessions share under read leases.
     pub receiver_access: ReceiverAccess,
+    /// Per-transport turns for agent-owned HID requests. Shared by every
+    /// device access built from these handles, so two slots of one receiver
+    /// queue behind each other before either starts its response timeout.
+    transport_turns: crate::hardware::TransportTurns,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
     /// Orders every path's Fn-lock writes per keyboard.
@@ -172,6 +176,7 @@ impl SharedHandles {
             registry: self.channel_registry.clone(),
             receiver_access: self.receiver_access.clone(),
             device_io: self.device_io.clone(),
+            transport_turns: self.transport_turns.clone(),
         }
     }
 
@@ -402,6 +407,7 @@ impl Orchestrator {
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
+            transport_turns: crate::hardware::TransportTurns::default(),
             host_switch_links,
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),

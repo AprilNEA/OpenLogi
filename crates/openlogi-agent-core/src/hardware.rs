@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
@@ -47,6 +47,87 @@ pub(crate) use write_order::{WriteOrder, WriteTicket};
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Physical transport behind a route. Slots on one receiver share a HID writer,
+/// so they share one turnstile even though their device indices differ.
+#[derive(Clone, PartialEq, Eq)]
+enum TransportKey {
+    Bolt(String),
+    Unifying(String),
+    Direct(u16, u16),
+    RawHid(u16, u16, u16, u16, String),
+}
+
+impl From<&DeviceRoute> for TransportKey {
+    fn from(route: &DeviceRoute) -> Self {
+        match route {
+            DeviceRoute::Bolt { receiver_uid, .. } => Self::Bolt(receiver_uid.clone()),
+            DeviceRoute::Unifying { receiver_uid, .. } => Self::Unifying(receiver_uid.clone()),
+            DeviceRoute::Direct {
+                vendor_id,
+                product_id,
+            } => Self::Direct(*vendor_id, *product_id),
+            DeviceRoute::RawHid {
+                vendor_id,
+                product_id,
+                usage_page,
+                usage_id,
+                identity,
+            } => Self::RawHid(
+                *vendor_id,
+                *product_id,
+                *usage_page,
+                *usage_id,
+                identity.clone(),
+            ),
+        }
+    }
+}
+
+type TransportTurn = tokio::sync::Mutex<()>;
+
+struct TransportEntry {
+    key: TransportKey,
+    turn: Weak<TransportTurn>,
+}
+
+/// Per-transport FIFO turns for agent-owned HID requests.
+///
+/// Callers used to start the device-response timeout before the HID writer
+/// was free. A slow wheel reconciliation could then spend a queued SmartShift
+/// or DPI write's whole budget, including the round trip that confirms the
+/// device's reply. Waiting for the turn happens before that budget starts.
+#[derive(Clone, Default)]
+pub(crate) struct TransportTurns {
+    inner: Arc<Mutex<Vec<TransportEntry>>>,
+}
+
+impl TransportTurns {
+    fn turn_for(&self, route: &DeviceRoute) -> Arc<TransportTurn> {
+        let key = TransportKey::from(route);
+        let mut entries = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        entries.retain(|entry| entry.turn.strong_count() != 0);
+        if let Some(turn) = entries
+            .iter()
+            .find_map(|entry| (entry.key == key).then(|| entry.turn.upgrade()).flatten())
+        {
+            return turn;
+        }
+        let turn = Arc::new(TransportTurn::new(()));
+        entries.push(TransportEntry {
+            key,
+            turn: Arc::downgrade(&turn),
+        });
+        turn
+    }
+}
+
+/// Run `work` only after `turn` is held, so a timeout inside `work` measures
+/// the device transaction and not the queue ahead of it.
+async fn after_transport_turn<T>(turn: &TransportTurn, work: impl Future<Output = T>) -> T {
+    let _queued = turn.lock().await;
+    work.await
+}
 
 /// Upper bound on waiting, at exit, for lighting writes already running to
 /// record the `0x8071` control they take. A write is a handful of requests;
@@ -121,10 +202,10 @@ fn choose_authoritative<T>(
     }
 }
 
-/// The four handles every device read and write goes through: the capture
-/// session's channel slot, inventory's channel registry, the receiver lease
-/// and the host device-I/O gate. Cheap to clone; bind it to a device with
-/// [`Self::op`].
+/// The handles every device read and write goes through: the capture
+/// session's channel slot, inventory's channel registry, the receiver lease,
+/// the host device-I/O gate, and the per-transport request turns. Cheap to
+/// clone; bind it to a device with [`Self::op`].
 #[derive(Clone)]
 pub struct DeviceAccess {
     /// The capture session's open channel, preferred for as long as inventory
@@ -136,6 +217,9 @@ pub struct DeviceAccess {
     pub receiver_access: ReceiverAccess,
     /// Host-lifecycle gate shared by every producer of proactive device I/O.
     pub device_io: DeviceIoGate,
+    /// Shared FIFO turns so one physical transport runs one agent-owned HID
+    /// request at a time, and the response timeout starts after the wait.
+    pub(crate) transport_turns: TransportTurns,
 }
 
 impl DeviceAccess {
@@ -202,19 +286,22 @@ impl DeviceOp {
         .map_err(|_| Unresolved::NoChannel)
     }
 
-    /// Lease the receiver, resolve the authoritative channel, then run `f`
-    /// against it under `WRITE_TIMEOUT`, mapping a timeout to
-    /// [`WriteError::RequestTimedOut`].
+    /// Lease the receiver, wait for this transport's HID turn, resolve the
+    /// authoritative channel, then run `f` against it under `WRITE_TIMEOUT`,
+    /// mapping a timeout to [`WriteError::RequestTimedOut`].
     ///
-    /// Lease-then-resolve, not the other way around: the lease wait is
-    /// unbounded, and a channel resolved before it would risk being retired
-    /// by the inventory enumerator while still queued — the write itself
-    /// would likely still succeed on the stale handle, but anything that
-    /// caches a feature off it (see the haptic feature cache's
-    /// `EpochGuarded` note) would then pin a channel the enumerator can never
-    /// reopen. Used by the IPC server's ordinary reads and writes and the
-    /// Actions Ring haptic path. Lighting uses [`Self::lighting`] so rollback
-    /// outlives the requester's deadline.
+    /// Lease-then-turn-then-resolve, not the other way around: both waits are
+    /// unbounded, and a channel resolved before them could be retired by the
+    /// inventory enumerator while still queued — the write itself would likely
+    /// still succeed on the stale handle, but anything that caches a feature
+    /// off it (see the haptic feature cache's `EpochGuarded` note) would then
+    /// pin a channel the enumerator can never reopen. The response budget
+    /// starts only once the turn is held, so a reply-confirmed SmartShift or
+    /// DPI write queued behind another slot on the same receiver still has the
+    /// whole budget to send its request and check the device's reply. Used by
+    /// the IPC server's ordinary reads and writes and the Actions Ring haptic
+    /// path. Lighting uses [`Self::lighting`] so rollback outlives the
+    /// requester's deadline.
     pub async fn run<F, Fut, T>(self, op: HidppOperation, f: F) -> Result<T, WriteError>
     where
         F: FnOnce(SharedChannel) -> Fut,
@@ -223,9 +310,13 @@ impl DeviceOp {
         if !self.access.device_io.allows_io() {
             return Err(WriteError::DeviceNotFound);
         }
+        let turn = self.access.transport_turns.turn_for(&self.route);
         let _lease = self.access.receiver_access.acquire_for_io().await;
-        let shared = self.resolve()?;
-        timed(op, f(shared)).await
+        after_transport_turn(&turn, async {
+            let shared = self.resolve()?;
+            timed(op, f(shared)).await
+        })
+        .await
     }
 
     /// [`Self::run`] for a write ordered by `ticket`: lease the receiver,
@@ -253,9 +344,11 @@ impl DeviceOp {
         if !self.access.device_io.allows_io() {
             return Err(WriteError::DeviceNotFound);
         }
+        let turn = self.access.transport_turns.turn_for(&self.route);
         let _lease = self.access.receiver_access.acquire_for_io().await;
         within_turn(
             ticket,
+            &turn,
             || async { write(self.resolve()?).await },
             || async { superseded(self.resolve()?).await },
         )
@@ -285,11 +378,15 @@ impl DeviceOp {
         if !self.access.device_io.allows_io() {
             return Err(WriteError::DeviceNotFound);
         }
+        let turn = self.access.transport_turns.turn_for(&self.route);
         ticket
             .in_order(|| async {
                 let _lease = self.access.receiver_access.acquire_for_io().await;
-                let shared = self.resolve()?;
-                timed(op, write(shared)).await
+                after_transport_turn(&turn, async {
+                    let shared = self.resolve()?;
+                    timed(op, write(shared)).await
+                })
+                .await
             })
             .await
     }
@@ -314,6 +411,7 @@ impl DeviceOp {
             registry,
             receiver_access,
             device_io,
+            ..
         } = self.access;
         let route = self.route.clone();
         let (r, g, b) = lighting_rgb(lighting);
@@ -425,9 +523,19 @@ impl DeviceOp {
         F: FnOnce(SharedChannel) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, WriteError>>,
     {
+        let turn = self.access.transport_turns.turn_for(&self.route);
         self.spawn_timed_write(
             label,
-            move |shared| tokio::time::timeout(WRITE_TIMEOUT, f(shared)),
+            move |shared| {
+                let turn = Arc::clone(&turn);
+                async move {
+                    // `timeout` stamps its deadline at construction, so build it after the turn.
+                    after_transport_turn(&turn, async move {
+                        tokio::time::timeout(WRITE_TIMEOUT, f(shared)).await
+                    })
+                    .await
+                }
+            },
             log,
         );
     }
@@ -497,12 +605,13 @@ fn log_outcome<T>(
     }
 }
 
-/// Wait for `ticket`'s turn, then give whichever of `write` and `superseded`
-/// runs the whole `WRITE_TIMEOUT`. Every ordered write goes through here: the
-/// turn is held only while that bounded I/O runs, so the wait behind earlier
-/// writes is bounded by their deadlines without eating this one's.
+/// Wait for `ticket`'s turn, then for `transport`, then give whichever of
+/// `write` and `superseded` runs the whole `WRITE_TIMEOUT`. Every ordered
+/// write goes through here: neither wait is part of the deadline, and the
+/// transport turn is held only while that bounded I/O runs.
 async fn within_turn<T, W, WriteFut, S, SupersededFut>(
     ticket: &WriteTicket,
+    transport: &TransportTurn,
     write: W,
     superseded: S,
 ) -> Result<T, Elapsed>
@@ -514,8 +623,18 @@ where
 {
     ticket
         .write_or(
-            || tokio::time::timeout(WRITE_TIMEOUT, write()),
-            || tokio::time::timeout(WRITE_TIMEOUT, superseded()),
+            || async {
+                after_transport_turn(transport, async {
+                    tokio::time::timeout(WRITE_TIMEOUT, write()).await
+                })
+                .await
+            },
+            || async {
+                after_transport_turn(transport, async {
+                    tokio::time::timeout(WRITE_TIMEOUT, superseded()).await
+                })
+                .await
+            },
         )
         .await
 }
@@ -557,11 +676,13 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
 /// keyboard whose read-back disagrees with the write) are logged.
 pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on: bool) {
     let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
     op.spawn_timed_write(
         "Fn-lock write",
         move |c| async move {
             within_turn(
                 &ticket,
+                &turn,
                 || async { openlogi_hid::set_fn_lock_on(&c, on).await.map(Some) },
                 || async { Ok(None) },
             )
@@ -709,6 +830,8 @@ pub(crate) fn reapply_mouse_volatile_in_background(
     let report_rate = report_rate.map(|rate| (rate, report_rate_order.request(&op.route)));
     let receiver_access = op.access.receiver_access.clone();
     let device_io = op.access.device_io.clone();
+    let transport_turns = op.access.transport_turns.clone();
+    let route = op.route.clone();
     let index = op.route.device_index();
     std::thread::spawn(move || {
         let Some(rt) = one_shot_runtime("volatile reapply") else {
@@ -723,13 +846,18 @@ pub(crate) fn reapply_mouse_volatile_in_background(
                 );
                 return;
             }
+            let turn = transport_turns.turn_for(&route);
             if let Some(change) = wheel {
-                let result = tokio::time::timeout(WRITE_TIMEOUT, change.apply_on(&shared)).await;
+                let result = after_transport_turn(&turn, async {
+                    tokio::time::timeout(WRITE_TIMEOUT, change.apply_on(&shared)).await
+                })
+                .await;
                 log_wheel_result(index, change, result);
             }
             if let Some(dpi) = dpi {
-                let result = tokio::time::timeout(WRITE_TIMEOUT, async {
-                    openlogi_hid::set_dpi_on(&shared, dpi).await
+                let result = after_transport_turn(&turn, async {
+                    tokio::time::timeout(WRITE_TIMEOUT, openlogi_hid::set_dpi_on(&shared, dpi))
+                        .await
                 })
                 .await;
                 log_outcome(index, "DPI write", result, |()| {
@@ -739,6 +867,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
             if let Some((rate, ticket)) = report_rate {
                 let result = within_turn(
                     &ticket,
+                    &turn,
                     || async {
                         openlogi_hid::set_report_rate_on(&shared, rate)
                             .await
@@ -756,8 +885,12 @@ pub(crate) fn reapply_mouse_volatile_in_background(
                 });
             }
             if let Some(ss) = smartshift {
-                let result = tokio::time::timeout(WRITE_TIMEOUT, async {
-                    openlogi_hid::set_smartshift_on(&shared, ss).await
+                let result = after_transport_turn(&turn, async {
+                    tokio::time::timeout(
+                        WRITE_TIMEOUT,
+                        openlogi_hid::set_smartshift_on(&shared, ss),
+                    )
+                    .await
                 })
                 .await;
                 log_outcome(index, "SmartShift write", result, |()| {
@@ -933,6 +1066,7 @@ mod tests {
             registry: registry.clone(),
             receiver_access: receiver_access.clone(),
             device_io: device_io.clone(),
+            transport_turns: TransportTurns::default(),
         }
         .op(route)
     }
@@ -1148,9 +1282,12 @@ mod tests {
         let route = unresolvable_route();
         let stalled = rates.request(&route);
         let (started, has_started) = tokio::sync::oneshot::channel();
+        let transport = TransportTurns::default().turn_for(&route);
+        let stalled_transport = Arc::clone(&transport);
         let reapply = tokio::spawn(async move {
             within_turn(
                 &stalled,
+                &stalled_transport,
                 || async move {
                     let _ = started.send(());
                     std::future::pending::<()>().await;
@@ -1164,6 +1301,7 @@ mod tests {
         let pick = rates.request(&route);
         let picked = within_turn(
             &pick,
+            &transport,
             || async {
                 tokio::time::sleep(WRITE_TIMEOUT / 2).await;
                 2000
@@ -1177,6 +1315,93 @@ mod tests {
             reapply.await.expect("reapply joins").is_err(),
             "the stalled write gave up at its own deadline"
         );
+    }
+
+    /// A reply-confirmed SmartShift or DPI write checks the device's echo inside
+    /// the same response budget as the request. Slots on one receiver share a
+    /// writer, so a confirmed write queued behind the other slot must not spend
+    /// that budget while it waits, and must still have the whole budget — long
+    /// enough to send and confirm — once the writer is free. Another transport
+    /// is not queued behind that receiver.
+    #[tokio::test(start_paused = true)]
+    async fn queued_reply_confirmed_write_keeps_its_whole_response_budget() {
+        let turns = TransportTurns::default();
+        let blocking = turns.turn_for(&DeviceRoute::Bolt {
+            receiver_uid: "receiver".into(),
+            slot: 1,
+        });
+        let held = blocking.lock().await;
+
+        let started = Arc::new(AtomicBool::new(false));
+        let write_started = Arc::clone(&started);
+        let queued_turns = turns.clone();
+        let queued = tokio::spawn(async move {
+            let turn = queued_turns.turn_for(&DeviceRoute::Bolt {
+                receiver_uid: "receiver".into(),
+                slot: 2,
+            });
+            after_transport_turn(&turn, async move {
+                tokio::time::timeout(WRITE_TIMEOUT, async move {
+                    write_started.store(true, Ordering::SeqCst);
+                    tokio::time::sleep(
+                        WRITE_TIMEOUT
+                            .checked_sub(Duration::from_millis(1))
+                            .expect("response budget is longer than one millisecond"),
+                    )
+                    .await;
+                    Ok::<(), WriteError>(())
+                })
+                .await
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(WRITE_TIMEOUT + Duration::from_millis(1)).await;
+        assert!(
+            !queued.is_finished(),
+            "queue time must not consume the reply-confirmed response budget"
+        );
+        assert!(
+            !started.load(Ordering::SeqCst),
+            "the write and its echo check wait until the transport is free"
+        );
+
+        let direct = after_transport_turn(
+            &turns.turn_for(&DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb034,
+            }),
+            async { true },
+        )
+        .await;
+        assert!(
+            direct,
+            "a different transport is not queued behind the receiver"
+        );
+
+        drop(held);
+        for _ in 0..8 {
+            if started.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            started.load(Ordering::SeqCst),
+            "the confirmed write starts once its transport turn is held"
+        );
+        tokio::time::advance(
+            WRITE_TIMEOUT
+                .checked_sub(Duration::from_millis(1))
+                .expect("response budget is longer than one millisecond"),
+        )
+        .await;
+
+        queued
+            .await
+            .expect("confirmed write must not panic")
+            .expect("queue wait must not spend the response budget")
+            .expect("the echo check still fits in the budget that started after the queue");
     }
 
     /// The timeout every [`DeviceOp::run`] call relies on: a write that never
