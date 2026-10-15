@@ -289,6 +289,9 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     if device.invert_scroll != legacy.invert_scroll && legacy.invert_scroll {
         link.overrides.invert_scroll = Some(legacy.invert_scroll);
     }
+    // `smooth_wheel` is a bare opt-in with no per-link slot: for the same
+    // reason only a legacy `true` is evidence of a choice, so it carries over.
+    device.smooth_wheel |= legacy.smooth_wheel;
 
     // Scalar values with no per-link override slot: take the legacy value
     // when the canonical side is unset. A genuine disagreement keeps the

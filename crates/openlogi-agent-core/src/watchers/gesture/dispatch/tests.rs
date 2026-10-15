@@ -105,3 +105,41 @@ fn an_inverted_wheel_inverts_its_held_scroll() {
     assert!((horizontal(held_wheel_scroll(1, NonZeroU8::MIN, true)) - 1.0).abs() < f64::EPSILON);
     assert!((horizontal(held_wheel_scroll(-8, per_notch(8), true)) + 1.0).abs() < f64::EPSILON);
 }
+
+fn vertical(delta: ScrollDelta) -> f64 {
+    assert!(
+        delta.x().abs() < f64::EPSILON,
+        "a diverted main wheel never scrolls sideways"
+    );
+    delta.y()
+}
+
+/// A diverted main wheel turned away from the user scrolls up, as the native
+/// wheel does with neither OpenLogi's inversion nor natural scrolling on, and
+/// a high-resolution report moves its share of a notch.
+#[test]
+fn a_diverted_main_wheel_scrolls_up_away_from_the_user() {
+    let away = main_wheel_scroll(1, NonZeroU8::MIN, false, false);
+    assert!((vertical(away) - 1.0).abs() < f64::EPSILON);
+    let toward = main_wheel_scroll(-12, per_notch(8), false, false);
+    assert!((vertical(toward) + 1.5).abs() < f64::EPSILON);
+}
+
+/// macOS reverses the wheel's own events for natural scrolling but not the
+/// ones OpenLogi posts in their place, and the wheel's invert bit is off
+/// while diverted: each reverses the scroll once, and both together cancel.
+#[test]
+fn inversion_and_natural_scrolling_each_reverse_a_diverted_main_wheel() {
+    for (inverted, natural, expected) in [
+        (false, false, 2.0),
+        (true, false, -2.0),
+        (false, true, -2.0),
+        (true, true, 2.0),
+    ] {
+        let scroll = main_wheel_scroll(16, per_notch(8), inverted, natural);
+        assert!(
+            (vertical(scroll) - expected).abs() < f64::EPSILON,
+            "inverted {inverted}, natural {natural}"
+        );
+    }
+}

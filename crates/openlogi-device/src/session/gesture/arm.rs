@@ -6,16 +6,18 @@ use std::num::NonZeroU8;
 use std::sync::Arc;
 
 use hidpp::feature::{CreatableFeature as _, hires_wheel::HiResWheelFeature};
+use hidpp::protocol::v20::Hidpp20Error;
 use hidpp::{channel::HidppChannel, device::Device};
 use openlogi_core::binding::ButtonId;
 use tracing::{debug, warn};
 
+use super::main_wheel::{self, ArmedMainWheel, MainWheelDivert};
 use super::{CaptureSpec, CapturedInput};
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::open_device;
 use crate::session::capture_restore::{
-    ArmedReporting, CaptureError, CaptureSessionFailure, PendingCaptureRestore, PointerDivert,
-    ReprogRestore, ThumbwheelRestore,
+    ArmedReporting, CaptureError, CaptureSessionFailure, HiResWheelRestore, PendingCaptureRestore,
+    PointerDivert, ReprogRestore, ThumbwheelRestore,
 };
 use crate::session::restore::rollback_start;
 use crate::thumbwheel::{
@@ -53,6 +55,8 @@ pub(super) struct ArmedControls {
     /// `0x2150` accessor and the information read while diverting it, present
     /// when the thumb wheel is diverted.
     pub(super) thumb: Option<ArmedThumbwheel>,
+    /// `0x2121` main wheel, present when its movement reports are diverted.
+    pub(super) main_wheel: Option<ArmedMainWheel>,
 }
 
 pub(super) struct ArmedThumbwheel {
@@ -97,11 +101,19 @@ impl ArmedControls {
             reprog,
             reporting,
             thumb,
+            main_wheel,
             ..
         } = self;
         let reprog =
             reprog.and_then(|controls| ReprogRestore::new(controls.feature_index(), reporting));
-        PendingCaptureRestore::new(retired, reprog, thumb.as_ref().map(|thumb| thumb.restore))
+        PendingCaptureRestore::new(
+            retired,
+            reprog,
+            thumb.as_ref().map(|thumb| thumb.restore),
+            main_wheel
+                .as_ref()
+                .map(|wheel| HiResWheelRestore::new(wheel.feature_index)),
+        )
     }
 
     /// Reapply volatile diversion after a wireless reconnect broadcast.
@@ -124,6 +136,11 @@ impl ArmedControls {
             && let Err(error) = thumb.wheel.divert(thumb.direction()).await
         {
             warn!(?error, "thumb-wheel re-divert after wake failed");
+        }
+        if let Some(wheel) = self.main_wheel.as_ref()
+            && let Err(error) = wheel.divert().await
+        {
+            warn!(?error, "main-wheel re-divert after wake failed");
         }
     }
 }
@@ -156,6 +173,7 @@ pub(super) async fn arm_controls(
         && armed.button_cids.is_empty()
         && armed.wheel_button_cids.is_empty()
         && armed.thumb.is_none()
+        && armed.main_wheel.is_none()
     {
         debug!(slot, "no capturable controls — idle session");
     }
@@ -281,7 +299,52 @@ pub(super) async fn arm_controls_into(
             thumb.wheel.divert(thumb.direction()).await?;
         }
     }
+
+    if let Some(requested) = spec.divert_main_wheel
+        && let Some(info) = device.root().get_feature(HiResWheelFeature::ID).await?
+    {
+        arm_main_wheel(chan, slot, info.index, requested, armed).await?;
+    }
     Ok(())
+}
+
+/// Divert the main wheel for smooth scrolling.
+///
+/// A wheel that refuses — a feature error, or an echo showing another mode —
+/// is handed back to native reporting and the rest of the session arms
+/// anyway, so only smoothing is lost rather than every capture on the
+/// device. A transport failure still fails arming, which rolls the wheel
+/// back with everything else.
+async fn arm_main_wheel(
+    chan: &Arc<HidppChannel>,
+    slot: u8,
+    feature_index: u8,
+    requested: MainWheelDivert,
+    armed: &mut ArmedControls,
+) -> Result<(), CaptureError> {
+    let wheel = match ArmedMainWheel::open(chan, slot, feature_index, requested).await {
+        Ok(wheel) => wheel,
+        Err(error @ Hidpp20Error::Channel(_)) => return Err(error.into()),
+        Err(error) => {
+            warn!(?error, "main wheel unreadable — left native");
+            return Ok(());
+        }
+    };
+    // Same ownership rule as the thumb wheel: recorded before the write,
+    // which a transport error leaves uncertain.
+    let wheel = armed.main_wheel.insert(wheel);
+    match wheel.divert().await {
+        Ok(()) => Ok(()),
+        Err(error @ Hidpp20Error::Channel(_)) => Err(error.into()),
+        Err(error) => {
+            // A refused write may still have moved the target, and an echo
+            // mismatch says it did something else: hand the wheel back.
+            warn!(?error, "main wheel refused the divert — handing it back");
+            main_wheel::undivert(&wheel.feature).await?;
+            armed.main_wheel = None;
+            Ok(())
+        }
+    }
 }
 
 async fn arm_reprog_control(

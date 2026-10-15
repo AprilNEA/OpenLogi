@@ -54,9 +54,9 @@ use devices::reapply_targets;
 use devices::{
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
     any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_report_rate,
-    configured_wheel_mode, held_wheel_inverted, host_switch_links, is_hidpp_device,
-    keeps_os_layout, newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply,
-    settings_moved, stable_id,
+    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
+    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply, settings_moved,
+    stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -757,7 +757,9 @@ impl Orchestrator {
                 self.os_mouse_hook_available,
             );
             plan.dispatch.pointer_target = pointer_target;
-            plan.dispatch.invert_held_wheel = held_wheel_inverted(&self.config, dev);
+            plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
+            plan.target.spec.divert_main_wheel =
+                main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
             if let Some(keyboard) = keyboard
                 .as_ref()
                 .filter(|keyboard| keyboard.route == plan.target.route)
@@ -934,7 +936,7 @@ impl Orchestrator {
         let route_key = stable_id(dev).route_key();
         let device = self.config.devices.get(key.as_str());
         let settings = VolatileMouseSettings {
-            wheel: configured_wheel_mode(&self.config, dev),
+            wheel: self.wheel_mode_change(dev),
             dpi: device.and_then(|d| d.effective_dpi(&route_key)),
             report_rate: configured_report_rate(&self.config, dev),
             smartshift: device
@@ -1061,7 +1063,7 @@ impl Orchestrator {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            let Some(change) = configured_wheel_mode(&self.config, dev) else {
+            let Some(change) = self.wheel_mode_change(dev) else {
                 debug!("no configured wheel mode fields — write skipped");
                 continue;
             };
@@ -1070,6 +1072,15 @@ impl Orchestrator {
                 change,
             );
         }
+    }
+
+    /// The native wheel mode the agent's own writes (the reconnect re-apply
+    /// and the reload push) give `dev`, or `None` for no write. That includes
+    /// a wheel its capture session diverts: the session writes the same
+    /// fields with its divert, and a write here would select native
+    /// reporting under it.
+    fn wheel_mode_change(&self, dev: &AgentDevice) -> Option<crate::hardware::WheelModeChange> {
+        configured_wheel_mode(&self.config, dev, self.os_mouse_hook_available)
     }
 
     /// The latest inventory snapshot (for the IPC `inventory()` poll). Empty

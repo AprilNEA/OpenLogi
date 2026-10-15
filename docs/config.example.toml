@@ -29,6 +29,8 @@ dpi_presets = [800, 1600, 3200]
 thumbwheel_sensitivity = 20
 invert_scroll = false
 scroll_resolution = "high"
+# Ease this mouse's main wheel in software (needs Accessibility on macOS).
+smooth_wheel = true
 
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"

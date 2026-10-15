@@ -228,6 +228,15 @@ impl InputDispatcher {
                 delta,
                 per_notch,
             } => self.dispatch_held_wheel(session, plan, button, delta, per_notch),
+            CapturedInput::MainWheel { delta, per_notch } => self.outputs.post_main_wheel_scroll(
+                session,
+                main_wheel_scroll(
+                    delta,
+                    per_notch,
+                    plan.invert_wheel,
+                    openlogi_inject::natural_scrolling(),
+                ),
+            ),
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
@@ -261,7 +270,7 @@ impl InputDispatcher {
         match binding.wheel() {
             HeldWheel::HorizontalScroll => self.outputs.post_scroll(
                 session,
-                held_wheel_scroll(delta, per_notch, plan.invert_held_wheel),
+                held_wheel_scroll(delta, per_notch, plan.invert_wheel),
             ),
         }
     }
@@ -311,6 +320,27 @@ fn held_wheel_scroll(delta: i16, per_notch: NonZeroU8, inverted: bool) -> Scroll
     let notches = f64::from(delta) / f64::from(per_notch.get());
     let rightward = if inverted { notches } else { -notches };
     ScrollDelta::wheel_ticks(rightward, 0.0)
+}
+
+/// The scroll a diverted main wheel's movement stands for: `delta` units
+/// away from the user scroll up by `delta / per_notch` notches, as the wheel
+/// does natively. It is reversed for the device's inversion, which the
+/// wheel's native invert bit no longer applies while diverted, and for the
+/// OS's natural scrolling, which macOS applies to the wheel's own events but
+/// not to synthesised ones; both on cancel out.
+fn main_wheel_scroll(
+    delta: i16,
+    per_notch: NonZeroU8,
+    inverted: bool,
+    natural: bool,
+) -> ScrollDelta {
+    let notches = f64::from(delta) / f64::from(per_notch.get());
+    let upward = if inverted == natural {
+        notches
+    } else {
+        -notches
+    };
+    ScrollDelta::wheel_ticks(0.0, upward)
 }
 
 #[cfg(test)]

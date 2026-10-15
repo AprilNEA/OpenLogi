@@ -66,7 +66,46 @@ fn published_plans_carry_the_held_wheel_inversion_of_the_link() {
         .plans()
         .first()
         .expect("the online device is planned");
-    assert!(plan.dispatch.invert_held_wheel);
+    assert!(plan.dispatch.invert_wheel);
+}
+
+/// A smooth-wheel device's published plan asks its session to divert the
+/// wheel once the hook may post the scrolling, and leaves it native again
+/// when the hook goes away.
+#[test]
+fn published_plans_divert_the_main_wheel_only_while_the_hook_runs() {
+    let mut config = Config::default();
+    config.set_smooth_wheel("a", true);
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        hires_wheel: true,
+        ..Capabilities::default()
+    });
+    let mut orch = orchestrator(config);
+    orch.devices = vec![device];
+    let main_wheel = |orch: &Orchestrator| {
+        orch.shared
+            .capture_plans
+            .borrow()
+            .plans()
+            .first()
+            .expect("the online device is planned")
+            .target
+            .spec
+            .divert_main_wheel
+    };
+    orch.set_os_mouse_hook_available(true);
+    orch.rebuild();
+    assert_eq!(
+        main_wheel(&orch),
+        Some(openlogi_hid::session::gesture::MainWheelDivert {
+            resolution: None,
+            inverted: None,
+        })
+    );
+    orch.set_os_mouse_hook_available(false);
+    orch.rebuild();
+    assert_eq!(main_wheel(&orch), None);
 }
 
 #[test]

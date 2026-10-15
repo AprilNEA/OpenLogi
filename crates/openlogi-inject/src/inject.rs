@@ -506,6 +506,27 @@ fn quantize_axis(residual: &mut f64, input: f64, units_per_input: f64) -> i32 {
     output
 }
 
+/// Whether the OS reverses the scrolling a mouse wheel produces — macOS's
+/// "Natural scrolling", on by default — read fresh on every call because the
+/// user can change it while the agent runs.
+///
+/// The OS applies it to wheel events from a device, but not to the events
+/// [`post_scroll`] and [`post_smooth_scroll`] synthesise. A caller posting in
+/// place of a diverted wheel flips its own distance with this. `false` on
+/// Windows and Linux, which apply no such reversal to a mouse wheel's
+/// events here.
+#[must_use]
+pub fn natural_scrolling() -> bool {
+    cfg_select! {
+        target_os = "macos" => {
+            objc2::rc::autoreleasepool(|_| macos::natural_scrolling())
+        }
+        _ => {
+            false
+        }
+    }
+}
+
 /// Synthesise a typed scroll distance at the current focus.
 ///
 /// Fractional wheel ticks are retained until the platform can represent them,

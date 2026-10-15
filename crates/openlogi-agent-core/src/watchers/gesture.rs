@@ -84,6 +84,14 @@ impl GestureOutputs {
             openlogi_inject::post_scroll(delta);
         }
     }
+
+    /// Post a diverted main wheel's scroll, eased by the scroll runtime.
+    fn post_main_wheel_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {
+        if !self.scroll.try_hidpp_wheel_scroll(session, delta) {
+            // As for `post_scroll`: the wheel no longer scrolls by itself.
+            openlogi_inject::post_scroll(delta);
+        }
+    }
 }
 
 /// Spawn the capture-manager thread. It owns a current-thread tokio runtime that

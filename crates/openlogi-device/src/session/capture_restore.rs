@@ -7,9 +7,12 @@ use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, RwLock};
 
+use hidpp::feature::CreatableFeature as _;
+use hidpp::feature::hires_wheel::HiResWheelFeature;
 use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
+use super::gesture::main_wheel;
 use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
 use crate::reprog_controls::{self, ReprogControlsV4};
@@ -174,6 +177,21 @@ impl ThumbwheelRestore {
     }
 }
 
+/// The main wheel a capture session diverted over `0x2121`. Teardown always
+/// selects native reporting, like a `0x1b04` control found diverted before
+/// arming: a diverted wheel then is left over from a session that never tore
+/// down, and handing it back keeps the wheel scrolling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HiResWheelRestore {
+    feature_index: u8,
+}
+
+impl HiResWheelRestore {
+    pub(crate) fn new(feature_index: u8) -> Self {
+        Self { feature_index }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CaptureStop {
     /// The owner deliberately requested teardown.
@@ -186,12 +204,13 @@ pub(crate) enum CaptureStop {
 }
 
 /// What a capture session writes to hand its controls back: every diverted
-/// `0x1b04` control's reporting, and the thumb wheel's.
+/// `0x1b04` control's reporting, the thumb wheel's, and the main wheel's.
 ///
 /// One untimed attempt per control; a failed one leaves the whole plan owed.
 pub struct CaptureRestorePlan {
     reprog: Option<ReprogRestore>,
     thumb: Option<ThumbwheelRestore>,
+    main_wheel: Option<HiResWheelRestore>,
 }
 
 impl fmt::Debug for CaptureRestorePlan {
@@ -205,6 +224,7 @@ impl fmt::Debug for CaptureRestorePlan {
                     .map_or(0, |reprog| reprog.controls.len()),
             )
             .field("has_thumbwheel", &self.thumb.is_some())
+            .field("has_main_wheel", &self.main_wheel.is_some())
             .finish()
     }
 }
@@ -220,6 +240,11 @@ impl RestorePlan for CaptureRestorePlan {
             for &reporting in &reprog.controls {
                 restored &= restore_reporting(&controls, reporting, "captured control").await;
             }
+        }
+        if let Some(wheel) = self.main_wheel {
+            let feature =
+                HiResWheelFeature::new(channel.clone(), device_index, wheel.feature_index);
+            restored &= restore_result(main_wheel::undivert(&feature).await, "main wheel");
         }
         if let Some(thumb) = self.thumb {
             let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
@@ -252,21 +277,30 @@ impl PendingCaptureRestore {
             CaptureRestorePlan {
                 reprog: None,
                 thumb: None,
+                main_wheel: None,
             },
         )
     }
 
-    /// The restore owed for `reprog` and the thumb wheel, or `None` when the
+    /// The restore owed for `reprog` and the two wheels, or `None` when the
     /// session diverted nothing.
     pub(crate) fn new(
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
         thumb: Option<ThumbwheelRestore>,
+        main_wheel: Option<HiResWheelRestore>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb.is_none() {
+        if reprog.is_none() && thumb.is_none() && main_wheel.is_none() {
             return None;
         }
-        Some(Self::owing(retired, CaptureRestorePlan { reprog, thumb }))
+        Some(Self::owing(
+            retired,
+            CaptureRestorePlan {
+                reprog,
+                thumb,
+                main_wheel,
+            },
+        ))
     }
 }
 

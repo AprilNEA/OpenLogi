@@ -175,6 +175,7 @@ async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
             )],
         ),
         None,
+        None,
     )
     .expect("one diverted control should require restoration");
 
@@ -222,6 +223,7 @@ fn diverted_gesture(
                 PointerDivert::RawXy,
             )],
         ),
+        None,
         None,
     )
     .expect("one diverted control should require restoration")
@@ -417,6 +419,7 @@ async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
             )],
         ),
         None,
+        None,
     )
     .expect("one diverted control should require restoration");
 
@@ -479,6 +482,7 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
                 PointerDivert::RawXy,
             )],
         ),
+        None,
         None,
     );
 

@@ -19,17 +19,22 @@
 //! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas — the wheel
 //! is therefore only diverted when the user's thumbwheel config leaves its
 //! defaults (click bound, rotation rebound, or sensitivity changed).
+//! The main wheel (`0x2121`) is diverted the same way, but only when the
+//! device's smooth-wheel switch asks for it: the GUI then posts eased scrolling
+//! from the [`CapturedInput::MainWheel`] reports (`main_wheel`).
 
 mod accum;
 mod arm;
+pub(super) mod main_wheel;
 
 use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::protocol::v20;
 use openlogi_core::binding::{ButtonId, GestureDirection};
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::SharedChannel;
 use crate::channel::route::DeviceRoute;
@@ -39,6 +44,7 @@ use super::capture::{ArmedCapture, Liveness, run_capture};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
+pub use main_wheel::MainWheelDivert;
 
 pub use super::capture_restore::{
     CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome,
@@ -89,6 +95,16 @@ pub enum CapturedInput {
     HeldWheel {
         /// The held button the movement belongs to.
         button: ButtonId,
+        /// Wheel movement; positive is away from the user.
+        delta: i16,
+        /// Units of `delta` per wheel notch: 1 for a low-resolution report,
+        /// the wheel's `0x2121` multiplier for a high-resolution one.
+        per_notch: NonZeroU8,
+    },
+    /// Main-wheel movement the firmware reports over `0x2121` instead of
+    /// scrolling, while the session diverts the wheel so the agent can post
+    /// smoothed scrolling for it.
+    MainWheel {
         /// Wheel movement; positive is away from the user.
         delta: i16,
         /// Units of `delta` per wheel notch: 1 for a low-resolution report,
@@ -167,6 +183,10 @@ pub struct CaptureSpec {
     /// agent while the button is held; any other divertable control is
     /// diverted as a plain press, so its click still works.
     pub divert_wheel_buttons: Vec<(u16, ButtonId)>,
+    /// Divert the main wheel's movement reports over `0x2121`, writing this
+    /// mode along with the divert; `None` leaves the wheel native. Inert on a
+    /// device without the feature.
+    pub divert_main_wheel: Option<MainWheelDivert>,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
@@ -238,6 +258,7 @@ impl ArmedCapture for GestureCapture {
             buttons = armed.button_cids.len(),
             wheel_buttons = armed.wheel_button_cids.len(),
             thumbwheel = armed.thumb.is_some(),
+            main_wheel = armed.main_wheel.is_some(),
             wake_rearm,
             "control capture active"
         );
@@ -273,6 +294,10 @@ impl ArmedCapture for GestureCapture {
             .collect();
         let wheel_set = armed.wheel_button_cids.clone();
         let hires_per_notch = armed.hires_per_notch;
+        let main_wheel = armed
+            .main_wheel
+            .as_ref()
+            .map(|wheel| (wheel.feature_index, wheel.per_notch));
         move |msg| {
             if let Some(idx) = reprog_index
                 && let Some(event) = reprog_controls::decode_event(msg, device_index, idx)
@@ -307,6 +332,16 @@ impl ArmedCapture for GestureCapture {
                     event.rotation_status,
                 );
                 if let Some(input) = thumbwheel_input(event, previous, thumb_resolution) {
+                    let _ = sink.send(input);
+                }
+                return;
+            }
+            if let Some((idx, per_notch)) = main_wheel
+                && let Some(event) = hires_wheel::decode_event(msg, device_index, idx)
+            {
+                if let HiResWheelEvent::RatchetSwitch(state) = event {
+                    debug!(index = device_index, ?state, "wheel ratchet switched");
+                } else if let Some(input) = main_wheel::movement_input(event, per_notch) {
                     let _ = sink.send(input);
                 }
             }

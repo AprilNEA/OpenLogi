@@ -96,6 +96,11 @@ enum ScrollOutputMode {
     Phased {
         at: Instant,
     },
+    /// Eased whatever the app-wide smoothing setting: a diverted main wheel,
+    /// whose own per-device switch asked for smoothing by diverting it.
+    Eased {
+        at: Instant,
+    },
     Direct,
 }
 
@@ -130,6 +135,7 @@ impl ScrollInput {
     /// recognizers need.
     fn output_under(&self, smoothing: bool) -> ScrollOutputMode {
         match (self.output, &self.source) {
+            (ScrollOutputMode::Eased { at }, _) => ScrollOutputMode::Eased { at },
             (
                 ScrollOutputMode::Smooth { at } | ScrollOutputMode::Phased { at },
                 ScrollSource::Hidpp(_),
@@ -279,6 +285,36 @@ impl ScrollInputHandle {
             return false;
         };
         self.try_enqueue(ScrollSource::Hidpp(session.clone()), impulse, output)
+    }
+
+    /// Queue one diverted main-wheel impulse from an active HID++ session.
+    ///
+    /// Always eased, whatever the app-wide smoothing setting says: the
+    /// device's own smooth-wheel switch is what diverted the wheel. The
+    /// vertical distance is scaled by the main-wheel sensitivity, as the hook
+    /// scales a native wheel. A rejection tells the already-diverted caller
+    /// to inject the distance directly.
+    #[must_use]
+    pub(crate) fn try_hidpp_wheel_scroll(
+        &self,
+        session: &HidppSessionId,
+        delta: ScrollDelta,
+    ) -> bool {
+        if !self.accepting.load(Ordering::Acquire) {
+            return false;
+        }
+        let Ok(impulse) = WheelDelta::try_from(delta) else {
+            return false;
+        };
+        let multiplier = self.preferences.vertical_sensitivity().scroll_multiplier();
+        let Some(scaled) = impulse.with_vertical_scale(multiplier) else {
+            return false;
+        };
+        self.try_enqueue(
+            ScrollSource::Hidpp(session.clone()),
+            scaled,
+            ScrollOutputMode::Eased { at: Instant::now() },
+        )
     }
 
     fn try_enqueue(
@@ -518,7 +554,7 @@ fn run_worker(
         match command {
             Ok(ScrollCommand::Input(input)) if cancellations.accepts(&input) => {
                 match input.output_under(smoothing) {
-                    ScrollOutputMode::Smooth { at } => {
+                    ScrollOutputMode::Smooth { at } | ScrollOutputMode::Eased { at } => {
                         engine.impulse(input.source, input.impulse, at, emit_smooth);
                     }
                     ScrollOutputMode::Phased { at } => {
@@ -657,6 +693,42 @@ mod tests {
         let queued = queued_input(&receiver);
         assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 0.0 });
         assert!(matches!(queued.output, ScrollOutputMode::Phased { .. }));
+    }
+
+    /// The device's own switch diverted the wheel to ease it, so its input
+    /// eases and takes the main-wheel sensitivity under either app-wide
+    /// smoothing setting, at submission and after a toggle while queued.
+    #[test]
+    fn a_diverted_main_wheel_is_eased_and_scaled_whatever_the_app_setting() {
+        for smoothing in [false, true] {
+            let (input, receiver, _controls) = standalone_input(1, preferences(smoothing, 7));
+            let session = HidppSessionId::with_epoch("mouse-a", 7);
+            assert!(input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0)));
+            let queued = queued_input(&receiver);
+            assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 1.0 });
+            for dequeued_under in [false, true] {
+                assert!(
+                    matches!(
+                        queued.output_under(dequeued_under),
+                        ScrollOutputMode::Eased { .. }
+                    ),
+                    "queued with smoothing {smoothing}, dequeued with {dequeued_under}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_diverted_main_wheel_rejects_what_it_cannot_ease() {
+        let (input, _receiver, _controls) = standalone_input(2, preferences(true, 7));
+        let session = HidppSessionId::with_epoch("mouse-a", 7);
+        assert!(!input.try_hidpp_wheel_scroll(&session, ScrollDelta::pixels(0.0, 1.0)));
+        assert!(!input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 0.0)));
+        input.accepting.store(false, Ordering::Release);
+        assert!(
+            !input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
+            "a stopped runtime leaves the caller to inject the distance itself"
+        );
     }
 
     #[test]

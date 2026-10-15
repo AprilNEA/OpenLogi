@@ -57,9 +57,10 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// before consuming the rest of the file.
 ///
 /// v8 adds `{ click = ..., wheel = "HorizontalScroll" }` wheel-hold button
-/// bindings. Nothing older needs migrating; the bump makes a v7 build refuse
-/// a file that may hold one at the version check, instead of failing on the
-/// binding shape.
+/// bindings and the per-device `smooth_wheel` switch. Nothing older needs
+/// migrating; the bump makes a v7 build refuse a file that may hold either at
+/// the version check, instead of failing on the binding shape or the unknown
+/// device field.
 ///
 /// v7 aligns the thumb-wheel scroll defaults with its normalised physical
 /// direction. Pre-v7 explicit default pairs are migrated in device and

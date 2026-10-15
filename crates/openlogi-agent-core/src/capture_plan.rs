@@ -65,12 +65,14 @@ pub struct DispatchPlan {
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
-    /// Whether this device's wheel scrolls inverted, so a wheel-hold button's
-    /// horizontal scroll follows it as Logi Options+ does. Read from the
+    /// Whether this device's wheel scrolls inverted, so the scrolling the
+    /// agent posts for it — a wheel-hold button's horizontal scroll, and the
+    /// diverted smooth wheel, whose native invert bit has no effect — follows
+    /// it as Logi Options+ does. Read from the
     /// inversion source the main wheel uses on the device's current link,
     /// which [`plan_for_device`] cannot see: the orchestrator fills it in,
     /// as it does [`Self::pointer_target`].
-    pub invert_held_wheel: bool,
+    pub invert_wheel: bool,
     /// Pointer identity used to select these mouse bindings; absent for the
     /// explicitly focused policy and keyboard input.
     pub pointer_target: Option<openlogi_hook::PointerTarget>,
@@ -304,6 +306,9 @@ pub fn plan_for_device(
                 divert_gesture_buttons,
                 divert_buttons,
                 divert_wheel_buttons,
+                // Needs the device's wheel capabilities and the settings of
+                // its current link, so the orchestrator fills it in.
+                divert_main_wheel: None,
             },
             rearm_generation,
         },
@@ -313,7 +318,7 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
-            invert_held_wheel: false,
+            invert_wheel: false,
             pointer_target: None,
         },
     }

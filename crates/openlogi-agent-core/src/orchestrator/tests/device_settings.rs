@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use openlogi_hid::reprog_controls::BACK_CIDS;
+use openlogi_hid::session::gesture::MainWheelDivert;
 
 use super::*;
 
@@ -15,14 +16,14 @@ fn held_wheel_inversion_follows_the_main_wheel_on_its_link() {
     config.set_invert_scroll("a", true);
     let mut device = dev("a", 1, true);
     assert!(
-        !held_wheel_inverted(&config, &device),
+        !wheel_inverted(&config, &device),
         "unknown capabilities invert nothing"
     );
     device.capabilities = Some(Capabilities {
         scroll_inversion: true,
         ..Capabilities::default()
     });
-    assert!(held_wheel_inverted(&config, &device));
+    assert!(wheel_inverted(&config, &device));
     let mut link = LinkConfig::default();
     link.overrides.invert_scroll = Some(false);
     config
@@ -32,7 +33,7 @@ fn held_wheel_inversion_follows_the_main_wheel_on_its_link() {
         .links
         .insert(stable_id(&device).route_key(), link);
     assert!(
-        !held_wheel_inverted(&config, &device),
+        !wheel_inverted(&config, &device),
         "the link's override is what the firmware is written"
     );
     device.capabilities = Some(Capabilities {
@@ -40,7 +41,7 @@ fn held_wheel_inversion_follows_the_main_wheel_on_its_link() {
         ..Capabilities::default()
     });
     assert!(
-        held_wheel_inverted(&config, &device),
+        wheel_inverted(&config, &device),
         "the hook reverses from the device-level setting"
     );
 }
@@ -58,7 +59,7 @@ fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
         ..Capabilities::default()
     });
     assert_eq!(
-        configured_wheel_mode(&config, &device),
+        configured_wheel_mode(&config, &device, true),
         Some(WheelModeChange::Resolution(ScrollResolution::Low))
     );
 
@@ -68,12 +69,101 @@ fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
         ..Capabilities::default()
     });
     assert_eq!(
-        configured_wheel_mode(&config, &device),
+        configured_wheel_mode(&config, &device, true),
         Some(WheelModeChange::Inversion(true))
     );
 
     device.capabilities = None;
-    assert_eq!(configured_wheel_mode(&config, &device), None);
+    assert_eq!(configured_wheel_mode(&config, &device, true), None);
+}
+
+/// Smooth scrolling diverts the wheel only with the device's opt-in, its
+/// `0x2121` wheel, the mouse hook and mouse capture. The divert carries the
+/// settings the re-apply would write, and the re-apply stands down while the
+/// session owns the wheel.
+#[test]
+fn the_main_wheel_is_diverted_only_with_every_gate_open() {
+    let mut config = Config::default();
+    config.set_scroll_resolution("a", Some(ScrollResolution::High));
+    config.set_invert_scroll("a", true);
+    config.set_smooth_wheel("a", true);
+    let wheel = Capabilities {
+        hires_wheel: true,
+        scroll_inversion: true,
+        ..Capabilities::default()
+    };
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(wheel);
+    assert_eq!(
+        main_wheel_divert(&config, &device, true),
+        Some(MainWheelDivert {
+            resolution: Some(ScrollResolution::High),
+            inverted: Some(true),
+        })
+    );
+    assert_eq!(
+        configured_wheel_mode(&config, &device, true),
+        None,
+        "the capture session writes the mode with its divert"
+    );
+
+    // Without the hook nothing may post the scrolling: the wheel stays
+    // native and the re-apply writes its mode as before.
+    assert_eq!(main_wheel_divert(&config, &device, false), None);
+    assert_eq!(
+        configured_wheel_mode(&config, &device, false),
+        Some(WheelModeChange::ResolutionAndInversion {
+            resolution: ScrollResolution::High,
+            inverted: true,
+        })
+    );
+
+    config.app_settings.capture_mouse_events = false;
+    assert_eq!(
+        main_wheel_divert(&config, &device, true),
+        None,
+        "capture off"
+    );
+    config.app_settings.capture_mouse_events = true;
+
+    config.set_device_enabled("a", false);
+    assert_eq!(main_wheel_divert(&config, &device, true), None, "disabled");
+    config.set_device_enabled("a", true);
+
+    device.capabilities = Some(Capabilities {
+        hires_wheel: false,
+        ..wheel
+    });
+    assert_eq!(main_wheel_divert(&config, &device, true), None, "no 0x2121");
+    device.capabilities = None;
+    assert_eq!(main_wheel_divert(&config, &device, true), None, "unknown");
+    device.capabilities = Some(wheel);
+
+    config.set_smooth_wheel("a", false);
+    assert_eq!(main_wheel_divert(&config, &device, true), None, "opted out");
+}
+
+/// The agent's own wheel-mode writes, the reconnect re-apply and the reload
+/// push, leave a smooth wheel to the session that diverts it, and write its
+/// mode again once the hook that posts its scrolling goes away.
+#[test]
+fn the_agent_writes_no_wheel_mode_under_a_diverting_session() {
+    let mut config = Config::default();
+    config.set_scroll_resolution("a", Some(ScrollResolution::High));
+    config.set_smooth_wheel("a", true);
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        hires_wheel: true,
+        ..Capabilities::default()
+    });
+    let mut orch = orchestrator(config);
+    orch.set_os_mouse_hook_available(true);
+    assert_eq!(orch.wheel_mode_change(&device), None);
+    orch.set_os_mouse_hook_available(false);
+    assert_eq!(
+        orch.wheel_mode_change(&device),
+        Some(WheelModeChange::Resolution(ScrollResolution::High))
+    );
 }
 
 #[test]
@@ -86,7 +176,7 @@ fn configured_wheel_mode_leaves_unset_resolution_unmanaged() {
         ..Capabilities::default()
     });
 
-    assert_eq!(configured_wheel_mode(&config, &device), None);
+    assert_eq!(configured_wheel_mode(&config, &device, true), None);
 }
 
 #[test]

@@ -83,6 +83,7 @@ use keyboard_layout::layout_key;
 use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
+pub(super) use spaces::natural_scrolling;
 use spaces::{next_desktop, previous_desktop};
 use symbolic_hotkey::{capture_region, screenshot};
 

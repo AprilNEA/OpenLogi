@@ -41,7 +41,7 @@ profiles so they keep their native direction.
 
 ## Shape
 
-`schema_version` is required and currently `7`. `selected_device` is an
+`schema_version` is required and currently `8`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -53,7 +53,8 @@ optional physical device key.
 - `smooth_scroll` toggles finite animation for traditional mouse-wheel input. With it
   off, a diverted horizontal thumb wheel still scrolls as a phased gesture (ended after
   120 ms idle) so apps that reveal content on horizontal swipes, like Messages, react;
-  vertical wheel output stays a plain wheel
+  vertical wheel output stays a plain wheel. A mouse whose `smooth_wheel` is on
+  eases its main wheel either way
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
   continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
@@ -85,6 +86,17 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
+- `smooth_wheel` for mice with a HID++ `0x2121` wheel: `true` smooths that
+  mouse's main wheel in software, as Logi Options+ "Smooth scrolling" does,
+  whatever `smooth_scroll` says. The agent switches the wheel to diverted
+  reporting and posts eased scrolling for each report, applying the mouse's
+  scroll inversion and `vertical_scroll_sensitivity`. It needs the input access
+  the mouse hook needs (Accessibility on macOS) and `capture_mouse_events` on;
+  without them the wheel stays native. The agent hands the wheel back to native
+  reporting when the switch goes off, the mouse is disabled, or the agent
+  exits. If the agent crashes first, the wheel does not scroll until the agent
+  runs again (the launch-at-login service restarts it) or the mouse reconnects,
+  which drops the diversion. Absent or `false` leaves the wheel native
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
