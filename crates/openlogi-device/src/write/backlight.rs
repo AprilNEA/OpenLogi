@@ -6,8 +6,9 @@ use hidpp::{
     feature::{
         CreatableFeature,
         backlight::{
-            BacklightConfig, BacklightFeature, BacklightInfo, BacklightMode as FirmwareMode,
-            BacklightOptions, BacklightStatus as FirmwareStatus, SetBacklightConfig,
+            BacklightConfig, BacklightEffect as FirmwareEffect, BacklightFeature, BacklightInfo,
+            BacklightMode as FirmwareMode, BacklightOptions, BacklightStatus as FirmwareStatus,
+            SetBacklightConfig,
         },
     },
 };
@@ -16,7 +17,8 @@ use tracing::debug;
 use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::backlight::{
-    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
+    BacklightChange, BacklightControls, BacklightEffect, BacklightMode, BacklightState,
+    BacklightStatus,
 };
 use crate::channel::route::DeviceRoute;
 
@@ -55,6 +57,45 @@ fn mode_to_firmware(mode: BacklightMode) -> FirmwareMode {
         BacklightMode::None => FirmwareMode::None,
         BacklightMode::Automatic | BacklightMode::TemporaryManual => FirmwareMode::Automatic,
         BacklightMode::PermanentManual => FirmwareMode::PermanentManual,
+    }
+}
+
+/// Map the fork's `0x1982` effect onto OpenLogi's [`BacklightEffect`].
+///
+/// Unlike [`mode_from_firmware`]/[`status_from_firmware`], this one is
+/// fallible rather than defaulting an unmodelled variant to a guess:
+/// `set_backlight_effect`'s read-back is compared against the *requested*
+/// effect to confirm the write applied, so silently collapsing an unknown
+/// future variant to [`BacklightEffect::Static`] could make that comparison
+/// report success for the wrong effect. Errors the same way an unrecognized
+/// wire byte already does one layer down (`get_backlight_info`'s own
+/// `TryFromPrimitive` decode).
+fn effect_from_firmware(effect: FirmwareEffect) -> Result<BacklightEffect, WriteError> {
+    match effect {
+        FirmwareEffect::Static => Ok(BacklightEffect::Static),
+        FirmwareEffect::None => Ok(BacklightEffect::None),
+        FirmwareEffect::Breathing => Ok(BacklightEffect::Breathing),
+        FirmwareEffect::Contrast => Ok(BacklightEffect::Contrast),
+        FirmwareEffect::Reaction => Ok(BacklightEffect::Reaction),
+        FirmwareEffect::Random => Ok(BacklightEffect::Random),
+        FirmwareEffect::Waves => Ok(BacklightEffect::Waves),
+        _ => Err(WriteError::UnsupportedResponse {
+            operation: HidppOperation::ReadBacklight,
+            feature_hex: BacklightFeature::ID,
+        }),
+    }
+}
+
+/// The inverse of [`effect_from_firmware`], used when writing a config back.
+fn effect_to_firmware(effect: BacklightEffect) -> FirmwareEffect {
+    match effect {
+        BacklightEffect::Static => FirmwareEffect::Static,
+        BacklightEffect::None => FirmwareEffect::None,
+        BacklightEffect::Breathing => FirmwareEffect::Breathing,
+        BacklightEffect::Contrast => FirmwareEffect::Contrast,
+        BacklightEffect::Reaction => FirmwareEffect::Reaction,
+        BacklightEffect::Random => FirmwareEffect::Random,
+        BacklightEffect::Waves => FirmwareEffect::Waves,
     }
 }
 
@@ -297,6 +338,71 @@ async fn update_backlight_on_channel(
         return Err(WriteError::BacklightNotApplied { change });
     }
     Ok(state_from(&config, &info, version))
+}
+
+/// Read the backlight effect currently running on `route`.
+///
+/// Not part of [`get_backlight`]'s [`BacklightState`] (see that type's own
+/// doc comment on why) — a separate `getBacklightInfo` round trip.
+///
+/// `FeatureUnsupported` when the device does not expose HID++ `0x1982`.
+pub async fn get_backlight_effect(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<BacklightEffect, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let (feature, _) = open_feature_with_version::<BacklightFeature>(&mut device).await?;
+        let (_, info) = read_raw(&feature).await?;
+        effect_from_firmware(info.effect)
+    })
+    .await
+}
+
+/// Set a predefined backlight effect on `route`, and return the read-back
+/// state. Persistent (`setBacklightConfig`, non-volatile) — survives
+/// reconnects, host switches, and power cycles, matching
+/// [`update_backlight`]. Every other field is written back as read, with the
+/// same [`BacklightMode::TemporaryManual`] caveat [`update_backlight`]
+/// documents.
+///
+/// `FeatureUnsupported` when the device does not expose HID++ `0x1982`.
+pub async fn set_backlight_effect(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    effect: BacklightEffect,
+) -> Result<BacklightState, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let (feature, version) = open_feature_with_version::<BacklightFeature>(&mut device).await?;
+        let (config, _) = read_raw(&feature).await?;
+        feature
+            .set_backlight_config(SetBacklightConfig {
+                enabled: config.enabled,
+                options: config.options,
+                mode: mode_to_firmware(mode_from_firmware(config.mode)),
+                effect: Some(effect_to_firmware(effect)),
+                current_level: config.current_level,
+                duration_hands_out: config.duration_hands_out,
+                duration_hands_in: config.duration_hands_in,
+                duration_powered: config.duration_powered,
+                duration_not_powered: config.duration_not_powered,
+            })
+            .await
+            .map_err(|e| {
+                classify_hidpp_error(e, HidppOperation::WriteBacklight, BacklightFeature::ID)
+            })?;
+        debug!(index, ?effect, "wrote backlight effect");
+        let (config, info) = read_raw(&feature).await?;
+        Ok(state_from(&config, &info, version))
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -668,6 +774,38 @@ mod tests {
     fn writable_modes_survive_the_read_write_round_trip() {
         for mode in [FirmwareMode::None, FirmwareMode::PermanentManual] {
             assert_eq!(mode_to_firmware(mode_from_firmware(mode)), mode);
+        }
+    }
+
+    #[test]
+    fn firmware_effects_round_trip_through_openlogi_effects() {
+        assert_eq!(
+            effect_from_firmware(FirmwareEffect::Breathing).expect("known effect"),
+            BacklightEffect::Breathing
+        );
+        assert_eq!(
+            effect_from_firmware(FirmwareEffect::Waves).expect("known effect"),
+            BacklightEffect::Waves
+        );
+        assert_eq!(
+            effect_from_firmware(FirmwareEffect::Static).expect("known effect"),
+            BacklightEffect::Static
+        );
+    }
+
+    #[test]
+    fn every_effect_survives_the_read_write_round_trip() {
+        for effect in [
+            FirmwareEffect::Static,
+            FirmwareEffect::None,
+            FirmwareEffect::Breathing,
+            FirmwareEffect::Contrast,
+            FirmwareEffect::Reaction,
+            FirmwareEffect::Random,
+            FirmwareEffect::Waves,
+        ] {
+            let mapped = effect_from_firmware(effect).expect("every known variant maps");
+            assert_eq!(effect_to_firmware(mapped), effect);
         }
     }
 
