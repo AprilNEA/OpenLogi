@@ -65,10 +65,13 @@ impl DeviceStore {
                 }
                 _ => None,
             };
-            self.sessions
-                .entry(record.device_key())
-                .or_default()
-                .last_connection = transport;
+            // An incomplete probe is not evidence of a connection-mode change.
+            if let Some(transport) = transport {
+                self.sessions
+                    .entry(record.device_key())
+                    .or_default()
+                    .last_connection = Some(transport);
+            }
         }
     }
 }
