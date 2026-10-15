@@ -911,3 +911,49 @@ fn reconnect_reset_preserves_gesture_timing_and_retires_old_edges() {
         );
     }
 }
+
+#[test]
+fn stale_return_travel_never_decides_the_next_held_gesture() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    for (stale_dx, stale_dy) in [(-2717, -105), (633, -1234)] {
+        handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy {
+                dx: stale_dx,
+                dy: stale_dy,
+            },
+            GESTURE,
+            &[],
+            &[],
+            &tx,
+        );
+        assert!(
+            next_gesture(&mut rx).is_err(),
+            "pre-press travel is discarded"
+        );
+        for dx in [115, 49, 76, 66] {
+            handle_reprog(
+                &mut acc,
+                RawControlEvent::RawXy { dx, dy: 2 },
+                GESTURE,
+                &[],
+                &[],
+                &tx,
+            );
+        }
+        assert_eq!(
+            next_gesture(&mut rx),
+            Ok(CapturedInput::Gesture(
+                ButtonId::GestureButton,
+                GestureDirection::Right
+            ))
+        );
+        handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+        assert!(
+            next_gesture(&mut rx).is_err(),
+            "recognized release has no click"
+        );
+    }
+}

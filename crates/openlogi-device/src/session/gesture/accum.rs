@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use openlogi_core::binding::{ButtonId, GestureDirection, GesturePolicy, SwipeAccumulator};
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use super::{CapturedInput, GESTURE_SOURCE_BUTTONS};
 use crate::reprog_controls::RawControlEvent;
@@ -32,9 +32,9 @@ enum HoldState {
         /// A second armed source is held alongside the holder. Overlap motion
         /// could belong to either control — dropped until the overlap ends.
         overlap: bool,
-        /// The hold's next raw-XY sample must be dropped: the haptic panel's
-        /// first sample after contact is an absolute position jump, not a
-        /// delta (see [`reprog_controls::HAPTIC_PANEL_CID`]).
+        /// A fresh hold's next raw-XY sample must be dropped: it can contain
+        /// sensor travel from before the press or a haptic-panel contact jump
+        /// (see [`crate::reprog_controls::HAPTIC_PANEL_CID`]).
         skip_first_raw_xy: bool,
     },
 }
@@ -68,7 +68,7 @@ pub(super) struct CaptureAccum {
     hold: HoldState,
     /// The armed gesture sources held in the last event, for edge detection:
     /// a source not previously held that becomes the holder is a fresh touch
-    /// (the haptic panel's first sample is then a contact jump to discard).
+    /// (its first raw-XY sample is stale and must be discarded).
     gestures_down: Vec<u16>,
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
@@ -195,8 +195,8 @@ impl CaptureAccum {
                         }
                         // ...and the first still-held source begins (or takes
                         // over) the hold. A source not down in the previous event
-                        // is a fresh touch, so the panel's contact-jump discard
-                        // applies; one that was already held has had its jump
+                        // is a fresh touch, so the stale-first-report discard
+                        // applies; one that was already held has had its report
                         // dropped during the overlap.
                         match held.first() {
                             Some(&(cid, button)) => begin_hold(
@@ -274,17 +274,18 @@ impl CaptureAccum {
         else {
             return;
         };
-        // While two armed sources are held the report could belong to either
-        // control — drop it rather than miscommit a swipe through the holder's map.
-        if *overlap {
-            return;
-        }
+        trace!(dx, dy, %button, "gesture travel");
         // A fresh hold's first report can contain travel from before the press
         // or a panel contact jump. Consume recognition's initial sample using
         // zero travel, preserving the stale-report rule for every source.
         if *skip_first_raw_xy {
             *skip_first_raw_xy = false;
             swipe.accumulate_at(now, 0, 0);
+            return;
+        }
+        // While two armed sources are held the report could belong to either
+        // control — drop it rather than miscommit a swipe through the holder's map.
+        if *overlap {
             return;
         }
         // Recognition and action thresholds require separate progress reports;
