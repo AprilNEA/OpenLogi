@@ -4,5 +4,6 @@
 //! transport remain in this crate's write layer.
 
 pub use openlogi_core::hid::backlight::{
-    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
+    BacklightChange, BacklightControls, BacklightEffect, BacklightMode, BacklightState,
+    BacklightStatus,
 };
