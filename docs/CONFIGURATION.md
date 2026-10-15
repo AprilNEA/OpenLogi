@@ -173,6 +173,32 @@ in TOML. The GUI presents their `short` action; changing that button in the GUI
 replaces the whole pair with the selected single action. `per_app_bindings` and
 `keyboard.bindings` remain single-action maps.
 
+A wheel-hold binding on `Back` or `Forward` turns the main scroll wheel into a
+virtual thumb wheel while the button is held, as Logi Options+ offers on mice
+without a thumb wheel such as the MX Anywhere family:
+
+```toml
+Back = { click = "BrowserBack", wheel = "HorizontalScroll" }
+```
+
+Turning the wheel away from you scrolls left and toward you scrolls right,
+reversed when the device's `invert_scroll` is on. Releasing the button without
+turning the wheel fires `click`; a press that scrolled fires nothing else. It is
+off unless you bind it.
+
+The held scroll needs raw-wheel reporting on that button, which only some
+firmware offers, and the mouse hook, so OpenLogi can post the scroll (on macOS,
+the Accessibility permission). Without either, OpenLogi captures the button for
+`click` alone, as it does a long-press pair, and the wheel scrolls as usual.
+With mouse capture turned off the button keeps its native function, like every
+other mouse binding. While the button is diverted the wheel scrolls only through
+OpenLogi, so OpenLogi hands both back to the firmware when the binding changes,
+the device disconnects, or the agent exits. It never sets the firmware's
+persistent flag, so the diversion does not outlive a device power cycle. Like
+long-press pairs, wheel-hold bindings are authored in TOML, the GUI presents
+their `click` action, and changing that button in the GUI replaces the binding
+with the selected single action.
+
 An Actions Ring entry wraps the action and may add an icon or literal label:
 
 ```toml

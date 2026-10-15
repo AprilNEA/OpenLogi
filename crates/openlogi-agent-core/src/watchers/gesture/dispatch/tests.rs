@@ -73,3 +73,35 @@ fn replacement_session_does_not_inherit_partial_progress() {
         "a new session must start with no action progress"
     );
 }
+
+fn per_notch(units: u8) -> NonZeroU8 {
+    NonZeroU8::new(units).expect("non-zero test multiplier")
+}
+
+fn horizontal(delta: ScrollDelta) -> f64 {
+    assert!(
+        delta.y().abs() < f64::EPSILON,
+        "a held wheel never scrolls vertically"
+    );
+    delta.x()
+}
+
+/// The thumb wheel's default bindings scroll left for its "up" direction, so
+/// the virtual one does too: away from the user is left, toward is right.
+#[test]
+fn a_held_wheel_scrolls_left_away_from_the_user_and_right_toward() {
+    assert!((horizontal(held_wheel_scroll(1, NonZeroU8::MIN, false)) + 1.0).abs() < f64::EPSILON);
+    assert!((horizontal(held_wheel_scroll(-3, NonZeroU8::MIN, false)) - 3.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn a_high_resolution_held_wheel_scrolls_its_share_of_a_notch() {
+    assert!((horizontal(held_wheel_scroll(4, per_notch(8), false)) + 0.5).abs() < f64::EPSILON);
+    assert!((horizontal(held_wheel_scroll(-16, per_notch(8), false)) - 2.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn an_inverted_wheel_inverts_its_held_scroll() {
+    assert!((horizontal(held_wheel_scroll(1, NonZeroU8::MIN, true)) - 1.0).abs() < f64::EPSILON);
+    assert!((horizontal(held_wheel_scroll(-8, per_notch(8), true)) + 1.0).abs() < f64::EPSILON);
+}

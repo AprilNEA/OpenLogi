@@ -6,11 +6,14 @@
 //! `getCtrlIdInfo` (walk the control table and confirm a control can divert or
 //! report raw XY), `getCidReporting` (snapshot a control before arming it) and
 //! `setCidReporting` (turn diversion on or off, and hand the control back).
-//! While a control is diverted with raw-XY reporting, the device emits two
-//! unsolicited events, decoded by [`decode_event`]:
+//! While a control is diverted, the device emits these unsolicited events,
+//! the first two decoded by [`decode_event`] and the third by
+//! [`decode_raw_wheel_event`]:
 //!
 //! - function `0` `divertedButtonsEvent` — up to four currently-pressed CIDs.
 //! - function `1` `rawXYEvent` — signed `dx`/`dy` while a raw-XY control is held.
+//! - function `4` `divertedRawWheel` — the main wheel's movement while a
+//!   control diverted with raw-wheel reporting is held, in place of scrolling.
 //!
 //! Wire formats cross-checked against Solaar's `hidpp20.py` and
 //! `notifications.py`.
@@ -25,7 +28,7 @@ use hidpp::{
 
 mod event;
 
-pub use event::{RawControlEvent, decode_event};
+pub use event::{RawControlEvent, RawWheelEvent, decode_event, decode_raw_wheel_event};
 pub use hidpp_reprog::{
     AnalyticsKeyEvent, CidFlags, CidInfo, CidReporting, CidReportingChange, CidReportingChangeEcho,
     ControlId, GroupMask, RawWheelResolution, ReprogControlsCapabilities, ReprogControlsEvent,
@@ -117,6 +120,13 @@ impl CtrlIdInfo {
     #[must_use]
     pub fn supports_raw_xy(self) -> bool {
         self.typed_flags().supports_raw_xy()
+    }
+
+    /// Whether the control can report the main wheel's movement while held,
+    /// in place of scrolling — required for a wheel-hold button.
+    #[must_use]
+    pub fn supports_raw_wheel(self) -> bool {
+        self.typed_flags().supports_raw_wheel()
     }
 
     /// Whether the control can report analytics key events.

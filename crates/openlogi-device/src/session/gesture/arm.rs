@@ -2,8 +2,10 @@
 //! diverts, the firmware state that records, and how it is re-armed and handed
 //! back.
 
+use std::num::NonZeroU8;
 use std::sync::Arc;
 
+use hidpp::feature::{CreatableFeature as _, hires_wheel::HiResWheelFeature};
 use hidpp::{channel::HidppChannel, device::Device};
 use openlogi_core::binding::ButtonId;
 use tracing::{debug, warn};
@@ -12,8 +14,8 @@ use super::{CaptureSpec, CapturedInput};
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::open_device;
 use crate::session::capture_restore::{
-    ArmedReporting, CaptureError, CaptureSessionFailure, PendingCaptureRestore, ReprogRestore,
-    ThumbwheelRestore, divert_change,
+    ArmedReporting, CaptureError, CaptureSessionFailure, PendingCaptureRestore, PointerDivert,
+    ReprogRestore, ThumbwheelRestore,
 };
 use crate::session::restore::rollback_start;
 use crate::thumbwheel::{
@@ -38,6 +40,14 @@ pub(super) struct ArmedControls {
     /// Standard-button CIDs diverted per the session's [`CaptureSpec`], with
     /// the [`ButtonId`] each dispatches as.
     pub(super) button_cids: Vec<(u16, ButtonId)>,
+    /// Wheel-hold CIDs diverted with raw-wheel reporting, with the
+    /// [`ButtonId`] each dispatches as. A wheel-hold control without raw-wheel
+    /// support is plain-diverted into `button_cids` instead.
+    pub(super) wheel_button_cids: Vec<(u16, ButtonId)>,
+    /// The main wheel's high-resolution multiplier, read from `0x2121` when a
+    /// wheel-hold control is armed; `None` on a wheel without that feature,
+    /// which cannot report in high resolution.
+    pub(super) hires_per_notch: Option<NonZeroU8>,
     /// Original reporting state for every diverted `0x1b04` control.
     reporting: Vec<ArmedReporting>,
     /// `0x2150` accessor and the information read while diverting it, present
@@ -98,13 +108,10 @@ impl ArmedControls {
     pub(super) async fn rearm(&self) {
         if let Some(rc) = self.reprog.as_ref() {
             for &reporting in &self.reporting {
-                let raw_xy = self.gesture_cids.contains(&reporting.cid)
-                    || self
-                        .gesture_button_cids
-                        .iter()
-                        .any(|&(cid, _)| cid == reporting.cid);
-                let change = divert_change(reporting.original, raw_xy);
-                if let Err(error) = rc.set_cid_reporting_full(reporting.cid, change).await {
+                if let Err(error) = rc
+                    .set_cid_reporting_full(reporting.cid, reporting.divert_change())
+                    .await
+                {
                     warn!(
                         cid = format_args!("{:#06x}", reporting.cid),
                         ?error,
@@ -147,6 +154,7 @@ pub(super) async fn arm_controls(
         && armed.gesture_button_cids.is_empty()
         && armed.dpi_cids.is_empty()
         && armed.button_cids.is_empty()
+        && armed.wheel_button_cids.is_empty()
         && armed.thumb.is_none()
     {
         debug!(slot, "no capturable controls — idle session");
@@ -182,7 +190,7 @@ pub(super) async fn arm_controls_into(
                 .iter()
                 .any(|c| c.cid == cid && c.is_divertable() && c.supports_raw_xy())
             {
-                arm_reprog_control(&rc, cid, true, &mut armed.reporting).await?;
+                arm_reprog_control(&rc, cid, PointerDivert::RawXy, &mut armed.reporting).await?;
                 armed.gesture_cids.push(cid);
             }
         }
@@ -191,7 +199,7 @@ pub(super) async fn arm_controls_into(
                 && control.is_divertable()
                 && control.supports_raw_xy()
             {
-                arm_reprog_control(&rc, cid, true, &mut armed.reporting).await?;
+                arm_reprog_control(&rc, cid, PointerDivert::RawXy, &mut armed.reporting).await?;
                 armed.gesture_button_cids.push((cid, button));
             }
         }
@@ -208,7 +216,7 @@ pub(super) async fn arm_controls_into(
                 continue;
             }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                arm_reprog_control(&rc, cid, false, &mut armed.reporting).await?;
+                arm_reprog_control(&rc, cid, PointerDivert::Plain, &mut armed.reporting).await?;
                 armed.dpi_cids.push(cid);
             }
         }
@@ -225,10 +233,11 @@ pub(super) async fn arm_controls_into(
                 continue;
             }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                arm_reprog_control(&rc, cid, false, &mut armed.reporting).await?;
+                arm_reprog_control(&rc, cid, PointerDivert::Plain, &mut armed.reporting).await?;
                 armed.button_cids.push((cid, button));
             }
         }
+        arm_wheel_hold_controls(device, chan, slot, &rc, &controls, spec, armed).await?;
     }
 
     if spec.capture_thumbwheel
@@ -278,7 +287,7 @@ pub(super) async fn arm_controls_into(
 async fn arm_reprog_control(
     rc: &ReprogControlsV4,
     cid: u16,
-    raw_xy: bool,
+    divert: PointerDivert,
     reporting: &mut Vec<ArmedReporting>,
 ) -> Result<(), CaptureError> {
     let original = rc.get_cid_reporting(cid).await?;
@@ -288,12 +297,72 @@ async fn arm_reprog_control(
         // replayed on restore, leaving the button dead.
         debug!(cid, "control was already diverted before arming");
     }
-    let change = divert_change(original, raw_xy);
+    let armed = ArmedReporting::pointer(cid, original, divert);
     // Record ownership before the write: a transport error does not prove the
     // firmware rejected the command, so rollback must cover this CID too.
-    reporting.push(ArmedReporting::pointer(cid, original));
-    rc.set_cid_reporting_full(cid, change).await?;
+    reporting.push(armed);
+    rc.set_cid_reporting_full(cid, armed.divert_change())
+        .await?;
     Ok(())
+}
+
+/// Divert the wheel-hold buttons `spec` lists, with raw-wheel reporting where
+/// the control offers it, then read the main wheel's multiplier so a
+/// high-resolution report can be scaled to notches. Like every step of
+/// [`arm_controls_into`], ownership is recorded before each write.
+async fn arm_wheel_hold_controls(
+    device: &Device,
+    chan: &Arc<HidppChannel>,
+    slot: u8,
+    rc: &ReprogControlsV4,
+    controls: &[reprog_controls::CtrlIdInfo],
+    spec: &CaptureSpec,
+    armed: &mut ArmedControls,
+) -> Result<(), CaptureError> {
+    for &(cid, button) in &spec.divert_wheel_buttons {
+        // A control armed earlier already has an owner; arming it twice
+        // would record a second restore for the same CID.
+        if armed.reporting.iter().any(|reporting| reporting.cid == cid) {
+            continue;
+        }
+        let Some(control) = controls.iter().find(|c| c.cid == cid && c.is_divertable()) else {
+            continue;
+        };
+        if control.supports_raw_wheel() {
+            arm_reprog_control(rc, cid, PointerDivert::RawWheel, &mut armed.reporting).await?;
+            armed.wheel_button_cids.push((cid, button));
+        } else {
+            // Without raw-wheel reporting the button cannot scroll, but its
+            // click is still the user's: deliver it as a plain press.
+            debug!(
+                cid,
+                "control lacks raw-wheel reporting — wheel-hold armed as a click"
+            );
+            arm_reprog_control(rc, cid, PointerDivert::Plain, &mut armed.reporting).await?;
+            armed.button_cids.push((cid, button));
+        }
+    }
+    if !armed.wheel_button_cids.is_empty() {
+        armed.hires_per_notch = read_hires_per_notch(device, chan, slot).await?;
+    }
+    Ok(())
+}
+
+/// The main wheel's high-resolution multiplier: how many units a
+/// high-resolution report carries per notch. `None` when the device has no
+/// `0x2121`, so its wheel cannot report in high resolution, or reports a
+/// multiplier of zero.
+async fn read_hires_per_notch(
+    device: &Device,
+    chan: &Arc<HidppChannel>,
+    slot: u8,
+) -> Result<Option<NonZeroU8>, CaptureError> {
+    let Some(info) = device.root().get_feature(HiResWheelFeature::ID).await? else {
+        return Ok(None);
+    };
+    let wheel = HiResWheelFeature::new(Arc::clone(chan), slot, info.index);
+    let capabilities = wheel.get_wheel_capabilities().await?;
+    Ok(NonZeroU8::new(capabilities.multiplier))
 }
 
 /// Read the device's full reprogrammable-control table in one pass, so we can

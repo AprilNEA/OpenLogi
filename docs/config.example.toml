@@ -39,6 +39,9 @@ Forward = { TapKeyHoldingModifiers = "Cmd+Tab" }
 MiddleClick = { HoldShortcut = "Ctrl+Space" }
 # Release before 500 ms runs `short`; reaching 500 ms runs `long` once.
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
+# On a mouse without a thumb wheel, hold Back and turn the main wheel to scroll
+# sideways; a click that did not turn the wheel still runs `click`:
+# Back = { click = "BrowserBack", wheel = "HorizontalScroll" }
 # The thumb wheel's capacitive tap. Inert unless set here; the wheel also
 # reports taps from incidental thumb contact.
 Thumbwheel = "AppExpose"

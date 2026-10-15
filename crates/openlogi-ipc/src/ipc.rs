@@ -102,7 +102,9 @@ pub use succession::Identity;
 ///      `WriteError::{HostRenameUnsupported, HostSlotEmpty, HostNameRejected,
 ///      HostNameNotApplied}` appended — the `0x1815` Easy-Switch host names
 ///      and OS, and renaming a slot's computer.
-pub const PROTOCOL_VERSION: u32 = 36;
+/// v37: `Capabilities::virtual_thumbwheel` appended — Back/Forward can hold
+///      the main wheel as a virtual thumb wheel.
+pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

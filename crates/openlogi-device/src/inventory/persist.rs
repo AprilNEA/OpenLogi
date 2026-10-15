@@ -46,7 +46,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// `Capabilities::report_rate` flag.
 /// v10 adds the `0x1982` backlight event index.
 /// v11 adds the `Capabilities::easy_switch` flag (`0x1815` host slots).
-const SCHEMA_VERSION: u32 = 11;
+/// v12 adds the `Capabilities::virtual_thumbwheel` flag (Back/Forward
+/// raw-wheel reporting).
+const SCHEMA_VERSION: u32 = 12;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.

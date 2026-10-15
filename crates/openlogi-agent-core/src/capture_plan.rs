@@ -65,6 +65,10 @@ pub struct DispatchPlan {
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// Whether this device's wheel scrolls inverted, so a wheel-hold button's
+    /// horizontal scroll follows it as Logi Options+ does. Read from the
+    /// device-level setting, as the hook's software inversion is.
+    pub invert_held_wheel: bool,
     /// Pointer identity used to select these mouse bindings; absent for the
     /// explicitly focused policy and keyboard input.
     pub pointer_target: Option<openlogi_hook::PointerTarget>,
@@ -88,17 +92,21 @@ impl DeviceCapturePlan {
         let spec = &mut self.target.spec;
         let before = spec.divert_buttons.len()
             + spec.divert_gesture_buttons.len()
-            + spec.divert_gesture_sources.len();
+            + spec.divert_gesture_sources.len()
+            + spec.divert_wheel_buttons.len();
         spec.divert_buttons
             .retain(|(cid, _)| !owned.contains_key(cid));
         spec.divert_gesture_buttons
             .retain(|(cid, _)| !owned.contains_key(cid));
         spec.divert_gesture_sources
             .retain(|cid| !owned.contains_key(cid));
+        spec.divert_wheel_buttons
+            .retain(|(cid, _)| !owned.contains_key(cid));
         let released = before
             - spec.divert_buttons.len()
             - spec.divert_gesture_buttons.len()
-            - spec.divert_gesture_sources.len();
+            - spec.divert_gesture_sources.len()
+            - spec.divert_wheel_buttons.len();
         if released > 0 {
             tracing::debug!(
                 released,
@@ -216,6 +224,21 @@ pub fn plan_for_device(
                 .map(|cid| (cid, ButtonId::DpiToggle)),
         );
     }
+    // Wheel-hold turns the main wheel into a virtual thumb wheel, which works
+    // only while the agent can post scroll events. Without the mouse hook
+    // (on macOS, without Accessibility) Back/Forward are plain-diverted below
+    // like a long press instead: the click still runs, and the wheel stays
+    // native. Arming then diverts raw wheel only where a control offers it.
+    let divert_wheel_buttons: Vec<(u16, ButtonId)> =
+        if os_mouse_hook_available && config.app_settings.capture_mouse_events {
+            DIVERTABLE_STANDARD_BUTTONS
+                .into_iter()
+                .filter(|(_, button)| matches!(button, ButtonId::Back | ButtonId::Forward))
+                .filter(|(_, button)| bindings.get(button).is_some_and(Binding::is_wheel_hold))
+                .collect()
+        } else {
+            Vec::new()
+        };
     // The HID++ gesture sources never reach the OS hook, so a non-default
     // single binding on one is deliverable only via a plain HID++ divert — but
     // only while the source is NOT in gesture mode (the raw-XY gesture divert
@@ -233,9 +256,12 @@ pub fn plan_for_device(
             config.app_settings.capture_mouse_events || !button.is_os_hook_button()
         })
         .filter(|(_, button)| !oshook.contains_key(button))
+        .filter(|entry| !divert_wheel_buttons.contains(entry))
         .filter(|(_, button)| {
             bindings.get(button).is_some_and(|binding| {
-                if matches!(binding, Binding::LongPress(_)) {
+                // Both decide on release whether the click runs, which only
+                // the shared button runtime can do.
+                if matches!(binding, Binding::LongPress(_) | Binding::WheelHold(_)) {
                     return true;
                 }
                 let action = binding.click_action();
@@ -275,6 +301,7 @@ pub fn plan_for_device(
                     .collect(),
                 divert_gesture_buttons,
                 divert_buttons,
+                divert_wheel_buttons,
             },
             rearm_generation,
         },
@@ -284,6 +311,7 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
+            invert_held_wheel: config.invert_scroll(config_key),
             pointer_target: None,
         },
     }
@@ -291,7 +319,7 @@ pub fn plan_for_device(
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::binding::{Binding, LongPressBinding};
+    use openlogi_core::binding::{Binding, LongPressBinding, WheelHoldBinding};
     use openlogi_hid::reprog_controls::{GESTURE_BUTTON_CID, HAPTIC_PANEL_CID};
 
     use super::*;
@@ -421,6 +449,105 @@ mod tests {
                 .any(|&(_, button)| button == ButtonId::Back),
             "the runtime needs both edges even when the short action is native"
         );
+    }
+
+    fn wheel_diverts(plan: &DeviceCapturePlan, button: ButtonId) -> bool {
+        plan.target
+            .spec
+            .divert_wheel_buttons
+            .iter()
+            .any(|&(_, diverted)| diverted == button)
+    }
+
+    fn wheel_hold_config(capture_mouse_events: bool) -> Config {
+        let mut cfg = Config::default();
+        cfg.app_settings.capture_mouse_events = capture_mouse_events;
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::Back,
+            Binding::WheelHold(WheelHoldBinding::horizontal_scroll(default_binding(
+                ButtonId::Back,
+            ))),
+        );
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::Forward,
+            Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::Copy)),
+        );
+        cfg
+    }
+
+    #[test]
+    fn wheel_hold_thumb_buttons_divert_raw_wheel_while_scrolls_can_be_posted() {
+        let plan = plan_for_device(&wheel_hold_config(true), "2b01a", route(), None, 0, true);
+        for button in [ButtonId::Back, ButtonId::Forward] {
+            assert!(wheel_diverts(&plan, button), "{button}");
+            assert!(!diverts(&plan, button), "{button} has one owner");
+        }
+        let expected: Vec<_> = DIVERTABLE_STANDARD_BUTTONS
+            .into_iter()
+            .filter(|(_, button)| matches!(button, ButtonId::Back | ButtonId::Forward))
+            .collect();
+        assert_eq!(plan.target.spec.divert_wheel_buttons, expected);
+    }
+
+    #[test]
+    fn wheel_hold_without_the_mouse_hook_is_plain_diverted_for_its_click() {
+        let plan = plan_for_device(&wheel_hold_config(true), "2b01a", route(), None, 0, false);
+        assert!(plan.target.spec.divert_wheel_buttons.is_empty());
+        for button in [ButtonId::Back, ButtonId::Forward] {
+            assert!(diverts(&plan, button), "{button} still clicks on release");
+        }
+    }
+
+    #[test]
+    fn mouse_capture_opt_out_keeps_wheel_hold_thumb_buttons_native() {
+        let plan = plan_for_device(&wheel_hold_config(false), "2b01a", route(), None, 0, true);
+        for button in [ButtonId::Back, ButtonId::Forward] {
+            assert!(
+                !wheel_diverts(&plan, button) && !diverts(&plan, button),
+                "{button}"
+            );
+        }
+    }
+
+    #[test]
+    fn wheel_hold_on_another_button_never_diverts_raw_wheel() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::MiddleClick,
+            Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::Copy)),
+        );
+        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
+        assert!(plan.target.spec.divert_wheel_buttons.is_empty());
+        assert!(diverts(&plan, ButtonId::MiddleClick));
+    }
+
+    #[test]
+    fn held_wheel_inversion_follows_the_device_scroll_inversion() {
+        let mut cfg = wheel_hold_config(true);
+        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
+        assert!(!plan.dispatch.invert_held_wheel);
+        cfg.set_invert_scroll("2b01a", true);
+        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
+        assert!(plan.dispatch.invert_held_wheel);
+    }
+
+    #[test]
+    fn releasing_a_control_releases_its_wheel_hold_diversion() {
+        let mut plan = plan_for_device(&wheel_hold_config(true), "2b01a", route(), None, 0, true);
+        let owned: BTreeMap<u16, ButtonId> = plan
+            .target
+            .spec
+            .divert_wheel_buttons
+            .iter()
+            .copied()
+            .filter(|&(_, button)| button == ButtonId::Back)
+            .collect();
+        plan.release_controls(&owned);
+        assert!(!wheel_diverts(&plan, ButtonId::Back));
+        assert!(wheel_diverts(&plan, ButtonId::Forward));
     }
 
     #[test]

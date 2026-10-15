@@ -158,6 +158,12 @@ pub struct Capabilities {
     /// IPC and the persisted identity.
     #[serde(default)]
     pub easy_switch: bool,
+    /// Back or Forward in the device's `0x1b04` control table can be diverted
+    /// with raw-wheel reporting, so a wheel-hold binding can turn the main
+    /// wheel into a virtual thumb wheel. Appended: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub virtual_thumbwheel: bool,
 }
 
 impl Capabilities {
@@ -189,6 +195,9 @@ impl Capabilities {
             report_rate: ids.contains(&0x8060) || ids.contains(&0x8061),
             backlight: ids.contains(&0x1982),
             easy_switch: ids.contains(&0x1815),
+            // Set by the `0x1b04` control walk; the feature table alone
+            // cannot say which controls report raw wheel.
+            virtual_thumbwheel: false,
         }
     }
 
@@ -579,6 +588,7 @@ mod tests {
                     report_rate: false,
                     backlight: false,
                     easy_switch: false,
+                    virtual_thumbwheel: false,
                 }),
                 settings_revision: 0,
             }],
@@ -696,6 +706,7 @@ mod tests {
                 report_rate: false,
                 backlight: false,
                 easy_switch: false,
+                virtual_thumbwheel: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -718,6 +729,7 @@ mod tests {
                 report_rate: false,
                 backlight: false,
                 easy_switch: false,
+                virtual_thumbwheel: false,
             }
         );
         // No driving features → nothing offered.

@@ -68,22 +68,41 @@ pub(crate) struct ArmedReporting {
     policy: ReprogRestorePolicy,
 }
 
+/// How a capture session diverts one pointer control: what the firmware
+/// reports while the control is held, besides its press and release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PointerDivert {
+    /// Nothing more: a diverted button.
+    Plain,
+    /// Raw pointer motion, for a gesture source.
+    RawXy,
+    /// Raw main-wheel movement instead of scrolling, for a wheel-hold button.
+    /// Only a control advertising `RAW_WHEEL` may be armed this way.
+    RawWheel,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReprogRestorePolicy {
-    /// Pointer control: clear diversion and raw XY.
-    Pointer,
+    /// Pointer control armed in the given mode: clear diversion and raw XY,
+    /// and raw wheel when the control was armed with it.
+    Pointer(PointerDivert),
     /// Keyboard key: clear diversion without touching raw XY.
     Keyboard,
 }
 
 impl ArmedReporting {
-    /// Capture ownership of a pointer control whose teardown clears both
-    /// diversion and raw XY.
-    pub(crate) fn pointer(cid: u16, original: reprog_controls::CidReporting) -> Self {
+    /// Capture ownership of a pointer control armed as `divert`, whose
+    /// teardown clears diversion and raw XY, and raw wheel when `divert` set
+    /// it.
+    pub(crate) fn pointer(
+        cid: u16,
+        original: reprog_controls::CidReporting,
+        divert: PointerDivert,
+    ) -> Self {
         Self {
             cid,
             original,
-            policy: ReprogRestorePolicy::Pointer,
+            policy: ReprogRestorePolicy::Pointer(divert),
         }
     }
 
@@ -97,10 +116,24 @@ impl ArmedReporting {
         }
     }
 
+    /// Compute the `setCidReporting` change that (re)diverts this control the
+    /// way it was armed.
+    pub(crate) fn divert_change(self) -> reprog_controls::CidReportingChange {
+        match self.policy {
+            ReprogRestorePolicy::Pointer(divert) => divert_change(self.original, divert),
+            ReprogRestorePolicy::Keyboard => divert_keyboard_key(self.original),
+        }
+    }
+
     /// Compute the `setCidReporting` change that restores this control.
     pub(crate) fn undivert_change(self) -> reprog_controls::CidReportingChange {
         match self.policy {
-            ReprogRestorePolicy::Pointer => undivert_change(self.original),
+            ReprogRestorePolicy::Pointer(PointerDivert::Plain | PointerDivert::RawXy) => {
+                undivert_change(self.original)
+            }
+            ReprogRestorePolicy::Pointer(PointerDivert::RawWheel) => {
+                undivert_raw_wheel_change(self.original)
+            }
             ReprogRestorePolicy::Keyboard => undivert_keyboard_key(self.original),
         }
     }
@@ -297,11 +330,14 @@ pub(crate) async fn drop_listener_after<T, R>(listener: T, teardown: impl Future
 /// Divert a control in the requested mode while preserving its remap target.
 pub(crate) fn divert_change(
     reporting: reprog_controls::CidReporting,
-    raw_xy: bool,
+    divert: PointerDivert,
 ) -> reprog_controls::CidReportingChange {
     reprog_controls::CidReportingChange {
         diverted: Some(true),
-        raw_xy: Some(raw_xy),
+        raw_xy: Some(divert == PointerDivert::RawXy),
+        // Left untouched unless requested: a control without `RAW_WHEEL` has
+        // no raw-wheel state to write.
+        raw_wheel: (divert == PointerDivert::RawWheel).then_some(true),
         remap: reporting.remap,
         ..Default::default()
     }
@@ -351,6 +387,17 @@ pub(crate) fn undivert_change(
         raw_xy: Some(false),
         remap: reporting.remap,
         ..Default::default()
+    }
+}
+
+/// [`undivert_change`] for a control armed with raw wheel: also hand the
+/// wheel back, so it scrolls natively again.
+pub(crate) fn undivert_raw_wheel_change(
+    reporting: reprog_controls::CidReporting,
+) -> reprog_controls::CidReportingChange {
+    reprog_controls::CidReportingChange {
+        raw_wheel: Some(false),
+        ..undivert_change(reporting)
     }
 }
 

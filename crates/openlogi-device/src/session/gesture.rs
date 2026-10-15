@@ -23,6 +23,7 @@
 mod accum;
 mod arm;
 
+use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::protocol::v20;
@@ -82,6 +83,18 @@ pub enum CapturedInput {
     /// An instantaneous firmware-reported tap with no observable hold
     /// duration, such as the thumb-wheel touch sensor.
     ButtonPulse(ButtonId),
+    /// Main-wheel movement while a wheel-hold button is held. The firmware
+    /// reports it over `0x1b04` instead of scrolling, so the agent can scroll
+    /// horizontally in its place.
+    HeldWheel {
+        /// The held button the movement belongs to.
+        button: ButtonId,
+        /// Wheel movement; positive is away from the user.
+        delta: i16,
+        /// Units of `delta` per wheel notch: 1 for a low-resolution report,
+        /// the wheel's `0x2121` multiplier for a high-resolution one.
+        per_notch: NonZeroU8,
+    },
 }
 
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the
@@ -149,6 +162,11 @@ pub struct CaptureSpec {
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
+    /// Standard-button CIDs bound to wheel-hold. A control advertising
+    /// raw-wheel support is diverted with it, so the main wheel reports to the
+    /// agent while the button is held; any other divertable control is
+    /// diverted as a plain press, so its click still works.
+    pub divert_wheel_buttons: Vec<(u16, ButtonId)>,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
@@ -218,6 +236,7 @@ impl ArmedCapture for GestureCapture {
             gesture_buttons = armed.gesture_button_cids.len(),
             dpi_buttons = armed.dpi_cids.len(),
             buttons = armed.button_cids.len(),
+            wheel_buttons = armed.wheel_button_cids.len(),
             thumbwheel = armed.thumb.is_some(),
             wake_rearm,
             "control capture active"
@@ -244,7 +263,16 @@ impl ArmedCapture for GestureCapture {
             .as_ref()
             .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
         let dpi_set = armed.dpi_cids.clone();
-        let button_set = armed.button_cids.clone();
+        // A wheel-hold button's press and release are ordinary button edges;
+        // only the raw wheel it unlocks needs its own attribution.
+        let button_set: Vec<(u16, ButtonId)> = armed
+            .button_cids
+            .iter()
+            .chain(&armed.wheel_button_cids)
+            .copied()
+            .collect();
+        let wheel_set = armed.wheel_button_cids.clone();
+        let hires_per_notch = armed.hires_per_notch;
         move |msg| {
             if let Some(idx) = reprog_index
                 && let Some(event) = reprog_controls::decode_event(msg, device_index, idx)
@@ -260,6 +288,15 @@ impl ArmedCapture for GestureCapture {
                     &button_set,
                     &sink,
                 );
+                return;
+            }
+            if let Some(idx) = reprog_index
+                && let Some(event) = reprog_controls::decode_raw_wheel_event(msg, device_index, idx)
+            {
+                accum
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .on_raw_wheel(event, &wheel_set, hires_per_notch, &sink);
                 return;
             }
             if let Some(idx) = thumb_index

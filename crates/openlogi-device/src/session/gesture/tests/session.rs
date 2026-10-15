@@ -171,6 +171,7 @@ async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
             vec![ArmedReporting::pointer(
                 reprog_controls::GESTURE_BUTTON_CID,
                 reporting(false, None),
+                PointerDivert::RawXy,
             )],
         ),
         None,
@@ -218,6 +219,7 @@ fn diverted_gesture(
             vec![ArmedReporting::pointer(
                 reprog_controls::GESTURE_BUTTON_CID,
                 reporting(false, None),
+                PointerDivert::RawXy,
             )],
         ),
         None,
@@ -411,6 +413,7 @@ async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
             vec![ArmedReporting::pointer(
                 reprog_controls::GESTURE_BUTTON_CID,
                 reporting(false, None),
+                PointerDivert::RawXy,
             )],
         ),
         None,
@@ -473,6 +476,7 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
             vec![ArmedReporting::pointer(
                 reprog_controls::GESTURE_BUTTON_CID,
                 reporting(false, None),
+                PointerDivert::RawXy,
             )],
         ),
         None,

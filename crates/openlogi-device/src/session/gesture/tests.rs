@@ -8,7 +8,7 @@ use crate::backend::NodeId;
 use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
 use crate::reprog_controls::RawControlEvent;
 use crate::session::capture_restore::{
-    ArmedReporting, CaptureStop, ReprogRestore, divert_change, divert_keyboard_key,
+    ArmedReporting, CaptureStop, PointerDivert, ReprogRestore, divert_change, divert_keyboard_key,
     drop_listener_after, restore_after_stop, stop_for_current_publication, undivert_change,
     undivert_keyboard_key, wait_for_channel_change,
 };
@@ -19,6 +19,7 @@ mod accumulator;
 mod restore;
 mod session;
 mod thumb_wheel;
+mod wheel_hold;
 
 fn reporting(
     diverted: bool,

@@ -302,6 +302,7 @@ pub(super) fn process_input(
                 emit(ButtonRuntimeEvent::Triggered { press, action });
             }
         }
+        ButtonInput::WheelWhilePressed { token } => state.wheel_moved(&token),
     }
 }
 

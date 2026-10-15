@@ -168,7 +168,8 @@ fn dispatch_input(
         }
         CapturedInput::Gesture(..)
         | CapturedInput::Scroll { .. }
-        | CapturedInput::ThumbwheelDirection { .. } => {}
+        | CapturedInput::ThumbwheelDirection { .. }
+        | CapturedInput::HeldWheel { .. } => {}
     }
 }
 

@@ -279,6 +279,7 @@ fn mouse_identity(name: &str) -> DeviceIdentity {
             report_rate: false,
             backlight: false,
             easy_switch: false,
+            virtual_thumbwheel: false,
         },
         light_capabilities: None,
         model_info: None,

@@ -1,12 +1,15 @@
 //! Sans-I/O accumulator for diverted `0x1b04` reports: which armed source
-//! holds the raw-XY stream, and the button edges and gestures that follow.
+//! holds the raw-XY stream, the button edges and gestures that follow, and
+//! which held wheel-hold button the raw wheel belongs to.
+
+use std::num::NonZeroU8;
 
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 use super::{CapturedInput, GESTURE_SOURCE_BUTTONS};
-use crate::reprog_controls::RawControlEvent;
+use crate::reprog_controls::{RawControlEvent, RawWheelEvent, RawWheelResolution};
 
 /// The hold that owns raw-XY motion, or the absence of one. Raw-XY reports
 /// carry no source attribution, so the first held source owns the accumulated
@@ -66,7 +69,8 @@ pub(super) struct CaptureAccum {
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
-    /// Diverted standard-button CIDs held in the last event.
+    /// Diverted standard-button and wheel-hold CIDs held in the last event,
+    /// in press order.
     buttons_down: Vec<u16>,
 }
 
@@ -253,6 +257,51 @@ impl CaptureAccum {
             debug!(?direction, %button, "gesture committed");
             let _ = sink.send(CapturedInput::Gesture(*button, direction));
         }
+    }
+
+    /// Attribute one raw wheel report to the earliest-pressed wheel-hold
+    /// button still held. Raw wheel carries no source, and the firmware sends
+    /// it only while such a control is held; a report with none held (a
+    /// release that crossed it in flight) is dropped, as is a high-resolution
+    /// report from a wheel whose multiplier is unknown, which cannot be
+    /// scaled to notches.
+    pub(super) fn on_raw_wheel(
+        &self,
+        event: RawWheelEvent,
+        wheel_button_cids: &[(u16, ButtonId)],
+        hires_per_notch: Option<NonZeroU8>,
+        sink: &mpsc::UnboundedSender<CapturedInput>,
+    ) {
+        if event.delta == 0 {
+            return;
+        }
+        let Some(button) = self.buttons_down.iter().find_map(|&down| {
+            wheel_button_cids
+                .iter()
+                .find(|&&(cid, _)| cid == down)
+                .map(|&(_, button)| button)
+        }) else {
+            trace!(
+                delta = event.delta,
+                "raw wheel with no wheel-hold button held — dropped"
+            );
+            return;
+        };
+        let per_notch = match event.resolution {
+            RawWheelResolution::Low => NonZeroU8::MIN,
+            RawWheelResolution::High => {
+                let Some(per_notch) = hires_per_notch else {
+                    debug!(%button, "high-resolution raw wheel without a known multiplier — dropped");
+                    return;
+                };
+                per_notch
+            }
+        };
+        let _ = sink.send(CapturedInput::HeldWheel {
+            button,
+            delta: event.delta,
+            per_notch,
+        });
     }
 }
 
