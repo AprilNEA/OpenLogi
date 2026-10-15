@@ -74,9 +74,33 @@ impl<P> PendingRestore<P> {
         }
     }
 
+    /// Debt aimed at `route` with no retired channel.
+    pub(crate) fn without_channel(route: DeviceRoute, plan: P) -> Self {
+        Self {
+            route,
+            retired_channel: Weak::new(),
+            retired_policy: RetiredChannelPolicy::ReplacementOnly,
+            plan,
+        }
+    }
+
     /// Permit a retry on the original channel after a normal teardown write
     /// failed while that publication was still current.
     pub(crate) fn allow_current_channel(mut self) -> Self {
+        self.retired_policy = RetiredChannelPolicy::CurrentAllowed;
+        self
+    }
+
+    /// The route the next retry looks up.
+    #[must_use]
+    pub fn route(&self) -> &DeviceRoute {
+        &self.route
+    }
+
+    /// Aim later retries at `route` and allow the channel that originally armed
+    /// capture when that route is still the current publication.
+    pub(crate) fn retarget(mut self, route: DeviceRoute) -> Self {
+        self.route = route;
         self.retired_policy = RetiredChannelPolicy::CurrentAllowed;
         self
     }
@@ -108,6 +132,18 @@ impl<P: RestorePlan> PendingRestore<P> {
             RestoreOutcome::RestorePending(self)
         }
     }
+
+    /// Retry through a route elected for the same physical device.
+    ///
+    /// The route sticks, so a later retry keeps following the device when the
+    /// first elected transport is not published yet.
+    pub async fn retry_via(
+        self,
+        route: DeviceRoute,
+        registry: &ChannelRegistry,
+    ) -> RestoreOutcome<P> {
+        self.retarget(route).retry(registry).await
+    }
 }
 
 /// How a session, or one later retry, left its firmware restoration.
@@ -116,7 +152,7 @@ pub enum RestoreOutcome<P> {
     /// Every control was restored on a publication that remained current.
     Restored,
     /// Restoration is incomplete. The caller must retain this token and retry
-    /// it before arming a successor on the same route.
+    /// it before arming a successor for the same physical device.
     RestorePending(PendingRestore<P>),
 }
 

@@ -1,0 +1,776 @@
+//! Tests for reaching a Litra over HID++ `0x1990` and falling back to its
+//! fixed raw report.
+//!
+//! The scripted light answers `0x1990` at index 6 rather than the 4 the raw
+//! report hard-codes, so a test that passes proves the index came from the
+//! root feature.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use hidpp::channel::HidppChannel;
+
+use super::illumination::{RESOLVE_TIMEOUT, control_range};
+use super::{LightCommand, LitraModel, apply, encode_command, read_state};
+use crate::backend::{BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter};
+use crate::channel::route::DeviceRoute;
+use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+use crate::write::{HidppFeatureErrorKind, HidppOperation, WriteError};
+use openlogi_core::device::{LightValueUnit, RawDeviceAddress};
+
+/// Where the scripted light lists `0x1990`.
+const INDEX: u8 = 0x06;
+
+/// `HAS_EVENTS | HAS_LINEAR_LEVELS`.
+const LINEAR: u8 = 0b0011;
+/// [`LINEAR`] plus `HAS_DYNAMIC_MAXIMUM`.
+const DYNAMIC: u8 = 0b1011;
+
+/// How a scripted light departs from a well-behaved one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quirk {
+    None,
+    /// The root lookup does not list `0x1990`.
+    NoIllumination,
+    /// `getBrightnessInfo` answers with a HID++ error.
+    RejectsReads,
+    /// Setters are acknowledged without changing anything.
+    IgnoresWrites,
+    /// Setters answer with a HID++ error.
+    RejectsWrites,
+}
+
+/// A scripted Litra's feature table and state.
+#[derive(Clone)]
+struct Light {
+    quirk: Quirk,
+    version: u8,
+    brightness_flags: u8,
+    brightness: (u16, u16, u16),
+    temperature: (u16, u16, u16),
+    on: bool,
+    lumens: u16,
+    kelvin: u16,
+    /// `getBrightnessEffectiveMax`; `0` is no limit. A brighter request is
+    /// lowered to it, as the specification describes.
+    effective_max: u16,
+    /// Every `0x1990` request, as `(function, first parameter bytes)`.
+    requests: Vec<(u8, [u8; 2])>,
+}
+
+impl Light {
+    /// A Litra Glow as litra-rs describes it, on, at 100 lm and 4000 K.
+    fn glow() -> Self {
+        Self {
+            quirk: Quirk::None,
+            version: 1,
+            brightness_flags: LINEAR,
+            brightness: (20, 250, 1),
+            temperature: (2700, 6500, 100),
+            on: true,
+            lumens: 100,
+            kelvin: 4000,
+            effective_max: 0,
+            requests: Vec::new(),
+        }
+    }
+
+    fn functions(&self) -> Vec<u8> {
+        self.requests
+            .iter()
+            .map(|(function, _)| *function)
+            .collect()
+    }
+
+    fn respond(&mut self, request: &[u8]) -> Option<Vec<u8>> {
+        // A directly attached device answers at `0xff` only.
+        if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) || request[1] != 0xff {
+            return None;
+        }
+        let function = request[3] >> 4;
+        let argument = u16::from_be_bytes([request[4], request[5]]);
+        let mut payload = [0u8; 16];
+        match (request[2], function) {
+            // Root ping, then the feature lookup.
+            (0x00, 0x01) => payload[0] = 4,
+            (0x00, 0x00) => {
+                if argument == 0x1990 && self.quirk != Quirk::NoIllumination {
+                    payload[0] = INDEX;
+                    payload[2] = self.version;
+                }
+            }
+            (INDEX, function) => {
+                self.requests.push((function, [request[4], request[5]]));
+                if function == 2 && self.quirk == Quirk::RejectsReads {
+                    // ERR_INVALID_FUNCTION_ID.
+                    return Some(feature_error(request, 0x07));
+                }
+                let setter = matches!(function, 1 | 4 | 9);
+                if setter && self.quirk == Quirk::RejectsWrites {
+                    // ERR_INVALID_ARGUMENT.
+                    return Some(feature_error(request, 0x02));
+                }
+                match function {
+                    _ if setter && self.quirk == Quirk::IgnoresWrites => {}
+                    0 => payload[0] = u8::from(self.on),
+                    1 => self.on = request[4] & 1 != 0,
+                    2 => info(&mut payload, self.brightness_flags, self.brightness),
+                    3 => payload[..2].copy_from_slice(&self.lumens.to_be_bytes()),
+                    4 => {
+                        self.lumens = match self.effective_max {
+                            0 => argument,
+                            limit => argument.min(limit),
+                        };
+                    }
+                    7 => info(&mut payload, LINEAR, self.temperature),
+                    8 => payload[..2].copy_from_slice(&self.kelvin.to_be_bytes()),
+                    9 => self.kelvin = argument,
+                    12 => payload[..2].copy_from_slice(&self.effective_max.to_be_bytes()),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+        let mut response = vec![0u8; 20];
+        response[0] = 0x11;
+        response[1..4].copy_from_slice(&request[1..4]);
+        response[4..].copy_from_slice(&payload);
+        Some(response)
+    }
+}
+
+/// A `get<Control>Info` reply: flags, then big-endian min, max and resolution.
+fn info(payload: &mut [u8; 16], flags: u8, (min, max, resolution): (u16, u16, u16)) {
+    payload[0] = flags;
+    payload[1..3].copy_from_slice(&min.to_be_bytes());
+    payload[3..5].copy_from_slice(&max.to_be_bytes());
+    payload[5..7].copy_from_slice(&resolution.to_be_bytes());
+}
+
+/// How the backend answers a HID++ open of the light's node.
+#[derive(Clone, Copy)]
+enum Opens {
+    /// A channel to the scripted [`Light`].
+    Hidpp,
+    /// A channel to a device that never answers.
+    Silent,
+    /// The node carries no HID++ collection.
+    NotHidpp,
+    /// The backend refuses the open this time.
+    Fails,
+}
+
+/// A backend with Litra nodes, a capturing raw writer and a scripted light.
+struct LitraBackend {
+    nodes: Vec<NodeInfo>,
+    opens: Opens,
+    light: Arc<Mutex<Light>>,
+    hidpp_opens: AtomicUsize,
+    raw_reports: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl LitraBackend {
+    fn new(tag: &str, opens: Opens, light: Light) -> Self {
+        Self {
+            nodes: vec![litra_node(tag)],
+            opens,
+            light: Arc::new(Mutex::new(light)),
+            hidpp_opens: AtomicUsize::new(0),
+            raw_reports: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// The route the standalone inventory publishes for the first node.
+    fn route(&self) -> DeviceRoute {
+        let node = &self.nodes[0];
+        DeviceRoute::from(&RawDeviceAddress {
+            vendor_id: node.vendor_id,
+            product_id: node.product_id,
+            usage_page: node.usage_page,
+            usage_id: node.usage_id,
+            identity: node.identity(),
+        })
+    }
+
+    fn light(&self) -> Light {
+        self.light
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn raw_reports(&self) -> Vec<Vec<u8>> {
+        self.raw_reports
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn hidpp_opens(&self) -> usize {
+        self.hidpp_opens.load(Ordering::SeqCst)
+    }
+}
+
+/// A Litra Glow node whose OS id and serial are unique to `tag`, so tests
+/// never share a remembered raw-only answer.
+fn litra_node(tag: &str) -> NodeInfo {
+    NodeInfo {
+        id: NodeId::from(format!("litra-hidpp-test-{tag}")),
+        vendor_id: crate::LOGITECH_VENDOR_ID,
+        product_id: super::LITRA_GLOW_PRODUCT_ID,
+        usage_page: 0xff43,
+        usage_id: 0x0202,
+        name: "Litra Glow".into(),
+        manufacturer: Some("Logitech".into()),
+        serial_number: Some(format!("LITRA-{tag}")),
+    }
+}
+
+struct CapturingWriter(Arc<Mutex<Vec<Vec<u8>>>>);
+
+#[hidpp::async_trait]
+impl RawWriter for CapturingWriter {
+    async fn write_output_report(&mut self, report: &[u8]) -> Result<(), BackendError> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(report.to_vec());
+        Ok(())
+    }
+}
+
+#[hidpp::async_trait]
+impl HidBackend for LitraBackend {
+    async fn enumerate(&self) -> Result<Vec<NodeInfo>, BackendError> {
+        Ok(self.nodes.clone())
+    }
+
+    async fn enumerate_hidpp(&self) -> Result<Vec<NodeInfo>, BackendError> {
+        Ok(Vec::new())
+    }
+
+    async fn open_hidpp(
+        &self,
+        _node: &NodeInfo,
+    ) -> Result<Option<Arc<HidppChannel>>, BackendError> {
+        self.hidpp_opens.fetch_add(1, Ordering::SeqCst);
+        match self.opens {
+            Opens::Hidpp => {
+                let light = Arc::clone(&self.light);
+                let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+                    light
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .respond(request)
+                });
+                Ok(Some(scripted_channel(raw).await))
+            }
+            Opens::Silent => {
+                let (raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+                Ok(Some(scripted_channel(raw).await))
+            }
+            Opens::NotHidpp => Ok(None),
+            Opens::Fails => Err(BackendError::Backend("busy".into())),
+        }
+    }
+
+    async fn open_raw_writer(&self, _node: &NodeInfo) -> Result<Box<dyn RawWriter>, BackendError> {
+        Ok(Box::new(CapturingWriter(Arc::clone(&self.raw_reports))))
+    }
+
+    fn watch(&self) -> Result<HotplugStream, BackendError> {
+        Ok(Box::new(futures_lite::stream::empty()))
+    }
+}
+
+#[tokio::test]
+async fn reads_the_light_through_the_index_its_root_feature_reports() {
+    let backend = LitraBackend::new("read", Opens::Hidpp, Light::glow());
+
+    let state = read_state(&backend, &backend.route(), LitraModel::Glow)
+        .await
+        .expect("the light answers")
+        .expect("a HID++ light reads back");
+
+    assert!(state.on);
+    assert_eq!(state.brightness, Some(100));
+    assert_eq!(state.temperature_kelvin, Some(4000));
+    assert_eq!(state.brightness_limit, None);
+    let brightness = state.capabilities.brightness.expect("a brightness range");
+    assert_eq!((brightness.min(), brightness.max()), (20, 250));
+    let temperature = state.capabilities.temperature.expect("a temperature range");
+    assert_eq!(
+        (temperature.min(), temperature.max(), temperature.step()),
+        (2700, 6500, 100)
+    );
+    assert!(backend.raw_reports().is_empty(), "nothing goes out raw");
+    // Brightness info first, as Logi Options+ reads it; no effective max
+    // without the dynamic-maximum flag.
+    assert_eq!(backend.light().functions(), [2, 7, 0, 3, 8]);
+}
+
+#[tokio::test]
+async fn the_effective_maximum_needs_version_one_and_the_dynamic_maximum_flag() {
+    let cases = [
+        // (version, flags, effective max, expected limit, F12 asked)
+        (0, DYNAMIC, 150, None, false),
+        (1, LINEAR, 150, None, false),
+        (1, DYNAMIC, 150, Some(150), true),
+        (1, DYNAMIC, 0, None, true),
+        (1, DYNAMIC, 250, None, true),
+    ];
+    for (case, (version, flags, effective_max, limit, asked)) in cases.into_iter().enumerate() {
+        let light = Light {
+            version,
+            brightness_flags: flags,
+            effective_max,
+            ..Light::glow()
+        };
+        let backend = LitraBackend::new(&format!("limit-{case}"), Opens::Hidpp, light);
+        let state = read_state(&backend, &backend.route(), LitraModel::Glow)
+            .await
+            .expect("the light answers")
+            .expect("a HID++ light reads back");
+        assert_eq!(state.brightness_limit, limit, "case {case}");
+        assert_eq!(
+            backend.light().functions().contains(&12),
+            asked,
+            "case {case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_write_goes_to_the_resolved_feature_and_is_read_back() {
+    let backend = LitraBackend::new("write", Opens::Hidpp, Light::glow());
+
+    let state = apply(
+        &backend,
+        &backend.route(),
+        LitraModel::Glow,
+        LightCommand::BrightnessPercent(50),
+    )
+    .await
+    .expect("the write succeeds")
+    .expect("a HID++ light reads back");
+
+    // 50 % of 20–250 lm is 135 lm, as the raw report encodes it.
+    assert_eq!(state.brightness, Some(135));
+    let light = backend.light();
+    assert_eq!(light.lumens, 135);
+    let writes: Vec<_> = light
+        .requests
+        .iter()
+        .filter(|(function, _)| *function == 4)
+        .collect();
+    assert_eq!(writes, [&(4, 135u16.to_be_bytes())]);
+    assert_eq!(light.functions().last(), Some(&3), "the write is read back");
+    assert!(backend.raw_reports().is_empty());
+}
+
+#[tokio::test]
+async fn a_brightness_above_the_limit_comes_back_as_the_value_the_light_kept() {
+    let light = Light {
+        brightness_flags: DYNAMIC,
+        effective_max: 150,
+        ..Light::glow()
+    };
+    let backend = LitraBackend::new("clamp", Opens::Hidpp, light);
+
+    let state = apply(
+        &backend,
+        &backend.route(),
+        LitraModel::Glow,
+        LightCommand::BrightnessNative(200),
+    )
+    .await
+    .expect("a clamped write is not an error")
+    .expect("a HID++ light reads back");
+
+    assert_eq!(state.brightness, Some(150));
+    assert_eq!(state.brightness_limit, Some(150));
+}
+
+#[tokio::test]
+async fn a_value_the_light_already_holds_is_not_written() {
+    let backend = LitraBackend::new("same", Opens::Hidpp, Light::glow());
+    let route = backend.route();
+
+    for command in [
+        LightCommand::Power(true),
+        LightCommand::BrightnessNative(100),
+        LightCommand::TemperatureKelvin(4000),
+    ] {
+        apply(&backend, &route, LitraModel::Glow, command)
+            .await
+            .expect("the light answers");
+    }
+
+    let functions = backend.light().functions();
+    assert!(
+        !functions
+            .iter()
+            .any(|function| matches!(function, 1 | 4 | 9)),
+        "no setter ran: {functions:?}"
+    );
+}
+
+#[tokio::test]
+async fn power_and_temperature_writes_are_read_back() {
+    let backend = LitraBackend::new("power", Opens::Hidpp, Light::glow());
+    let route = backend.route();
+
+    let off = apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::Power(false),
+    )
+    .await
+    .expect("the write succeeds")
+    .expect("a HID++ light reads back");
+    assert!(!off.on);
+    let warm = apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::TemperatureKelvin(2700),
+    )
+    .await
+    .expect("the write succeeds")
+    .expect("a HID++ light reads back");
+    assert_eq!(warm.temperature_kelvin, Some(2700));
+
+    let light = backend.light();
+    assert!(!light.on);
+    assert_eq!(light.kelvin, 2700);
+    assert!(light.requests.contains(&(1, [0, 0])));
+    assert!(light.requests.contains(&(9, 2700u16.to_be_bytes())));
+}
+
+#[tokio::test]
+async fn the_returned_state_is_what_the_light_reports_not_what_was_sent() {
+    let light = Light {
+        quirk: Quirk::IgnoresWrites,
+        ..Light::glow()
+    };
+    let backend = LitraBackend::new("stubborn", Opens::Hidpp, light);
+    let route = backend.route();
+
+    for command in [
+        LightCommand::Power(false),
+        LightCommand::BrightnessNative(200),
+        LightCommand::TemperatureKelvin(6500),
+    ] {
+        let state = apply(&backend, &route, LitraModel::Glow, command)
+            .await
+            .expect("the setter is acknowledged")
+            .expect("a HID++ light reads back");
+        assert!(state.on, "{command:?}");
+        assert_eq!(state.brightness, Some(100), "{command:?}");
+        assert_eq!(state.temperature_kelvin, Some(4000), "{command:?}");
+    }
+    let functions = backend.light().functions();
+    for setter in [1, 4, 9] {
+        assert!(
+            functions.contains(&setter),
+            "setter {setter} ran: {functions:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_rejected_hidpp_write_is_returned_and_not_repeated_raw() {
+    let light = Light {
+        quirk: Quirk::RejectsWrites,
+        ..Light::glow()
+    };
+    let backend = LitraBackend::new("rejects", Opens::Hidpp, light);
+
+    let error = apply(
+        &backend,
+        &backend.route(),
+        LitraModel::Glow,
+        LightCommand::Power(false),
+    )
+    .await
+    .expect_err("the light refused the write");
+    assert!(
+        matches!(
+            error,
+            WriteError::HidppFeature {
+                operation: HidppOperation::Light,
+                feature_hex: 0x1990,
+                kind: HidppFeatureErrorKind::InvalidArgument,
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(backend.raw_reports().is_empty(), "nothing goes out raw");
+    assert!(backend.light().on);
+}
+
+#[tokio::test]
+async fn values_are_checked_against_the_ranges_the_light_reports() {
+    // A light wider than the Glow's static 20–250 lm range: its own range
+    // decides, both ways.
+    let light = Light {
+        brightness: (10, 300, 10),
+        ..Light::glow()
+    };
+    let backend = LitraBackend::new("range", Opens::Hidpp, light);
+    let route = backend.route();
+
+    let state = apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::BrightnessNative(280),
+    )
+    .await
+    .expect("280 lm is inside the light's own range")
+    .expect("a HID++ light reads back");
+    assert_eq!(state.brightness, Some(280));
+
+    for (command, control) in [
+        (LightCommand::BrightnessNative(285), "brightness_native"),
+        (LightCommand::TemperatureKelvin(2750), "temperature_kelvin"),
+        (LightCommand::BrightnessPercent(101), "brightness_percent"),
+    ] {
+        let error = apply(&backend, &route, LitraModel::Glow, command)
+            .await
+            .expect_err("off the light's grid");
+        assert!(
+            matches!(&error, WriteError::InvalidLightValue { control: name, .. } if name == control),
+            "{error:?}"
+        );
+    }
+    let functions = backend.light().functions();
+    assert_eq!(
+        functions
+            .iter()
+            .filter(|function| matches!(function, 4 | 9))
+            .count(),
+        1,
+        "only the valid write ran: {functions:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_light_that_is_not_hidpp_gets_the_raw_report_and_is_not_asked_again() {
+    let backend = LitraBackend::new("not-hidpp", Opens::NotHidpp, Light::glow());
+    let route = backend.route();
+
+    let state = apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::TemperatureKelvin(4600),
+    )
+    .await
+    .expect("the raw report goes out");
+    assert_eq!(state, None, "a raw report reads nothing back");
+    let expected = encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(4600))
+        .expect("valid")
+        .to_vec();
+    assert_eq!(backend.raw_reports(), [expected]);
+
+    apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::Power(true),
+    )
+    .await
+    .expect("the raw report goes out");
+    assert_eq!(
+        read_state(&backend, &route, LitraModel::Glow)
+            .await
+            .expect("no error"),
+        None
+    );
+    assert_eq!(backend.hidpp_opens(), 1, "the answer is remembered");
+    assert_eq!(backend.raw_reports().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_light_that_does_not_answer_falls_back_at_the_resolve_deadline() {
+    let backend = LitraBackend::new("silent", Opens::Silent, Light::glow());
+    let route = backend.route();
+
+    let started = tokio::time::Instant::now();
+    apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::Power(false),
+    )
+    .await
+    .expect("the raw report goes out");
+    let waited = started.elapsed();
+    assert!(
+        waited >= RESOLVE_TIMEOUT && waited < hidpp::channel::SEND_RESPONSE_TIMEOUT,
+        "waited {waited:?}"
+    );
+    assert_eq!(backend.raw_reports().len(), 1);
+
+    apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::Power(true),
+    )
+    .await
+    .expect("the raw report goes out");
+    assert_eq!(
+        backend.hidpp_opens(),
+        1,
+        "a silent light is not asked again"
+    );
+    assert_eq!(backend.raw_reports().len(), 2);
+}
+
+#[tokio::test]
+async fn a_light_without_0x1990_gets_the_raw_report() {
+    let light = Light {
+        quirk: Quirk::NoIllumination,
+        ..Light::glow()
+    };
+    let backend = LitraBackend::new("absent", Opens::Hidpp, light);
+    let route = backend.route();
+
+    for _ in 0..2 {
+        apply(
+            &backend,
+            &route,
+            LitraModel::Glow,
+            LightCommand::Power(true),
+        )
+        .await
+        .expect("the raw report goes out");
+    }
+    assert_eq!(backend.raw_reports().len(), 2);
+    assert_eq!(backend.hidpp_opens(), 1);
+    assert!(backend.light().requests.is_empty());
+}
+
+#[tokio::test]
+async fn a_light_whose_state_cannot_be_read_gets_the_raw_report() {
+    let light = Light {
+        quirk: Quirk::RejectsReads,
+        ..Light::glow()
+    };
+    let backend = LitraBackend::new("unreadable", Opens::Hidpp, light);
+    let route = backend.route();
+
+    for _ in 0..2 {
+        let state = apply(
+            &backend,
+            &route,
+            LitraModel::Glow,
+            LightCommand::Power(false),
+        )
+        .await
+        .expect("the raw report goes out");
+        assert_eq!(state, None);
+    }
+    assert_eq!(backend.raw_reports().len(), 2);
+    assert_eq!(backend.hidpp_opens(), 1, "the failed read is remembered");
+    assert_eq!(
+        backend.light().functions(),
+        [2],
+        "no setter ran over HID++ before falling back"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_open_falls_back_for_that_command_only() {
+    let backend = LitraBackend::new("refused", Opens::Fails, Light::glow());
+    let route = backend.route();
+
+    for _ in 0..2 {
+        apply(
+            &backend,
+            &route,
+            LitraModel::Glow,
+            LightCommand::Power(true),
+        )
+        .await
+        .expect("the raw report goes out");
+    }
+    assert_eq!(backend.raw_reports().len(), 2);
+    assert_eq!(
+        backend.hidpp_opens(),
+        2,
+        "a refused open says nothing about the light, so it is asked again"
+    );
+}
+
+#[tokio::test]
+async fn two_nodes_answering_to_one_route_are_refused() {
+    let mut backend = LitraBackend::new("twin", Opens::Hidpp, Light::glow());
+    let mut twin = litra_node("twin");
+    twin.id = NodeId::from("litra-hidpp-test-twin-2".to_owned());
+    backend.nodes.push(twin);
+
+    let error = apply(
+        &backend,
+        &backend.route(),
+        LitraModel::Glow,
+        LightCommand::Power(true),
+    )
+    .await
+    .expect_err("two nodes match one route");
+    assert!(matches!(error, WriteError::AmbiguousRawDevice), "{error:?}");
+    assert_eq!(backend.hidpp_opens(), 0);
+    assert!(backend.raw_reports().is_empty());
+}
+
+#[tokio::test]
+async fn another_light_of_the_same_model_is_not_the_routed_one() {
+    let mut backend = LitraBackend::new("pair-a", Opens::Hidpp, Light::glow());
+    backend.nodes.push(litra_node("pair-b"));
+
+    apply(
+        &backend,
+        &backend.route(),
+        LitraModel::Glow,
+        LightCommand::BrightnessNative(120),
+    )
+    .await
+    .expect("the route names one of the two lights by serial");
+    assert_eq!(backend.hidpp_opens(), 1);
+    assert_eq!(backend.light().lumens, 120);
+}
+
+#[tokio::test]
+async fn a_disconnected_light_is_not_found() {
+    let mut backend = LitraBackend::new("gone", Opens::Hidpp, Light::glow());
+    let route = backend.route();
+    backend.nodes.clear();
+
+    let error = apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::Power(true),
+    )
+    .await
+    .expect_err("nothing answers to the route");
+    assert!(matches!(error, WriteError::DeviceNotFound), "{error:?}");
+}
+
+#[test]
+fn a_control_range_keeps_its_top_on_the_resolution_grid() {
+    let lumens = LightValueUnit::Lumens;
+    let range = control_range(30, 405, 10, lumens).expect("a range");
+    assert_eq!((range.min(), range.max(), range.step()), (30, 400, 10));
+    let range = control_range(20, 250, 0, lumens).expect("a range");
+    assert_eq!(
+        (range.max(), range.step()),
+        (250, 1),
+        "a zero resolution reads as 1"
+    );
+    assert_eq!(control_range(250, 250, 1, lumens), None, "a single setting");
+    assert_eq!(control_range(300, 250, 1, lumens), None, "a reversed range");
+}

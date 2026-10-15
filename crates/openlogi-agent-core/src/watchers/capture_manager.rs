@@ -42,12 +42,7 @@ pub(super) trait CaptureManager {
     ) -> bool;
 
     /// The next instant recovery work can make progress, if any.
-    fn deadline(
-        &self,
-        requests: ReceiverRequestState,
-        device_io_allowed: bool,
-        published: &Self::Published,
-    ) -> Option<Instant>;
+    fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant>;
 
     /// Whether any finished session still owes the firmware a restore.
     fn has_pending_restores(&self) -> bool;
@@ -121,7 +116,7 @@ pub(super) async fn run<M: CaptureManager>(
         }
 
         let requests = *receiver_requests.borrow();
-        let deadline = manager.deadline(requests, device_io.allows_io(), &published.borrow());
+        let deadline = manager.deadline(requests, device_io.allows_io());
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             reconcile = true;
             continue;

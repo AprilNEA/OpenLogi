@@ -548,3 +548,96 @@ fn a_smooth_motion_finishing_inside_a_phased_gesture_does_not_end_the_stream() {
     );
     assert_delta(cumulative(&frames), wheel(2.0, 0.0));
 }
+
+#[test]
+fn phased_gesture_frames_reach_the_phased_injector() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    for millis in [0, 30] {
+        engine.phased_impulse(
+            hidpp_source("mouse-a", 1),
+            wheel(1.0, 0.0),
+            base + Duration::from_millis(millis),
+            &mut |f| frames.push(f),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(30) + PHASED_IDLE, &mut |f| {
+        frames.push(f);
+    });
+
+    assert_eq!(
+        phases(&frames),
+        [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Changed,
+            SmoothScrollPhase::Ended
+        ]
+    );
+    assert!(
+        frames.iter().all(|f| f.phased),
+        "a phased gesture's frames, terminal included, keep their phases"
+    );
+
+    frames.clear();
+    engine.phased_impulse(
+        hidpp_source("mouse-a", 1),
+        wheel(1.0, 0.0),
+        base,
+        &mut |f| {
+            frames.push(f);
+        },
+    );
+    engine.cancel_all(&mut |f| frames.push(f));
+    assert_eq!(
+        phases(&frames),
+        [SmoothScrollPhase::Began, SmoothScrollPhase::Cancelled]
+    );
+    assert!(frames.iter().all(|f| f.phased));
+}
+
+#[test]
+fn smoothed_wheel_frames_stay_phaseless() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.impulse(source(), wheel(0.0, 1.0), base, &mut |f| frames.push(f));
+    engine.advance_due(base + ANIMATION_DURATION, &mut |f| frames.push(f));
+
+    assert_eq!(
+        frames.last().map(|f| f.phase),
+        Some(SmoothScrollPhase::Ended)
+    );
+    assert!(frames.iter().all(|f| !f.phased));
+}
+
+#[test]
+fn smooth_output_inside_an_open_phased_gesture_stays_phased() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.phased_impulse(
+        hidpp_source("mouse-a", 1),
+        wheel(1.0, 0.0),
+        base,
+        &mut |f| frames.push(f),
+    );
+    engine.impulse(
+        hidpp_source("mouse-b", 1),
+        wheel(1.0, 0.0),
+        base,
+        &mut |f| {
+            frames.push(f);
+        },
+    );
+    engine.advance_due(base + PHASED_IDLE, &mut |f| frames.push(f));
+
+    assert_eq!(
+        frames.last().map(|f| f.phase),
+        Some(SmoothScrollPhase::Ended)
+    );
+    assert!(
+        frames.iter().all(|f| f.phased),
+        "the stream keeps the kind it opened with, so the gesture never changes kind"
+    );
+}

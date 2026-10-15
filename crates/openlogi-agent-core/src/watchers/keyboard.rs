@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_hid::{
-    CaptureHost, CaptureSessionOutcome, CapturedInput, DeviceRoute, PendingCaptureRestore,
-    run_keyboard_capture_session,
+    CaptureHost, CaptureSessionOutcome, CaptureSessionStop, CapturedInput, DeviceRoute,
+    PendingCaptureRestore, run_keyboard_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
@@ -78,8 +78,10 @@ struct KeyboardDispatchPlan {
     config_key: String,
     bindings: BTreeMap<ButtonId, Binding>,
 }
-type RunningKeyboardSession = CaptureSession<KeyboardTarget, KeyboardDispatchPlan>;
-type KeyboardSlot = CaptureSlot<KeyboardTarget, KeyboardDispatchPlan, PendingRestore>;
+type RunningKeyboardSession =
+    CaptureSession<KeyboardTarget, KeyboardDispatchPlan, CaptureSessionStop>;
+type KeyboardSlot =
+    CaptureSlot<KeyboardTarget, KeyboardDispatchPlan, PendingRestore, CaptureSessionStop>;
 
 struct KeyboardInput {
     session: HidppSessionId,
@@ -166,7 +168,9 @@ fn dispatch_input(
         }
         CapturedInput::Gesture(..)
         | CapturedInput::Scroll { .. }
-        | CapturedInput::ThumbwheelDirection { .. } => {}
+        | CapturedInput::ThumbwheelDirection { .. }
+        | CapturedInput::HeldWheel { .. }
+        | CapturedInput::MainWheel { .. } => {}
     }
 }
 
@@ -204,7 +208,7 @@ fn reconcile_session(
     dispatcher: &ActionDispatcher,
 ) {
     let desired = wanted.map(|(target, dispatch)| (target, dispatch));
-    let action = running.reconcile(desired);
+    let action = running.reconcile_with(desired, |_, _| CaptureSessionStop::Shutdown);
     if action != ReconcileAction::None {
         dispatcher.cancel_hidpp_session(running.id());
     }
@@ -497,7 +501,6 @@ impl CaptureManager for KeyboardManager {
         &self,
         requests: ReceiverRequestState,
         device_io_allowed: bool,
-        _published: &Self::Published,
     ) -> Option<tokio::time::Instant> {
         self.state.deadline(requests, device_io_allowed)
     }

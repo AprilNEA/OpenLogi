@@ -412,7 +412,7 @@ impl ReplayRawHidChannel {
 
     #[cfg(test)]
     pub(crate) fn with_failing_writes(
-        responder: fn(&[u8]) -> Option<Vec<u8>>,
+        responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
         fails: fn(&[u8]) -> bool,
     ) -> (Self, ReplayChannelHandle) {
         Self::build_scripted(responder, Some(fails))

@@ -6,7 +6,7 @@ use gpui::{
     Bounds, DevicePixels, DisplayId, Pixels, Point, WindowBounds, WindowOptions, point, size,
 };
 
-use crate::ring::{WINDOW_SIZE, ring_window_options};
+use crate::ring::{Placement, WINDOW_SIZE, ring_window_options};
 
 #[cfg(target_os = "windows")]
 mod native;
@@ -22,6 +22,11 @@ pub(crate) struct RingPlacement {
 }
 
 impl RingPlacement {
+    /// Window options for this invocation, paired with how the view places its panel.
+    pub(crate) fn openings(&self) -> Vec<(WindowOptions, Placement)> {
+        vec![(self.window_options(), Placement::Window)]
+    }
+
     pub(crate) fn window_options(&self) -> WindowOptions {
         WindowOptions {
             display_id: Some(self.display_id),
@@ -91,11 +96,23 @@ mod tests {
         }
     }
 
+    /// The single positioned window this placement opens.
+    #[track_caller]
+    fn opened(placement: &RingPlacement) -> WindowOptions {
+        let (options, panel) = placement
+            .openings()
+            .into_iter()
+            .next()
+            .expect("a Windows ring opens one window");
+        assert_eq!(panel, Placement::Window);
+        options
+    }
+
     /// Mirror GPUI's validation: the requested bounds, scaled by the requested
     /// monitor's own factor, must land back on that monitor as a 1px window.
     #[track_caller]
     fn assert_bootstrap_on_display(placement: &RingPlacement) {
-        let Some(WindowBounds::Windowed(bounds)) = placement.window_options().window_bounds else {
+        let Some(WindowBounds::Windowed(bounds)) = opened(placement).window_bounds else {
             panic!("the ring must request windowed bootstrap bounds");
         };
         let device = bounds.to_device_pixels(placement.scale_factor());
@@ -116,7 +133,7 @@ mod tests {
             dpi: 192,
             ..placement((2000, 800), (1920, 0, 4480, 1440))
         };
-        let options = placement.window_options();
+        let options = opened(&placement);
         assert_eq!(options.display_id, Some(DisplayId::from(42)));
         assert!(
             options.show,

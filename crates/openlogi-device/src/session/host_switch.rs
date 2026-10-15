@@ -578,6 +578,14 @@ where
 /// spec has not said the slot is empty, and must still be allowed to switch.
 /// Only an explicit `Empty` refuses, so this returns a plain `bool` — an
 /// unreadable status can never abort the transition it was meant to protect.
+///
+/// Some devices (confirmed on an MX Vertical, see #1709) answer `status ==
+/// Empty` for every slot, including the one they are currently connected on
+/// and others that are genuinely paired and carry a real friendly name — the
+/// status byte is simply unimplemented/stuck at 0 on these units. A nonzero
+/// `name_len` is independent evidence the slot has a stored pairing, so it
+/// overrides an `Empty` status; only a slot with both `Empty` and no name is
+/// treated as truly empty.
 async fn host_slot_is_empty(device: &mut Device, host: u8) -> bool {
     let feature = timed_hidpp(
         "locating hosts-info feature",
@@ -599,7 +607,7 @@ async fn host_slot_is_empty(device: &mut Device, host: u8) -> bool {
     )
     .await
     {
-        Ok(slot) => slot.status == HostSlotStatus::Empty,
+        Ok(slot) => slot.status == HostSlotStatus::Empty && slot.name_len == 0,
         Err(error) => {
             debug!(host, %error, "host slot status is unreadable; treating the slot as usable");
             false

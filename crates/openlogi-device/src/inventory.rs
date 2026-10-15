@@ -48,6 +48,18 @@ pub enum InventoryError {
     AmbiguousRawDevice,
 }
 
+/// How long a successful feature-table probe is reused.
+///
+/// [`probe_cache_is_stale`] stays false through this age and becomes true only
+/// after it. A scan at exactly this age still hits the cache.
+pub const PROBE_CACHE_FRESHNESS: Duration = cache::REFRESH_INTERVAL;
+
+/// Reports whether a probe stamped at `probed_at` must be walked again at `now`.
+#[must_use]
+pub fn probe_cache_is_stale(probed_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(probed_at) > PROBE_CACHE_FRESHNESS
+}
+
 /// Stateful device enumerator: owns persistent channels and the per-device
 /// probe cache so the event-first watcher reuses immutable data across
 /// reconciliations. One-shot callers use the [`enumerate`] free function, which

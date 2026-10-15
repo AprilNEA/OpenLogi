@@ -42,7 +42,13 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// event indexes.
 /// v8 adds the `0x4531` multi-platform event index and records whether the
 /// keyboard lets software set its platform (`Capabilities::os_layout`).
-const SCHEMA_VERSION: u32 = 8;
+/// v9 adds the extended report-rate `0x8061` event index and the
+/// `Capabilities::report_rate` flag.
+/// v10 adds the `0x1982` backlight event index.
+/// v11 adds the `Capabilities::easy_switch` flag (`0x1815` host slots).
+/// v12 adds the `Capabilities::virtual_thumbwheel` flag (Back/Forward
+/// raw-wheel reporting).
+const SCHEMA_VERSION: u32 = 12;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -237,6 +243,8 @@ mod tests {
             fn_inversion_multi_host: None,
             extended_dpi: None,
             multi_platform: Some(14),
+            extended_report_rate: Some(15),
+            backlight: Some(16),
         };
         let mut cache = HashMap::new();
         cache.insert(

@@ -7,14 +7,27 @@ use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, RwLock};
 
+use hidpp::feature::CreatableFeature as _;
+use hidpp::feature::hires_wheel::HiResWheelFeature;
 use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
+use super::gesture::main_wheel;
 use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel, ThumbwheelStatus, WheelDirection};
 use crate::{ChannelRegistry, DeviceRoute, IoSuspended, SharedChannel};
+
+/// Why a capture manager is stopping an active session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureSessionStop {
+    /// Capture is no longer wanted, or its controls changed on the same route.
+    Shutdown,
+    /// The same physical device moved to another route. Restore through that
+    /// route before a successor arms.
+    Handoff(DeviceRoute),
+}
 
 /// Shared slot holding the active capture session's open channel, so bounded
 /// hardware writes can reuse it instead of opening a second connection.
@@ -58,22 +71,41 @@ pub(crate) struct ArmedReporting {
     policy: ReprogRestorePolicy,
 }
 
+/// How a capture session diverts one pointer control: what the firmware
+/// reports while the control is held, besides its press and release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PointerDivert {
+    /// Nothing more: a diverted button.
+    Plain,
+    /// Raw pointer motion, for a gesture source.
+    RawXy,
+    /// Raw main-wheel movement instead of scrolling, for a wheel-hold button.
+    /// Only a control advertising `RAW_WHEEL` may be armed this way.
+    RawWheel,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReprogRestorePolicy {
-    /// Pointer control: clear diversion and raw XY.
-    Pointer,
+    /// Pointer control armed in the given mode: clear diversion and raw XY,
+    /// and raw wheel when the control was armed with it.
+    Pointer(PointerDivert),
     /// Keyboard key: clear diversion without touching raw XY.
     Keyboard,
 }
 
 impl ArmedReporting {
-    /// Capture ownership of a pointer control whose teardown clears both
-    /// diversion and raw XY.
-    pub(crate) fn pointer(cid: u16, original: reprog_controls::CidReporting) -> Self {
+    /// Capture ownership of a pointer control armed as `divert`, whose
+    /// teardown clears diversion and raw XY, and raw wheel when `divert` set
+    /// it.
+    pub(crate) fn pointer(
+        cid: u16,
+        original: reprog_controls::CidReporting,
+        divert: PointerDivert,
+    ) -> Self {
         Self {
             cid,
             original,
-            policy: ReprogRestorePolicy::Pointer,
+            policy: ReprogRestorePolicy::Pointer(divert),
         }
     }
 
@@ -87,10 +119,24 @@ impl ArmedReporting {
         }
     }
 
+    /// Compute the `setCidReporting` change that (re)diverts this control the
+    /// way it was armed.
+    pub(crate) fn divert_change(self) -> reprog_controls::CidReportingChange {
+        match self.policy {
+            ReprogRestorePolicy::Pointer(divert) => divert_change(self.original, divert),
+            ReprogRestorePolicy::Keyboard => divert_keyboard_key(self.original),
+        }
+    }
+
     /// Compute the `setCidReporting` change that restores this control.
     pub(crate) fn undivert_change(self) -> reprog_controls::CidReportingChange {
         match self.policy {
-            ReprogRestorePolicy::Pointer => undivert_change(self.original),
+            ReprogRestorePolicy::Pointer(PointerDivert::Plain | PointerDivert::RawXy) => {
+                undivert_change(self.original)
+            }
+            ReprogRestorePolicy::Pointer(PointerDivert::RawWheel) => {
+                undivert_raw_wheel_change(self.original)
+            }
             ReprogRestorePolicy::Keyboard => undivert_keyboard_key(self.original),
         }
     }
@@ -131,7 +177,22 @@ impl ThumbwheelRestore {
     }
 }
 
-#[derive(Clone, Copy)]
+/// The main wheel a capture session diverted over `0x2121`. Teardown always
+/// selects native reporting, like a `0x1b04` control found diverted before
+/// arming: a diverted wheel then is left over from a session that never tore
+/// down, and handing it back keeps the wheel scrolling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HiResWheelRestore {
+    feature_index: u8,
+}
+
+impl HiResWheelRestore {
+    pub(crate) fn new(feature_index: u8) -> Self {
+        Self { feature_index }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CaptureStop {
     /// The owner deliberately requested teardown.
     Shutdown,
@@ -139,17 +200,19 @@ pub(crate) enum CaptureStop {
     ChannelChanged,
     /// The paired slot went offline while its USB receiver remains current.
     ReceiverSlotGone,
-    /// The input owner selected another transport for the same physical device.
-    Moved,
+    /// The same physical device moved. Restore through the successor route
+    /// instead of the transport it left.
+    Handoff(DeviceRoute),
 }
 
 /// What a capture session writes to hand its controls back: every diverted
-/// `0x1b04` control's reporting, and the thumb wheel's.
+/// `0x1b04` control's reporting, the thumb wheel's, and the main wheel's.
 ///
 /// One untimed attempt per control; a failed one leaves the whole plan owed.
 pub struct CaptureRestorePlan {
     reprog: Option<ReprogRestore>,
     thumb: Option<ThumbwheelRestore>,
+    main_wheel: Option<HiResWheelRestore>,
 }
 
 impl fmt::Debug for CaptureRestorePlan {
@@ -163,6 +226,7 @@ impl fmt::Debug for CaptureRestorePlan {
                     .map_or(0, |reprog| reprog.controls.len()),
             )
             .field("has_thumbwheel", &self.thumb.is_some())
+            .field("has_main_wheel", &self.main_wheel.is_some())
             .finish()
     }
 }
@@ -178,6 +242,11 @@ impl RestorePlan for CaptureRestorePlan {
             for &reporting in &reprog.controls {
                 restored &= restore_reporting(&controls, reporting, "captured control").await;
             }
+        }
+        if let Some(wheel) = self.main_wheel {
+            let feature =
+                HiResWheelFeature::new(channel.clone(), device_index, wheel.feature_index);
+            restored &= restore_result(main_wheel::undivert(&feature).await, "main wheel");
         }
         if let Some(thumb) = self.thumb {
             let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
@@ -202,17 +271,38 @@ pub type CaptureSessionOutcome = RestoreOutcome<CaptureRestorePlan>;
 pub type CaptureSessionFailure = SessionFailure<CaptureError, CaptureRestorePlan>;
 
 impl PendingCaptureRestore {
-    /// The restore owed for `reprog` and the thumb wheel, or `None` when the
+    /// Token aimed at `route` whose retry writes nothing and completes once that route is current.
+    #[must_use]
+    pub fn detached(route: DeviceRoute) -> Self {
+        Self::without_channel(
+            route,
+            CaptureRestorePlan {
+                reprog: None,
+                thumb: None,
+                main_wheel: None,
+            },
+        )
+    }
+
+    /// The restore owed for `reprog` and the two wheels, or `None` when the
     /// session diverted nothing.
     pub(crate) fn new(
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
         thumb: Option<ThumbwheelRestore>,
+        main_wheel: Option<HiResWheelRestore>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb.is_none() {
+        if reprog.is_none() && thumb.is_none() && main_wheel.is_none() {
             return None;
         }
-        Some(Self::owing(retired, CaptureRestorePlan { reprog, thumb }))
+        Some(Self::owing(
+            retired,
+            CaptureRestorePlan {
+                reprog,
+                thumb,
+                main_wheel,
+            },
+        ))
     }
 }
 
@@ -226,14 +316,14 @@ pub(crate) async fn restore_after_stop(
         return CaptureSessionOutcome::Restored;
     };
     match stop {
-        // A receiver can remain plugged in through the entire move. Its
-        // original channel is still valid when the device returns, so cleanup
-        // must not require replacement of that connection.
-        CaptureStop::Moved | CaptureStop::ReceiverSlotGone => {
+        // An offline slot can return without the receiver being unplugged.
+        // Its exact route must be published again before restoration writes.
+        CaptureStop::ReceiverSlotGone => {
             CaptureSessionOutcome::RestorePending(pending.allow_current_channel())
         }
         CaptureStop::Shutdown => pending.allow_current_channel().retry(registry).await,
         CaptureStop::ChannelChanged => pending.retry(registry).await,
+        CaptureStop::Handoff(route) => pending.retry_via(route, registry).await,
     }
 }
 
@@ -288,11 +378,14 @@ pub(crate) async fn drop_listener_after<T, R>(listener: T, teardown: impl Future
 /// Divert a control in the requested mode while preserving its remap target.
 pub(crate) fn divert_change(
     reporting: reprog_controls::CidReporting,
-    raw_xy: bool,
+    divert: PointerDivert,
 ) -> reprog_controls::CidReportingChange {
     reprog_controls::CidReportingChange {
         diverted: Some(true),
-        raw_xy: Some(raw_xy),
+        raw_xy: Some(divert == PointerDivert::RawXy),
+        // Left untouched unless requested: a control without `RAW_WHEEL` has
+        // no raw-wheel state to write.
+        raw_wheel: (divert == PointerDivert::RawWheel).then_some(true),
         remap: reporting.remap,
         ..Default::default()
     }
@@ -342,6 +435,17 @@ pub(crate) fn undivert_change(
         raw_xy: Some(false),
         remap: reporting.remap,
         ..Default::default()
+    }
+}
+
+/// [`undivert_change`] for a control armed with raw wheel: also hand the
+/// wheel back, so it scrolls natively again.
+pub(crate) fn undivert_raw_wheel_change(
+    reporting: reprog_controls::CidReporting,
+) -> reprog_controls::CidReportingChange {
+    reprog_controls::CidReportingChange {
+        raw_wheel: Some(false),
+        ..undivert_change(reporting)
     }
 }
 

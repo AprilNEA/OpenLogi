@@ -6,8 +6,6 @@ use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
 use openlogi_hid::{CaptureChannelSlot, DeviceRoute};
 
-mod reconnect;
-
 fn route() -> DeviceRoute {
     DeviceRoute::Direct {
         vendor_id: 0x046d,
@@ -46,7 +44,10 @@ fn live_session_with_epoch(epoch: u64) -> RunningSession {
 
 fn draining_session_with_epoch(epoch: u64) -> RunningSession {
     let mut session = live_session_with_epoch(epoch);
-    assert_eq!(session.reconcile(None), ReconcileAction::Retiring);
+    assert_eq!(
+        session.reconcile_with(None, stop_for_target_change),
+        ReconcileAction::Retiring
+    );
     session
 }
 
@@ -111,16 +112,16 @@ async fn retry_deadline_is_not_postponed_by_ready_input() {
 fn suspended_device_io_disables_retry_deadlines() {
     let retry_at = Instant::now() + RETRY_DELAY;
     let slots = HashMap::from([(
-        CaptureKey::for_target(&plan().target),
+        physical_key(),
         GestureSlot::recovering(None, Some(retry_at)),
     )]);
 
     assert_eq!(
-        next_deadline(ReceiverRequestState::default(), true, &slots, &[]),
+        next_deadline(ReceiverRequestState::default(), true, &slots),
         Some(retry_at),
     );
     assert_eq!(
-        next_deadline(ReceiverRequestState::default(), false, &slots, &[]),
+        next_deadline(ReceiverRequestState::default(), false, &slots),
         None,
         "capture retries must stay dormant until visible resume",
     );
@@ -135,14 +136,14 @@ async fn exclusive_receiver_access_disables_expired_recovery_deadlines() {
         .await;
     let restart_at = Instant::now();
     let slots = HashMap::from([(
-        CaptureKey::for_target(&plan().target),
+        physical_key(),
         GestureSlot::recovering(None, Some(restart_at)),
     )]);
 
-    assert_eq!(next_deadline(*requests.borrow(), true, &slots, &[]), None);
+    assert_eq!(next_deadline(*requests.borrow(), true, &slots), None);
     drop(exclusive);
     assert_eq!(
-        next_deadline(*requests.borrow(), true, &slots, &[]),
+        next_deadline(*requests.borrow(), true, &slots),
         Some(restart_at),
         "release makes the retry actionable without adding another backoff"
     );
@@ -154,7 +155,8 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
     use futures_lite::future::poll_once;
 
     for shutdown_requested in [false, true] {
-        let (plans_tx, capture_plans) = watch::channel(Arc::new(vec![plan()]));
+        let (plans_tx, capture_plans) =
+            watch::channel(Arc::new(CapturePublication::from_plans(vec![plan()])));
         let capture = CaptureChannelSlot::default();
         // A missing inventory channel makes the real session task fail without
         // opening hardware; ordered Done then drives normal restart recovery.
@@ -167,6 +169,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             registry,
             receiver_access: access.clone(),
             device_io,
+            transport_turns: crate::hardware::TransportTurns::default(),
         };
         let mut actions =
             crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring)
@@ -211,7 +214,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
 #[tokio::test]
 async fn input_accepted_during_restoration_precedes_session_done() {
     let id = session_id(7);
-    let key = CaptureKey::for_target(&plan().target);
+    let key = physical_key();
     let (events, mut event_rx) = mpsc::unbounded_channel();
     let (session_tx, session_rx) = mpsc::unbounded_channel();
     let listener_sink = session_tx.clone();
@@ -221,7 +224,7 @@ async fn input_accepted_during_restoration_precedes_session_done() {
         forward_task,
         events,
         SessionDone {
-            key: key.clone(),
+            physical_key: key.clone(),
             session: id.clone(),
             pending_restore: None,
         },
@@ -237,7 +240,7 @@ async fn input_accepted_during_restoration_precedes_session_done() {
 
     match event_rx.recv().await {
         Some(SessionEvent::Input(input)) => {
-            assert_eq!(input.key, key);
+            assert_eq!(input.physical_key, key);
             assert_eq!(input.session, id);
             assert_eq!(input.input, CapturedInput::ButtonPulse(ButtonId::DpiToggle));
         }
@@ -293,13 +296,17 @@ async fn exclusive_request_retires_capture_without_rejecting_owned_input() {
     .await
     .expect("pairing should announce its exclusive request");
 
-    let (plans, _) = tokio::sync::watch::channel(Arc::new(vec![plan()]));
+    let (plans, _) =
+        tokio::sync::watch::channel(Arc::new(CapturePublication::from_plans(vec![plan()])));
     let plans = plans.subscribe();
     let requests = access.subscribe_requests();
     assert!(wanted_sessions(*requests.borrow(), &plans).is_empty());
 
     let mut session = live_session_with_epoch(7);
-    assert_eq!(session.reconcile(None), ReconcileAction::Retiring);
+    assert_eq!(
+        session.reconcile_with(None, stop_for_target_change),
+        ReconcileAction::Retiring
+    );
     assert!(!session.is_active());
     assert!(
         dispatch_context_for(&session_id(7), Some(&session)).is_some(),
@@ -333,7 +340,10 @@ fn an_active_session_refreshes_bindings_without_rearming_hardware() {
     assert_eq!(session.target(), &new_plan.target);
 
     assert_eq!(
-        session.reconcile(Some((&new_plan.target, &new_plan.dispatch))),
+        session.reconcile_with(
+            Some((&new_plan.target, &new_plan.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged,
         "a hot plan refresh must cancel input lifecycles admitted under the old action map"
     );
@@ -372,10 +382,13 @@ fn side_gesture_transition_keeps_the_retiring_plan_until_native_restore() {
         .clear();
     assert_ne!(session.target(), &published_without_hook.target);
     assert_eq!(
-        session.reconcile(Some((
-            &published_without_hook.target,
-            &published_without_hook.dispatch,
-        ))),
+        session.reconcile_with(
+            Some((
+                &published_without_hook.target,
+                &published_without_hook.dispatch,
+            )),
+            stop_for_target_change,
+        ),
         ReconcileAction::Retiring
     );
     assert!(!session.is_active());
@@ -421,6 +434,60 @@ fn capture_target_changes_schedule_the_old_session_for_retirement() {
 }
 
 #[test]
+fn receiver_route_change_requests_a_firmware_handoff() {
+    let old_plan = plan();
+    let mut new_plan = old_plan.clone();
+    let successor_route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-b".to_owned(),
+        slot: 2,
+    };
+    new_plan.target.route.clone_from(&successor_route);
+    let (stop, mut stopped) = oneshot::channel();
+    let mut session =
+        CaptureSession::active(session_id(7), old_plan.target, old_plan.dispatch, stop);
+
+    assert_eq!(
+        session.reconcile_with(
+            Some((&new_plan.target, &new_plan.dispatch)),
+            stop_for_target_change,
+        ),
+        ReconcileAction::Retiring
+    );
+    assert_eq!(
+        stopped
+            .try_recv()
+            .expect("route change should stop the active session"),
+        CaptureSessionStop::Handoff(successor_route),
+        "teardown must restore through the receiver the mouse moved to"
+    );
+}
+
+#[test]
+fn same_route_rearm_shuts_down_instead_of_handing_off() {
+    let old_plan = plan();
+    let mut rearmed = old_plan.clone();
+    rearmed.target.rearm_generation = old_plan.target.rearm_generation + 1;
+    let (stop, mut stopped) = oneshot::channel();
+    let mut session =
+        CaptureSession::active(session_id(7), old_plan.target, old_plan.dispatch, stop);
+
+    assert_eq!(
+        session.reconcile_with(
+            Some((&rearmed.target, &rearmed.dispatch)),
+            stop_for_target_change,
+        ),
+        ReconcileAction::Retiring
+    );
+    assert_eq!(
+        stopped
+            .try_recv()
+            .expect("a reconnect rearm should stop the session"),
+        CaptureSessionStop::Shutdown,
+        "the same route restores through its current publication"
+    );
+}
+
+#[test]
 fn config_key_adoption_hot_refreshes_the_same_physical_capture_slot() {
     let old_plan = plan();
     let physical_key = old_plan.target.physical_key.clone();
@@ -437,7 +504,10 @@ fn config_key_adoption_hot_refreshes_the_same_physical_capture_slot() {
         .get(&physical_key)
         .map(|plan| (&plan.target, &plan.dispatch));
 
-    assert_eq!(running.reconcile(desired), ReconcileAction::DispatchChanged);
+    assert_eq!(
+        running.reconcile_with(desired, stop_for_target_change),
+        ReconcileAction::DispatchChanged
+    );
     running.rekey(&wanted[&physical_key].dispatch.config_key);
     assert!(running.is_active());
     assert_eq!(running.id().device_key(), "unit:00000001");
@@ -482,7 +552,10 @@ fn active_session_adopts_action_only_plan_changes_without_rearming() {
     );
     assert_eq!(first.target, rebound.target);
     assert_eq!(
-        session.reconcile(Some((&rebound.target, &rebound.dispatch))),
+        session.reconcile_with(
+            Some((&rebound.target, &rebound.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged
     );
     assert_eq!(
@@ -523,7 +596,10 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
     );
     assert_eq!(first.target, gestured.target);
     assert_eq!(
-        session.reconcile(Some((&gestured.target, &gestured.dispatch))),
+        session.reconcile_with(
+            Some((&gestured.target, &gestured.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged
     );
     assert_eq!(
@@ -567,7 +643,10 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
     );
     assert_eq!(base.target, per_app.target);
     assert_eq!(
-        session.reconcile(Some((&per_app.target, &per_app.dispatch))),
+        session.reconcile_with(
+            Some((&per_app.target, &per_app.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged
     );
     assert_eq!(
@@ -614,7 +693,10 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
         "both custom bindings require the same HID++ diversion"
     );
     assert_eq!(
-        session.reconcile(Some((&rebound.target, &rebound.dispatch))),
+        session.reconcile_with(
+            Some((&rebound.target, &rebound.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged,
         "dispatch-only binding changes must not cycle firmware diversion"
     );
@@ -632,9 +714,69 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
     );
     assert_eq!(rebound.target, rescaled.target);
     assert_eq!(
-        session.reconcile(Some((&rescaled.target, &rescaled.dispatch))),
+        session.reconcile_with(
+            Some((&rescaled.target, &rescaled.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged,
         "an already-diverted wheel needs a state reset, not a hardware restart"
     );
     assert!(session.is_active());
+}
+
+#[tokio::test]
+async fn pending_restore_follows_a_disabled_devices_latest_route() {
+    use std::collections::BTreeMap;
+
+    let stale = DeviceRoute::Bolt {
+        receiver_uid: "receiver-b".to_owned(),
+        slot: 2,
+    };
+    let latest = DeviceRoute::Bolt {
+        receiver_uid: "receiver-c".to_owned(),
+        slot: 1,
+    };
+    let registry = openlogi_hid::ChannelRegistry::default();
+    let key = physical_key();
+    let recovering = |route: DeviceRoute| {
+        HashMap::from([(
+            key.clone(),
+            GestureSlot::recovering(
+                Some(PendingRestore {
+                    token: PendingCaptureRestore::detached(route),
+                    retry_at: Instant::now(),
+                }),
+                None,
+            ),
+        )])
+    };
+    let route_of = |slots: &HashMap<PhysicalDeviceKey, GestureSlot>| {
+        slots
+            .get(&key)
+            .and_then(GestureSlot::recovery)
+            .and_then(|recovery| recovery.pending_restore.as_ref())
+            .map(|pending| pending.token.route().clone())
+    };
+
+    let mut stuck = recovering(stale.clone());
+    retry_pending_restores(&mut stuck, &registry, None, Instant::now()).await;
+    assert_eq!(
+        route_of(&stuck),
+        Some(stale.clone()),
+        "without a published route the owed restore stays on its last target"
+    );
+
+    let mut followed = recovering(stale);
+    let publication =
+        CapturePublication::new(Vec::new(), BTreeMap::from([(key.clone(), latest.clone())]));
+    retry_pending_restores(&mut followed, &registry, Some(&publication), Instant::now()).await;
+    assert!(
+        publication.plans().is_empty(),
+        "capture stays disarmed while the device is disabled"
+    );
+    assert_eq!(
+        route_of(&followed),
+        Some(latest),
+        "restore must follow the mouse onto the receiver inventory names now"
+    );
 }

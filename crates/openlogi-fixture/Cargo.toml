@@ -14,7 +14,7 @@ categories = ["development-tools::testing", "hardware-support"]
 # tooling. Default features perform no file I/O, host access, or async work.
 # The optional fs feature owns strict corpus loading for host tools and tests.
 [dependencies]
-openlogi-core = { version = "0.8.13", path = "../openlogi-core", default-features = false }
+openlogi-core = { version = "0.8.14", path = "../openlogi-core", default-features = false }
 serde = { workspace = true }
 serde_ignored = "0.1.14"
 serde_json = { workspace = true, optional = true }

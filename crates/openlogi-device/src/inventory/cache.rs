@@ -161,7 +161,7 @@ pub(super) fn seen(id: Option<CacheKey>) -> CacheOutcome {
 
 /// Whether `cached` is stale enough that the device should be re-probed.
 pub(super) fn is_stale(cached: &Cached, now: Instant) -> bool {
-    now.saturating_duration_since(cached.probed_at) >= REFRESH_INTERVAL
+    super::probe_cache_is_stale(cached.probed_at, now)
 }
 
 /// Decide a device's probe: reuse a fresh cache, or (online + miss/stale)

@@ -43,8 +43,8 @@ use tracing::{debug, error, warn};
 use x11rb::protocol::xproto::ConnectionExt as _;
 
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
-    LOGITECH_VENDOR_ID, MouseEvent,
+    ButtonId, CursorPosition, Delivery, EventDisposition, ForegroundApp, HookBackend, HookError,
+    HookEvent, LOGITECH_VENDOR_ID, MouseEvent,
 };
 use foreground::{FRONTMOST, X11Source};
 pub(crate) use foreground::{
@@ -520,6 +520,29 @@ impl LowResCompanions {
     }
 }
 
+/// Run one event past the callback and return what to forward to the desktop
+/// for it, if anything. Held low-res companions never get here.
+///
+/// `invert` is the report's software-inversion setting, already narrowed by
+/// the caller to vertical wheel events. Through [`Delivery`] the callback
+/// sees the reversed delta, so a suppressed impulse the agent replays is
+/// reversed too (#1737), and a forwarded event is negated once on its way out.
+fn dispatch(
+    event: InputEvent,
+    hires_scroll: bool,
+    invert: bool,
+    cb: &dyn Fn(HookEvent) -> EventDisposition,
+) -> Option<InputEvent> {
+    let delivery = translate(&event, hires_scroll).map_or_else(
+        || Delivery::forwarded(invert),
+        |mouse| Delivery::run(HookEvent::Mouse(mouse), invert, cb),
+    );
+    match delivery.disposition {
+        EventDisposition::PassThrough => Some(invert_wheel(event, delivery.invert_native)),
+        EventDisposition::Suppress => None,
+    }
+}
+
 #[expect(
     clippy::needless_pass_by_value,
     reason = "path/cb/stop/stop_rx are moved into the spawned thread and must not be refs"
@@ -608,19 +631,21 @@ fn device_thread(
                     companions.hold(event);
                     continue;
                 }
-                let disposition = translate(&event, hires_scroll)
-                    .map_or(EventDisposition::PassThrough, |me| cb(HookEvent::Mouse(me)));
-                if disposition == EventDisposition::PassThrough
-                    && let EventSummary::RelativeAxis(_, axis, _) = event.destructure()
-                {
-                    companions.hires_forwarded(axis);
-                }
-                match disposition {
-                    EventDisposition::PassThrough => {
-                        let inverted = *report_inverted.get_or_insert_with(crate::scroll_inversion);
-                        pending.push(invert_wheel(event, inverted));
+                let is_vertical_wheel = matches!(
+                    event.destructure(),
+                    EventSummary::RelativeAxis(
+                        _,
+                        RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_WHEEL_HI_RES,
+                        _
+                    )
+                );
+                let invert = is_vertical_wheel
+                    && *report_inverted.get_or_insert_with(crate::scroll_inversion);
+                if let Some(forwarded) = dispatch(event, hires_scroll, invert, &*cb) {
+                    if let EventSummary::RelativeAxis(_, axis, _) = event.destructure() {
+                        companions.hires_forwarded(axis);
                     }
-                    EventDisposition::Suppress => {}
+                    pending.push(forwarded);
                 }
             }
         }
@@ -1097,7 +1122,10 @@ mod tests {
 
 #[cfg(test)]
 mod scroll_inversion_tests {
+    use std::cell::Cell;
+
     use super::*;
+    use crate::ScrollDelta;
 
     fn rel(axis: RelativeAxisCode, value: i32) -> InputEvent {
         InputEvent::new(EventType::RELATIVE.0, axis.0, value)
@@ -1167,5 +1195,80 @@ mod scroll_inversion_tests {
             )),
             i32::MAX
         );
+    }
+
+    /// A detented notch and a hi-res one, each with the `hires_scroll` mode
+    /// its device runs in.
+    const NOTCHES: [(RelativeAxisCode, bool, i32); 2] = [
+        (RelativeAxisCode::REL_WHEEL, false, 1),
+        (RelativeAxisCode::REL_WHEEL_HI_RES, true, 120),
+    ];
+
+    /// Run a wheel event through [`dispatch`] with a callback that answers
+    /// `disposition`, returning the delta the callback saw and the value
+    /// forwarded to the desktop, if any.
+    fn dispatch_wheel(
+        event: InputEvent,
+        hires_scroll: bool,
+        invert: bool,
+        disposition: EventDisposition,
+    ) -> (Option<ScrollDelta>, Option<i32>) {
+        let seen = Cell::new(None);
+        let forwarded = dispatch(event, hires_scroll, invert, &|hook_event| {
+            if let HookEvent::Mouse(MouseEvent::Scroll { delta, .. }) = hook_event {
+                seen.set(Some(delta));
+            }
+            disposition
+        });
+        (seen.get(), forwarded.map(value_of))
+    }
+
+    /// The delta [`translate`] reads from an untouched wheel event.
+    fn wheel_delta(event: InputEvent, hires_scroll: bool) -> ScrollDelta {
+        match translate(&event, hires_scroll) {
+            Some(MouseEvent::Scroll { delta, .. }) => delta,
+            other => panic!("a wheel event translates to a scroll, got {other:?}"),
+        }
+    }
+
+    /// With inversion on, the callback sees the reversed delta whatever it
+    /// decides, so an impulse the agent suppresses and replays is reversed
+    /// too (#1737), and a forwarded event reaches the desktop negated exactly
+    /// once.
+    #[test]
+    fn inverted_wheel_reaches_the_callback_reversed_and_the_desktop_reversed_once() {
+        for (axis, hires_scroll, value) in NOTCHES {
+            let event = rel(axis, value);
+            let reversed = wheel_delta(event, hires_scroll).negate_y();
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, true, EventDisposition::PassThrough),
+                (Some(reversed), Some(-value)),
+                "{axis:?} passed through"
+            );
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, true, EventDisposition::Suppress),
+                (Some(reversed), None),
+                "{axis:?} suppressed"
+            );
+        }
+    }
+
+    /// With inversion off, neither the callback nor the desktop sees a change.
+    #[test]
+    fn wheel_is_left_alone_when_inversion_is_off() {
+        for (axis, hires_scroll, value) in NOTCHES {
+            let event = rel(axis, value);
+            let delta = wheel_delta(event, hires_scroll);
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, false, EventDisposition::PassThrough),
+                (Some(delta), Some(value)),
+                "{axis:?} passed through"
+            );
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, false, EventDisposition::Suppress),
+                (Some(delta), None),
+                "{axis:?} suppressed"
+            );
+        }
     }
 }
