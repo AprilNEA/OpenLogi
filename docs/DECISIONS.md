@@ -4,6 +4,195 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: RGB software control is held per session and handed back on exit
+
+A volatile `0x8071` effect shows only while the host holds software control,
+so a successful write keeps it. The agent used to keep it forever, which left
+a keyboard frozen on the last colour after OpenLogi quit, with no other host
+able to take it until a power cycle.
+
+- **Hand it back on a final exit.** Tray quit, uninstall, and SIGTERM return
+  cluster control to the firmware before the HID++ fleet stops, so lighting
+  goes back to the onboard effect. G HUB behaves this way, and Solaar's RGB
+  control restores firmware control on close to match it. It is also the rule
+  this agent already follows for diversion: leave the device in its native
+  state. Logi Options+ is no reference here: it builds the `0x8070`/`0x8071`
+  wrappers but never drives them, and claims only `0x1300` for the
+  precision-mode DPI LED.
+- **Not on a handover or replacement.** The successor repaints on arrival, so
+  releasing would only flash the onboard effect, and the successor's own
+  final exit still hands control back. A disconnect or crash cannot send
+  anything; the firmware drops volatile state on power loss.
+- **Clear only the bit that was set.** The release clears `ALL_CLUSTERS` and
+  keeps the other control and event flags from before the session's first
+  claim. Restoring that snapshot verbatim would leave control held forever
+  after an agent that never released it, which every earlier build was.
+- **The standalone CLI keeps the colour.** Leaving a colour set is the point
+  of `openlogi diag lighting`, so only the agent's exit consumes the leases.
+- **Lighting off is not a release.** It writes black under the same control;
+  releasing there would light the onboard effect instead.
+- **The exit waits for writes already running.** It refuses new lighting
+  writes first, then gives running ones a bounded wait to record their
+  leases, so a first write that claims while the agent quits is still handed
+  back. A write still running at the deadline keeps its control, and the
+  exit logs it.
+- **A lease belongs to one device.** It is bound to the connection the claim
+  went through and released only through that connection while inventory
+  still publishes it, which covers a replug. A receiver slot keeps the
+  receiver's connection when another device is paired into it, so every
+  write also records the unit ID the device reports (`0x0003`), including
+  one that finds control already held: the replacement may be held by this
+  session's earlier claim or by another host. A write with another unit ID
+  replaces the lease, and the release re-reads the unit ID and leaves a
+  different device alone. Inventory snapshots do not void leases: they trail
+  the channel a write goes through, so dropping a route's lease when a
+  snapshot shows its device gone could erase a claim already taken on the
+  replacement. A device without `0x0003` is identified by having none.
+- **`0x8081` per-key frames go under the same claim.** While the firmware
+  owns a cluster it draws its own effect over host frames. On a device with an
+  `0x8071` engine a per-key write therefore claims (with rollback), sets
+  Static as the base on every cluster that offers it, paints, and replays the
+  first frame after a fresh claim, as Solaar does. A device with only `0x8081`
+  has no engine to take over and is written as before.
+
+Verified against scripted devices only; the repository has no `0x8071` or
+`0x8081` capture yet.
+
+## 2026-10: macOS updates go through Sparkle, which never polls
+
+The built-in engine replaces the running bundle in place, so a standard user
+whose copy sits in an `/Applications` they cannot write to gets a permission
+error instead of an update, and there is no install on quit. Sparkle asks for
+administrator rights there and installs on quit. The signed macOS bundle now
+embeds Sparkle 2 (through `gpui-updater-sparkle`, loaded at run time) and the
+engine stays the fallback everywhere else.
+
+- **The privacy promise outranks Sparkle's defaults.** Updates are opt-in and
+  OpenLogi does not poll. The bundle ships `SUEnableAutomaticChecks = NO` and
+  the app switches the schedule off should the user defaults turn it on; the
+  one launch check is OpenLogi's own, behind **Check for updates**, and opens
+  no window. `SUAllowsAutomaticUpdates = YES` is what lets **Automatic updates**
+  work without the schedule: Sparkle's settings otherwise tie automatic
+  downloads to automatic checks (`SPUUpdaterSettings.m`). The config owns the
+  preference and Sparkle's `automaticallyDownloadsUpdates` mirrors it; a change
+  made with the checkbox in Sparkle's update window is adopted back.
+- **One feed per architecture, not a universal build.** The release ships an
+  arm64 and an x86_64 DMG from a build matrix; `SUFeedURL` points each bundle
+  at `appcast-<arch>.xml`, which keeps the matrix and the DMGs as they are. A
+  universal bundle would allow one feed but doubles every binary in the
+  download and changes what the release builds.
+- **Signed on Linux, in Rust.** `release appcast` signs in the publish job with
+  `ed25519-compact`, checked against signatures Sparkle's own `sign_update`
+  made, instead of running Sparkle's macOS-only tools there. It refuses a
+  private key that does not match the public key the bundles embed.
+- **`CFBundleVersion` is the crate version.** Sparkle compares the appcast's
+  `sparkle:version` against it, and cargo-bundle writes the build's UTC
+  timestamp there, which would rank above every release. xtask stamps the
+  crate version, as it already did for the helpers, and refuses a Sparkle
+  bundle without it. Bundles from before Sparkle keep their timestamps, but
+  they update through the engine, which compares the version compiled into
+  the binary.
+- **Kept: `latest.json` and the DMG minisigs.** Bundles from before Sparkle read
+  only the manifest, and they reach a Sparkle bundle through it.
+- **Rejected: Sparkle's XPC services.** OpenLogi is not sandboxed, so they never
+  run; xtask removes them rather than sign and ship them.
+
+## 2026-09: Grant probes run on notification, with a heartbeat backstop
+
+The hook re-checked the Accessibility grant between every 500 ms run-loop
+slice — `AXIsProcessTrusted` plus a throwaway `CGEventTapCreate` — and the
+agent polled both privacy grants every 1.2 s for the GUI. Each probe is a
+WindowServer round trip that takes seconds around a sleep transition, which is
+where the probe-budget work (#952, #1282) came from. macOS posts two
+undocumented notifications when the list is edited, and the
+[`axwatch`](https://crates.io/crates/axwatch) crate observes both. Measured
+against tccd's event log on macOS 26: adding a row, switching it off and
+switching it on post both; removing the row posts only the Darwin one.
+
+- **Probe on cue.** `grant::ProbeCue` raises a flag from the watch's handler,
+  and the tap thread probes only on a raised flag; the two agent-core grant
+  watchers read on the same wakes. Detection latency for an announced edit is
+  unchanged (one slice); an unannounced one is bounded by the heartbeat.
+- **Keep the heartbeat and the probe.** The notifications are undocumented, and
+  a missing run loop, a code-signing rule or a future macOS can swallow them;
+  the reconciled probe remains the authority, at 5 s instead of 500 ms. A watch
+  that cannot start falls back to the old cadence with a warning, never
+  silently.
+- **Rejected: `AXIsProcessTrusted` alone on wake.** It stays `true` after the
+  row is removed — the very edit only the Darwin notification announces — so
+  the read cannot replace the probe.
+- **Not changed: `TAP_PROBE_BUDGET`.** Rarer probes make a collision with a
+  sleep transition rarer, not impossible; shrinking the budget waits for a
+  measured revoke→teardown on hardware.
+
+## 2026-09: A crash respawn re-arms by login session, not by exit code
+
+With `launch_at_login` off, the macOS dormancy gate read every launchd start as
+a login the user opted out of, and left 60 s later with the `exit(0)` launchd
+never respawns. A crash respawn takes the same path — the plist has one trigger
+(`SuccessfulExit` implies `RunAtLoad`) — so one hook-watchdog `exit(78)` on a
+lid close silently ended remapping until the user opened the GUI (#952).
+
+- **The gate asks the session, not launchd.** Arming records the login session
+  (kernel boot session UUID + audit session id) in the runtime dir; every final
+  `exit(0)` — tray Quit, uninstall, SIGTERM — erases it; a handover to a
+  scheduled successor (binary update, Input Monitoring relaunch) keeps it. A
+  start that finds its own session recorded re-arms at once; a login finds a
+  stale session and stays dormant. The boot half is required: audit ids repeat
+  across boots.
+- **Rejected: a second, crash-only plist** (`KeepAlive = {Crashed: true}`, no
+  `RunAtLoad`). `Crashed` does not cover `exit(78)` or a panic's `exit(101)`,
+  which are exactly the exits that need recovery, and it would reintroduce the
+  two-label registration the 2026-08 lifecycle work removed.
+- **SIGTERM is final.** launchd's logout and dev tooling mean "stop". The
+  stale-agent takeover (`takeover.rs`) sends it too, and there the successor
+  would rather find the record; it makes no difference, because the only
+  starts that reach the takeover are GUI kickstarts, and that GUI's
+  declaration arms the successor anyway.
+
+## 2026-09: The macOS device-I/O gate follows powerd, through an SPI, and fails open
+
+The gate that keeps HID access off while the Mac is dark (#656) was first built
+on `NSWorkspace` notifications (#1142): `WillSleep` / `ScreensDidSleep` /
+`SessionDidResignActive` closed it, `ScreensDidWake` / `SessionDidBecomeActive`
+reopened it. Those are edges, and macOS does not guarantee the wake edge —
+Apple DTS (developer forums thread 796109) confirms `ScreensDidWake` is skipped
+on some MacBooks for a lid-close/open cycle and that the system may not even
+run the app's run loop to deliver it. One dropped edge paused device I/O until
+the agent was restarted (#1281). The screen-sleep source was never a
+requirement in its own right: it stood in for "not a DarkWake", the state
+AppKit cannot name (`NSWorkspaceDidWakeNotification` fires for both).
+
+The gate now reads the thing it is actually about. `activity_macos` subscribes
+to powerd through `IOPMConnection`, which reports every Sleep / DarkWake /
+FullWake transition as the complete capability set of the new state and reads
+the current set on demand, so every input is a level: nothing pairs, a missed
+event is corrected by the next, no reconciler timer exists. The console level
+(fast user switching) comes from `CGSessionCopyCurrentDictionary`, with the
+AppKit session edges forwarded as hints and the level re-read on every power
+transition. A launch reads both levels before releasing its hold, so a
+watchdog relaunch during a sleep transition no longer guesses "awake" (#952).
+
+Three things decided the API:
+
+- **Only `IOPMConnection` names a DarkWake.** DTS states plainly that the
+  public API does not expose DarkWake at all: `IORegisterForSystemPower`
+  delivers `kIOMessageSystemHasPoweredOn` for a DarkWake as for a full wake,
+  so a gate on it cannot tell the one-second DarkWake blip #1281 was reported
+  with from the full wake that followed it. The undocumented `IOPMrootDomain`
+  "System Capabilities" registry key carries the same level but no events,
+  which is what forced #1283 into polling.
+- **It is an SPI, and that is accepted.** The functions are exported by IOKit
+  since 10.6 and prototyped only in Apple's open-source `IOKitUser`; the
+  shipping `pmset` is built on them. The hand-written `extern` is confined to
+  `activity_macos.rs` and inventoried in `.agents/rules/objc-ffi.md`. OpenLogi
+  is not App Store distributed.
+- **Losing the SPI fails open.** If the subscription cannot be made the gate
+  is told "permanent full wake" and follows the console alone, at error level.
+  That is pre-0.8.2 behaviour (hardware usable, #656 unprotected); failing
+  closed would leave an agent that can never touch hardware, which is the
+  outage #1281 describes.
+
 ## 2026-08: The agent stays one process; a crossing edge gets a wire, not an event layer
 
 The 2026-06 daemon split (#165) put the resident input machinery in

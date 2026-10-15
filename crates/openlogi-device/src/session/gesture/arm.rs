@@ -13,10 +13,12 @@ use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::open_device;
 use crate::session::capture_restore::{
     ArmedReporting, CaptureError, CaptureSessionFailure, PendingCaptureRestore, ReprogRestore,
-    divert_change,
+    ThumbwheelRestore, divert_change,
 };
 use crate::session::restore::rollback_start;
-use crate::thumbwheel::{self, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution};
+use crate::thumbwheel::{
+    self, ReportingMode, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution,
+};
 use crate::{ChannelRegistry, SharedChannel};
 
 /// The set of controls a session has diverted, kept so they can be handed back
@@ -28,8 +30,8 @@ pub(super) struct ArmedControls {
     /// The gesture-source CIDs diverted with raw-XY reporting: the
     /// `spec.divert_gesture_sources` members the device exposes.
     pub(super) gesture_cids: Vec<u16>,
-    /// Raw-XY-capable additional CIDs diverted as gesture sources (macOS side
-    /// buttons and a gesture-mode DPI/ModeShift button).
+    /// Raw-XY-capable additional CIDs diverted as gesture sources (side
+    /// buttons on supported desktops and a gesture-mode DPI/ModeShift button).
     pub(super) gesture_button_cids: Vec<(u16, ButtonId)>,
     /// DPI/ModeShift CIDs diverted as plain buttons when gesture mode is off.
     pub(super) dpi_cids: Vec<u16>,
@@ -46,6 +48,7 @@ pub(super) struct ArmedControls {
 pub(super) struct ArmedThumbwheel {
     pub(super) wheel: Thumbwheel,
     info: Option<ThumbwheelInfo>,
+    restore: ThumbwheelRestore,
 }
 
 impl ArmedThumbwheel {
@@ -88,11 +91,7 @@ impl ArmedControls {
         } = self;
         let reprog =
             reprog.and_then(|controls| ReprogRestore::new(controls.feature_index(), reporting));
-        PendingCaptureRestore::new(
-            retired,
-            reprog,
-            thumb.as_ref().map(|thumb| thumb.wheel.feature_index()),
-        )
+        PendingCaptureRestore::new(retired, reprog, thumb.as_ref().map(|thumb| thumb.restore))
     }
 
     /// Reapply volatile diversion after a wireless reconnect broadcast.
@@ -179,7 +178,10 @@ pub(super) async fn arm_controls_into(
         // Divert each gesture-mode source; a source not listed stays native
         // (an idle HID++ control must not be captured-and-dropped).
         for &cid in &spec.divert_gesture_sources {
-            if controls.iter().any(|c| c.cid == cid && c.supports_raw_xy()) {
+            if controls
+                .iter()
+                .any(|c| c.cid == cid && c.is_divertable() && c.supports_raw_xy())
+            {
                 arm_reprog_control(&rc, cid, true, &mut armed.reporting).await?;
                 armed.gesture_cids.push(cid);
             }
@@ -247,9 +249,22 @@ pub(super) async fn arm_controls_into(
         if wheel_info.is_some_and(|info| !info.supports_single_tap) {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
+        // Read before the first divert: teardown hands back the native
+        // inversion found here (see `ThumbwheelRestore::new`).
+        let original = match tw.get_status().await {
+            Ok(status) => Some(status),
+            Err(e) => {
+                warn!(error = ?e, "thumb wheel getStatus failed; restore will use the default sign");
+                None
+            }
+        };
+        if original.is_some_and(|status| status.mode == ReportingMode::Diverted) {
+            debug!("thumb wheel was already diverted before arming");
+        }
         // Store ownership before the write: a transport error cannot prove
         // whether firmware applied diversion, so rollback must cover it too.
         armed.thumb = Some(ArmedThumbwheel {
+            restore: ThumbwheelRestore::new(tw.feature_index(), original),
             wheel: tw,
             info: wheel_info,
         });
@@ -276,7 +291,7 @@ async fn arm_reprog_control(
     let change = divert_change(original, raw_xy);
     // Record ownership before the write: a transport error does not prove the
     // firmware rejected the command, so rollback must cover this CID too.
-    reporting.push(ArmedReporting { cid, original });
+    reporting.push(ArmedReporting::pointer(cid, original));
     rc.set_cid_reporting_full(cid, change).await?;
     Ok(())
 }

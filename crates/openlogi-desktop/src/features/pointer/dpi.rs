@@ -1,4 +1,5 @@
-//! Device DPI controls.
+//! Device DPI controls, and the report-rate row below them (see
+//! [`super::report_rate`]).
 //!
 //! The slider range comes from the selected device's HID++ DPI capability
 //! (`0x2201` AdjustableDpi or `0x2202` ExtendedAdjustableDpi, whichever it
@@ -19,6 +20,7 @@ use gpui_component::{
 use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;
 
+use super::report_rate::{ReportRateFacts, report_rate_section};
 use crate::state::{AppState, DeviceKey, DpiLoad, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::PresetChip;
@@ -60,12 +62,16 @@ struct DpiPanelSnapshot {
 
 impl DpiPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        // Repaint when the active device changes or DPI discovery
-        // completes. The slider entity is rebuilt in `render` whenever the
-        // selected device or reported range changes, because SliderState's
-        // range is builder-only.
-        let state_obs =
-            AppState::repaint_on(cx, |event| matches!(event, StateEvent::DpiChanged(_)));
+        // Repaint when the active device changes, DPI discovery completes,
+        // or the report-rate read lands. The slider entity is rebuilt in
+        // `render` whenever the selected device or reported range changes,
+        // because SliderState's range is builder-only.
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::DpiChanged(_) | StateEvent::ReportRateChanged(_)
+            )
+        });
 
         Self {
             slider: None,
@@ -217,6 +223,7 @@ impl Render for DpiPanel {
                             .child(add_preset_chip()),
                     ),
             )
+            .children(report_rate_section(ReportRateFacts::current(cx), pal))
     }
 }
 

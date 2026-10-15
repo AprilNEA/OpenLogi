@@ -28,7 +28,7 @@ pub use types::{
 use self::types::be16;
 use crate::{
     feature::{EventSource, FeatureEndpoint},
-    protocol::v20::{ErrorType, Hidpp20Error},
+    protocol::v20::{self, ErrorType, Hidpp20Error},
 };
 
 /// Implements the `ColorLedEffects` / `0x8070` feature.
@@ -50,13 +50,20 @@ impl ColorLedEffectsFeature {
     }
 
     /// Retrieves information about `zone_index`.
+    ///
+    /// The reply must be long and must echo `zone_index` in byte 0; anything
+    /// else (a short reply that would zero-fill the fields, or the info of
+    /// another zone) is refused with [`Hidpp20Error::UnsupportedResponse`].
     pub async fn get_zone_info(&self, zone_index: u8) -> Result<ZoneInfo, Hidpp20Error> {
-        let payload = self
-            .endpoint
-            .call(1, [zone_index, 0, 0])
-            .await?
-            .extend_payload();
-        ZoneInfo::from_payload(&payload)
+        let v20::Message::Long(_, payload) = self.endpoint.call(1, [zone_index, 0, 0]).await?
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
+        let info = ZoneInfo::from_payload(&payload)?;
+        if info.zone_index != zone_index {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        }
+        Ok(info)
     }
 
     /// Retrieves information about effect `zone_effect_index` of `zone_index`.

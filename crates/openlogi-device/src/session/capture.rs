@@ -29,8 +29,9 @@ use tracing::{debug, info, warn};
 use liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
 
 use super::capture_restore::{
-    CaptureChannelSlot, CaptureError, CaptureSessionOutcome, CaptureStop, PendingCaptureRestore,
-    drop_listener_after, restore_after_stop, stop_for_current_publication, wait_for_channel_change,
+    CaptureChannelSlot, CaptureError, CaptureSessionOutcome, CaptureSessionStop, CaptureStop,
+    PendingCaptureRestore, drop_listener_after, restore_after_stop, stop_for_current_publication,
+    wait_for_channel_change,
 };
 use super::gesture::CapturedInput;
 use crate::{ChannelRegistry, DeviceIoGate, DeviceRoute, SharedChannel};
@@ -47,8 +48,9 @@ pub struct CaptureHost<'a> {
     /// Receives every [`CapturedInput`] the session decodes.
     pub sink: mpsc::UnboundedSender<CapturedInput>,
     /// Resolves, or is dropped, when the session should restore its controls
-    /// and return.
-    pub shutdown: oneshot::Receiver<()>,
+    /// and return. [`CaptureSessionStop::Handoff`] names the route that now
+    /// reaches the same physical device.
+    pub shutdown: oneshot::Receiver<CaptureSessionStop>,
     /// Where the session publishes its open channel so bounded hardware
     /// writes reuse it instead of opening a second connection.
     pub channel_slot: CaptureChannelSlot,
@@ -294,7 +296,7 @@ async fn idle_deadline(watchdog: Option<&Watchdog<'_>>) {
 async fn monitor<A: ArmedCapture>(
     context: CaptureMonitor<'_, A>,
     wireless: Option<WirelessDeviceStatusFeature>,
-    shutdown: oneshot::Receiver<()>,
+    shutdown: oneshot::Receiver<CaptureSessionStop>,
     mut device_io: DeviceIoGate,
 ) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
@@ -333,12 +335,18 @@ async fn monitor<A: ArmedCapture>(
                 info!(index = context.device_index, capture = A::NAME, "inventory replaced or removed capture channel — restarting session");
                 return transition;
             }
-            _ = &mut shutdown => {
+            requested = &mut shutdown => {
                 // Shutdown and inventory replacement can become ready on the
                 // same turn. Prefer the typed channel transition so teardown
                 // never blindly writes through a transport already known to
-                // be obsolete.
-                return stop_for_current_publication(context.registry, context.shared);
+                // be obsolete. A handoff already names the successor route, so
+                // it must not fall back onto the transport the device left.
+                return match requested {
+                    Ok(CaptureSessionStop::Handoff(route)) => CaptureStop::Handoff(route),
+                    Ok(CaptureSessionStop::Shutdown) | Err(_) => {
+                        stop_for_current_publication(context.registry, context.shared)
+                    }
+                };
             }
             event = async {
                 match wake_events.as_ref() {

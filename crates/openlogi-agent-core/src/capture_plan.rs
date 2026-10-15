@@ -58,8 +58,9 @@ pub struct DispatchPlan {
     /// keyed by the button its captured swipes dispatch as; empty when none
     /// gestures.
     pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// macOS Back/Forward gesture maps resolved from device-owned HID++ raw XY.
-    /// These remain available while an old diversion is draining.
+    /// Back/Forward gesture maps resolved from device-owned HID++ raw XY.
+    /// On Windows the OS hook remains a passive fallback; these maps also
+    /// remain available while an old diversion is draining.
     pub side_gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
@@ -78,18 +79,99 @@ pub struct DeviceCapturePlan {
     pub dispatch: DispatchPlan,
 }
 
-/// Read-only, lossless, coalescing view of the latest capture-plan snapshot.
-pub type SharedCapturePlans = watch::Receiver<Arc<Vec<DeviceCapturePlan>>>;
+impl DeviceCapturePlan {
+    /// Hand the `0x1b04` controls in `owned` to another session on the same
+    /// device: they leave every divert set of this plan, and the dispatch map
+    /// keeps resolving them so a press the other session forwards still finds
+    /// its action.
+    pub(crate) fn release_controls(&mut self, owned: &BTreeMap<u16, ButtonId>) {
+        let spec = &mut self.target.spec;
+        let before = spec.divert_buttons.len()
+            + spec.divert_gesture_buttons.len()
+            + spec.divert_gesture_sources.len();
+        spec.divert_buttons
+            .retain(|(cid, _)| !owned.contains_key(cid));
+        spec.divert_gesture_buttons
+            .retain(|(cid, _)| !owned.contains_key(cid));
+        spec.divert_gesture_sources
+            .retain(|cid| !owned.contains_key(cid));
+        let released = before
+            - spec.divert_buttons.len()
+            - spec.divert_gesture_buttons.len()
+            - spec.divert_gesture_sources.len();
+        if released > 0 {
+            tracing::debug!(
+                released,
+                route = %self.target.route,
+                "controls left to the keyboard session"
+            );
+        }
+    }
+}
 
-/// Back/Forward gesture maps that macOS must own through device-specific HID++
-/// capture because Bluetooth-direct CGEvents may carry no sender identity.
+/// Armed capture plans plus the latest route of every online physical device.
+///
+/// Plans omit a disabled device so capture leaves it native. Its route stays
+/// here so a pending restore can follow the mouse onto another receiver.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CapturePublication {
+    plans: Vec<DeviceCapturePlan>,
+    routes: BTreeMap<PhysicalDeviceKey, DeviceRoute>,
+}
+
+impl CapturePublication {
+    /// Plans to arm and the routes restoration may follow.
+    #[must_use]
+    pub(crate) fn new(
+        plans: Vec<DeviceCapturePlan>,
+        routes: BTreeMap<PhysicalDeviceKey, DeviceRoute>,
+    ) -> Self {
+        Self { plans, routes }
+    }
+
+    /// A publication whose routes are the routes of `plans`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_plans(plans: Vec<DeviceCapturePlan>) -> Self {
+        let mut routes = BTreeMap::new();
+        for plan in &plans {
+            routes
+                .entry(plan.target.physical_key.clone())
+                .or_insert_with(|| plan.target.route.clone());
+        }
+        Self { plans, routes }
+    }
+
+    /// Capture sessions the watcher may arm.
+    #[must_use]
+    pub(crate) fn plans(&self) -> &[DeviceCapturePlan] {
+        &self.plans
+    }
+
+    /// Latest route of `key`, including when that device is not being captured.
+    #[must_use]
+    pub(crate) fn restore_route(&self, key: &PhysicalDeviceKey) -> Option<&DeviceRoute> {
+        self.routes.get(key)
+    }
+}
+
+/// Read-only, lossless, coalescing view of the latest capture publication.
+pub type SharedCapturePlans = watch::Receiver<Arc<CapturePublication>>;
+
+/// Back/Forward gesture maps eligible for device-specific HID++ capture.
+///
+/// macOS gives these controls exclusively to HID++ because Bluetooth-direct
+/// CGEvents may carry no sender identity. Windows requests the same raw-XY
+/// capture opportunistically while retaining its native hook map as fallback.
 #[must_use]
 pub(crate) fn hidpp_side_gesture_maps_for(
     config: &Config,
     config_key: &str,
     app: Option<&str>,
 ) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
-    if !cfg!(target_os = "macos") || !config.app_settings.capture_mouse_events {
+    if !cfg!(any(target_os = "macos", target_os = "windows"))
+        || !config.app_settings.capture_mouse_events
+    {
         return BTreeMap::new();
     }
     oshook_gestures_for(config, Some(config_key), app)
@@ -111,9 +193,8 @@ pub fn plan_for_device(
 ) -> DeviceCapturePlan {
     let bindings = button_bindings_for(config, Some(config_key), app);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
-    // press. macOS Back/Forward are the exception below: HID++ owns their
-    // button and motion reports because Bluetooth-direct CGEvents may be
-    // unattributed.
+    // press. Back/Forward may additionally request device-owned HID++ raw XY:
+    // macOS uses it exclusively, while Windows keeps the hook as fallback.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
     let side_gesture_bindings = hidpp_side_gesture_maps_for(config, config_key, app);
     // One direction map per HID++ source in gesture mode — several may
@@ -611,14 +692,14 @@ mod tests {
     }
 
     #[test]
-    fn macos_side_gestures_request_hidpp_raw_xy_capture() {
+    fn supported_desktops_request_side_gesture_hidpp_raw_xy_capture() {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
         cfg.set_gesture_mode("2b042", ButtonId::MiddleClick, true);
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
             assert_eq!(
                 plan.dispatch
                     .side_gesture_bindings
@@ -794,7 +875,7 @@ mod tests {
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, false);
         assert!(plan.target.spec.divert_gesture_buttons.is_empty());
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
             assert!(
                 plan.dispatch
                     .side_gesture_bindings

@@ -13,8 +13,18 @@ use thiserror::Error;
 use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
 use crate::reprog_controls::{self, ReprogControlsV4};
-use crate::thumbwheel::Thumbwheel;
-use crate::{ChannelRegistry, IoSuspended, SharedChannel};
+use crate::thumbwheel::{self, Thumbwheel, ThumbwheelStatus, WheelDirection};
+use crate::{ChannelRegistry, DeviceRoute, IoSuspended, SharedChannel};
+
+/// Why a capture manager is stopping an active session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureSessionStop {
+    /// Capture is no longer wanted, or its controls changed on the same route.
+    Shutdown,
+    /// The same physical device moved to another route. Restore through that
+    /// route before a successor arms.
+    Handoff(DeviceRoute),
+}
 
 /// Shared slot holding the active capture session's open channel, so bounded
 /// hardware writes can reuse it instead of opening a second connection.
@@ -51,10 +61,49 @@ impl From<IoSuspended> for CaptureError {
 
 /// One `0x1b04` control whose original reporting state can restore a failed
 /// or completed capture transaction.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ArmedReporting {
     pub(crate) cid: u16,
     pub(crate) original: reprog_controls::CidReporting,
+    policy: ReprogRestorePolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReprogRestorePolicy {
+    /// Pointer control: clear diversion and raw XY.
+    Pointer,
+    /// Keyboard key: clear diversion without touching raw XY.
+    Keyboard,
+}
+
+impl ArmedReporting {
+    /// Capture ownership of a pointer control whose teardown clears both
+    /// diversion and raw XY.
+    pub(crate) fn pointer(cid: u16, original: reprog_controls::CidReporting) -> Self {
+        Self {
+            cid,
+            original,
+            policy: ReprogRestorePolicy::Pointer,
+        }
+    }
+
+    /// Capture ownership of a keyboard key whose teardown clears diversion
+    /// without touching raw XY.
+    pub(crate) fn keyboard(cid: u16, original: reprog_controls::CidReporting) -> Self {
+        Self {
+            cid,
+            original,
+            policy: ReprogRestorePolicy::Keyboard,
+        }
+    }
+
+    /// Compute the `setCidReporting` change that restores this control.
+    pub(crate) fn undivert_change(self) -> reprog_controls::CidReportingChange {
+        match self.policy {
+            ReprogRestorePolicy::Pointer => undivert_change(self.original),
+            ReprogRestorePolicy::Keyboard => undivert_keyboard_key(self.original),
+        }
+    }
 }
 
 /// A non-empty set of `0x1b04` controls owned through one feature index.
@@ -72,12 +121,35 @@ impl ReprogRestore {
     }
 }
 
-#[derive(Clone, Copy)]
+/// The thumb wheel a capture session diverted, and the native rotation sign
+/// to hand back with native reporting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ThumbwheelRestore {
+    feature_index: u8,
+    native_direction: WheelDirection,
+}
+
+impl ThumbwheelRestore {
+    /// Teardown always selects native reporting, with the sign
+    /// [`thumbwheel::native_direction_to_restore`] derives from the status read
+    /// before arming.
+    pub(crate) fn new(feature_index: u8, original: Option<ThumbwheelStatus>) -> Self {
+        Self {
+            feature_index,
+            native_direction: thumbwheel::native_direction_to_restore(original),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CaptureStop {
     /// The owner deliberately requested teardown.
     Shutdown,
     /// Inventory removed or replaced the channel that armed capture.
     ChannelChanged,
+    /// The same physical device moved. Restore through the successor route
+    /// instead of the transport it left.
+    Handoff(DeviceRoute),
 }
 
 /// What a capture session writes to hand its controls back: every diverted
@@ -86,7 +158,7 @@ pub(crate) enum CaptureStop {
 /// One untimed attempt per control; a failed one leaves the whole plan owed.
 pub struct CaptureRestorePlan {
     reprog: Option<ReprogRestore>,
-    thumb_index: Option<u8>,
+    thumb: Option<ThumbwheelRestore>,
 }
 
 impl fmt::Debug for CaptureRestorePlan {
@@ -99,7 +171,7 @@ impl fmt::Debug for CaptureRestorePlan {
                     .as_ref()
                     .map_or(0, |reprog| reprog.controls.len()),
             )
-            .field("has_thumbwheel", &self.thumb_index.is_some())
+            .field("has_thumbwheel", &self.thumb.is_some())
             .finish()
     }
 }
@@ -116,9 +188,12 @@ impl RestorePlan for CaptureRestorePlan {
                 restored &= restore_reporting(&controls, reporting, "captured control").await;
             }
         }
-        if let Some(feature_index) = self.thumb_index {
-            let thumbwheel = Thumbwheel::new(channel, device_index, feature_index);
-            restored &= restore_result(thumbwheel.undivert().await, "thumb wheel");
+        if let Some(thumb) = self.thumb {
+            let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
+            restored &= restore_result(
+                thumbwheel.undivert(thumb.native_direction).await,
+                "thumb wheel",
+            );
         }
         restored
     }
@@ -136,23 +211,29 @@ pub type CaptureSessionOutcome = RestoreOutcome<CaptureRestorePlan>;
 pub type CaptureSessionFailure = SessionFailure<CaptureError, CaptureRestorePlan>;
 
 impl PendingCaptureRestore {
+    /// Token aimed at `route` whose retry writes nothing and completes once that route is current.
+    #[must_use]
+    pub fn detached(route: DeviceRoute) -> Self {
+        Self::without_channel(
+            route,
+            CaptureRestorePlan {
+                reprog: None,
+                thumb: None,
+            },
+        )
+    }
+
     /// The restore owed for `reprog` and the thumb wheel, or `None` when the
     /// session diverted nothing.
     pub(crate) fn new(
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
-        thumb_index: Option<u8>,
+        thumb: Option<ThumbwheelRestore>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb_index.is_none() {
+        if reprog.is_none() && thumb.is_none() {
             return None;
         }
-        Some(Self::owing(
-            retired,
-            CaptureRestorePlan {
-                reprog,
-                thumb_index,
-            },
-        ))
+        Some(Self::owing(retired, CaptureRestorePlan { reprog, thumb }))
     }
 }
 
@@ -168,6 +249,7 @@ pub(crate) async fn restore_after_stop(
     match stop {
         CaptureStop::Shutdown => pending.allow_current_channel().retry(registry).await,
         CaptureStop::ChannelChanged => pending.retry(registry).await,
+        CaptureStop::Handoff(route) => pending.retry_via(route, registry).await,
     }
 }
 
@@ -225,6 +307,18 @@ pub(crate) fn divert_change(
     }
 }
 
+/// Divert a keyboard control without touching raw XY (keyboards do not support raw XY).
+pub(crate) fn divert_keyboard_key(
+    reporting: reprog_controls::CidReporting,
+) -> reprog_controls::CidReportingChange {
+    reprog_controls::CidReportingChange {
+        diverted: Some(true),
+        raw_xy: None,
+        remap: reporting.remap,
+        ..Default::default()
+    }
+}
+
 /// Restore one captured reporting record, preserving its remap target and
 /// touching only the diversion bits capture owns.
 pub(crate) async fn restore_reporting(
@@ -233,7 +327,7 @@ pub(crate) async fn restore_reporting(
     what: &str,
 ) -> bool {
     let result = controls
-        .set_cid_reporting_full(reporting.cid, undivert_change(reporting.original))
+        .set_cid_reporting_full(reporting.cid, reporting.undivert_change())
         .await
         .map(|_| ());
     restore_result(result, what)
@@ -248,13 +342,25 @@ pub(crate) fn restore_result<E: fmt::Display>(result: Result<(), E>, what: &str)
     }
 }
 
-/// Clear diversion while preserving the control's original remap target.
+/// Clear diversion and raw XY while preserving the control's original remap target.
 pub(crate) fn undivert_change(
     reporting: reprog_controls::CidReporting,
 ) -> reprog_controls::CidReportingChange {
     reprog_controls::CidReportingChange {
         diverted: Some(false),
         raw_xy: Some(false),
+        remap: reporting.remap,
+        ..Default::default()
+    }
+}
+
+/// Clear keyboard diversion without touching raw XY while preserving remap.
+pub(crate) fn undivert_keyboard_key(
+    reporting: reprog_controls::CidReporting,
+) -> reprog_controls::CidReportingChange {
+    reprog_controls::CidReportingChange {
+        diverted: Some(false),
+        raw_xy: None,
         remap: reporting.remap,
         ..Default::default()
     }

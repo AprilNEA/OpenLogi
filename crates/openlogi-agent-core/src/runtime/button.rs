@@ -372,7 +372,7 @@ impl ButtonState {
     }
 
     fn cancel_pointer_except(&mut self, current: openlogi_hook::PointerTarget) -> Vec<ActivePress> {
-        self.active.extract_if(|_, press| matches!(press.target, ActionDispatchTarget::Pointer(target) if target != current))
+        self.active.extract_if(|_, press| matches!(press.target, ActionDispatchTarget::Pointer { target, .. } if target != current))
             .map(|(_, press)| press)
             .collect()
     }

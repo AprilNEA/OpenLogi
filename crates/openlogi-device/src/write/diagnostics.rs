@@ -5,6 +5,7 @@ use hidpp::{
     device::Device,
     feature::CreatableFeature,
     feature::FeatureType,
+    feature::adc_measurement::AdcMeasurementFeature,
     feature::battery_status::BatteryStatusFeature,
     feature::device_information::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
@@ -143,7 +144,8 @@ pub async fn dump_reprog_controls(
 }
 
 /// Diagnostic read of the device's raw battery report — the unified `0x1004`
-/// fields, or the legacy `0x1000` `discharge_level`/`next_level`/`status`. For
+/// fields, the legacy `0x1000` `discharge_level`/`next_level`/`status`, or the
+/// `0x1F20` ADC voltage and charging state. For
 /// `openlogi diag battery`: surfaces exactly what the firmware reports so a
 /// claim like "MX2S shows 0% while charging" can be confirmed against the wire
 /// instead of guessed (the GUI only ever shows the mapped value).
@@ -187,8 +189,20 @@ pub async fn read_battery_raw(
             Err(e) => return Err(e),
         }
 
-        // Reached only when neither 0x1004 nor 0x1000 is present; report the
-        // preferred feature rather than implying 0x1000 was specifically absent.
+        match open_feature::<AdcMeasurementFeature>(&mut device).await {
+            Ok(feature) => {
+                let measurement = feature
+                    .get_adc_measurement()
+                    .await
+                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+                return Ok(format!("0x1F20 AdcMeasurement: {measurement:?}"));
+            }
+            Err(WriteError::FeatureUnsupported { .. }) => {}
+            Err(e) => return Err(e),
+        }
+
+        // Reached only when none of the read features is present; report the
+        // preferred feature rather than implying 0x1F20 was specifically absent.
         Err(WriteError::FeatureUnsupported {
             feature_hex: 0x1004,
         })
@@ -211,11 +225,14 @@ pub struct FirmwareEntityInfo {
     pub kind: DeviceEntityType,
     /// Three-letter prefix of the firmware name, e.g. `MPM`.
     pub prefix: String,
-    /// Firmware number, BCD-decoded by the protocol layer.
+    /// Firmware number, decoded by the protocol layer from packed BCD, or from
+    /// binary when the firmware sends binary.
     pub number: u8,
-    /// Firmware revision, BCD-decoded by the protocol layer.
+    /// Firmware revision, decoded by the protocol layer from packed BCD, or from
+    /// binary when the firmware sends binary.
     pub revision: u8,
-    /// Firmware build, BCD-decoded by the protocol layer.
+    /// Firmware build, decoded by the protocol layer from packed BCD, or from
+    /// binary when the firmware sends binary.
     pub build: u16,
     /// Whether this is the entity currently running.
     pub active: bool,
@@ -322,8 +339,8 @@ pub(crate) async fn dump_firmware_entities_on_channel(
             }),
             // The device answered about *this* entity and the answer was no:
             // it refused the read, or it sent a record this parser cannot
-            // decode (a G502's radio stack reports a build field that is not
-            // valid BCD). The rest of the table is still worth reading.
+            // decode (a firmware prefix that is not UTF-8). The rest of the
+            // table is still worth reading.
             Err(e @ (Hidpp20Error::Feature(_) | Hidpp20Error::UnsupportedResponse)) => {
                 entries.push(FirmwareEntity::Unreadable {
                     index: entity,

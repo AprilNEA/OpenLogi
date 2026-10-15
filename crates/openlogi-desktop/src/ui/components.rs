@@ -11,7 +11,10 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Disableable, Icon, IconName, Selectable, Sizable, Size, h_flex,
+    Disableable, Icon, IconName, Selectable, Sizable, Size,
+    button::ButtonVariants as _,
+    dialog::{Cancel, Confirm, DialogFooter},
+    h_flex,
     input::{Input, InputState},
     searchable_list::SearchableListDelegate,
     select::{Select, SelectState},
@@ -40,6 +43,32 @@ pub(crate) fn control_button(id: impl Into<ElementId>) -> gpui_component::button
 /// Pins via `min_h` because the inherent `Input::h` is multi-line-only.
 pub(crate) fn control_input(state: &Entity<InputState>) -> Input {
     Input::new(state).small().min_h(px(theme::CONTROL_H))
+}
+
+/// Cancel and Save buttons for a form dialog opened with `open_dialog`.
+///
+/// A plain gpui-component dialog paints only the footer it is given: the
+/// buttons its `DialogButtonProps` describe are drawn by the alert dialog
+/// alone, so a form dialog that sets only `button_props` can be committed by
+/// nothing but the Enter key. Save confirms the dialog, so its `on_ok` still
+/// decides whether it closes; Cancel dismisses it.
+pub(crate) fn save_cancel_footer() -> DialogFooter {
+    DialogFooter::new()
+        .child(
+            control_button("dialog-cancel")
+                .debug_selector(|| "dialog-cancel".into())
+                .label(tr!("common.cancel"))
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(Cancel), cx)),
+        )
+        .child(
+            control_button("dialog-save")
+                .debug_selector(|| "dialog-save".into())
+                .primary()
+                .label(tr!("common.save"))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(Confirm { secondary: false }), cx);
+                }),
+        )
 }
 
 /// Re-derive an input's placeholder from the current locale.

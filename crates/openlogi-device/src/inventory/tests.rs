@@ -70,6 +70,7 @@ fn inventory(slots: &[u8]) -> Vec<DeviceInventory> {
                 battery: None,
                 model_info: None,
                 capabilities: None,
+                settings_revision: 0,
             })
             .collect(),
     }]
@@ -98,6 +99,7 @@ fn bolt_slot(slot: u8) -> (PairedDevice, CacheOutcome) {
             battery: None,
             model_info: None,
             capabilities: None,
+            settings_revision: 0,
         },
         CacheOutcome::Seen(CacheKey::Bolt {
             unit_id: [0, 0, 0, slot],

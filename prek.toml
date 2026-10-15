@@ -35,7 +35,7 @@ language = "system"
 types = ["rust"]
 pass_filenames = false
 
-# The single-source-of-truth guards (.ast-grep/rules): each names the module
+# Single-source-of-truth guards stored with their owners: each names the module
 # that owns a decision and fails on its ingredients anywhere else. The same
 # rules as CI's `ast-grep` job, here over the staged Rust files; ast-grep is in
 # the devenv shell.

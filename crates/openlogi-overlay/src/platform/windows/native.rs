@@ -1,5 +1,5 @@
-//! The Win32 boundary: sample once, establish the HWND's target DPI while
-//! hidden, then place and reveal the ring without activating it.
+//! The Win32 boundary: sample once, establish the HWND's target DPI while it
+//! is still a 1px bootstrap, then place the ring without activating it.
 
 use anyhow::{Context as _, Result, ensure};
 use gpui::{App, Bounds, DevicePixels, DisplayId, Window, point, size};
@@ -9,7 +9,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
     MonitorFromPoint, MonitorFromWindow,
 };
-use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
 };
@@ -51,6 +51,15 @@ impl RingPlacement {
                 DevicePixels(rect.bottom - rect.top),
             ),
         );
+        let (mut dpi, mut dpi_y) = (0, 0);
+        // SAFETY: monitor is from a native query and both outputs are writable
+        // for the duration of the call; a failed HRESULT is not used as a DPI.
+        let hr =
+            unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi, &raw mut dpi_y) };
+        ensure!(
+            hr >= 0 && dpi != 0,
+            "could not read ring monitor DPI (HRESULT {hr:#x})"
+        );
         Ok(Self {
             // The pinned GPUI Windows backend uses HMONITOR as DisplayId.
             display_id: DisplayId::from(monitor as usize as u64),
@@ -60,6 +69,7 @@ impl RingPlacement {
                 display.center()
             },
             display,
+            dpi,
         })
     }
 
@@ -76,7 +86,8 @@ impl RingPlacement {
             anyhow::bail!("ring window has no Win32 handle");
         };
         let hwnd = handle.hwnd.get() as HWND;
-        // Bootstrap a tiny hidden window well inside the selected monitor.
+        // Pin the 1px bootstrap well inside the selected monitor (GPUI should
+        // already have opened it there). If that crosses a DPI boundary,
         // SetWindowPos synchronously delivers WM_DPICHANGED; GPUI applies its
         // suggested rectangle and updates rendering scale before this returns.
         // Final geometry is applied only AFTER that transition, so the suggested

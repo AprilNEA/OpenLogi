@@ -124,6 +124,10 @@ To install the CLI binary on `PATH`:
 cargo install --path crates/openlogi
 ```
 
+### macOS input-hook safety
+
+The agent's input-hook watchdog gives CoreGraphics permission probes a 10-second budget. After a probe returns, tap servicing and teardown use a fresh 1.5-second budget. Teardown keeps that short budget when Accessibility is revoked or the re-arm limit is reached. The watchdog exits the agent if cleanup stalls, so macOS releases the process-owned tap.
+
 ## Developing the GUI without hardware
 
 `openlogi-agent-mock` serves the real agent IPC contract from a scripted
@@ -258,6 +262,8 @@ The runner sets `RUSTFLAGS=-D warnings` the way CI does. Jobs that need another
 OS are reported as skipped; a skip is not a pass. The full job map (and which
 diff requires which job) is [`.agents/rules/ci.md`](../.agents/rules/ci.md).
 
+For structural searches and guard changes, use the [ast-grep skill](../.agents/skills/ast-grep/SKILL.md). The [guard workflow](../.agents/rules/ci.md#ast-grep-rules) defines placement beside the owner, root discovery, and verification.
+
 ### Pre-push gate
 
 Before pushing, read [the local gate and push checklist](../.agents/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
@@ -324,6 +330,11 @@ Environment overrides:
   fully offline build (default: fetched on demand at first launch).
 - `OPENLOGI_SIGN_IDENTITY=<identity>` — codesign the `.app` and `.dmg` with the
   given Developer ID.
+- `OPENLOGI_SPARKLE_PUBLIC_ED_KEY=<base64>` — embed Sparkle.framework and update
+  through it (see Release updater publishing). Without it the bundle updates
+  through the built-in engine.
+- `OPENLOGI_UPDATE_BASE_URL=<url>` — update host of the embedded Sparkle feed;
+  required with `OPENLOGI_SPARKLE_PUBLIC_ED_KEY`.
 - `OPENLOGI_DMG_BACKGROUND_URL=<url>` — override the branded DMG background
   TIFF URL (default: `https://assets.openlogi.org/dmg/dmg-background.tiff`).
 
@@ -344,6 +355,28 @@ cargo run -p xtask -- linux package
 
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
 icon) are declared in `packaging/linux/nfpm.yaml`.
+
+`packaging/linux/install.sh` is a POSIX `/bin/sh` frontend for those release
+packages, not a second package lifecycle. Its online mode maps the host and
+package manager to the release naming contract
+`openlogi-v<version>-linux-<amd64|arm64>.<format>`, authenticates that file's
+detached signature against its embedded minisign public key, verifies only that
+file's `SHA256SUMS` entry, and then delegates installation to apt, dnf, yum,
+zypper, rpm, or pacman. The embedded public key must stay in sync with
+`OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`. The nFPM post-install script remains the
+owner of udev and desktop/icon cache reloads. The explicit `--from-source` mode
+preserves the checkout installer for the four local `target/release` binaries
+and shared resources.
+
+Run the mocked online/source smoke suite directly with dash; it exercises
+latest and pinned versions, both architectures, every package-manager mapping,
+signature and checksum rejection before sudo, dry-run, and the source resource
+set without network or system writes:
+
+```sh
+dash -n packaging/linux/install.sh
+dash packaging/linux/tests/install-smoke.sh
+```
 
 The Nix package uses the same shared resources and is declared in
 `packaging/linux/package.nix`; see the Nix package section above for its build
@@ -378,9 +411,13 @@ the updater does not yet change behavior based on it.
 
 ## Release updater publishing
 
-Tagged releases still attach DMGs and `SHA256SUMS` to GitHub Releases for manual
-downloads and the Homebrew cask. The release workflow also publishes the same
-DMGs to Cloudflare R2 and writes a static updater manifest at:
+Tagged releases attach artifacts and `SHA256SUMS` to GitHub Releases for manual
+downloads. When both Linux build legs succeed, the release workflow copies
+`packaging/linux/install.sh` to `dist/install.sh`; that exact file is listed in
+`SHA256SUMS`, signed as `install.sh.minisig`, and attached as a release asset.
+Partial releases without a complete Linux package set omit the installer. The
+workflow also publishes the artifacts to Cloudflare R2 and writes a static
+updater manifest at:
 
 ```text
 ${OPENLOGI_UPDATE_BASE_URL}/channels/stable/latest.json
@@ -394,6 +431,36 @@ asset carries a minisign signature that verifies against that key, plus a
 matching SHA-256. A build without the key embedded (local/dev) fails closed —
 the update check errors rather than installing an unverified artifact.
 
+### macOS: Sparkle
+
+The signed macOS release bundle embeds
+[Sparkle](https://sparkle-project.org) and updates through it instead
+(`platform::updater` in `openlogi-desktop`). Each architecture ships its own
+DMG, so each reads its own feed:
+
+```text
+${OPENLOGI_UPDATE_BASE_URL}/channels/stable/appcast-arm64.xml
+${OPENLOGI_UPDATE_BASE_URL}/channels/stable/appcast-x86_64.xml
+```
+
+Each feed carries one item: that architecture's notarized, stapled DMG with an
+EdDSA (`sparkle:edSignature`) signature over the exact file, and the release
+notes as Markdown. The bundle trusts only the key in its `SUPublicEDKey`, and
+`SUVerifyUpdateBeforeExtraction` makes Sparkle check that signature before it
+unpacks anything.
+
+Updates stay opt-in. The bundle ships `SUEnableAutomaticChecks = NO`, so
+Sparkle never schedules a check or asks to; the app runs the one launch check
+itself when **Check for updates** is on, without a window. With **Automatic
+updates** also on, a found update downloads in the background and installs on
+quit or through **Restart to Update**. "Check for Updates…" opens Sparkle's
+update window. A bundle without Sparkle (Windows, Linux, local builds) and a
+Sparkle that fails to load fall back to the engine and `latest.json`.
+
+`latest.json` and the DMG minisigs keep being published: bundles from before
+Sparkle read only that manifest, and they update into a Sparkle bundle through
+it.
+
 Configure the R2/update settings in one 1Password item referenced by the GitHub
 secret `OP_R2_SECRET_ITEM`. The item must contain:
 
@@ -403,16 +470,47 @@ secret `OP_R2_SECRET_ITEM`. The item must contain:
   the app and used to verify updater artifacts.
 - `OPENLOGI_UPDATE_MINISIGN_SECRET_KEY` — the passwordless minisign secret key
   file, **base64-encoded** (`base64 < minisign.key`), used only in the release
-  publish job to sign DMGs before `latest.json` is generated. It is stored
-  base64 (not raw) so its two lines survive 1Password's paste handling; the
-  workflow decodes it, mirroring the GitHub App key.
+  publish job to sign release artifacts before `latest.json` is generated. It
+  is stored base64 (not raw) so its two lines survive 1Password's paste
+  handling; the workflow decodes it, mirroring the GitHub App key.
+- `OPENLOGI_SPARKLE_PUBLIC_ED_KEY` — Sparkle's base64 EdDSA public key, stamped
+  into the macOS bundle as `SUPublicEDKey`.
+- `OPENLOGI_SPARKLE_PRIVATE_ED_KEY` — the matching base64 private key (the
+  32-byte seed), used only in the publish job to sign the DMGs into the
+  appcasts. `release appcast` refuses a private key that does not belong to the
+  public key above.
 - `CLOUDFLARE_R2_ACCOUNT_ID` — Cloudflare account ID used for the S3 endpoint.
 - `CLOUDFLARE_R2_BUCKET` — bucket name.
 - `CLOUDFLARE_R2_ACCESS_KEY_ID` — R2 S3 access key.
 - `CLOUDFLARE_R2_SECRET_ACCESS_KEY` — R2 S3 secret key.
 
 The workflow uploads immutable artifacts under `/releases/<tag>/` and only the
-channel manifest under `/channels/stable/latest.json` is mutable.
+channel files under `/channels/stable/` — `latest.json` and the two appcasts —
+are mutable. They are uploaded after the artifacts they point at.
+
+Generate the Sparkle key pair once, with the `generate_keys` tool from the
+[Sparkle release](https://github.com/sparkle-project/Sparkle/releases) xtask
+embeds:
+
+```sh
+./bin/generate_keys --account openlogi         # prints the public key
+./bin/generate_keys --account openlogi -x sparkle-private.key
+# store the file's contents as OPENLOGI_SPARKLE_PRIVATE_ED_KEY, then delete it
+```
+
+The key cannot be replaced casually: every installed bundle trusts only the one
+it shipped with. Rotating it means shipping a bundle with the new key that is
+still signed with the old one, or relying on Sparkle's fallback to the DMG's
+Developer ID signature.
+
+After a complete Linux release is published, the workflow dispatches
+`publish-openlogi-installer` with the tag to `openlogi-org/get`. That repository
+downloads `install.sh`, `install.sh.minisig`, and `SHA256SUMS` from the published
+GitHub Release, verifies both the exact checksum and minisign signature, and
+commits immutable versioned files plus the latest stable aliases served by
+Cloudflare Pages at `get.openlogi.org`. It mirrors no native package binaries.
+The dispatch uses the same 1Password-backed GitHub App as the Homebrew update;
+the App must be installed for the `openlogi-org/get` repository.
 
 The manifest is generated by the workspace `xtask` helper:
 
@@ -423,6 +521,22 @@ cargo run -p xtask -- release latest-json \
   --base-url https://updates.openlogi.org \
   --output dist/latest.json
 ```
+
+and so are the appcasts, after the DMGs are stapled (stapling rewrites them).
+The private key is read only from the environment:
+
+```sh
+OPENLOGI_SPARKLE_PRIVATE_ED_KEY=… cargo run -p xtask -- release appcast \
+  --dist dist \
+  --tag v0.2.0 \
+  --base-url https://updates.openlogi.org \
+  --public-key "$OPENLOGI_SPARKLE_PUBLIC_ED_KEY" \
+  --release-notes .release/RELEASE_NOTES.md \
+  --output-dir .release/appcast
+```
+
+The stable feed takes `MAJOR.MINOR.PATCH` releases only: Sparkle's version
+comparator stops at the first `-`, so it would read `1.2.0-rc.1` as `1.2.0`.
 
 ## Crowdin translation sync
 

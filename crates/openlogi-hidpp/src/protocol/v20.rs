@@ -65,6 +65,35 @@ impl Message {
             Message::Long(_, payload) => payload,
         }
     }
+
+    /// The feature error this message reports against a request sent with
+    /// `request`, or [`None`] when it is not an error for that request.
+    ///
+    /// A HID++2.0 error response sets the feature index to `0xFF` and shifts
+    /// the request's feature index and function byte one byte to the right,
+    /// so an error can be attributed to its request from the header alone —
+    /// also for a request written in a report width the channel cannot
+    /// correlate, such as the 64-byte `0x12` lighting frame. An error code
+    /// this crate does not know decodes as
+    /// [`Hidpp20Error::UnsupportedResponse`].
+    #[must_use]
+    pub fn feature_error_for(&self, request: MessageHeader) -> Option<Hidpp20Error> {
+        if !self.is_error_for(request) {
+            return None;
+        }
+        Some(
+            ErrorType::try_from(self.extend_payload()[1])
+                .map_or(Hidpp20Error::UnsupportedResponse, Hidpp20Error::Feature),
+        )
+    }
+
+    fn is_error_for(&self, request: MessageHeader) -> bool {
+        let header = self.header();
+        header.device_index == request.device_index
+            && header.feature_index == 0xff
+            && nibble::combine(header.function_id, header.software_id) == request.feature_index
+            && self.extend_payload()[0] == nibble::combine(request.function_id, request.software_id)
+    }
 }
 
 impl From<HidppMessage> for Message {
@@ -187,18 +216,7 @@ fn v20_response_predicate(
 ) -> impl Fn(&HidppMessage) -> bool + Send + 'static {
     move |&response| {
         let response = Message::from(response);
-        let response_header = response.header();
-
-        // A HID++2.0 error response sets the feature index to 0xFF and moves all header
-        // values starting from the real feature index one byte to the right.
-        let is_error = response_header.device_index == header.device_index
-            && response_header.feature_index == 0xff
-            && nibble::combine(response_header.function_id, response_header.software_id)
-                == header.feature_index
-            && response.extend_payload()[0]
-                == nibble::combine(header.function_id, header.software_id);
-
-        is_error || response_header == header
+        response.is_error_for(header) || response.header() == header
     }
 }
 
@@ -260,4 +278,60 @@ pub enum Hidpp20Error {
     /// Indicates that a received response is not fully supported.
     #[error("the received response from the device is (partly) unsupported")]
     UnsupportedResponse,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A request to function 3 of the feature at index `0x07`, software id
+    /// `0xa`, on device `0x01`.
+    fn request() -> MessageHeader {
+        MessageHeader {
+            device_index: 0x01,
+            feature_index: 0x07,
+            function_id: U4::from_lo(0x3),
+            software_id: U4::from_lo(0xa),
+        }
+    }
+
+    /// A short report `[device, feature, function byte, payload..]`.
+    fn short(bytes: [u8; SHORT_REPORT_LENGTH - 1]) -> Message {
+        Message::from(HidppMessage::Short(bytes))
+    }
+
+    #[test]
+    fn an_error_naming_the_request_is_attributed_to_it() {
+        let error = short([0x01, 0xff, 0x07, 0x3a, 0x02, 0x00]);
+        assert!(matches!(
+            error.feature_error_for(request()),
+            Some(Hidpp20Error::Feature(ErrorType::InvalidArgument))
+        ));
+    }
+
+    #[test]
+    fn an_error_for_another_request_is_not() {
+        // Another function of the same feature, another feature, another
+        // device, and the request's own success reply.
+        for other in [
+            [0x01, 0xff, 0x07, 0x5a, 0x02, 0x00],
+            [0x01, 0xff, 0x08, 0x3a, 0x02, 0x00],
+            [0x02, 0xff, 0x07, 0x3a, 0x02, 0x00],
+            [0x01, 0x07, 0x3a, 0x00, 0x00, 0x00],
+        ] {
+            assert!(
+                short(other).feature_error_for(request()).is_none(),
+                "{other:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_error_code_is_an_unsupported_response() {
+        let error = short([0x01, 0xff, 0x07, 0x3a, 0x7f, 0x00]);
+        assert!(matches!(
+            error.feature_error_for(request()),
+            Some(Hidpp20Error::UnsupportedResponse)
+        ));
+    }
 }

@@ -3,6 +3,7 @@
 mod embed;
 pub(crate) mod identity;
 mod signing;
+pub(crate) mod sparkle;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ use crate::icon::IconPipeline as _;
 use crate::icon::macos::AppBundle;
 use crate::support::fs::{command_exists, ensure_dir, repo_root};
 use crate::support::info_plist;
+use crate::support::update_feed::{self, MacArch};
 use crate::support::xcode;
 use identity::{Channel, Component};
 
@@ -39,27 +41,40 @@ impl DistributionTarget {
             Self::X8664 => "x86_64-apple-darwin",
         }
     }
+
+    /// The architecture a bundle for `target` runs on: the host's when no
+    /// target is given.
+    pub(crate) fn arch(target: Option<Self>) -> Result<MacArch> {
+        match target {
+            Some(Self::Aarch64) => Ok(MacArch::Arm64),
+            Some(Self::X8664) => Ok(MacArch::X86_64),
+            None => MacArch::host().context("no macOS release architecture for this host"),
+        }
+    }
 }
 
 /// Build `OpenLogi.app` wearing `channel`'s identity, signing it with whatever
 /// local identity is available (dev) or leaving it unsigned (production).
 pub(crate) fn run(channel: Channel) -> Result<()> {
-    build_bundle(channel, None, None)
+    build_bundle(channel, None, None, None)
 }
 
 /// Build the bundle that ships: always the production identity, signed with the
-/// Developer ID identity when one is given.
+/// Developer ID identity when one is given, and updating through Sparkle when
+/// given its `feed`.
 pub(crate) fn run_for_distribution(
     sign_identity: Option<&str>,
     target: Option<DistributionTarget>,
+    feed: Option<&sparkle::Feed>,
 ) -> Result<()> {
-    build_bundle(Channel::Production, sign_identity, target)
+    build_bundle(Channel::Production, sign_identity, target, feed)
 }
 
 fn build_bundle(
     channel: Channel,
     sign_identity: Option<&str>,
     target: Option<DistributionTarget>,
+    feed: Option<&sparkle::Feed>,
 ) -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
@@ -113,11 +128,23 @@ fn build_bundle(
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     move_to_canonical_path(&built_app, &app)?;
     AppBundle.install(&app)?;
+    // cargo-bundle writes the build's UTC timestamp as `CFBundleVersion`. The
+    // app carries the crate version instead, like its helpers: Sparkle
+    // compares an appcast's `sparkle:version`, the release version, against it.
+    info_plist::stamp_bundle_version(&app.join("Contents/Info.plist"), env!("CARGO_PKG_VERSION"))?;
     embed::embed_helpers(&root, &release_dir, &app, channel)?;
     embed::write_agent_launch_plist(&app, channel)?;
     embed::embed_cli(&release_dir, &app)?;
     embed::verify_bundle_binaries(&app, channel)?;
     info_plist::stamp_privacy_usage_descriptions(&app)?;
+    info_plist::stamp_launch_services_keys(&app)?;
+    match feed {
+        Some(feed) => sparkle::embed(&root, &app, feed)?,
+        None => println!(
+            "==> Sparkle: skipped (set {} to embed it; the app updates through its built-in engine)",
+            update_feed::SPARKLE_PUBLIC_KEY_ENV
+        ),
+    }
     // Identity first, then the checks, then signing — a signature seals the
     // `Info.plist` files, so nothing may rewrite them afterwards.
     identity::stamp(&app, channel, Component::VARIANTS)?;

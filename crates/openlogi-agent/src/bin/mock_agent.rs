@@ -54,8 +54,9 @@ use openlogi_core::device::{
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    LightCommand, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -233,7 +234,13 @@ fn default_to_dev_profile() {
 /// Accept loop — the mock's copy of `server::run` (kept verbatim rather than
 /// making the production loop generic over its service impl for a dev tool).
 async fn serve(server: MockAgent) -> std::io::Result<()> {
-    let listener = transport::bind()?;
+    serve_on(transport::bind()?, server).await
+}
+
+async fn serve_on(
+    listener: interprocess::local_socket::tokio::Listener,
+    server: MockAgent,
+) -> std::io::Result<()> {
     info!(
         profile = std::env::var(openlogi_core::env::PROFILE).unwrap_or_default(),
         "mock agent listening"
@@ -547,6 +554,28 @@ impl State {
         self.clock.advance(duration);
     }
 
+    /// Drop the paired device `route` names, as its receiver does on unpair.
+    fn unpair(&mut self, route: &DeviceRoute) -> Result<(), PairingFailure> {
+        let (DeviceRoute::Bolt { receiver_uid, slot }
+        | DeviceRoute::Unifying { receiver_uid, slot }) = route
+        else {
+            return Err(PairingFailure::ReceiverNotFound);
+        };
+        let names =
+            |uid: Option<&str>| uid.is_some_and(|uid| uid.eq_ignore_ascii_case(receiver_uid));
+        let inventory = self
+            .profile
+            .inventories
+            .iter_mut()
+            .find(|inventory| names(inventory.receiver.unique_id.as_deref()))
+            .ok_or(PairingFailure::ReceiverNotFound)?;
+        inventory.paired.retain(|device| device.slot != *slot);
+        if names(Some(RECEIVER_UID)) {
+            self.paired_extra.retain(|device| device.slot != *slot);
+        }
+        Ok(())
+    }
+
     /// Append the scripted pairing candidate to the Bolt receiver's inventory
     /// and return its assigned slot.
     fn pair_scripted(&mut self, name: &str) -> u8 {
@@ -559,12 +588,13 @@ impl State {
             kind: DeviceKind::Keyboard,
             online: true,
             battery: Some(BatteryInfo {
-                percentage: 90,
+                percentage: Some(90),
                 level: BatteryLevel::Full,
                 status: BatteryStatus::Discharging,
             }),
             model_info: None,
             capabilities: Some(Capabilities::default()),
+            settings_revision: 0,
         });
         self.profile
             .settings
@@ -610,7 +640,7 @@ fn draining_battery(elapsed: Duration) -> BatteryInfo {
     let drained = u8::try_from(elapsed.as_secs() / 60 % 61).unwrap_or(0);
     let percentage = 80 - drained;
     BatteryInfo {
-        percentage,
+        percentage: Some(percentage),
         level: match percentage {
             0..=10 => BatteryLevel::Critical,
             11..=25 => BatteryLevel::Low,
@@ -827,6 +857,98 @@ impl Agent for MockAgent {
     ) -> Result<BacklightState, WriteError> {
         let state = self.state.lock().await;
         profile_value(&state.settings_for(&route)?.backlight, &route, 0x1982).copied()
+    }
+
+    async fn read_fn_lock(self, _: Context, route: DeviceRoute) -> Result<FnLockState, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.fn_lock, &route, 0x40a3).copied()
+    }
+
+    async fn set_fn_lock(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.fn_lock, &route, 0x40a3)?;
+        stored.fn_lock = fn_lock;
+        info!(%route, fn_lock, "set_fn_lock");
+        Ok(*stored)
+    }
+
+    async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {
+        let result = self.state.lock().await.unpair(&route);
+        info!(%route, ok = result.is_ok(), "unpair_device");
+        result
+    }
+    async fn read_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ReportRateInfo, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.report_rate, &route, 0x8061).cloned()
+    }
+    async fn set_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.report_rate, &route, 0x8061)?;
+        if !stored.supports(rate) {
+            return Err(WriteError::ReportRateUnsupported { requested: rate });
+        }
+        stored.current = rate;
+        info!(%route, %rate, "set_report_rate");
+        Ok(stored.clone())
+    }
+    async fn set_backlight(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.backlight, &route, 0x1982)?;
+        if !stored.accepts(change) {
+            return Err(WriteError::BacklightChangeUnsupported { change });
+        }
+        *stored = stored.changed(change);
+        info!(%route, %change, "set_backlight");
+        Ok(*stored)
+    }
+
+    async fn read_easy_switch_hosts(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.easy_switch, &route, 0x1815).cloned()
+    }
+
+    async fn rename_easy_switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.easy_switch, &route, 0x1815)?;
+        let name = stored.name_for(slot, &name)?.to_owned();
+        if let Some(host) = stored.slots.iter_mut().find(|host| host.index == slot) {
+            host.name = Some(name);
+        }
+        info!(%route, slot, "rename_easy_switch_host");
+        Ok(stored.clone())
     }
 
     async fn request_accessibility_prompt(self, _: Context) {
