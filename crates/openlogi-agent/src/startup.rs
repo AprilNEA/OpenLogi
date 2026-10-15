@@ -189,6 +189,7 @@ impl HidppWatcherHandles {
 pub(crate) fn spawn_hidpp_watchers(
     shared: &SharedHandles,
     inputs: &InputServices,
+    observable: &Arc<ObservableState>,
 ) -> HidppWatcherHandles {
     let gesture = watchers::gesture::spawn(
         &shared.capture_plans,
@@ -197,6 +198,7 @@ pub(crate) fn spawn_hidpp_watchers(
             inputs.dispatcher.clone(),
             inputs.scroll_input.clone(),
             shared.hook_maps.clone(),
+            Arc::clone(observable),
         ),
     );
     let host_switch = watchers::host_switch::spawn(

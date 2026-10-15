@@ -19,6 +19,7 @@ mod defaults;
 mod effect;
 mod gesture;
 mod key_combo;
+mod motion;
 mod swipe;
 mod value;
 
@@ -38,6 +39,7 @@ pub use defaults::{default_binding, default_binding_for, default_gesture_binding
 pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};
 pub use gesture::GestureDirection;
 pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
+pub use motion::accelerate_report_delta;
 pub use swipe::{
     GESTURE_HOLD_FOR_SWIPE, GESTURE_SWIPE_DEADZONE, GESTURE_SWIPE_THRESHOLD, SwipeAccumulator,
     detect_swipe,

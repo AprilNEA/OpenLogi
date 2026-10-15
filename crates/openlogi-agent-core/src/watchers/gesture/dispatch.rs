@@ -1,6 +1,8 @@
 //! Resolve captured HID++ inputs against the active per-device plan.
 
 mod wheel;
+#[cfg(any(target_os = "macos", test))]
+mod zoom;
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -16,6 +18,12 @@ use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
 use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::{HidppSessionId, PressToken};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum WheelAdmission {
+    Active,
+    Draining,
+}
 
 /// Effective thumb-wheel configuration whose continuity is tied to one
 /// dispatch plan. A binding or sensitivity update clears accumulated state
@@ -91,6 +99,20 @@ impl SessionWheels {
     fn cancel_session(&mut self, session: &HidppSessionId) {
         self.0.remove(session);
     }
+
+    #[cfg(not(target_os = "macos"))]
+    fn cancel_zoom_session(&mut self, session: &HidppSessionId) {
+        if let Some(wheel) = self.0.get_mut(session) {
+            wheel.clear_zoom();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn clear_zoom(&mut self) {
+        for wheel in self.0.values_mut() {
+            wheel.clear_zoom();
+        }
+    }
 }
 
 /// Input routing plus the per-session state retained between
@@ -100,16 +122,24 @@ pub(super) struct InputDispatcher {
     outputs: GestureOutputs,
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
+    #[cfg(target_os = "macos")]
+    zooms: Option<zoom::worker::Worker>,
 }
 
 impl InputDispatcher {
     /// Build a dispatcher for session-owned capture-plan snapshots.
     pub(super) fn new(outputs: GestureOutputs) -> Self {
+        #[cfg(target_os = "macos")]
+        let zooms = zoom::worker::Worker::spawn(outputs.clone())
+            .map_err(|error| tracing::warn!(%error, "native Zoom worker unavailable"))
+            .ok();
         Self {
             hook_maps: outputs.hook_maps.clone(),
             outputs,
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
+            #[cfg(target_os = "macos")]
+            zooms,
         }
     }
 
@@ -132,7 +162,55 @@ impl InputDispatcher {
     pub(super) fn cancel_session(&mut self, session: &HidppSessionId) {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
+        #[cfg(target_os = "macos")]
+        if let Some(zooms) = &mut self.zooms {
+            zooms.cancel(session);
+        }
         self.gesture_presses.cancel_session(session);
+    }
+
+    pub(super) fn pause_zoom(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(zooms) = &mut self.zooms {
+            zooms.pause();
+        }
+        #[cfg(not(target_os = "macos"))]
+        self.wheels.clear_zoom();
+    }
+
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(clippy::unused_self, reason = "native zoom state exists only on macOS")
+    )]
+    pub(super) fn resume_zoom(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(zooms) = &mut self.zooms {
+            zooms.resume();
+        }
+    }
+    pub(super) fn cancel_zoom_session(&mut self, session: &HidppSessionId) {
+        #[cfg(target_os = "macos")]
+        if let Some(zooms) = &mut self.zooms {
+            zooms.cancel(session);
+        }
+        #[cfg(not(target_os = "macos"))]
+        self.wheels.cancel_zoom_session(session);
+    }
+
+    pub(super) fn shutdown_zoom(&mut self) -> impl std::future::Future<Output = ()> + use<> {
+        #[cfg(target_os = "macos")]
+        let cleanup = self
+            .zooms
+            .as_mut()
+            .map(zoom::worker::Worker::shutdown_and_wait);
+        #[cfg(not(target_os = "macos"))]
+        self.wheels.clear_zoom();
+        async move {
+            #[cfg(target_os = "macos")]
+            if let Some(cleanup) = cleanup {
+                cleanup.await;
+            }
+        }
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -142,6 +220,7 @@ impl InputDispatcher {
         session: &HidppSessionId,
         plan: &DispatchPlan,
         input: CapturedInput,
+        admission: WheelAdmission,
     ) {
         let key = session.device_key();
         if self.record_thumbwheel_direction(key, input) {
@@ -218,7 +297,8 @@ impl InputDispatcher {
             CapturedInput::Scroll {
                 increments,
                 resolution,
-            } => self.dispatch_wheel(session, plan, increments, resolution),
+                status,
+            } => self.dispatch_wheel(session, plan, increments, resolution, status, admission),
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
@@ -231,7 +311,28 @@ impl InputDispatcher {
         plan: &DispatchPlan,
         increments: i16,
         resolution: WheelResolution,
+        status: openlogi_hid::thumbwheel::RotationStatus,
+        admission: WheelAdmission,
     ) {
+        let now = Instant::now();
+        #[cfg(target_os = "macos")]
+        if increments == 0 && status == openlogi_hid::thumbwheel::RotationStatus::Stop {
+            if admission == WheelAdmission::Draining {
+                self.cancel_zoom_session(session);
+            } else if let Some(zooms) = &mut self.zooms {
+                zooms.stop(session, now);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if admission == WheelAdmission::Draining {
+                self.wheels.cancel_zoom_session(session);
+            } else if increments == 0 {
+                self.wheels
+                    .for_session(session)
+                    .prepare_zoom_report(status, 0, now);
+            }
+        }
         let Some(rotation) = WheelRotation::from_increments(increments) else {
             return;
         };
@@ -239,12 +340,44 @@ impl InputDispatcher {
         let button = rotation.button();
         let configuration = WheelConfiguration::for_plan(plan);
         let action = configuration.action(rotation);
+        #[cfg(not(target_os = "macos"))]
+        if matches!(action, Action::ZoomIn | Action::ZoomOut)
+            && (admission == WheelAdmission::Draining
+                || !self
+                    .wheels
+                    .for_session(session)
+                    .prepare_zoom_report(status, increments, now))
+        {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if matches!(action, Action::ZoomIn | Action::ZoomOut) {
+            if admission == WheelAdmission::Draining {
+                self.cancel_zoom_session(session);
+            } else if let Some(zooms) = &mut self.zooms {
+                zooms.motion(
+                    session,
+                    zoom::worker::Input {
+                        configuration: configuration.clone(),
+                        foreground_app: self.outputs.foreground_app_id(),
+                        pointer: plan.pointer_target,
+                        rotation,
+                        magnitude: f64::from(i32::from(increments).abs()),
+                        now,
+                        stopped: status == openlogi_hid::thumbwheel::RotationStatus::Stop,
+                    },
+                );
+            }
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        self.cancel_zoom_session(session);
         let wheels = self.wheels.for_session(session);
         match wheels.advance(
             rotation,
             action,
             ScrollScale::new(resolution, configuration.sensitivity),
-            Instant::now(),
+            now,
         ) {
             WheelOutput::Idle => {}
             WheelOutput::Scroll(delta) => self.outputs.post_scroll(session, delta),

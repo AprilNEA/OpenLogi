@@ -68,6 +68,8 @@ pub enum CapturedInput {
         /// instead of scrolling by however finely this wheel happens to
         /// report.
         resolution: WheelResolution,
+        /// Firmware roll lifecycle, including zero-motion start/stop reports.
+        status: thumbwheel::RotationStatus,
     },
     /// The un-inverted polarity learned while arming a thumb wheel. This is a
     /// one-time session fact rather than user input; the agent records it for
@@ -321,14 +323,12 @@ fn thumbwheel_input(
     previous: RotationStatus,
     resolution: WheelResolution,
 ) -> Option<CapturedInput> {
-    if event.rotation != 0 {
+    if event.rotation != 0 || event.rotation_status.is_rolling() || previous.leaves_roll_open() {
         return Some(CapturedInput::Scroll {
             increments: event.rotation,
             resolution,
+            status: event.rotation_status,
         });
-    }
-    if event.rotation_status.is_rolling() || previous.leaves_roll_open() {
-        return None;
     }
     event
         .single_tap
