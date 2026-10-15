@@ -505,12 +505,17 @@ mod tests {
     }
 
     /// A window whose root view is `view`, as the app's root wraps its own.
+    ///
+    /// Motion is reduced: a dialog slides in on the wall clock, so on a slow
+    /// runner a redraw between measuring a button and clicking it would move
+    /// the button away from the click. Its resting position is what is tested.
     fn rooted_window<V: Render>(
         cx: &mut TestAppContext,
         view: impl FnOnce() -> V + 'static,
     ) -> &mut VisualTestContext {
         cx.update(|cx| {
             gpui_component::init(cx);
+            cx.set_reduce_motion(true);
             let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
             let resolver = AssetResolver::new();
             let state = cx.new(|_| {

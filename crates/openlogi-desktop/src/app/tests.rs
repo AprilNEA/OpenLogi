@@ -118,6 +118,10 @@ fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
     cx.update(gpui_component::init);
+    // The dialog slides in on the wall clock, so on a slow runner a redraw
+    // between measuring Cancel and clicking it moves the button away from
+    // the click. Reduced motion draws the dialog where it comes to rest.
+    cx.update(|cx| cx.set_reduce_motion(true));
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
