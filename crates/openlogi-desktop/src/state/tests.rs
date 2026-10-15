@@ -52,6 +52,7 @@ mod camera;
 pub(crate) mod device_list;
 mod device_names;
 mod dpi;
+mod easy_switch;
 mod fn_lock;
 mod lighting;
 mod os_layout;

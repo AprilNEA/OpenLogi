@@ -313,6 +313,18 @@ impl Runtime {
                     });
                 });
             }
+            ipc::GuiUpdate::EasySwitchHostRenamed {
+                key,
+                route,
+                write,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_easy_switch_host_renamed(&key, &route, write, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::DeviceUnpaired {
                 record_key,
                 route,

@@ -147,6 +147,11 @@ false) returns `unsupported_feature`, and a name the device does not read back
 returns `readback_mismatch`. A device without `0x1815` returns
 `unsupported_feature`.
 
+The desktop app shows the same channels in an Easy-Switch card on the Device
+tab and renames a paired channel under the same name rules. Neither the CLI
+nor the app renames a channel on its own: unlike Logi Options+, OpenLogi does
+not write this computer's name or OS onto the current channel when it starts.
+
 Hardware writes, file persistence, and reload are separate steps, not an atomic
 transaction. The config revision is checked under a writer lock; concurrent edits
 are not overwritten. A lock conflict is reported immediately, without waiting.

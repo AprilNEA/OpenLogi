@@ -26,10 +26,13 @@ use tracing::warn;
 pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
+pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{BacklightLoad, DpiLoad, FnLockLoad, ReportRateLoad, SmartShiftLoad};
+pub use load::{
+    BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ReportRateLoad, SmartShiftLoad,
+};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +73,7 @@ mod device_session;
 mod device_store;
 mod devices;
 mod dpi;
+mod easy_switch;
 mod events;
 mod fn_lock;
 mod inventory;
@@ -223,6 +227,7 @@ impl AppState {
             state.load_current_fn_lock(cx);
             state.load_current_report_rate(cx);
             state.load_current_backlight(cx);
+            state.load_current_easy_switch(cx);
         });
     }
 

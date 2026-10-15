@@ -18,8 +18,8 @@ use std::future::Future;
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand,
-    ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
 use tarpc::client::RpcError;
@@ -223,6 +223,43 @@ impl Request for SetBacklight {
     }
 }
 
+/// Name the computer on one Easy-Switch slot of a device now, answered as
+/// [`GuiUpdate::EasySwitchHostRenamed`] with the slots the device reads back.
+pub struct RenameEasySwitchHost {
+    pub route: DeviceRoute,
+    /// Zero-based slot index.
+    pub slot: u8,
+    pub name: String,
+    pub key: DeviceKey,
+    /// The number the device-read service gave this rename, returned with
+    /// the answer so it is matched to the rename it answers.
+    pub write: u64,
+}
+
+impl Request for RenameEasySwitchHost {
+    type Answer = Result<EasySwitchHosts, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .rename_easy_switch_host(
+                context::current(),
+                self.route.clone(),
+                self.slot,
+                self.name.clone(),
+            )
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::EasySwitchHostRenamed {
+            key: self.key,
+            route: self.route,
+            write: self.write,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
 /// Apply a SmartShift configuration now.
 pub struct SetSmartShift {
     pub route: DeviceRoute,
@@ -385,6 +422,27 @@ impl Request for ReadBacklight {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_backlight(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a device's Easy-Switch host slots; the answer goes back over
+/// `reply`.
+pub struct ReadEasySwitchHosts {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<EasySwitchHosts, WriteError>>,
+}
+
+impl Request for ReadEasySwitchHosts {
+    type Answer = Result<EasySwitchHosts, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_easy_switch_hosts(context::current(), self.route.clone())
             .await
     }
 
@@ -626,11 +684,13 @@ commands! {
     SetFnLock,
     SetReportRate,
     SetBacklight,
+    RenameEasySwitchHost,
     ReadDpi,
     ReadSmartShift,
     ReadFnLock,
     ReadReportRate,
     ReadBacklight,
+    ReadEasySwitchHosts,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,

@@ -43,6 +43,7 @@ use crate::ui::theme::{
 };
 
 mod backlight;
+mod easy_switch;
 
 const CAMERA_PREVIEW_W: Rems = rems(32.125);
 const CAMERA_CONTROLS_W: Rems = rems(31.25);
@@ -653,6 +654,10 @@ fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
             .when(keyboard, |column| column.child(keyboard_card(pal, cx)))
             .children(backlight::backlight_card(
                 backlight::BacklightFacts::current(cx),
+                pal,
+            ))
+            .children(easy_switch::easy_switch_card(
+                easy_switch::EasySwitchFacts::current(cx),
                 pal,
             ))
             .child(configuration_card(pal, cx)),
