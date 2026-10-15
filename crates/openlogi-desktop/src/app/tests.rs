@@ -199,6 +199,7 @@ fn charging_without_reading_suppresses_percentage() {
         BatteryStatus::Charging
     )));
     assert!(battery_charging_no_reading(&BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage: None,
         level: BatteryLevel::Unknown,
         status: BatteryStatus::Charging,

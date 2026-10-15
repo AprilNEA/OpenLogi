@@ -28,22 +28,30 @@ impl BatteryInfo {
     /// sentinels, not evidence of an empty battery.
     #[must_use]
     pub fn usable_percentage(&self) -> Option<u8> {
-        (self.freshness == BatteryFreshness::Current
-            && self.percentage <= 100
-            && !(self.percentage == 0
-                && (self.is_charging() || self.level == BatteryLevel::Unknown)))
-            .then_some(self.percentage)
+        self.percentage.filter(|&percentage| {
+            self.freshness == BatteryFreshness::Current
+                && percentage <= 100
+                && !(percentage == 0 && (self.is_charging() || self.level == BatteryLevel::Unknown))
+        })
     }
 
     /// Warning state from a current reading; external power suppresses warnings.
     #[must_use]
     pub fn severity(&self) -> Severity {
-        if self.is_charging() || self.status == BatteryStatus::Full {
+        if self.freshness != BatteryFreshness::Current
+            || self.is_charging()
+            || self.status == BatteryStatus::Full
+        {
             return Severity::Normal;
         }
         match self.usable_percentage() {
             Some(0..=10) => Severity::Critical,
             Some(11..=20) => Severity::Low,
+            None if self.percentage.is_none() => match self.level {
+                BatteryLevel::Critical => Severity::Critical,
+                BatteryLevel::Low => Severity::Low,
+                _ => Severity::Normal,
+            },
             _ => Severity::Normal,
         }
     }
@@ -83,7 +91,7 @@ mod tests {
                 BatteryLevel::Critical,
             ] {
                 let mut battery = BatteryInfo {
-                    percentage,
+                    percentage: Some(percentage),
                     level,
                     status: BatteryStatus::Discharging,
                     freshness: BatteryFreshness::Current,
@@ -107,16 +115,41 @@ mod tests {
     }
 
     #[test]
+    fn level_only_readings_keep_attention_without_inventing_percentages() {
+        for (level, severity) in [
+            (BatteryLevel::Critical, Severity::Critical),
+            (BatteryLevel::Low, Severity::Low),
+            (BatteryLevel::Good, Severity::Normal),
+            (BatteryLevel::Unknown, Severity::Normal),
+        ] {
+            let mut battery = BatteryInfo {
+                percentage: None,
+                level,
+                status: BatteryStatus::Discharging,
+                freshness: BatteryFreshness::Current,
+            };
+            assert_eq!(battery.severity(), severity);
+            assert_eq!(battery.usable_percentage(), None);
+            assert!(!battery.rearms_warning());
+            battery.freshness = BatteryFreshness::Cached;
+            assert_eq!(battery.severity(), Severity::Normal);
+            battery.freshness = BatteryFreshness::Current;
+            battery.status = BatteryStatus::Charging;
+            assert_eq!(battery.severity(), Severity::Normal);
+        }
+    }
+
+    #[test]
     fn unknown_zero_is_not_an_empty_battery_and_recovery_has_hysteresis() {
         let mut battery = BatteryInfo {
-            percentage: 0,
+            percentage: Some(0),
             level: BatteryLevel::Unknown,
             status: BatteryStatus::Discharging,
             freshness: BatteryFreshness::Current,
         };
         assert_eq!(battery.usable_percentage(), None);
         for (percentage, rearms) in [(20, false), (21, false), (25, false), (26, true)] {
-            battery.percentage = percentage;
+            battery.percentage = Some(percentage);
             assert_eq!(battery.rearms_warning(), rearms);
         }
     }

@@ -728,7 +728,7 @@ fn battery_preferences_require_evidence_and_survive_missing_readings() {
     }
     inventory.paired[0].battery = Some(BatteryInfo {
         freshness: openlogi_core::device::BatteryFreshness::Cached,
-        percentage: 50,
+        percentage: Some(50),
         level: BatteryLevel::Good,
         status: BatteryStatus::Discharging,
     });
@@ -763,7 +763,7 @@ fn battery_preferences_do_not_follow_a_reused_receiver_slot() {
     inventory.paired[0].wpid = Some(0x4082);
     inventory.paired[0].battery = Some(BatteryInfo {
         freshness: openlogi_core::device::BatteryFreshness::Current,
-        percentage: 50,
+        percentage: Some(50),
         level: BatteryLevel::Good,
         status: BatteryStatus::Discharging,
     });
@@ -795,7 +795,7 @@ fn battery_preferences_survive_a_model_less_offline_placeholder() {
         inventory.paired[0].wpid = wpid;
         inventory.paired[0].battery = Some(BatteryInfo {
             freshness: openlogi_core::device::BatteryFreshness::Current,
-            percentage: 50,
+            percentage: Some(50),
             level: BatteryLevel::Good,
             status: BatteryStatus::Discharging,
         });

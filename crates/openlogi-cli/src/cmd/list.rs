@@ -359,6 +359,7 @@ mod format_tests {
     #[test]
     fn a_level_only_battery_prints_no_percentage() {
         let b = BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: None,
             level: BatteryLevel::Good,
             status: BatteryStatus::Discharging,
