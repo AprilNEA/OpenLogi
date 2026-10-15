@@ -36,7 +36,7 @@ use crate::ui::theme::{self, Palette, Typography as _};
 use crate::windows::{self, AuxWindow};
 
 /// The pairing flow as the window renders it: the agent's [`PairingPhase`]
-/// plus [`Self::Idle`] for no session.
+/// plus local command failures and cancellation awaiting acknowledgement.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub enum PairingUi {
     /// No session in flight (initial, or after Done / dismissing a failure).
@@ -54,6 +54,9 @@ pub enum PairingUi {
     Paired { slot: u8 },
     /// The session ended without pairing.
     Failed(PairingFailure),
+    /// A command failed without an agent session to carry its explanation.
+    /// Empty snapshots cannot dismiss this local result.
+    CommandFailed(PairingFailure),
     /// Waiting for the agent to restore the receiver and release its session.
     Cancelling,
 }
@@ -97,6 +100,16 @@ pub fn apply_state(cx: &mut App, phase: Option<PairingPhase>) {
         // Only the command acknowledgement proves cancellation finished.
         return;
     }
+    if phase.is_none()
+        && matches!(
+            cx.try_global::<PairingUi>(),
+            Some(PairingUi::CommandFailed(_))
+        )
+    {
+        // A refusal never created a session. Its refreshed empty snapshot
+        // acknowledges no UI action and must not erase the error or Retry.
+        return;
+    }
     let next = match phase {
         None => PairingUi::Idle,
         Some(PairingPhase::Searching) => PairingUi::Searching,
@@ -112,10 +125,10 @@ pub fn apply_state(cx: &mut App, phase: Option<PairingPhase>) {
     cx.set_global(next);
 }
 
-/// Report a pairing command the client could not deliver. No session will ever
-/// appear to explain the silence, so the window has to be told directly.
+/// Report an undelivered or refused command separately from a session result.
+/// Retry, cancellation acknowledgement, or a new session replaces this verdict.
 pub fn apply_undeliverable(cx: &mut App, failure: PairingFailure) {
-    cx.set_global(PairingUi::Failed(failure));
+    cx.set_global(PairingUi::CommandFailed(failure));
 }
 
 /// The agent has finished cancellation, including when no session existed.
@@ -407,7 +420,7 @@ fn pairing_body(
                         .on_click(|_, _, cx| cancel_search(cx)),
                 );
         }
-        PairingUi::Failed(failure) => {
+        PairingUi::Failed(failure) | PairingUi::CommandFailed(failure) => {
             col = col
                 .child(
                     div()

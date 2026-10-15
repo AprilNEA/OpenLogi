@@ -91,6 +91,83 @@ fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_refused_start_keeps_its_error_and_target_after_empty_snapshots(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    let mut commands = cx.update(install_state);
+    let bolt = receiver("Bolt", 0xc548, Some("00000000AAAABBBB"));
+    cx.update(|cx| {
+        AppState::update(cx, |state, cx| {
+            state
+                .apply_agent_snapshot(&snapshot(vec![bolt.clone()]), &AssetResolver::new(), &[])
+                .events
+                .emit(cx);
+        });
+    });
+    let (_, visual) = cx.add_window_view(AddDeviceView::new);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let choice = visual
+        .debug_bounds("pairing-receiver-c548-00000000AAAABBBB")
+        .expect("the receiver is selectable");
+    visual.simulate_click(choice.center(), Modifiers::default());
+    let Command::StartPairing(request) = commands.try_recv().unwrap() else {
+        panic!("expected the selected receiver's pairing command");
+    };
+    assert_eq!(request.selector, receiver_selector(&bolt).unwrap());
+
+    // A refused StartPairing creates no agent session. Its forced refresh,
+    // and later inventory updates, therefore still carry pairing: None.
+    visual.update(|_, cx| {
+        apply_undeliverable(cx, PairingFailure::ReceiverBusy);
+        apply_state(cx, None);
+        apply_state(cx, None);
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let retry = visual
+        .debug_bounds("pairing-retry")
+        .expect("an unchanged snapshot must not dismiss the refusal and its retry action");
+    assert!(
+        visual
+            .debug_bounds("pairing-receiver-c548-00000000AAAABBBB")
+            .is_none(),
+        "the refusal must not turn back into the picker"
+    );
+    visual.simulate_click(retry.center(), Modifiers::default());
+    let Command::StartPairing(request) = commands.try_recv().unwrap() else {
+        panic!("expected a retry");
+    };
+    assert_eq!(request.selector, receiver_selector(&bolt).unwrap());
+    visual.update(|_, cx| {
+        assert!(matches!(cx.global::<PairingUi>(), PairingUi::Searching));
+        assert_eq!(cx.global::<PairingSelection>().0.as_ref(), Some(&bolt));
+    });
+}
+
+#[gpui::test]
+fn an_agent_session_supersedes_a_command_failure_and_can_be_dismissed(cx: &mut TestAppContext) {
+    for phase in [
+        PairingPhase::Searching,
+        PairingPhase::Failed(PairingFailure::Timeout),
+    ] {
+        cx.update(|cx| {
+            apply_undeliverable(cx, PairingFailure::ReceiverBusy);
+            apply_state(cx, None);
+            assert!(matches!(
+                cx.global::<PairingUi>(),
+                PairingUi::CommandFailed(PairingFailure::ReceiverBusy)
+            ));
+            apply_state(cx, Some(phase));
+            assert!(matches!(
+                cx.global::<PairingUi>(),
+                PairingUi::Searching | PairingUi::Failed(PairingFailure::Timeout)
+            ));
+            apply_state(cx, None);
+            assert!(matches!(cx.global::<PairingUi>(), PairingUi::Idle));
+        });
+    }
+}
+
+#[gpui::test]
 fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
