@@ -27,19 +27,34 @@
 
 use std::cfg_select;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use thiserror::Error;
 
 pub use openlogi_core::app::ForegroundApp;
 pub use openlogi_core::binding::ButtonId;
+/// Which modifier keys were held when a key event fired — the same type a
+/// [`KeyTrigger`](openlogi_core::config::KeyTrigger) is written with, so an
+/// event's modifiers compare against a binding's without a conversion.
+pub use openlogi_core::config::KeyModifiers;
 pub use openlogi_core::scroll::ScrollDelta;
+
+mod pointer;
+pub use pointer::{
+    PointerContext, PointerTarget, pointer_context, pointer_context_supported,
+    pointer_target_is_focused,
+};
 
 /// Logitech's USB/Bluetooth vendor id (`0x046D`), widened from
 /// [`openlogi_core::hid::LOGITECH_VENDOR_ID`] because the hook's identity
 /// sources (IOKit, evdev) hand it back as a `u32`.
 pub const LOGITECH_VENDOR_ID: u32 = openlogi_core::hid::LOGITECH_VENDOR_ID as u32;
 
-/// Cursor position in the operating system's global screen coordinate space.
+/// Cursor position in the operating system's global screen coordinate space,
+/// scaled so it lines up with GPUI's own logical (DIP) display bounds — the
+/// Windows backend divides physical `GetCursorPos` pixels by the cursor's
+/// monitor DPI scale to match; macOS `CGEvent` points and Linux root-window
+/// coordinates are already resolution-independent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CursorPosition {
     /// Horizontal screen coordinate.
@@ -86,6 +101,47 @@ impl EventDevice {
     }
 }
 
+/// Whether the capture layer is currently inverting the vertical wheel.
+///
+/// Software scroll inversion for devices whose firmware has no native
+/// `0x2121` invert bit (#694, #776). The flag is process-global and applies to
+/// every pointer this hook captures — the hook attributes events to a device,
+/// but nothing maps an OS event source back to the config key the setting is
+/// stored under, so a second Logitech mouse would follow the first. Documented
+/// rather than silently per-device.
+static INVERT_SCROLL: AtomicBool = AtomicBool::new(false);
+
+/// Whether this platform can invert the wheel in software.
+///
+/// Linux and macOS transform the event in place, inside the capture layer,
+/// where it still carries its native units: the fields the reader used are the
+/// fields the writer negates, so nothing is converted or rounded. Re-injecting
+/// from the normalised `delta_y` would have to pick a unit, and a macOS hi-res
+/// wheel reports pixels in one field while a detented one reports lines in
+/// another.
+///
+/// Windows is `false`, and not because `WH_MOUSE_LL` hands the callback a
+/// read-only event — that alone could be answered by suppressing and
+/// re-injecting, which is exact there. The blocker is attribution: the Windows
+/// hook cannot say which device a wheel event came from ([`MouseEvent::Scroll`]
+/// always carries `device: None`), so the inversion could not be confined to
+/// the configured mouse. Applying it to every wheel event would reverse a
+/// precision touchpad too, which is the one thing this setting must not do.
+pub const SOFTWARE_SCROLL_INVERSION: bool = !cfg!(target_os = "windows");
+
+/// Turn software scroll inversion on or off for the captured pointers.
+///
+/// Takes effect on the next scroll event; no restart of the hook is needed.
+pub fn set_scroll_inversion(inverted: bool) {
+    INVERT_SCROLL.store(inverted, Ordering::Relaxed);
+}
+
+/// Whether [`set_scroll_inversion`] is currently on.
+#[must_use]
+pub fn scroll_inversion() -> bool {
+    INVERT_SCROLL.load(Ordering::Relaxed)
+}
+
 /// Whether the OS hook may suppress/remap a button event from this source.
 ///
 /// Fail-closed on macOS-style attribution: only a known Logitech non-trackpad
@@ -98,22 +154,6 @@ pub fn source_is_remappable(device: Option<&EventDevice>) -> bool {
         Some(d) => d.is_logitech(),
         None => false,
     }
-}
-
-/// Which modifier keys were held when a key event fired. Mirrors the
-/// detectable macOS modifier flags. Note `Fn` is deliberately absent — it is
-/// firmware-internal and never reported on non-function-row keys (see the
-/// function-key-remapper spec, Appendix A).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "four independent modifier flags from OS event bits"
-)]
-pub struct KeyModifiers {
-    pub shift: bool,
-    pub control: bool,
-    pub option: bool,
-    pub command: bool,
 }
 
 /// A keyboard event observed by the hook.
@@ -516,12 +556,9 @@ impl Hook {
 
 /// Return the currently frontmost application.
 ///
-/// [`ForegroundApp::id`] is the identifier per-app profiles match on: the
-/// bundle identifier on macOS (e.g. `"com.microsoft.VSCode"`), the `WM_CLASS`
-/// class component under X11 / XWayland (e.g. `"Code"`), the xdg-shell
-/// `app_id` under wlroots (e.g. `"org.mozilla.firefox"`), and the lower-cased
-/// executable path on Windows. [`ForegroundApp::display_name`] is whatever the
-/// platform can name it, falling back to the identifier.
+/// [`ForegroundApp::id`] defines the platform-specific identifier that per-app
+/// profiles match. [`ForegroundApp::display_name`] is the platform's application
+/// name, falling back to the identifier.
 ///
 /// `None` when no app is frontmost, when reading fails, or on an unsupported
 /// platform — including a pure-Wayland session with no backend (see
@@ -532,6 +569,23 @@ impl Hook {
 #[must_use]
 pub fn frontmost_application() -> Option<ForegroundApp> {
     Backend::frontmost_app()
+}
+
+/// Return the Safari process captured by the latest macOS foreground-app
+/// observation without querying AppKit on the caller's thread.
+///
+/// This is a nonblocking atomic snapshot for input callbacks. It returns
+/// `None` when Safari is not frontmost and on non-macOS platforms.
+#[must_use]
+pub fn frontmost_safari_pid() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::frontmost_safari_pid()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }
 
 /// Failure to install or operate a native foreground-application observer.
@@ -659,9 +713,6 @@ mod macos;
 mod linux;
 
 #[cfg(any(target_os = "windows", test))]
-mod windows_worker;
-
-#[cfg(target_os = "windows")]
 mod windows;
 
 #[cfg(test)]

@@ -1,0 +1,33 @@
+# Owner: openlogi_agent_core::hardware::DeviceAccess — the handles every
+# device read and write goes through (capture channel slot, channel registry,
+# receiver lease, io gate), bound to a device with DeviceAccess::op.
+# SharedHandles (orchestrator.rs) owns the handles themselves and builds the
+# bundle.
+id: agent-device-access-owner
+language: rust
+severity: error
+message: The capture slot and the channel registry travel as hardware::DeviceAccess; take or hold a DeviceAccess (or a DeviceOp) instead of spelling the handles out here.
+note: |
+  DeviceOp, ActionExecutor, ActionRuntime::new, both capture watchers' spawn
+  functions, contexts and session channels, and two background writers each
+  listed the same handles field by field. See "Single source of truth" in
+  AGENTS.md.
+files:
+  - crates/openlogi-agent-core/**/*.rs
+  - crates/openlogi-agent/**/*.rs
+ignores:
+  - crates/openlogi-agent-core/src/hardware.rs
+  - crates/openlogi-agent-core/src/orchestrator.rs
+rule:
+  all:
+    - any:
+        - kind: struct_item
+        - kind: parameters
+    - has:
+        stopBy: end
+        kind: type_identifier
+        regex: '^CaptureChannelSlot$'
+    - has:
+        stopBy: end
+        kind: type_identifier
+        regex: '^ChannelRegistry$'

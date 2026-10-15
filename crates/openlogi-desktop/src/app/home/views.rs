@@ -21,8 +21,8 @@ use super::{
     AppView, connection_summary, connection_view, custom_model_subtitle, device_card, device_image,
     device_menu, device_menu_button, device_ring, keyboard_glow, kind_badge,
 };
-use crate::state::{AppState, DeviceRecord, StateEvent};
-use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading};
+use crate::state::{AppState, DeviceRecord};
+use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading, value_label};
 use crate::ui::carousel::Carousel;
 use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
 
@@ -43,10 +43,7 @@ pub(super) fn device_view_switcher(
                     if !checked {
                         return;
                     }
-                    AppState::update(cx, |state, cx| {
-                        state.set_device_view_mode(mode);
-                        cx.emit(StateEvent::SettingsChanged);
-                    });
+                    AppState::apply(cx, |state| state.commit_device_view_mode(mode));
                     view.update(cx, |_, cx| cx.notify());
                 })
         };
@@ -202,11 +199,7 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
                 let Some(&idx) = select_order.get(*position) else {
                     return;
                 };
-                AppState::global(cx).update(cx, |state, cx| {
-                    if let Some(key) = state.set_current_device(idx) {
-                        cx.emit(StateEvent::DeviceSelected(key));
-                    }
-                });
+                AppState::apply(cx, |state| state.select_device(idx));
                 AppState::load_current_device_reads(cx);
             })),
     )
@@ -360,12 +353,12 @@ fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
         let battery = if battery_charging_no_reading(battery) {
             tr!("device.charging").to_string()
         } else if record.online {
-            format!("{} {}%", tr!("device.battery"), battery.percentage)
+            format!("{} {}", tr!("device.battery"), value_label(battery))
         } else {
             format!(
-                "{} {}%",
+                "{} {}",
                 tr!("device.last_known_battery"),
-                battery.percentage
+                value_label(battery)
             )
         };
         format!("{metadata} {battery}.").into()

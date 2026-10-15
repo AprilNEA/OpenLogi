@@ -92,8 +92,13 @@ impl ThumbwheelPreset {
             Self::Tabs => "pointer.previous_next_tab",
             Self::Desktops => "pointer.previous_next_desktop",
             Self::Tracks => "pointer.previous_next_track",
-            Self::Volume => "pointer.volume_down_up",
-            Self::VolumeReversed => "pointer.volume_up_down",
+            // `Self::Volume` is the intuitive pairing (rolling the wheel up
+            // raises the volume — see `pair()` above), so it takes the label a
+            // user reads that way, "Volume Up / Down"; `VolumeReversed` gets
+            // the other wording, matching the actual inverted direction it
+            // configures.
+            Self::Volume => "pointer.volume_up_down",
+            Self::VolumeReversed => "pointer.volume_down_up",
             Self::CycleDpi => "pointer.cycle_dpi_presets",
             Self::VerticalScroll => "pointer.vertical_scroll",
             Self::VerticalScrollReversed => "pointer.vertical_scroll_reversed",
@@ -145,6 +150,22 @@ mod tests {
 
         for (preset, (backward, forward)) in ThumbwheelPreset::ALL.into_iter().zip(expected) {
             assert_eq!(preset.pair(), ThumbwheelPair { backward, forward });
+        }
+    }
+
+    #[test]
+    fn volume_preset_labels_match_the_direction_they_actually_configure() {
+        // The label must read the way the wheel actually behaves — whichever
+        // preset's `forward` (rolling the wheel up) raises the volume is the
+        // one a user expects "Up" to come first for.
+        for preset in [ThumbwheelPreset::Volume, ThumbwheelPreset::VolumeReversed] {
+            let pair = preset.pair();
+            let reads_up_first = preset.translation_key() == "pointer.volume_up_down";
+            assert_eq!(
+                pair.forward == Action::VolumeUp,
+                reads_up_first,
+                "{preset:?}: label must say \"Up\" first exactly when rolling up raises the volume"
+            );
         }
     }
 

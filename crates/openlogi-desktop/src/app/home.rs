@@ -27,8 +27,9 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::config::{DeviceViewMode, LightSettings};
-use openlogi_core::device::{DeviceKind, DeviceTransports};
+use openlogi_core::device::{DeviceKind, DeviceModelInfo, ModelTransport};
 use openlogi_core::hid::DeviceRoute;
+use openlogi_ipc::PairingFailure;
 
 use super::AppView;
 use super::status::{loading_body, notice_body};
@@ -37,10 +38,12 @@ use super::widgets::{
 };
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::services::ipc::UnpairFailure;
+use crate::state::{AppState, DeviceRecord};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
 use crate::ui::components::control_input;
 use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
+use crate::windows::add_device::pairing_failure_text;
 
 /// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
 /// and Add Device.
@@ -266,10 +269,7 @@ fn transport_glance(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
     let path = if matches!(record.kind, DeviceKind::Camera) {
         "action-icons/usb.svg"
     } else {
-        connection_icon_path(
-            record.route.as_ref(),
-            record.model_info.as_ref().map(|model| &model.transports),
-        )
+        connection_icon_path(record.route.as_ref(), record.model_info.as_ref())
     };
     let color: Hsla = match path {
         "action-icons/bluetooth.svg" => rgb(theme::ACCENT_BLUE).into(),
@@ -424,14 +424,34 @@ fn open_delete_confirmation(window: &mut Window, cx: &mut App, record_key: Strin
             .on_ok({
                 let record_key = record_key.clone();
                 move |_event, _window, cx| {
-                    AppState::update(cx, |state, cx| {
-                        if state.forget_device(&record_key) {
-                            cx.emit(StateEvent::InventoryChanged);
-                        }
-                    });
+                    AppState::apply(cx, |state| state.forget_device(&record_key));
                     true
                 }
             })
+    });
+}
+
+/// Say why a device the user asked to forget is still here: its receiver kept
+/// the pairing, so deleting only its settings would bring the card back.
+pub(super) fn open_removal_failed(
+    window: &mut Window,
+    cx: &mut App,
+    name: &str,
+    failure: &UnpairFailure,
+) {
+    let title = tr!("device.delete_device_failed", name => name.to_string());
+    let description = match failure {
+        UnpairFailure::AgentUnreachable => tr!("agent.cant_reach_the_background_service"),
+        UnpairFailure::Refused(PairingFailure::ReceiverBusy) => {
+            tr!("device.delete_device_receiver_busy")
+        }
+        UnpairFailure::Refused(PairingFailure::ReceiverNotFound) => {
+            tr!("device.delete_device_receiver_missing")
+        }
+        UnpairFailure::Refused(other) => pairing_failure_text(other).into(),
+    };
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        alert.title(title.clone()).description(description.clone())
     });
 }
 
@@ -471,9 +491,8 @@ fn open_rename_dialog(
                 let record_key = record_key.clone();
                 move |_, _, cx| {
                     let custom_name = input.read(cx).value().to_string();
-                    AppState::update(cx, |state, cx| {
-                        state.set_device_custom_name(&record_key, &custom_name);
-                        cx.emit(StateEvent::InventoryChanged);
+                    AppState::apply(cx, |state| {
+                        state.commit_device_custom_name(&record_key, &custom_name)
                     });
                     true
                 }
@@ -501,10 +520,7 @@ fn connection_view(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
                 .path(if matches!(record.kind, DeviceKind::Camera) {
                     "action-icons/usb.svg"
                 } else {
-                    connection_icon_path(
-                        record.route.as_ref(),
-                        record.model_info.as_ref().map(|model| &model.transports),
-                    )
+                    connection_icon_path(record.route.as_ref(), record.model_info.as_ref())
                 })
                 .size_3()
                 .flex_none(),
@@ -574,32 +590,33 @@ fn device_image(
 }
 
 /// Connection-type glyph for a gallery card: a dongle for receiver-paired
-/// devices, a USB mark for radio-less direct ones (a wired keyboard is only
-/// ever on the cable), a Bluetooth mark for the rest.
+/// devices, a USB mark for wired direct ones, a Bluetooth mark for the rest.
 ///
-/// The route says how the device is *addressed*, not what medium carries it,
-/// so `Direct` alone can't pick a glyph — the firmware transport table
-/// (HID++ 0x0003) disambiguates. A radio-capable device on a direct route
-/// keeps the Bluetooth mark: it *may* be on a cable right now, but the
-/// current link medium isn't reported, and Bluetooth is how such devices are
-/// normally attached.
+/// A `Direct` route carries the vendor/product id of the HID node this
+/// session actually enumerated, which — for a multi-transport device —
+/// pinpoints the transport that's live *right now* via
+/// [`DeviceModelInfo::transport_for_product_id`], rather than guessing from
+/// the static, unordered transport flags (which mislabeled a USB-connected
+/// multi-transport device as Bluetooth — issue #1218).
 pub(super) fn connection_icon_path(
     route: Option<&DeviceRoute>,
-    transports: Option<&DeviceTransports>,
+    model: Option<&DeviceModelInfo>,
 ) -> &'static str {
+    if let Some(DeviceRoute::Direct { product_id, .. }) = route
+        && let Some(transport) = model.and_then(|m| m.transport_for_product_id(*product_id))
+    {
+        return match transport {
+            ModelTransport::Equad | ModelTransport::Usb => "action-icons/usb.svg",
+            ModelTransport::Bluetooth | ModelTransport::Btle => "action-icons/bluetooth.svg",
+        };
+    }
+
     match route {
         Some(DeviceRoute::Bolt { .. }) => "action-icons/bolt.svg",
         Some(DeviceRoute::Unifying { .. }) => "action-icons/unifying.svg",
-        // Explicit arms (not `_`) so a new DeviceRoute variant trips the
-        // compiler here, matching the exhaustive sibling `route_label`.
-        Some(DeviceRoute::Direct { .. }) | None => match transports {
-            // No Bluetooth radio at all ⇒ the direct link can only be the
-            // cable. eQuad counts as wired-capable here: eQuad is
-            // receiver-only by definition, so it is never the *direct* link —
-            // an equad-only table still means this connection is a cable.
+        // Offline records retain model information but have no live route.
+        Some(DeviceRoute::Direct { .. }) | None => match model.map(|m| m.transports) {
             Some(t) if (t.usb || t.equad) && !t.bluetooth && !t.btle => "action-icons/usb.svg",
-            // Unknown transports (no 0x0003 snapshot, or an all-false table)
-            // keep the old default.
             _ => "action-icons/bluetooth.svg",
         },
         Some(DeviceRoute::RawHid { .. }) => "action-icons/usb.svg",
@@ -620,7 +637,8 @@ pub(super) fn device_scanning_state(cx: &App) -> Div {
 }
 
 /// Home body when the agent reports enumeration as broken
-/// ([`InventoryHealth::Unavailable`]): scanning never completed and won't
+/// ([`InventoryHealth::Unavailable`](openlogi_ipc::InventoryHealth::Unavailable)): scanning
+/// never completed and won't
 /// just by waiting, so showing a spinner (or claiming "no devices") would
 /// both be wrong. The agent keeps retrying and a recovery flows back in as a
 /// regular snapshot.

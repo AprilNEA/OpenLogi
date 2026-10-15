@@ -15,6 +15,8 @@
     windows_subsystem = "windows"
 )]
 
+#[cfg(target_os = "macos")]
+mod activity_macos;
 mod autostart;
 mod binary_watch;
 mod lifecycle;
@@ -52,7 +54,9 @@ fn main() {
     // racing the GUI's one-shot auto-spawn could otherwise bring up two, and the
     // loser would steal the socket and install a duplicate event tap. Held for
     // the whole process; the OS releases it on exit (crash-recovery is free).
-    let _guard = match openlogi_core::single_instance::acquire("agent.lock") {
+    let _guard = match openlogi_core::single_instance::acquire(
+        openlogi_core::single_instance::Role::Agent,
+    ) {
         Ok(g) => g,
         Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
             // The holder may be a leftover from before this binary's update —
@@ -73,12 +77,14 @@ fn main() {
         }
     };
 
-    // Watch our own executable and restart as the new image when an app update
-    // replaces it — see `binary_watch`. Only the lock-holding (real) agent
-    // watches, so a losing duplicate can't restart anything. The overlay is
-    // spawned later, once the lifecycle decides the agent is actually wanted —
-    // a dormant agent must not bring a helper up.
-    let uninstalled = binary_watch::spawn();
+    // Every non-signal process transition reports to the lifecycle owner. In
+    // particular, the binary watcher must not exec or exit from its own thread:
+    // an armed lifecycle first releases firmware diversion.
+    let (shutdown_tx, shutdown_requests) = shutdown::request_channel();
+    // Only the lock-holding (real) agent watches, so a losing duplicate cannot
+    // restart anything. The overlay spawns only after the lifecycle decides the
+    // agent is wanted; a dormant agent must not bring a helper up.
+    binary_watch::spawn(shutdown_tx.clone());
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
         warn!(error = %e, "could not load config.toml; using defaults");
@@ -108,9 +114,8 @@ fn main() {
     #[cfg(target_os = "macos")]
     {
         // Fail closed before the core thread can enumerate or open HID devices.
-        // AppKit releases this startup hold only after its workspace observers
-        // have received the initial session state and Core Graphics has
-        // reported whether the display is already asleep.
+        // The AppKit loop releases this launch hold only after it has read the
+        // login session's console ownership and powerd's current power state.
         let _ = device_io_signal.suspend();
         // Read the menu-bar preference before `config` moves into the core
         // thread; the main thread hosts the tray.
@@ -125,14 +130,14 @@ fn main() {
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
             .spawn(move || {
-                runtime.block_on(lifecycle::run(config, uninstalled, armed_tx));
+                runtime.block_on(lifecycle::run(config, shutdown_requests, armed_tx));
             })
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
             return;
         }
         if armed_rx.recv().is_ok() {
-            tray::run_app_loop(show_in_menu_bar, app_icon, device_io_signal);
+            tray::run_app_loop(show_in_menu_bar, app_icon, device_io_signal, shutdown_tx);
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -141,7 +146,7 @@ fn main() {
         // (message pump included); the async core keeps the main thread.
         #[cfg(target_os = "windows")]
         {
-            tray_windows::spawn(config.app_settings.show_in_menu_bar);
+            tray_windows::spawn(config.app_settings.show_in_menu_bar, shutdown_tx.clone());
             // Native resume notifications feed the same event seam as macOS
             // and Linux: inventory wakes immediately and replays volatile
             // settings on its settled authoritative snapshot.
@@ -151,7 +156,7 @@ fn main() {
         resume_linux::register(device_io_signal.clone());
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         drop(device_io_signal);
-        runtime.block_on(lifecycle::run(config, uninstalled));
+        runtime.block_on(lifecycle::run(config, shutdown_requests));
     }
 }
 

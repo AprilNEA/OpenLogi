@@ -1,4 +1,8 @@
 //! Native Windows foreground-application activation observer.
+#![expect(
+    unsafe_code,
+    reason = "the foreground observer owns a Win32 event hook and message pump"
+)]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,10 +18,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WINEVENT_OUTOFCONTEXT, WM_APP, WM_QUIT, WM_USER,
 };
 
-use super::{Backend, MessageLoopExit, message_loop};
-use crate::windows_worker::{
-    ForegroundChanges, NotificationLatch, WorkerEvent, WorkerPhase, WorkerStatus,
-};
+use super::hook::{Backend, MessageLoopExit, message_loop};
+use super::worker::{ForegroundChanges, NotificationLatch, WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{ForegroundApp, HookBackend};
 
 /// Thread message asking the observer pump to take an authoritative foreground

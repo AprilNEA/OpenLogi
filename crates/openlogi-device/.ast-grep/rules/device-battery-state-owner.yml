@@ -1,0 +1,27 @@
+# Owner: inventory::cache::refresh_battery resolves live battery observations
+# against the last-known battery and link state, including charging holds.
+id: device-battery-state-owner
+language: rust
+severity: error
+message: Keep BatteryRead intact until inventory::cache::refresh_battery resolves the battery and link state.
+note: |
+  Converting Unavailable to an empty, linked state during a full probe once
+  dropped offline headsets, while cache hits retained their last-known state.
+files:
+  - crates/openlogi-device/src/inventory/**/*.rs
+ignores:
+  - crates/openlogi-device/src/inventory/cache.rs
+rule:
+  any:
+    - all:
+        - kind: match_arm
+        - regex: '^BatteryRead::Unavailable\s*=>'
+    - all:
+        - kind: match_arm
+        - regex: '^Self::Unavailable\s*=>'
+        - inside:
+            kind: impl_item
+            stopBy: end
+            has:
+              field: type
+              regex: '^BatteryRead$'

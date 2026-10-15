@@ -7,6 +7,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::backlight::BacklightChange;
+use super::dpi::Dpi;
+use super::report_rate::ReportRate;
+
 /// Error returned by HID++ read/write operations.
 ///
 /// Serializable + Clone so it can cross the agent↔GUI IPC unchanged: the GUI
@@ -16,7 +20,7 @@ use thiserror::Error;
 /// that genuinely lacks a feature would be re-probed forever. Variant order is
 /// therefore wire format: changes require a `PROTOCOL_VERSION` bump (guarded
 /// by `openlogi-ipc/tests/wire_format.rs`).
-#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+#[derive(Debug, Clone, Error, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WriteError {
     /// HID transport error serialized as text.
     ///
@@ -96,6 +100,81 @@ pub enum WriteError {
     /// Multiple raw HID nodes matched one physical route.
     #[error("multiple raw HID devices matched the route")]
     AmbiguousRawDevice,
+    /// A DPI write asked for a value the device does not report as supported.
+    ///
+    /// Nothing was written: the device layer checks the device-reported list
+    /// first rather than leaving the firmware to clamp, ignore or reject it.
+    #[error("DPI {requested} is not one of the device-reported supported values")]
+    DpiUnsupported {
+        /// The rejected DPI.
+        requested: Dpi,
+    },
+    /// The device acknowledged a DPI write but reads back a different value,
+    /// including after one re-write.
+    #[error("device reports DPI {actual} after a write of {requested}")]
+    DpiNotApplied {
+        /// The DPI that was written.
+        requested: Dpi,
+        /// The DPI the device reports afterwards.
+        actual: Dpi,
+    },
+    /// A haptic play asked for a waveform the device does not advertise.
+    ///
+    /// Nothing was sent: the device layer checks the `0x19b0` capability mask
+    /// first, as Logi Options+ does, so a retry cannot succeed.
+    #[error("device does not advertise haptic waveform {waveform}")]
+    HapticWaveformUnsupported {
+        /// The waveform ID that was refused.
+        waveform: u8,
+    },
+    /// A report-rate write asked for a rate the device does not list for its
+    /// current connection.
+    ///
+    /// Nothing was written: the device layer checks the device-reported list
+    /// first, so the firmware never has to clamp or reject it.
+    #[error("report rate {requested} Hz is not one the device lists for this connection")]
+    ReportRateUnsupported {
+        /// The rejected rate.
+        requested: ReportRate,
+    },
+    /// The device acknowledged a report-rate write but reads back a
+    /// different rate — for instance a gaming mouse whose onboard profile
+    /// owns the rate.
+    #[error("device reports {actual} Hz after a write of {requested} Hz")]
+    ReportRateNotApplied {
+        /// The rate that was written.
+        requested: ReportRate,
+        /// The rate the device reports afterwards.
+        actual: ReportRate,
+    },
+    /// A backlight change the keyboard does not offer — a level beyond its
+    /// level count, or a mode, level or battery-saving control its `0x1982`
+    /// capability bits leave out.
+    ///
+    /// Nothing was written: the device layer checks a fresh read first.
+    #[error("the keyboard does not offer {change}")]
+    BacklightChangeUnsupported {
+        /// The rejected change.
+        change: BacklightChange,
+    },
+    /// The keyboard acknowledged a backlight write but reads back a
+    /// configuration without the change.
+    #[error("keyboard does not report {change} after the write")]
+    BacklightNotApplied {
+        /// The change that was written.
+        change: BacklightChange,
+    },
+    /// A haptic play refused because the device reports a non-zero `0x19b0`
+    /// haptic status.
+    ///
+    /// Nothing was sent: Logi Options+ plays only while the status is zero,
+    /// and the device layer applies the same gate, so a retry cannot succeed
+    /// until the device reports otherwise.
+    #[error("device reports haptic status {status}, so haptics cannot play")]
+    HapticsUnavailable {
+        /// The raw status byte the device reported.
+        status: u8,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -133,6 +212,25 @@ pub enum HidppOperation {
     Light,
     /// Play one haptic waveform. Appended last — variant order is wire format.
     PlayHaptic,
+    /// Read keyboard Fn-lock (fn inversion). Appended last — variant order is
+    /// wire format.
+    ReadFnLock,
+    /// Read the `0x2205` pointer-motion scaling. Appended last — variant order
+    /// is wire format.
+    ReadPointerScaling,
+    /// Write the `0x2205` pointer-motion scaling. Appended last — variant order
+    /// is wire format.
+    WritePointerScaling,
+    /// Keep a keyboard's `0x4531` platform on the host OS: read the platform
+    /// table and the current host's platform, and write it when it differs.
+    /// Appended last — variant order is wire format.
+    WriteOsLayout,
+    /// Read the `0x8060` / `0x8061` report rate and the rates the device
+    /// lists. Appended last — variant order is wire format.
+    ReadReportRate,
+    /// Write the `0x8060` / `0x8061` report rate. Appended last — variant
+    /// order is wire format.
+    WriteReportRate,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.
