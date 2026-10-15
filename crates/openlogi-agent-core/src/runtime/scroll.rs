@@ -85,7 +85,8 @@ fn accel_gain(window_ticks: f64, max_gain: f64) -> f64 {
 /// changes takes the new value, exactly as the smoothing toggle does.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MotionTuning {
-    /// Amplitude multiplier per wheel tick, in native lines.
+    /// Amplitude multiplier per wheel tick, in native wheel steps (lines on
+    /// macOS, notches on Windows and Linux).
     pub(crate) step: f64,
     /// Animation length of one tick's pulse.
     pub(crate) duration: Duration,

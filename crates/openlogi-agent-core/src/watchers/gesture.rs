@@ -78,10 +78,11 @@ impl GestureOutputs {
     }
 
     fn post_scroll(&self, session: &HidppSessionId, delta: ScrollDelta, sensitivity: f64) {
-        if !self.scroll.try_hidpp_scroll(session, delta, sensitivity) {
+        if let Err(direct) = self.scroll.try_hidpp_scroll(session, delta, sensitivity) {
             // HID++ diversion consumed the physical input already, so direct
-            // synthesis is this source's fail-open path.
-            openlogi_inject::post_scroll(delta);
+            // synthesis is this source's fail-open path. `direct` carries the
+            // step the eased output would have applied.
+            openlogi_inject::post_scroll(direct);
         }
     }
 
