@@ -320,7 +320,7 @@ mod tests {
             online: true,
             name: "Keyboard".into(),
             battery: Some(BatteryInfo {
-                percentage,
+                percentage: Some(percentage),
                 level: BatteryLevel::Good,
                 status: BatteryStatus::Discharging,
                 freshness: BatteryFreshness::Current,
@@ -372,6 +372,19 @@ mod tests {
         assert!(read(&mut state, muted, now).is_empty());
         assert_eq!(state.snapshot.devices[0].severity, Severity::Critical);
         assert_eq!(state.snapshot.severity, Severity::Normal);
+    }
+
+    #[test]
+    fn level_only_battery_colors_the_icon_without_a_percentage_notification() {
+        let mut state = State::new(None);
+        let mut reading = observation(8);
+        let battery = reading.battery.as_mut().unwrap();
+        battery.percentage = None;
+        battery.level = BatteryLevel::Low;
+        assert!(read(&mut state, reading, Instant::now()).is_empty());
+        assert_eq!(state.snapshot.severity, Severity::Low);
+        assert_eq!(state.snapshot.devices[0].percentage, None);
+        assert!(!state.history.warned.contains("unit:01020304"));
     }
 
     #[test]

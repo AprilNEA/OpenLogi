@@ -87,6 +87,7 @@ fn hold_percentage_while_charging(
         return fresh;
     }
     let held = |p: &BatteryInfo| BatteryInfo {
+        freshness: BatteryFreshness::HeldPercentage,
         percentage: p.percentage,
         level: p.level,
         status: fresh.status,
@@ -99,6 +100,7 @@ fn hold_percentage_while_charging(
         }
         (BatteryProbe::Voltage(_) | BatteryProbe::Adc(_), Some(p)) => held(p),
         (BatteryProbe::Voltage(_) | BatteryProbe::Adc(_), None) => BatteryInfo {
+            freshness: BatteryFreshness::Current,
             percentage: None,
             level: BatteryLevel::Unknown,
             status: fresh.status,
@@ -127,7 +129,11 @@ async fn refresh_battery(
         ),
         BatteryRead::Unlinked => (None, true),
         BatteryRead::Unavailable => previous.map_or((None, false), |known| {
-            (known.battery.clone(), known.unlinked)
+            let mut battery = known.battery.clone();
+            if let Some(battery) = battery.as_mut() {
+                battery.freshness = BatteryFreshness::Cached;
+            }
+            (battery, known.unlinked)
         }),
     }
 }
@@ -456,6 +462,7 @@ mod hold_tests {
             state_of_charge: false,
         };
         let fresh = BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: None,
             level: BatteryLevel::Low,
             status: BatteryStatus::Charging,
@@ -496,7 +503,7 @@ mod hold_tests {
         let now = Instant::now();
         let cached = Cached {
             probe: ProbedFeatures {
-                battery: Some(battery(8, BatteryStatus::Discharging)),
+                battery: Some(battery(Some(8), BatteryStatus::Discharging)),
                 ..ProbedFeatures::default()
             },
             battery: Some(BatteryProbe::Legacy(1)),
@@ -518,7 +525,8 @@ mod hold_tests {
         .await;
         let reading = failed.battery.unwrap();
         assert_eq!(
-            reading.percentage, 8,
+            reading.percentage,
+            Some(8),
             "last-good data remains available to the existing GUI"
         );
         assert_eq!(reading.freshness, BatteryFreshness::Cached);

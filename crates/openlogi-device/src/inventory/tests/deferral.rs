@@ -297,7 +297,7 @@ fn deferred_and_failed_probes_do_not_publish_fresh_battery_readings() {
     let mut ledger = super::ledger::NodeLedger::default();
     let mut known = inventory(&[1]).pop().unwrap();
     known.paired[0].battery = Some(BatteryInfo {
-        percentage: 8,
+        percentage: Some(8),
         level: BatteryLevel::Critical,
         status: BatteryStatus::Discharging,
         freshness: BatteryFreshness::Current,
@@ -306,7 +306,7 @@ fn deferred_and_failed_probes_do_not_publish_fresh_battery_readings() {
     for replay in [ledger.defer(&1), ledger.settle(&1, false, None)] {
         let replay = replay.inventory.unwrap();
         let battery = replay.paired[0].battery.as_ref().unwrap();
-        assert_eq!(battery.percentage, 8);
+        assert_eq!(battery.percentage, Some(8));
         assert_eq!(battery.freshness, BatteryFreshness::Cached);
         assert!(!battery.needs_attention());
     }

@@ -166,6 +166,7 @@ pub(super) async fn read_battery(
                 Ok(AdcMeasurement::Linked { voltage_mv, status }) => {
                     let percentage = voltage_battery_percentage(voltage_mv);
                     Some(BatteryInfo {
+                        freshness: openlogi_core::device::BatteryFreshness::Current,
                         percentage: Some(percentage),
                         level: legacy_battery_level_from_percentage(percentage),
                         status: map_adc_battery_status(status),

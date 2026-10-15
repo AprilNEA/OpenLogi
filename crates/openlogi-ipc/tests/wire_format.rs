@@ -613,11 +613,12 @@ fn device_inventory() {
     // A level-only battery (no state-of-charge gauge) carries no percentage.
     assert_wire(
         &BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: None,
             level: BatteryLevel::Good,
             status: BatteryStatus::Discharging,
         },
-        "000200",
+        "00020000",
     );
     let inventory = vec![DeviceInventory {
         receiver: ReceiverInfo {
@@ -674,7 +675,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b0000101015002000001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010107",
     );
 }
 
@@ -1091,6 +1092,6 @@ fn battery_preferences_and_device_selection() {
     assert_wire(&request, "07200207756e69743a6161");
     assert_wire(
         &AgentRequest::AcknowledgeDeviceSelection { request },
-        "1f07200207756e69743a6161",
+        "2407200207756e69743a6161",
     );
 }

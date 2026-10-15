@@ -126,7 +126,7 @@ mod tests {
                 kind: DeviceKind::Keyboard,
                 online: true,
                 battery: Some(BatteryInfo {
-                    percentage: 18,
+                    percentage: Some(18),
                     level: BatteryLevel::Good,
                     status: BatteryStatus::Discharging,
                     freshness: BatteryFreshness::Current,
@@ -140,6 +140,7 @@ mod tests {
                     serial_number: None,
                 }),
                 capabilities: None,
+                settings_revision: 0,
             }],
         }
     }
