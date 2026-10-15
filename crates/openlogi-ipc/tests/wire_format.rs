@@ -824,8 +824,8 @@ fn report_rate_dtos_and_errors() {
 
 #[test]
 fn host_switch_observation_is_appended_and_typed() {
-    assert_wire(&AgentRequest::ObserveHostSwitch { since: 7 }, "2207");
     use openlogi_ipc::{HostSwitchChannel, HostSwitchEvent, HostSwitchObservation};
+    assert_wire(&AgentRequest::ObserveHostSwitch { since: 7 }, "2207");
     assert_wire(
         &HostSwitchEvent {
             sequence: 7,
