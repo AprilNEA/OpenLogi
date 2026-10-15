@@ -493,3 +493,67 @@ fn an_app_profile_explains_that_an_action_replaces_wheel_hold(cx: &mut TestAppCo
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
 }
+
+fn in_gesture_mode(cx: &mut VisualTestContext, button: ButtonId) -> bool {
+    cx.update(|_, cx| {
+        AppState::try_read(cx)
+            .expect("state is installed")
+            .gesture_bindings()
+            .contains_key(&button)
+    })
+}
+
+#[gpui::test]
+fn a_gesture_button_offers_wheel_hold_and_leaves_gestures_for_it(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_gesture_mode(crate::state::tests::KNOWN_MOUSE_KEY, ButtonId::Back, true);
+    let (view, cx) = wheel_hold_view(cx, true, config, ButtonId::Back);
+    view.update(cx, |view, _| {
+        view.set_gesture_selected_dir(Some(GestureDirection::Up));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(in_gesture_mode(cx, ButtonId::Back));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
+        "the gesture inspector offers the switch too"
+    );
+
+    click_picker_control(cx, "inspector-wheel-hold-row-control");
+
+    assert!(holds_the_wheel(cx, ButtonId::Back));
+    assert!(
+        !in_gesture_mode(cx, ButtonId::Back),
+        "holding the wheel leaves gesture mode"
+    );
+    view.read_with(cx, |view, _| assert_eq!(view.gesture_active_dir, None));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
+        "the single-action inspector shows the switch, now on"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_gesture_button_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_gesture_mode(
+        crate::state::tests::KNOWN_MOUSE_KEY,
+        ButtonId::Forward,
+        true,
+    );
+    let (view, cx) = wheel_hold_view(cx, false, config, ButtonId::Forward);
+    assert!(in_gesture_mode(cx, ButtonId::Forward));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "no switch where holding cannot scroll"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}

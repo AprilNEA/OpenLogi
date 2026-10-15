@@ -200,9 +200,11 @@ In the desktop app, select `Back` or `Forward` in the default profile and turn
 on **Hold to scroll sideways**. The switch appears only on mice that report raw
 wheel on that button; a binding carried over to another mouse still shows it,
 so it can be turned off. Picking a different action for the button keeps the
-wheel hold and changes `click`. The setting is per device, not per application:
-an app profile that gives the button its own action replaces the wheel hold in
-that application.
+wheel hold and changes `click`. A button in gesture mode offers the switch too:
+turning it on leaves gesture mode with the gesture map's `Click` as the press,
+and turning gestures back on restores the saved directions. The setting is per
+device, not per application: an app profile that gives the button its own
+action replaces the wheel hold in that application.
 
 An Actions Ring entry wraps the action and may add an icon or literal label:
 

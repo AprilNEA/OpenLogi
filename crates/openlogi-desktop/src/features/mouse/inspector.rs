@@ -154,7 +154,7 @@ fn button_inspector(
     if data.editing_app.is_none()
         && let Some(gesture_map) = gesture_map
     {
-        return gesture_inspector(button, gesture_map, data.gesture_direction, picker, pal, cx);
+        return gesture_inspector(button, gesture_map, data, picker, pal, cx);
     }
     if let Some(app) = data.editing_app
         && !overridden
@@ -185,7 +185,13 @@ fn button_inspector(
             pal,
         ))
         .child(current_action_card(&action, picker, pal))
-        .children(wheel_hold_section(button, data, overridden, pal))
+        .children(wheel_hold_section(
+            button,
+            data,
+            overridden,
+            picker.view,
+            pal,
+        ))
         .when(overridden, |panel| {
             let observer = picker.view.clone();
             panel.child(
@@ -265,12 +271,13 @@ fn wheel_hold_section(
     button: ButtonId,
     data: &BindingInspectorData<'_>,
     overridden: bool,
+    view: &Entity<MouseModelView>,
     pal: Palette,
 ) -> Option<gpui::AnyElement> {
     let enabled = data.wheel_hold.contains(&button);
     match data.editing_app {
         None if button.supports_wheel_hold() && (data.virtual_thumbwheel || enabled) => {
-            Some(wheel_hold_row(button, enabled, pal).into_any_element())
+            Some(wheel_hold_row(button, enabled, view, pal).into_any_element())
         }
         Some(app) if enabled && !overridden => Some(
             div()
@@ -291,7 +298,17 @@ fn wheel_hold_section(
 /// per-app entry holds one action, so the mode is device-wide. Turning it
 /// off stays possible on a device that does not report raw wheel, so a
 /// binding carried over from another mouse can be removed.
-fn wheel_hold_row(button: ButtonId, enabled: bool, pal: Palette) -> impl IntoElement {
+///
+/// The gesture inspector offers it too. Turning it on there leaves gesture
+/// mode, stashing the direction map, so the selected direction is cleared
+/// as "Use a single action" does.
+fn wheel_hold_row(
+    button: ButtonId,
+    enabled: bool,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+) -> impl IntoElement {
+    let observer = view.clone();
     toggle_row(
         "inspector-wheel-hold-row",
         pal,
@@ -301,6 +318,12 @@ fn wheel_hold_row(button: ButtonId, enabled: bool, pal: Palette) -> impl IntoEle
             .selected(enabled)
             .on_change(move |enabled, _window, cx| {
                 AppState::apply(cx, |state| state.commit_wheel_hold(button, *enabled));
+                if *enabled {
+                    observer.update(cx, |view, cx| {
+                        view.set_gesture_selected_dir(None);
+                        cx.notify();
+                    });
+                }
             }),
     )
 }
@@ -361,12 +384,15 @@ fn inherited_gesture_inspector(
 fn gesture_inspector(
     button: ButtonId,
     gesture_map: &BTreeMap<GestureDirection, Action>,
-    selected_direction: Option<GestureDirection>,
+    data: &BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
-    let direction = selected_direction.unwrap_or(GestureDirection::Click);
+    let direction = data.gesture_direction.unwrap_or(GestureDirection::Click);
+    // Gesture mode never holds the wheel, so the switch here is off and only
+    // turning it on is useful, which needs measured raw wheel.
+    let offer_wheel_hold = button.supports_wheel_hold() && data.virtual_thumbwheel;
     let current = gesture_action(gesture_map, button, direction);
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
@@ -395,6 +421,9 @@ fn gesture_inspector(
             pal,
         ))
         .child(current_action_card(&current, picker, pal))
+        .when(offer_wheel_hold, |panel| {
+            panel.child(wheel_hold_row(button, false, picker.view, pal))
+        })
         .child(
             control_button("inspector-single-action")
                 .w_full()
