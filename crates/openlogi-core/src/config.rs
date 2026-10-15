@@ -23,6 +23,7 @@ mod migrate;
 mod per_app;
 mod per_device;
 mod settings;
+mod wheel_hold;
 
 // Stacked, not `all(test, …)`: clippy reads the combined form as a test
 // outside a test module and withdraws the `unwrap`/`expect` exemption.

@@ -61,6 +61,7 @@ mod reload;
 mod report_rate;
 mod smartshift;
 mod transient_identity;
+mod wheel_hold;
 mod wheel_resolution;
 
 /// Config key of the mouse [`direct_inventory`] builds with a real unit id.
@@ -68,9 +69,9 @@ mod wheel_resolution;
 /// The transport-free identity, not the `direct:046d:b023:…` route it is
 /// reached on: a device whose unit id is known resolves to its identity key,
 /// which is what settings are now written under.
-pub(super) const KNOWN_MOUSE_KEY: &str = "unit:a393cae0";
+pub(crate) const KNOWN_MOUSE_KEY: &str = "unit:a393cae0";
 
-fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
+pub(crate) fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
     DeviceInventory {
         receiver: ReceiverInfo {
             name: "MX Master 3S".to_string(),

@@ -207,6 +207,42 @@ impl RenderOnce for Toggle {
     }
 }
 
+/// One setting: a title and a caption on the left, its toggle on the right.
+/// The caption column shrinks and wraps, so a long translation cannot push the
+/// toggle out of its card or panel. `selector` names the row for layout tests,
+/// and `{selector}-control` the toggle's slot.
+pub(crate) fn toggle_row(
+    selector: &'static str,
+    pal: theme::Palette,
+    title: SharedString,
+    description: SharedString,
+    toggle: Toggle,
+) -> impl IntoElement {
+    h_flex()
+        .debug_selector(move || selector.into())
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_body().text_color(pal.text_primary).child(title))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(
+            div()
+                .debug_selector(move || format!("{selector}-control"))
+                .flex_shrink_0()
+                .child(toggle),
+        )
+}
+
 /// A titled card used by device-detail panels.
 #[derive(IntoElement)]
 pub(crate) struct PanelCard {

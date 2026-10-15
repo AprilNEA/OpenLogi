@@ -194,10 +194,15 @@ With mouse capture turned off the button keeps its native function, like every
 other mouse binding. While the button is diverted the wheel scrolls only through
 OpenLogi, so OpenLogi hands both back to the firmware when the binding changes,
 the device disconnects, or the agent exits. It never sets the firmware's
-persistent flag, so the diversion does not outlive a device power cycle. Like
-long-press pairs, wheel-hold bindings are authored in TOML, the GUI presents
-their `click` action, and changing that button in the GUI replaces the binding
-with the selected single action.
+persistent flag, so the diversion does not outlive a device power cycle.
+
+In the desktop app, select `Back` or `Forward` in the default profile and turn
+on **Hold to scroll sideways**. The switch appears only on mice that report raw
+wheel on that button; a binding carried over to another mouse still shows it,
+so it can be turned off. Picking a different action for the button keeps the
+wheel hold and changes `click`. The setting is per device, not per application:
+an app profile that gives the button its own action replaces the wheel hold in
+that application.
 
 An Actions Ring entry wraps the action and may add an icon or literal label:
 

@@ -235,7 +235,7 @@ pub fn plan_for_device(
         if os_mouse_hook_available && config.app_settings.capture_mouse_events {
             DIVERTABLE_STANDARD_BUTTONS
                 .into_iter()
-                .filter(|(_, button)| matches!(button, ButtonId::Back | ButtonId::Forward))
+                .filter(|(_, button)| button.supports_wheel_hold())
                 .filter(|(_, button)| bindings.get(button).is_some_and(Binding::is_wheel_hold))
                 .collect()
         } else {

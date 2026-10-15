@@ -1,4 +1,4 @@
-use gpui::{Modifiers, TestAppContext, VisualTestContext, size};
+use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, size};
 use openlogi_core::binding::default_binding;
 use openlogi_core::config::Config;
 
@@ -219,6 +219,8 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 bindings: &bindings,
                 gesture_maps: &gesture_maps,
                 dpi_gestures: false,
+                virtual_thumbwheel: false,
+                wheel_hold: &BTreeSet::new(),
                 editing_app: None,
                 overridden: None,
             },
@@ -323,4 +325,171 @@ fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
             .count(),
         1
     );
+}
+
+/// Installs the known mouse, with or without raw wheel on Back/Forward, and
+/// opens the mouse view on it with `button` selected. Callers hold
+/// `LOCALE_LOCK` in English: a locale change from another test between a
+/// click's mouse-down redraw and its mouse-up reflows the inspector, and the
+/// release then misses the switch.
+fn wheel_hold_view(
+    cx: &mut TestAppContext,
+    raw_wheel: bool,
+    config: Config,
+    button: ButtonId,
+) -> (Entity<MouseModelView>, &mut VisualTestContext) {
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut inventory = crate::state::tests::direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        inventory.paired[0]
+            .capabilities
+            .as_mut()
+            .expect("the fixture mouse has capabilities")
+            .virtual_thumbwheel = raw_wheel;
+        let state = cx.new(|_| {
+            AppState::new(Sources {
+                inventories: &[inventory],
+                ..Sources::in_memory(config, &resolver, commands)
+            })
+        });
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    view.update(cx, |view, _| view.select(MouseControlId::Button(button)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    (view, cx)
+}
+
+fn holds_the_wheel(cx: &mut VisualTestContext, button: ButtonId) -> bool {
+    cx.update(|_, cx| {
+        AppState::try_read(cx)
+            .expect("state is installed")
+            .wheel_hold_buttons()
+            .contains(&button)
+    })
+}
+
+#[gpui::test]
+fn the_wheel_hold_switch_turns_holding_back_into_sideways_scrolling(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = wheel_hold_view(cx, true, Config::ephemeral(), ButtonId::Back);
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
+        "Back offers the switch on a mouse that reports raw wheel"
+    );
+    assert!(!holds_the_wheel(cx, ButtonId::Back));
+
+    click_picker_control(cx, "inspector-wheel-hold-row-control");
+    assert!(holds_the_wheel(cx, ButtonId::Back));
+
+    click_picker_control(cx, "inspector-wheel-hold-row-control");
+    assert!(!holds_the_wheel(cx, ButtonId::Back));
+
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::MiddleClick));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "only Back and Forward can hold the wheel"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_mouse_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = wheel_hold_view(cx, false, Config::ephemeral(), ButtonId::Forward);
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "no switch where holding cannot scroll"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_carried_over_wheel_hold_can_still_be_turned_off(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_wheel_hold(
+        crate::state::tests::KNOWN_MOUSE_KEY,
+        ButtonId::Forward,
+        true,
+    );
+    let (view, cx) = wheel_hold_view(cx, false, config, ButtonId::Forward);
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
+        "a setting from another mouse stays visible so it can be turned off"
+    );
+
+    click_picker_control(cx, "inspector-wheel-hold-row-control");
+
+    assert!(!holds_the_wheel(cx, ButtonId::Forward));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "once off, it cannot be turned back on here"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn an_app_profile_explains_that_an_action_replaces_wheel_hold(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_wheel_hold(crate::state::tests::KNOWN_MOUSE_KEY, ButtonId::Back, true);
+    let (view, cx) = wheel_hold_view(cx, true, config, ButtonId::Back);
+    assert!(cx.debug_bounds("inspector-wheel-hold-app-note").is_none());
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_editing_app(Some("com.apple.Safari".into()))
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "the switch is device-wide, so an app profile does not show it"
+    );
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-app-note").is_some(),
+        "the app profile says what picking an action does"
+    );
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::Forward));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-app-note").is_none(),
+        "a button that does not hold the wheel has nothing to explain"
+    );
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::Back));
+    });
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.commit_binding(ButtonId::Back, Action::Copy)
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-app-note").is_none(),
+        "once the app overrides the button, its own action already applies"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
 }

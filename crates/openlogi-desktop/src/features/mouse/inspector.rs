@@ -1,6 +1,6 @@
 //! Fixed binding inspector for the Buttons workspace.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::{
@@ -23,7 +23,7 @@ use crate::features::binding_editor::{
 };
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
-use crate::ui::components::{MenuRow, control_button, control_input};
+use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
@@ -35,6 +35,11 @@ pub(super) struct BindingInspectorData<'a> {
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     pub dpi_gestures: bool,
+    /// The device reports raw wheel on Back/Forward, so holding one can
+    /// scroll sideways (`Capabilities::virtual_thumbwheel`).
+    pub virtual_thumbwheel: bool,
+    /// Buttons that hold the wheel to scroll sideways, from the global profile.
+    pub wheel_hold: &'a BTreeSet<ButtonId>,
     pub editing_app: Option<&'a str>,
     pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
@@ -163,16 +168,6 @@ fn button_inspector(
         .get(&button)
         .cloned()
         .unwrap_or_else(|| default_binding(button));
-    let status = match (
-        data.editing_app,
-        overridden,
-        action == default_binding(button),
-    ) {
-        (Some(app), true, _) => tr!("actions.overridden_in_app", app => app.to_string()),
-        (Some(_), false, _) => tr!("profiles.inherited_from_default"),
-        (None, _, true) => tr!("pointer.device_default"),
-        (None, _, false) => tr!("profiles.customized"),
-    };
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::apply(cx, |state| state.commit_binding(button, action));
@@ -186,10 +181,11 @@ fn button_inspector(
         .gap_3()
         .child(inspector_heading(
             tr!(button.translation_key()),
-            Some(status),
+            Some(button_status(button, &action, data, overridden)),
             pal,
         ))
         .child(current_action_card(&action, picker, pal))
+        .children(wheel_hold_section(button, data, overridden, pal))
         .when(overridden, |panel| {
             let observer = picker.view.clone();
             panel.child(
@@ -243,6 +239,70 @@ fn button_inspector(
                 cx,
             ))
         })
+}
+
+/// The heading's status line. A button that holds the wheel is customized
+/// even while its press keeps the default action.
+fn button_status(
+    button: ButtonId,
+    action: &Action,
+    data: &BindingInspectorData<'_>,
+    overridden: bool,
+) -> gpui::SharedString {
+    let default = *action == default_binding(button) && !data.wheel_hold.contains(&button);
+    match (data.editing_app, overridden, default) {
+        (Some(app), true, _) => tr!("actions.overridden_in_app", app => app.to_string()),
+        (Some(_), false, _) => tr!("profiles.inherited_from_default"),
+        (None, _, true) => tr!("pointer.device_default"),
+        (None, _, false) => tr!("profiles.customized"),
+    }
+}
+
+/// Back/Forward's wheel-hold control: the switch in the global profile, or,
+/// in an app profile that has not overridden the button, a note that an
+/// action picked there replaces it.
+fn wheel_hold_section(
+    button: ButtonId,
+    data: &BindingInspectorData<'_>,
+    overridden: bool,
+    pal: Palette,
+) -> Option<gpui::AnyElement> {
+    let enabled = data.wheel_hold.contains(&button);
+    match data.editing_app {
+        None if button.supports_wheel_hold() && (data.virtual_thumbwheel || enabled) => {
+            Some(wheel_hold_row(button, enabled, pal).into_any_element())
+        }
+        Some(app) if enabled && !overridden => Some(
+            div()
+                .debug_selector(|| "inspector-wheel-hold-app-note".into())
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!(
+                    "actions.app_profile_action_replaces_wheel_hold",
+                    app => app.to_string()
+                ))
+                .into_any_element(),
+        ),
+        _ => None,
+    }
+}
+
+/// Back/Forward's wheel-hold switch. Shown only in the global profile: a
+/// per-app entry holds one action, so the mode is device-wide. Turning it
+/// off stays possible on a device that does not report raw wheel, so a
+/// binding carried over from another mouse can be removed.
+fn wheel_hold_row(button: ButtonId, enabled: bool, pal: Palette) -> impl IntoElement {
+    toggle_row(
+        "inspector-wheel-hold-row",
+        pal,
+        tr!("actions.hold_to_scroll_sideways"),
+        tr!("actions.hold_to_scroll_sideways_description"),
+        Toggle::new("inspector-wheel-hold-toggle")
+            .selected(enabled)
+            .on_change(move |enabled, _window, cx| {
+                AppState::apply(cx, |state| state.commit_wheel_hold(button, *enabled));
+            }),
+    )
 }
 
 fn inherited_gesture_inspector(
@@ -891,5 +951,42 @@ mod tests {
             ButtonId::Forward,
             Some("com.apple.Safari")
         ));
+    }
+
+    fn global_profile<'a>(
+        bindings: &'a BTreeMap<ButtonId, Action>,
+        gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+        wheel_hold: &'a BTreeSet<ButtonId>,
+    ) -> BindingInspectorData<'a> {
+        BindingInspectorData {
+            selected: Some(MouseControlId::Button(ButtonId::Back)),
+            gesture_direction: None,
+            bindings,
+            gesture_maps,
+            dpi_gestures: false,
+            virtual_thumbwheel: true,
+            wheel_hold,
+            editing_app: None,
+            overridden: None,
+        }
+    }
+
+    #[test]
+    fn a_button_holding_the_wheel_reads_customized_even_with_its_default_click() {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let (bindings, gesture_maps) = (BTreeMap::new(), BTreeMap::new());
+        let action = default_binding(ButtonId::Back);
+        let plain = BTreeSet::new();
+        let data = global_profile(&bindings, &gesture_maps, &plain);
+        assert_eq!(
+            button_status(ButtonId::Back, &action, &data, false),
+            tr!("pointer.device_default")
+        );
+        let held = BTreeSet::from([ButtonId::Back]);
+        let data = global_profile(&bindings, &gesture_maps, &held);
+        assert_eq!(
+            button_status(ButtonId::Back, &action, &data, false),
+            tr!("profiles.customized")
+        );
     }
 }
