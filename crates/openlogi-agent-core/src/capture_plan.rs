@@ -109,8 +109,54 @@ impl DeviceCapturePlan {
     }
 }
 
-/// Read-only, lossless, coalescing view of the latest capture-plan snapshot.
-pub type SharedCapturePlans = watch::Receiver<Arc<Vec<DeviceCapturePlan>>>;
+/// Armed capture plans plus the latest route of every online physical device.
+///
+/// Plans omit a disabled device so capture leaves it native. Its route stays
+/// here so a pending restore can follow the mouse onto another receiver.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CapturePublication {
+    plans: Vec<DeviceCapturePlan>,
+    routes: BTreeMap<PhysicalDeviceKey, DeviceRoute>,
+}
+
+impl CapturePublication {
+    /// Plans to arm and the routes restoration may follow.
+    #[must_use]
+    pub(crate) fn new(
+        plans: Vec<DeviceCapturePlan>,
+        routes: BTreeMap<PhysicalDeviceKey, DeviceRoute>,
+    ) -> Self {
+        Self { plans, routes }
+    }
+
+    /// A publication whose routes are the routes of `plans`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_plans(plans: Vec<DeviceCapturePlan>) -> Self {
+        let mut routes = BTreeMap::new();
+        for plan in &plans {
+            routes
+                .entry(plan.target.physical_key.clone())
+                .or_insert_with(|| plan.target.route.clone());
+        }
+        Self { plans, routes }
+    }
+
+    /// Capture sessions the watcher may arm.
+    #[must_use]
+    pub(crate) fn plans(&self) -> &[DeviceCapturePlan] {
+        &self.plans
+    }
+
+    /// Latest route of `key`, including when that device is not being captured.
+    #[must_use]
+    pub(crate) fn restore_route(&self, key: &PhysicalDeviceKey) -> Option<&DeviceRoute> {
+        self.routes.get(key)
+    }
+}
+
+/// Read-only, lossless, coalescing view of the latest capture publication.
+pub type SharedCapturePlans = watch::Receiver<Arc<CapturePublication>>;
 
 /// Back/Forward gesture maps eligible for device-specific HID++ capture.
 ///

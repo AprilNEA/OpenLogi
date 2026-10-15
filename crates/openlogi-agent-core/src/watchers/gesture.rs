@@ -40,7 +40,9 @@ use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore
 use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
 use super::retry::RETRY_DELAY;
 use super::shutdown::{ManagerCompletion, WatcherHandle};
-use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
+use crate::capture_plan::{
+    CapturePublication, CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans,
+};
 use crate::hardware::DeviceAccess;
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::hook::SharedHookMaps;
@@ -139,7 +141,7 @@ struct SessionChannels {
 }
 
 struct GestureManagerContext {
-    capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    capture_plans: SharedCapturePlans,
     access: DeviceAccess,
     receiver_requests: watch::Receiver<ReceiverRequestState>,
     outputs: GestureOutputs,
@@ -196,12 +198,12 @@ fn dispatch_context_for<'a>(
 #[cfg(test)]
 fn wanted_sessions(
     requests: ReceiverRequestState,
-    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-) -> Arc<Vec<DeviceCapturePlan>> {
+    capture_plans: &SharedCapturePlans,
+) -> Vec<DeviceCapturePlan> {
     if requests.any() {
-        return Arc::new(Vec::new());
+        return Vec::new();
     }
-    Arc::clone(&capture_plans.borrow())
+    capture_plans.borrow().plans().to_vec()
 }
 
 fn reconcile_session(
@@ -237,14 +239,15 @@ fn reconcile_published_session(
     key: &PhysicalDeviceKey,
     session: &mut RunningSession,
     receiver_requests: &watch::Receiver<ReceiverRequestState>,
-    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    capture_plans: &SharedCapturePlans,
     dispatcher: &mut InputDispatcher,
 ) {
     if receiver_requests.borrow().any() {
         reconcile_session(session, None, dispatcher);
     } else {
-        let plans = capture_plans.borrow();
-        let wanted = plans
+        let published = capture_plans.borrow();
+        let wanted = published
+            .plans()
             .iter()
             .find(|plan| plan.target.physical_key == *key)
             .map(|plan| (&plan.target, &plan.dispatch));
@@ -264,10 +267,11 @@ fn acquire_session_lease(
     Some(fresh)
 }
 
+/// Retry owed restores. `routes` is the latest physical-device publication; `None` keeps each token on its current route.
 async fn retry_pending_restores(
     slots: &mut HashMap<PhysicalDeviceKey, GestureSlot>,
     registry: &openlogi_hid::ChannelRegistry,
-    published: &[DeviceCapturePlan],
+    routes: Option<&CapturePublication>,
     now: Instant,
 ) {
     let keys: Vec<_> = slots
@@ -287,12 +291,11 @@ async fn retry_pending_restores(
             slots.insert(key, GestureSlot::Recovering(recovery));
             continue;
         };
-        let elected = published
-            .iter()
-            .find(|plan| plan.target.physical_key == key)
-            .map(|plan| plan.target.route.clone());
-        // Retarget only when inventory names a different route. A same-route
-        // retry must keep the replacement-only policy set by a channel change.
+        // Routes include devices capture skips. A same-route retry keeps the
+        // replacement-only policy set by a channel change.
+        let elected = routes
+            .and_then(|routes| routes.restore_route(&key))
+            .cloned();
         let outcome = match elected {
             Some(route) if route != *pending.token.route() => {
                 pending.token.retry_via(route, registry).await
@@ -362,7 +365,7 @@ impl GestureManagerState {
         &mut self,
         requests: ReceiverRequestState,
         device_io_allowed: bool,
-        published: &Arc<Vec<DeviceCapturePlan>>,
+        published: &Arc<CapturePublication>,
         channels: &SessionChannels,
     ) {
         let receiver_access = &channels.access.receiver_access;
@@ -377,7 +380,7 @@ impl GestureManagerState {
         let wanted = if requests.any() {
             &[][..]
         } else {
-            published.as_slice()
+            published.plans()
         };
         for (key, slot) in &mut self.slots {
             let Some(session) = slot.session_mut() else {
@@ -394,6 +397,7 @@ impl GestureManagerState {
                 return true;
             };
             if !published
+                .plans()
                 .iter()
                 .any(|plan| plan.target.physical_key == *key)
             {
@@ -415,7 +419,8 @@ impl GestureManagerState {
             None
         };
         if restore_lease.is_some() {
-            retry_pending_restores(&mut self.slots, &channels.access.registry, wanted, now).await;
+            let routes = (!requests.any()).then_some(published.as_ref());
+            retry_pending_restores(&mut self.slots, &channels.access.registry, routes, now).await;
         }
 
         for plan in wanted {
@@ -446,7 +451,7 @@ impl GestureManagerState {
         event: SessionEvent,
         device_io_allowed: bool,
         receiver_requests: &watch::Receiver<ReceiverRequestState>,
-        capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+        capture_plans: &SharedCapturePlans,
     ) -> bool {
         match event {
             SessionEvent::Input(event) => {
@@ -520,7 +525,7 @@ async fn drain_for_shutdown(
     state: &mut GestureManagerState,
     event_rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
     receiver_requests: &watch::Receiver<ReceiverRequestState>,
-    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    capture_plans: &SharedCapturePlans,
     channels: &SessionChannels,
 ) {
     for session in state
@@ -557,14 +562,14 @@ async fn drain_for_shutdown(
         if let Some(_lease) =
             acquire_session_lease(&channels.access.receiver_access, &mut state.lease)
         {
-            // Clone before the await. Draining sessions already consumed their
-            // stop command, so only this latest publication can move a stale
-            // handoff onto the route inventory still names.
-            let plans = Arc::clone(&capture_plans.borrow());
+            // Clone before the await. Only this publication can move a stale
+            // handoff onto the route inventory still names, including a device
+            // whose capture plan was withdrawn.
+            let publication = Arc::clone(&capture_plans.borrow());
             retry_pending_restores(
                 &mut state.slots,
                 &channels.access.registry,
-                &plans,
+                Some(&publication),
                 Instant::now(),
             )
             .await;
@@ -584,7 +589,7 @@ struct GestureManager {
 }
 
 impl CaptureManager for GestureManager {
-    type Published = Arc<Vec<DeviceCapturePlan>>;
+    type Published = Arc<CapturePublication>;
     type Event = SessionEvent;
 
     async fn reconcile(&mut self, requests: ReceiverRequestState, published: &Self::Published) {

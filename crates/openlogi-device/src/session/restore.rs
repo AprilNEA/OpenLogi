@@ -74,6 +74,16 @@ impl<P> PendingRestore<P> {
         }
     }
 
+    /// Debt aimed at `route` with no retired channel.
+    pub(crate) fn without_channel(route: DeviceRoute, plan: P) -> Self {
+        Self {
+            route,
+            retired_channel: Weak::new(),
+            retired_policy: RetiredChannelPolicy::ReplacementOnly,
+            plan,
+        }
+    }
+
     /// Permit a retry on the original channel after a normal teardown write
     /// failed while that publication was still current.
     pub(crate) fn allow_current_channel(mut self) -> Self {

@@ -155,7 +155,8 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
     use futures_lite::future::poll_once;
 
     for shutdown_requested in [false, true] {
-        let (plans_tx, capture_plans) = watch::channel(Arc::new(vec![plan()]));
+        let (plans_tx, capture_plans) =
+            watch::channel(Arc::new(CapturePublication::from_plans(vec![plan()])));
         let capture = CaptureChannelSlot::default();
         // A missing inventory channel makes the real session task fail without
         // opening hardware; ordered Done then drives normal restart recovery.
@@ -294,7 +295,8 @@ async fn exclusive_request_retires_capture_without_rejecting_owned_input() {
     .await
     .expect("pairing should announce its exclusive request");
 
-    let (plans, _) = tokio::sync::watch::channel(Arc::new(vec![plan()]));
+    let (plans, _) =
+        tokio::sync::watch::channel(Arc::new(CapturePublication::from_plans(vec![plan()])));
     let plans = plans.subscribe();
     let requests = access.subscribe_requests();
     assert!(wanted_sessions(*requests.borrow(), &plans).is_empty());
@@ -719,4 +721,61 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
         "an already-diverted wheel needs a state reset, not a hardware restart"
     );
     assert!(session.is_active());
+}
+
+#[tokio::test]
+async fn pending_restore_follows_a_disabled_devices_latest_route() {
+    use std::collections::BTreeMap;
+
+    let stale = DeviceRoute::Bolt {
+        receiver_uid: "receiver-b".to_owned(),
+        slot: 2,
+    };
+    let latest = DeviceRoute::Bolt {
+        receiver_uid: "receiver-c".to_owned(),
+        slot: 1,
+    };
+    let registry = openlogi_hid::ChannelRegistry::default();
+    let key = physical_key();
+    let recovering = |route: DeviceRoute| {
+        HashMap::from([(
+            key.clone(),
+            GestureSlot::recovering(
+                Some(PendingRestore {
+                    token: PendingCaptureRestore::detached(route),
+                    retry_at: Instant::now(),
+                }),
+                None,
+            ),
+        )])
+    };
+    let route_of = |slots: &HashMap<PhysicalDeviceKey, GestureSlot>| {
+        slots
+            .get(&key)
+            .and_then(GestureSlot::recovery)
+            .and_then(|recovery| recovery.pending_restore.as_ref())
+            .map(|pending| pending.token.route().clone())
+    };
+
+    let mut stuck = recovering(stale.clone());
+    retry_pending_restores(&mut stuck, &registry, None, Instant::now()).await;
+    assert_eq!(
+        route_of(&stuck),
+        Some(stale.clone()),
+        "without a published route the owed restore stays on its last target"
+    );
+
+    let mut followed = recovering(stale);
+    let publication =
+        CapturePublication::new(Vec::new(), BTreeMap::from([(key.clone(), latest.clone())]));
+    retry_pending_restores(&mut followed, &registry, Some(&publication), Instant::now()).await;
+    assert!(
+        publication.plans().is_empty(),
+        "capture stays disarmed while the device is disabled"
+    );
+    assert_eq!(
+        route_of(&followed),
+        Some(latest),
+        "restore must follow the mouse onto the receiver inventory names now"
+    );
 }

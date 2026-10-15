@@ -33,7 +33,7 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
@@ -105,9 +105,9 @@ pub struct SharedHandles {
     /// taking the orchestrator/config lock.
     pub scroll_preferences: Arc<ScrollPreferences>,
     pub dpi_cycle: Arc<RwLock<DpiCycles>>,
-    /// One capture plan per online device — what to divert and how to
-    /// dispatch, keyed by the device the events arrive on. Carries each
-    /// device's effective thumb-wheel sensitivity.
+    /// Capture plans for online enabled devices, plus the latest route of
+    /// every online physical device. A disabled device stays out of the plans
+    /// so capture leaves it native, but its route remains for restoration.
     pub capture_plans: SharedCapturePlans,
     pub capture_channel: CaptureChannelSlot,
     /// Exact-route channels owned and published by the inventory enumerator.
@@ -336,7 +336,7 @@ pub struct Orchestrator {
     os_mouse_hook_available: bool,
     /// Private producer halves for the read-only runtime projections in
     /// `shared`, keeping the orchestrator's single-writer contract structural.
-    capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
+    capture_plans_tx: watch::Sender<Arc<CapturePublication>>,
     keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
     host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
     shared: SharedHandles,
@@ -381,7 +381,8 @@ impl Orchestrator {
         observable: Arc<ObservableState>,
         hardware: HardwareContext,
     ) -> Self {
-        let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
+        let (capture_plans_tx, capture_plans) =
+            watch::channel(Arc::new(CapturePublication::default()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let shared = SharedHandles {
@@ -646,7 +647,7 @@ impl Orchestrator {
     }
 
     fn publish_capture_plans(&self) {
-        publish_arc_if_changed(&self.capture_plans_tx, self.capture_plans_for());
+        publish_arc_if_changed(&self.capture_plans_tx, self.capture_publication());
     }
 
     /// Rewrite the per-device DPI-cycle map for every online device,
@@ -686,7 +687,7 @@ impl Orchestrator {
         guard.by_key = by_key;
     }
 
-    /// One capture plan per online device, from the current config + app.
+    /// Capture plans for enabled devices, and a route for every online device.
     ///
     /// A `0x1b04` control has one owner per device. The keyboard session owns
     /// every control the keyboard spec names, so those are released from the
@@ -694,41 +695,61 @@ impl Orchestrator {
     /// otherwise have both sessions divert the multiplatform Back key
     /// (`0x00bd`, a [`BACK_CIDS`](openlogi_hid::reprog_controls::BACK_CIDS)
     /// member), each reading the other's diverted state back as "original".
-    fn capture_plans_for(&self) -> Vec<DeviceCapturePlan> {
+    ///
+    /// Disabled devices are omitted from the plans so capture leaves them
+    /// native. Their route is still published: a restore owed from an earlier
+    /// handoff has to follow the mouse after capture stops.
+    fn capture_publication(&self) -> CapturePublication {
         let rearm_generation = self.shared.capture_rearm_generation.load(Ordering::Relaxed);
         let keyboard = self.keyboard_spec_for();
-        self.devices
-            .iter()
-            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
-            .filter_map(|dev| {
-                let route = dev.route.clone()?;
-                let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
-                let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
-                    .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
-                let (app, pointer_target) = if dev.kind == DeviceKind::Keyboard {
-                    (self.current_app.as_deref(), None)
-                } else {
-                    self.mouse_context()
-                };
-                let mut plan = plan_for_device(
-                    &self.config,
-                    physical_key,
-                    &dev.config_key,
-                    route,
-                    app,
-                    rearm_generation,
-                    self.os_mouse_hook_available,
-                );
-                plan.dispatch.pointer_target = pointer_target;
-                if let Some(keyboard) = keyboard
-                    .as_ref()
-                    .filter(|keyboard| keyboard.route == plan.target.route)
-                {
-                    plan.release_controls(&keyboard.wanted);
-                }
-                Some(plan)
-            })
-            .collect()
+        let mut plans = Vec::new();
+        let mut routes = BTreeMap::new();
+        for dev in &self.devices {
+            let Some((physical_key, route)) = Self::capture_identity(dev) else {
+                continue;
+            };
+            routes
+                .entry(physical_key.clone())
+                .or_insert_with(|| route.clone());
+            if !self.config.device_enabled(&dev.config_key) {
+                continue;
+            }
+            let (app, pointer_target) = if dev.kind == DeviceKind::Keyboard {
+                (self.current_app.as_deref(), None)
+            } else {
+                self.mouse_context()
+            };
+            let mut plan = plan_for_device(
+                &self.config,
+                physical_key,
+                &dev.config_key,
+                route,
+                app,
+                rearm_generation,
+                self.os_mouse_hook_available,
+            );
+            plan.dispatch.pointer_target = pointer_target;
+            if let Some(keyboard) = keyboard
+                .as_ref()
+                .filter(|keyboard| keyboard.route == plan.target.route)
+            {
+                plan.release_controls(&keyboard.wanted);
+            }
+            plans.push(plan);
+        }
+        CapturePublication::new(plans, routes)
+    }
+
+    /// Physical key and route of one online device inventory can still address.
+    fn capture_identity(dev: &AgentDevice) -> Option<(PhysicalDeviceKey, DeviceRoute)> {
+        if !dev.online {
+            return None;
+        }
+        let route = dev.route.clone()?;
+        let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
+        let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
+            .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
+        Some((physical_key, route))
     }
 
     /// Publish whether the OS movement hook is currently usable.

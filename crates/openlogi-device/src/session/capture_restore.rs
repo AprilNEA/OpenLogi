@@ -211,6 +211,18 @@ pub type CaptureSessionOutcome = RestoreOutcome<CaptureRestorePlan>;
 pub type CaptureSessionFailure = SessionFailure<CaptureError, CaptureRestorePlan>;
 
 impl PendingCaptureRestore {
+    /// Token aimed at `route` whose retry writes nothing and completes once that route is current.
+    #[must_use]
+    pub fn detached(route: DeviceRoute) -> Self {
+        Self::without_channel(
+            route,
+            CaptureRestorePlan {
+                reprog: None,
+                thumb: None,
+            },
+        )
+    }
+
     /// The restore owed for `reprog` and the thumb wheel, or `None` when the
     /// session diverted nothing.
     pub(crate) fn new(
