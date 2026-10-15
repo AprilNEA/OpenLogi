@@ -8,7 +8,7 @@ use openlogi_core::hid::DeviceRoute;
 /// A paired device and the user's independently selected presentation options.
 #[derive(Clone, Debug)]
 pub struct Observation {
-    /// Physical navigation target, independent of where preferences are stored.
+    /// Canonical GUI target when online or identified; otherwise a resolved or runtime key.
     pub key: String,
     /// Stable physical identity for warning persistence, absent for anonymous devices.
     pub history_key: Option<String>,
@@ -49,7 +49,7 @@ pub(super) fn observations(config: &Config, inventories: &[DeviceInventory]) -> 
                 .and_then(|device| device.custom_name.clone())
                 .or_else(|| paired.codename.clone())
                 .unwrap_or_else(|| "Logitech".to_owned());
-            let navigation_key = if history_key.is_some() {
+            let navigation_key = if paired.online || history_key.is_some() {
                 canonical_device_key(&stable, Some(&identity))
             } else {
                 resolved_key
@@ -208,6 +208,19 @@ mod tests {
     }
 
     #[test]
+    fn online_identity_missing_navigation_follows_the_gui_adoption_target() {
+        let mut config = Config::default();
+        let physical = PhysicalDeviceKey::parse("unit:01020304").unwrap();
+        let route_key = "receiver:receiver:slot:1";
+        config.adopt_route(&physical, route_key, None);
+        let mut receiver = inventory(0xc548, 1, [0; 4]);
+        receiver.paired[0].model_info = None;
+        let rows = observations(&config, &[receiver]);
+        assert_eq!(rows[0].key, route_key);
+        assert!(rows[0].online);
+    }
+
+    #[test]
     fn anonymous_navigation_uses_the_same_runtime_key_as_the_gui() {
         let config = Config::default();
         let direct = inventory(0xb369, 0xff, [0; 4]);
@@ -215,6 +228,7 @@ mod tests {
         assert_eq!(rows[0].key, "direct:046d:b369:unit:00000000");
         assert_eq!(rows[0].history_key, None);
     }
+
     #[test]
     fn battery_navigation_survives_legacy_route_adoption_without_changing_preferences() {
         let mut config = Config::default();

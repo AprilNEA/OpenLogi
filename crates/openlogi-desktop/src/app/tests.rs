@@ -1476,13 +1476,20 @@ fn tray_navigation_opens_exact_device_settings_cold_and_warm(cx: &mut gpui::Test
         let profile: DeviceProfile = serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).unwrap();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
-        let legacy_key = "receiver:OL-BOLT-UID-0001:slot:1";
+        let legacy_key = "receiver:ol-bolt-uid-0001:slot:1";
         let physical_key = "unit:4f4c4401";
-        let mut config = openlogi_core::config::Config::ephemeral();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+        let (mut config, mut file) =
+            openlogi_core::config::ConfigFile::load_from_path(&path).unwrap();
         config.devices.entry(legacy_key.into()).or_default().dpi =
             Some(openlogi_core::hid::Dpi::new(1600));
+        file.save(&config).unwrap();
         let state = cx.new(|_| {
-            let mut state = AppState::new(Sources::in_memory(config, &resolver, commands));
+            let mut state = AppState::new(Sources {
+                persistence: crate::state::ConfigPersistence::UserFile(file),
+                ..Sources::in_memory(config, &resolver, commands)
+            });
             let _ = state.refresh_inventories(
                 &profile.inventories,
                 &profile.standalone,
@@ -1491,6 +1498,12 @@ fn tray_navigation_opens_exact_device_settings_cold_and_warm(cx: &mut gpui::Test
             );
             state
         });
+        let adopted = openlogi_core::config::Config::load_from_path(&path).unwrap();
+        assert!(!adopted.devices.contains_key(legacy_key));
+        assert_eq!(
+            adopted.dpi(physical_key),
+            Some(openlogi_core::hid::Dpi::new(1600))
+        );
         let keys: Vec<_> = state
             .read(cx)
             .devices()
@@ -1561,11 +1574,20 @@ fn tray_navigation_survives_adoption_with_existing_window(cx: &mut gpui::TestApp
         let profile: DeviceProfile = serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).unwrap();
         let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut config = openlogi_core::config::Config::ephemeral();
-        let legacy_key = "receiver:OL-BOLT-UID-0001:slot:1";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+        let (mut config, mut file) =
+            openlogi_core::config::ConfigFile::load_from_path(&path).unwrap();
+        let legacy_key = "receiver:ol-bolt-uid-0001:slot:1";
         config.devices.entry(legacy_key.into()).or_default().dpi =
             Some(openlogi_core::hid::Dpi::new(1600));
-        let state = cx.new(|_| AppState::new(Sources::in_memory(config, &resolver, commands)));
+        file.save(&config).unwrap();
+        let state = cx.new(|_| {
+            AppState::new(Sources {
+                persistence: crate::state::ConfigPersistence::UserFile(file),
+                ..Sources::in_memory(config, &resolver, commands)
+            })
+        });
         AppState::set_global(state.clone(), cx);
         main_window::open(cx);
         assert!(state.read(cx).devices().is_empty());
@@ -1578,6 +1600,12 @@ fn tray_navigation_survives_adoption_with_existing_window(cx: &mut gpui::TestApp
             );
         });
         let physical_key = "unit:4f4c4401";
+        let adopted = openlogi_core::config::Config::load_from_path(&path).unwrap();
+        assert!(!adopted.devices.contains_key(legacy_key));
+        assert_eq!(
+            adopted.dpi(physical_key),
+            Some(openlogi_core::hid::Dpi::new(1600))
+        );
         assert!(main_window::open_device_settings(physical_key, cx));
         assert_eq!(
             state.read(cx).current_record().unwrap().config_key,
@@ -1590,5 +1618,14 @@ fn tray_navigation_survives_adoption_with_existing_window(cx: &mut gpui::TestApp
             physical_key
         );
         assert_eq!(cx.windows().len(), 1);
+        let mut unresolved = profile.inventories.clone();
+        unresolved[0].paired[0].model_info = None;
+        state.update(cx, |state, _| {
+            let _ = state.refresh_inventories(&unresolved, &[], &resolver, &[]);
+        });
+        assert!(main_window::open_device_settings(legacy_key, cx));
+        let record = state.read(cx).current_record().unwrap();
+        assert_eq!(record.config_key, legacy_key);
+        assert!(record.online && record.model_info.is_none());
     });
 }
