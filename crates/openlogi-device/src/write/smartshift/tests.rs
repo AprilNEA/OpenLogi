@@ -443,3 +443,47 @@ async fn a_write_holds_when_the_reply_carries_what_it_wrote() -> Result<(), Writ
     assert_eq!(writes, [[FREE, 30, 0]]);
     Ok(())
 }
+
+#[tokio::test]
+async fn set_torque_writes_only_torque_when_advertised() -> Result<(), WriteError> {
+    let harness = Harness::new(Wheel::new(
+        SmartShiftEnhancedCapabilities::TUNABLE_TORQUE,
+        50,
+    ))
+    .await;
+
+    let updated = set_smartshift_torque_on(&harness.shared, torque(65)).await?;
+
+    assert_eq!(harness.capability_reads(), 1);
+    assert_eq!(harness.writes(), [[0, 0, 65]]);
+    assert_eq!(updated.tunable_torque, Some(torque(65)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn set_torque_fails_when_device_does_not_advertise_it() {
+    let harness = Harness::new(Wheel::new(SmartShiftEnhancedCapabilities::empty(), 50)).await;
+
+    let result = set_smartshift_torque_on(&harness.shared, torque(65)).await;
+
+    assert!(matches!(
+        result,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x2111
+        })
+    ));
+    assert_eq!(harness.writes().len(), 0);
+}
+
+#[tokio::test]
+async fn set_torque_fails_when_reply_does_not_echo() {
+    let harness = Harness::new(Wheel {
+        firmware: |w| w.torque = 50,
+        ..Wheel::new(SmartShiftEnhancedCapabilities::TUNABLE_TORQUE, 50)
+    })
+    .await;
+
+    let result = set_smartshift_torque_on(&harness.shared, torque(65)).await;
+
+    refused(&result.map(|_| ()), 0x2111);
+}

@@ -280,6 +280,53 @@ impl SmartShift {
         })
         .await
     }
+
+    /// Write a new tunable `torque`, leaving wheel mode and auto-disengage threshold unchanged.
+    /// Returns `WriteError::FeatureUnsupported` on legacy 0x2110 devices or when
+    /// the device does not advertise tunable torque.
+    async fn set_torque(&self, value: TunableTorque) -> Result<(), WriteError> {
+        match self {
+            Self::Enhanced(feature) => {
+                let info = feature.get_capabilities().await.map_err(|e| {
+                    classify_hidpp_error(
+                        e,
+                        HidppOperation::ReadSmartShift,
+                        SmartShiftEnhancedFeature::ID,
+                    )
+                })?;
+                if !info
+                    .capabilities
+                    .contains(SmartShiftEnhancedCapabilities::TUNABLE_TORQUE)
+                {
+                    return Err(WriteError::FeatureUnsupported {
+                        feature_hex: SmartShiftEnhancedFeature::ID,
+                    });
+                }
+                let wire_value = NonZeroU8::from(value);
+                let applied = feature
+                    .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
+                        wheel_mode: None,
+                        auto_disengage: None,
+                        tunable_torque: Some(wire_value),
+                    })
+                    .await
+                    .map_err(|e| {
+                        classify_hidpp_error(
+                            e,
+                            HidppOperation::WriteSmartShift,
+                            SmartShiftEnhancedFeature::ID,
+                        )
+                    })?;
+                confirm_write(
+                    applied.current_tunable_torque == wire_value.get(),
+                    SmartShiftEnhancedFeature::ID,
+                )
+            }
+            Self::Legacy(_) => Err(WriteError::FeatureUnsupported {
+                feature_hex: SmartShiftEnhancedFeature::ID,
+            }),
+        }
+    }
 }
 
 /// The tunable torque to put on the wire for a requested `torque`.
@@ -361,6 +408,48 @@ pub async fn set_smartshift_sensitivity(
         smartshift.status().await
     })
     .await
+}
+
+/// Set the SmartShift tunable torque (scrolling force) on `route`, preserving
+/// the current mode and auto-disengage sensitivity. Returns the read-back
+/// status after the write so the caller can display and verify it.
+///
+/// `FeatureUnsupported` when the device does not expose Enhanced SmartShift `0x2111`.
+pub async fn set_smartshift_torque(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    value: TunableTorque,
+) -> Result<SmartShiftStatus, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        set_smartshift_torque_on_channel(&channel, index, value).await
+    })
+    .await
+}
+
+pub(super) async fn set_smartshift_torque_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    value: TunableTorque,
+) -> Result<SmartShiftStatus, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let smartshift = SmartShift::open(&mut device).await?;
+    match smartshift.set_torque(value).await {
+        Ok(()) => smartshift.status().await,
+        Err(err) if is_transient_smartshift_error(&err) => {
+            debug!(
+                index,
+                error = ?err,
+                "SmartShift torque write hit a transient error; retrying once"
+            );
+            tokio::time::sleep(TRANSIENT_RETRY_DELAY).await;
+            smartshift.set_torque(value).await?;
+            smartshift.status().await
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Toggle SmartShift mode (free ↔ ratchet) on `route`. Reads the current
@@ -535,6 +624,14 @@ pub async fn set_smartshift_on(
     status: SmartShiftStatus,
 ) -> Result<(), WriteError> {
     set_smartshift_on_channel(shared.channel(), shared.device_index(), status).await
+}
+
+/// Set SmartShift tunable torque (scrolling force) on an already-open [`SharedChannel`].
+pub async fn set_smartshift_torque_on(
+    shared: &SharedChannel,
+    value: TunableTorque,
+) -> Result<SmartShiftStatus, WriteError> {
+    set_smartshift_torque_on_channel(shared.channel(), shared.device_index(), value).await
 }
 
 #[cfg(test)]
