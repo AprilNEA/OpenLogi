@@ -11,16 +11,17 @@ use openlogi_core::config::{
 };
 
 impl AppState {
-    /// Battery evidence, including cached readings, enables the controls. A missing
-    /// reading later in this session does not hide a known device's preferences.
+    /// A persistent identity and battery evidence, including cached readings, enable
+    /// the controls. A later missing reading keeps a known device's preferences.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn battery_preferences_available(&self, record: &super::devices::DeviceRecord) -> bool {
-        record.battery.is_some()
-            || self
-                .devices
-                .sessions
-                .get(record.config_key.as_str())
-                .is_some_and(|session| session.battery_model.is_some())
+        record.is_persistent()
+            && (record.battery.is_some()
+                || self
+                    .devices
+                    .sessions
+                    .get(record.config_key.as_str())
+                    .is_some_and(|session| session.battery_model.is_some()))
     }
 
     /// Preferences shared by every route of this physical device.
@@ -36,6 +37,13 @@ impl AppState {
         key: &DeviceKey,
         preferences: openlogi_core::config::BatteryPreferences,
     ) -> StateEvents {
+        if !self
+            .devices()
+            .iter()
+            .any(|record| record.persistent_config_key() == Some(key.as_str()))
+        {
+            return StateEvents::none();
+        }
         let events = StateEvent::DeviceConfigChanged(key.clone()).into();
         if self.config.battery_preferences(key.as_str()) != preferences {
             self.config
