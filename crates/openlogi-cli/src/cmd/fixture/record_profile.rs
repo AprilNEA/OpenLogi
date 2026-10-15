@@ -282,18 +282,15 @@ async fn capture_hidpp_settings(
             .await?
         }
     };
-    // Schema v1 makes RGB lighting and keyboard backlight mutually exclusive,
-    // so observed RGB capability is a sufficient negative backlight fact.
-    let backlight = if capabilities.lighting {
-        ProfileSetting::Unsupported
-    } else if device.online {
-        semantic_read(
-            "backlight",
-            agent::call(client.read_backlight(context::current(), source_route.clone())),
-        )
-        .await?
-    } else {
-        return Err(unknown_offline_support("backlight"));
+    let backlight = match capability_setting(device.online, capabilities.backlight) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "backlight",
+                agent::call(client.read_backlight(context::current(), source_route.clone())),
+            )
+            .await?
+        }
     };
 
     let fn_lock = match capability_setting(device.online, capabilities.fn_lock) {
@@ -306,6 +303,31 @@ async fn capture_hidpp_settings(
             .await?
         }
     };
+    let report_rate = match capability_setting(device.online, capabilities.report_rate) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "report-rate",
+                agent::call(client.read_report_rate(context::current(), source_route.clone())),
+            )
+            .await?
+        }
+    };
+    let mut easy_switch = match capability_setting(device.online, capabilities.easy_switch) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "Easy-Switch",
+                agent::call(
+                    client.read_easy_switch_hosts(context::current(), source_route.clone()),
+                ),
+            )
+            .await?
+        }
+    };
+    if let Some(hosts) = easy_switch.value_mut() {
+        sanitize::easy_switch_hosts(hosts);
+    }
 
     Ok(ProfileDeviceSettings {
         route: profile_route,
@@ -314,6 +336,8 @@ async fn capture_hidpp_settings(
         wheel,
         backlight,
         fn_lock,
+        report_rate,
+        easy_switch,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
@@ -372,6 +396,8 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         wheel: ProfileSetting::Unsupported,
         backlight: ProfileSetting::Unsupported,
         fn_lock: ProfileSetting::Unsupported,
+        report_rate: ProfileSetting::Unsupported,
+        easy_switch: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };

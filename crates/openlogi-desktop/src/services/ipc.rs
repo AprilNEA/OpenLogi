@@ -39,7 +39,10 @@
 
 use std::time::{Duration, Instant};
 
-use openlogi_core::hid::{DeviceRoute, FnLockState, LightCommand, WriteError};
+use openlogi_core::hid::{
+    BacklightState, DeviceRoute, EasySwitchHosts, FnLockState, LightCommand, ReportRateInfo,
+    WriteError,
+};
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
 use tarpc::client::RpcError;
@@ -61,8 +64,9 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadSmartShift, ReloadConfig,
-    RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting,
+    CancelPairing, Command, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
+    ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
+    SetBacklight, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting, SetReportRate,
     SetSmartShift, StartPairing, UnpairDevice,
 };
 
@@ -105,6 +109,45 @@ pub enum GuiUpdate {
         key: DeviceKey,
         /// The echoed state, or why the write did not land.
         result: Result<FnLockState, WriteError>,
+    },
+    /// What a mouse reports after a report-rate write the GUI asked for: the
+    /// rate it took, or the typed refusal. Answers [`SetReportRate`].
+    ReportRateWritten {
+        /// The mouse that was written.
+        key: DeviceKey,
+        /// The connection the write went out on. The rate list belongs to
+        /// that connection, so an answer is stale once the mouse moves.
+        route: DeviceRoute,
+        /// The read-back, or why the write did not land.
+        result: Result<ReportRateInfo, WriteError>,
+    },
+    /// What a keyboard reports after a backlight change the GUI asked for:
+    /// the backlight it reads back, or the typed refusal. Answers
+    /// [`SetBacklight`].
+    BacklightWritten {
+        /// The keyboard that was written.
+        key: DeviceKey,
+        /// The connection the write went out on; an answer is stale once the
+        /// keyboard moves, like [`Self::ReportRateWritten`]'s.
+        route: DeviceRoute,
+        /// Which change this answers: [`SetBacklight::write`].
+        write: u64,
+        /// The read-back, or why the write did not land.
+        result: Result<BacklightState, WriteError>,
+    },
+    /// What a device reports after an Easy-Switch host rename the GUI asked
+    /// for: the slots it reads back, or the typed refusal. Answers
+    /// [`RenameEasySwitchHost`].
+    EasySwitchHostRenamed {
+        /// The device that was written.
+        key: DeviceKey,
+        /// The connection the write went out on; an answer is stale once the
+        /// device moves, like [`Self::ReportRateWritten`]'s.
+        route: DeviceRoute,
+        /// Which rename this answers: [`RenameEasySwitchHost::write`].
+        write: u64,
+        /// The read-back, or why the rename did not land.
+        result: Result<EasySwitchHosts, WriteError>,
     },
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather

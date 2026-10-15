@@ -18,6 +18,7 @@ use crate::channel::route::{DeviceRoute, open_route_channel};
 mod backlight;
 mod diagnostics;
 mod dpi;
+mod easy_switch;
 mod error;
 mod fn_lock;
 mod haptic;
@@ -26,15 +27,20 @@ mod lighting;
 mod litra;
 mod os_layout;
 mod pointer_scaling;
+mod report_rate;
 mod smartshift;
 
-pub use backlight::{get_backlight, get_backlight_on, set_backlight_enabled};
+pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
     dump_firmware_entities, dump_reprog_controls, read_battery_raw,
 };
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
+};
+pub use easy_switch::{
+    get_easy_switch_hosts, get_easy_switch_hosts_on, rename_easy_switch_host,
+    rename_easy_switch_host_on,
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
@@ -54,10 +60,17 @@ pub(crate) use litra::litra_capabilities;
 pub use litra::{
     LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
-    litra_model_for_route, matches_litra,
+    litra_model_for_route, matches_litra, read_state as read_litra_state,
 };
+pub use openlogi_core::hid::{
+    EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
+};
+pub use openlogi_core::hid::{ReportRate, ReportRateInfo};
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
 pub use pointer_scaling::{PointerScaling, get_pointer_scaling, set_pointer_scaling};
+pub use report_rate::{
+    get_report_rate_info, get_report_rate_info_on, set_report_rate, set_report_rate_on,
+};
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
@@ -81,13 +94,23 @@ pub(crate) use error::classify_hidpp_error;
 pub(crate) async fn open_feature<F: CreatableFeature + 'static>(
     device: &mut Device,
 ) -> Result<Arc<F>, WriteError> {
+    open_feature_with_version::<F>(device)
+        .await
+        .map(|(feature, _)| feature)
+}
+
+/// [`open_feature`], also returning the feature version the device reports
+/// in the same root `getFeature` reply.
+pub(crate) async fn open_feature_with_version<F: CreatableFeature + 'static>(
+    device: &mut Device,
+) -> Result<(Arc<F>, u8), WriteError> {
     let info = device
         .root()
         .get_feature(F::ID)
         .await
         .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, F::ID))?
         .ok_or(WriteError::FeatureUnsupported { feature_hex: F::ID })?;
-    Ok(device.add_feature::<F>(info.index))
+    Ok((device.add_feature::<F>(info.index), info.version))
 }
 
 /// Boilerplate-eater: open the channel that reaches `route`, then run `f` once

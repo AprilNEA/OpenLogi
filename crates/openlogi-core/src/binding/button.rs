@@ -137,6 +137,16 @@ impl ButtonId {
         matches!(self, ButtonId::Back | ButtonId::Forward)
     }
 
+    /// Whether holding this button may turn the main wheel into a virtual
+    /// thumb wheel ([`Binding::WheelHold`](super::Binding::WheelHold)). Back
+    /// and Forward are the only eligible controls: they are where devices
+    /// report raw-wheel support (`0x1b04` `RAW_WHEEL`), and where Logi
+    /// Options+ offers its virtual thumb wheel.
+    #[must_use]
+    pub fn supports_wheel_hold(self) -> bool {
+        matches!(self, ButtonId::Back | ButtonId::Forward)
+    }
+
     /// Whether this button is a HID++ gesture source — a control that is
     /// captured over HID++ raw-XY diversion (never the OS hook) and can
     /// therefore own the gesture role with swipe directions: DPI/ModeShift,

@@ -237,11 +237,22 @@ pub(super) fn run_shell_command(cmd: &str) {
 
 const DEVICE_NAME: &str = "OpenLogi action injector";
 
+/// Settle time after creating the uinput device, before its first emit.
+///
+/// `/dev/uinput` creation is synchronous, but udev, libinput, and the display
+/// server noticing the new event node and opening it are not — and an evdev
+/// reader never sees events written before it opens the device. Emitting the
+/// very first action right after creation races that pickup and is silently
+/// dropped, with every later action working once the display server has
+/// caught up (#1800).
+const UINPUT_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
 static VIRTUAL_INPUT: LazyLock<Option<Mutex<VirtualDevice>>> = LazyLock::new(|| {
-    build()
-        .map(Mutex::new)
+    let device = build()
         .map_err(|e| tracing::warn!("failed to create uinput action device: {e}"))
-        .ok()
+        .ok()?;
+    std::thread::sleep(UINPUT_SETTLE);
+    Some(Mutex::new(device))
 });
 
 #[rustfmt::skip]

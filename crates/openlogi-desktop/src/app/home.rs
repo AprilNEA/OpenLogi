@@ -41,7 +41,7 @@ use crate::services::assets::GlowGeometry;
 use crate::services::ipc::UnpairFailure;
 use crate::state::{AppState, DeviceRecord};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
-use crate::ui::components::control_input;
+use crate::ui::components::{control_input, save_cancel_footer};
 use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
 use crate::windows::add_device::pairing_failure_text;
 
@@ -455,7 +455,7 @@ pub(super) fn open_removal_failed(
     });
 }
 
-fn open_rename_dialog(
+pub(super) fn open_rename_dialog(
     window: &mut Window,
     cx: &mut App,
     record_key: String,
@@ -480,12 +480,7 @@ fn open_rename_dialog(
                         .child(tr!("device.leave_blank_to_use_the_model_name")),
                 ),
             )
-            .button_props(
-                DialogButtonProps::default()
-                    .ok_text(tr!("common.save"))
-                    .cancel_text(tr!("common.cancel"))
-                    .show_cancel(true),
-            )
+            .footer(save_cancel_footer())
             .on_ok({
                 let input = input.clone();
                 let record_key = record_key.clone();

@@ -209,3 +209,26 @@ pub struct LightCapabilities {
     #[serde(default)]
     pub zones: bool,
 }
+
+/// A standalone light's state as the light itself reports it.
+///
+/// Read back from the device rather than taken from saved settings: the
+/// light's own buttons, another program, or a brightness limit can make the
+/// two differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LightState {
+    /// The controls and ranges the light reports for itself.
+    pub capabilities: LightCapabilities,
+    /// Whether the light is on.
+    pub on: bool,
+    /// Current brightness in the unit of [`LightCapabilities::brightness`],
+    /// when the light has a brightness control.
+    pub brightness: Option<u16>,
+    /// Current colour temperature in Kelvin, when the light has a
+    /// colour-temperature control.
+    pub temperature_kelvin: Option<u16>,
+    /// The highest brightness the light allows right now, when that is below
+    /// the top of its brightness range — for instance on a USB port that
+    /// cannot supply full power. A brighter request is lowered to it.
+    pub brightness_limit: Option<u16>,
+}

@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, MouseProfileTarget, canonical_device_key};
 use openlogi_core::device::{
@@ -23,8 +23,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, FnLockState,
-    HidppOperation, HostOs, WriteError, is_reserved_keyboard_control,
+    BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
+    DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, ReportRate,
+    ReportRateInfo, WriteError, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -32,10 +33,10 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
 use crate::hardware::{
-    DeviceAccess, DeviceOp, FnLockOrder, HardwareContext, KeptOsLayouts, VolatileMouseSettings,
+    DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
 };
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
@@ -52,9 +53,10 @@ mod devices;
 use devices::reapply_targets;
 use devices::{
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_wheel_mode,
-    host_switch_links, is_hidpp_device, keeps_os_layout, newly_kept_os_layouts, os_layout_appeared,
-    pick_current, plan_reapply, settings_moved, stable_id,
+    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_report_rate,
+    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
+    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply, settings_moved,
+    stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -103,9 +105,9 @@ pub struct SharedHandles {
     /// taking the orchestrator/config lock.
     pub scroll_preferences: Arc<ScrollPreferences>,
     pub dpi_cycle: Arc<RwLock<DpiCycles>>,
-    /// One capture plan per online device — what to divert and how to
-    /// dispatch, keyed by the device the events arrive on. Carries each
-    /// device's effective thumb-wheel sensitivity.
+    /// Capture plans for online enabled devices, plus the latest route of
+    /// every online physical device. A disabled device stays out of the plans
+    /// so capture leaves it native, but its route remains for restoration.
     pub capture_plans: SharedCapturePlans,
     pub capture_channel: CaptureChannelSlot,
     /// Exact-route channels owned and published by the inventory enumerator.
@@ -127,10 +129,21 @@ pub struct SharedHandles {
     /// Receiver access shared by HID++ sessions and pairing. Pairing/host
     /// transitions are exclusive; capture sessions share under read leases.
     pub receiver_access: ReceiverAccess,
+    /// Per-transport turns for agent-owned HID requests. Shared by every
+    /// device access built from these handles, so two slots of one receiver
+    /// queue behind each other before either starts its response timeout.
+    transport_turns: crate::hardware::TransportTurns,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
     /// Orders every path's Fn-lock writes per keyboard.
-    fn_lock_order: FnLockOrder,
+    fn_lock_order: WriteOrder,
+    /// Orders the GUI's report-rate writes and the reconnect reapply's per
+    /// mouse.
+    report_rate_order: WriteOrder,
+    /// Orders the GUI's backlight writes per keyboard.
+    backlight_order: WriteOrder,
+    /// Orders host renames per device.
+    host_name_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -165,6 +178,7 @@ impl SharedHandles {
             registry: self.channel_registry.clone(),
             receiver_access: self.receiver_access.clone(),
             device_io: self.device_io.clone(),
+            transport_turns: self.transport_turns.clone(),
         }
     }
 
@@ -192,7 +206,8 @@ impl SharedHandles {
     /// Write `fn_lock` to the keyboard at `route` and return its echo. When a
     /// newer Fn-lock write for the keyboard is requested before this one gets
     /// its turn, this one reads the keyboard instead of writing a value that
-    /// is about to be replaced.
+    /// is about to be replaced. Waiting for the turn does not count against
+    /// the write's deadline.
     pub async fn set_fn_lock(
         &self,
         route: &DeviceRoute,
@@ -200,11 +215,74 @@ impl SharedHandles {
     ) -> Result<FnLockState, WriteError> {
         let ticket = self.fn_lock_order.request(route);
         self.keyboard_device(route)
-            .run(HidppOperation::WriteFnLock, |c| async move {
-                match ticket.turn().await {
-                    Some(_turn) => openlogi_hid::set_fn_lock_on(&c, fn_lock).await,
-                    None => openlogi_hid::get_fn_lock_on(&c).await,
-                }
+            .run_in_turn(
+                HidppOperation::WriteFnLock,
+                &ticket,
+                |c| async move { openlogi_hid::set_fn_lock_on(&c, fn_lock).await },
+                |c| async move { openlogi_hid::get_fn_lock_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write `rate` to the mouse at `route` and return what it reads back.
+    /// When a newer report-rate write for the mouse is requested before this
+    /// one gets its turn, this one reads the mouse instead of writing a rate
+    /// that is about to be replaced. A reconnect reapply numbers its write
+    /// when it is scheduled, so it never lands over a pick made after that,
+    /// and a pick queued behind a reapply still gets the whole deadline once
+    /// its turn comes.
+    pub async fn set_report_rate(
+        &self,
+        route: &DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        let ticket = self.report_rate_order.request(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteReportRate,
+                &ticket,
+                |c| async move { openlogi_hid::set_report_rate_on(&c, rate).await },
+                |c| async move { openlogi_hid::get_report_rate_info_on(&c).await },
+            )
+            .await
+    }
+
+    /// Apply `change` to the backlight of the keyboard at `route` and return
+    /// what it reads back. Every change is applied, one at a time in request
+    /// order: each rewrites the whole configuration it read, so two that
+    /// overlapped would undo one another, and a newer change to another
+    /// control does not make an older one moot. Waiting for the earlier
+    /// changes does not count against the write's deadline.
+    pub async fn set_backlight(
+        &self,
+        route: &DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError> {
+        let ticket = self.backlight_order.request(route);
+        self.device(route)
+            .run_in_order(
+                HidppOperation::WriteBacklight,
+                ticket,
+                move |c| async move { openlogi_hid::update_backlight_on(&c, change).await },
+            )
+            .await
+    }
+
+    /// Name the computer on Easy-Switch `slot` of the device at `route` and
+    /// return the slots it reads back. Renames run one at a time in request
+    /// order, so the name asked for last is the one the device keeps.
+    /// Waiting for the earlier renames does not count against the write's
+    /// deadline.
+    pub async fn rename_easy_switch_host(
+        &self,
+        route: &DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        let ticket = self.host_name_order.request(route);
+        self.device(route)
+            .run_in_order(HidppOperation::RenameHost, ticket, move |c| async move {
+                openlogi_hid::rename_easy_switch_host_on(&c, slot, &name).await
             })
             .await
     }
@@ -284,7 +362,7 @@ pub struct Orchestrator {
     os_mouse_hook_available: bool,
     /// Private producer halves for the read-only runtime projections in
     /// `shared`, keeping the orchestrator's single-writer contract structural.
-    capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
+    capture_plans_tx: watch::Sender<Arc<CapturePublication>>,
     keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
     host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
     shared: SharedHandles,
@@ -329,7 +407,8 @@ impl Orchestrator {
         observable: Arc<ObservableState>,
         hardware: HardwareContext,
     ) -> Self {
-        let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
+        let (capture_plans_tx, capture_plans) =
+            watch::channel(Arc::new(CapturePublication::default()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let shared = SharedHandles {
@@ -350,8 +429,12 @@ impl Orchestrator {
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
+            transport_turns: crate::hardware::TransportTurns::default(),
             host_switch_links,
-            fn_lock_order: FnLockOrder::default(),
+            fn_lock_order: WriteOrder::default(),
+            report_rate_order: WriteOrder::default(),
+            backlight_order: WriteOrder::default(),
+            host_name_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
@@ -592,7 +675,7 @@ impl Orchestrator {
     }
 
     fn publish_capture_plans(&self) {
-        publish_arc_if_changed(&self.capture_plans_tx, self.capture_plans_for());
+        publish_arc_if_changed(&self.capture_plans_tx, self.capture_publication());
     }
 
     /// Rewrite the per-device DPI-cycle map for every online device,
@@ -632,7 +715,7 @@ impl Orchestrator {
         guard.by_key = by_key;
     }
 
-    /// One capture plan per online device, from the current config + app.
+    /// Capture plans for enabled devices, and a route for every online device.
     ///
     /// A `0x1b04` control has one owner per device. The keyboard session owns
     /// every control the keyboard spec names, so those are released from the
@@ -640,41 +723,64 @@ impl Orchestrator {
     /// otherwise have both sessions divert the multiplatform Back key
     /// (`0x00bd`, a [`BACK_CIDS`](openlogi_hid::reprog_controls::BACK_CIDS)
     /// member), each reading the other's diverted state back as "original".
-    fn capture_plans_for(&self) -> Vec<DeviceCapturePlan> {
+    ///
+    /// Disabled devices are omitted from the plans so capture leaves them
+    /// native. Their route is still published: a restore owed from an earlier
+    /// handoff has to follow the mouse after capture stops.
+    fn capture_publication(&self) -> CapturePublication {
         let rearm_generation = self.shared.capture_rearm_generation.load(Ordering::Relaxed);
         let keyboard = self.keyboard_spec_for();
-        self.devices
-            .iter()
-            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
-            .filter_map(|dev| {
-                let route = dev.route.clone()?;
-                let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
-                let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
-                    .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
-                let (app, pointer_target) = if dev.kind == DeviceKind::Keyboard {
-                    (self.current_app.as_deref(), None)
-                } else {
-                    self.mouse_context()
-                };
-                let mut plan = plan_for_device(
-                    &self.config,
-                    physical_key,
-                    &dev.config_key,
-                    route,
-                    app,
-                    rearm_generation,
-                    self.os_mouse_hook_available,
-                );
-                plan.dispatch.pointer_target = pointer_target;
-                if let Some(keyboard) = keyboard
-                    .as_ref()
-                    .filter(|keyboard| keyboard.route == plan.target.route)
-                {
-                    plan.release_controls(&keyboard.wanted);
-                }
-                Some(plan)
-            })
-            .collect()
+        let mut plans = Vec::new();
+        let mut routes = BTreeMap::new();
+        for dev in &self.devices {
+            let Some((physical_key, route)) = Self::capture_identity(dev) else {
+                continue;
+            };
+            routes
+                .entry(physical_key.clone())
+                .or_insert_with(|| route.clone());
+            if !self.config.device_enabled(&dev.config_key) {
+                continue;
+            }
+            let (app, pointer_target) = if dev.kind == DeviceKind::Keyboard {
+                (self.current_app.as_deref(), None)
+            } else {
+                self.mouse_context()
+            };
+            let mut plan = plan_for_device(
+                &self.config,
+                physical_key,
+                &dev.config_key,
+                route,
+                app,
+                rearm_generation,
+                self.os_mouse_hook_available,
+            );
+            plan.dispatch.pointer_target = pointer_target;
+            plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
+            plan.target.spec.divert_main_wheel =
+                main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
+            if let Some(keyboard) = keyboard
+                .as_ref()
+                .filter(|keyboard| keyboard.route == plan.target.route)
+            {
+                plan.release_controls(&keyboard.wanted);
+            }
+            plans.push(plan);
+        }
+        CapturePublication::new(plans, routes)
+    }
+
+    /// Physical key and route of one online device inventory can still address.
+    fn capture_identity(dev: &AgentDevice) -> Option<(PhysicalDeviceKey, DeviceRoute)> {
+        if !dev.online {
+            return None;
+        }
+        let route = dev.route.clone()?;
+        let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
+        let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
+            .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
+        Some((physical_key, route))
     }
 
     /// Publish whether the OS movement hook is currently usable.
@@ -830,8 +936,9 @@ impl Orchestrator {
         let route_key = stable_id(dev).route_key();
         let device = self.config.devices.get(key.as_str());
         let settings = VolatileMouseSettings {
-            wheel: configured_wheel_mode(&self.config, dev),
+            wheel: self.wheel_mode_change(dev),
             dpi: device.and_then(|d| d.effective_dpi(&route_key)),
+            report_rate: configured_report_rate(&self.config, dev),
             smartshift: device
                 .and_then(|d| d.effective_smartshift(&route_key))
                 .map(openlogi_hid::SmartShiftStatus::from),
@@ -840,6 +947,8 @@ impl Orchestrator {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
                 settings,
+                &self.shared.report_rate_order,
+                &self.shared.capture_plans,
             );
         }
         // A disabled entry is re-applied too: it writes black, and a device
@@ -955,15 +1064,25 @@ impl Orchestrator {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            let Some(change) = configured_wheel_mode(&self.config, dev) else {
+            let Some(change) = self.wheel_mode_change(dev) else {
                 debug!("no configured wheel mode fields — write skipped");
                 continue;
             };
             crate::hardware::write_scroll_wheel_mode_in_background(
                 self.shared.device(&route),
                 change,
+                self.shared.capture_plans.clone(),
             );
         }
+    }
+
+    /// The native wheel mode the agent's own writes (the reconnect re-apply
+    /// and the reload push) give `dev`, or `None` for no write. That includes
+    /// a wheel its capture session diverts: the session writes the same
+    /// fields with its divert, and a write here would select native
+    /// reporting under it.
+    fn wheel_mode_change(&self, dev: &AgentDevice) -> Option<crate::hardware::WheelModeChange> {
+        configured_wheel_mode(&self.config, dev, self.os_mouse_hook_available)
     }
 
     /// The latest inventory snapshot (for the IPC `inventory()` poll). Empty
@@ -1231,20 +1350,22 @@ struct KeyboardDivertSet {
     reserved: Vec<u16>,
 }
 
-/// Which of `bindings` carry a real action on a keyboard control. A
-/// [`Binding::LongPress`] is bound whatever its arms hold; a single binding is
-/// bound unless it is [`Action::None`], the "leave native" value.
+/// Which of `bindings` carry a stored binding on a keyboard control — a
+/// control is diverted whenever it is present at all, even as
+/// [`openlogi_core::binding::Action::None`] (which means "suppress this key," not "leave native"):
+/// `button_bindings_for` seeds no default for a [`ButtonId::Control`], so
+/// presence here is always an explicit user choice (#1747).
 fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivertSet {
     let mut set = KeyboardDivertSet::default();
-    for (button, binding) in bindings {
+    for button in bindings.keys() {
         let Some(cid) = button.cid().map(openlogi_core::binding::Cid::raw) else {
             continue;
         };
-        let bound =
-            matches!(binding, Binding::LongPress(_)) || binding.click_action() != Action::None;
-        if !bound {
-            continue;
-        }
+        // A keyboard key never seeds a default (see `ButtonId::ALL`'s own
+        // doc), so its presence here means the user explicitly bound it —
+        // even to `Action::None`, which means "suppress", not "leave
+        // native" (#1747). Only a key truly absent from the stored config
+        // is left on its firmware function.
         if is_reserved_keyboard_control(cid) {
             set.reserved.push(cid);
         } else {

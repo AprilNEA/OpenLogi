@@ -1,21 +1,33 @@
-//! Raw HID driver for Logitech Litra lights.
+//! Driver for Logitech Litra lights.
 //!
 //! Litra is deliberately implemented beside, not inside, the HID++ feature
 //! writers. The shared device registry owns product matching; this driver owns
-//! semantic-range conversion and fixed report encoding, while the generic
-//! transport only owns enumeration and opening the selected raw HID node.
+//! semantic-range conversion and the two ways of reaching the light, while the
+//! generic transport only owns enumeration and opening the selected HID node.
+//!
+//! A command first goes to HID++ `0x1990 Illumination` on the light's node,
+//! resolved through the root feature and read back ([`illumination`]). A light
+//! that does not answer there gets the fixed-index raw report the driver has
+//! always sent, which carries no read-back; that answer is remembered for the
+//! node, so later commands go straight to the raw report.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+mod illumination;
+
+#[cfg(test)]
+mod hidpp_tests;
+
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, PoisonError};
 use std::time::Duration;
 
-use openlogi_core::device::{LightCapabilities, LightValueRange, LightValueUnit};
+use openlogi_core::device::{LightCapabilities, LightState, LightValueRange, LightValueUnit};
 use tokio::sync::{Mutex, OwnedMutexGuard};
-use tracing::debug;
+use tracing::{debug, info};
 
-use crate::backend::HidBackend;
-use crate::channel::route::{DeviceRoute, open_route_writer};
+use crate::backend::{HidBackend, NodeId, NodeInfo};
+use crate::channel::route::{DeviceRoute, find_raw_route_node};
 
+use self::illumination::{Illumination, RESOLVE_TIMEOUT};
 use super::WriteError;
 
 // LightCommand is pure IPC wire data with no HID++ I/O, so it lives in
@@ -171,31 +183,132 @@ async fn device_lock(route: &DeviceRoute) -> OwnedMutexGuard<()> {
     lock.lock_owned().await
 }
 
-/// Apply a semantic Litra command through a raw HID route.
-pub async fn apply(
-    backend: &dyn HidBackend,
-    route: &DeviceRoute,
-    model: LitraModel,
-    command: LightCommand,
-) -> Result<(), WriteError> {
+/// Litra nodes that did not answer HID++ `0x1990`, by route and OS node.
+///
+/// Asking again would hold every command for up to [`RESOLVE_TIMEOUT`]. The
+/// answer belongs to the OS node, so a light that comes back as a different
+/// node is asked again; it lasts until the process exits otherwise.
+static RAW_ONLY: LazyLock<std::sync::Mutex<HashSet<(String, NodeId)>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+/// How the light on a route is reached.
+enum Link {
+    /// HID++ `0x1990`, with read-back; `state` was just read.
+    Illumination {
+        light: Illumination,
+        state: LightState,
+    },
+    /// Only the fixed-index raw report, on this node.
+    Raw(NodeInfo),
+}
+
+/// Find the light `route` addresses and work out how to reach it.
+///
+/// Opening the node as HID++ can fail for reasons that say nothing about
+/// the light — the backend refused it this time — so that failure falls back
+/// for this command only. A light that opened but did not answer the root
+/// ping, list `0x1990` or have its state read is remembered in [`RAW_ONLY`].
+async fn connect(backend: &dyn HidBackend, route: &DeviceRoute) -> Result<Link, WriteError> {
+    let Some(node) = find_raw_route_node(backend, route).await? else {
+        return Err(WriteError::DeviceNotFound);
+    };
+    let key = (route.to_string(), node.id.clone());
+    if RAW_ONLY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&key)
+    {
+        return Ok(Link::Raw(node));
+    }
+    let channel = match backend.open_hidpp(&node).await {
+        Ok(Some(channel)) => channel,
+        Ok(None) => {
+            remember_raw_only(key, route, &"no HID++ collection");
+            return Ok(Link::Raw(node));
+        }
+        Err(error) => {
+            debug!(route = %route, %error, "could not open the Litra as HID++ — sending its raw report");
+            return Ok(Link::Raw(node));
+        }
+    };
+    match tokio::time::timeout(RESOLVE_TIMEOUT, illumination::resolve(channel)).await {
+        Ok(Ok((light, state))) => Ok(Link::Illumination { light, state }),
+        Ok(Err(unresolved)) => {
+            remember_raw_only(key, route, &unresolved);
+            Ok(Link::Raw(node))
+        }
+        Err(_elapsed) => {
+            remember_raw_only(key, route, &"no answer");
+            Ok(Link::Raw(node))
+        }
+    }
+}
+
+fn remember_raw_only(key: (String, NodeId), route: &DeviceRoute, reason: &dyn std::fmt::Display) {
+    info!(route = %route, %reason, "Litra does not answer HID++ 0x1990 — using its fixed raw report");
+    RAW_ONLY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key);
+}
+
+/// Whether `route` names `model`'s registered Litra interface.
+fn check_route(route: &DeviceRoute, model: LitraModel) -> Result<(), WriteError> {
     let Some(route_model) = litra_model_for_route(route) else {
         return Err(unsupported("raw_hid_route"));
     };
     if route_model != model {
         return Err(unsupported("litra_model"));
     }
-    let report = encode_command(model, command)?;
+    Ok(())
+}
+
+/// Apply a semantic Litra command to the light on `route`.
+///
+/// Returns the state the light reports afterwards, or `None` when it is
+/// reached only through the raw report, which reads nothing back.
+pub async fn apply(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    model: LitraModel,
+    command: LightCommand,
+) -> Result<Option<LightState>, WriteError> {
+    check_route(route, model)?;
     let _guard = device_lock(route).await;
-    let Some(mut writer) = open_route_writer(backend, route).await? else {
-        return Err(WriteError::DeviceNotFound);
+    let node = match connect(backend, route).await? {
+        Link::Illumination { light, state } => {
+            // The command reached the light over HID++ from here on, so a
+            // failure is returned rather than sent again as a raw report.
+            let state = light.apply(state, command).await?;
+            debug!(route = %route, ?state, "applied Litra command over HID++ 0x1990");
+            return Ok(Some(state));
+        }
+        Link::Raw(node) => node,
     };
+    let report = encode_command(model, command)?;
+    let mut writer = backend.open_raw_writer(&node).await?;
     tokio::time::timeout(RAW_WRITE_TIMEOUT, writer.write_output_report(&report))
         .await
         .map_err(|_| WriteError::RequestTimedOut {
             operation: super::HidppOperation::Light,
         })??;
     debug!(route = %route, "applied raw Litra command");
-    Ok(())
+    Ok(None)
+}
+
+/// Read the state of the light on `route`, or `None` when it is reached only
+/// through the raw report, which reads nothing back.
+pub async fn read_state(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    model: LitraModel,
+) -> Result<Option<LightState>, WriteError> {
+    check_route(route, model)?;
+    let _guard = device_lock(route).await;
+    match connect(backend, route).await? {
+        Link::Illumination { state, .. } => Ok(Some(state)),
+        Link::Raw(_) => Ok(None),
+    }
 }
 
 #[cfg(test)]

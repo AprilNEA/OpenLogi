@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use openlogi_core::binding::LongPressBinding;
+use openlogi_core::binding::{LongPressBinding, WheelHoldBinding};
 
 use super::*;
 
@@ -16,6 +16,57 @@ fn hook_press(id: u64, button: ButtonId) -> ActivePress {
 
 fn long_press(short: Action, long: Action) -> Binding {
     Binding::LongPress(LongPressBinding::new(short, long))
+}
+
+fn wheel_hold(click: Action) -> Binding {
+    Binding::WheelHold(WheelHoldBinding::horizontal_scroll(click))
+}
+
+fn hook_press_bound(id: u64, binding: &Binding) -> ActivePress {
+    ActivePress {
+        token: PressToken::hook_for_test(id, ButtonId::Back),
+        behavior: PressBehavior::new(Some(binding), Instant::now()),
+        target: ActionDispatchTarget::Keyboard,
+    }
+}
+
+/// Press `binding` on Back, feed `inputs`, and return every event the runtime
+/// emitted after the press.
+fn events_after_press(
+    binding: &Binding,
+    inputs: impl FnOnce(&ActivePress) -> Vec<ButtonInput>,
+) -> Vec<ButtonRuntimeEvent> {
+    let mut state = ButtonState::default();
+    let press = hook_press_bound(1, binding);
+    state.press(press.clone());
+    let mut events = Vec::new();
+    for input in inputs(&press) {
+        process_input(&mut state, input, &mut |event| events.push(event));
+    }
+    events
+}
+
+fn up(press: &ActivePress) -> ButtonInput {
+    ButtonInput::Up {
+        key: press.token.key.clone(),
+        released_at: Instant::now(),
+    }
+}
+
+fn wheel(press: &ActivePress) -> ButtonInput {
+    ButtonInput::WheelWhilePressed {
+        token: press.token.clone(),
+    }
+}
+
+fn triggered(events: &[ButtonRuntimeEvent]) -> Vec<&Action> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ButtonRuntimeEvent::Triggered { action, .. } => Some(action),
+            _ => None,
+        })
+        .collect()
 }
 
 fn recv_event(receiver: &mpsc::Receiver<ButtonRuntimeEvent>) -> ButtonRuntimeEvent {
@@ -40,6 +91,99 @@ fn release_returns_the_exact_active_press_once() {
     assert!(state.press(press.clone()).is_none());
     assert_eq!(state.release(&press.token.key), Some(press.clone()));
     assert_eq!(state.release(&press.token.key), None);
+}
+
+#[test]
+fn a_wheel_hold_click_fires_its_click_on_release_only() {
+    let binding = wheel_hold(Action::Copy);
+    assert_eq!(hook_press_bound(1, &binding).behavior.start_action(), None);
+    let events = events_after_press(&binding, |press| vec![up(press)]);
+    assert_eq!(triggered(&events), [&Action::Copy]);
+    assert!(matches!(
+        events.last(),
+        Some(ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn wheel_movement_during_a_wheel_hold_press_suppresses_its_click() {
+    let events = events_after_press(&wheel_hold(Action::Copy), |press| {
+        vec![wheel(press), wheel(press), up(press)]
+    });
+    assert_eq!(triggered(&events), Vec::<&Action>::new());
+    assert!(matches!(
+        events.as_slice(),
+        [ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn wheel_movement_for_a_replaced_press_cannot_suppress_the_live_click() {
+    let binding = wheel_hold(Action::Copy);
+    let mut state = ButtonState::default();
+    let first = hook_press_bound(1, &binding);
+    let second = hook_press_bound(2, &binding);
+    state.press(first.clone());
+    state.press(second.clone());
+    let mut events = Vec::new();
+    process_input(&mut state, wheel(&first), &mut |event| events.push(event));
+    process_input(&mut state, up(&second), &mut |event| events.push(event));
+    assert_eq!(triggered(&events), [&Action::Copy]);
+}
+
+#[test]
+fn wheel_movement_leaves_a_long_press_alone() {
+    let events = events_after_press(&long_press(Action::Copy, Action::Paste), |press| {
+        vec![wheel(press), up(press)]
+    });
+    assert_eq!(triggered(&events), [&Action::Copy]);
+}
+
+#[test]
+fn a_scrolled_hidpp_wheel_hold_press_ends_without_its_click() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let session = HidppSessionId::with_epoch("mouse-a", 7);
+    let binding = wheel_hold(Action::Copy);
+    let press = input
+        .try_hidpp_down(
+            &session,
+            ButtonId::Back,
+            Some(&binding),
+            ActionDispatchTarget::Keyboard,
+        )
+        .expect("down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    assert!(input.try_wheel_while_pressed(&press));
+    assert!(input.try_hidpp_up(&session, ButtonId::Back));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+    assert!(owner.shutdown());
+    assert!(
+        received
+            .try_iter()
+            .all(|event| !matches!(event, ButtonRuntimeEvent::Triggered { .. })),
+        "a press that scrolled must not click"
+    );
 }
 
 #[test]
@@ -376,6 +520,8 @@ fn invalidation_rejects_old_tokens_and_cancels_active_presses() {
 
     input.invalidate_all();
     assert!(!input.try_trigger_while_pressed(&token, &Action::Copy));
+    // The dispatcher posts a held-wheel scroll only for an accepted token.
+    assert!(!input.try_wheel_while_pressed(&token));
     assert!(matches!(
         recv_event(&received),
         ButtonRuntimeEvent::Ended {

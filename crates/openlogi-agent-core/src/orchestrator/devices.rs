@@ -4,10 +4,11 @@
 
 use std::collections::HashMap;
 
-use openlogi_core::config::Config;
+use openlogi_core::config::{Config, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use openlogi_hid::session::gesture::MainWheelDivert;
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, ReportRate};
 
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
@@ -16,8 +17,57 @@ use crate::watchers::host_switch::HostSwitchLink;
 /// Resolve the two independently-gated HiResWheel settings for one device
 /// into the change that applies them. A setting the device cannot take, or
 /// that is not configured, is left out of the change and keeps the device's
-/// current value; `None` when that leaves nothing to write.
-pub(super) fn configured_wheel_mode(config: &Config, dev: &AgentDevice) -> Option<WheelModeChange> {
+/// current value; `None` when that leaves nothing to write, and while the
+/// device's capture session owns the wheel ([`main_wheel_divert`]): that
+/// session writes the same settings along with its divert, and a write from
+/// here would hand the wheel back to native reporting under it.
+pub(super) fn configured_wheel_mode(
+    config: &Config,
+    dev: &AgentDevice,
+    os_mouse_hook_available: bool,
+) -> Option<WheelModeChange> {
+    if main_wheel_divert(config, dev, os_mouse_hook_available).is_some() {
+        return None;
+    }
+    let (resolution, inverted) = wheel_settings(config, dev)?;
+    WheelModeChange::new(resolution, inverted)
+}
+
+/// The main-wheel divert `dev`'s capture session arms for smooth scrolling,
+/// carrying the wheel settings [`configured_wheel_mode`] would otherwise
+/// write; `None` leaves the wheel native.
+///
+/// Diverting needs the device's opt-in, its `0x2121` wheel, and an agent that
+/// may post the scrolling in the wheel's place: the mouse hook running (on
+/// macOS, Accessibility granted) and mouse capture not switched off. Logi
+/// Options+ keeps the wheel native without Accessibility the same way.
+pub(super) fn main_wheel_divert(
+    config: &Config,
+    dev: &AgentDevice,
+    os_mouse_hook_available: bool,
+) -> Option<MainWheelDivert> {
+    let wanted = os_mouse_hook_available
+        && config.app_settings.capture_mouse_events
+        && config.device_enabled(&dev.config_key)
+        && config.smooth_wheel(&dev.config_key)
+        && dev.capabilities.is_some_and(|caps| caps.hires_wheel);
+    if !wanted {
+        return None;
+    }
+    let (resolution, inverted) = wheel_settings(config, dev)?;
+    Some(MainWheelDivert {
+        resolution,
+        inverted,
+    })
+}
+
+/// The configured wheel resolution and native inversion for `dev`, each
+/// `None` where the device cannot take it or nothing is configured; `None`
+/// overall while the device's capabilities are unknown.
+fn wheel_settings(
+    config: &Config,
+    dev: &AgentDevice,
+) -> Option<(Option<ScrollResolution>, Option<bool>)> {
     let capabilities = dev.capabilities?;
     let route_key = stable_id(dev).route_key();
     let device = config.devices.get(dev.config_key.as_str());
@@ -28,7 +78,35 @@ pub(super) fn configured_wheel_mode(config: &Config, dev: &AgentDevice) -> Optio
     let inverted = capabilities
         .scroll_inversion
         .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
-    WheelModeChange::new(resolution, inverted)
+    Some((resolution, inverted))
+}
+
+/// Whether the scrolling the agent posts for `dev`'s main wheel is reversed —
+/// a wheel-hold button's horizontal scroll and the diverted smooth wheel: the
+/// inversion its native wheel gets. A wheel with the native `0x2121`
+/// invert bit is written the value effective on the link `dev` is reached
+/// by ([`configured_wheel_mode`]); one without it is reversed by the hook
+/// from the device-level setting (`Orchestrator::publish_scroll_inversion`).
+/// Unknown capabilities write and reverse nothing, so nothing is inverted.
+pub(super) fn wheel_inverted(config: &Config, dev: &AgentDevice) -> bool {
+    match dev.capabilities {
+        Some(capabilities) if capabilities.scroll_inversion => config
+            .devices
+            .get(dev.config_key.as_str())
+            .is_some_and(|d| d.effective_invert_scroll(&stable_id(dev).route_key())),
+        Some(_) => config.invert_scroll(&dev.config_key),
+        None => false,
+    }
+}
+
+/// The saved report rate to push to `dev`: only to a device with a
+/// report-rate feature, so a rate saved for a mouse is never written to
+/// whatever later answers under the same key without one.
+pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Option<ReportRate> {
+    dev.capabilities
+        .is_some_and(|caps| caps.report_rate)
+        .then(|| config.report_rate(&dev.config_key))
+        .flatten()
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's

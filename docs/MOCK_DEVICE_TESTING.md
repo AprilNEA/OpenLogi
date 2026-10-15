@@ -32,7 +32,8 @@ Hardware complexity makes the distinction important:
 - A channel has a dedicated reader and can carry concurrent requests,
   responses, late responses, and unsolicited lifecycle/input notifications.
 - Some output uses request/response HID++ reports, some lighting uses 64-byte
-  `0x12` reports, and standalone Litra devices use raw writes with no response.
+  `0x12` reports, and standalone Litra devices are tried over HID++ `0x1990`
+  before falling back to raw writes with no response.
 - Enumeration is event-first and stateful. It reuses channels, caches immutable
   probe data, refreshes volatile battery state, replays last-good inventory
   through transient failures, and eventually retires and reopens unhealthy

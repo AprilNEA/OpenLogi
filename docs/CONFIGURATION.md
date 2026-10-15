@@ -41,7 +41,7 @@ profiles so they keep their native direction.
 
 ## Shape
 
-`schema_version` is required and currently `7`. `selected_device` is an
+`schema_version` is required and currently `8`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -53,7 +53,8 @@ optional physical device key.
 - `smooth_scroll` toggles finite animation for traditional mouse-wheel input. With it
   off, a diverted horizontal thumb wheel still scrolls as a phased gesture (ended after
   120 ms idle) so apps that reveal content on horizontal swipes, like Messages, react;
-  vertical wheel output stays a plain wheel
+  vertical wheel output stays a plain wheel. A mouse whose `smooth_wheel` is on
+  eases its main wheel either way
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
   continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
@@ -85,6 +86,20 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
+- `smooth_wheel` for mice with a HID++ `0x2121` wheel: `true` smooths that
+  mouse's main wheel in software, as Logi Options+ "Smooth scrolling" does,
+  whatever `smooth_scroll` says. The agent switches the wheel to diverted
+  reporting and posts eased scrolling for each report, applying the mouse's
+  scroll inversion and `vertical_scroll_sensitivity`. It needs the input access
+  the mouse hook needs (Accessibility on macOS) and `capture_mouse_events` on;
+  without them the wheel stays native. The agent hands the wheel back to native
+  reporting when the switch goes off, the mouse is disabled, or the agent
+  exits. If the agent crashes first, the wheel does not scroll until the agent
+  runs again (the launch-at-login service restarts it) or the mouse reconnects,
+  which drops the diversion. The desktop's Scrolling card offers it as
+  **Smooth wheel** when the current connection has `0x2121`; a smooth wheel
+  turned on over another connection can still be turned off there. Absent or
+  `false` leaves the wheel native
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
@@ -113,6 +128,9 @@ Common device fields are:
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+
   does; `false` leaves the keyboard's layout to its own shortcuts
+- `report_rate` for mice with an adjustable report rate (HID++ `0x8060` or
+  `0x8061`), in hertz. The agent writes it when the mouse reconnects over a
+  connection that offers that rate; absent leaves the mouse's own rate
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or
@@ -169,6 +187,39 @@ Long-press pairs currently apply to global device `bindings` and are authored
 in TOML. The GUI presents their `short` action; changing that button in the GUI
 replaces the whole pair with the selected single action. `per_app_bindings` and
 `keyboard.bindings` remain single-action maps.
+
+A wheel-hold binding on `Back` or `Forward` turns the main scroll wheel into a
+virtual thumb wheel while the button is held, as Logi Options+ offers on mice
+without a thumb wheel such as the MX Anywhere family:
+
+```toml
+Back = { click = "BrowserBack", wheel = "HorizontalScroll" }
+```
+
+Turning the wheel away from you scrolls left and toward you scrolls right,
+reversed when the device's `invert_scroll` is on. Releasing the button without
+turning the wheel fires `click`; a press that scrolled fires nothing else. It is
+off unless you bind it.
+
+The held scroll needs raw-wheel reporting on that button, which only some
+firmware offers, and the mouse hook, so OpenLogi can post the scroll (on macOS,
+the Accessibility permission). Without either, OpenLogi captures the button for
+`click` alone, as it does a long-press pair, and the wheel scrolls as usual.
+With mouse capture turned off the button keeps its native function, like every
+other mouse binding. While the button is diverted the wheel scrolls only through
+OpenLogi, so OpenLogi hands both back to the firmware when the binding changes,
+the device disconnects, or the agent exits. It never sets the firmware's
+persistent flag, so the diversion does not outlive a device power cycle.
+
+In the desktop app, select `Back` or `Forward` in the default profile and turn
+on **Hold to scroll sideways**. The switch appears only on mice that report raw
+wheel on that button; a binding carried over to another mouse still shows it,
+so it can be turned off. Picking a different action for the button keeps the
+wheel hold and changes `click`. A button in gesture mode offers the switch too:
+turning it on leaves gesture mode with the gesture map's `Click` as the press,
+and turning gestures back on restores the saved directions. The setting is per
+device, not per application: an app profile that gives the button its own
+action replaces the wheel hold in that application.
 
 An Actions Ring entry wraps the action and may add an icon or literal label:
 

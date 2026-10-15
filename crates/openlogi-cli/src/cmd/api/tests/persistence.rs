@@ -357,6 +357,64 @@ async fn unmeasured_capabilities_do_not_refuse_os_layout() {
     assert_eq!(config.devices["unit:12345678"].keep_os_layout, Some(true));
 }
 
+#[tokio::test]
+async fn saves_a_verified_report_rate_then_reloads() {
+    use super::report_rate::{info, report_rate_command, report_rate_read, report_rate_write};
+    use openlogi_core::hid::ReportRate;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE);
+    let reload_path = path.clone();
+    let result = run_script_at(
+        identified_snapshot(),
+        report_rate_command(Some(1000)),
+        vec![
+            report_rate_read(500),
+            report_rate_write(Ok(info(1000))),
+            Box::new(move |request| {
+                assert!(matches!(request, AgentRequest::ReloadConfig {}));
+                let saved = Config::load_from_path(&reload_path).unwrap();
+                assert_eq!(
+                    saved.report_rate("unit:12345678"),
+                    Some(ReportRate::new(1000))
+                );
+                AgentResponse::ReloadConfig(Ok(()))
+            }),
+        ],
+        Some(&path),
+    )
+    .await;
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["data"]["persistence"], "saved");
+}
+
+#[tokio::test]
+async fn report_rate_readback_mismatch_never_saves() {
+    use super::report_rate::{info, report_rate_command, report_rate_read, report_rate_write};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE);
+    let result = run_script_at(
+        identified_snapshot(),
+        report_rate_command(Some(1000)),
+        vec![report_rate_read(500), report_rate_write(Ok(info(500)))],
+        Some(&path),
+    )
+    .await;
+    assert_eq!(result["error"]["code"], "readback_mismatch");
+    assert!(!path.exists());
+
+    let read = run_script_at(
+        identified_snapshot(),
+        report_rate_command(None),
+        vec![],
+        Some(&path),
+    )
+    .await;
+    assert_eq!(read["error"]["code"], "invalid_value");
+    assert!(!path.exists());
+}
+
 #[test]
 fn parser_accepts_save_after_the_setting() {
     let cli = crate::Cli::try_parse_from([

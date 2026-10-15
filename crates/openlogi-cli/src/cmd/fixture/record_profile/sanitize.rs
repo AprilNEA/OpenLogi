@@ -2,6 +2,7 @@
 
 use anyhow::{Result, anyhow};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::hid::EasySwitchHosts;
 use openlogi_fixture::{
     SyntheticIdentityKind, SyntheticIdentityOrdinal, SyntheticIdentityValue,
     generate_synthetic_identity,
@@ -48,6 +49,19 @@ pub(super) fn standalone(device: &mut StandaloneDevice) -> Result<()> {
         device.unit_id = unit_id(ordinal)?;
     }
     Ok(())
+}
+
+/// Replace every computer name with `Computer N`, N the one-based slot: a
+/// host name is whatever its owner called the computer, often their own name.
+/// Cut to the slot's size so the profile still validates.
+pub(super) fn easy_switch_hosts(hosts: &mut EasySwitchHosts) {
+    for slot in &mut hosts.slots {
+        if let Some(name) = slot.name.as_mut() {
+            let mut synthetic = format!("Computer {}", u16::from(slot.index) + 1);
+            synthetic.truncate(usize::from(slot.name_max_len).max(1));
+            *name = synthetic;
+        }
+    }
 }
 
 fn ordinal(index: usize) -> Result<SyntheticIdentityOrdinal> {

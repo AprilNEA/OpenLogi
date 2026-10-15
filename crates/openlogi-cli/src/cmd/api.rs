@@ -7,7 +7,9 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
-use openlogi_core::hid::{DeviceRoute, Dpi, SmartShiftMode, WriteError};
+use openlogi_core::hid::{
+    DeviceRoute, Dpi, EasySwitchSlot, HostConnection, ReportRate, SmartShiftMode, WriteError,
+};
 use openlogi_ipc::{AgentClient, AgentSnapshot};
 use serde_json::{Value, json};
 use tarpc::context;
@@ -67,6 +69,28 @@ pub enum ApiCommand {
         #[arg(long, value_enum)]
         set: Switch,
     },
+    /// Read the report rate, or set it immediately (add --save to persist).
+    ReportRate {
+        /// Exact opaque ID returned by `api devices`.
+        #[arg(long)]
+        device: String,
+        /// A rate in hertz that the device lists for its current connection.
+        /// Omit to read only.
+        #[arg(long)]
+        set: Option<u16>,
+    },
+    /// List the device's Easy-Switch channels, or name the computer on one.
+    EasySwitch {
+        /// Exact opaque ID returned by `api devices`.
+        #[arg(long)]
+        device: String,
+        /// The channel to rename, numbered from 1 as on the device.
+        #[arg(long, requires = "name", value_parser = clap::value_parser!(u8).range(1..))]
+        channel: Option<u8>,
+        /// The computer's new name; the device limits its length in bytes.
+        #[arg(long, requires = "channel")]
+        name: Option<String>,
+    },
 }
 
 /// A partial SmartShift update; omitted fields are read from the device.
@@ -108,6 +132,14 @@ pub enum Switch {
     On,
     /// Turn the setting off.
     Off,
+}
+
+impl Switch {
+    /// Whether this asks for the setting to be on.
+    #[must_use]
+    pub fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
 }
 
 /// Emit one JSON envelope and a matching process status, including runtime failures.
@@ -183,34 +215,13 @@ async fn execute(
         }
         ApiCommand::Smartshift(args) => smartshift(client, &snapshot, &args, save.as_mut()).await,
         ApiCommand::FnLock { device, set } => {
-            let route = select_device(&snapshot, &device)?;
-            let state = match set {
-                Some(set) => {
-                    let requested = matches!(set, Switch::On);
-                    if let Some(save) = save.as_mut() {
-                        save.fn_lock(requested);
-                    }
-                    let observed =
-                        agent::call(client.set_fn_lock(context::current(), route, requested))
-                            .await??;
-                    // A superseded agent request reads instead of writing; Ok
-                    // alone does not guarantee that our requested state won.
-                    if observed.fn_lock != requested {
-                        return Err(ApiError::new(
-                            "readback_mismatch",
-                            "device Fn lock differs from the requested state after the write",
-                        ));
-                    }
-                    observed
-                }
-                None => agent::call(client.read_fn_lock(context::current(), route)).await??,
-            };
-            Ok(json!({
-                "device": device,
-                "persistence": "not_saved",
-                "fn_lock": state.fn_lock,
-                "default_fn_lock": state.default_fn_lock,
-            }))
+            fn_lock(
+                client,
+                select_device(&snapshot, &device)?,
+                set,
+                save.as_mut(),
+            )
+            .await
         }
         ApiCommand::OsLayout { device, set } => {
             let route = select_device(&snapshot, &device)?;
@@ -228,7 +239,7 @@ async fn execute(
                     "the keyboard does not let software set its key layout",
                 ));
             }
-            let keep = matches!(set, Switch::On);
+            let keep = set.is_on();
             save.keep_os_layout(keep);
             Ok(json!({
                 "device": device,
@@ -236,12 +247,69 @@ async fn execute(
                 "keep_os_layout": keep,
             }))
         }
+        ApiCommand::ReportRate { device, set } => {
+            report_rate(
+                client,
+                select_device(&snapshot, &device)?,
+                set,
+                save.as_mut(),
+            )
+            .await
+        }
+        ApiCommand::EasySwitch {
+            device,
+            channel,
+            name,
+        } => {
+            easy_switch(
+                client,
+                select_device(&snapshot, &device)?,
+                channel.zip(name),
+            )
+            .await
+        }
     }?;
     if let Some(save) = save {
         save.commit(client).await?;
         result["persistence"] = json!("saved");
     }
     Ok(result)
+}
+
+/// Read the Fn lock, or set it to `set` first and check that it took.
+async fn fn_lock(
+    client: &AgentClient,
+    route: DeviceRoute,
+    set: Option<Switch>,
+    save: Option<&mut Save>,
+) -> Result<Value, ApiError> {
+    let device = route.to_string();
+    let state = match set {
+        Some(set) => {
+            let requested = set.is_on();
+            if let Some(save) = save {
+                save.fn_lock(requested);
+            }
+            let observed =
+                agent::call(client.set_fn_lock(context::current(), route, requested)).await??;
+            // A superseded agent request reads instead of writing; Ok alone
+            // does not guarantee that our requested state won.
+            if observed.fn_lock != requested {
+                return Err(ApiError::new(
+                    "readback_mismatch",
+                    "device Fn lock differs from the requested state after the write",
+                ));
+            }
+            observed
+        }
+        None => agent::call(client.read_fn_lock(context::current(), route)).await??,
+    };
+    Ok(json!({
+        "device": device,
+        "persistence": "not_saved",
+        "fn_lock": state.fn_lock,
+        "default_fn_lock": state.default_fn_lock,
+    }))
 }
 
 async fn dpi(
@@ -278,6 +346,100 @@ async fn dpi(
         "current": info.current,
         "supported": info.capabilities.values(),
     }))
+}
+
+async fn report_rate(
+    client: &AgentClient,
+    route: DeviceRoute,
+    set: Option<u16>,
+    save: Option<&mut Save>,
+) -> Result<Value, ApiError> {
+    let device = route.to_string();
+    let mut info =
+        agent::call(client.read_report_rate(context::current(), route.clone())).await??;
+    if let Some(value) = set {
+        let requested = ReportRate::new(value);
+        if !info.supports(requested) {
+            return Err(ApiError::new(
+                "invalid_value",
+                "report rate is not one the device lists for its current connection",
+            ));
+        }
+        if let Some(save) = save {
+            save.report_rate(requested);
+        }
+        info = agent::call(client.set_report_rate(context::current(), route, requested)).await??;
+        // A superseded agent request reads instead of writing; Ok alone does
+        // not guarantee that our requested rate won.
+        if info.current != requested {
+            return Err(ApiError::new(
+                "readback_mismatch",
+                "device report rate differs from the requested value after the write",
+            ));
+        }
+    }
+    Ok(json!({
+        "device": device,
+        "persistence": "not_saved",
+        "current": info.current,
+        "supported": info.supported,
+    }))
+}
+
+/// Read the Easy-Switch channels, or rename the computer on `rename`'s
+/// one-based channel first.
+async fn easy_switch(
+    client: &AgentClient,
+    route: DeviceRoute,
+    rename: Option<(u8, String)>,
+) -> Result<Value, ApiError> {
+    let device = route.to_string();
+    let hosts = match rename {
+        Some((channel, name)) => {
+            let slot = channel - 1;
+            let hosts = agent::call(client.rename_easy_switch_host(
+                context::current(),
+                route,
+                slot,
+                name.clone(),
+            ))
+            .await??;
+            // Renames run in request order, so a later one may already have
+            // replaced ours; Ok alone does not guarantee that our name won.
+            if hosts.slot(slot).and_then(|slot| slot.name.as_deref()) != Some(name.trim()) {
+                return Err(ApiError::new(
+                    "readback_mismatch",
+                    "device host name differs from the requested name after the write",
+                ));
+            }
+            hosts
+        }
+        None => agent::call(client.read_easy_switch_hosts(context::current(), route)).await??,
+    };
+    Ok(json!({
+        "device": device,
+        "persistence": "not_saved",
+        "current_channel": hosts.current.map(|slot| u16::from(slot) + 1),
+        "can_rename": hosts.can_rename,
+        "channels": hosts.slots.iter().map(channel_json).collect::<Vec<_>>(),
+    }))
+}
+
+fn channel_json(slot: &EasySwitchSlot) -> Value {
+    json!({
+        "channel": u16::from(slot.index) + 1,
+        "paired": slot.paired,
+        "connection": match slot.connection {
+            HostConnection::Unknown => "unknown",
+            HostConnection::Unifying => "unifying",
+            HostConnection::Usb => "usb",
+            HostConnection::Bluetooth => "bluetooth",
+            HostConnection::Bolt => "bolt",
+        },
+        "name": slot.name,
+        "name_max_len": slot.name_max_len,
+        "os": slot.os.map(|os| os.to_string()),
+    })
 }
 
 async fn smartshift(
@@ -326,7 +488,8 @@ impl From<WriteError> for ApiError {
         let code = match &error {
             WriteError::FeatureUnsupported { .. }
             | WriteError::LightUnsupported { .. }
-            | WriteError::HapticWaveformUnsupported { .. } => "unsupported_feature",
+            | WriteError::HapticWaveformUnsupported { .. }
+            | WriteError::HostRenameUnsupported => "unsupported_feature",
             WriteError::DeviceNotFound => "device_not_found",
             WriteError::DeviceUnreachable { .. } => "device_offline",
             WriteError::AgentUnavailable => "agent_unavailable",
@@ -334,8 +497,13 @@ impl From<WriteError> for ApiError {
             WriteError::AmbiguousRawDevice => "ambiguous_device",
             // The agent's own checks report what `dpi` checks for itself, so
             // a caller sees one code whichever side caught it.
-            WriteError::DpiUnsupported { .. } => "invalid_value",
-            WriteError::DpiNotApplied { .. } => "readback_mismatch",
+            WriteError::DpiUnsupported { .. }
+            | WriteError::ReportRateUnsupported { .. }
+            | WriteError::HostSlotEmpty { .. }
+            | WriteError::HostNameRejected { .. } => "invalid_value",
+            WriteError::DpiNotApplied { .. }
+            | WriteError::ReportRateNotApplied { .. }
+            | WriteError::HostNameNotApplied { .. } => "readback_mismatch",
             _ => "device_error",
         };
         Self::new(code, error.to_string())
