@@ -27,6 +27,7 @@ use tokio::sync::watch;
 /// The agent's observable state, and the notification that it changed.
 pub struct ObservableState {
     tx: watch::Sender<Observation>,
+    host_switch: watch::Sender<openlogi_ipc::HostSwitchObservation>,
 }
 
 impl ObservableState {
@@ -62,7 +63,70 @@ impl ObservableState {
                 foreground: ForegroundApps::default(),
             },
         });
-        Self { tx }
+        let (host_switch, _) = watch::channel(openlogi_ipc::HostSwitchObservation {
+            generation: 1,
+            events: Vec::new(),
+        });
+        Self { tx, host_switch }
+    }
+
+    /// Publish only a validated, actually observed host-button choice. Bounded
+    /// memory is separate from ordinary state and does not retain input text.
+    pub fn publish_host_switch(&self, route: openlogi_core::hid::DeviceRoute, slot: u8) {
+        let Some(channel) = openlogi_ipc::HostSwitchChannel::from_slot(slot) else {
+            return;
+        };
+        let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        else {
+            return;
+        };
+        let Ok(observed_at_ms) = u64::try_from(duration.as_millis()) else {
+            return;
+        };
+        self.host_switch.send_modify(|state| {
+            state.generation += 1;
+            state.events.push(openlogi_ipc::HostSwitchEvent {
+                sequence: state.generation,
+                route,
+                channel,
+                observed_at_ms,
+            });
+            if state.events.len() > 16 {
+                state.events.remove(0);
+            }
+        });
+    }
+    /// A reconnect may report the keyboard's measured current host. Publish
+    /// only after this agent previously observed that keyboard leaving for a
+    /// different host; initial startup never drives a monitor input.
+    pub fn publish_host_arrival(&self, route: openlogi_core::hid::DeviceRoute, slot: u8) {
+        let Some(channel) = openlogi_ipc::HostSwitchChannel::from_slot(slot) else {
+            return;
+        };
+        let changed = self
+            .host_switch
+            .borrow()
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.route == route)
+            .is_some_and(|event| event.channel != channel);
+        if changed {
+            self.publish_host_switch(route, slot);
+        }
+    }
+    /// Hold with the same heartbeat budget as the existing state observation.
+    pub async fn observe_host_switch(
+        &self,
+        since: Generation,
+    ) -> openlogi_ipc::HostSwitchObservation {
+        let mut rx = self.host_switch.subscribe();
+        match tokio::time::timeout(OBSERVE_HOLD, rx.wait_for(|state| state.generation != since))
+            .await
+        {
+            Ok(Ok(state)) => state.clone(),
+            Ok(Err(_)) | Err(_) => self.host_switch.borrow().clone(),
+        }
     }
 
     /// Clone the whole current state.
@@ -511,5 +575,55 @@ mod tests {
 
         state.set_accessibility_and_hook(true, false);
         assert!(rx.has_changed().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod host_switch_tests {
+    use super::ObservableState;
+    use openlogi_core::hid::DeviceRoute;
+    #[tokio::test]
+    async fn host_events_are_separate_bounded_and_reject_unknown_slots() {
+        let state = ObservableState::new("fixture".into());
+        let initial = state.snapshot();
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb37c,
+        };
+        state.publish_host_arrival(route.clone(), 0);
+        assert_eq!(
+            state.observe_host_switch(0).await.generation,
+            1,
+            "Startup must not publish an arrival"
+        );
+        state.publish_host_switch(route.clone(), 3);
+        assert_eq!(state.observe_host_switch(0).await.generation, 1);
+        for i in 0..20 {
+            state.publish_host_switch(route.clone(), i % 3);
+        }
+        let observation = state.observe_host_switch(0).await;
+        assert_eq!(observation.generation, 21);
+        assert_eq!(observation.events.len(), 16);
+        assert_eq!(observation.events.first().unwrap().sequence, 6);
+        assert_eq!(observation.events.last().unwrap().channel.number(), 2);
+        assert!(
+            observation
+                .events
+                .iter()
+                .all(|event| event.route == route && event.observed_at_ms > 0)
+        );
+        assert_eq!(
+            state.snapshot(),
+            initial,
+            "Host choices must not mutate ordinary GUI state"
+        );
+        state.publish_host_arrival(route.clone(), 0);
+        assert_eq!(state.observe_host_switch(0).await.generation, 22);
+        state.publish_host_arrival(route, 0);
+        assert_eq!(
+            state.observe_host_switch(0).await.generation,
+            22,
+            "Same-host readings are not events"
+        );
     }
 }

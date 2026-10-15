@@ -96,7 +96,9 @@ pub use succession::Identity;
 ///      `Capabilities::backlight` appended — the keyboard backlight set from
 ///      the settings app; `WriteError::HapticsUnavailable` appended — a
 ///      haptic play is refused before it is sent while the device reports a
-///      non-zero `0x19b0` haptic status.
+///      non-zero `0x19b0` haptic status; `DeviceConfig::host_switch_events`
+///      and `Agent::observe_host_switch` appended — opt-in, bounded keyboard
+///      channel observations with a quiet initial client baseline.
 pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -467,6 +469,49 @@ pub enum ClientKind {
     Overlay,
 }
 
+/// One physical keyboard host-button choice, not a confirmation of the host move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostSwitchChannel {
+    One,
+    Two,
+    Three,
+}
+impl HostSwitchChannel {
+    /// Convert the firmware's zero-based host slot once at the boundary.
+    #[must_use]
+    pub fn from_slot(slot: u8) -> Option<Self> {
+        match slot {
+            0 => Some(Self::One),
+            1 => Some(Self::Two),
+            2 => Some(Self::Three),
+            _ => None,
+        }
+    }
+    /// Human channel number for the external JSON contract.
+    #[must_use]
+    pub fn number(self) -> u8 {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+            Self::Three => 3,
+        }
+    }
+}
+/// An agent-memory event. No keys, text, host names or pairing material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostSwitchEvent {
+    pub sequence: Generation,
+    pub route: DeviceRoute,
+    pub channel: HostSwitchChannel,
+    pub observed_at_ms: u64,
+}
+/// Bounded recent event state. A new consumer must establish a quiet baseline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostSwitchObservation {
+    pub generation: Generation,
+    pub events: Vec<HostSwitchEvent>,
+}
+
 #[tarpc::service]
 pub trait Agent {
     /// Wire-protocol version, for the connect handshake.
@@ -632,4 +677,7 @@ pub trait Agent {
         route: DeviceRoute,
         change: BacklightChange,
     ) -> Result<BacklightState, WriteError>;
+    /// Observe keyboard host-button events. New connections must skip the first
+    /// observation, which may contain history; subsequent events are never replayed.
+    async fn observe_host_switch(since: Generation) -> HostSwitchObservation;
 }

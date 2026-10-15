@@ -36,7 +36,8 @@ impl Save {
                 device,
                 set: Some(_),
             }
-            | ApiCommand::OsLayout { device, .. } => device,
+            | ApiCommand::OsLayout { device, .. }
+            | ApiCommand::HostSwitchEvents { device, .. } => device,
             ApiCommand::Smartshift(args)
                 if args.mode.is_some() || args.auto_disengage.is_some() =>
             {
@@ -49,7 +50,12 @@ impl Save {
                 ));
             }
         };
-        let route = select_device(snapshot, device)?;
+        let route = match command {
+            ApiCommand::HostSwitchEvents { set, .. } => {
+                super::output::select_host_watch_target(snapshot, device, *set)?
+            }
+            _ => select_device(snapshot, device)?,
+        };
         let (config, file) = ConfigFile::load_from_path(path)
             .map_err(|error| ApiError::new("config_error", error.to_string()))?;
         let (slot, model) = snapshot
@@ -127,6 +133,9 @@ impl Save {
 
     pub(super) fn keep_os_layout(&mut self, keep: bool) {
         self.config.set_keep_os_layout(&self.key, keep);
+    }
+    pub(super) fn host_switch_events(&mut self, enabled: bool) {
+        self.config.set_host_switch_events(&self.key, enabled);
     }
     pub(super) fn report_rate(&mut self, rate: ReportRate) {
         self.config.set_report_rate(&self.key, rate);

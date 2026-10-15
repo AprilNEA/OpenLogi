@@ -156,7 +156,8 @@ pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec
                         .and_then(|device| device.route.clone())
                 })
                 .collect::<Vec<_>>();
-            (!targets.is_empty()).then_some(HostSwitchLink { keyboard, targets })
+            (!targets.is_empty() || settings.host_switch_events)
+                .then_some(HostSwitchLink { keyboard, targets })
         })
         .collect()
 }

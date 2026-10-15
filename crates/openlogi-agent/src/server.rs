@@ -216,6 +216,14 @@ impl Agent for AgentServer {
             .await
     }
 
+    async fn observe_host_switch(
+        self,
+        _: Context,
+        since: openlogi_ipc::Generation,
+    ) -> openlogi_ipc::HostSwitchObservation {
+        self.observable.observe_host_switch(since).await
+    }
+
     async fn read_backlight(
         self,
         _: Context,

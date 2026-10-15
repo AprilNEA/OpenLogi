@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use openlogi_hid::{
     ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, HostSwitchRestoreOutcome,
-    HostSwitchStopReason, PendingHostSwitchRestore, run_host_switch_session, switch_linked_hosts,
+    HostSwitchStopReason, PendingHostSwitchRestore, observe_host_switch_session,
+    run_host_switch_session_reporting, switch_linked_hosts,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -31,6 +32,7 @@ pub type HostSwitchLinks = watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>;
 
 struct HostSwitchManagerContext {
     links: HostSwitchLinks,
+    observable: std::sync::Arc<crate::observable::ObservableState>,
     channel_pool: ChannelPool,
     registry: ChannelRegistry,
     receiver_access: ReceiverAccess,
@@ -47,12 +49,14 @@ pub fn spawn(
     receiver_access: ReceiverAccess,
     registry: ChannelRegistry,
     device_io: DeviceIoGate,
+    observable: std::sync::Arc<crate::observable::ObservableState>,
 ) -> WatcherHandle {
     let links = links.clone();
     let receiver_requests = receiver_access.subscribe_requests();
     WatcherHandle::spawn("openlogi-host-switch-watcher", move |shutdown| {
         manage(HostSwitchManagerContext {
             links,
+            observable,
             channel_pool,
             registry,
             receiver_access,
@@ -83,6 +87,7 @@ struct RunningSession {
     link: HostSwitchLink,
     epoch: SessionEpoch,
     phase: SessionPhase,
+    observed: bool,
 }
 
 impl RunningSession {
@@ -157,6 +162,11 @@ struct RestoreCompletion {
 }
 
 enum ManagerEvent {
+    Observed {
+        epoch: SessionEpoch,
+        host: u8,
+        arrival: bool,
+    },
     Session(SessionCompletion),
     Restore(RestoreCompletion),
     Transition(Result<(), tokio::task::JoinError>),
@@ -168,6 +178,7 @@ struct SessionServices {
     receiver_access: ReceiverAccess,
     device_io: DeviceIoGate,
     events: mpsc::UnboundedSender<ManagerEvent>,
+    observable: std::sync::Arc<crate::observable::ObservableState>,
 }
 
 struct HostSwitchManagerState {
@@ -366,17 +377,23 @@ impl HostSwitchManagerState {
             debug!(route = %session.link.keyboard, "host switch session ended");
         }
         let request_is_current = !terminal && published.contains(&session.link);
+        let observer_only = session.link.targets.is_empty();
         if let Some(token) = result.pending_restore {
             self.slots.push(HostSwitchSlot::Recovering(Recovery {
                 link: session.link,
                 epoch: session.epoch,
-                requested_host: result.requested_host.filter(|_| request_is_current),
+                requested_host: result
+                    .requested_host
+                    .filter(|_| request_is_current && !observer_only),
                 restore: RestorePhase::Ready {
                     token,
                     retry_at: Instant::now() + RETRY_DELAY,
                 },
             }));
-        } else if let Some(host) = result.requested_host.filter(|_| request_is_current) {
+        } else if let Some(host) = result
+            .requested_host
+            .filter(|_| request_is_current && !session.link.targets.is_empty())
+        {
             self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
                 link: session.link,
                 host,
@@ -431,6 +448,7 @@ impl HostSwitchManagerState {
 async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
     let HostSwitchManagerContext {
         mut links,
+        observable,
         channel_pool,
         registry,
         receiver_access,
@@ -446,6 +464,7 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
         receiver_access,
         device_io: device_io.clone(),
         events,
+        observable,
     };
     let mut state = HostSwitchManagerState::new();
     let mut terminal = false;
@@ -487,7 +506,15 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
             }
             Some(event) = event_rx.recv() => {
                 let published = links.borrow().clone();
-                handle_manager_event(&mut state, event, &published, terminal);
+                if let ManagerEvent::Observed { epoch, host, arrival } = event {
+                    if !terminal
+                        && let Some(HostSwitchSlot::Running(session)) = state.slots.iter_mut().find(|slot| matches!(slot, HostSwitchSlot::Running(s) if s.epoch == epoch))
+                        && !session.observed && published.contains(&session.link)
+                    {
+                        if arrival { services.observable.publish_host_arrival(session.link.keyboard.clone(), host); }
+                        else { session.observed = true; services.observable.publish_host_switch(session.link.keyboard.clone(), host); }
+                    }
+                } else { handle_manager_event(&mut state, event, &published, terminal); }
             }
             result = links.changed() => {
                 if result.is_err() {
@@ -521,6 +548,7 @@ fn handle_manager_event(
     terminal: bool,
 ) {
     match event {
+        ManagerEvent::Observed { .. } => {}
         ManagerEvent::Session(completion) => {
             state.handle_session_completion(completion, published, terminal);
         }
@@ -549,16 +577,55 @@ fn spawn_session(
     let device_io = services.device_io.clone();
     let events = services.events.clone();
     tokio::spawn(async move {
+        let observed_events = events.clone();
         let task = tokio::spawn(async move {
+            let events = observed_events;
             let _receiver_lease = receiver_lease;
-            match run_host_switch_session(
-                session_link.keyboard.clone(),
-                stop_rx,
-                &registry,
-                device_io,
-            )
-            .await
-            {
+            let result = if session_link.targets.is_empty() {
+                let observed_events = events.clone();
+                let on_host = std::sync::Arc::new(move |host| {
+                    let _ = observed_events.send(ManagerEvent::Observed {
+                        epoch,
+                        host,
+                        arrival: false,
+                    });
+                });
+                let arrival_events = events.clone();
+                let on_current = std::sync::Arc::new(move |host| {
+                    let _ = arrival_events.send(ManagerEvent::Observed {
+                        epoch,
+                        host,
+                        arrival: true,
+                    });
+                });
+                observe_host_switch_session(
+                    session_link.keyboard.clone(),
+                    stop_rx,
+                    &registry,
+                    device_io,
+                    on_host,
+                    on_current,
+                )
+                .await
+            } else {
+                let observed_events = events.clone();
+                let on_host = std::sync::Arc::new(move |host| {
+                    let _ = observed_events.send(ManagerEvent::Observed {
+                        epoch,
+                        host,
+                        arrival: false,
+                    });
+                });
+                run_host_switch_session_reporting(
+                    session_link.keyboard.clone(),
+                    stop_rx,
+                    &registry,
+                    device_io,
+                    on_host,
+                )
+                .await
+            };
+            match result {
                 Ok(outcome) => {
                     let (requested_host, pending_restore) = outcome.into_parts();
                     SessionResult {
@@ -587,6 +654,7 @@ fn spawn_session(
         link,
         epoch,
         phase: SessionPhase::Active(stop),
+        observed: false,
     }
 }
 
@@ -709,6 +777,7 @@ mod tests {
             link: link(2),
             epoch: SessionEpoch(1),
             phase: SessionPhase::Active(stop),
+            observed: false,
         }));
 
         state.stop_sessions(&[link(3)], false);
@@ -838,6 +907,7 @@ mod tests {
             receiver_access: access.clone(),
             device_io: gate,
             events,
+            observable: std::sync::Arc::new(crate::observable::ObservableState::new("test".into())),
         };
         let _session = spawn_session(
             link(2),

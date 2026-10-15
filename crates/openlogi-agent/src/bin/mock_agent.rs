@@ -758,6 +758,18 @@ impl Agent for MockAgent {
         None
     }
 
+    async fn observe_host_switch(
+        self,
+        _: Context,
+        _since: Generation,
+    ) -> openlogi_ipc::HostSwitchObservation {
+        tokio::time::sleep(OBSERVE_HOLD).await;
+        openlogi_ipc::HostSwitchObservation {
+            generation: 1,
+            events: Vec::new(),
+        }
+    }
+
     async fn observe_action_ring(self, _: Context, _since: Generation) -> RingObservation {
         // The mock scripts no rings, so it only ever has "none" to report —
         // held for the window so an overlay polling it doesn't spin.

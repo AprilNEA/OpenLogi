@@ -110,6 +110,20 @@ Common device fields are:
   including the Windows `exe:<filename>` fallback
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
 - `host_switch_targets` and `fn_lock` for compatible keyboards
+- `host_switch_events`: opt-in Easy-Switch observations (default `false`). With
+  no linked targets, the agent enables analytics reports only; it does not divert
+  keys or switch devices. Keyboards without reportable controls are unsupported.
+  `api --save host-switch-events --device "<exact ID>" --set on|off` saves the
+  flag through the existing configuration/reload path. Disabling also accepts a
+  uniquely remembered offline device.
+  `api watch-host-switch --device "<exact ID>"` produces JSON lines from the
+  agent: a quiet `baseline`, then fresh `host_switch` records with 1-based
+  `channel`, `sequence`, and `observed_at_ms`. The baseline confirms the IPC
+  connection, not successful firmware capture. No ordinary typing is recorded.
+  Restart/reconnect history is never emitted as new presses. Only the currently
+  connected host can hear physical presses; a measured return is emitted only
+  after this agent previously observed departure. Switching between two other
+  computers requires observation on one of those computers.
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+
   does; `false` leaves the keyboard's layout to its own shortcuts

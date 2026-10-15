@@ -476,3 +476,57 @@ async fn lost_reload_acknowledgement_keeps_the_saved_preference() {
         Some(true)
     );
 }
+
+#[tokio::test]
+async fn host_watch_offline_disable_preserves_other_settings_and_only_reloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE);
+    fs::write(&path, "# keep me\nschema_version = 6\n[devices.\"unit:12345678\"]\nfn_lock = true\nhost_switch_events = true\n[devices.\"unit:87654321\"]\ndpi = 2600\n").unwrap();
+    let mut device = identified_snapshot();
+    device.inventory[0].paired[0].online = false;
+    let reload_path = path.clone();
+    let result = run_script_at(
+        device,
+        ApiCommand::HostSwitchEvents {
+            device: route().to_string(),
+            set: Switch::Off,
+        },
+        vec![Box::new(move |request| {
+            assert!(matches!(request, AgentRequest::ReloadConfig {}));
+            let saved = Config::load_from_path(&reload_path).unwrap();
+            assert!(!saved.devices["unit:12345678"].host_switch_events);
+            assert_eq!(saved.devices["unit:12345678"].fn_lock, Some(true));
+            assert_eq!(saved.dpi("unit:87654321"), Some(2600.into()));
+            assert!(
+                fs::read_to_string(&reload_path)
+                    .unwrap()
+                    .contains("# keep me")
+            );
+            AgentResponse::ReloadConfig(Ok(()))
+        })],
+        Some(&path),
+    )
+    .await;
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["data"]["persistence"], "saved");
+}
+
+#[tokio::test]
+async fn host_watch_enabling_an_offline_device_never_writes_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE);
+    let mut device = identified_snapshot();
+    device.inventory[0].paired[0].online = false;
+    let result = run_script_at(
+        device,
+        ApiCommand::HostSwitchEvents {
+            device: route().to_string(),
+            set: Switch::On,
+        },
+        vec![],
+        Some(&path),
+    )
+    .await;
+    assert_eq!(result["error"]["code"], "device_offline");
+    assert!(!path.exists());
+}

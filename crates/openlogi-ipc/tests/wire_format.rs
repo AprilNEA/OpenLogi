@@ -821,3 +821,41 @@ fn report_rate_dtos_and_errors() {
         "fbe803037dfbf401fbe803",
     );
 }
+
+#[test]
+fn host_switch_observation_is_appended_and_typed() {
+    use openlogi_ipc::{HostSwitchChannel, HostSwitchEvent, HostSwitchObservation};
+    assert_wire(&AgentRequest::ObserveHostSwitch { since: 7 }, "2207");
+    assert_wire(
+        &HostSwitchEvent {
+            sequence: 7,
+            route: DeviceRoute::Bolt {
+                receiver_uid: "A".into(),
+                slot: 1,
+            },
+            channel: HostSwitchChannel::Two,
+            observed_at_ms: 100,
+        },
+        "07000141010164",
+    );
+    assert_wire(&HostSwitchChannel::One, "00");
+    assert_wire(&HostSwitchChannel::Two, "01");
+    assert_wire(&HostSwitchChannel::Three, "02");
+    assert_wire(
+        &HostSwitchObservation {
+            generation: 7,
+            events: Vec::new(),
+        },
+        "0700",
+    );
+    assert_eq!(
+        HostSwitchChannel::from_slot(0),
+        Some(HostSwitchChannel::One)
+    );
+    assert_eq!(
+        HostSwitchChannel::from_slot(2),
+        Some(HostSwitchChannel::Three)
+    );
+    assert_eq!(HostSwitchChannel::from_slot(3), None);
+    assert_eq!(HostSwitchChannel::Three.number(), 3);
+}

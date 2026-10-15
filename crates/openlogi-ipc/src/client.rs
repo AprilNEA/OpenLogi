@@ -33,8 +33,8 @@ use tarpc::client::{self, RpcError};
 use tarpc::context::{self, Context};
 
 use crate::{
-    AgentClient, ClientKind, Generation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
-    RingObservation, transport,
+    AgentClient, ClientKind, Generation, HostSwitchObservation, OBSERVE_HOLD, Observation,
+    PROTOCOL_VERSION, RingObservation, transport,
 };
 
 /// Why a client could not be established.
@@ -209,6 +209,12 @@ impl Stamped for Observation {
     }
 }
 
+impl Stamped for HostSwitchObservation {
+    fn generation(&self) -> Generation {
+        self.generation
+    }
+}
+
 impl Stamped for RingObservation {
     fn generation(&self) -> Generation {
         self.generation
@@ -307,6 +313,58 @@ impl Observer<RingObservation> {
             let client = client.clone();
             Box::pin(async move { client.observe_action_ring(observe_context(), since).await })
         })
+    }
+}
+
+impl Observer<HostSwitchObservation> {
+    /// Observe the separate host-button event cell, using the shared deadlines.
+    #[must_use]
+    fn host_switch(client: AgentClient) -> Self {
+        Self::new(client, |client, since| {
+            let client = client.clone();
+            Box::pin(async move { client.observe_host_switch(observe_context(), since).await })
+        })
+    }
+}
+
+/// Event consumers get a quiet baseline, never a replay of old host choices.
+pub enum HostSwitchUpdate {
+    Baseline,
+    Choices(Vec<crate::HostSwitchEvent>),
+}
+/// Own the no-replay decision together with this connection's observe ledger.
+pub struct HostSwitchEvents {
+    observer: Observer<HostSwitchObservation>,
+    seen: Option<Generation>,
+}
+impl HostSwitchEvents {
+    #[must_use]
+    pub fn new(client: AgentClient) -> Self {
+        Self {
+            observer: Observer::host_switch(client),
+            seen: None,
+        }
+    }
+    /// The first observation establishes a baseline. Later answers contain
+    /// only new choices, even when the agent retains an earlier bounded history.
+    /// # Errors
+    /// Returns a transport error when this connection fails; reconnect with a
+    /// new instance, which establishes another quiet baseline.
+    pub async fn next(&mut self) -> Result<Option<HostSwitchUpdate>, RpcError> {
+        let Some(observation) = self.observer.next().await? else {
+            return Ok(None);
+        };
+        let previous = self.seen.replace(observation.generation);
+        Ok(Some(match previous {
+            None => HostSwitchUpdate::Baseline,
+            Some(seen) => HostSwitchUpdate::Choices(
+                observation
+                    .events
+                    .into_iter()
+                    .filter(|event| event.sequence > seen)
+                    .collect(),
+            ),
+        }))
     }
 }
 
@@ -636,6 +694,67 @@ mod tests {
         assert!(
             observer.next().await.is_err(),
             "asking again must not poll the finished call"
+        );
+    }
+    #[tokio::test]
+    async fn host_switch_feed_never_replays_initial_or_repeated_choices() {
+        use crate::{HostSwitchChannel, HostSwitchEvent, HostSwitchObservation};
+        let route = openlogi_core::hid::DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xffff,
+        };
+        let old = HostSwitchEvent {
+            sequence: 2,
+            route,
+            channel: HostSwitchChannel::Two,
+            observed_at_ms: 1000,
+        };
+        let mut new = old.clone();
+        new.sequence = 3;
+        new.channel = HostSwitchChannel::One;
+        let replies = Arc::new(Mutex::new(std::collections::VecDeque::from([
+            HostSwitchObservation {
+                generation: 2,
+                events: vec![old.clone()],
+            },
+            HostSwitchObservation {
+                generation: 3,
+                events: vec![old, new.clone()],
+            },
+            HostSwitchObservation {
+                generation: 3,
+                events: vec![new],
+            },
+        ])));
+        let client = in_memory_agent(
+            move |request| {
+                let replies = replies.clone();
+                Box::pin(async move {
+                    let AgentRequest::ObserveHostSwitch { .. } = request else {
+                        panic!("Unexpected request");
+                    };
+                    let answer = replies.lock().unwrap().pop_front();
+                    match answer {
+                        Some(answer) => Ok(AgentResponse::ObserveHostSwitch(answer)),
+                        None => std::future::pending().await,
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+        let mut feed = super::HostSwitchEvents::new(client);
+        assert!(matches!(
+            feed.next().await.unwrap(),
+            Some(super::HostSwitchUpdate::Baseline)
+        ));
+        let Some(super::HostSwitchUpdate::Choices(choices)) = feed.next().await.unwrap() else {
+            panic!("Expected new choices");
+        };
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].sequence, 3);
+        assert!(
+            feed.next().await.unwrap().is_none(),
+            "Same-generation history is not replayed"
         );
     }
 }
