@@ -47,7 +47,7 @@ impl EasySwitchFacts {
         Some(Self {
             key: record.device_key(),
             load: state.current_easy_switch_load(),
-            reachable: record.route.is_some(),
+            reachable: state.current_easy_switch_reachable(),
             refusal: state.current_host_rename_refusal(),
         })
     }

@@ -40,6 +40,15 @@ impl AppState {
             .is_some_and(|capabilities| capabilities.easy_switch)
     }
 
+    /// Whether a rename can reach the active device now: it has a connection
+    /// and is awake on it. A receiver device that is asleep, out of range or
+    /// switched to another computer keeps its route but answers nothing.
+    #[must_use]
+    pub fn current_easy_switch_reachable(&self) -> bool {
+        self.current_record()
+            .is_some_and(|record| record.online && record.route.is_some())
+    }
+
     /// What is known of the active device's Easy-Switch hosts.
     #[must_use]
     pub fn current_easy_switch_load(&self) -> EasySwitchLoad {
@@ -62,8 +71,9 @@ impl AppState {
     /// `key` through the agent. The card shows the name at once; the
     /// device's read-back arrives as [`Self::apply_easy_switch_host_renamed`].
     ///
-    /// No-op unless `key` is the active device, it reports Easy-Switch hosts,
-    /// its last reading accepts `name` for `slot` (see
+    /// No-op unless `key` is the active device, it reports Easy-Switch hosts
+    /// and is reachable (see [`Self::current_easy_switch_reachable`]), its
+    /// last reading accepts `name` for `slot` (see
     /// [`EasySwitchHosts::name_for`]) and `name` differs from the name the
     /// slot shows, and that reading is on the device's current connection.
     /// The rename dialog checks the name first, so those are renames from
@@ -80,6 +90,10 @@ impl AppState {
         }
         if !self.is_current_device(key) {
             debug!(key = %key, "host rename for a device that is no longer selected — ignoring it");
+            return events;
+        }
+        if !self.current_easy_switch_reachable() {
+            debug!(key = %key, "host rename for a device that is offline — ignoring it");
             return events;
         }
         let Some(route) = self

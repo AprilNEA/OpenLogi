@@ -312,6 +312,40 @@ fn a_rename_the_reading_does_not_take_writes_nothing(cx: &mut gpui::TestAppConte
     );
 }
 
+/// A receiver keyboard that falls asleep, leaves range or is switched to
+/// another computer keeps its route but answers nothing: its last reading
+/// stays on the card, and a rename is not sent until it is back.
+#[gpui::test]
+fn an_offline_receiver_device_keeps_its_channels_and_takes_no_rename(
+    cx: &mut gpui::TestAppContext,
+) {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories: &[on_receiver(keyboard_inventory(true))],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+    let (key, route) = installed_and_read(cx, &mut receiver, state, hosts());
+    let reachable = |cx: &gpui::TestAppContext| {
+        cx.read(|cx| {
+            AppState::try_read(cx)
+                .expect("state installed")
+                .current_easy_switch_reachable()
+        })
+    };
+    assert!(reachable(cx));
+
+    let mut asleep = on_receiver(keyboard_inventory(true));
+    asleep.paired[0].online = false;
+    assert_eq!(refresh(cx, &mut receiver, asleep), Some(route));
+    assert!(!reachable(cx));
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(hosts())));
+
+    let _ = rename(cx, &key, 0, "Desk");
+    assert!(sent(&mut receiver).is_empty());
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(hosts())));
+}
+
 /// A dialog opened for one keyboard and saved after another was selected
 /// must not write either: the rename names a device that is not on screen,
 /// and its reading is on its own connection, not the selected one's.
