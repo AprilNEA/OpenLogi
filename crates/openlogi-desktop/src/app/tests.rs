@@ -1476,12 +1476,13 @@ fn tray_navigation_opens_exact_device_settings_cold_and_warm(cx: &mut gpui::Test
         let profile: DeviceProfile = serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).unwrap();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
+        let legacy_key = "receiver:OL-BOLT-UID-0001:slot:1";
+        let physical_key = "unit:4f4c4401";
+        let mut config = openlogi_core::config::Config::ephemeral();
+        config.devices.entry(legacy_key.into()).or_default().dpi =
+            Some(openlogi_core::hid::Dpi::new(1600));
         let state = cx.new(|_| {
-            let mut state = AppState::new(Sources::in_memory(
-                openlogi_core::config::Config::ephemeral(),
-                &resolver,
-                commands,
-            ));
+            let mut state = AppState::new(Sources::in_memory(config, &resolver, commands));
             let _ = state.refresh_inventories(
                 &profile.inventories,
                 &profile.standalone,
@@ -1496,12 +1497,14 @@ fn tray_navigation_opens_exact_device_settings_cold_and_warm(cx: &mut gpui::Test
             .iter()
             .map(|record| record.config_key.clone())
             .collect();
-        assert!(keys.len() >= 2);
-        AppState::set_global(state, cx);
+        assert!(keys.iter().any(|key| key == physical_key));
+        assert!(!keys.iter().any(|key| key == legacy_key));
+        let other = keys.iter().find(|key| *key != physical_key).unwrap();
+        AppState::set_global(state.clone(), cx);
         assert!(!main_window::open_device_settings("unit:missing", cx));
         assert!(cx.default_global::<WindowRegistry>().main.is_none());
 
-        for key in [&keys[0], &keys[1], &keys[0]] {
+        for key in [physical_key, other.as_str(), physical_key] {
             assert!(main_window::open_device_settings(key, cx));
             let handle = cx.default_global::<WindowRegistry>().main.unwrap();
             handle
@@ -1514,7 +1517,7 @@ fn tray_navigation_opens_exact_device_settings_cold_and_warm(cx: &mut gpui::Test
                             .current_record()
                             .unwrap()
                             .config_key,
-                        *key
+                        key
                     );
                     assert!(matches!(view.read(cx).route, super::Route::Device { .. }));
                 })
@@ -1525,5 +1528,67 @@ fn tray_navigation_opens_exact_device_settings_cold_and_warm(cx: &mut gpui::Test
             1,
             "warm selection reuses the main window"
         );
+        let mut replacement = profile.inventories.clone();
+        replacement[0].paired[0]
+            .model_info
+            .as_mut()
+            .unwrap()
+            .unit_id = [7; 4];
+        state.update(cx, |state, _| {
+            let _ = state.refresh_inventories(&replacement, &[], &resolver, &[]);
+        });
+        assert!(!main_window::open_device_settings(legacy_key, cx));
+        assert!(main_window::open_device_settings(physical_key, cx));
+        assert_eq!(
+            state.read(cx).current_record().unwrap().config_key,
+            physical_key
+        );
+        assert_ne!(state.read(cx).current_record().unwrap().unit_id, [7; 4]);
+    });
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[gpui::test]
+fn tray_navigation_survives_adoption_with_existing_window(cx: &mut gpui::TestAppContext) {
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AppState, Sources};
+    use crate::windows::main_window;
+    use gpui::AppContext as _;
+    use openlogi_fixture::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile};
+
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let profile: DeviceProfile = serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).unwrap();
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = openlogi_core::config::Config::ephemeral();
+        let legacy_key = "receiver:OL-BOLT-UID-0001:slot:1";
+        config.devices.entry(legacy_key.into()).or_default().dpi =
+            Some(openlogi_core::hid::Dpi::new(1600));
+        let state = cx.new(|_| AppState::new(Sources::in_memory(config, &resolver, commands)));
+        AppState::set_global(state.clone(), cx);
+        main_window::open(cx);
+        assert!(state.read(cx).devices().is_empty());
+        state.update(cx, |state, _| {
+            let _ = state.refresh_inventories(
+                &profile.inventories,
+                &profile.standalone,
+                &resolver,
+                &[],
+            );
+        });
+        let physical_key = "unit:4f4c4401";
+        assert!(main_window::open_device_settings(physical_key, cx));
+        assert_eq!(
+            state.read(cx).current_record().unwrap().config_key,
+            physical_key
+        );
+        assert!(!main_window::open_device_settings(legacy_key, cx));
+        assert!(!main_window::open_device_settings("unit:missing", cx));
+        assert_eq!(
+            state.read(cx).current_record().unwrap().config_key,
+            physical_key
+        );
+        assert_eq!(cx.windows().len(), 1);
     });
 }

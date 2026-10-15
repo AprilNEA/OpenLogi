@@ -1,6 +1,6 @@
 //! Transport-independent inputs for the native battery menus and warnings.
 
-use openlogi_core::config::{BatteryPreferences, Config};
+use openlogi_core::config::{BatteryPreferences, Config, canonical_device_key};
 use openlogi_core::device::{BatteryInfo, DeviceInventory};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_core::hid::DeviceRoute;
@@ -8,7 +8,7 @@ use openlogi_core::hid::DeviceRoute;
 /// A paired device and the user's independently selected presentation options.
 #[derive(Clone, Debug)]
 pub struct Observation {
-    /// The configuration key used by device navigation and preferences.
+    /// Physical navigation target, independent of where preferences are stored.
     pub key: String,
     /// Stable physical identity for warning persistence, absent for anonymous devices.
     pub history_key: Option<String>,
@@ -43,14 +43,19 @@ pub(super) fn observations(config: &Config, inventories: &[DeviceInventory]) -> 
                 .map_or_else(BatteryPreferences::default, |key| {
                     config.battery_preferences(key.as_str())
                 });
-            let key =
-                resolved_key.map_or_else(|| stable.runtime_key(), PhysicalDeviceKey::into_string);
-            let name = config
-                .devices
-                .get(&key)
+            let name = resolved_key
+                .as_ref()
+                .and_then(|key| config.devices.get(key.as_str()))
                 .and_then(|device| device.custom_name.clone())
                 .or_else(|| paired.codename.clone())
                 .unwrap_or_else(|| "Logitech".to_owned());
+            let navigation_key = if history_key.is_some() {
+                canonical_device_key(&stable, Some(&identity))
+            } else {
+                resolved_key
+            };
+            let key =
+                navigation_key.map_or_else(|| stable.runtime_key(), PhysicalDeviceKey::into_string);
             devices.push((
                 stable,
                 Observation {
@@ -210,6 +215,34 @@ mod tests {
         assert_eq!(rows[0].key, "direct:046d:b369:unit:00000000");
         assert_eq!(rows[0].history_key, None);
     }
+    #[test]
+    fn battery_navigation_survives_legacy_route_adoption_without_changing_preferences() {
+        let mut config = Config::default();
+        let legacy_key = "receiver:receiver:slot:1";
+        let legacy = config.devices.entry(legacy_key.into()).or_default();
+        legacy.custom_name = Some("Work keyboard".into());
+        legacy.battery = BatteryPreferences {
+            show_in_menu: false,
+            warn_low: false,
+        };
+        let rows = observations(&config, &[inventory(0xc548, 1, [1, 2, 3, 4])]);
+        assert_eq!(rows[0].key, "unit:01020304");
+        assert_eq!(rows[0].name, "Work keyboard");
+        assert!(!rows[0].preferences.show_in_menu);
+        assert!(!rows[0].preferences.warn_low);
+        assert!(config.devices.contains_key(legacy_key));
+        let physical = PhysicalDeviceKey::parse("unit:01020304").unwrap();
+        assert!(config.adopt_route(&physical, legacy_key, None));
+        let adopted = observations(&config, &[inventory(0xc548, 1, [1, 2, 3, 4])]);
+        assert_eq!(adopted[0].key, rows[0].key);
+        assert_eq!(adopted[0].name, rows[0].name);
+        assert_eq!(adopted[0].preferences, rows[0].preferences);
+        let replacement = observations(&config, &[inventory(0xc548, 1, [5, 6, 7, 8])]);
+        assert_eq!(replacement[0].key, "unit:05060708");
+        assert_ne!(replacement[0].key, rows[0].key);
+        assert_eq!(replacement[0].preferences, BatteryPreferences::default());
+    }
+
     #[test]
     fn transient_direct_devices_ignore_previously_saved_battery_opt_outs() {
         let mut config = Config::default();
