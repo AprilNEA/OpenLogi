@@ -34,7 +34,11 @@ use gpui::{
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
+use gpui_component::{
+    Selectable as _, h_flex,
+    input::{InputEvent, InputState},
+    v_flex,
+};
 use openlogi_core::binding::{Action, WorkflowStep};
 
 use super::editors::{
@@ -193,6 +197,15 @@ impl FunctionRowView {
             }
             s
         });
+        // Editing the draft retracts the error from a rejected save, so a
+        // corrected shortcut no longer reads as invalid.
+        cx.subscribe(&state, |view, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) && view.draft_invalid {
+                view.draft_invalid = false;
+                cx.notify();
+            }
+        })
+        .detach();
         self.text_state = Some(state.clone());
         state
     }
