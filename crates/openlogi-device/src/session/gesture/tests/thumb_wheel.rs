@@ -75,7 +75,11 @@ fn a_release_after_a_roll_left_open_is_not_a_tap() {
                 previous,
                 TRACED_RES
             ),
-            None,
+            Some(CapturedInput::Scroll {
+                increments: 0,
+                resolution: TRACED_RES,
+                status: RotationStatus::Inactive,
+            }),
             "after {previous:?}"
         );
     }
@@ -168,10 +172,11 @@ fn received(inputs: &mut mpsc::UnboundedReceiver<CapturedInput>) -> Vec<Captured
     std::iter::from_fn(|| inputs.try_recv().ok()).collect()
 }
 
-fn scroll(increments: i16) -> CapturedInput {
+fn scroll(increments: i16, status: RotationStatus) -> CapturedInput {
     CapturedInput::Scroll {
         increments,
         resolution: TRACED_RES,
+        status,
     }
 }
 
@@ -190,8 +195,9 @@ async fn a_roll_that_never_reports_its_stop_ends_without_a_tap() {
     assert_eq!(
         received(&mut inputs),
         vec![
-            scroll(2),
-            scroll(3),
+            scroll(2, RotationStatus::Start),
+            scroll(3, RotationStatus::Active),
+            scroll(0, RotationStatus::Inactive),
             CapturedInput::ButtonPulse(ButtonId::Thumbwheel)
         ]
     );
@@ -209,6 +215,9 @@ async fn a_reconnect_forgets_a_roll_left_open() {
     handler(&wheel_report(0, 0, true));
     assert_eq!(
         received(&mut inputs),
-        vec![scroll(3), CapturedInput::ButtonPulse(ButtonId::Thumbwheel)]
+        vec![
+            scroll(3, RotationStatus::Active),
+            CapturedInput::ButtonPulse(ButtonId::Thumbwheel)
+        ]
     );
 }
