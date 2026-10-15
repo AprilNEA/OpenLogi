@@ -69,9 +69,9 @@
 //! // HID++2.0 includes an arbitrary "software ID" in every message, used to
 //! // map responses back to requests. The channel's policy decides it per
 //! // request: `Fixed` (the default, id 1), `Rotating` (one id per request),
-//! // or `Leased` (a process-unique fixed id handed back on drop, for
-//! // concurrent opens of one node). Decide the policy while the channel is
-//! // still exclusively owned, then share it.
+//! // or `Leased` (a fixed id held for the channel's lifetime and handed
+//! // back on drop, for concurrent opens of one node). Decide the policy
+//! // while the channel is still exclusively owned, then share it.
 //! channel.set_sw_id_policy(SwIdPolicy::rotating());
 //! let channel = Arc::new(channel);
 //!

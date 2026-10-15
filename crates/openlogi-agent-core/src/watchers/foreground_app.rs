@@ -1,25 +1,51 @@
 //! Foreground application watcher.
 
-use std::time::Duration;
+use std::sync::mpsc::RecvTimeoutError;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use openlogi_core::app::ForegroundApp;
 use tokio::sync::mpsc;
-
-use super::poll;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-use super::poll::Poll;
-
-#[cfg(target_os = "macos")]
-use std::sync::mpsc::RecvTimeoutError;
-#[cfg(target_os = "macos")]
-use std::thread;
-#[cfg(target_os = "macos")]
-use std::time::Instant;
-#[cfg(target_os = "macos")]
 use tracing::{debug, warn};
 
-#[cfg(target_os = "macos")]
-const MACOS_RECONCILE_PERIOD: Duration = Duration::from_secs(30);
+use super::poll;
+
+/// Recovery after the native event path has been quiet.
+///
+/// This is deliberately not a foreground polling cadence: every delivered
+/// native event defers it. It remains armed because native observers and event
+/// transports can miss a change without disconnecting their callback.
+const IDLE_RECOVERY_PERIOD: Duration = Duration::from_secs(30);
+
+/// Retry cadence only while native observer setup or health is failing.
+const OBSERVER_RETRY_PERIOD: Duration = Duration::from_secs(2);
+
+fn next_idle_recovery_deadline(now: Instant) -> Instant {
+    now + IDLE_RECOVERY_PERIOD
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdleRecovery {
+    ReadCurrent,
+    RenewObserver,
+}
+
+enum ObserverExit {
+    RecoverAfterDrop,
+    RetryAfterFailure,
+}
+
+/// Linux's selected native source moves onto the observer worker, so reads
+/// while it is active intentionally return the latest publication. Renewing
+/// the observer returns that source to the synchronous reader before recovery;
+/// macOS and Windows can query their OS state independently.
+const fn idle_recovery() -> IdleRecovery {
+    if cfg!(target_os = "linux") {
+        IdleRecovery::RenewObserver
+    } else {
+        IdleRecovery::ReadCurrent
+    }
+}
 
 /// Channel item: `Some(app)` when an app is frontmost; `None` for "no
 /// foreground app" (rare on macOS — Finder is usually frontmost even when
@@ -28,11 +54,10 @@ pub type ForegroundUpdate = Option<ForegroundApp>;
 
 /// Watch foreground application changes.
 ///
-/// macOS uses native activation notifications plus a slow recovery read. Linux
-/// and Windows keep their platform-specific readers on the supplied polling
-/// cadence.
+/// macOS, Linux, and Windows use native platform events plus a slow idle
+/// recovery pass. Unsupported targets return a receiver that never yields.
 #[must_use]
-pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<ForegroundUpdate> {
+pub fn spawn() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
     if !cfg!(any(
         target_os = "macos",
         target_os = "linux",
@@ -42,20 +67,9 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<ForegroundUpdate> {
         return poll::never();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
-        let _ = period;
-        spawn_macos()
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    {
-        Poll {
-            name: "openlogi-app-watcher",
-            period,
-            degrades: "per-app profiles are disabled",
-        }
-        .on_change(openlogi_hook::frontmost_application)
+        spawn_native()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -65,15 +79,13 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<ForegroundUpdate> {
 }
 
 /// The last value published to the orchestrator, used only to suppress
-/// duplicate snapshots. `NSWorkspace`, not this adapter, remains the source of
-/// truth for the current application.
-#[cfg(any(target_os = "macos", test))]
+/// duplicate snapshots. The native platform source, not this adapter, remains
+/// the source of truth for the current application.
 #[derive(Default)]
 struct ForegroundChanges {
     published: Option<ForegroundUpdate>,
 }
 
-#[cfg(any(target_os = "macos", test))]
 impl ForegroundChanges {
     fn observe(&mut self, current: &ForegroundUpdate) -> bool {
         if self.published.as_ref() == Some(current) {
@@ -84,62 +96,97 @@ impl ForegroundChanges {
     }
 }
 
-/// Observe native app activations from each notification's application payload.
-/// A slow authoritative reconciliation read recovers from any notification the
-/// OS failed to deliver and notices a dropped consumer without a separate poll.
-#[cfg(target_os = "macos")]
-fn spawn_macos() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
+/// Treat native callbacks as invalidations, then read the hook crate's current
+/// application SSOT. After 30 seconds without an event, a health check and
+/// authoritative read recover from a missed event or silent observer failure.
+/// Linux first renews its observer because its active source owns the native
+/// transport and serves reads from the last event publication.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn spawn_native() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
     let (tx, rx) = mpsc::unbounded_channel();
     let spawned = thread::Builder::new()
         .name("openlogi-app-watcher".into())
         .spawn(move || {
-            let (activation_tx, activation_rx) = std::sync::mpsc::channel();
-            let _observer =
-                openlogi_hook::watch_frontmost_application_activations(move |activation| {
-                    let _ = activation_tx.send(activation);
-                });
             let mut changes = ForegroundChanges::default();
-
-            // Register first so an activation racing this initial snapshot is
-            // either reflected by the read or queued for the loop below.
-            if !publish_current(&tx, &mut changes) {
-                return;
-            }
-            let mut next_reconcile = Instant::now() + MACOS_RECONCILE_PERIOD;
+            let mut recovery_deadline = Instant::now();
 
             loop {
-                let timeout = next_reconcile.saturating_duration_since(Instant::now());
-                match activation_rx.recv_timeout(timeout) {
-                    Ok(mut activation) => {
-                        // Coalesce a burst to its latest authoritative AppKit
-                        // payload; intermediate activations were never stable
-                        // foreground state for the consumer.
-                        while let Ok(next) = activation_rx.try_recv() {
-                            activation = next;
+                // Every callback means only "the authoritative value may have
+                // changed", so capacity one preserves all semantics while
+                // bounding native bursts before this worker can coalesce them.
+                let (native_tx, native_rx) = std::sync::mpsc::sync_channel(1);
+                let observer = match openlogi_hook::watch_frontmost_application_changes(move || {
+                    let _ = native_tx.try_send(());
+                }) {
+                    Ok(observer) => observer,
+                    Err(error) => {
+                        warn!(%error, "could not start native foreground-app observer; retrying");
+                        let now = Instant::now();
+                        if now >= recovery_deadline {
+                            if !publish_current(&tx, &mut changes) {
+                                return;
+                            }
+                            recovery_deadline = next_idle_recovery_deadline(now);
                         }
-                        if !publish(&tx, &mut changes, activation) {
-                            return;
-                        }
-                        next_reconcile = Instant::now() + MACOS_RECONCILE_PERIOD;
-                    }
-                    Err(RecvTimeoutError::Timeout) => {
+                        thread::sleep(OBSERVER_RETRY_PERIOD);
                         if tx.is_closed() {
                             debug!("foreground-app watcher receiver dropped — exiting");
                             return;
                         }
-                        if Instant::now() >= next_reconcile {
+                        continue;
+                    }
+                };
+                recovery_deadline = next_idle_recovery_deadline(Instant::now());
+
+                let observer_exit = loop {
+                    let timeout = recovery_deadline.saturating_duration_since(Instant::now());
+                    match native_rx.recv_timeout(timeout) {
+                        Ok(()) => {
+                            while native_rx.try_recv().is_ok() {}
                             if !publish_current(&tx, &mut changes) {
                                 return;
                             }
-                            next_reconcile = Instant::now() + MACOS_RECONCILE_PERIOD;
+                            recovery_deadline = next_idle_recovery_deadline(Instant::now());
+                        }
+                        Err(RecvTimeoutError::Timeout) => {
+                            if tx.is_closed() {
+                                debug!("foreground-app watcher receiver dropped — exiting");
+                                return;
+                            }
+                            if let Err(error) = observer.check_health() {
+                                warn!(%error, "native foreground-app observer stopped; restarting");
+                                break ObserverExit::RetryAfterFailure;
+                            }
+                            if idle_recovery() == IdleRecovery::RenewObserver {
+                                break ObserverExit::RecoverAfterDrop;
+                            }
+                            if !publish_current(&tx, &mut changes) {
+                                return;
+                            }
+                            recovery_deadline = next_idle_recovery_deadline(Instant::now());
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            warn!("native foreground-app observer disconnected; restarting");
+                            break ObserverExit::RetryAfterFailure;
                         }
                     }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        warn!(
-                            "foreground-app activation observer stopped — per-app profiles are disabled"
-                        );
-                        return;
+                };
+
+                // On Linux this synchronously returns the selected native
+                // source to `frontmost_application`, so the recovery read below
+                // cannot be satisfied by the stale observer publication.
+                drop(observer);
+                if tx.is_closed() {
+                    debug!("foreground-app watcher receiver dropped — exiting");
+                    return;
+                }
+                match observer_exit {
+                    ObserverExit::RecoverAfterDrop => {
+                        if !publish_current(&tx, &mut changes) {
+                            return;
+                        }
                     }
+                    ObserverExit::RetryAfterFailure => thread::sleep(OBSERVER_RETRY_PERIOD),
                 }
             }
         });
@@ -149,7 +196,6 @@ fn spawn_macos() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
     rx
 }
 
-#[cfg(target_os = "macos")]
 fn publish_current(
     tx: &mpsc::UnboundedSender<ForegroundUpdate>,
     changes: &mut ForegroundChanges,
@@ -157,7 +203,6 @@ fn publish_current(
     publish(tx, changes, openlogi_hook::frontmost_application())
 }
 
-#[cfg(target_os = "macos")]
 fn publish(
     tx: &mpsc::UnboundedSender<ForegroundUpdate>,
     changes: &mut ForegroundChanges,
@@ -193,5 +238,29 @@ mod tests {
         assert!(!changes.observe(&Some(app("com.example.One"))));
         assert!(changes.observe(&Some(app("com.example.Two"))));
         assert!(changes.observe(&None));
+    }
+
+    #[test]
+    fn native_activity_defers_the_idle_recovery_read() {
+        let started = Instant::now();
+        let original = next_idle_recovery_deadline(started);
+        let activation = started + Duration::from_secs(12);
+        let deferred = next_idle_recovery_deadline(activation);
+
+        assert_eq!(
+            original.saturating_duration_since(started),
+            IDLE_RECOVERY_PERIOD
+        );
+        assert_eq!(
+            deferred.saturating_duration_since(activation),
+            IDLE_RECOVERY_PERIOD
+        );
+        assert!(deferred > original);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_idle_recovery_renews_the_observer_before_reading() {
+        assert_eq!(idle_recovery(), IdleRecovery::RenewObserver);
     }
 }

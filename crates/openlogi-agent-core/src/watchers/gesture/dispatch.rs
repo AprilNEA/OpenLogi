@@ -8,11 +8,13 @@ use std::time::Instant;
 use openlogi_core::binding::{Action, Binding, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_hid::CapturedInput;
+use openlogi_hid::thumbwheel::WheelResolution;
 use tracing::debug;
 
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
+use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::{HidppSessionId, PressToken};
 
 /// Effective thumb-wheel configuration whose continuity is tied to one
@@ -94,6 +96,7 @@ impl SessionWheels {
 /// Input routing plus the per-session state retained between
 /// captured events. Capture-session lifecycle remains owned by the parent.
 pub(super) struct InputDispatcher {
+    hook_maps: SharedHookMaps,
     outputs: GestureOutputs,
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
@@ -103,10 +106,26 @@ impl InputDispatcher {
     /// Build a dispatcher for session-owned capture-plan snapshots.
     pub(super) fn new(outputs: GestureOutputs) -> Self {
         Self {
+            hook_maps: outputs.hook_maps.clone(),
             outputs,
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
         }
+    }
+
+    /// Publish a hardware polarity observation into the OS-hook snapshot.
+    fn record_thumbwheel_direction(&self, key: &str, input: CapturedInput) -> bool {
+        let CapturedInput::ThumbwheelDirection {
+            positive_is_forward,
+        } = input
+        else {
+            return false;
+        };
+        if let Ok(mut maps) = self.hook_maps.write() {
+            maps.thumbwheel_positive_is_forward
+                .insert(key.to_owned(), positive_is_forward);
+        }
+        true
     }
 
     /// Cancel every input lifecycle retained for one capture session.
@@ -125,6 +144,9 @@ impl InputDispatcher {
         input: CapturedInput,
     ) {
         let key = session.device_key();
+        if self.record_thumbwheel_direction(key, input) {
+            return;
+        }
         match input {
             CapturedInput::Gesture(button, direction) => {
                 let Some(press) = self.gesture_presses.get(session, button) else {
@@ -161,10 +183,12 @@ impl InputDispatcher {
                 } else {
                     debug!(key, ?button, "HID++ button with no binding — ignored");
                 }
-                let press = self
-                    .outputs
-                    .actions
-                    .try_hidpp_button_down(session, button, binding);
+                let press = self.outputs.actions.try_hidpp_button_down(
+                    session,
+                    button,
+                    binding,
+                    plan.pointer_target,
+                );
                 if is_gesture {
                     if let Some(press) = press {
                         self.gesture_presses.start(session, button, press);
@@ -184,33 +208,54 @@ impl InputDispatcher {
                 } else {
                     debug!(key, ?button, "HID++ button pulse with no binding — ignored");
                 }
-                self.outputs
-                    .actions
-                    .dispatch_hidpp_button_pulse(session, button, binding);
+                self.outputs.actions.dispatch_hidpp_button_pulse(
+                    session,
+                    button,
+                    binding,
+                    plan.pointer_target,
+                );
             }
             CapturedInput::Scroll {
                 increments,
                 resolution,
-            } => {
-                let Some(rotation) = WheelRotation::from_increments(increments) else {
-                    return;
-                };
-                let button = rotation.button();
-                let configuration = WheelConfiguration::for_plan(plan);
-                let action = configuration.action(rotation);
-                let wheels = self.wheels.for_session(session);
-                match wheels.advance(
-                    rotation,
-                    action,
-                    ScrollScale::new(resolution, configuration.sensitivity),
-                    Instant::now(),
-                ) {
-                    WheelOutput::Idle => {}
-                    WheelOutput::Scroll(delta) => self.outputs.post_scroll(session, delta),
-                    WheelOutput::FireAction => {
-                        debug!(key, ?button, action = %action.label(), "thumb wheel → action");
-                        self.outputs.actions.dispatch(action, Some(key));
-                    }
+            } => self.dispatch_wheel(session, plan, increments, resolution),
+            CapturedInput::ThumbwheelDirection { .. } => {
+                unreachable!("thumb-wheel direction reports return before dispatch")
+            }
+        }
+    }
+
+    fn dispatch_wheel(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        increments: i16,
+        resolution: WheelResolution,
+    ) {
+        let Some(rotation) = WheelRotation::from_increments(increments) else {
+            return;
+        };
+        let key = session.device_key();
+        let button = rotation.button();
+        let configuration = WheelConfiguration::for_plan(plan);
+        let action = configuration.action(rotation);
+        let wheels = self.wheels.for_session(session);
+        match wheels.advance(
+            rotation,
+            action,
+            ScrollScale::new(resolution, configuration.sensitivity),
+            Instant::now(),
+        ) {
+            WheelOutput::Idle => {}
+            WheelOutput::Scroll(delta) => self.outputs.post_scroll(session, delta),
+            WheelOutput::FireAction(repeats) => {
+                debug!(key, ?button, action = %action.label(), repeats, "thumb wheel → action");
+                for _ in 0..repeats {
+                    self.outputs.actions.dispatch_pointer_action(
+                        action,
+                        Some(key),
+                        plan.pointer_target,
+                    );
                 }
             }
         }

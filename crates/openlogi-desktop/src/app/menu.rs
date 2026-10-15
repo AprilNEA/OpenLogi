@@ -14,7 +14,7 @@ use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 use url::Url;
 
 use crate::state::AppState;
-use crate::ui::battery::battery_charging_no_reading;
+use crate::ui::battery::value_label;
 
 /// Keymap context installed on the main application surface.
 pub(crate) const APP_KEY_CONTEXT: &str = "OpenLogi";
@@ -83,13 +83,7 @@ pub fn install(cx: &mut App) {
     cx.on_action(|_: &OpenAddDevice, cx| crate::windows::add_device::open(cx));
     cx.on_action(|_: &BringAllToFront, cx| cx.activate(true));
     cx.on_action(|_: &CheckForUpdates, cx| check_for_updates(cx));
-    cx.on_action(|_: &OpenConfigFolder, cx| {
-        if let Ok(path) = openlogi_core::paths::config_dir()
-            && let Some(url) = file_url(&path)
-        {
-            cx.open_url(&url);
-        }
-    });
+    cx.on_action(|_: &OpenConfigFolder, cx| open_config_folder(cx));
     cx.on_action(|_: &OpenHelp, cx| cx.open_url(HELP_URL));
     cx.on_action(|_: &OpenLatestRelease, cx| cx.open_url(RELEASES_URL));
     cx.on_action(|_: &OpenRepository, cx| cx.open_url(REPO_URL));
@@ -122,13 +116,17 @@ pub fn rebuild(cx: &mut App) {
     cx.set_menus(menus(cx));
 }
 
-/// Run a manual update check and open Settings → Updates where its status is
-/// rendered. Shared by the app menu and agent tray IPC commands.
+/// Run a manual update check and show its progress: Sparkle in its own window,
+/// the built-in engine on Settings → Updates. Shared by the app menu, agent
+/// tray IPC commands and deep links.
 pub fn check_for_updates(cx: &mut App) {
-    if let Some(updater) = crate::platform::updater::shared(cx) {
+    let updater = crate::platform::updater::shared(cx);
+    if let Some(updater) = &updater {
         updater.update(cx, gpui_updater::Updater::check);
     }
-    crate::windows::settings::open_at(crate::windows::settings::SettingsPage::Updates, cx);
+    if !updater.is_some_and(|updater| updater.read(cx).is_driver_backed()) {
+        crate::windows::settings::open_at(crate::windows::settings::SettingsPage::Updates, cx);
+    }
 }
 
 fn menus(cx: &App) -> Vec<Menu> {
@@ -138,10 +136,10 @@ fn menus(cx: &App) -> Vec<Menu> {
             name: "OpenLogi".into(),
             disabled: false,
             items: vec![
-                MenuItem::action(tr!("About OpenLogi"), OpenAbout),
-                MenuItem::action(tr!("Check for Updates…"), CheckForUpdates),
+                MenuItem::action(tr!("about.about_openlogi"), OpenAbout),
+                MenuItem::action(tr!("updates.check_for_updates_dialog"), CheckForUpdates),
                 MenuItem::separator(),
-                MenuItem::action(tr!("Settings…"), OpenSettings),
+                MenuItem::action(tr!("app.settings_dialog"), OpenSettings),
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
@@ -149,69 +147,85 @@ fn menus(cx: &App) -> Vec<Menu> {
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
-                MenuItem::action(tr!("Hide OpenLogi"), Hide),
+                MenuItem::action(tr!("app.hide_openlogi"), Hide),
                 #[cfg(target_os = "macos")]
-                MenuItem::action(tr!("Hide Others"), HideOthers),
+                MenuItem::action(tr!("app.hide_others"), HideOthers),
                 #[cfg(target_os = "macos")]
-                MenuItem::action(tr!("Show All"), ShowAll),
+                MenuItem::action(tr!("common.show_all"), ShowAll),
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
-                MenuItem::action(tr!("Quit OpenLogi"), Quit),
+                MenuItem::action(tr!("app.quit_openlogi"), Quit),
             ],
         },
         Menu {
-            name: tr!("Edit"),
+            name: tr!("common.edit"),
             disabled: false,
             items: vec![
-                MenuItem::os_action(tr!("Undo"), gpui_component::input::Undo, OsAction::Undo),
-                MenuItem::os_action(tr!("Redo"), gpui_component::input::Redo, OsAction::Redo),
+                MenuItem::os_action(
+                    tr!("common.undo"),
+                    gpui_component::input::Undo,
+                    OsAction::Undo,
+                ),
+                MenuItem::os_action(
+                    tr!("common.redo"),
+                    gpui_component::input::Redo,
+                    OsAction::Redo,
+                ),
                 MenuItem::separator(),
-                MenuItem::os_action(tr!("Cut"), gpui_component::input::Cut, OsAction::Cut),
-                MenuItem::os_action(tr!("Copy"), gpui_component::input::Copy, OsAction::Copy),
-                MenuItem::os_action(tr!("Paste"), gpui_component::input::Paste, OsAction::Paste),
+                MenuItem::os_action(tr!("common.cut"), gpui_component::input::Cut, OsAction::Cut),
+                MenuItem::os_action(
+                    tr!("common.copy"),
+                    gpui_component::input::Copy,
+                    OsAction::Copy,
+                ),
+                MenuItem::os_action(
+                    tr!("common.paste"),
+                    gpui_component::input::Paste,
+                    OsAction::Paste,
+                ),
                 MenuItem::separator(),
                 MenuItem::os_action(
-                    tr!("Select All"),
+                    tr!("common.select_all"),
                     gpui_component::input::SelectAll,
                     OsAction::SelectAll,
                 ),
             ],
         },
         Menu {
-            name: tr!("View"),
+            name: tr!("common.view"),
             disabled: false,
             items: vec![
-                MenuItem::action(tr!("Settings…"), OpenSettings),
-                MenuItem::action(tr!("About OpenLogi"), OpenAbout),
+                MenuItem::action(tr!("app.settings_dialog"), OpenSettings),
+                MenuItem::action(tr!("about.about_openlogi"), OpenAbout),
                 MenuItem::separator(),
-                MenuItem::action(tr!("Open Configuration Folder"), OpenConfigFolder),
+                MenuItem::action(tr!("app.open_configuration_folder"), OpenConfigFolder),
             ],
         },
         Menu {
-            name: tr!("Device"),
+            name: tr!("device.device"),
             disabled: false,
             items: device_menu_items(cx),
         },
         Menu {
-            name: tr!("Window"),
+            name: tr!("app.window"),
             disabled: false,
             items: vec![
-                MenuItem::action(tr!("Close Window"), CloseWindow),
+                MenuItem::action(tr!("common.close_window"), CloseWindow),
                 MenuItem::separator(),
-                MenuItem::action(tr!("Minimize"), Minimize),
-                MenuItem::action(tr!("Zoom"), Zoom),
+                MenuItem::action(tr!("common.minimize"), Minimize),
+                MenuItem::action(tr!("common.zoom"), Zoom),
                 MenuItem::separator(),
-                MenuItem::action(tr!("Bring All to Front"), BringAllToFront),
+                MenuItem::action(tr!("app.bring_all_to_front"), BringAllToFront),
             ],
         },
         Menu {
-            name: tr!("Help"),
+            name: tr!("common.help"),
             disabled: false,
             items: vec![
-                MenuItem::action(tr!("OpenLogi Help"), OpenHelp),
+                MenuItem::action(tr!("about.openlogi_help"), OpenHelp),
                 MenuItem::separator(),
-                MenuItem::action(tr!("Open GitHub Repository"), OpenRepository),
-                MenuItem::action(tr!("Latest Release"), OpenLatestRelease),
+                MenuItem::action(tr!("about.open_github_repository"), OpenRepository),
+                MenuItem::action(tr!("about.latest_release"), OpenLatestRelease),
             ],
         },
     ]
@@ -219,7 +233,7 @@ fn menus(cx: &App) -> Vec<Menu> {
 
 fn device_menu_items(cx: &App) -> Vec<MenuItem> {
     let mut items = vec![
-        MenuItem::action(tr!("Add Device…"), OpenAddDevice),
+        MenuItem::action(tr!("pairing.add_device_dialog"), OpenAddDevice),
         MenuItem::separator(),
     ];
 
@@ -228,18 +242,16 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
         Some(state) if !state.devices().is_empty() => {
             for record in state.devices() {
                 let title = match &record.battery {
-                    Some(battery) if battery_charging_no_reading(battery) => {
-                        format!("{} · {}", record.display_name, tr!("Charging"))
-                    }
-                    Some(battery) => format!("{} · {}%", record.display_name, battery.percentage),
+                    Some(battery) => format!("{} · {}", record.display_name, value_label(battery)),
                     None => record.display_name.clone(),
                 };
                 items.push(MenuItem::action(title, gpui::NoAction).disabled(true));
             }
         }
         _ => {
-            items
-                .push(MenuItem::action(tr!("No devices connected"), gpui::NoAction).disabled(true));
+            items.push(
+                MenuItem::action(tr!("device.no_devices_connected"), gpui::NoAction).disabled(true),
+            );
         }
     }
 
@@ -248,4 +260,21 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
 
 pub(crate) fn file_url(path: &std::path::Path) -> Option<String> {
     Url::from_file_path(path).ok().map(Into::into)
+}
+
+/// Reveal the user's configuration directory in the OS file manager.
+///
+/// Every in-window button that offers this calls here directly instead of
+/// dispatching [`OpenConfigFolder`]. `App::dispatch_action` routes through
+/// the *active* window and drops the action when that window cannot be
+/// resolved — it logs "window not found" and swallows the error — which left
+/// the button on the fail-closed configuration-error screen doing nothing at
+/// all. Only the menu bar, which has no view to call from, goes through the
+/// action.
+pub(crate) fn open_config_folder(cx: &mut App) {
+    if let Ok(path) = openlogi_core::paths::config_dir()
+        && let Some(url) = file_url(&path)
+    {
+        cx.open_url(&url);
+    }
 }

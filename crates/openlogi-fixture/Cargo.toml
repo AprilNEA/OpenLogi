@@ -1,0 +1,31 @@
+[package]
+name = "openlogi-fixture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Host-free schemas and privacy verification for OpenLogi device fixtures."
+keywords = ["logitech", "hidpp", "fixture", "testing"]
+categories = ["development-tools::testing", "hardware-support"]
+
+# Fixture contracts must remain usable by portable replay and published CLI
+# tooling. Default features perform no file I/O, host access, or async work.
+# The optional fs feature owns strict corpus loading for host tools and tests.
+[dependencies]
+openlogi-core = { version = "0.8.13", path = "../openlogi-core", default-features = false }
+serde = { workspace = true }
+serde_ignored = "0.1.14"
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
+
+[features]
+fs = ["dep:serde_json"]

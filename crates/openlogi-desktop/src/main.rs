@@ -13,19 +13,12 @@
     windows_subsystem = "windows"
 )]
 
-/// Translate `key` (an English msgid) to the current locale and wrap it as a
-/// [`gpui::SharedString`], ready for `.child(...)` / `.label(...)` / menu items.
-/// Forwards `rust_i18n` interpolation, e.g. `tr!("Bind %{name}", name => x)`.
-///
-/// Defined before the `mod` declarations so every submodule can use it without
-/// an import (textual macro scope). Pairs with the `rust_i18n::i18n!` below.
+/// Translate into a [`gpui::SharedString`]; declared here for crate-wide scope.
 macro_rules! tr {
     ($($args:tt)*) => {
-        // `t!` yields `Cow<'static, str>`. A borrowed hit — the common case: a
-        // found translation or the English-key fallback — wraps into a
-        // `SharedString` with no copy; only owned (interpolated) results allocate.
+        // Catalog entries stay static; interpolated results are owned.
         match ::rust_i18n::t!($($args)*) {
-            ::std::borrow::Cow::Borrowed(s) => ::gpui::SharedString::from(s),
+            ::std::borrow::Cow::Borrowed(s) => ::gpui::SharedString::new_static(s),
             ::std::borrow::Cow::Owned(s) => ::gpui::SharedString::from(s),
         }
     };
@@ -41,7 +34,7 @@ mod state;
 mod ui;
 mod windows;
 
-// Loads the Crowdin-managed `crates/openlogi-ui/locales/*.yml` files at compile
+// Loads the Crowdin-managed `crates/openlogi-ui/locales/*.toml` files at compile
 // time and generates the `t!`/`tr!` lookup backend for this crate. `fallback =
 // "en"` matches the codes gpui-component ships, so the framework's own widgets
 // localize alongside ours.
@@ -51,8 +44,8 @@ use anyhow::Result;
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::{Config, ConfigFile};
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
+use crate::platform::app_icon::AppIconExt as _;
 use crate::services::assets::sync::{AssetCommand, AssetControl};
 use crate::services::{i18n, ipc};
 use crate::state::ConfigPersistence;
@@ -67,17 +60,18 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let _guard = match openlogi_core::single_instance::acquire("openlogi.lock") {
-        Ok(g) => g,
-        Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
-            info!(
-                path = %path.display(),
-                "another OpenLogi instance is already running — exiting"
-            );
-            return Ok(());
-        }
-        Err(e) => return Err(anyhow::Error::from(e).context("single-instance check")),
-    };
+    let _guard =
+        match openlogi_core::single_instance::acquire(openlogi_core::single_instance::Role::Gui) {
+            Ok(g) => g,
+            Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
+                info!(
+                    path = %path.display(),
+                    "another OpenLogi instance is already running — exiting"
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(anyhow::Error::from(e).context("single-instance check")),
+        };
 
     let (initial_config, config_persistence) = match ConfigFile::load_or_default() {
         Ok((config, file)) => (config, ConfigPersistence::UserFile(file)),
@@ -97,7 +91,7 @@ fn main() -> Result<()> {
     // The always-on agent owns the hook, the HID++ capture, and all device I/O.
     // The GUI is a client: it observes inventory + status and forwards device
     // commands over IPC. Started here so the first state is already on its way.
-    let ipc::IpcClient {
+    let ipc::Handle {
         updates,
         commands: ipc_commands,
     } = ipc::spawn();
@@ -127,7 +121,7 @@ fn main() -> Result<()> {
     });
 
     // Reopen the window when the app is relaunched with none open (dock click).
-    app.on_reopen(|cx| windows::main_window::open(&[], cx));
+    app.on_reopen(windows::main_window::open);
 
     app.run(move |cx| {
         gpui_component::init(cx);
@@ -147,10 +141,11 @@ fn main() -> Result<()> {
         // check on launch. Done before `initial_config` is handed to the
         // event loop below.
         platform::updater::install(cx, &initial_config.app_settings);
+        platform::installation::install(cx);
 
         // Wear the icon the user picked. An update replaces the bundle and
         // takes the icon with it, so this is a repair as much as a restore.
-        platform::app_icon::restore(initial_config.app_settings.app_icon);
+        initial_config.app_settings.app_icon.restore();
 
         // On-demand GUI: quit when the last window closes. The agent stays
         // resident and keeps remapping (and hosts the menu-bar item from which
@@ -179,10 +174,5 @@ fn main() -> Result<()> {
 }
 
 fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    openlogi_core::logging::init_stderr();
 }

@@ -9,7 +9,7 @@ on:
       - master
     paths:
       # English source is SoT; non-English catalogs come from Crowdin only.
-      - crates/openlogi-ui/locales/en.yml
+      - crates/openlogi-ui/locales/en.toml
       - .config/crowdin.yml
       - .github/workflows/crowdin.yml
       - .github/scripts/i18n/**
@@ -71,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/openlogi-locales-before
-          cp crates/openlogi-ui/locales/*.yml /tmp/openlogi-locales-before/
+          cp crates/openlogi-ui/locales/*.toml /tmp/openlogi-locales-before/
 
       # Upload sources + seed per-language translations, then download only
       # (no push/PR — we merge first so sparse/English exports never land).
@@ -101,7 +101,7 @@ jobs:
           python3 .github/scripts/i18n/merge_crowdin_download.py \
             --before /tmp/openlogi-locales-before \
             --locales crates/openlogi-ui/locales \
-            --en crates/openlogi-ui/locales/en.yml
+            --en crates/openlogi-ui/locales/en.toml
 
       - name: Push translation branch and open PR
         env:
@@ -126,7 +126,7 @@ jobs:
             body="$(cat <<'EOF'
           Automated per-language translation sync from Crowdin.
 
-          - `en.yml` is the English source of truth; feature PRs keep key parity across all `locales/*.yml`.
+          - `en.toml` is the English source of truth; feature PRs keep semantic-key parity across all `locales/*.toml`.
           - Existing non-English catalogs are uploaded first so Crowdin is seeded with real work.
           - Download is merged into complete catalogs: only values that differ from English are applied.
           - Untranslated keys are never replaced with English fill-in and never deleted (#549 / #552).

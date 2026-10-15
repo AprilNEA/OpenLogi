@@ -3,16 +3,10 @@
 
 use super::ServiceStatus;
 
-/// The launchd service label this process manages: the dev variant inside a
-/// dev-profile bundle, so a dev registration can never collide with the
-/// shipped one.
+/// The launchd service label this process manages: its own profile's.
 #[must_use]
 pub fn agent_service_label() -> String {
-    if openlogi_core::paths::is_dev_profile() {
-        openlogi_core::brand::dev_id(openlogi_core::brand::AGENT_SERVICE_LABEL)
-    } else {
-        openlogi_core::brand::AGENT_SERVICE_LABEL.to_owned()
-    }
+    openlogi_core::paths::Profile::current().agent_service_label()
 }
 
 pub(super) fn status() -> ServiceStatus {
@@ -24,30 +18,66 @@ pub(super) fn status() -> ServiceStatus {
 enum EnsureAction {
     /// The service is absent — register it.
     Register,
-    /// The service is registered but a different executable registered it —
-    /// unregister-then-register, the dance Apple requires after an update.
+    /// The service is registered but the registration cannot be used as it
+    /// stands — unregister-then-register, the dance Apple requires after an
+    /// update and the only way to rebuild a job launchd has dropped.
     Reregister,
 }
 
-/// The pure convergence rule behind [`ensure_registered`] (which is what the
-/// tests below pin down).
+/// What launchd itself last said about the job, which is the one fact
+/// [`ServiceStatus`] cannot carry: `SMAppService` reads the Background Task
+/// Management record, not the launchd domain, and the two can disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchdJob {
+    /// Nothing observed — the ordinary convergence call.
+    Unobserved,
+    /// Something removed the job (a `launchctl bootout` / `unload`, from a
+    /// cleanup tool or by hand) while the record survived it.
+    Missing,
+}
+
+/// The pure convergence rule behind [`ensure_registered`] and
+/// [`reregister_missing_job`] (which is what the tests below pin down).
 ///
 /// - Absent (`NotRegistered`) → register. `NotFound` also attempts it, so a
 ///   broken bundle surfaces an informative framework error instead of
 ///   silence.
 /// - `Enabled` with a stale version marker → re-register.
+/// - `Enabled` with no job left in launchd → re-register: registering again
+///   returns `kSMErrorAlreadyRegistered` against the surviving record and
+///   submits nothing, so the dance is what puts a startable job back.
 /// - `RequiresApproval` → nothing, ever: the user's System Settings choice
-///   outranks the update path too.
-fn ensure_action(status: ServiceStatus, stale: bool) -> Option<EnsureAction> {
+///   outranks the update and repair paths too.
+fn ensure_action(status: ServiceStatus, stale: bool, job: LaunchdJob) -> Option<EnsureAction> {
     match status {
         ServiceStatus::NotRegistered | ServiceStatus::NotFound => Some(EnsureAction::Register),
-        ServiceStatus::Enabled if stale => Some(EnsureAction::Reregister),
+        ServiceStatus::Enabled if stale || job == LaunchdJob::Missing => {
+            Some(EnsureAction::Reregister)
+        }
         ServiceStatus::Enabled | ServiceStatus::RequiresApproval => None,
     }
 }
 
 pub(super) fn ensure_registered() -> Result<(), String> {
-    match ensure_action(backend::status(), registration_is_stale()) {
+    converge(LaunchdJob::Unobserved)
+}
+
+/// Rebuild a registration whose launchd job is gone: the service still reports
+/// [`ServiceStatus::Enabled`], so nothing else here would touch it, yet every
+/// `launchctl kickstart` answers "Could not find service" and the agent can
+/// never be started again.
+///
+/// # Errors
+///
+/// The framework's error description, as for [`ensure_registered`].
+pub fn reregister_missing_job() -> Result<(), String> {
+    converge(LaunchdJob::Missing)
+}
+
+/// Apply [`ensure_action`] and record the version that registered, so the next
+/// update is recognised as stale.
+fn converge(job: LaunchdJob) -> Result<(), String> {
+    match ensure_action(backend::status(), registration_is_stale(), job) {
         Some(EnsureAction::Register) => {
             backend::register()?;
             tracing::info!("registered the agent service with launchd");
@@ -55,7 +85,14 @@ pub(super) fn ensure_registered() -> Result<(), String> {
         Some(EnsureAction::Reregister) => {
             backend::unregister()?;
             backend::register()?;
-            tracing::info!("re-registered the agent service (executable changed)");
+            match job {
+                LaunchdJob::Missing => {
+                    tracing::info!("re-registered the agent service (launchd had no job for it)");
+                }
+                LaunchdJob::Unobserved => {
+                    tracing::info!("re-registered the agent service (executable changed)");
+                }
+            }
         }
         None => return Ok(()),
     }
@@ -116,6 +153,30 @@ mod backend {
 
     use super::{ServiceStatus, agent_service_label};
 
+    /// The domain `SMAppService` reports its errors in.
+    ///
+    /// Spelled out on purpose. The framework has used this string since
+    /// macOS 13 but exports it as the `SMAppServiceErrorDomain` symbol only
+    /// from macOS 15, and a binary that imports that symbol is refused by
+    /// dyld on 13 and 14 before `main` runs (#1279). Rust has no availability
+    /// checking to catch that, so the constant must never be linked here.
+    const ERROR_DOMAIN: &str = "SMAppServiceErrorDomain";
+
+    /// Recognize `SMAppService` errors without importing its macOS 15-only
+    /// error-domain symbol.
+    pub(super) trait SmAppServiceErrorExt {
+        /// Match both the framework's domain and `expected`: the same small
+        /// integers mean something else as POSIX or OSStatus codes.
+        fn is_sm_app_service_error(&self, expected: core::ffi::c_uint) -> bool;
+    }
+
+    impl SmAppServiceErrorExt for NSError {
+        fn is_sm_app_service_error(&self, expected: core::ffi::c_uint) -> bool {
+            self.domain().to_string() == ERROR_DOMAIN
+                && isize::try_from(expected).is_ok_and(|expected| self.code() == expected)
+        }
+    }
+
     /// The framework handle for the agent service's embedded plist.
     #[expect(unsafe_code, reason = "plain ObjC class method via objc2 bindings")]
     fn service() -> Retained<SMAppService> {
@@ -162,20 +223,12 @@ mod backend {
     /// Treat exactly one framework error code — the "already in the desired
     /// state" one for the operation — as success. Matched by the framework's
     /// own constants, never bare ints.
-    #[expect(
-        unsafe_code,
-        reason = "reading a framework-provided immutable static NSString"
-    )]
     fn forgive(
         result: Result<(), Retained<NSError>>,
         benign: core::ffi::c_uint,
     ) -> Result<(), String> {
         result.or_else(|error| {
-            // SAFETY: the extern static is an immutable framework-owned
-            // NSString.
-            let domain_matches =
-                &*error.domain() == unsafe { objc2_service_management::SMAppServiceErrorDomain };
-            if domain_matches && isize::try_from(benign).is_ok_and(|code| error.code() == code) {
+            if error.is_sm_app_service_error(benign) {
                 Ok(())
             } else {
                 Err(error.localizedDescription().to_string())
@@ -191,13 +244,19 @@ mod tests {
     #[test]
     fn an_absent_service_is_registered() {
         assert_eq!(
-            ensure_action(ServiceStatus::NotRegistered, false),
+            ensure_action(ServiceStatus::NotRegistered, false, LaunchdJob::Unobserved),
             Some(EnsureAction::Register)
         );
         // A fresh install has no marker, which reads as stale — that must
         // still be a plain register, not an unregister dance.
         assert_eq!(
-            ensure_action(ServiceStatus::NotRegistered, true),
+            ensure_action(ServiceStatus::NotRegistered, true, LaunchdJob::Unobserved),
+            Some(EnsureAction::Register)
+        );
+        // Nothing to unregister when the record is gone too, however the
+        // caller learned that launchd has no job.
+        assert_eq!(
+            ensure_action(ServiceStatus::NotRegistered, false, LaunchdJob::Missing),
             Some(EnsureAction::Register)
         );
     }
@@ -207,29 +266,105 @@ mod tests {
         // NotFound means a broken or bare bundle; attempting the register
         // surfaces an informative framework error instead of silence.
         assert_eq!(
-            ensure_action(ServiceStatus::NotFound, false),
+            ensure_action(ServiceStatus::NotFound, false, LaunchdJob::Unobserved),
             Some(EnsureAction::Register)
         );
     }
 
     #[test]
     fn a_current_registration_is_left_alone() {
-        assert_eq!(ensure_action(ServiceStatus::Enabled, false), None);
+        assert_eq!(
+            ensure_action(ServiceStatus::Enabled, false, LaunchdJob::Unobserved),
+            None
+        );
     }
 
     #[test]
     fn an_update_reregisters() {
         assert_eq!(
-            ensure_action(ServiceStatus::Enabled, true),
+            ensure_action(ServiceStatus::Enabled, true, LaunchdJob::Unobserved),
+            Some(EnsureAction::Reregister)
+        );
+    }
+
+    #[test]
+    fn a_job_launchd_lost_is_reregistered() {
+        // The record outlived its launchd job (a `bootout` / `unload` from a
+        // cleanup tool or by hand). The version marker is current, so nothing
+        // else here would act — and registering again would return
+        // `kSMErrorAlreadyRegistered` without submitting a job, leaving every
+        // kickstart to answer "Could not find service".
+        assert_eq!(
+            ensure_action(ServiceStatus::Enabled, false, LaunchdJob::Missing),
             Some(EnsureAction::Reregister)
         );
     }
 
     #[test]
     fn a_system_settings_disable_is_never_overridden() {
-        // Not on a normal launch, and not by the update path either: the
-        // user's Login Items choice outranks both.
-        assert_eq!(ensure_action(ServiceStatus::RequiresApproval, false), None);
-        assert_eq!(ensure_action(ServiceStatus::RequiresApproval, true), None);
+        // Not on a normal launch, not by the update path, and not by the
+        // repair either: the user's Login Items choice outranks all three.
+        assert_eq!(
+            ensure_action(
+                ServiceStatus::RequiresApproval,
+                false,
+                LaunchdJob::Unobserved
+            ),
+            None
+        );
+        assert_eq!(
+            ensure_action(
+                ServiceStatus::RequiresApproval,
+                true,
+                LaunchdJob::Unobserved
+            ),
+            None
+        );
+        assert_eq!(
+            ensure_action(ServiceStatus::RequiresApproval, false, LaunchdJob::Missing),
+            None
+        );
+    }
+
+    #[test]
+    fn only_the_frameworks_own_error_domain_and_code_match() {
+        use objc2_foundation::{NSError, NSString};
+        use objc2_service_management::{kSMErrorAlreadyRegistered, kSMErrorJobNotFound};
+
+        use super::backend::SmAppServiceErrorExt;
+
+        for (domain, code, expected, matches) in [
+            (
+                "SMAppServiceErrorDomain",
+                12,
+                kSMErrorAlreadyRegistered,
+                true,
+            ),
+            ("SMAppServiceErrorDomain", 6, kSMErrorJobNotFound, true),
+            // The other operation's benign code is a real failure for this one.
+            ("SMAppServiceErrorDomain", 12, kSMErrorJobNotFound, false),
+            (
+                "SMAppServiceErrorDomain",
+                6,
+                kSMErrorAlreadyRegistered,
+                false,
+            ),
+            // ENOMEM is 12 too; POSIX/OSStatus errors must never match.
+            ("NSPOSIXErrorDomain", 12, kSMErrorAlreadyRegistered, false),
+            ("NSOSStatusErrorDomain", 6, kSMErrorJobNotFound, false),
+            (
+                "SMAppServiceErrorDomain",
+                -1,
+                kSMErrorAlreadyRegistered,
+                false,
+            ),
+        ] {
+            let error = NSError::new(code, &NSString::from_str(domain));
+            assert_eq!(
+                error.is_sm_app_service_error(expected),
+                matches,
+                "domain={domain}, code={code}, expected={expected}"
+            );
+        }
     }
 }

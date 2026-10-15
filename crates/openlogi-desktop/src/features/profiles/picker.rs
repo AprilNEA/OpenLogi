@@ -15,10 +15,10 @@ use gpui_component::{
     v_flex,
 };
 
-use super::catalog::{AppCatalogPicker, AppIconState, ProfileIconCache};
+use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::shell::application_mark;
 use super::{AddAppChoices, CatalogPresentation, ProfileChoice, ProfileScopeActions};
-use crate::features::mouse::picker::{compact_panel, divider, title};
+use crate::features::binding_editor::{compact_panel, divider, title};
 use crate::ui::components::{MenuRow, control_button, control_input};
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
@@ -45,7 +45,7 @@ pub(super) fn add_app_popover(
             control_button(format!("{id_base}:add-app-profile"))
                 .outline()
                 .icon(IconName::Plus)
-                .label(tr!("Add app")),
+                .label(tr!("profiles.add_app")),
         )
         .on_open_change(move |open, window, cx| {
             if *open {
@@ -56,7 +56,7 @@ pub(super) fn add_app_popover(
             let search = catalog.read(cx).search();
             crate::ui::components::localize_placeholder(
                 &search,
-                tr!("Search applications…"),
+                tr!("profiles.search_applications"),
                 window,
                 cx,
             );
@@ -115,7 +115,7 @@ fn add_app_content(
 
     compact_panel(pal)
         .w(px(320.))
-        .child(title(tr!("Add app profile"), pal))
+        .child(title(tr!("profiles.add_app_profile"), pal))
         .child(divider(pal))
         .child(
             control_input(&search)
@@ -130,7 +130,7 @@ fn add_app_content(
                     .pb_1()
                     .text_caption()
                     .text_color(pal.text_muted)
-                    .child(tr!("Recent applications")),
+                    .child(tr!("profiles.recent_applications")),
             )
         })
         .children(recent_rows)
@@ -143,13 +143,13 @@ fn add_app_content(
         ))
         .when(
             show_applications && matches!(&choices.catalog, CatalogPresentation::Loading),
-            |card| card.child(catalog_message(tr!("Loading applications…"), pal)),
+            |card| card.child(catalog_message(tr!("profiles.loading_applications"), pal)),
         )
         .when(
             show_applications && matches!(&choices.catalog, CatalogPresentation::Failed),
             |card| {
                 card.child(catalog_message(
-                    tr!("Application catalog unavailable."),
+                    tr!("profiles.application_catalog_unavailable"),
                     pal,
                 ))
             },
@@ -166,7 +166,7 @@ fn add_app_content(
             ))
         })
         .when(show_applications && no_matches, |card| {
-            card.child(catalog_message(tr!("No applications found"), pal))
+            card.child(catalog_message(tr!("profiles.no_applications_found"), pal))
         })
 }
 
@@ -184,6 +184,7 @@ fn catalog_list(
 ) -> gpui::Div {
     let count = rows.len();
     div()
+        .relative()
         .h(px(application_list_height(count)))
         .w_full()
         .child(
@@ -227,6 +228,7 @@ fn applications_toggle(
         .w_full()
         .flex()
         .items_center()
+        .justify_start()
         .gap_2()
         .px_2()
         .py_1p5()
@@ -270,7 +272,7 @@ fn applications_toggle(
                     .size_4(),
                 ),
         )
-        .child(tr!("All applications"))
+        .child(tr!("profiles.all_applications"))
         .on_click(move |_event, _window, cx| {
             catalog.update(cx, AppCatalogPicker::toggle_expanded);
         })
@@ -285,15 +287,17 @@ fn profile_matches_query(choice: &ProfileChoice, query: &str) -> bool {
 fn application_row(
     id_base: &'static str,
     choice: ProfileChoice,
-    icon: AppIconState,
+    icon: ApplicationIconState,
     actions: ProfileScopeActions,
     pal: Palette,
     popover: WeakEntity<PopoverState>,
 ) -> gpui::Div {
     let app = choice.app.clone();
+    let aria_label = format!("{}: {}", choice.name, choice.app);
     div().h(px(APP_ROW_H)).child(
         MenuRow::new(format!("{id_base}:catalog-app:{}", choice.app))
             .role(Role::MenuItem)
+            .aria_label(aria_label)
             .child(
                 h_flex()
                     .min_w_0()
@@ -357,7 +361,7 @@ mod tests {
     use gpui_component::popover::Popover;
 
     use super::APP_ROW_H;
-    use crate::features::mouse::picker::compact_panel;
+    use crate::features::binding_editor::compact_panel;
     use crate::ui::components::MenuRow;
     use crate::ui::theme;
 

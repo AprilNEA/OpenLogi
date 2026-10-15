@@ -18,7 +18,7 @@ pub(crate) struct Args {
     #[arg(long, default_value = "target/release/OpenLogi.dmg")]
     pub(crate) output: PathBuf,
     /// Developer ID identity used to sign the DMG, and the app when packaging.
-    #[arg(long, env = "OPENLOGI_SIGN_IDENTITY")]
+    #[arg(long, env = super::bundle::SIGN_IDENTITY_ENV)]
     pub(crate) sign_identity: Option<String>,
     /// Branded DMG background URL.
     #[arg(

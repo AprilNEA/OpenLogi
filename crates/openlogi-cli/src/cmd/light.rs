@@ -7,7 +7,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
 use openlogi_core::device::{LightValueUnit, StandaloneDevice};
-use openlogi_hid::{DeviceRoute, LightCommand, find_litra};
+use openlogi_hid::{LightCommand, find_litra};
 
 #[derive(Debug, Subcommand)]
 pub enum LightCmd {
@@ -163,13 +163,7 @@ async fn apply(device: &StandaloneDevice, command: LightCommand) -> Result<()> {
             device.address.product_id
         )
     })?;
-    let route = DeviceRoute::RawHid {
-        vendor_id: device.address.vendor_id,
-        product_id: device.address.product_id,
-        usage_page: device.address.usage_page,
-        usage_id: device.address.usage_id,
-        identity: device.address.identity.clone(),
-    };
+    let route = device.route();
     openlogi_hid::apply_litra(&route, model, command)
         .await
         .context("failed to write the light command")

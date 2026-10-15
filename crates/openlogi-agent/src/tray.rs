@@ -1,4 +1,4 @@
-//! The agent's macOS AppKit loop, menu-bar item, and resume notifications.
+//! The agent's macOS AppKit loop, menu-bar item, and login-session observer.
 //!
 //! The always-on agent hosts the menu bar (the GUI is on-demand). The item
 //! carries GUI-directed actions ("Show Main Window", Settings, About, Check for
@@ -10,6 +10,10 @@
 //! launched then URL delivered) and warm reactivation (URL delivered to the
 //! running app).
 //!
+//! The device-I/O gate itself lives in `activity_macos`; this file only
+//! forwards the `NSWorkspace` session edges (fast user switching) to it and
+//! sequences the launch hold around `finishLaunching`.
+//!
 //! macOS-only. AppKit objects are `Retained<T>` (no #99-style leaks); the run
 //! loop owns the main thread for the agent's lifetime.
 
@@ -20,7 +24,6 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -31,14 +34,16 @@ use objc2::{
 use objc2_app_kit::NSStatusItem;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSImage, NSRunningApplication, NSWorkspace,
-    NSWorkspaceDidWakeNotification, NSWorkspaceScreensDidWakeNotification,
-    NSWorkspaceSessionDidBecomeActiveNotification,
+    NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
 };
-use objc2_foundation::{NSNotification, NSNotificationName, NSString};
+use objc2_foundation::{NSNotification, NSString};
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
+use openlogi_hid::DeviceIoSignal;
 use tracing::{info, warn};
 
+use crate::activity_macos::{self, ActivityGate};
+use crate::shutdown::{self, ShutdownRequestSender};
 use crate::status_item;
 
 /// The installed menu-bar item plus the action target its menu items weakly
@@ -55,6 +60,10 @@ thread_local! {
     /// on the main thread, which is the same thread that installed it, so the
     /// affinity AppKit demands is the affinity the storage already has.
     static TRAY: RefCell<Option<TrayState>> = const { RefCell::new(None) };
+    /// Where menu actions hand process termination to the async lifecycle.
+    /// Kept separately because the AppKit loop still exists when the status
+    /// item is hidden by preference.
+    static SHUTDOWN_TX: RefCell<Option<ShutdownRequestSender>> = const { RefCell::new(None) };
 }
 
 /// The menu-bar glyph for `icon`: a monochrome template the system tints for
@@ -106,29 +115,34 @@ pub fn relocalize() {
     });
 }
 
-struct ResumeTargetIvars {
-    pending: Arc<AtomicBool>,
+struct SessionTargetIvars {
+    gate: Arc<ActivityGate>,
 }
 
 define_class!(
-    // SAFETY: NSObject has no subclassing requirements, and `ResumeTarget`
+    // SAFETY: NSObject has no subclassing requirements, and `SessionTarget`
     // does not implement `Drop`.
     #[unsafe(super(NSObject))]
-    #[ivars = ResumeTargetIvars]
-    #[name = "OpenLogiAgentWorkspaceResumeTarget"]
-    struct ResumeTarget;
+    #[ivars = SessionTargetIvars]
+    #[name = "OpenLogiAgentWorkspaceSessionTarget"]
+    struct SessionTarget;
 
-    impl ResumeTarget {
-        #[unsafe(method(workspaceDidResume:))]
-        fn workspace_did_resume(&self, _notification: &NSNotification) {
-            self.ivars().pending.store(true, Ordering::Relaxed);
+    impl SessionTarget {
+        #[unsafe(method(workspaceSessionDidResignActive:))]
+        fn workspace_session_did_resign_active(&self, _notification: &NSNotification) {
+            self.ivars().gate.set_on_console(false);
+        }
+
+        #[unsafe(method(workspaceSessionDidBecomeActive:))]
+        fn workspace_session_did_become_active(&self, _notification: &NSNotification) {
+            self.ivars().gate.set_on_console(true);
         }
     }
 );
 
-impl ResumeTarget {
-    fn new(pending: Arc<AtomicBool>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(ResumeTargetIvars { pending });
+impl SessionTarget {
+    fn new(gate: Arc<ActivityGate>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(SessionTargetIvars { gate });
         // SAFETY: `init` initializes our freshly allocated NSObject subclass.
         unsafe { msg_send![super(this), init] }
     }
@@ -192,7 +206,8 @@ fn open_command(command: DeeplinkCommand) {
     open_url(&command.to_url());
 }
 
-/// Menu-bar Quit: take a running GUI with us, then end the process.
+/// Menu-bar Quit: take a running GUI with us, then hand process termination to
+/// the lifecycle that owns firmware capture and the input hook.
 ///
 /// Kept out of `define_class!` so the lint set actually sees the exit — clippy
 /// does not look inside macro expansions.
@@ -209,12 +224,9 @@ fn quit_agent() -> ! {
             .output();
     }
     crate::overlay::evict_on_quit();
-    info!("menu-bar Quit — exiting agent");
-    #[expect(
-        clippy::exit,
-        reason = "reached from an AppKit menu action on the main thread: the run loop owns `main`'s stack frame, so no status can travel back to it"
-    )]
-    std::process::exit(0)
+    info!("menu-bar Quit — requesting graceful agent shutdown");
+    let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
+    shutdown::request_tray_quit(requests.as_ref(), 0)
 }
 
 /// Whether an OpenLogi GUI process is currently running (prod or dev bundle).
@@ -240,67 +252,79 @@ fn gui_is_running() -> bool {
 /// tokio core still does all the work). The toggle takes effect on the agent's
 /// next launch — a no-restart live toggle would need a main-thread hop from the
 /// IPC reload path (deferred; it can't be verified headlessly).
-/// `resume_pending` forwards coalesced workspace resume notifications to that core.
+/// `device_io_signal` is the hardware gate; it opens only while the Mac is in
+/// a full wake and this login session owns the console (`activity_macos`).
 pub fn run_app_loop(
     show_in_menu_bar: bool,
     app_icon: AppIcon,
-    resume_pending: Arc<AtomicBool>,
+    device_io_signal: DeviceIoSignal,
+    shutdown_tx: ShutdownRequestSender,
 ) -> ! {
+    SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
-        #[expect(
-            clippy::exit,
-            reason = "this branch means `run_app_loop` was called off the process main thread, where AppKit cannot run at all; the function is `-> !` and `main` returns `()`, so a failure status has nowhere to propagate"
-        )]
-        std::process::exit(1);
+        let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
+        shutdown::request_tray_quit(requests.as_ref(), 1);
     };
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
+    let gate = ActivityGate::new(device_io_signal);
+    let _session = install_session_observer(Arc::clone(&gate));
+    // Before `run()`: AppKit remaps the probes for the keyboard layout only
+    // once the loop has turned with them in the main menu.
+    openlogi_inject::prepare_menu_shortcuts(mtm);
     // Bind the status item (+ its target/menu) so they outlive `run()` — the
     // menu items only weakly reference the target. `None` when hidden.
     let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon));
-    let _resume_target = install_resume_observer(resume_pending);
+
+    // AppKit documents that an app launched into an inactive session receives
+    // `NSWorkspaceSessionDidResignActiveNotification` between its will- and
+    // did-finish-launching notifications. Finish that lifecycle while the
+    // launch hold still keeps the hardware gate closed, then read both levels
+    // — the console from CoreGraphics, the power state from powerd, which
+    // also starts the transition stream — before releasing the hold. Every
+    // one of those is a level, so the order they land in cannot matter.
+    app.finishLaunching();
+    let _power = activity_macos::connect(&gate);
+    gate.set_on_console(activity_macos::session_is_on_console());
+    gate.finish_startup();
     info!(show_in_menu_bar, "agent AppKit loop started");
 
     app.run();
-    #[expect(
-        clippy::exit,
-        reason = "AppKit only returns from `run()` once the loop is torn down, and the agent core is still running on another thread; this function is `-> !` with no return path, so the process ends here"
-    )]
-    std::process::exit(0);
+    info!("agent AppKit loop ended — requesting graceful core shutdown");
+    let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
+    shutdown::request_tray_quit(requests.as_ref(), 0);
 }
 
-/// Observe native resume transitions that the inventory polling-gap heuristic
-/// cannot see. The returned target must live for the AppKit loop's lifetime.
-fn install_resume_observer(pending: Arc<AtomicBool>) -> Retained<ResumeTarget> {
-    let target = ResumeTarget::new(pending);
+/// Forward the login session's console edges to the gate. These are the fast
+/// user switching notifications; sleep and wake are deliberately not observed
+/// here — powerd reports them as levels (`activity_macos`).
+fn install_session_observer(gate: Arc<ActivityGate>) -> Retained<SessionTarget> {
+    let target = SessionTarget::new(gate);
     let workspace = NSWorkspace::sharedWorkspace();
     let center = workspace.notificationCenter();
-    for name in resume_notification_names() {
-        // SAFETY: `ResumeTarget` implements `workspaceDidResume:` with the
-        // exact one-NSNotification argument signature, and the caller retains
-        // the target for the AppKit loop's lifetime.
-        unsafe {
-            center.addObserver_selector_name_object(
-                &target,
-                sel!(workspaceDidResume:),
-                Some(name),
-                Some(&workspace),
-            );
-        }
-    }
-    target
-}
-
-fn resume_notification_names() -> [&'static NSNotificationName; 3] {
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
-    let system_wake = unsafe { NSWorkspaceDidWakeNotification };
-    // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
-    let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
+    let session_inactive = unsafe { NSWorkspaceSessionDidResignActiveNotification };
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let session_active = unsafe { NSWorkspaceSessionDidBecomeActiveNotification };
-    [system_wake, screen_wake, session_active]
+    // SAFETY: Both selectors take exactly one `NSNotification` argument, and
+    // the caller retains the target for the AppKit loop's lifetime.
+    unsafe {
+        center.addObserver_selector_name_object(
+            &target,
+            sel!(workspaceSessionDidResignActive:),
+            Some(session_inactive),
+            Some(&workspace),
+        );
+        center.addObserver_selector_name_object(
+            &target,
+            sel!(workspaceSessionDidBecomeActive:),
+            Some(session_active),
+            Some(&workspace),
+        );
+    }
+    target
 }
 
 /// Build and install the menu-bar status item, returning the objects that must
@@ -337,7 +361,7 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
 
     let show = status_item::new_action_item(
         mtm,
-        &rust_i18n::t!("Show Main Window"),
+        &rust_i18n::t!("app.show_main_window"),
         sel!(openOpenLogi:),
         target,
         "m",
@@ -347,7 +371,7 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
 
     let settings = status_item::new_action_item(
         mtm,
-        &rust_i18n::t!("Settings…"),
+        &rust_i18n::t!("app.settings_dialog"),
         sel!(openSettings:),
         target,
         ",",
@@ -355,7 +379,7 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
     menu.addItem(&settings);
     let about = status_item::new_action_item(
         mtm,
-        &rust_i18n::t!("About OpenLogi"),
+        &rust_i18n::t!("about.about_openlogi"),
         sel!(openAbout:),
         target,
         "",
@@ -363,7 +387,7 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
     menu.addItem(&about);
     let updates = status_item::new_action_item(
         mtm,
-        &rust_i18n::t!("Check for Updates…"),
+        &rust_i18n::t!("updates.check_for_updates_dialog"),
         sel!(checkForUpdates:),
         target,
         "u",
@@ -373,14 +397,14 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
 
     let quit = status_item::new_action_item(
         mtm,
-        &rust_i18n::t!("Quit OpenLogi"),
+        &rust_i18n::t!("app.quit_openlogi"),
         sel!(quitOpenLogi:),
         target,
         "q",
     );
     if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str("xmark.square"),
-        Some(&NSString::from_str(&rust_i18n::t!("Quit OpenLogi"))),
+        Some(&NSString::from_str(&rust_i18n::t!("app.quit_openlogi"))),
     ) {
         image.setTemplate(true);
         quit.setImage(Some(&image));
@@ -392,26 +416,34 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity_macos::PowerState;
+    use openlogi_hid::device_io_channel;
 
     #[test]
-    fn resume_notifications_are_forwarded_and_coalesced() {
-        let pending = Arc::new(AtomicBool::new(false));
-        let target = install_resume_observer(Arc::clone(&pending));
+    fn a_session_switch_closes_the_gate_and_the_switch_back_reopens_it() {
+        let (signal, io) = device_io_channel();
+        let gate = ActivityGate::new(signal);
+        let target = install_session_observer(Arc::clone(&gate));
+        gate.set_power(PowerState::FullWake);
+        gate.set_on_console(true);
+        gate.finish_startup();
+        assert!(io.allows_io());
+
         let workspace = NSWorkspace::sharedWorkspace();
         let center = workspace.notificationCenter();
+        // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
+        let session_inactive = unsafe { NSWorkspaceSessionDidResignActiveNotification };
+        // SAFETY: `workspace` is live, matches the registration filter, and
+        // notification delivery completes synchronously.
+        unsafe { center.postNotificationName_object(session_inactive, Some(&workspace)) };
+        assert!(!io.allows_io());
 
-        for name in resume_notification_names() {
-            // SAFETY: `workspace` is live, matches the registration filter,
-            // and notification delivery completes synchronously.
-            unsafe { center.postNotificationName_object(name, Some(&workspace)) };
-            assert!(pending.swap(false, Ordering::Relaxed));
-        }
-        for name in resume_notification_names() {
-            // SAFETY: Same live object and synchronous delivery as above.
-            unsafe { center.postNotificationName_object(name, Some(&workspace)) };
-        }
-        assert!(pending.swap(false, Ordering::Relaxed));
-        assert!(!pending.swap(false, Ordering::Relaxed));
+        // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
+        let session_active = unsafe { NSWorkspaceSessionDidBecomeActiveNotification };
+        // SAFETY: `workspace` is live, matches the registration filter, and
+        // notification delivery completes synchronously.
+        unsafe { center.postNotificationName_object(session_active, Some(&workspace)) };
+        assert!(io.allows_io());
 
         // SAFETY: This is the same live target registered with `center` above.
         unsafe { center.removeObserver(&target) };
