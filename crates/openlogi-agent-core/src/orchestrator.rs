@@ -948,6 +948,7 @@ impl Orchestrator {
                 &self.shared.device(&route),
                 settings,
                 &self.shared.report_rate_order,
+                &self.shared.capture_plans,
             );
         }
         // A disabled entry is re-applied too: it writes black, and a device
@@ -1070,6 +1071,7 @@ impl Orchestrator {
             crate::hardware::write_scroll_wheel_mode_in_background(
                 self.shared.device(&route),
                 change,
+                self.shared.capture_plans.clone(),
             );
         }
     }

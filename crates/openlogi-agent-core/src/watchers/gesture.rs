@@ -87,9 +87,10 @@ impl GestureOutputs {
 
     /// Post a diverted main wheel's scroll, eased by the scroll runtime.
     fn post_main_wheel_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {
-        if !self.scroll.try_hidpp_wheel_scroll(session, delta) {
+        if let Err(direct) = self.scroll.try_hidpp_wheel_scroll(session, delta) {
             // As for `post_scroll`: the wheel no longer scrolls by itself.
-            openlogi_inject::post_scroll(delta);
+            // `direct` is already scaled by the wheel's sensitivity.
+            openlogi_inject::post_scroll(direct);
         }
     }
 }

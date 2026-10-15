@@ -165,6 +165,15 @@ impl CapturePublication {
     pub(crate) fn restore_route(&self, key: &PhysicalDeviceKey) -> Option<&DeviceRoute> {
         self.routes.get(key)
     }
+
+    /// Whether a plan here hands the main wheel at `route` to its capture
+    /// session, which then owns that wheel's reporting mode.
+    #[must_use]
+    pub(crate) fn diverts_main_wheel(&self, route: &DeviceRoute) -> bool {
+        self.plans
+            .iter()
+            .any(|plan| plan.target.route == *route && plan.target.spec.divert_main_wheel.is_some())
+    }
 }
 
 /// Read-only, lossless, coalescing view of the latest capture publication.
@@ -336,6 +345,28 @@ mod tests {
             receiver_uid: "cafe".into(),
             slot: 2,
         }
+    }
+
+    /// Only a plan that hands its main wheel to capture marks that wheel as
+    /// owned, and only for its own route.
+    #[test]
+    fn a_publication_diverts_only_the_wheel_its_plan_hands_to_capture() {
+        let other = DeviceRoute::Bolt {
+            receiver_uid: "cafe".into(),
+            slot: 3,
+        };
+        let mut plan = plan_for_device(&Config::default(), "mouse", route(), None, 0, true);
+        plan.target.spec.divert_main_wheel =
+            Some(openlogi_hid::session::gesture::MainWheelDivert::default());
+        let diverting = CapturePublication::from_plans(vec![plan.clone()]);
+        assert!(diverting.diverts_main_wheel(&route()));
+        assert!(
+            !diverting.diverts_main_wheel(&other),
+            "another device's wheel stays native"
+        );
+        plan.target.spec.divert_main_wheel = None;
+        assert!(!CapturePublication::from_plans(vec![plan]).diverts_main_wheel(&route()));
+        assert!(!CapturePublication::default().diverts_main_wheel(&route()));
     }
 
     fn plan_for_device(

@@ -292,29 +292,34 @@ impl ScrollInputHandle {
     /// Always eased, whatever the app-wide smoothing setting says: the
     /// device's own smooth-wheel switch is what diverted the wheel. The
     /// vertical distance is scaled by the main-wheel sensitivity, as the hook
-    /// scales a native wheel. A rejection tells the already-diverted caller
-    /// to inject the distance directly.
-    #[must_use]
+    /// scales a native wheel.
+    ///
+    /// # Errors
+    ///
+    /// The distance the already-diverted caller must inject directly when the
+    /// runtime is stopped or its queue is full. It carries the same
+    /// sensitivity scaling, so a refused report scrolls as far as a queued
+    /// one. A delta that cannot be eased (not finite wheel ticks, or zero)
+    /// comes back as given.
     pub(crate) fn try_hidpp_wheel_scroll(
         &self,
         session: &HidppSessionId,
         delta: ScrollDelta,
-    ) -> bool {
-        if !self.accepting.load(Ordering::Acquire) {
-            return false;
-        }
+    ) -> Result<(), ScrollDelta> {
         let Ok(impulse) = WheelDelta::try_from(delta) else {
-            return false;
+            return Err(delta);
         };
         let multiplier = self.preferences.vertical_sensitivity().scroll_multiplier();
         let Some(scaled) = impulse.with_vertical_scale(multiplier) else {
-            return false;
+            return Err(delta);
         };
-        self.try_enqueue(
-            ScrollSource::Hidpp(session.clone()),
-            scaled,
-            ScrollOutputMode::Eased { at: Instant::now() },
-        )
+        let queued = self.accepting.load(Ordering::Acquire)
+            && self.try_enqueue(
+                ScrollSource::Hidpp(session.clone()),
+                scaled,
+                ScrollOutputMode::Eased { at: Instant::now() },
+            );
+        if queued { Ok(()) } else { Err(scaled.into()) }
     }
 
     fn try_enqueue(
@@ -703,7 +708,10 @@ mod tests {
         for smoothing in [false, true] {
             let (input, receiver, _controls) = standalone_input(1, preferences(smoothing, 7));
             let session = HidppSessionId::with_epoch("mouse-a", 7);
-            assert!(input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0)));
+            assert_eq!(
+                input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0)),
+                Ok(())
+            );
             let queued = queued_input(&receiver);
             assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 1.0 });
             for dequeued_under in [false, true] {
@@ -718,16 +726,32 @@ mod tests {
         }
     }
 
+    /// What the runtime cannot ease comes back as given; what it cannot
+    /// queue comes back scaled, so the caller's direct injection scrolls as
+    /// far as the eased output would have.
     #[test]
-    fn a_diverted_main_wheel_rejects_what_it_cannot_ease() {
-        let (input, _receiver, _controls) = standalone_input(2, preferences(true, 7));
+    fn a_diverted_main_wheel_hands_back_what_it_cannot_take() {
+        let (input, receiver, _controls) = standalone_input(1, preferences(true, 7));
         let session = HidppSessionId::with_epoch("mouse-a", 7);
-        assert!(!input.try_hidpp_wheel_scroll(&session, ScrollDelta::pixels(0.0, 1.0)));
-        assert!(!input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 0.0)));
+        let pixels = ScrollDelta::pixels(0.0, 1.0);
+        assert_eq!(input.try_hidpp_wheel_scroll(&session, pixels), Err(pixels));
+        let zero = ScrollDelta::wheel_ticks(0.0, 0.0);
+        assert_eq!(input.try_hidpp_wheel_scroll(&session, zero), Err(zero));
+
+        let tick = ScrollDelta::wheel_ticks(0.0, 2.0);
+        let scaled = ScrollDelta::wheel_ticks(0.0, 1.0);
+        assert_eq!(input.try_hidpp_wheel_scroll(&session, tick), Ok(()));
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, tick),
+            Err(scaled),
+            "a full queue hands back the scaled distance"
+        );
+        queued_input(&receiver);
         input.accepting.store(false, Ordering::Release);
-        assert!(
-            !input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
-            "a stopped runtime leaves the caller to inject the distance itself"
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, tick),
+            Err(scaled),
+            "a stopped runtime hands back the scaled distance"
         );
     }
 
