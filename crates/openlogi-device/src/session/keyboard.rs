@@ -1,6 +1,5 @@
-//! Live key capture for one keyboard: divert the bound F-row controls over
-//! HID++ `0x1b04` and turn their physical edges into [`CapturedInput`] the agent can
-//! dispatch.
+//! Live key capture for one keyboard: divert the bound `0x1b04` controls and
+//! turn their physical edges into [`CapturedInput`] the agent can dispatch.
 //!
 //! [`run_keyboard_capture_session`] is the keyboard counterpart of
 //! [`crate::session::gesture::run_capture_session`], and runs the same channel
@@ -9,6 +8,11 @@
 //! arming — diversion on exactly the controls the caller asks for (an unbound
 //! key is never diverted, so it keeps its native firmware function) — and the
 //! edge decoding.
+//!
+//! Which controls exist is the keyboard's business: the caller names them by
+//! control ID ([`ButtonId::Control`]) and this session diverts whichever of
+//! them the device's own `0x1b04` table reports as divertable, so a key
+//! OpenLogi has no catalog row for is captured exactly like a known one.
 //!
 //! Diversion works on the key's *control* — the printed media/shortcut
 //! function — so it fires when Fn-lock is off (or via Fn+key when it is on).
@@ -24,7 +28,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::capture::{ArmedCapture, CaptureHost, Liveness, open_device, run_capture};
-use super::capture_restore::{ArmedReporting, ReprogRestore, divert_change};
+use super::capture_restore::{ArmedReporting, ReprogRestore, divert_keyboard_key};
 use super::gesture::{
     CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
     PendingCaptureRestore, enumerate_controls,
@@ -35,21 +39,32 @@ use crate::{ChannelRegistry, SharedChannel};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 
-/// The divertable keyboard F-row controls OpenLogi models, as
-/// `(0x1b04 control ID, ButtonId)` pairs. CID values match Logitech's control
-/// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
-/// positions are the Signature-series layout.
-pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
-    (0x00d4, ButtonId::KeySearch),
-    (0x0103, ButtonId::KeyDictation),
-    (0x0108, ButtonId::KeyEmoji),
-    (0x010a, ButtonId::KeyScreenCapture),
-    (0x011c, ButtonId::KeyMicMute),
-    (0x00e5, ButtonId::KeyPlayPause),
-    (0x00e7, ButtonId::KeyMute),
-    (0x00e8, ButtonId::KeyVolumeDown),
-    (0x00e9, ButtonId::KeyVolumeUp),
+/// Controls that are never diverted as keyboard keys, whatever a binding says.
+///
+/// - `0x00d1`–`0x00d3`, the Easy-Switch host keys: the host-switch session
+///   owns their diversion on the same channel, and a second owner would read
+///   its diverted state back as "original" and dispatch every press twice.
+/// - `0x0050`/`0x0051`, the primary clicks of a keyboard with a built-in
+///   touchpad: swallowing them would leave the user without a pointer, the
+///   same reason the mouse hook never suppresses them.
+///
+/// The config layer still accepts these names — a file is not invalid for
+/// naming a control — so the policy lives here, next to the hardware write,
+/// and is applied again by the orchestrator so a binding that names only
+/// reserved controls publishes no session at all.
+pub const RESERVED_KEYBOARD_CONTROLS: [u16; 5] = [
+    reprog_controls::control_ids::HOST_SWITCH_CHANNEL_1.0,
+    reprog_controls::control_ids::HOST_SWITCH_CHANNEL_2.0,
+    reprog_controls::control_ids::HOST_SWITCH_CHANNEL_3.0,
+    0x0050,
+    0x0051,
 ];
+
+/// Whether `cid` is one of the [`RESERVED_KEYBOARD_CONTROLS`].
+#[must_use]
+pub fn is_reserved_keyboard_control(cid: u16) -> bool {
+    RESERVED_KEYBOARD_CONTROLS.contains(&cid)
+}
 
 /// Capture the requested keyboard controls on `route` until `host.shutdown`
 /// resolves, forwarding [`CapturedInput::ButtonDown`] and
@@ -179,7 +194,7 @@ impl ArmedCapture for ArmedKeys {
         for &reporting in &self.reporting {
             if let Err(e) = self
                 .controls
-                .set_cid_reporting_full(reporting.cid, divert_change(reporting.original, false))
+                .set_cid_reporting_full(reporting.cid, divert_keyboard_key(reporting.original))
                 .await
             {
                 warn!(
@@ -210,14 +225,23 @@ async fn arm_keys(
     armed: &mut ArmedKeys,
 ) -> Result<(), CaptureError> {
     for (&cid, &button) in wanted {
+        if is_reserved_keyboard_control(cid) {
+            warn!(
+                cid = format_args!("{cid:#06x}"),
+                "reserved control requested as a keyboard key — left native"
+            );
+            continue;
+        }
         if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
             let original = armed.controls.get_cid_reporting(cid).await?;
             // A transport failure does not prove the firmware rejected the
             // command, so include this CID in rollback before writing.
-            armed.reporting.push(ArmedReporting { cid, original });
+            armed
+                .reporting
+                .push(ArmedReporting::keyboard(cid, original));
             armed
                 .controls
-                .set_cid_reporting_full(cid, divert_change(original, false))
+                .set_cid_reporting_full(cid, divert_keyboard_key(original))
                 .await?;
             armed.diverted.insert(cid, button);
         } else {
@@ -233,12 +257,38 @@ async fn arm_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openlogi_core::binding::KNOWN_CONTROLS;
+
+    /// The keyboard catalog names keys; the mouse capture path owns the
+    /// standard-button, gesture-source and DPI-shift control families. One
+    /// control must not be both, or a device would carry two `ButtonId`s for
+    /// one key — so the catalog never claims a family member or a reserved
+    /// control (they remain bindable as `control:0x…`).
+    #[test]
+    fn keyboard_catalog_never_claims_a_mouse_owned_or_reserved_control() {
+        let mouse_owned: Vec<u16> = reprog_controls::BACK_CIDS
+            .into_iter()
+            .chain(reprog_controls::FORWARD_CIDS)
+            .chain(reprog_controls::DPI_MODE_SHIFT_CIDS)
+            .chain([
+                reprog_controls::GESTURE_BUTTON_CID,
+                reprog_controls::HAPTIC_PANEL_CID,
+            ])
+            .chain(RESERVED_KEYBOARD_CONTROLS)
+            .collect();
+        let claimed: Vec<_> = KNOWN_CONTROLS
+            .iter()
+            .filter(|control| mouse_owned.contains(&control.id.raw()))
+            .map(|control| control.name)
+            .collect();
+        assert!(claimed.is_empty(), "{claimed:?}");
+    }
 
     #[test]
     fn keyboard_snapshots_emit_balanced_edges_without_duplicates() {
         let diverted = BTreeMap::from([
-            (0x00d4, ButtonId::KeySearch),
-            (0x0103, ButtonId::KeyDictation),
+            (0x00d4, ButtonId::control(0x00d4)),
+            (0x0103, ButtonId::control(0x0103)),
         ]);
         let (sink, mut inputs) = mpsc::unbounded_channel();
         let mut down = BTreeSet::new();
@@ -252,10 +302,10 @@ mod tests {
         assert_eq!(
             std::iter::from_fn(|| inputs.try_recv().ok()).collect::<Vec<_>>(),
             vec![
-                CapturedInput::ButtonDown(ButtonId::KeySearch),
-                CapturedInput::ButtonDown(ButtonId::KeyDictation),
-                CapturedInput::ButtonUp(ButtonId::KeySearch),
-                CapturedInput::ButtonUp(ButtonId::KeyDictation),
+                CapturedInput::ButtonDown(ButtonId::control(0x00d4)),
+                CapturedInput::ButtonDown(ButtonId::control(0x0103)),
+                CapturedInput::ButtonUp(ButtonId::control(0x00d4)),
+                CapturedInput::ButtonUp(ButtonId::control(0x0103)),
             ]
         );
     }

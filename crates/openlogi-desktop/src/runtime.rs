@@ -289,6 +289,59 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_config_reload_result(result));
                 });
             }
+            ipc::GuiUpdate::FnLockWritten { key, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_fn_lock_written(&key, result));
+                });
+            }
+            ipc::GuiUpdate::ReportRateWritten { key, route, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_report_rate_written(&key, &route, result)
+                    });
+                });
+            }
+            ipc::GuiUpdate::BacklightWritten {
+                key,
+                route,
+                write,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_backlight_written(&key, &route, write, result)
+                    });
+                });
+            }
+            ipc::GuiUpdate::EasySwitchHostRenamed {
+                key,
+                route,
+                write,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_easy_switch_host_renamed(&key, &route, write, result)
+                    });
+                });
+            }
+            ipc::GuiUpdate::DeviceUnpaired {
+                record_key,
+                route,
+                config_key,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_device_unpaired(
+                            &record_key,
+                            &route,
+                            config_key.as_deref(),
+                            result,
+                        )
+                    });
+                });
+            }
         }
     }
 

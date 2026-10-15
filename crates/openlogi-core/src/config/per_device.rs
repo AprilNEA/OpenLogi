@@ -15,7 +15,7 @@ use super::{
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
 };
-use crate::hid::Dpi;
+use crate::hid::{Dpi, ReportRate};
 
 impl Config {
     /// The bindings stored for `device_key` as they were committed, or an
@@ -287,6 +287,46 @@ impl Config {
         self.devices.get(device_key).and_then(|d| d.fn_lock)
     }
 
+    /// Record the keyboard Fn-lock state for `device_key`; the agent writes
+    /// it on reload and re-applies it when the keyboard reconnects.
+    pub fn set_fn_lock(&mut self, device_key: &str, fn_lock: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .fn_lock = Some(fn_lock);
+    }
+
+    /// Whether the agent keeps `device_key`'s key layout on the host OS. On
+    /// unless the user turned it off, as in Logi Options+.
+    #[must_use]
+    pub fn keep_os_layout(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.keep_os_layout)
+            .unwrap_or(true)
+    }
+    /// Record whether the agent keeps `device_key`'s key layout on the host
+    /// OS.
+    pub fn set_keep_os_layout(&mut self, device_key: &str, keep: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .keep_os_layout = Some(keep);
+    }
+    /// The persisted report rate for `device_key`, or `None` when the user
+    /// never chose one (the device keeps its own rate).
+    #[must_use]
+    pub fn report_rate(&self, device_key: &str) -> Option<ReportRate> {
+        self.devices.get(device_key).and_then(|d| d.report_rate)
+    }
+    /// Record the report rate for `device_key`; the agent re-applies it when
+    /// the device reconnects on a connection that lists it.
+    pub fn set_report_rate(&mut self, device_key: &str, rate: ReportRate) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .report_rate = Some(rate);
+    }
     /// Record the SmartShift wheel config for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).
     pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {

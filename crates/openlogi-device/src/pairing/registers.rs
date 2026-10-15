@@ -1,10 +1,8 @@
-use hidpp::channel::HidppChannel;
+use hidpp::{channel::HidppChannel, receiver::NotificationFlags};
 use tracing::warn;
 
 use super::{PairingError, RECEIVER_INDEX};
 
-/// Notification-flags register (3-byte big-endian value).
-pub(super) const NOTIFICATIONS: u8 = 0x00;
 /// Unifying pairing lock + unpair.
 pub(super) const UNIFYING_PAIRING: u8 = 0xb2;
 /// Bolt discovery start/stop (short register).
@@ -12,9 +10,33 @@ pub(super) const BOLT_DISCOVERY: u8 = 0xc0;
 /// Bolt pair / cancel / unpair (long register).
 pub(super) const BOLT_PAIRING: u8 = 0xc1;
 
-/// `WIRELESS` (0x000100) | `SOFTWARE_PRESENT` (0x000800) notification flags,
-/// big-endian. Both must be set for the receiver to stream pairing events.
-pub(super) const NOTIFICATION_FLAGS: [u8; 3] = [0x00, 0x09, 0x00];
+/// Notification flags a session adds to the ones it finds: the receiver
+/// streams pairing events only while both are set.
+pub(super) const PAIRING_NOTIFICATIONS: NotificationFlags =
+    NotificationFlags::WIRELESS.union(NotificationFlags::SOFTWARE_PRESENT);
+
+pub(super) async fn read_notification_flags(
+    channel: &HidppChannel,
+) -> Result<NotificationFlags, PairingError> {
+    hidpp::receiver::read_notification_flags(channel)
+        .await
+        .map_err(|e| {
+            warn!(?e, "notification flags read failed");
+            PairingError::Register(format!("{e}"))
+        })
+}
+
+pub(super) async fn write_notification_flags(
+    channel: &HidppChannel,
+    flags: NotificationFlags,
+) -> Result<(), PairingError> {
+    hidpp::receiver::write_notification_flags(channel, flags)
+        .await
+        .map_err(|e| {
+            warn!(?e, "notification flags write failed");
+            PairingError::Register(format!("{e}"))
+        })
+}
 
 pub(super) async fn write_register(
     channel: &HidppChannel,

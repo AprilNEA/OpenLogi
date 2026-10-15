@@ -103,8 +103,15 @@ fn cached_probe_is_reused_until_refresh_interval() {
         "just under the window is still fresh"
     );
     assert!(
-        is_stale(&cached, probed_at + REFRESH_INTERVAL),
-        "at the window the probe is refreshed"
+        !is_stale(&cached, probed_at + REFRESH_INTERVAL),
+        "the window is inclusive: this exact age is still reused"
+    );
+    assert!(
+        is_stale(
+            &cached,
+            probed_at + REFRESH_INTERVAL + Duration::from_nanos(1)
+        ),
+        "the probe is stale only after the window"
     );
 }
 
@@ -118,6 +125,15 @@ fn unifying_cache_hits_use_only_the_battery_refresh_budget() {
     );
     assert_eq!(
         unifying_probe_budget(Some(&cached), cached.probed_at + REFRESH_INTERVAL, timeouts),
+        UNIFYING_CACHED_SLOT_PROBE_TIMEOUT,
+        "an entry aged exactly one refresh interval is still a cache hit"
+    );
+    assert_eq!(
+        unifying_probe_budget(
+            Some(&cached),
+            cached.probed_at + REFRESH_INTERVAL + Duration::from_nanos(1),
+            timeouts,
+        ),
         UNIFYING_SLOT_PROBE_TIMEOUT,
         "stale entries still get enough time for a full feature walk"
     );

@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+mod button_map;
 mod device;
 #[cfg(feature = "fs")]
 mod file;
@@ -30,6 +31,8 @@ mod settings;
 mod tests;
 
 pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
+#[cfg(all(test, feature = "fs", unix))]
+use file::resolve_symlinks;
 #[cfg(feature = "fs")]
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]

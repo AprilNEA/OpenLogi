@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "backlight-state",
+  "channel": "target",
+  "report_support": "long_only",
+  "exchanges": [
+    {
+      "request_match": "hidpp20",
+      "request": "11ff001000000000000000000000000000000000",
+      "response": "11ff001004050000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff000019820000000000000000000000000000",
+      "response": "11ff000000000000000000000000000000000000",
+      "required": true
+    }
+  ]
+}

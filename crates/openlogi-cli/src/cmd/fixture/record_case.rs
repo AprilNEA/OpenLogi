@@ -21,6 +21,8 @@ use openlogi_ipc::client::{self, ConnectError};
 use super::target_selection::{self, FixtureTarget};
 
 mod audit;
+#[cfg(test)]
+mod corpus_tests;
 mod replay;
 
 pub(super) const DEFAULT_RECORDING_CAPACITY: usize = 8_192;
@@ -633,6 +635,7 @@ mod tests {
                     battery: None,
                     model_info: None,
                     capabilities: None,
+                    settings_revision: 0,
                 },
                 PairedDevice {
                     slot: 1,
@@ -643,6 +646,7 @@ mod tests {
                     battery: None,
                     model_info: None,
                     capabilities: None,
+                    settings_revision: 0,
                 },
                 PairedDevice {
                     slot: openlogi_device::DIRECT_DEVICE_INDEX,
@@ -653,6 +657,7 @@ mod tests {
                     battery: None,
                     model_info: None,
                     capabilities: None,
+                    settings_revision: 0,
                 },
             ],
         }];

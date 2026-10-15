@@ -113,6 +113,11 @@ impl HardwareContext {
         openlogi_hid::pairing::run_pairing(&*self.backend, target, commands, events).await
     }
 
+    /// Remove the device `route` reaches from its receiver's pairing table.
+    pub async fn unpair(&self, route: &DeviceRoute) -> Result<(), PairingError> {
+        openlogi_hid::pairing::unpair(&*self.backend, route).await
+    }
+
     pub(super) async fn apply_litra(
         &self,
         route: &DeviceRoute,
@@ -136,3 +141,7 @@ impl HardwareContext {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "context/corpus_tests.rs"]
+mod corpus_tests;

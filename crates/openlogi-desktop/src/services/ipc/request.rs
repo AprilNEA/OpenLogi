@@ -18,7 +18,8 @@ use std::future::Future;
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
 use tarpc::client::RpcError;
@@ -26,7 +27,7 @@ use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use super::GuiUpdate;
+use super::{GuiUpdate, UnpairFailure};
 use crate::state::DeviceKey;
 
 /// The GPUI-bound update stream a request may deliver through.
@@ -138,6 +139,124 @@ impl Request for SetLighting {
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
         log_rejection("lighting", outcome);
+    }
+}
+
+/// Write keyboard Fn-lock now, answered as [`GuiUpdate::FnLockWritten`] with
+/// the state the keyboard echoes back.
+pub struct SetFnLock {
+    pub route: DeviceRoute,
+    pub fn_lock: bool,
+    pub key: DeviceKey,
+}
+
+impl Request for SetFnLock {
+    type Answer = Result<FnLockState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_fn_lock(context::current(), self.route.clone(), self.fn_lock)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::FnLockWritten {
+            key: self.key,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Write a mouse's report rate now, answered as
+/// [`GuiUpdate::ReportRateWritten`] with what the mouse reads back.
+pub struct SetReportRate {
+    pub route: DeviceRoute,
+    pub rate: ReportRate,
+    pub key: DeviceKey,
+}
+
+impl Request for SetReportRate {
+    type Answer = Result<ReportRateInfo, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_report_rate(context::current(), self.route.clone(), self.rate)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::ReportRateWritten {
+            key: self.key,
+            route: self.route,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Apply one backlight change to a keyboard now, answered as
+/// [`GuiUpdate::BacklightWritten`] with what the keyboard reads back.
+pub struct SetBacklight {
+    pub route: DeviceRoute,
+    pub change: BacklightChange,
+    pub key: DeviceKey,
+    /// The number the device-read service gave this change, returned with
+    /// the answer so it is matched to the change it answers.
+    pub write: u64,
+}
+
+impl Request for SetBacklight {
+    type Answer = Result<BacklightState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_backlight(context::current(), self.route.clone(), self.change)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::BacklightWritten {
+            key: self.key,
+            route: self.route,
+            write: self.write,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Name the computer on one Easy-Switch slot of a device now, answered as
+/// [`GuiUpdate::EasySwitchHostRenamed`] with the slots the device reads back.
+pub struct RenameEasySwitchHost {
+    pub route: DeviceRoute,
+    /// Zero-based slot index.
+    pub slot: u8,
+    pub name: String,
+    pub key: DeviceKey,
+    /// The number the device-read service gave this rename, returned with
+    /// the answer so it is matched to the rename it answers.
+    pub write: u64,
+}
+
+impl Request for RenameEasySwitchHost {
+    type Answer = Result<EasySwitchHosts, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .rename_easy_switch_host(
+                context::current(),
+                self.route.clone(),
+                self.slot,
+                self.name.clone(),
+            )
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::EasySwitchHostRenamed {
+            key: self.key,
+            route: self.route,
+            write: self.write,
+            result: or_unavailable(outcome),
+        });
     }
 }
 
@@ -271,6 +390,87 @@ impl Request for ReadSmartShift {
     }
 }
 
+/// Read a mouse's report rate; the answer goes back over `reply`.
+pub struct ReadReportRate {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<ReportRateInfo, WriteError>>,
+}
+
+impl Request for ReadReportRate {
+    type Answer = Result<ReportRateInfo, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_report_rate(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a keyboard's backlight; the answer goes back over `reply`.
+pub struct ReadBacklight {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<BacklightState, WriteError>>,
+}
+
+impl Request for ReadBacklight {
+    type Answer = Result<BacklightState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_backlight(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a device's Easy-Switch host slots; the answer goes back over
+/// `reply`.
+pub struct ReadEasySwitchHosts {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<EasySwitchHosts, WriteError>>,
+}
+
+impl Request for ReadEasySwitchHosts {
+    type Answer = Result<EasySwitchHosts, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_easy_switch_hosts(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a keyboard's Fn-lock state; the answer goes back over `reply`.
+pub struct ReadFnLock {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<FnLockState, WriteError>>,
+}
+
+impl Request for ReadFnLock {
+    type Answer = Result<FnLockState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_fn_lock(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
 /// Have the agent re-read `config.toml`.
 ///
 /// The loop holds this one until a connection exists and never answers it
@@ -384,6 +584,40 @@ impl Request for CancelPairing {
     }
 }
 
+/// Remove a forgotten device's pairing from its receiver, answered as
+/// [`GuiUpdate::DeviceUnpaired`] so the card goes only once the receiver has
+/// let the device go.
+pub struct UnpairDevice {
+    pub route: DeviceRoute,
+    pub record_key: String,
+    /// Where the device's settings live, dropped once the receiver lets go.
+    pub config_key: Option<String>,
+}
+
+impl Request for UnpairDevice {
+    type Answer = Result<(), PairingFailure>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .unpair_device(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let result = match outcome {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(failure)) => Err(UnpairFailure::Refused(failure)),
+            Err(Unavailable) => Err(UnpairFailure::AgentUnreachable),
+        };
+        let _ = updates.send(GuiUpdate::DeviceUnpaired {
+            record_key: self.record_key,
+            route: self.route,
+            config_key: self.config_key,
+            result,
+        });
+    }
+}
+
 /// Drain the agent's live event-monitor buffer for the debug Diagnostics
 /// monitor. The first poll enables monitoring agent-side; the agent
 /// auto-disables it once polls stop. An unreachable agent has nothing to
@@ -447,13 +681,22 @@ commands! {
     SetLight,
     SetLightManualPower,
     SetSmartShift,
+    SetFnLock,
+    SetReportRate,
+    SetBacklight,
+    RenameEasySwitchHost,
     ReadDpi,
     ReadSmartShift,
+    ReadFnLock,
+    ReadReportRate,
+    ReadBacklight,
+    ReadEasySwitchHosts,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,
     PairDevice,
     CancelPairing,
+    UnpairDevice,
     #[cfg(all(target_os = "macos", debug_assertions))]
     PollEventMonitor,
 }

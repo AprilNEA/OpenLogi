@@ -118,13 +118,17 @@ pub(super) fn foreground_app_from_running_application(
     app: &NSRunningApplication,
     pool: objc2::rc::AutoreleasePool<'_>,
 ) -> Option<ForegroundApp> {
-    let bundle_id = app.bundleIdentifier()?;
+    // Unbundled applications still need an identifier for per-app profiles.
+    let identifier = match app.bundleIdentifier() {
+        Some(bundle_id) => bundle_id,
+        None => app.executableURL().and_then(|url| url.path())?,
+    };
     let name = app.localizedName();
     // SAFETY: Both UTF-8 views are copied into owned Strings before `pool`
     // drains, so no borrowed Objective-C storage escapes.
     let (id, name) = unsafe {
         (
-            bundle_id.to_str(pool).to_owned(),
+            identifier.to_str(pool).to_owned(),
             name.as_ref().map(|name| name.to_str(pool).to_owned()),
         )
     };
@@ -135,6 +139,71 @@ pub(super) fn foreground_app_from_running_application(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a macOS desktop session with bundled and unbundled applications"]
+    fn running_application_identity_prefers_bundle_id_then_executable_path() {
+        let (unbundled, bundled) = objc2::rc::autoreleasepool(|pool| {
+            let applications = NSWorkspace::sharedWorkspace().runningApplications();
+            let (unbundled_app, executable_id) = applications
+                .iter()
+                .find_map(|app| {
+                    if app.bundleIdentifier().is_some() || app.isTerminated() {
+                        return None;
+                    }
+                    let path = app.executableURL()?.path()?.to_string();
+                    (!path.is_empty()).then_some((app, path))
+                })
+                .expect("requires a running unbundled application with an executable path");
+            let (bundled_app, bundle_id, executable_path) = applications
+                .iter()
+                .find_map(|app| {
+                    if app.isTerminated() {
+                        return None;
+                    }
+                    let bundle_id = app.bundleIdentifier()?.to_string();
+                    let path = app.executableURL()?.path()?.to_string();
+                    (!bundle_id.is_empty() && !path.is_empty()).then_some((app, bundle_id, path))
+                })
+                .expect("requires a running bundled application with an executable path");
+            assert_ne!(bundle_id, executable_path);
+
+            let unbundled_name = unbundled_app
+                .localizedName()
+                .map_or_else(|| executable_id.clone(), |name| name.to_string());
+            let bundled_name = bundled_app
+                .localizedName()
+                .map_or_else(|| bundle_id.clone(), |name| name.to_string());
+            eprintln!(
+                "unbundled native fixture: pid={}, bundle_id=None, path={executable_id:?}",
+                unbundled_app.processIdentifier()
+            );
+            eprintln!(
+                "bundled native fixture: pid={}, bundle_id={bundle_id:?}, path={executable_path:?}",
+                bundled_app.processIdentifier()
+            );
+
+            (
+                (
+                    foreground_app_from_running_application(&unbundled_app, pool),
+                    ForegroundApp {
+                        id: executable_id,
+                        display_name: unbundled_name,
+                    },
+                ),
+                (
+                    foreground_app_from_running_application(&bundled_app, pool),
+                    ForegroundApp {
+                        id: bundle_id,
+                        display_name: bundled_name,
+                    },
+                ),
+            )
+        });
+
+        assert_eq!(bundled.0, Some(bundled.1));
+        assert_eq!(unbundled.0, Some(unbundled.1));
+    }
 
     #[test]
     fn safari_snapshot_accepts_only_safari_with_a_positive_pid() {

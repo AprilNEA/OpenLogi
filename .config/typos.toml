@@ -15,6 +15,8 @@ extend-exclude = [
 
 [default]
 extend-ignore-identifiers-re = ["^(?:ALS|AlsAutomatic|AlsSaturated)$"]
+# Preserve the synthetic device serial format owned by openlogi-fixture.
+extend-ignore-re = ['\bOL-SER-[0-9]{5}\b']
 
 [default.extend-identifiers]
 # Protocol and domain identifiers whose source spelling must stay exact.

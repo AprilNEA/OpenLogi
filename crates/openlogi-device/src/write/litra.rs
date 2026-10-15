@@ -32,8 +32,6 @@ const REPORT_PREFIX: [u8; 2] = [0xff, 0x04];
 const COMMAND_POWER: u8 = 0x1c;
 const COMMAND_BRIGHTNESS: u8 = 0x4c;
 const COMMAND_TEMPERATURE: u8 = 0x9c;
-const MIN_BRIGHTNESS_LUMENS: u16 = 20;
-const MAX_BRIGHTNESS_LUMENS: u16 = 250;
 const MIN_TEMPERATURE_KELVIN: u16 = 2700;
 const MAX_TEMPERATURE_KELVIN: u16 = 6500;
 const TEMPERATURE_STEP_KELVIN: u16 = 100;
@@ -46,13 +44,12 @@ const fn validated_range(min: u16, max: u16, step: u16, unit: LightValueUnit) ->
     }
 }
 
-const GLOW_BRIGHTNESS_RANGE: LightValueRange = validated_range(
-    MIN_BRIGHTNESS_LUMENS,
-    MAX_BRIGHTNESS_LUMENS,
-    1,
-    LightValueUnit::Lumens,
-);
-const GLOW_TEMPERATURE_RANGE: LightValueRange = validated_range(
+// Native brightness per model, as litra-rs (`timrogers/litra-rs`, `src/lib.rs`)
+// bounds it: the Beam is a brighter panel than the Glow, so the two cannot share
+// one range — percent mapping and native-value checks both read it.
+const GLOW_BRIGHTNESS_RANGE: LightValueRange = validated_range(20, 250, 1, LightValueUnit::Lumens);
+const BEAM_BRIGHTNESS_RANGE: LightValueRange = validated_range(30, 400, 1, LightValueUnit::Lumens);
+const TEMPERATURE_RANGE: LightValueRange = validated_range(
     MIN_TEMPERATURE_KELVIN,
     MAX_TEMPERATURE_KELVIN,
     TEMPERATURE_STEP_KELVIN,
@@ -77,14 +74,16 @@ pub fn litra_model_for_route(route: &DeviceRoute) -> Option<LitraModel> {
 }
 
 pub(crate) const fn litra_capabilities(model: LitraModel) -> LightCapabilities {
-    match model {
-        LitraModel::Glow | LitraModel::Beam => LightCapabilities {
-            power: true,
-            brightness: Some(GLOW_BRIGHTNESS_RANGE),
-            temperature: Some(GLOW_TEMPERATURE_RANGE),
-            color: false,
-            zones: false,
-        },
+    let brightness = match model {
+        LitraModel::Glow => GLOW_BRIGHTNESS_RANGE,
+        LitraModel::Beam => BEAM_BRIGHTNESS_RANGE,
+    };
+    LightCapabilities {
+        power: true,
+        brightness: Some(brightness),
+        temperature: Some(TEMPERATURE_RANGE),
+        color: false,
+        zones: false,
     }
 }
 
@@ -205,7 +204,7 @@ mod tests {
 
     use super::{
         COMMAND_BRIGHTNESS, COMMAND_POWER, COMMAND_TEMPERATURE, LightCommand, LitraModel,
-        REPORT_ID, encode_command, litra_model_for_route,
+        REPORT_ID, encode_command, litra_capabilities, litra_model_for_route,
     };
     use crate::{DeviceRoute, WriteError};
 
@@ -253,6 +252,43 @@ mod tests {
         let report =
             encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(4600)).expect("valid");
         assert_eq!(&report[3..6], &[COMMAND_TEMPERATURE, 0x11, 0xf8]);
+    }
+
+    /// Beam is brighter than Glow: 30–400 lm (litra-rs `src/lib.rs`), so the
+    /// percent mapping and the native check must use its own range.
+    #[test]
+    fn beam_brightness_uses_its_own_native_range() {
+        let range = litra_capabilities(LitraModel::Beam)
+            .brightness
+            .expect("Beam advertises brightness");
+        assert_eq!((range.min(), range.max()), (30, 400));
+
+        let minimum =
+            encode_command(LitraModel::Beam, LightCommand::BrightnessPercent(0)).expect("valid");
+        let maximum =
+            encode_command(LitraModel::Beam, LightCommand::BrightnessPercent(100)).expect("valid");
+        assert_eq!(&minimum[3..6], &[COMMAND_BRIGHTNESS, 0, 30]);
+        assert_eq!(&maximum[3..6], &[COMMAND_BRIGHTNESS, 0x01, 0x90]);
+
+        for accepted in [30, 251, 400] {
+            let report = encode_command(LitraModel::Beam, LightCommand::BrightnessNative(accepted))
+                .expect("inside the Beam range");
+            assert_eq!(&report[4..6], &accepted.to_be_bytes());
+        }
+        for rejected in [29, 401] {
+            assert_matches!(
+                encode_command(LitraModel::Beam, LightCommand::BrightnessNative(rejected)),
+                Err(WriteError::InvalidLightValue { .. })
+            );
+        }
+    }
+
+    #[test]
+    fn beam_shares_the_glow_temperature_range() {
+        assert_eq!(
+            litra_capabilities(LitraModel::Beam).temperature,
+            litra_capabilities(LitraModel::Glow).temperature
+        );
     }
 
     #[test]

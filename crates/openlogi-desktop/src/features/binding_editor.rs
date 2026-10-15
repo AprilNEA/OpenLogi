@@ -101,9 +101,10 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::ScrollDown => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
-        Action::CustomShortcut(_) | Action::HoldShortcut(_) | Action::TypeText(_) => {
-            "action-icons/keyboard.svg"
-        }
+        Action::CustomShortcut(_)
+        | Action::HoldShortcut(_)
+        | Action::TapKeyHoldingModifiers(_)
+        | Action::TypeText(_) => "action-icons/keyboard.svg",
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
     }
 }
@@ -163,6 +164,7 @@ pub(crate) fn action_rows_matching(
                     let icon_path = action_icon_path(&action);
                     let on_pick = on_pick.clone();
                     MenuRow::new((id_prefix, action_key))
+                        .debug_selector(|| format!("{id_prefix}-{action:?}"))
                         .selected(selected)
                         .role(Role::MenuItem)
                         .aria_label(accessible_label)

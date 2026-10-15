@@ -1,5 +1,5 @@
 use super::*;
-use hidpp::feature::extended_dpi::{DpiRange, Lod};
+use hidpp::feature::extended_dpi::{DpiRange, Lod, SensorCapabilities};
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
 
@@ -7,15 +7,15 @@ use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 use crate::write::diagnostics::dump_firmware_entities_on_channel;
 use crate::write::dpi::expand_dpi_ranges;
-use crate::write::lighting::{collect_present_zones, per_key_reports};
+use crate::write::lighting::{collect_present_zones, per_key_commit, per_key_frames};
 use crate::write::smartshift::{
     is_missing_enhanced, is_transient_smartshift_error, smartshift_to_wheel,
     status_matches_desired, wheel_mode_to_smartshift,
 };
 use crate::write::{HidppFeatureErrorKind, HidppOperation};
 use crate::{
-    BacklightMode, BacklightState, BacklightStatus, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    BacklightControls, BacklightMode, BacklightState, BacklightStatus, FnLockState,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };
 use hidpp::feature::device_information::DeviceEntityType;
 
@@ -146,10 +146,7 @@ fn status_match_preserves_absent_torque() {
 
 #[test]
 fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
-    let reports = per_key_reports(0x03, 0x27, 0x11, 0x22, 0x33);
-    let (commit, frames) = reports
-        .split_last()
-        .expect("per-key lighting must emit a commit");
+    let frames = per_key_frames(0x03, 0x27, 0x11, 0x22, 0x33);
 
     assert_eq!(frames.len(), 17);
     assert!(frames.iter().all(|report| report.len() == 64));
@@ -158,7 +155,17 @@ fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
     assert!(frames.iter().all(|report| report[2] == 0x27));
     assert!(frames.iter().all(|report| report[3] == 0x3a));
     assert!(frames.iter().all(|report| report[5] == 0x01));
-    assert!(frames.iter().all(|report| report[7] == 0x0e));
+    // Bytes 6..8 are the big-endian count of entries the frame carries: 14
+    // per full frame, and 9 in the last one (233 keys = 16 × 14 + 9).
+    let (tail, full) = frames.split_last().expect("per-key lighting emits frames");
+    assert!(full.iter().all(|report| report[6..8] == [0, 0x0e]));
+    assert_eq!(tail[6..8], [0, 0x09]);
+    assert!(
+        tail[8 + 9 * 4..].iter().all(|byte| *byte == 0),
+        "nothing follows the nine declared entries"
+    );
+    let declared: usize = frames.iter().map(|report| usize::from(report[7])).sum();
+    assert_eq!(declared, 0xe9);
 
     let entries: Vec<_> = frames
         .iter()
@@ -171,9 +178,17 @@ fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
         assert_eq!(entry, (key, 0x11, 0x22, 0x33));
     }
 
-    assert_eq!(commit.len(), 20);
-    assert_eq!(&commit[..4], &[0x11, 0x03, 0x27, 0x5a]);
-    assert!(commit[4..].iter().all(|byte| *byte == 0));
+    // The commit is function 5 with an empty payload, sent as a 20-byte
+    // request so its reply can be awaited.
+    let commit = per_key_commit(0x03, 0x27);
+    assert!(matches!(commit, hidpp::protocol::v20::Message::Long(..)));
+    let header = commit.header();
+    assert_eq!((header.device_index, header.feature_index), (0x03, 0x27));
+    assert_eq!(
+        (header.function_id.to_lo(), header.software_id.to_lo()),
+        (0x5, 0xa)
+    );
+    assert!(commit.extend_payload().iter().all(|byte| *byte == 0));
 }
 
 #[tokio::test]
@@ -212,6 +227,8 @@ async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), 
             status: BacklightStatus::AlsAutomatic,
             current_level: 4,
             nb_levels: 8,
+            power_save: false,
+            controls: BacklightControls::default(),
         }
     );
 
@@ -326,7 +343,10 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
     // `Capabilities::from_feature_ids` turns the DPI panel on for 0x2201 *or*
     // 0x2202, so a mouse that only speaks 0x2202 has to be drivable — it used
     // to get a panel that failed every read and write.
-    let (raw, handle) = ScriptedRawHidChannel::with_responder(extended_dpi_scripted_response);
+    let dpi_x = std::sync::Mutex::new(800);
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        extended_dpi_scripted_response(request, &dpi_x)
+    });
     let channel = scripted_channel(raw).await;
     let shared = SharedChannel::new(
         channel,
@@ -362,11 +382,45 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
         .find(|report| report.len() == 20 && report[2] == 0x05 && report[3] >> 4 == 0x06)
         .expect("a DPI write must reach the device");
     assert_eq!(u16::from_be_bytes([write[5], write[6]]), 1200);
-    // No independent Y axis on this sensor, so the spec has the host send 0.
+    // The sensor does not advertise an independent Y axis, so the spec has
+    // the host send 0.
     assert_eq!(u16::from_be_bytes([write[7], write[8]]), 0);
-    // Lift-off distance is read back and rewritten unchanged — the packet has
-    // no "leave alone" encoding, so writing a bare 0 would retune the sensor.
+    // It does advertise lift-off control, so the LOD is read back and
+    // rewritten unchanged — the packet has no "leave alone" encoding.
     assert_eq!(write[9], u8::from(Lod::Medium));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_dropped_dpi_write_is_retried_once() -> Result<(), WriteError> {
+    // Firmware still drowsy from a link re-establishment can ACK a
+    // `setSensorDpi` yet keep the old value. The read-back catches the
+    // mismatch and a single re-write lands the requested DPI.
+    let state = std::sync::Arc::new(std::sync::Mutex::new(DrowsyDpiState {
+        current: 1000,
+        set_writes: 0,
+    }));
+    let responder_state = std::sync::Arc::clone(&state);
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        adjustable_dpi_drowsy_response(request, &responder_state)
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb034,
+        },
+    );
+
+    set_dpi_on(&shared, Dpi::new(650)).await?;
+
+    let state = state.lock().unwrap();
+    assert_eq!(
+        state.set_writes, 2,
+        "the dropped write must be retried exactly once"
+    );
+    assert_eq!(state.current, 650);
     Ok(())
 }
 
@@ -514,7 +568,10 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
             ]);
             true
         }
-        // Raw per-key frame commit expects no reply.
+        // 0x8080 frameEnd is acknowledged like any HID++2.0 request.
+        (0x07, 0x05) => true,
+        // Anything else gets no reply. The 0x12 per-key frames never reach
+        // here: the filter above admits only 0x10/0x11 requests.
         _ => return None,
     };
 
@@ -528,8 +585,12 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
 
 /// A mouse that exposes `0x2202 ExtendedAdjustableDpi` and **no**
 /// `0x2201 AdjustableDpi` — the shape `Capabilities::from_feature_ids` lights
-/// the DPI panel up for but the write path could not drive.
-fn extended_dpi_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
+/// the DPI panel up for but the write path could not drive. `dpi_x` is the
+/// sensor's live X-axis DPI, which a write changes.
+fn extended_dpi_scripted_response(
+    request: &[u8],
+    dpi_x: &std::sync::Mutex<u16>,
+) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
     }
@@ -553,6 +614,13 @@ fn extended_dpi_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
             payload[0] = 1;
             false
         }
+        // getSensorCapabilities: echo the sensor, no DPI levels, lift-off
+        // distance control but no independent Y axis.
+        (0x05, 0x01) => {
+            payload[0] = request[4];
+            payload[2] = SensorCapabilities::LOD.bits();
+            false
+        }
         // getSensorDpiRanges: echo (sensorIdx, direction, page), then 400 with
         // a step-100 hyphen up to 800, a fixed 1200, and the end-of-list word.
         (0x05, 0x02) => {
@@ -561,18 +629,81 @@ fn extended_dpi_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
                 .copy_from_slice(&[0x01, 0x90, 0xe0, 0x64, 0x03, 0x20, 0x04, 0xb0, 0x00, 0x00]);
             true
         }
-        // getSensorDpiParameters: 800 DPI now and by default, no independent Y
-        // axis (dpiY reads 0), lift-off distance MEDIUM.
+        // getSensorDpiParameters: the live DPI, 800 by default, no
+        // independent Y axis (dpiY reads 0), lift-off distance MEDIUM.
         (0x05, 0x05) => {
-            payload[1..3].copy_from_slice(&800u16.to_be_bytes());
+            payload[1..3].copy_from_slice(&dpi_x.lock().unwrap().to_be_bytes());
             payload[3..5].copy_from_slice(&800u16.to_be_bytes());
             payload[9] = u8::from(Lod::Medium);
             true
         }
-        // setSensorDpiParameters: echo the request back.
+        // setSensorDpiParameters: apply dpiX and echo the request back.
         (0x05, 0x06) => {
+            *dpi_x.lock().unwrap() = u16::from_be_bytes([request[5], request[6]]);
             payload[..6].copy_from_slice(&request[4..10]);
             true
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+/// Live sensor state for [`adjustable_dpi_drowsy_response`].
+struct DrowsyDpiState {
+    current: u16,
+    set_writes: u8,
+}
+
+/// A `0x2201`-only mouse whose first `setSensorDpi` is ACKed but dropped —
+/// firmware drowsy from a link re-establishment — while the second is honored.
+fn adjustable_dpi_drowsy_response(
+    request: &[u8],
+    state: &std::sync::Mutex<DrowsyDpiState>,
+) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    let long = match (feature_index, function) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        // Root feature lookup: only 0x2201 present.
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x2201) * 0x04;
+            false
+        }
+        // getSensorDpiList: the echoed sensor index, then 650 and 1000.
+        (0x04, 0x01) => {
+            payload[..7].copy_from_slice(&[request[4], 0x02, 0x8a, 0x03, 0xe8, 0x00, 0x00]);
+            true
+        }
+        // getSensorDpi: the echoed sensor index, then the live value.
+        (0x04, 0x02) => {
+            payload[0] = request[4];
+            payload[1..3].copy_from_slice(&state.lock().unwrap().current.to_be_bytes());
+            false
+        }
+        // setSensorDpi: always ACKed, but the first write changes nothing.
+        (0x04, 0x03) => {
+            let mut state = state.lock().unwrap();
+            state.set_writes += 1;
+            if state.set_writes > 1 {
+                state.current = u16::from_be_bytes([request[5], request[6]]);
+            }
+            payload[..3].copy_from_slice(&request[4..7]);
+            false
         }
         _ => return None,
     };
@@ -637,16 +768,16 @@ const DEVICE_INFO_INDEX: u8 = 0x03;
 /// `ErrorType::Busy`, the refusal the scripted mouse answers entity 3 with.
 const BUSY: u8 = 0x08;
 /// How many firmware entities the scripted mouse declares.
-const ENTITY_COUNT: u8 = 4;
+const ENTITY_COUNT: u8 = 5;
 
-/// A wired G502 LIGHTSPEED, plus one invented entity.
+/// A wired G502 LIGHTSPEED, plus two invented entities.
 ///
 /// Entities 0..=2 are what the real mouse reports: a bootloader, the running
-/// main application, and a Softdevice radio stack whose build field is not
-/// valid BCD, so this parser cannot decode it. Entity 3 is added to cover the
-/// other entity-local failure — firmware that refuses the read outright rather
-/// than answering with a record that will not parse.
-fn mouse_with_an_unparseable_radio_stack(request: &[u8]) -> Option<Vec<u8>> {
+/// main application, and a Softdevice radio stack whose build field is binary
+/// rather than BCD. Entities 3 and 4 cover the two entity-local failures: a
+/// record that will not parse (a prefix that is not UTF-8), and firmware that
+/// refuses the read outright.
+fn g502_plus_two_failing_entities(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
     }
@@ -679,10 +810,15 @@ fn mouse_with_an_unparseable_radio_stack(request: &[u8]) -> Option<Vec<u8>> {
                 1 => payload[..11].copy_from_slice(&[
                     0x00, b'M', b'P', b'M', 0x17, 0x00, 0x00, 0x08, 0x01, 0xc0, 0x8d,
                 ]),
-                // Softdevice whose build reads 0x00a9 — not packed BCD, so
-                // get_fw_info answers UnsupportedResponse.
+                // Softdevice whose build reads 0x00a9 — binary, not packed
+                // BCD. It decodes as build 169, as Options+ reads it.
                 2 => payload[..11].copy_from_slice(&[
                     0x05, b'R', b'Q', b'M', 0x00, 0x00, 0x00, 0xa9, 0x00, 0x00, 0x00,
+                ]),
+                // A prefix that is not UTF-8: get_fw_info answers
+                // UnsupportedResponse.
+                3 => payload[..11].copy_from_slice(&[
+                    0x05, 0xff, 0xfe, 0xfd, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
                 ]),
                 _ => return Some(feature_error(request, BUSY)),
             }
@@ -713,12 +849,11 @@ async fn scripted_device_info_channel(channel: ScriptedRawHidChannel) -> Arc<Hid
 
 #[tokio::test]
 async fn an_entity_the_device_cannot_describe_does_not_stop_the_dump() {
-    // Both entity-local shapes: a record that will not decode (entity 2) and a
-    // read the firmware refuses (entity 3). Neither says anything about the
+    // Both entity-local shapes: a record that will not decode (entity 3) and a
+    // read the firmware refuses (entity 4). Neither says anything about the
     // route, so the remaining entities are still read and the declared count
     // still matches what the device claimed.
-    let (raw, handle) =
-        ScriptedRawHidChannel::with_responder(mouse_with_an_unparseable_radio_stack);
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(g502_plus_two_failing_entities);
     let channel = scripted_device_info_channel(raw).await;
 
     let entities = dump_firmware_entities_on_channel(&channel, 1)
@@ -735,22 +870,30 @@ async fn an_entity_the_device_cannot_describe_does_not_stop_the_dump() {
     assert_eq!(info.transport_pid, 0xc08d);
     assert!(info.active);
 
-    assert!(
-        matches!(
-            entities[2],
-            FirmwareEntity::Unreadable {
-                index: 2,
-                error: WriteError::UnsupportedResponse { .. }
-            }
-        ),
-        "a record that will not decode is reported, not dropped: {:?}",
-        entities[2]
-    );
+    // The Softdevice's binary build is read as a number, not refused.
+    let FirmwareEntity::Readable { info, .. } = &entities[2] else {
+        panic!("entity 2 parses: {:?}", entities[2]);
+    };
+    assert_eq!(info.kind, DeviceEntityType::Softdevice);
+    assert_eq!(info.prefix, "RQM");
+    assert_eq!((info.number, info.revision, info.build), (0, 0, 169));
+
     assert!(
         matches!(
             entities[3],
             FirmwareEntity::Unreadable {
                 index: 3,
+                error: WriteError::UnsupportedResponse { .. }
+            }
+        ),
+        "a record that will not decode is reported, not dropped: {:?}",
+        entities[3]
+    );
+    assert!(
+        matches!(
+            entities[4],
+            FirmwareEntity::Unreadable {
+                index: 4,
                 error: WriteError::HidppFeature {
                     kind: HidppFeatureErrorKind::Busy,
                     ..
@@ -758,12 +901,12 @@ async fn an_entity_the_device_cannot_describe_does_not_stop_the_dump() {
             }
         ),
         "a refused read is reported, not dropped: {:?}",
-        entities[3]
+        entities[4]
     );
 
     let written = handle.written_reports();
     assert!(
-        written.iter().any(|report| is_fw_info_for(report, 3)),
+        written.iter().any(|report| is_fw_info_for(report, 4)),
         "every declared entity is asked about"
     );
 }
@@ -773,10 +916,10 @@ async fn a_channel_failure_aborts_the_dump_instead_of_blaming_the_firmware() {
     // The node goes away while entity 1 is being read. Continuing would spend
     // a timeout per remaining entity and then print malformed-firmware rows
     // for what is really a disconnect, so the whole dump fails instead.
-    let (raw, handle) = ScriptedRawHidChannel::with_failing_writes(
-        mouse_with_an_unparseable_radio_stack,
-        |request| is_fw_info_for(request, 1),
-    );
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_failing_writes(g502_plus_two_failing_entities, |request| {
+            is_fw_info_for(request, 1)
+        });
     let channel = scripted_device_info_channel(raw).await;
 
     let error = dump_firmware_entities_on_channel(&channel, 1)
@@ -789,4 +932,563 @@ async fn a_channel_failure_aborts_the_dump_instead_of_blaming_the_firmware() {
         !written.iter().any(|report| is_fw_info_for(report, 2)),
         "the dump stops at the failure rather than timing out per entity"
     );
+}
+
+/// A multi-host keyboard: `0x40a3` at index 0x09 and `0x1815 HostsInfo` at
+/// index 0x0a reporting host slot 2 as current. Both fn-inversion echoes
+/// report whatever state the last `set` wrote (shared across the test through
+/// the request the responder sees, since scripted responders are stateless).
+fn multi_host_keyboard_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    match (feature_index, function) {
+        (0x00, 0x01) => payload[0] = 4,
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = match feature_id {
+                0x40a3 => 0x09,
+                0x1815 => 0x0a,
+                _ => 0x00,
+            };
+        }
+        // getFeatureInfo: capabilities, descriptor caps, 3 hosts, current = 2.
+        (0x0a, 0x00) => payload[..4].copy_from_slice(&[0x07, 0x00, 3, 2]),
+        // getGlobalFnInversion(host): inversion ON (media keys first).
+        (0x09, 0x00) => payload[..4].copy_from_slice(&[request[4], 1, 1, 1]),
+        // setGlobalFnInversion(host, state): echo host and the written state.
+        (0x09, 0x01) => payload[..4].copy_from_slice(&[request[4], request[5], 1, 1]),
+        _ => return None,
+    }
+    // Long replies: `getFeatureInfo` and the inversion echoes carry four
+    // payload bytes, one more than a short report holds.
+    let mut response = vec![0u8; 20];
+    response[0] = 0x11;
+    response[1..4].copy_from_slice(&request[1..4]);
+    response[4..].copy_from_slice(&payload);
+    Some(response)
+}
+
+#[tokio::test]
+async fn fn_lock_addresses_the_current_host_slot_read_from_hosts_info() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(multi_host_keyboard_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb378,
+        },
+    );
+
+    // Inversion ON in firmware reads back as Fn-lock off.
+    let state = get_fn_lock_on(&shared).await?;
+    assert_eq!(
+        state,
+        FnLockState {
+            fn_lock: false,
+            default_fn_lock: Some(false),
+        }
+    );
+    let get = handle
+        .written_reports()
+        .into_iter()
+        .find(|report| report[2] == 0x09 && report[3] >> 4 == 0x00)
+        .expect("a getGlobalFnInversion read");
+    // A read addresses the spec's 0xff "current host": every firmware answers
+    // it, and it must not depend on 0x1815 being readable.
+    assert_eq!(get[4], 0xff);
+    assert!(
+        !handle
+            .written_reports()
+            .into_iter()
+            .any(|report| report[2] == 0x0a),
+        "a read never asks 0x1815 which slot is current"
+    );
+
+    let written = set_fn_lock_on(&shared, true).await?;
+    assert!(written.fn_lock);
+
+    let set = handle
+        .written_reports()
+        .into_iter()
+        .find(|report| report[2] == 0x09 && report[3] >> 4 == 0x01)
+        .expect("a setGlobalFnInversion write");
+    // Host slot 2 from 0x1815, not the 0xff "current host" the MX Keys S
+    // firmware ignores; Fn-lock on is inversion OFF (0).
+    assert_eq!(&set[4..6], &[2, 0]);
+    Ok(())
+}
+
+/// The multi-host keyboard whose `0x1815 getFeatureInfo` answers with a HID++
+/// error (`Busy`): the feature is there, the slot is not readable right now.
+fn multi_host_keyboard_with_unreadable_hosts_info(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() >= 4 && request[2] == 0x0a && request[3] >> 4 == 0x00 {
+        // HID++ 2.0 error frame: feature index 0xff, then the failing
+        // feature index, the function/software id nibble pair, and the code.
+        let mut response = vec![0u8; 20];
+        response[0] = 0x11;
+        response[1] = request[1];
+        response[2] = 0xff;
+        response[3] = request[2];
+        response[4] = request[3];
+        response[5] = 8; // Busy
+        return Some(response);
+    }
+    multi_host_keyboard_response(request)
+}
+
+#[tokio::test]
+async fn fn_lock_write_does_not_guess_the_host_when_hosts_info_is_unreadable() {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(multi_host_keyboard_with_unreadable_hosts_info);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb378,
+        },
+    );
+
+    let error = set_fn_lock_on(&shared, true)
+        .await
+        .expect_err("a keyboard with 0x1815 that cannot say which slot is current fails the write");
+    assert_eq!(
+        error,
+        WriteError::HidppFeature {
+            operation: HidppOperation::WriteFnLock,
+            feature_hex: 0x1815,
+            kind: HidppFeatureErrorKind::Busy,
+        }
+    );
+    // Nothing was written to 0x40a3: a 0xff-addressed write is the one the
+    // MX Keys S firmware drops, so it is never sent as a guess.
+    assert!(
+        !handle
+            .written_reports()
+            .into_iter()
+            .any(|report| report[2] == 0x09 && report[3] >> 4 == 0x01),
+        "no setGlobalFnInversion without a known host slot"
+    );
+
+    // The read does not need the slot: 0xff reads work on the MX Keys S, so
+    // the GUI still learns the keyboard's own state while 0x1815 is busy.
+    let state = get_fn_lock_on(&shared)
+        .await
+        .expect("a read addresses the current host directly");
+    assert!(!state.fn_lock);
+}
+
+/// A keyboard with only the original `0x40a0` (at index 0x0c), whose state
+/// reads as inversion OFF. Its `set` answers no state, as Options+ expects.
+fn legacy_keyboard_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 3];
+    match (feature_index, function) {
+        (0x00, 0x01) => payload[0] = 4,
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x40a0) * 0x0c;
+        }
+        // getGlobalFnInversion: inversion OFF in the low nibble; the high
+        // nibble is not the state.
+        (0x0c, 0x00) => payload[0] = 0x50,
+        (0x0c, 0x01) => {}
+        _ => return None,
+    }
+    let mut response = vec![0u8; 7];
+    response[0] = 0x10;
+    response[1..4].copy_from_slice(&request[1..4]);
+    response[4..].copy_from_slice(&payload);
+    Some(response)
+}
+
+#[tokio::test]
+async fn fn_lock_on_a_legacy_keyboard_uses_0x40a0_and_reads_back_its_writes() {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(legacy_keyboard_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc31c,
+        },
+    );
+    let calls = |function: u8| {
+        handle
+            .written_reports()
+            .into_iter()
+            .filter(|report| report[2] == 0x0c && report[3] >> 4 == function)
+            .count()
+    };
+
+    // Inversion OFF reads as Fn-lock on; 0x40a0 has no default to report.
+    let state = get_fn_lock_on(&shared)
+        .await
+        .expect("0x40a0 is the last fallback");
+    assert_eq!(
+        state,
+        FnLockState {
+            fn_lock: true,
+            default_fn_lock: None,
+        }
+    );
+    assert_eq!((calls(0), calls(1)), (1, 0));
+
+    // Its reply carries no state, so the write is confirmed by a read.
+    let written = set_fn_lock_on(&shared, true)
+        .await
+        .expect("the keyboard reads back what was written");
+    assert_eq!(written, state);
+    assert_eq!((calls(0), calls(1)), (2, 1));
+    let set = handle
+        .written_reports()
+        .into_iter()
+        .find(|report| report[2] == 0x0c && report[3] >> 4 == 0x01)
+        .expect("a setGlobalFnInversion write");
+    // Fn-lock on is inversion OFF (0), the only argument byte.
+    assert_eq!(&set[4..7], &[0, 0, 0]);
+
+    // A keyboard that reads back the old state did not take the write.
+    let error = set_fn_lock_on(&shared, false)
+        .await
+        .expect_err("a read-back that disagrees with the write is not a success");
+    assert_eq!(
+        error,
+        WriteError::UnsupportedResponse {
+            operation: HidppOperation::WriteFnLock,
+            feature_hex: 0x40a0,
+        }
+    );
+    let sets: Vec<_> = handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == 0x0c && report[3] >> 4 == 0x01)
+        .collect();
+    assert_eq!(sets.len(), 2);
+    assert_eq!(sets[1][4], 1, "Fn-lock off is inversion ON");
+    assert_eq!(calls(0), 3);
+}
+
+/// A single-host keyboard (`0x40a2` only) whose firmware echoes inversion ON
+/// no matter what is written — the keyboard did not take the write.
+fn stubborn_single_host_keyboard_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    match (feature_index, function) {
+        (0x00, 0x01) => payload[0] = 4,
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x40a2) * 0x0b;
+        }
+        (0x0b, 0x00 | 0x01) => payload[..2].copy_from_slice(&[1, 1]),
+        _ => return None,
+    }
+    let mut response = vec![0u8; 7];
+    response[0] = 0x10;
+    response[1..4].copy_from_slice(&request[1..4]);
+    response[4..].copy_from_slice(&payload[..3]);
+    Some(response)
+}
+
+#[tokio::test]
+async fn fn_lock_write_that_the_keyboard_does_not_echo_fails() {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(stubborn_single_host_keyboard_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb342,
+        },
+    );
+
+    let error = set_fn_lock_on(&shared, true)
+        .await
+        .expect_err("an echo that disagrees with the write is not a success");
+    assert_eq!(
+        error,
+        WriteError::UnsupportedResponse {
+            operation: HidppOperation::WriteFnLock,
+            feature_hex: 0x40a2,
+        }
+    );
+    // The single-host fallback wrote inversion OFF once; no 0x1815 lookup
+    // is attempted on a keyboard without 0x40a3.
+    let sets: Vec<_> = handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == 0x0b && report[3] >> 4 == 0x01)
+        .collect();
+    assert_eq!(sets.len(), 1);
+    assert_eq!(sets[0][4], 0);
+}
+
+/// Zones a scripted `0x8070` keyboard reports, in index order: each zone's raw
+/// location and the raw effect ids of its own effect list.
+type ScriptedZones = &'static [(u16, &'static [u16])];
+
+const COLOR_LED_EFFECTS_INDEX: u8 = 0x09;
+
+/// A `0x8070` keyboard answering `getInfo`, `getZoneInfo`,
+/// `getZoneEffectInfo` and `setZoneEffect` from `zones`. A request for a zone
+/// or effect it does not have gets no reply.
+fn color_led_effects_device(
+    zones: ScriptedZones,
+) -> impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static {
+    move |request| {
+        if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+            return None;
+        }
+        let mut payload = [0u8; 16];
+        let long = match (request[2], request[3] >> 4) {
+            (0x00, 0x01) => {
+                payload[0] = 4;
+                false
+            }
+            (0x00, 0x00) => {
+                if u16::from_be_bytes([request[4], request[5]]) == 0x8070 {
+                    payload[0] = COLOR_LED_EFFECTS_INDEX;
+                }
+                false
+            }
+            (COLOR_LED_EFFECTS_INDEX, 0x00) => {
+                payload[0] = u8::try_from(zones.len()).expect("scripted zone count fits a byte");
+                true
+            }
+            (COLOR_LED_EFFECTS_INDEX, 0x01) => {
+                let (location, effects) = zones.get(usize::from(request[4]))?;
+                payload[0] = request[4];
+                payload[1..3].copy_from_slice(&location.to_be_bytes());
+                payload[3] =
+                    u8::try_from(effects.len()).expect("scripted effect count fits a byte");
+                true
+            }
+            (COLOR_LED_EFFECTS_INDEX, 0x02) => {
+                let (_, effects) = zones.get(usize::from(request[4]))?;
+                let effect_id = effects.get(usize::from(request[5]))?;
+                payload[0] = request[4];
+                payload[1] = request[5];
+                payload[2..4].copy_from_slice(&effect_id.to_be_bytes());
+                true
+            }
+            (COLOR_LED_EFFECTS_INDEX, 0x03) => true,
+            _ => return None,
+        };
+        let mut response = vec![0u8; if long { 20 } else { 7 }];
+        response[0] = if long { 0x11 } else { 0x10 };
+        response[1..4].copy_from_slice(&request[1..4]);
+        let payload_len = response.len() - 4;
+        response[4..].copy_from_slice(&payload[..payload_len]);
+        Some(response)
+    }
+}
+
+/// Every `setZoneEffect` the keyboard received, as `(zone, effect index)`.
+fn zone_effect_writes(handle: &crate::replay::ReplayChannelHandle) -> Vec<(u8, u8)> {
+    handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| {
+            report.len() == 20 && report[2] == COLOR_LED_EFFECTS_INDEX && report[3] >> 4 == 0x03
+        })
+        .map(|report| {
+            assert_eq!(
+                report[6..9],
+                [0x11, 0x22, 0x33],
+                "fixed colour params are RGB"
+            );
+            assert_eq!(report[16], 0, "the colour is applied volatilely");
+            (report[4], report[5])
+        })
+        .collect()
+}
+
+async fn color_led_effects_shared(
+    zones: ScriptedZones,
+) -> (SharedChannel, crate::replay::ReplayChannelHandle) {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(color_led_effects_device(zones));
+    let shared = SharedChannel::new(
+        scripted_channel(raw).await,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc33f,
+        },
+    );
+    (shared, handle)
+}
+
+#[tokio::test]
+async fn a_fixed_colour_targets_each_zones_own_fixed_effect() -> Result<(), WriteError> {
+    // Zone 0 lists the fixed colour third; zone 1 after an effect id this
+    // crate does not model; zone 2 has none, so it is left alone; zone 3 has a
+    // location the parser rejects, so it keeps the legacy index 1.
+    const ZONES: ScriptedZones = &[
+        (0x0001, &[0x0000, 0x0004, 0x0001]),
+        (0x0006, &[0x0063, 0x0004, 0x0001]),
+        (0x0002, &[0x0003]),
+        (0x0042, &[0x0001, 0x0004]),
+    ];
+    let (shared, handle) = color_led_effects_shared(ZONES).await;
+
+    set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await?;
+
+    assert_eq!(zone_effect_writes(&handle), [(0, 2), (1, 2), (3, 1)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_keyboard_whose_zones_offer_no_fixed_colour_is_not_written() {
+    const ZONES: ScriptedZones = &[(0x0001, &[0x0003, 0x0004]), (0x0002, &[0x0000])];
+    let (shared, handle) = color_led_effects_shared(ZONES).await;
+
+    let result =
+        set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8070
+        }),
+        "Auto falls through to the next path on this error"
+    );
+    assert!(zone_effect_writes(&handle).is_empty());
+}
+
+/// `true` for the 20-byte `0x8080` frameEnd sent to the scripted keyboard,
+/// whose `0x8080` sits at feature index `0x07`.
+fn is_per_key_commit(report: &[u8]) -> bool {
+    report.len() == 20 && report[0] == 0x11 && report[2] == 0x07 && report[3] >> 4 == 0x05
+}
+
+/// The first key id of the third `0x12` frame; each frame carries 14 keys.
+const THIRD_PER_KEY_FRAME_FIRST_KEY: u8 = 2 * 14;
+
+/// [`scripted_response`], with the third `0x12` per-key frame rejected as an
+/// invalid argument.
+fn per_key_frame_rejected_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.first() == Some(&0x12) && request.get(8) == Some(&THIRD_PER_KEY_FRAME_FIRST_KEY) {
+        return Some(feature_error(request, 0x02));
+    }
+    scripted_response(request)
+}
+
+/// [`scripted_response`], with the `0x8080` frameEnd answered busy.
+fn per_key_commit_busy_response(request: &[u8]) -> Option<Vec<u8>> {
+    if is_per_key_commit(request) {
+        return Some(feature_error(request, 0x08));
+    }
+    scripted_response(request)
+}
+
+#[tokio::test]
+async fn a_rejected_per_key_frame_fails_the_write_before_the_commit() {
+    // The 0x12 frames were written fire-and-forget, so a frame the keyboard
+    // rejected was committed anyway and the write reported success.
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(per_key_frame_rejected_response);
+    let shared = SharedChannel::new(
+        scripted_channel(raw).await,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc339,
+        },
+    );
+
+    let result =
+        set_keyboard_color_with_on(&shared, LightingMethod::PerKey, 0x11, 0x22, 0x33).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::HidppFeature {
+            operation: HidppOperation::Lighting,
+            feature_hex: 0x8080,
+            kind: HidppFeatureErrorKind::InvalidArgument,
+        })
+    );
+    assert!(
+        !handle
+            .written_reports()
+            .iter()
+            .any(|report| is_per_key_commit(report)),
+        "a rejected frame must not be committed"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_per_key_commit_fails_the_write() {
+    // The frameEnd was written raw too, so its reply was never read.
+    let (raw, _handle) = ScriptedRawHidChannel::with_responder(per_key_commit_busy_response);
+    let shared = SharedChannel::new(
+        scripted_channel(raw).await,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc339,
+        },
+    );
+
+    let result =
+        set_keyboard_color_with_on(&shared, LightingMethod::PerKey, 0x11, 0x22, 0x33).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::HidppFeature {
+            operation: HidppOperation::Lighting,
+            feature_hex: 0x8080,
+            kind: HidppFeatureErrorKind::Busy,
+        })
+    );
+}
+
+#[tokio::test]
+async fn per_key_frames_are_fenced_before_their_one_commit() -> Result<(), WriteError> {
+    // Errors for the 0x12 frames arrive asynchronously. A round trip after the
+    // last frame proves the device has answered every earlier frame, so the
+    // commit is only sent once no frame can still report an error.
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(scripted_response);
+    let shared = SharedChannel::new(
+        scripted_channel(raw).await,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc339,
+        },
+    );
+
+    set_keyboard_color_with_on(&shared, LightingMethod::PerKey, 0x11, 0x22, 0x33).await?;
+
+    let written = handle.written_reports();
+    let last_frame = written
+        .iter()
+        .rposition(|report| report.first() == Some(&0x12))
+        .expect("the frames were streamed");
+    let is_root_ping = |report: &Vec<u8>| {
+        matches!(report.first(), Some(0x10 | 0x11)) && report[2] == 0x00 && report[3] >> 4 == 0x01
+    };
+    let fence = written[last_frame..]
+        .iter()
+        .position(is_root_ping)
+        .map(|offset| last_frame + offset)
+        .expect("a root ping follows the last frame");
+    let commits: Vec<usize> = written
+        .iter()
+        .enumerate()
+        .filter(|(_, report)| is_per_key_commit(report))
+        .map(|(position, _)| position)
+        .collect();
+    assert_eq!(commits.len(), 1, "exactly one frameEnd");
+    assert!(commits[0] > fence, "the frameEnd follows the fence");
+    Ok(())
 }

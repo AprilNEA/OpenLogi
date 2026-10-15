@@ -279,9 +279,9 @@ fn preferred_identity_kind(runtime: Option<IdentityKind>) -> IdentityKind {
 
 /// The installed application's Finder icon for a profile identifier.
 ///
-/// Only macOS has an icon backend: its identifiers are bundle identifiers,
-/// which Launch Services renders to a small RGBA rendition. Blocking — run it
-/// on the background executor.
+/// Only macOS has an icon backend. Launch Services resolves bundle identifiers
+/// to a small RGBA rendition. Executable paths that do not resolve use the
+/// existing monogram fallback. Run this blocking lookup on the background executor.
 fn application_icon(identifier: &str) -> Option<Arc<RenderImage>> {
     #[cfg(target_os = "macos")]
     {

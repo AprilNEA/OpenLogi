@@ -216,13 +216,15 @@ impl<'de> Deserialize<'de> for SmartShiftAutoDisengage {
     }
 }
 
-/// A non-zero tunable-torque level reported by SmartShift Enhanced.
+/// A SmartShift Enhanced tunable-torque level, in percent of the wheel's
+/// maximum force.
 ///
-/// Devices without tunable-torque hardware represent that absence as zero;
-/// [`SmartShiftStatus`] exposes it as `None` instead.
+/// Zero is HID++'s write-only "do not change" sentinel and a status reply
+/// without a torque level, which [`SmartShiftStatus`] exposes as `None`.
+/// Logi Options+ and Solaar both bound the level to `1..=100`.
 #[nutype(
     const_fn,
-    validate(greater_or_equal = 1),
+    validate(greater_or_equal = 1, less_or_equal = 100),
     derive(
         Debug,
         Clone,
@@ -366,5 +368,17 @@ mod tests {
             u8::from(SmartShiftThreshold::from_rounded(f32::INFINITY)),
             254
         );
+    }
+
+    #[test]
+    fn tunable_torque_is_a_percentage() {
+        let Err(_) = TunableTorque::try_new(0) else {
+            panic!("zero is the write-only do-not-change sentinel");
+        };
+        assert_eq!(TunableTorque::try_new(1).map(u8::from), Ok(1));
+        assert_eq!(TunableTorque::try_new(100).map(u8::from), Ok(100));
+        let Err(_) = TunableTorque::try_new(101) else {
+            panic!("torque above 100% of the maximum force is not a level");
+        };
     }
 }
