@@ -277,6 +277,17 @@ impl Pulse {
     }
 }
 
+/// The two instants a reversal is measured from.
+#[derive(Clone, Copy)]
+struct Flip {
+    /// Last tick of the direction scrolled away from: the cooldown ramp's
+    /// reference.
+    departed_at: Instant,
+    /// The flip's first opposing tick: the corrective burst's own age, from
+    /// which the knee compression fades.
+    started_at: Instant,
+}
+
 /// One axis of cold-start attenuation for quick direction reversals of
 /// pre-accelerated input.
 ///
@@ -294,17 +305,13 @@ struct ReversalCooldown {
     dir: i8,
     /// Arrival of the committed direction's most recent tick.
     last_at: Option<Instant>,
-    /// Last tick time of the direction scrolled away from, kept while a flip
-    /// is still recovering.
-    flip_ref: Option<Instant>,
-    /// Arrival of the pending flip's first opposing tick — the corrective
-    /// burst's own age, from which the knee compression fades.
-    flip_started: Option<Instant>,
-    /// Raw opposing distance accumulated towards [`REVERSAL_COMMIT`].
-    pending: f64,
-    /// Whether the pending flip has crossed [`REVERSAL_COMMIT`] and `dir`
-    /// now points the new way.
-    committed: bool,
+    /// A committed reversal still within [`REVERSAL_RECOVERY`]. It is kept
+    /// apart from `pending`, so a sub-commit tick back the old way during the
+    /// recovery cannot discard it.
+    recovering: Option<Flip>,
+    /// Opposing ticks that have not yet crossed [`REVERSAL_COMMIT`], with
+    /// their raw distance so far.
+    pending: Option<(Flip, f64)>,
     /// Arrival of this axis's most recent tick in either direction. Once it
     /// is a full [`REVERSAL_COOLDOWN`] old the axis starts fresh, however
     /// busy the source's other axis has been meanwhile.
@@ -312,23 +319,16 @@ struct ReversalCooldown {
 }
 
 impl ReversalCooldown {
-    fn clear_flip(&mut self) {
-        self.flip_ref = None;
-        self.flip_started = None;
-        self.pending = 0.0;
-        self.committed = false;
-    }
-
     /// Scale one tick of a reversal in progress: the cooldown ramp re-imposes
     /// a cold start relative to the departed direction's last tick (the OS
     /// acceleration stays hot across a quick flip), and the knee compression
     /// tames the corrective burst's peak speed, fading out over
     /// [`REVERSAL_RECOVERY`] from the burst's first opposing tick.
-    fn rescale(value: f64, flip_ref: Instant, flip_started: Instant, at: Instant) -> f64 {
-        let ramp = (at.saturating_duration_since(flip_ref).as_secs_f64()
+    fn rescale(value: f64, flip: Flip, at: Instant) -> f64 {
+        let ramp = (at.saturating_duration_since(flip.departed_at).as_secs_f64()
             / REVERSAL_COOLDOWN.as_secs_f64())
         .min(1.0);
-        let recovery = (at.saturating_duration_since(flip_started).as_secs_f64()
+        let recovery = (at.saturating_duration_since(flip.started_at).as_secs_f64()
             / REVERSAL_RECOVERY.as_secs_f64())
         .min(1.0);
         let magnitude = value.abs() * ramp;
@@ -360,46 +360,40 @@ impl ReversalCooldown {
         }
         if sign == self.dir {
             self.last_at = Some(at);
-            return match (self.flip_ref, self.flip_started) {
-                // Committed reversal still recovering: keep rescaling until
-                // the compression has fully faded.
-                (Some(flip_ref), Some(flip_started)) if self.committed => {
-                    if at.saturating_duration_since(flip_started) >= REVERSAL_RECOVERY {
-                        self.clear_flip();
-                        value
-                    } else {
-                        Self::rescale(value, flip_ref, flip_started, at)
-                    }
+            // Opposing ticks that never committed were free-spin jitter, and
+            // the main direction resumed: drop them. A committed reversal
+            // still recovering keeps rescaling until its compression has
+            // fully faded.
+            self.pending = None;
+            return match self.recovering {
+                Some(flip) if at.saturating_duration_since(flip.started_at) < REVERSAL_RECOVERY => {
+                    Self::rescale(value, flip, at)
                 }
-                // The opposing ticks never committed — free-spin jitter —
-                // and the main direction resumed; drop the pending flip.
-                (Some(_), _) => {
-                    self.clear_flip();
+                _ => {
+                    self.recovering = None;
                     value
                 }
-                _ => value,
             };
         }
         // Opposing tick: keep the pending flip's references, or start a
         // fresh flip from the departed direction's last arrival.
-        let (flip_ref, flip_started) = match (self.flip_ref, self.flip_started) {
-            (Some(flip_ref), Some(flip_started)) if !self.committed => (flip_ref, flip_started),
-            _ => {
-                let flip_ref = self.last_at.unwrap_or(at);
-                self.flip_ref = Some(flip_ref);
-                self.flip_started = Some(at);
-                self.pending = 0.0;
-                self.committed = false;
-                (flip_ref, at)
-            }
-        };
-        self.pending += value.abs();
-        if self.pending >= REVERSAL_COMMIT {
+        let departed_at = self.last_at.unwrap_or(at);
+        let (flip, distance) = self.pending.get_or_insert((
+            Flip {
+                departed_at,
+                started_at: at,
+            },
+            0.0,
+        ));
+        *distance += value.abs();
+        let flip = *flip;
+        if *distance >= REVERSAL_COMMIT {
             self.dir = sign;
             self.last_at = Some(at);
-            self.committed = true;
+            self.recovering = Some(flip);
+            self.pending = None;
         }
-        Self::rescale(value, flip_ref, flip_started, at)
+        Self::rescale(value, flip, at)
     }
 }
 
