@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
-use openlogi_core::device::{LightState, LightValueUnit, StandaloneDevice};
+use openlogi_core::device::{LightState, StandaloneDevice};
 use openlogi_hid::{LightCommand, LitraModel, find_litra};
 
 #[derive(Debug, Subcommand)]
@@ -170,31 +170,24 @@ async fn set_power(query: Option<&str>, enabled: bool) -> Result<()> {
 }
 
 async fn set_brightness(args: BrightnessArgs) -> Result<()> {
+    let command = brightness_command(args.percent, args.lumens)?;
     let devices = standalone().await?;
     let device = select(&devices, args.device.device.as_deref())?;
-    let caps = device
-        .light_capabilities
-        .ok_or_else(|| anyhow!("selected light did not advertise capabilities"))?;
-    let range = caps
-        .brightness
-        .ok_or_else(|| anyhow!("selected light does not support brightness"))?;
-    let command = match (args.percent, args.lumens) {
-        (Some(percent), None) => LightCommand::BrightnessPercent(percent),
-        (None, Some(lumens)) => {
-            if range.unit() != LightValueUnit::Lumens || !range.contains(lumens) {
-                return Err(anyhow!(
-                    "lumens must be in the supported range {}..={} with step {}",
-                    range.min(),
-                    range.max(),
-                    range.step()
-                ));
-            }
-            LightCommand::BrightnessNative(lumens)
-        }
-        (None, None) => return Err(anyhow!("pass either --percent or --lumens")),
-        (Some(_), Some(_)) => unreachable!("clap enforces the argument conflict"),
-    };
     apply(device, command).await
+}
+
+/// The command for `--percent` or `--lumens`.
+///
+/// Lumens are not checked here: the driver checks them against the range the
+/// light reports over HID++, or the model's static range when only the raw
+/// report reaches it, and a light can report a wider range than the static one.
+fn brightness_command(percent: Option<u8>, lumens: Option<u16>) -> Result<LightCommand> {
+    match (percent, lumens) {
+        (Some(percent), None) => Ok(LightCommand::BrightnessPercent(percent)),
+        (None, Some(lumens)) => Ok(LightCommand::BrightnessNative(lumens)),
+        (None, None) => Err(anyhow!("pass either --percent or --lumens")),
+        (Some(_), Some(_)) => unreachable!("clap enforces the argument conflict"),
+    }
 }
 
 async fn set_temperature(args: TemperatureArgs) -> Result<()> {
@@ -262,7 +255,7 @@ fn select<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{describe_state, select};
+    use super::{LightCommand, brightness_command, describe_state, select};
     use openlogi_core::device::{
         DeviceKind, LightCapabilities, LightState, LightValueRange, LightValueUnit,
         RawDeviceAddress, StandaloneDevice,
@@ -308,6 +301,21 @@ mod tests {
                 .display_name,
             "Litra Glow"
         );
+    }
+
+    #[test]
+    fn lumens_outside_the_static_range_reach_the_driver() {
+        // The Glow's static range is 20–250 lm; a light that reports more is
+        // checked by the driver against its own range.
+        assert_eq!(
+            brightness_command(None, Some(280)).expect("a native command"),
+            LightCommand::BrightnessNative(280)
+        );
+        assert_eq!(
+            brightness_command(Some(40), None).expect("a percent command"),
+            LightCommand::BrightnessPercent(40)
+        );
+        brightness_command(None, None).expect_err("one of the two is required");
     }
 
     #[test]
