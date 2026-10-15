@@ -129,6 +129,27 @@ async fn after_transport_turn<T>(turn: &TransportTurn, work: impl Future<Output 
     work.await
 }
 
+/// Resolve `op`'s current channel only after `turn` is held, then give `write`
+/// the whole [`WRITE_TIMEOUT`]. A channel cloned before the wait would pin a
+/// connection inventory has already retired.
+async fn timed_on_current_channel<T, F, Fut>(
+    op: &DeviceOp,
+    turn: &TransportTurn,
+    write: F,
+) -> Result<Result<T, WriteError>, Elapsed>
+where
+    F: FnOnce(SharedChannel) -> Fut,
+    Fut: Future<Output = Result<T, WriteError>>,
+{
+    after_transport_turn(turn, async move {
+        match op.resolve() {
+            Ok(shared) => tokio::time::timeout(WRITE_TIMEOUT, write(shared)).await,
+            Err(_) => Ok(Err(WriteError::DeviceNotFound)),
+        }
+    })
+    .await
+}
+
 /// Upper bound on waiting, at exit, for lighting writes already running to
 /// record the `0x8071` control they take. A write is a handful of requests;
 /// the budget only matters when a device stopped answering.
@@ -487,11 +508,11 @@ impl DeviceOp {
     /// never answers within `WRITE_TIMEOUT` warns instead of hanging the
     /// thread forever.
     ///
-    /// Resolves the channel on the calling thread before spawning — every
-    /// `*_in_background` write did this, so a resolution failure (no target,
-    /// registry miss) never pays for a thread spawn, and the lease (acquired
-    /// only once the thread is running) is never awaited for a write that was
-    /// already going nowhere.
+    /// A registry miss is checked on the calling thread before spawning, so a
+    /// write that already has no target never pays for a thread. The channel
+    /// that check returns is dropped immediately. The write resolves the
+    /// current channel again only after it holds the transport turn, so a
+    /// connection retired while it is queued is not pinned and not written.
     pub fn detach<F, Fut, T>(self, label: &'static str, f: F)
     where
         F: FnOnce(SharedChannel) -> Fut + Send + 'static,
@@ -526,15 +547,9 @@ impl DeviceOp {
         let turn = self.access.transport_turns.turn_for(&self.route);
         self.spawn_timed_write(
             label,
-            move |shared| {
+            move |op| {
                 let turn = Arc::clone(&turn);
-                async move {
-                    // `timeout` stamps its deadline at construction, so build it after the turn.
-                    after_transport_turn(&turn, async move {
-                        tokio::time::timeout(WRITE_TIMEOUT, f(shared)).await
-                    })
-                    .await
-                }
+                async move { timed_on_current_channel(&op, &turn, f).await }
             },
             log,
         );
@@ -543,38 +558,34 @@ impl DeviceOp {
     /// [`Self::spawn_write`] for a write that bounds its own device I/O, as
     /// `tokio::time::timeout` would: one that first waits its turn behind
     /// the device's earlier writes (see [`within_turn`]) must not spend its
-    /// deadline on that wait.
+    /// deadline on that wait. `f` resolves the channel itself, after that
+    /// wait, and must not close over one resolved beforehand.
     fn spawn_timed_write<F, Fut, T>(
         self,
         label: &'static str,
         f: F,
         log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
     ) where
-        F: FnOnce(SharedChannel) -> Fut + Send + 'static,
+        F: FnOnce(DeviceOp) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Result<T, WriteError>, Elapsed>>,
     {
-        let shared = match self.resolve() {
-            Ok(shared) => shared,
+        match self.resolve() {
+            Ok(shared) => drop(shared),
             Err(reason) => {
                 debug!(route = %self.route, label, %reason, "background write skipped");
                 return;
             }
-        };
-        let DeviceAccess {
-            receiver_access,
-            device_io,
-            ..
-        } = self.access;
+        }
         std::thread::spawn(move || {
             let Some(rt) = one_shot_runtime(label) else {
                 return;
             };
-            let result = rt.block_on(async {
-                let _lease = receiver_access.acquire_for_io().await;
-                if !device_io.allows_io() {
+            let result = rt.block_on(async move {
+                let _lease = self.access.receiver_access.acquire_for_io().await;
+                if !self.access.device_io.allows_io() {
                     return None;
                 }
-                Some(f(shared).await)
+                Some(f(self).await)
             });
             if let Some(result) = result {
                 log(result);
@@ -679,11 +690,14 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on:
     let turn = op.access.transport_turns.turn_for(&op.route);
     op.spawn_timed_write(
         "Fn-lock write",
-        move |c| async move {
+        move |op| async move {
             within_turn(
                 &ticket,
                 &turn,
-                || async { openlogi_hid::set_fn_lock_on(&c, on).await.map(Some) },
+                || async {
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_fn_lock_on(&shared, on).await.map(Some)
+                },
                 || async { Ok(None) },
             )
             .await
@@ -796,11 +810,13 @@ impl VolatileMouseSettings {
 /// stream while correlating responses only by software id — they cross-talk and
 /// produce the intermittent SmartShift `InvalidArgument` seen in #485. One
 /// sequential writer removes that self-race, so this deliberately does NOT
-/// decompose into three [`DeviceOp::detach`] calls: the channel is resolved
-/// once, the lease is held for the whole sequence, and every write below runs
-/// on the one OS thread spawned here. Takes `op` by reference (unlike every
-/// other function here) because it only ever reads its fields — it never
-/// hands the operation itself to [`DeviceOp::run`] or [`DeviceOp::detach`].
+/// decompose into three [`DeviceOp::detach`] calls: the lease is held for the
+/// whole sequence, and every write below runs on the one OS thread spawned
+/// here. Each write resolves the current channel only after it holds the
+/// transport turn, so a connection retired while the sequence is queued is
+/// not pinned. Takes `op` by reference (unlike every other function here)
+/// because it only ever reads its fields — it never hands the operation
+/// itself to [`DeviceOp::run`] or [`DeviceOp::detach`].
 ///
 /// The report rate is the one setting here the GUI also writes on its own, so
 /// its write is numbered in `report_rate_order` now, as the reapply is
@@ -812,52 +828,50 @@ pub(crate) fn reapply_mouse_volatile_in_background(
     settings: VolatileMouseSettings,
     report_rate_order: &WriteOrder,
 ) {
+    match op.resolve() {
+        Ok(shared) => drop(shared),
+        Err(reason) => {
+            debug!(route = %op.route, %reason, "volatile reapply skipped");
+            return;
+        }
+    }
     let VolatileMouseSettings {
         wheel,
         dpi,
         report_rate,
         smartshift,
     } = settings;
-    let shared = match op.resolve() {
-        Ok(shared) => shared,
-        Err(reason) => {
-            debug!(route = %op.route, %reason, "volatile reapply skipped");
-            return;
-        }
-    };
     // Numbered only once the reapply will run: a ticket that never writes
     // would still supersede a pick already waiting for its turn.
     let report_rate = report_rate.map(|rate| (rate, report_rate_order.request(&op.route)));
-    let receiver_access = op.access.receiver_access.clone();
-    let device_io = op.access.device_io.clone();
-    let transport_turns = op.access.transport_turns.clone();
+    let access = op.access.clone();
     let route = op.route.clone();
-    let index = op.route.device_index();
+    let index = route.device_index();
     std::thread::spawn(move || {
         let Some(rt) = one_shot_runtime("volatile reapply") else {
             return;
         };
-        rt.block_on(async {
-            let _lease = receiver_access.acquire_for_io().await;
-            if !device_io.allows_io() {
+        rt.block_on(async move {
+            let _lease = access.receiver_access.acquire_for_io().await;
+            if !access.device_io.allows_io() {
                 debug!(
                     index,
                     "host device I/O suspended — volatile reapply skipped"
                 );
                 return;
             }
-            let turn = transport_turns.turn_for(&route);
+            let op = DeviceOp { access, route };
+            let turn = op.access.transport_turns.turn_for(&op.route);
             if let Some(change) = wheel {
-                let result = after_transport_turn(&turn, async {
-                    tokio::time::timeout(WRITE_TIMEOUT, change.apply_on(&shared)).await
+                let result = timed_on_current_channel(&op, &turn, |shared| async move {
+                    change.apply_on(&shared).await
                 })
                 .await;
                 log_wheel_result(index, change, result);
             }
             if let Some(dpi) = dpi {
-                let result = after_transport_turn(&turn, async {
-                    tokio::time::timeout(WRITE_TIMEOUT, openlogi_hid::set_dpi_on(&shared, dpi))
-                        .await
+                let result = timed_on_current_channel(&op, &turn, |shared| async move {
+                    openlogi_hid::set_dpi_on(&shared, dpi).await
                 })
                 .await;
                 log_outcome(index, "DPI write", result, |()| {
@@ -869,6 +883,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
                     &ticket,
                     &turn,
                     || async {
+                        let shared = op.resolve()?;
                         openlogi_hid::set_report_rate_on(&shared, rate)
                             .await
                             .map(Some)
@@ -885,12 +900,8 @@ pub(crate) fn reapply_mouse_volatile_in_background(
                 });
             }
             if let Some(ss) = smartshift {
-                let result = after_transport_turn(&turn, async {
-                    tokio::time::timeout(
-                        WRITE_TIMEOUT,
-                        openlogi_hid::set_smartshift_on(&shared, ss),
-                    )
-                    .await
+                let result = timed_on_current_channel(&op, &turn, |shared| async move {
+                    openlogi_hid::set_smartshift_on(&shared, ss).await
                 })
                 .await;
                 log_outcome(index, "SmartShift write", result, |()| {
@@ -1402,6 +1413,305 @@ mod tests {
             .expect("confirmed write must not panic")
             .expect("queue wait must not spend the response budget")
             .expect("the echo check still fits in the budget that started after the queue");
+    }
+
+    /// A background worker queued on a transport must not keep the connection
+    /// it observed at schedule time. Inventory reopens a node only after every
+    /// other owner drops it, and the write has to use the channel published
+    /// once the turn is actually held.
+    #[tokio::test]
+    async fn queued_background_write_resolves_the_channel_after_the_turn() {
+        let published = publish_direct_mouse().await;
+        let turns = TransportTurns::default();
+        let access = DeviceAccess {
+            channel: std::sync::Arc::new(RwLock::new(None)),
+            registry: published.registry.clone(),
+            receiver_access: ReceiverAccess::default(),
+            device_io: published.device_io.clone(),
+            transport_turns: turns.clone(),
+        };
+        let turn = turns.turn_for(&published.route);
+        let held = turn.lock().await;
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        access.op(&published.route).spawn_write(
+            "queued write",
+            move |shared| {
+                let _ = seen_tx.send(shared.downgrade());
+                async move { Ok::<(), WriteError>(()) }
+            },
+            |_| {},
+        );
+
+        published.retire_original().await;
+        assert!(
+            published.retired.upgrade().is_none(),
+            "a queued worker must not keep the retired connection alive"
+        );
+        assert!(
+            published.registry.lookup(&published.route).is_none(),
+            "inventory drops the retired publication before the replacement opens"
+        );
+
+        published.publish_replacement().await;
+        let replacement = published
+            .registry
+            .lookup(&published.route)
+            .expect("the replacement connection is current")
+            .downgrade();
+        assert!(
+            published.retired.upgrade().is_none(),
+            "opening the replacement must not resurrect the retired connection"
+        );
+
+        drop(held);
+        let seen = tokio::time::timeout(Duration::from_secs(2), seen_rx)
+            .await
+            .expect("the queued write must run once the turn is free")
+            .expect("the write records the channel it resolved");
+        assert!(
+            seen == replacement,
+            "the write must use the channel resolved after the turn"
+        );
+        assert!(
+            published.retired.upgrade().is_none(),
+            "the finished write must not have revived the retired connection"
+        );
+    }
+
+    /// Volatile reapply waits out the same transport queue. It has to drop the
+    /// connection it checked at schedule time, or a reload queued behind
+    /// another slot pins a node inventory is trying to reopen.
+    #[tokio::test]
+    async fn queued_volatile_reapply_drops_the_connection_it_checked() {
+        let published = publish_direct_mouse().await;
+        let turns = TransportTurns::default();
+        let receiver_access = ReceiverAccess::default();
+        let access = DeviceAccess {
+            channel: std::sync::Arc::new(RwLock::new(None)),
+            registry: published.registry.clone(),
+            receiver_access: receiver_access.clone(),
+            device_io: published.device_io.clone(),
+            transport_turns: turns.clone(),
+        };
+        let turn = turns.turn_for(&published.route);
+        let held = turn.lock().await;
+        reapply_mouse_volatile_in_background(
+            &access.op(&published.route),
+            VolatileMouseSettings {
+                dpi: Some(Dpi::new(800)),
+                ..VolatileMouseSettings::default()
+            },
+            &WriteOrder::default(),
+        );
+        wait_until_a_worker_holds_the_receiver(&receiver_access).await;
+
+        published.retire_original().await;
+        assert!(
+            published.retired.upgrade().is_none(),
+            "reapply must not pin the retired connection while it waits for the transport"
+        );
+
+        drop(held);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            receiver_access
+                .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing),
+        )
+        .await
+        .expect("reapply finishes without a connection instead of writing the retired one");
+        assert!(published.retired.upgrade().is_none());
+    }
+
+    struct PublishedMouse {
+        backend: std::sync::Arc<openlogi_hid::replay::ReplayBackend>,
+        registry: ChannelRegistry,
+        device_io: DeviceIoGate,
+        route: DeviceRoute,
+        original: openlogi_hid::NodeId,
+        replacement_node: openlogi_hid::NodeId,
+        retired: openlogi_hid::WeakSharedChannel,
+    }
+
+    impl PublishedMouse {
+        async fn retire_original(&self) {
+            self.backend
+                .set_node_presence(&self.original, openlogi_hid::replay::NodePresence::Absent)
+                .expect("known node");
+            self.backend
+                .set_channel_connection(
+                    ORIGINAL_CHANNEL,
+                    openlogi_hid::replay::ChannelConnection::Disconnected,
+                )
+                .expect("known channel");
+            self.enumerate().await;
+        }
+
+        async fn publish_replacement(&self) {
+            self.backend
+                .set_node_presence(
+                    &self.replacement_node,
+                    openlogi_hid::replay::NodePresence::Present,
+                )
+                .expect("known node");
+            self.enumerate().await;
+        }
+
+        async fn enumerate(&self) {
+            openlogi_hid::Enumerator::with_backend(self.backend.clone())
+                .with_registry(self.registry.clone())
+                .enumerate()
+                .await
+                .expect("replay enumeration");
+        }
+    }
+
+    const ORIGINAL_CHANNEL: &str = "retired-mouse";
+    const REPLACEMENT_CHANNEL: &str = "replacement-mouse";
+
+    async fn publish_direct_mouse() -> PublishedMouse {
+        use openlogi_fixture::{FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport};
+        use openlogi_hid::replay::{
+            ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
+            ReplayChannel, ReplayNode, ReplayTopology,
+        };
+        use openlogi_hid::{NodeId, NodeInfo};
+
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        };
+        let original = NodeId::from("retired-mouse-node".to_string());
+        let replacement_node = NodeId::from("replacement-mouse-node".to_string());
+        let node = |id: NodeId, presence: NodePresence, channel: &str| ReplayNode {
+            info: NodeInfo {
+                id,
+                vendor_id: 0x046d,
+                product_id: 0xb35b,
+                usage_page: 0xff00,
+                usage_id: 0x0002,
+                name: "Replay Mouse".to_string(),
+                manufacturer: Some("Logitech".to_string()),
+                serial_number: None,
+            },
+            presence,
+            open_outcome: OpenOutcome::Hidpp,
+            channel: Some(channel.to_string()),
+            raw_writer: RawWriterAvailability::Unavailable,
+            receiver_slots: Vec::new(),
+        };
+        let cassette = |channel: &str| HidCassette {
+            schema_version: FIXTURE_SCHEMA_VERSION,
+            name: channel.to_string(),
+            channel: channel.to_string(),
+            report_support: ReportSupport::ShortAndLong,
+            exchanges: direct_probe_exchanges(),
+        };
+        let backend = std::sync::Arc::new(
+            ReplayBackend::new(
+                ReplayTopology {
+                    nodes: vec![
+                        node(original.clone(), NodePresence::Present, ORIGINAL_CHANNEL),
+                        node(
+                            replacement_node.clone(),
+                            NodePresence::Absent,
+                            REPLACEMENT_CHANNEL,
+                        ),
+                    ],
+                    channels: vec![
+                        ReplayChannel {
+                            id: ORIGINAL_CHANNEL.to_string(),
+                            connection: ChannelConnection::Connected,
+                            report_support: ReportSupport::ShortAndLong,
+                        },
+                        ReplayChannel {
+                            id: REPLACEMENT_CHANNEL.to_string(),
+                            connection: ChannelConnection::Connected,
+                            report_support: ReportSupport::ShortAndLong,
+                        },
+                    ],
+                },
+                vec![cassette(ORIGINAL_CHANNEL), cassette(REPLACEMENT_CHANNEL)],
+            )
+            .expect("valid replay topology"),
+        );
+        let (_device_io_signal, device_io) = device_io_channel();
+        let registry = ChannelRegistry::default();
+        openlogi_hid::Enumerator::with_backend(backend.clone())
+            .with_registry(registry.clone())
+            .enumerate()
+            .await
+            .expect("the original mouse publishes");
+        let retired = registry
+            .lookup(&route)
+            .expect("inventory publishes the original connection")
+            .downgrade();
+        PublishedMouse {
+            backend,
+            registry,
+            device_io,
+            route,
+            original,
+            replacement_node,
+            retired,
+        }
+    }
+
+    fn direct_probe_exchanges() -> Vec<openlogi_fixture::CassetteExchange> {
+        use openlogi_fixture::{CassetteExchange, RequestMatch};
+
+        let h20 = |request: Vec<u8>, response: Vec<u8>| CassetteExchange {
+            request_match: RequestMatch::Hidpp20,
+            request,
+            response: Some(response),
+            required: true,
+        };
+        let short = |device: u8, feature: u8, function: u8, payload: [u8; 3]| {
+            vec![
+                0x10, device, feature, function, payload[0], payload[1], payload[2],
+            ]
+        };
+        vec![
+            h20(
+                short(0xff, 0x00, 0x10, [0, 0, 0]),
+                short(0xff, 0x00, 0x10, [4, 0, 0]),
+            ),
+            h20(
+                short(0xff, 0x00, 0x00, [0x00, 0x01, 0]),
+                short(0xff, 0x00, 0x00, [0x01, 0, 0]),
+            ),
+            h20(
+                short(0xff, 0x01, 0x00, [0, 0, 0]),
+                short(0xff, 0x01, 0x00, [2, 0, 0]),
+            ),
+            h20(
+                short(0xff, 0x01, 0x10, [1, 0, 0]),
+                short(0xff, 0x01, 0x10, [0x00, 0x01, 0]),
+            ),
+            h20(
+                short(0xff, 0x01, 0x10, [2, 0, 0]),
+                short(0xff, 0x01, 0x10, [0x22, 0x01, 0]),
+            ),
+        ]
+    }
+
+    async fn wait_until_a_worker_holds_the_receiver(access: &ReceiverAccess) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let attempt = tokio::time::timeout(
+                    Duration::from_millis(20),
+                    access
+                        .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing),
+                )
+                .await;
+                if attempt.is_err() {
+                    break;
+                }
+                drop(attempt);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reapply thread reaches the transport queue");
     }
 
     /// The timeout every [`DeviceOp::run`] call relies on: a write that never
