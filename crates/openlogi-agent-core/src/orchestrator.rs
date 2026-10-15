@@ -131,6 +131,8 @@ pub struct SharedHandles {
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Separate host-button observation cell; no ordinary key data.
+    pub host_switch_observer: Arc<ObservableState>,
     /// Orders every path's Fn-lock writes per keyboard.
     fn_lock_order: WriteOrder,
     /// Orders the GUI's report-rate writes and the reconnect reapply's per
@@ -403,6 +405,7 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
+            host_switch_observer: observable.clone(),
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),

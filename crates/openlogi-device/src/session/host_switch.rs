@@ -13,7 +13,7 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature,
-        change_host::ChangeHostFeature,
+        change_host::{ChangeHostFeature, ChangeHostInfo},
         hosts_info::{HostIndex, HostSlotStatus, HostsInfoFeature},
     },
     protocol::v20,
@@ -64,6 +64,22 @@ const HIDPP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 enum ReportingMode {
     Diverted,
     Analytics,
+}
+
+#[derive(Clone, Copy)]
+enum CaptureMode {
+    Linked,
+    Observe,
+}
+
+fn reporting_mode(info: reprog_controls::CtrlIdInfo, mode: CaptureMode) -> Option<ReportingMode> {
+    if matches!(mode, CaptureMode::Linked) && info.is_divertable() {
+        Some(ReportingMode::Diverted)
+    } else if info.supports_analytics_events() {
+        Some(ReportingMode::Analytics)
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -124,6 +140,78 @@ pub async fn run_host_switch_session(
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<HostSwitchSessionOutcome, HostSwitchSessionFailure> {
+    capture_host_switch_session(
+        keyboard,
+        shutdown,
+        registry,
+        device_io,
+        CaptureMode::Linked,
+        None,
+    )
+    .await
+}
+
+/// Capture a configured linked-device switch and publish the observed press.
+/// Existing diversion, host-change and restoration behavior is retained.
+pub async fn run_host_switch_session_reporting(
+    keyboard: DeviceRoute,
+    shutdown: oneshot::Receiver<HostSwitchStopReason>,
+    registry: &ChannelRegistry,
+    device_io: DeviceIoGate,
+    on_host: Arc<dyn Fn(u8) + Send + Sync>,
+) -> Result<HostSwitchSessionOutcome, HostSwitchSessionFailure> {
+    capture_host_switch_session(
+        keyboard,
+        shutdown,
+        registry,
+        device_io,
+        CaptureMode::Linked,
+        Some(on_host),
+    )
+    .await
+}
+
+/// Observe host keys through analytics reporting, without diverting them or
+/// issuing a ChangeHost command. The callback runs before restoration.
+pub async fn observe_host_switch_session(
+    keyboard: DeviceRoute,
+    shutdown: oneshot::Receiver<HostSwitchStopReason>,
+    registry: &ChannelRegistry,
+    device_io: DeviceIoGate,
+    on_host: Arc<dyn Fn(u8) + Send + Sync>,
+    on_current: Arc<dyn Fn(u8) + Send + Sync>,
+) -> Result<HostSwitchSessionOutcome, HostSwitchSessionFailure> {
+    device_io.ensure_allowed().map_err(HostSwitchError::from)?;
+    if let Some(shared) = registry.lookup(&keyboard) {
+        let channel = Arc::clone(shared.channel());
+        if let Ok((_device, _feature, info)) =
+            read_host_state_on(&channel, shared.device_index()).await
+            && info.current_host < info.host_count
+            && registry.is_current(&shared)
+            && device_io.allows_io()
+        {
+            on_current(info.current_host);
+        }
+    }
+    capture_host_switch_session(
+        keyboard,
+        shutdown,
+        registry,
+        device_io,
+        CaptureMode::Observe,
+        Some(on_host),
+    )
+    .await
+}
+
+async fn capture_host_switch_session(
+    keyboard: DeviceRoute,
+    shutdown: oneshot::Receiver<HostSwitchStopReason>,
+    registry: &ChannelRegistry,
+    device_io: DeviceIoGate,
+    mode: CaptureMode,
+    on_host: Option<Arc<dyn Fn(u8) + Send + Sync>>,
+) -> Result<HostSwitchSessionOutcome, HostSwitchSessionFailure> {
     device_io.ensure_allowed().map_err(HostSwitchError::from)?;
     let shared = registry
         .lookup(&keyboard)
@@ -144,7 +232,7 @@ pub async fn run_host_switch_session(
     let controls = ReprogControlsV4::new(Arc::clone(&channel), keyboard_index, feature.index);
 
     let mut armed = Vec::new();
-    if let Err(error) = arm_host_controls_inner(&controls, &mut armed).await {
+    if let Err(error) = arm_host_controls(&controls, &mut armed, mode).await {
         let pending = PendingHostSwitchRestore::new(&shared, controls.feature_index(), armed);
         return Err(rollback_host_switch_start(error, pending, registry, &device_io).await);
     }
@@ -155,8 +243,10 @@ pub async fn run_host_switch_session(
     let (press_tx, mut press_rx) = mpsc::unbounded_channel();
     let feature_index = controls.feature_index();
     let event_controls = armed.clone();
+    let observed_registry = registry.clone();
+    let observed_channel = shared.clone();
     let listener = channel.add_msg_listener_guarded(move |raw, matched| {
-        if matched {
+        if matched || !observed_registry.is_current(&observed_channel) {
             return;
         }
         let message = v20::Message::from(raw);
@@ -166,6 +256,9 @@ pub async fn run_host_switch_session(
             return;
         };
         if let Some(host) = event_host(&event_controls, event) {
+            if let Some(on_host) = &on_host {
+                on_host(host);
+            }
             let _ = press_tx.send(host);
         }
     });
@@ -332,9 +425,10 @@ pub async fn switch_linked_hosts(
     Ok(changed)
 }
 
-async fn arm_host_controls_inner(
+async fn arm_host_controls(
     controls: &ReprogControlsV4,
     armed: &mut Vec<ArmedControl>,
+    capture: CaptureMode,
 ) -> Result<(), HostSwitchError> {
     let count = timed_hidpp("reading host control count", controls.get_count()).await?;
     for index in 0..count {
@@ -354,13 +448,7 @@ async fn arm_host_controls_inner(
             analytics = info.supports_analytics_events(),
             "host switch control discovered"
         );
-        let mode = if info.is_divertable() {
-            Some(ReportingMode::Diverted)
-        } else if info.supports_analytics_events() {
-            Some(ReportingMode::Analytics)
-        } else {
-            None
-        };
+        let mode = reporting_mode(info, capture);
         if let Some(mode) = mode {
             let original = timed_hidpp(
                 "reading host control reporting",
@@ -468,11 +556,10 @@ async fn prepare_host_change(
     }
 }
 
-async fn prepare_host_change_on(
+async fn read_host_state_on(
     channel: &Arc<HidppChannel>,
     device_index: u8,
-    host: u8,
-) -> Result<PreparedHostChange, HostSwitchError> {
+) -> Result<(Device, Arc<ChangeHostFeature>, ChangeHostInfo), HostSwitchError> {
     let mut device = timed_hidpp(
         "opening host-change device",
         Device::new(Arc::clone(channel), device_index),
@@ -486,6 +573,15 @@ async fn prepare_host_change_on(
     .ok_or_else(|| HostSwitchError::Hidpp("ChangeHost is unsupported".into()))?;
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
     let state = timed_hidpp("reading current host", change_host.get_host_info()).await?;
+    Ok((device, change_host, state))
+}
+
+async fn prepare_host_change_on(
+    channel: &Arc<HidppChannel>,
+    device_index: u8,
+    host: u8,
+) -> Result<PreparedHostChange, HostSwitchError> {
+    let (mut device, change_host, state) = read_host_state_on(channel, device_index).await?;
     let required = host_change_required(state.current_host, state.host_count, host)?;
     if required && host_slot_is_empty(&mut device, host).await {
         return Err(HostSwitchError::HostSlotEmpty { host });

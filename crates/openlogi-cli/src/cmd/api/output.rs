@@ -109,7 +109,10 @@ pub(super) fn devices(snapshot: &AgentSnapshot) -> Vec<Value> {
         .collect()
 }
 
-pub(super) fn select_device(snapshot: &AgentSnapshot, id: &str) -> Result<DeviceRoute, ApiError> {
+pub(super) fn select_known_device(
+    snapshot: &AgentSnapshot,
+    id: &str,
+) -> Result<DeviceRoute, ApiError> {
     if snapshot.status.inventory != InventoryHealth::Ready {
         return Err(ApiError::new(
             "inventory_not_ready",
@@ -122,11 +125,7 @@ pub(super) fn select_device(snapshot: &AgentSnapshot, id: &str) -> Result<Device
         .filter(|(route, _)| route.to_string() == id)
         .collect();
     match matches.as_slice() {
-        [(route, true)] => Ok(route.clone()),
-        [(_, false)] => Err(ApiError::new(
-            "device_offline",
-            "selected device is offline",
-        )),
+        [(route, _)] => Ok(route.clone()),
         [] => Err(ApiError::new(
             "device_not_found",
             "no device has this exact ID; refresh api devices",
@@ -135,5 +134,35 @@ pub(super) fn select_device(snapshot: &AgentSnapshot, id: &str) -> Result<Device
             "ambiguous_device",
             "the ID addresses multiple devices; no operation was attempted",
         )),
+    }
+}
+
+/// Hardware operations require online availability; config-only disabling can
+/// use a uniquely remembered device without touching its absent channel.
+pub(super) fn select_device(snapshot: &AgentSnapshot, id: &str) -> Result<DeviceRoute, ApiError> {
+    let route = select_known_device(snapshot, id)?;
+    let online = entries(snapshot)
+        .iter()
+        .any(|(candidate, online, _)| candidate.as_ref() == Some(&route) && *online);
+    if !online {
+        return Err(ApiError::new(
+            "device_offline",
+            "selected device is offline",
+        ));
+    }
+    Ok(route)
+}
+
+/// One owner for a watch configuration target: enabling requires online
+/// hardware; disabling only needs the uniquely remembered identity.
+pub(super) fn select_host_watch_target(
+    snapshot: &AgentSnapshot,
+    id: &str,
+    set: super::Switch,
+) -> Result<DeviceRoute, ApiError> {
+    if set.is_on() {
+        select_device(snapshot, id)
+    } else {
+        select_known_device(snapshot, id)
     }
 }

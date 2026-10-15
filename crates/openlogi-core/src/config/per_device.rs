@@ -313,6 +313,13 @@ impl Config {
             .or_default()
             .keep_os_layout = Some(keep);
     }
+    /// Opt in to analytics-only host-button observation; no mouse link is needed.
+    pub fn set_host_switch_events(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .host_switch_events = enabled;
+    }
     /// The persisted report rate for `device_key`, or `None` when the user
     /// never chose one (the device keeps its own rate).
     #[must_use]

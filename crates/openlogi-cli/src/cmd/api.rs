@@ -48,6 +48,20 @@ pub enum ApiCommand {
     },
     /// Read SmartShift, or change selected fields (add --save to persist).
     Smartshift(SmartshiftArgs),
+    /// Enable host-button events without a linked mouse (requires --save).
+    HostSwitchEvents {
+        /// Exact keyboard ID from api devices.
+        #[arg(long)]
+        device: String,
+        #[arg(long, value_enum)]
+        set: Switch,
+    },
+    /// Stream newly observed host-button choices; initial history is skipped.
+    WatchHostSwitch {
+        /// Exact keyboard ID from api devices.
+        #[arg(long)]
+        device: String,
+    },
     /// Read Fn lock, or set it immediately (add --save to persist).
     FnLock {
         /// Exact opaque ID returned by `api devices`.
@@ -130,6 +144,12 @@ impl Switch {
 
 /// Emit one JSON envelope and a matching process status, including runtime failures.
 pub async fn run(args: ApiArgs) -> Result<ExitCode> {
+    if let ApiCommand::WatchHostSwitch { device } = &args.command {
+        if args.save {
+            return emit_stream_failure("--save is not valid for observation");
+        }
+        return watch_host_switch(device).await;
+    }
     let result = match agent::connect().await {
         Ok(client) => {
             let path = args
@@ -154,6 +174,57 @@ pub async fn run(args: ApiArgs) -> Result<ExitCode> {
     })
 }
 
+fn stream_line(value: &Value) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer(&mut stdout, value)?;
+    writeln!(stdout)?;
+    stdout.flush()?;
+    Ok(())
+}
+fn emit_stream_failure(message: &str) -> Result<ExitCode> {
+    stream_line(&envelope(Err(ApiError::new(
+        "event_stream_failed",
+        message,
+    ))))?;
+    Ok(ExitCode::FAILURE)
+}
+async fn watch_host_switch(device: &str) -> Result<ExitCode> {
+    let client = match agent::connect().await {
+        Ok(client) => client,
+        Err(error) => return emit_stream_failure(&error.to_string()),
+    };
+    let snapshot = match agent::call(client.snapshot(context::current())).await {
+        Ok(value) => value,
+        Err(error) => return emit_stream_failure(&format!("{error:?}")),
+    };
+    let route = match select_device(&snapshot, device) {
+        Ok(route) => route,
+        Err(error) => return emit_stream_failure(&format!("{error:?}")),
+    };
+    let mut observer = openlogi_ipc::client::HostSwitchEvents::new(client);
+    loop {
+        let observation = match observer.next().await {
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
+            Err(_) => {
+                return emit_stream_failure("agent connection lost; history was not replayed");
+            }
+        };
+        let choices = match observation {
+            openlogi_ipc::client::HostSwitchUpdate::Baseline => {
+                stream_line(&envelope(Ok(json!({"type":"baseline","device":device}))))?;
+                continue;
+            }
+            openlogi_ipc::client::HostSwitchUpdate::Choices(choices) => choices,
+        };
+        for event in choices.iter().filter(|event| event.route == route) {
+            stream_line(&envelope(Ok(
+                json!({"type":"host_switch","device":device,"sequence":event.sequence,"channel":event.channel.number(),"observed_at_ms":event.observed_at_ms}),
+            )))?;
+        }
+    }
+}
+
 /// Whether the agent measured the device at `route` and found that software
 /// cannot set its key layout. Unmeasured capabilities are not a refusal.
 fn measured_without_os_layout(snapshot: &AgentSnapshot, route: &DeviceRoute) -> bool {
@@ -163,6 +234,29 @@ fn measured_without_os_layout(snapshot: &AgentSnapshot, route: &DeviceRoute) -> 
                 && paired.capabilities.is_some_and(|caps| !caps.os_layout)
         })
     })
+}
+
+fn status_data(snapshot: &AgentSnapshot) -> Value {
+    json!({"agent_version":snapshot.status.agent_version,"inventory":inventory_health(snapshot.status.inventory),
+        "accessibility_granted":snapshot.status.accessibility_granted,"input_monitoring_granted":snapshot.status.input_monitoring_granted,
+        "hook_installed":snapshot.status.hook_installed,"hid_open_failures":snapshot.status.hid_open_failures,"launch_at_login":snapshot.status.launch_at_login})
+}
+
+fn host_switch_setting(
+    snapshot: &AgentSnapshot,
+    device: &str,
+    set: Switch,
+    save: Option<&mut Save>,
+) -> Result<Value, ApiError> {
+    let _route = output::select_host_watch_target(snapshot, device, set)?;
+    let Some(save) = save else {
+        return Err(ApiError::new(
+            "invalid_value",
+            "host-switch-events requires --save",
+        ));
+    };
+    save.host_switch_events(set.is_on());
+    Ok(json!({"device":device,"host_switch_events":set.is_on(),"persistence":"not_saved"}))
 }
 
 async fn execute(
@@ -177,15 +271,7 @@ async fn execute(
         .map(|path| Save::prepare(path, &snapshot, &command))
         .transpose()?;
     let mut result = match command {
-        ApiCommand::Status => Ok(json!({
-            "agent_version": snapshot.status.agent_version,
-            "inventory": inventory_health(snapshot.status.inventory),
-            "accessibility_granted": snapshot.status.accessibility_granted,
-            "input_monitoring_granted": snapshot.status.input_monitoring_granted,
-            "hook_installed": snapshot.status.hook_installed,
-            "hid_open_failures": snapshot.status.hid_open_failures,
-            "launch_at_login": snapshot.status.launch_at_login,
-        })),
+        ApiCommand::Status => Ok(status_data(&snapshot)),
         ApiCommand::Devices => Ok(json!({
             "inventory": inventory_health(snapshot.status.inventory),
             "devices": devices(&snapshot),
@@ -200,6 +286,13 @@ async fn execute(
             .await
         }
         ApiCommand::Smartshift(args) => smartshift(client, &snapshot, &args, save.as_mut()).await,
+        ApiCommand::WatchHostSwitch { .. } => Err(ApiError::new(
+            "invalid_value",
+            "use the dedicated event stream",
+        )),
+        ApiCommand::HostSwitchEvents { device, set } => {
+            host_switch_setting(&snapshot, &device, set, save.as_mut())
+        }
         ApiCommand::FnLock { device, set } => {
             let route = select_device(&snapshot, &device)?;
             let state = match set {

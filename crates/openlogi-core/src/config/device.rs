@@ -301,6 +301,10 @@ pub struct DeviceConfig {
     /// leave the device's rate alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_rate: Option<ReportRate>,
+    /// Publish observed Easy-Switch choices without linking a pointing device.
+    /// This enables only analytics reporting; native host switching remains intact.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub host_switch_events: bool,
 }
 
 impl DeviceConfig {
@@ -403,6 +407,7 @@ impl Default for DeviceConfig {
             fn_lock: None,
             keep_os_layout: None,
             report_rate: None,
+            host_switch_events: false,
         }
     }
 }
@@ -527,6 +532,8 @@ struct RawDeviceConfig {
     keep_os_layout: Option<bool>,
     #[serde(default)]
     report_rate: Option<ReportRate>,
+    #[serde(default)]
+    host_switch_events: bool,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -589,6 +596,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
             report_rate: raw.report_rate,
+            host_switch_events: raw.host_switch_events,
         }
     }
 }
@@ -613,5 +621,22 @@ mod tests {
         let serialized = toml::to_string(&config)?;
         assert!(serialized.contains("host_switch_targets"));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod host_switch_event_tests {
+    use super::DeviceConfig;
+    #[test]
+    fn observation_defaults_off_and_does_not_require_mouse_links() {
+        let old: DeviceConfig = toml::from_str("fn_lock = true").unwrap();
+        assert!(!old.host_switch_events);
+        let mut enabled = old;
+        enabled.host_switch_events = true;
+        let encoded = toml::to_string(&enabled).unwrap();
+        let decoded: DeviceConfig = toml::from_str(&encoded).unwrap();
+        assert!(decoded.host_switch_events);
+        assert!(decoded.host_switch_targets.is_empty());
+        assert_eq!(decoded.fn_lock, Some(true));
     }
 }

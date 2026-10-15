@@ -302,6 +302,17 @@ impl Agent for TestAgent {
         unreachable!("profile capture must use one snapshot")
     }
 
+    async fn observe_host_switch(
+        self,
+        _: tarpc::context::Context,
+        _: openlogi_ipc::Generation,
+    ) -> openlogi_ipc::HostSwitchObservation {
+        openlogi_ipc::HostSwitchObservation {
+            generation: 1,
+            events: Vec::new(),
+        }
+    }
+
     async fn observe_action_ring(self, _: TarpcContext, _since: Generation) -> RingObservation {
         unreachable!("profile capture must not inspect the Actions Ring")
     }

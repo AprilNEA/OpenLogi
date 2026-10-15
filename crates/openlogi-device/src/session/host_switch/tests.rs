@@ -440,3 +440,24 @@ fn analytics_cleanup_restores_the_original_analytics_bit() {
     assert_eq!(change.diverted, None);
     assert_eq!(change.raw_xy, None);
 }
+
+#[test]
+fn observation_never_diverts_a_host_key() {
+    let mut info = CtrlIdInfo {
+        cid: 0x00d3,
+        task_id: 0x00af,
+        flags: u16::MAX,
+    };
+    assert!(matches!(
+        super::reporting_mode(info, super::CaptureMode::Observe),
+        Some(ReportingMode::Analytics)
+    ));
+    assert!(matches!(
+        super::reporting_mode(info, super::CaptureMode::Linked),
+        Some(ReportingMode::Diverted)
+    ));
+    // A merely divertible control must not cause the observer to take ownership
+    // of the physical switch. Unsupported keyboards keep their native behavior.
+    info.flags = 0x0020;
+    assert!(super::reporting_mode(info, super::CaptureMode::Observe).is_none());
+}

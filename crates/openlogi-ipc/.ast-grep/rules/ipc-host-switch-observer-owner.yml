@@ -1,0 +1,14 @@
+id: ipc-host-switch-observer-owner
+language: rust
+severity: error
+message: HostSwitchEvents owns the observation deadline and quiet initial baseline; use that facade rather than a raw host-switch RPC.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-ipc/src/client.rs
+  - crates/openlogi-agent/src/server.rs
+  - crates/openlogi-agent-core/src/observable.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  pattern: $CLIENT.observe_host_switch($$$)
