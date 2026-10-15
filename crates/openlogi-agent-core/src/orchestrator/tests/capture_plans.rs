@@ -489,3 +489,30 @@ fn two_mouse_hidpp_plans_are_device_scoped_while_hook_fallback_is_selected_devic
         "the passive Windows fallback is one selected-device map, not a per-source map"
     );
 }
+
+#[test]
+fn foreground_refresh_cancels_only_when_effective_bindings_change() {
+    use crate::orchestrator::ForegroundChange;
+    let mut config = Config::default();
+    config.app_settings.mouse_profile_target = openlogi_core::config::MouseProfileTarget::Focused;
+    config.set_per_app_binding("a", "changed", ButtonId::Back, Some(Action::Copy));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    assert_eq!(
+        orch.set_current_app(Some(ForegroundApp::unnamed("same-one".into()))),
+        ForegroundChange::ContextOnly
+    );
+    assert_eq!(
+        orch.set_current_app(Some(ForegroundApp::unnamed("same-two".into()))),
+        ForegroundChange::ContextOnly
+    );
+    assert_eq!(
+        orch.set_current_app(Some(ForegroundApp::unnamed("changed".into()))),
+        ForegroundChange::BindingsChanged
+    );
+    assert_eq!(
+        orch.set_current_app(None),
+        ForegroundChange::BindingsChanged
+    );
+}

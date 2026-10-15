@@ -6,6 +6,7 @@
 //! in [`hook`]; the button state machine remains an internal implementation.
 
 mod button;
+pub(crate) use button::{ButtonRuntimeEvent, ButtonRuntimeOwner};
 pub mod hook;
 mod pointer;
 pub mod scroll;
@@ -18,9 +19,7 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use tracing::{debug, info, warn};
 
-use self::button::{
-    ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
-};
+use self::button::{ButtonInputHandle, EndReason, PressControl};
 pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
 use crate::{DpiCycleState, DpiCycles};
@@ -48,7 +47,7 @@ impl ActionDispatchTarget {
         Self::for_pointer(None, openlogi_hook::frontmost_safari_pid)
     }
 
-    fn for_pointer(
+    pub(crate) fn for_pointer(
         target: Option<openlogi_hook::PointerTarget>,
         capture_safari_pid: impl FnOnce() -> Option<i32>,
     ) -> Self {
@@ -365,14 +364,25 @@ impl ActionDispatcher {
     }
 
     /// Execute a semantic gesture action only if its exact press is still live.
-    pub(crate) fn try_dispatch_while_pressed(&self, press: &PressToken, action: &Action) -> bool {
-        self.buttons.try_trigger_while_pressed(press, action)
+    pub(crate) fn try_dispatch_while_pressed(
+        &self,
+        press: &PressToken,
+        action: &Action,
+        target: ActionDispatchTarget,
+    ) -> bool {
+        self.buttons
+            .try_trigger_while_pressed(press, action, target)
     }
 
     /// End a gesture hold whose release was lost before another button takes
     /// over the thread-local gesture accumulator.
     fn cancel_stale_hook_press(&self, press: &PressToken) {
         self.buttons.cancel_stale_press(press);
+    }
+
+    pub(crate) fn cancel_gesture_press(&self, press: &PressToken) {
+        self.buttons
+            .cancel_press(press, button::CancelReason::Invalidated);
     }
 
     /// Cancel every active press owned by the current OS-hook callback thread.
@@ -432,8 +442,15 @@ impl ActionDispatcher {
         self.buttons.invalidate_all();
     }
 
-    /// End only pointer-scoped presses when the hovered window changes.
-    /// Keyboard and explicitly focus-scoped holds keep their own lifecycles.
+    /// End ordinary presses on a context refresh while keeping unchanged
+    /// gesture capabilities alive for their separately admitted actions.
+    pub fn cancel_context_buttons(&self) {
+        self.buttons.cancel_context();
+    }
+
+    /// End ordinary pointer-scoped presses when the hovered window changes.
+    /// Gesture capabilities survive unchanged bindings and refresh each output
+    /// target; keyboard and focus-scoped holds keep their own lifecycles.
     /// Preserve presses already admitted against the newly published target.
     pub fn cancel_pointer_buttons_except(&self, current: openlogi_hook::PointerTarget) {
         self.buttons.cancel_pointer_except(current);
@@ -530,6 +547,37 @@ fn dispatch_browser_navigation(
             unreachable!("pointer targets resolve before navigation")
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_dispatcher() -> (
+    ActionDispatcher,
+    button::ButtonRuntimeOwner,
+    std::sync::mpsc::Receiver<button::ButtonRuntimeEvent>,
+) {
+    let (events, received) = std::sync::mpsc::channel();
+    let owner = button::ButtonRuntimeOwner::spawn(move |event| {
+        events
+            .send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let (action_ring, _ring_events) = tokio::sync::mpsc::unbounded_channel();
+    let dispatcher = ActionDispatcher {
+        executor: ActionExecutor {
+            dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
+            access: crate::hardware::DeviceAccess {
+                channel: Arc::new(RwLock::new(None)),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io: openlogi_hid::device_io_channel().1,
+                transport_turns: crate::hardware::TransportTurns::default(),
+            },
+            action_ring,
+        },
+        buttons: owner.input(),
+    };
+    (dispatcher, owner, received)
 }
 
 #[cfg(test)]

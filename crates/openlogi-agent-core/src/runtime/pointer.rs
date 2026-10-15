@@ -15,7 +15,7 @@ impl ActionDispatchTarget {
         )
     }
 
-    pub(super) fn resolve_with(
+    pub(crate) fn resolve_with(
         self,
         action: &Action,
         current: impl FnOnce() -> PointerTarget,
