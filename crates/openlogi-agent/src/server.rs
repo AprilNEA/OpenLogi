@@ -18,8 +18,9 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, HapticWaveform, HidppOperation,
-    LightCommand, ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    HapticWaveform, HidppOperation, LightCommand, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -268,6 +269,59 @@ impl Agent for AgentServer {
 
     async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {
         self.pairing.unpair(&route).await
+    }
+    async fn read_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ReportRateInfo, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadReportRate, |c| async move {
+                openlogi_hid::get_report_rate_info_on(&c).await
+            })
+            .await
+    }
+    async fn set_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        self.shared.set_report_rate(&route, rate).await
+    }
+    async fn set_backlight(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError> {
+        self.shared.set_backlight(&route, change).await
+    }
+
+    async fn read_easy_switch_hosts(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadHosts, |c| async move {
+                openlogi_hid::get_easy_switch_hosts_on(&c).await
+            })
+            .await
+    }
+
+    async fn rename_easy_switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        self.shared
+            .rename_easy_switch_host(&route, slot, name)
+            .await
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {
@@ -553,10 +607,14 @@ impl HapticBreaker {
 }
 
 /// Whether a failed play can succeed on a retry. A waveform the device does
-/// not advertise is refused before anything is sent, so retrying it would
+/// not advertise, and a play while the device reports a non-zero haptic
+/// status, are refused before anything is sent, so retrying either would
 /// only spend the budget the next interaction is waiting on.
 fn is_worth_retrying(error: &WriteError) -> bool {
-    !matches!(error, WriteError::HapticWaveformUnsupported { .. })
+    !matches!(
+        error,
+        WriteError::HapticWaveformUnsupported { .. } | WriteError::HapticsUnavailable { .. }
+    )
 }
 
 /// A wall-clock allowance shared by every attempt at one interaction.
@@ -737,9 +795,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unadvertised_waveform_is_not_retried_but_a_lost_reply_is() {
+    fn a_play_refused_before_sending_is_not_retried_but_a_lost_reply_is() {
         assert!(!is_worth_retrying(&WriteError::HapticWaveformUnsupported {
             waveform: 1
+        }));
+        assert!(!is_worth_retrying(&WriteError::HapticsUnavailable {
+            status: 2
         }));
         assert!(is_worth_retrying(&WriteError::DeviceUnreachable {
             index: 1

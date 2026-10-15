@@ -1,4 +1,4 @@
-//! Per-device scroll inversion and wheel resolution.
+//! Per-device scroll inversion, wheel resolution and smooth wheel.
 
 use tracing::debug;
 
@@ -139,6 +139,42 @@ impl AppState {
             return events;
         }
         self.persist_and_reload("wheel resolution");
+        events
+    }
+    /// Whether the active device's main wheel is smoothed by OpenLogi through
+    /// its diverted HID++ reports. `false` when no device is selected or it
+    /// hasn't opted in.
+    #[must_use]
+    pub fn current_smooth_wheel(&self) -> bool {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .is_some_and(|key| self.config.smooth_wheel(key))
+    }
+    /// Turn the active device's smooth wheel on or off, persist it, and reload
+    /// the agent so it diverts the wheel or hands it back. Turning it on needs
+    /// `0x2121 HiResWheel` on the current link; turning it off stays possible
+    /// without it, so a setting made on another link can always be removed.
+    /// Committing the current value saves and reloads nothing.
+    pub fn commit_smooth_wheel(&mut self, enabled: bool) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
+        if enabled && !self.current_hires_wheel_supported() {
+            debug!("smooth wheel requires HiResWheel on this link");
+            return events;
+        }
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!("no persistent device key — smooth-wheel change ignored");
+            return events;
+        };
+        if self.config.smooth_wheel(&key) == enabled {
+            return events;
+        }
+        self.config
+            .edit(|config| config.set_smooth_wheel(&key, enabled));
+        self.persist_and_reload("smooth wheel");
         events
     }
 }

@@ -70,6 +70,19 @@ pub struct ExtendedReportRateFeature {
 }
 
 impl ExtendedReportRateFeature {
+    /// Whether an unsolicited report with `function_id` is the device's
+    /// report-rate broadcast, sent when its rate changes on the device.
+    ///
+    /// Logi Options+ 2.8 (`Feature8061ExtendedAdjustableReportRate::
+    /// onFeatureReport`) takes exactly function `0` for its
+    /// `ReportRateInfoEvent`. Deliberately independent of the payload, like
+    /// `ExtendedDpiFeature::is_parameters_broadcast`: a listener re-reads the
+    /// rate with [`Self::get_report_rate`].
+    #[must_use]
+    pub const fn is_rate_broadcast(function_id: u8) -> bool {
+        function_id == 0
+    }
+
     /// Retrieves the report rates supported by `connection_type`.
     pub async fn get_device_capabilities(
         &self,
@@ -123,7 +136,18 @@ fn report_rate_list_from_payload(payload: [u8; 16]) -> ExtendedReportRateList {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExtendedReportRateList, report_rate_list_from_payload};
+    use super::{ExtendedReportRateFeature, ExtendedReportRateList, report_rate_list_from_payload};
+
+    #[test]
+    fn only_function_zero_is_the_rate_broadcast() {
+        assert!(ExtendedReportRateFeature::is_rate_broadcast(0));
+        for function in 1..=0x0f {
+            assert!(
+                !ExtendedReportRateFeature::is_rate_broadcast(function),
+                "function {function}"
+            );
+        }
+    }
 
     #[test]
     fn the_rate_mask_is_byte_one_alone() {

@@ -107,6 +107,47 @@ fn config_backups_rotate_between_generations() {
     );
 }
 
+/// v8 adds wheel-hold bindings. A v7 file holds none, so it loads with its
+/// bindings unchanged, and a wheel hold saved into it stamps the file v8 and
+/// survives the reload.
+#[test]
+fn a_v7_file_loads_unchanged_and_a_wheel_hold_saves_as_v8() {
+    use crate::binding::{LongPressBinding, WheelHoldBinding};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 7\n\n[devices.2b042.bindings]\n\
+         Back = \"BrowserBack\"\n\
+         DpiToggle = { short = \"Copy\", long = \"Paste\" }\n",
+    )
+    .expect("write v7 config");
+    let mut cfg = Config::load_from_path(&path).expect("a v7 file loads");
+    let bindings = cfg.stored_bindings("2b042");
+    assert_eq!(
+        bindings.get(&ButtonId::Back),
+        Some(&Binding::Single(Action::BrowserBack))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::DpiToggle),
+        Some(&Binding::LongPress(LongPressBinding::new(
+            Action::Copy,
+            Action::Paste
+        )))
+    );
+
+    let wheel_hold = Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::BrowserBack));
+    cfg.set_binding("2b042", ButtonId::Back, wheel_hold.clone());
+    cfg.save_to_path(&path).expect("save");
+    let body = fs::read_to_string(&path).expect("read saved config");
+    assert!(body.contains("schema_version = 8"), "got: {body}");
+    let reloaded = Config::load_from_path(&path).expect("a v8 file loads");
+    assert_eq!(
+        reloaded.stored_bindings("2b042").get(&ButtonId::Back),
+        Some(&wheel_hold)
+    );
+}
+
 #[test]
 fn missing_file_yields_default() {
     let dir = tempfile::tempdir().expect("tempdir");

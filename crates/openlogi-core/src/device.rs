@@ -10,7 +10,9 @@ use crate::hid::DeviceRoute;
 
 mod light;
 
-pub use light::{LightCapabilities, LightValueRange, LightValueRangeError, LightValueUnit};
+pub use light::{
+    LightCapabilities, LightState, LightValueRange, LightValueRangeError, LightValueUnit,
+};
 
 /// What a paired peripheral is. Mirrors `hidpp::receiver::bolt::BoltDeviceKind`
 /// but is owned by us so consumers don't depend on `hidpp`.
@@ -144,6 +146,26 @@ pub struct Capabilities {
     /// platform. Appended: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub os_layout: bool,
+    /// The device's report rate can be chosen — HID++ `0x8060
+    /// AdjustableReportRate` or `0x8061 ExtendedAdjustableReportRate`.
+    /// Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub report_rate: bool,
+    /// The keyboard's backlight can be switched and tuned — HID++ `0x1982
+    /// Backlight`. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub backlight: bool,
+    /// The device has Easy-Switch host slots whose computers' names and OS
+    /// software can read — HID++ `0x1815 HostsInfo`. Appended: crosses the
+    /// IPC and the persisted identity.
+    #[serde(default)]
+    pub easy_switch: bool,
+    /// Back or Forward in the device's `0x1b04` control table can be diverted
+    /// with raw-wheel reporting, so a wheel-hold binding can turn the main
+    /// wheel into a virtual thumb wheel. Appended: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub virtual_thumbwheel: bool,
 }
 
 impl Capabilities {
@@ -154,7 +176,8 @@ impl Capabilities {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
         // Every family here is driven by `set_keyboard_color`, which tries
-        // effect engines before per-zone paths. Backlight (0x198x) stays out.
+        // effect engines before per-zone paths. The 0x198x backlight is not
+        // lighting: `backlight` below covers 0x1982.
         const LIGHTING: [u16; 4] = [0x8070, 0x8071, 0x8081, 0x8080];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
@@ -171,6 +194,12 @@ impl Capabilities {
             // The probe clears it unless the keyboard lets software set the
             // platform; the feature table alone cannot say.
             os_layout: ids.contains(&0x4531),
+            report_rate: ids.contains(&0x8060) || ids.contains(&0x8061),
+            backlight: ids.contains(&0x1982),
+            easy_switch: ids.contains(&0x1815),
+            // Set by the `0x1b04` control walk; the feature table alone
+            // cannot say which controls report raw wheel.
+            virtual_thumbwheel: false,
         }
     }
 
@@ -558,6 +587,10 @@ mod tests {
                     dpi_gestures: false,
                     fn_lock: false,
                     os_layout: false,
+                    report_rate: false,
+                    backlight: false,
+                    easy_switch: false,
+                    virtual_thumbwheel: false,
                 }),
                 settings_revision: 0,
             }],
@@ -672,6 +705,10 @@ mod tests {
                 dpi_gestures: false,
                 fn_lock: false,
                 os_layout: false,
+                report_rate: false,
+                backlight: false,
+                easy_switch: false,
+                virtual_thumbwheel: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -691,6 +728,10 @@ mod tests {
                 dpi_gestures: false,
                 fn_lock: false,
                 os_layout: false,
+                report_rate: false,
+                backlight: false,
+                easy_switch: false,
+                virtual_thumbwheel: false,
             }
         );
         // No driving features → nothing offered.
@@ -701,6 +742,17 @@ mod tests {
         // 0x4531 offers the OS layout until the probe reads it cannot be set.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x4531]).os_layout);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x40a3]).os_layout);
+        // Either report-rate feature offers the report rate.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8060]).report_rate);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8061]).report_rate);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x2202]).report_rate);
+        // Only the 0x1982 backlight is driven; the older 0x1981 is not.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1982]).backlight);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1981]).backlight);
+        // 0x1815 HostsInfo offers the Easy-Switch hosts; 0x1814 ChangeHost
+        // alone switches channels but cannot name them.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1815]).easy_switch);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1814]).easy_switch);
     }
 
     #[test]

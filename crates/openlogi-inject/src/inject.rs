@@ -506,6 +506,27 @@ fn quantize_axis(residual: &mut f64, input: f64, units_per_input: f64) -> i32 {
     output
 }
 
+/// Whether the OS reverses the scrolling a mouse wheel produces — macOS's
+/// "Natural scrolling", on by default — read fresh on every call because the
+/// user can change it while the agent runs.
+///
+/// The OS applies it to wheel events from a device, but not to the events
+/// [`post_scroll`] and [`post_smooth_scroll`] synthesise. A caller posting in
+/// place of a diverted wheel flips its own distance with this. `false` on
+/// Windows and Linux, which apply no such reversal to a mouse wheel's
+/// events here.
+#[must_use]
+pub fn natural_scrolling() -> bool {
+    cfg_select! {
+        target_os = "macos" => {
+            objc2::rc::autoreleasepool(|_| macos::natural_scrolling())
+        }
+        _ => {
+            false
+        }
+    }
+}
+
 /// Synthesise a typed scroll distance at the current focus.
 ///
 /// Fractional wheel ticks are retained until the platform can represent them,
@@ -533,10 +554,14 @@ pub fn post_scroll(delta: ScrollDelta) {
 
 /// Lifecycle phase of one synthetic smooth-scroll frame.
 ///
-/// macOS forwards this state to the scroll-wheel event so applications see a
-/// balanced continuous gesture. Linux and Windows have no equivalent field;
-/// there the phase is retained by the runtime contract but only the frame's
-/// distance is injected.
+/// Part of the runtime contract — the motion engine emits a balanced
+/// lifecycle. Smoothed wheel output ([`post_smooth_scroll`]) does not forward
+/// it: macOS deliberately posts *phaseless* continuous events there (matching
+/// wheel semantics), because stamping `kCGScrollWheelEventScrollPhase`
+/// declares a trackpad gesture, which enables rubber-band overscroll and
+/// WebKit gesture latching that breaks JS-scrolled sites. Only an intended
+/// gesture ([`post_phased_scroll`]) carries the phase on macOS. Linux and
+/// Windows have no equivalent field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmoothScrollPhase {
     /// First output frame of a new animation.
@@ -551,11 +576,11 @@ pub enum SmoothScrollPhase {
 
 /// Synthesise one frame of a finite smooth-scroll animation.
 ///
-/// On macOS wheel ticks become continuous pixel events at ten points per tick,
-/// matching the line/point relationship carried in native continuous events.
-/// Other platforms preserve fractional wheel ticks through their native
-/// high-resolution output. Non-finite distance is rejected at this I/O
-/// boundary; zero-distance terminal frames remain meaningful on macOS.
+/// On macOS wheel ticks become phaseless continuous pixel events at ten
+/// points per tick, matching the line/point relationship carried in native
+/// continuous events. Other platforms preserve fractional wheel ticks through
+/// their native high-resolution output. Non-finite distance is rejected at
+/// this I/O boundary, and zero-distance frames are dropped everywhere.
 pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
     if !delta.is_finite() {
         return;
@@ -567,6 +592,29 @@ pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
         _ => {
             let _ = phase;
             post_scroll(delta);
+        }
+    }
+}
+
+/// Synthesise one frame of a phased scroll gesture.
+///
+/// Unlike [`post_smooth_scroll`], macOS stamps the frame's phase onto the
+/// continuous event and posts zero-distance frames too, so the application
+/// sees a balanced Began/Changed/Ended gesture. Use it only where a gesture is
+/// the point: AppKit's swipe recognisers (e.g. Messages revealing timestamps)
+/// ignore horizontal scrolls that carry no phase. Other platforms have no phase
+/// field and inject the distance exactly as [`post_smooth_scroll`] does.
+/// Non-finite distance is rejected at this I/O boundary.
+pub fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
+    if !delta.is_finite() {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_phased_scroll(delta, phase);
+        }
+        _ => {
+            post_smooth_scroll(delta, phase);
         }
     }
 }

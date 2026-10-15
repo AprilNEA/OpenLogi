@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::device::{DeviceInventory, LightState, StandaloneDevice};
 use openlogi_core::hid::{FnLockState, LightCommand, PairingError, WriteError};
 
 use crate::probe_cache::FileProbeCacheStore;
@@ -19,7 +19,7 @@ use crate::transport::native_backend;
 use openlogi_core::hid::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus};
 use openlogi_device::ChannelPool;
 use openlogi_device::backend::{HidBackend, HotplugStream};
-use openlogi_device::backlight::BacklightState;
+use openlogi_device::backlight::{BacklightChange, BacklightState};
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
@@ -148,12 +148,13 @@ pub async fn get_backlight(route: &DeviceRoute) -> Result<BacklightState, WriteE
     device::get_backlight(&*native_backend(), route).await
 }
 
-/// Turn the backlight of the keyboard `route` reaches on or off.
-pub async fn set_backlight_enabled(
+/// Apply one change to the backlight of the keyboard `route` reaches and
+/// read it back; see [`device::update_backlight`].
+pub async fn update_backlight(
     route: &DeviceRoute,
-    on: bool,
+    change: BacklightChange,
 ) -> Result<BacklightState, WriteError> {
-    device::set_backlight_enabled(&*native_backend(), route, on).await
+    device::update_backlight(&*native_backend(), route, change).await
 }
 
 /// Set every key of the keyboard `route` reaches to one colour.
@@ -199,13 +200,23 @@ pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Resul
     device::play_haptic(&*native_backend(), route, waveform).await
 }
 
-/// Apply a light command to the Litra `route` reaches.
+/// Apply a light command to the Litra `route` reaches, returning the state
+/// it reports afterwards (`None` when only its raw report reaches it).
 pub async fn apply_litra(
     route: &DeviceRoute,
     model: LitraModel,
     command: LightCommand,
-) -> Result<(), WriteError> {
+) -> Result<Option<LightState>, WriteError> {
     device::apply_litra(&*native_backend(), route, model, command).await
+}
+
+/// Read the state of the Litra `route` reaches (`None` when only its raw
+/// report reaches it, which reads nothing back).
+pub async fn read_litra_state(
+    route: &DeviceRoute,
+    model: LitraModel,
+) -> Result<Option<LightState>, WriteError> {
+    device::read_litra_state(&*native_backend(), route, model).await
 }
 
 /// Walk the HID++ feature table of the device `route` reaches.

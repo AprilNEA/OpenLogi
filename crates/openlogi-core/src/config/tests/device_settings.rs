@@ -1,4 +1,4 @@
-//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, keeping the OS layout, and the stored bindings.
+//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, the smooth wheel, keeping the OS layout, the report rate, and the stored bindings.
 
 use super::*;
 
@@ -73,6 +73,36 @@ fn unset_keep_os_layout_is_omitted_from_toml() {
     cfg.set_invert_scroll("2b042", true);
     let body = toml::to_string_pretty(&cfg).expect("serialize");
     assert!(!body.contains("keep_os_layout"), "{body}");
+}
+
+#[test]
+fn smooth_wheel_defaults_off_and_roundtrips_per_device() {
+    let mut cfg = Config::default();
+    assert!(!cfg.smooth_wheel("mouse"));
+    cfg.set_smooth_wheel("mouse", true);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("smooth_wheel = true"), "{body}");
+    let restored = write_and_read(&cfg);
+    assert!(restored.smooth_wheel("mouse"));
+    assert!(!restored.smooth_wheel("absent"));
+    cfg.set_smooth_wheel("mouse", false);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("smooth_wheel"), "off is omitted: {body}");
+    assert!(!write_and_read(&cfg).smooth_wheel("mouse"));
+}
+
+#[test]
+fn a_smooth_wheel_opt_in_survives_route_adoption() {
+    let route = "receiver:82839805:slot:2";
+    let mut config = Config::default();
+    config.set_smooth_wheel(route, true);
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:4f4c4403").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert!(
+        !config.devices.contains_key(route),
+        "sanity: the route entry folded"
+    );
+    assert!(config.smooth_wheel("unit:4f4c4403"));
 }
 
 #[test]
@@ -252,4 +282,50 @@ fn a_keep_os_layout_opt_out_survives_route_adoption() {
         "sanity: the route entry folded"
     );
     assert!(!config.keep_os_layout("unit:6be9d300"));
+}
+
+#[test]
+fn report_rate_roundtrips_per_device_in_hertz() {
+    use crate::hid::ReportRate;
+
+    let mut cfg = Config::default();
+    cfg.set_report_rate("2b042", ReportRate::new(1000));
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(
+        toml.contains("report_rate = 1000"),
+        "the rate is stored as plain hertz: {toml}"
+    );
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.report_rate("2b042"), Some(ReportRate::new(1000)));
+    assert_eq!(restored.report_rate("absent"), None);
+}
+
+#[test]
+fn unset_report_rate_is_omitted_from_toml() {
+    let mut cfg = Config::default();
+    cfg.set_dpi("2b042", Dpi::new(1600));
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(!toml.contains("report_rate"), "{toml}");
+}
+
+#[test]
+fn a_saved_report_rate_survives_route_adoption() {
+    // The CLI can save to a route-keyed entry; the app later adopts that
+    // route into the mouse's identity-keyed entry. The rate must come along,
+    // or the next reconnect stops re-applying it.
+    use crate::hid::ReportRate;
+
+    let route = "receiver:82839805:slot:2";
+    let mut config = Config::default();
+    config.set_report_rate(route, ReportRate::new(500));
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:a393cae0").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert!(
+        !config.devices.contains_key(route),
+        "sanity: the route entry folded"
+    );
+    assert_eq!(
+        config.report_rate("unit:a393cae0"),
+        Some(ReportRate::new(500))
+    );
 }

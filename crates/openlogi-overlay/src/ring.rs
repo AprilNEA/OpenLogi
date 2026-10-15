@@ -1,15 +1,15 @@
 //! The ring itself: the GPUI view, and the window it is drawn in.
 //!
-//! Placement is the interesting part — the panel is centred on the cursor and
-//! clamped to the display it came up on, so a ring raised near a screen edge
-//! stays whole instead of being cut off.
+//! Where a client can place its own windows, the window is the ring: a 360×360
+//! panel centred on the cursor and clamped to its display. Wayland allows
+//! neither half of that, so there the window covers the display and the same
+//! panel is drawn at the pointer inside it.
 
-#[cfg(any(not(target_os = "windows"), test))]
-use gpui::{Bounds, Pixels, Point, Size, point};
 use gpui::{
-    Context, Hsla, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, WindowBackgroundAppearance, WindowKind,
-    WindowOptions, div, prelude::FluentBuilder as _, px, svg,
+    Bounds, Context, Div, Hsla, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement,
+    Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
+    WindowBackgroundAppearance, WindowKind, WindowOptions, div, point, prelude::FluentBuilder as _,
+    px, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::ipc::OverlayCommand;
-use crate::session::{ClickAwaySession, ShowingRing};
+use crate::session::{self, ClickAwaySession, ShowingRing};
 
 pub(crate) const WINDOW_SIZE: f32 = 360.0;
 pub(crate) const SLOT_SIZE: f32 = 54.0;
@@ -51,10 +51,24 @@ const fn neutral(lightness: f32, alpha: f32) -> Hsla {
 const SELECTED_FILL_L: f32 = 0.48;
 const SELECTED_BORDER_L: f32 = 0.78;
 
+/// Where the ring's panel sits inside the window it was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// The window was opened at the cursor, so the panel fills it.
+    Window,
+    /// The window covers a display. `center` stays empty until that window hears the pointer.
+    #[cfg_attr(
+        all(windows, not(test)),
+        expect(dead_code, reason = "only Wayland covers a display")
+    )]
+    AtPointer { center: Option<Point<Pixels>> },
+}
+
 pub(crate) struct RingView {
     invocation: ActionRingInvocation,
     commands: mpsc::UnboundedSender<OverlayCommand>,
     hovered: Option<ActionRingSlot>,
+    placement: Placement,
     /// Publishes click-away identity for exactly this view's lifetime.
     _showing: ShowingRing,
 }
@@ -65,12 +79,14 @@ impl RingView {
         invocation: ActionRingInvocation,
         commands: mpsc::UnboundedSender<OverlayCommand>,
         live: &Arc<ClickAwaySession>,
+        placement: Placement,
     ) -> Self {
         let showing = live.showing(invocation.session_id);
         Self {
             invocation,
             commands,
             hovered: None,
+            placement,
             _showing: showing,
         }
     }
@@ -138,17 +154,17 @@ impl RingView {
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     let _ = activate.send(OverlayCommand::Activate { session_id, slot });
-                    window.remove_window();
+                    session::dismiss_from_window(cx, window, session_id);
                 })
                 .into_any_element(),
         )
     }
 }
 
-impl Render for RingView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl RingView {
+    /// The fixed 360×360 ring. Both placements anchor this same element.
+    fn panel(&self, cx: &mut Context<Self>) -> Div {
         let session_id = self.invocation.session_id;
-        let root_commands = self.commands.clone();
         let center_commands = self.commands.clone();
         let hovered_label = self.hovered.and_then(|slot| {
             let presentation = self.invocation.slots.get(&slot)?;
@@ -170,9 +186,8 @@ impl Render for RingView {
             .collect::<Vec<_>>();
 
         div()
-            .id("ring-root")
             .relative()
-            .size_full()
+            .size(px(WINDOW_SIZE))
             .child(
                 div()
                     .absolute()
@@ -202,7 +217,7 @@ impl Render for RingView {
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         let _ = center_commands.send(OverlayCommand::Cancel { session_id });
-                        window.remove_window();
+                        session::dismiss_from_window(cx, window, session_id);
                     }),
             )
             .when_some(hovered_label, |ring, label| {
@@ -218,9 +233,42 @@ impl Render for RingView {
                         .child(label),
                 )
             })
-            .on_click(move |_, window, _| {
+    }
+}
+
+impl Render for RingView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let session_id = self.invocation.session_id;
+        let root_commands = self.commands.clone();
+        let placement = self.placement;
+        let panel = panel_origin(placement, window.viewport_size()).map(|origin| {
+            div()
+                .absolute()
+                .left(origin.x)
+                .top(origin.y)
+                .child(self.panel(cx))
+        });
+
+        div()
+            .id("ring-root")
+            .relative()
+            .size_full()
+            .when(matches!(placement, Placement::AtPointer { .. }), |root| {
+                // The move synthesized from pointer-enter is the only cursor
+                // report Wayland gives this window. Latch the first one.
+                root.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if let Placement::AtPointer { center } = &mut this.placement
+                        && center.is_none()
+                    {
+                        *center = Some(event.position);
+                        cx.notify();
+                    }
+                }))
+            })
+            .children(panel)
+            .on_click(move |_, window, cx| {
                 let _ = root_commands.send(OverlayCommand::Cancel { session_id });
-                window.remove_window();
+                session::dismiss_from_window(cx, window, session_id);
             })
     }
 }
@@ -241,7 +289,23 @@ pub(crate) fn ring_window_options() -> WindowOptions {
     }
 }
 
-#[cfg(any(not(target_os = "windows"), test))]
+/// Top-left of the ring panel within its window, or nothing while the pointer is unknown.
+///
+/// `viewport` is the pointer's space. Display bounds are logical pixels and
+/// disagree with it under fractional scaling, so the clamp cannot use them.
+fn panel_origin(placement: Placement, viewport: Size<Pixels>) -> Option<Point<Pixels>> {
+    let center = match placement {
+        Placement::Window => return Some(Point::default()),
+        Placement::AtPointer { center } => center?,
+    };
+    let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
+    Some(clamp_window_origin(
+        point(center.x - size.width / 2.0, center.y - size.height / 2.0),
+        size,
+        Bounds::new(Point::default(), viewport),
+    ))
+}
+
 pub(crate) fn clamp_window_origin(
     desired: Point<Pixels>,
     window_size: Size<Pixels>,
@@ -269,6 +333,51 @@ mod tests {
         assert_eq!(
             clamp_window_origin(point(px(700.0), px(500.0)), size, display),
             point(px(500.0), px(250.0))
+        );
+    }
+
+    #[test]
+    fn a_window_sized_ring_fills_its_window() {
+        assert_eq!(
+            panel_origin(Placement::Window, Size::new(px(360.0), px(360.0))),
+            Some(Point::default())
+        );
+    }
+
+    #[test]
+    fn a_display_sized_ring_draws_nothing_until_the_pointer_is_known() {
+        assert_eq!(
+            panel_origin(
+                Placement::AtPointer { center: None },
+                Size::new(px(1920.0), px(1080.0))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_display_sized_ring_centers_on_the_pointer() {
+        assert_eq!(
+            panel_origin(
+                Placement::AtPointer {
+                    center: Some(point(px(900.0), px(500.0))),
+                },
+                Size::new(px(1920.0), px(1080.0))
+            ),
+            Some(point(px(720.0), px(320.0)))
+        );
+    }
+
+    #[test]
+    fn a_display_sized_ring_stays_whole_against_an_edge() {
+        assert_eq!(
+            panel_origin(
+                Placement::AtPointer {
+                    center: Some(point(px(4.0), px(1076.0))),
+                },
+                Size::new(px(1920.0), px(1080.0))
+            ),
+            Some(point(px(0.0), px(720.0)))
         );
     }
 

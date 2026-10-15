@@ -104,6 +104,165 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
     assert!(cx.debug_bounds("profile-confirmation").is_none());
 }
 
+/// The device rename dialog must paint its own Save and Cancel buttons: a
+/// plain gpui-component dialog draws only the footer it is given.
+#[gpui::test]
+fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, Modifiers};
+    use gpui_component::Root;
+
+    use super::{AppView, home::open_rename_dialog};
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::{AppState, Sources};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    // The dialog slides in on the wall clock, so on a slow runner a redraw
+    // between measuring Cancel and clicking it moves the button away from
+    // the click. Reduced motion draws the dialog where it comes to rest.
+    cx.update(|cx| cx.set_reduce_motion(true));
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let state = cx.new(|_| {
+            AppState::new(Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ))
+        });
+        AppState::set_global(state, cx);
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update(|window, cx| {
+        open_rename_dialog(
+            window,
+            cx,
+            "direct:046d:b35b:unit:a393cae0".to_owned(),
+            String::new(),
+            "MX Keys".to_owned(),
+        );
+        window.draw(cx).clear(cx);
+    });
+    assert!(
+        cx.debug_bounds("dialog-save").is_some(),
+        "the dialog can be saved"
+    );
+    let cancel = cx
+        .debug_bounds("dialog-cancel")
+        .expect("the dialog can be cancelled");
+
+    cx.simulate_click(cancel.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("dialog-save").is_none(),
+        "Cancel closes the dialog"
+    );
+}
+
+/// The Pointer tab's Scrolling card carries the smooth-wheel switch, shows the
+/// saved setting (a smooth wheel turned on earlier switches off) and knows this
+/// link has `0x2121` (so it switches back on).
+#[gpui::test]
+fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::{AppContext as _, Modifiers, px, size};
+    use gpui_component::Root;
+
+    use super::AppView;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
+    use crate::state::{AgentLink, AppState, Sources};
+    use openlogi_ipc::{AgentStatus, InventoryHealth, PROTOCOL_VERSION};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        inventory.paired[0]
+            .capabilities
+            .as_mut()
+            .expect("the fixture mouse has capabilities")
+            .hires_wheel = true;
+        let mut config = openlogi_core::config::Config::ephemeral();
+        config.set_smooth_wheel(KNOWN_MOUSE_KEY, true);
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources {
+                inventories: &[inventory],
+                ..Sources::in_memory(config, &resolver, commands)
+            });
+            // Past the connecting frame and the accessibility gate.
+            let _ = state.set_agent_link(AgentLink::Ready(AgentStatus {
+                accessibility_granted: true,
+                hook_installed: true,
+                launch_at_login: false,
+                inventory: InventoryHealth::Ready,
+                protocol_version: PROTOCOL_VERSION,
+                agent_version: "smooth-wheel-test".to_string(),
+                input_monitoring_granted: true,
+                hid_open_failures: false,
+            }));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let hosted = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&hosted);
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        *slot.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let app_view = hosted
+        .borrow_mut()
+        .take()
+        .expect("the window hosts the app view");
+    cx.simulate_resize(size(px(1280.), px(900.)));
+    cx.update(|window, cx| {
+        let record_key = AppState::try_read(cx)
+            .expect("state is installed")
+            .devices()[0]
+            .record_key()
+            .clone();
+        app_view.update(cx, |view, cx| {
+            view.open_device(record_key, cx);
+            view.active_tab = DetailTab::Pointer;
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    });
+
+    let switch = cx
+        .debug_bounds("smooth-wheel-row-control")
+        .expect("the Scrolling card offers the smooth wheel");
+    let mut click_and_read = || {
+        cx.simulate_click(switch.center(), Modifiers::none());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            AppState::try_read(cx)
+                .expect("state is installed")
+                .current_smooth_wheel()
+        })
+    };
+    assert!(
+        !click_and_read(),
+        "the switch shows the saved setting, so a click turns it off"
+    );
+    assert!(
+        click_and_read(),
+        "this link has 0x2121, so it turns back on"
+    );
+}
+
 /// "Charging" replaces the bogus percentage only when charging *and* the
 /// reading is still 0% or absent with no level (cold start, no cached
 /// pre-charge value). A non-zero charge, a real 0% while discharging, or a
@@ -431,6 +590,10 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         dpi_gestures: false,
         fn_lock: false,
         os_layout: false,
+        report_rate: false,
+        backlight: false,
+        easy_switch: false,
+        virtual_thumbwheel: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -460,6 +623,10 @@ fn tabs_follow_capabilities_not_kind() {
         dpi_gestures: false,
         fn_lock: false,
         os_layout: false,
+        report_rate: false,
+        backlight: false,
+        easy_switch: false,
+        virtual_thumbwheel: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -504,6 +671,10 @@ fn keyboard_without_asset_hides_buttons_tab() {
         dpi_gestures: false,
         fn_lock: false,
         os_layout: false,
+        report_rate: false,
+        backlight: false,
+        easy_switch: false,
+        virtual_thumbwheel: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -527,6 +698,10 @@ fn keyboard_with_buttons_shows_keys_tab() {
         dpi_gestures: false,
         fn_lock: false,
         os_layout: false,
+        report_rate: false,
+        backlight: false,
+        easy_switch: false,
+        virtual_thumbwheel: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));

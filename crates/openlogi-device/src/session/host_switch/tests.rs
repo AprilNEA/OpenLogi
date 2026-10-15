@@ -36,6 +36,10 @@ enum SlotStatus {
     LookupErrors,
     /// Implements the feature but errors on the status read.
     ReadErrors,
+    /// Reports `status == Empty` for every slot, including paired ones, but
+    /// still reports a nonzero friendly-name length for them — the MX
+    /// Vertical quirk from #1709.
+    StuckEmptyButNamed,
 }
 
 /// A three-channel keyboard currently on host 0, paired on hosts 0 and 1
@@ -60,6 +64,13 @@ fn keyboard_erroring_on_slot_status(request: &[u8]) -> Option<Vec<u8>> {
     scripted_keyboard(request, SlotStatus::ReadErrors)
 }
 
+/// A keyboard whose `0x1815` status byte is stuck at `Empty` for every slot
+/// but still reports a real friendly-name length — paired slots must still
+/// be switchable.
+fn keyboard_with_stuck_empty_status(request: &[u8]) -> Option<Vec<u8>> {
+    scripted_keyboard(request, SlotStatus::StuckEmptyButNamed)
+}
+
 fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
@@ -75,7 +86,9 @@ fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>>
                 0x1815 => match slot_status {
                     SlotStatus::Unimplemented => 0x00,
                     SlotStatus::LookupErrors => return Some(feature_error(request, BUSY)),
-                    SlotStatus::Reported | SlotStatus::ReadErrors => HOSTS_INFO_INDEX,
+                    SlotStatus::Reported
+                    | SlotStatus::ReadErrors
+                    | SlotStatus::StuckEmptyButNamed => HOSTS_INFO_INDEX,
                 },
                 _ => 0x00,
             };
@@ -88,11 +101,25 @@ fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>>
                 return Some(feature_error(request, BUSY));
             }
             payload[0] = request[4];
-            payload[1] = u8::from(request[4] < 2);
+            if slot_status == SlotStatus::StuckEmptyButNamed {
+                payload[1] = 0; // status stuck at Empty on every slot
+                payload[4] = 5; // but a real friendly-name length
+            } else {
+                payload[1] = u8::from(request[4] < 2);
+            }
         }
         _ => return None,
     }
 
+    // Short reports carry only 3 payload bytes; `name_len` lives at index 4,
+    // so answering with it requires a long (0x11) report.
+    if payload[3..].iter().any(|&byte| byte != 0) {
+        let mut response = vec![0u8; 20];
+        response[0] = 0x11;
+        response[1..4].copy_from_slice(&request[1..4]);
+        response[4..].copy_from_slice(&payload);
+        return Some(response);
+    }
     let mut response = vec![0u8; 7];
     response[0] = 0x10;
     response[1..4].copy_from_slice(&request[1..4]);
@@ -120,6 +147,20 @@ async fn switching_to_an_unpaired_slot_is_refused() {
         matches!(error, HostSwitchError::HostSlotEmpty { host: 2 }),
         "got {error:?}"
     );
+}
+
+#[tokio::test]
+async fn a_stuck_empty_status_does_not_override_a_nonzero_name_length() {
+    // #1709: the device's status byte is stuck at Empty for every slot, but
+    // a nonzero friendly-name length is independent evidence the slot is
+    // really paired, so the switch must still be allowed.
+    let channel = scripted_channel(keyboard_with_stuck_empty_status).await;
+
+    let change = prepare_host_change_on(&channel, 1, 2)
+        .await
+        .expect("a nonzero name length must override a stuck Empty status");
+
+    assert!(change.required, "host 2 differs from the current host 0");
 }
 
 #[tokio::test]

@@ -23,7 +23,7 @@ use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
 use super::commit_slider::{CommitSlider, SliderRange};
-use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle};
+use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle, toggle_row};
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
 
 const TITLE: &str = "OpenLogi Component Gallery";
@@ -267,7 +267,22 @@ impl ComponentGallery {
                         .selected(true)
                         .label(Some(SharedString::from("Unavailable")))
                         .disabled(true),
-                ),
+                )
+                .child(toggle_row(
+                    "gallery-toggle-row",
+                    pal,
+                    SharedString::from("Setting"),
+                    SharedString::from(
+                        "The caption under the title says what the setting changes and wraps \
+                         instead of pushing the toggle out.",
+                    ),
+                    Toggle::new("gallery-toggle-row-control")
+                        .selected(self.toggle_selected)
+                        .on_change(cx.listener(|this, selected: &bool, _, cx| {
+                            this.toggle_selected = *selected;
+                            cx.notify();
+                        })),
+                )),
             pal,
         )
     }

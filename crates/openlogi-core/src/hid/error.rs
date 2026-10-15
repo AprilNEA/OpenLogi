@@ -7,7 +7,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::backlight::BacklightChange;
 use super::dpi::Dpi;
+use super::report_rate::ReportRate;
 
 /// Error returned by HID++ read/write operations.
 ///
@@ -125,6 +127,87 @@ pub enum WriteError {
         /// The waveform ID that was refused.
         waveform: u8,
     },
+    /// A report-rate write asked for a rate the device does not list for its
+    /// current connection.
+    ///
+    /// Nothing was written: the device layer checks the device-reported list
+    /// first, so the firmware never has to clamp or reject it.
+    #[error("report rate {requested} Hz is not one the device lists for this connection")]
+    ReportRateUnsupported {
+        /// The rejected rate.
+        requested: ReportRate,
+    },
+    /// The device acknowledged a report-rate write but reads back a
+    /// different rate — for instance a gaming mouse whose onboard profile
+    /// owns the rate.
+    #[error("device reports {actual} Hz after a write of {requested} Hz")]
+    ReportRateNotApplied {
+        /// The rate that was written.
+        requested: ReportRate,
+        /// The rate the device reports afterwards.
+        actual: ReportRate,
+    },
+    /// A backlight change the keyboard does not offer — a level beyond its
+    /// level count, or a mode, level or battery-saving control its `0x1982`
+    /// capability bits leave out.
+    ///
+    /// Nothing was written: the device layer checks a fresh read first.
+    #[error("the keyboard does not offer {change}")]
+    BacklightChangeUnsupported {
+        /// The rejected change.
+        change: BacklightChange,
+    },
+    /// The keyboard acknowledged a backlight write but reads back a
+    /// configuration without the change.
+    #[error("keyboard does not report {change} after the write")]
+    BacklightNotApplied {
+        /// The change that was written.
+        change: BacklightChange,
+    },
+    /// A haptic play refused because the device reports a non-zero `0x19b0`
+    /// haptic status.
+    ///
+    /// Nothing was sent: Logi Options+ plays only while the status is zero,
+    /// and the device layer applies the same gate, so a retry cannot succeed
+    /// until the device reports otherwise.
+    #[error("device reports haptic status {status}, so haptics cannot play")]
+    HapticsUnavailable {
+        /// The raw status byte the device reported.
+        status: u8,
+    },
+    /// A rename of an Easy-Switch slot's computer on a device whose `0x1815`
+    /// capabilities leave renaming out.
+    ///
+    /// Nothing was written.
+    #[error("the device does not let software rename its Easy-Switch hosts")]
+    HostRenameUnsupported,
+    /// A rename of an Easy-Switch slot that has no computer paired, or that
+    /// the device does not have.
+    ///
+    /// Nothing was written.
+    #[error("Easy-Switch channel {} has no paired computer", u16::from(*slot) + 1)]
+    HostSlotEmpty {
+        /// The zero-based slot index asked for.
+        slot: u8,
+    },
+    /// A host name that is empty, holds a NUL, or is longer than the slot
+    /// stores.
+    ///
+    /// Nothing was written.
+    #[error("a host name must be 1 to {max_len} bytes of UTF-8 without NUL")]
+    HostNameRejected {
+        /// The longest name, in UTF-8 bytes, the slot stores.
+        max_len: u8,
+    },
+    /// The device acknowledged a host-name write but reads back another
+    /// name.
+    #[error("device reports host name {actual:?} after a write of {requested:?}")]
+    HostNameNotApplied {
+        /// The name that was written.
+        requested: String,
+        /// The name the device reports afterwards, if any.
+        actual: Option<String>,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -175,6 +258,18 @@ pub enum HidppOperation {
     /// table and the current host's platform, and write it when it differs.
     /// Appended last — variant order is wire format.
     WriteOsLayout,
+    /// Read the `0x8060` / `0x8061` report rate and the rates the device
+    /// lists. Appended last — variant order is wire format.
+    ReadReportRate,
+    /// Write the `0x8060` / `0x8061` report rate. Appended last — variant
+    /// order is wire format.
+    WriteReportRate,
+    /// Read the `0x1815` Easy-Switch host slots, their names and OS.
+    /// Appended last — variant order is wire format.
+    ReadHosts,
+    /// Write an Easy-Switch slot's `0x1815` host name. Appended last —
+    /// variant order is wire format.
+    RenameHost,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

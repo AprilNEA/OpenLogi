@@ -260,6 +260,50 @@ fn binding_long_press_requires_exact_short_and_long_fields() {
     toml::from_str::<BindingWrapper>(unknown).expect_err("a long press rejects unknown fields");
 }
 
+#[test]
+fn binding_wheel_hold_roundtrips_without_overlapping_other_table_shapes() {
+    let binding = Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::BrowserBack));
+    let back = binding_roundtrip(BTreeMap::from([(ButtonId::Back, binding.clone())]));
+    assert_eq!(back[&ButtonId::Back], binding);
+
+    let toml = toml::to_string_pretty(&BindingWrapper { bindings: back }).expect("serialize");
+    assert!(toml.contains("click = \"BrowserBack\""));
+    assert!(toml.contains("wheel = \"HorizontalScroll\""));
+    assert!(!toml.contains("WheelHold"));
+}
+
+#[test]
+fn binding_wheel_hold_requires_exact_click_and_wheel_fields() {
+    // Lowercase `click` is not the `Click` gesture direction: without `wheel`
+    // the table is no binding at all rather than a one-armed gesture map.
+    let missing_wheel = "[bindings.Back]\nclick = \"Copy\"";
+    toml::from_str::<BindingWrapper>(missing_wheel).expect_err("a wheel hold needs its wheel");
+
+    let unknown_wheel = "[bindings.Back]\nclick = \"Copy\"\nwheel = \"Zoom\"";
+    toml::from_str::<BindingWrapper>(unknown_wheel)
+        .expect_err("a wheel hold rejects a wheel behavior it does not know");
+
+    let unknown =
+        "[bindings.Back]\nclick = \"Copy\"\nwheel = \"HorizontalScroll\"\nlong = \"Paste\"";
+    toml::from_str::<BindingWrapper>(unknown).expect_err("a wheel hold rejects unknown fields");
+}
+
+#[test]
+fn wheel_hold_clicks_with_its_click_action_and_has_no_directions() {
+    let mut binding = Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::Copy));
+    assert!(binding.is_wheel_hold());
+    assert!(!binding.is_gesture());
+    assert_eq!(binding.click_action(), Action::Copy);
+    assert_eq!(binding.direction_action(GestureDirection::Click), None);
+    assert!(!Binding::Single(Action::Copy).is_wheel_hold());
+
+    binding.upgrade_to_gesture();
+    assert_eq!(
+        binding,
+        Binding::Gesture(BTreeMap::from([(GestureDirection::Click, Action::Copy)]))
+    );
+}
+
 /// The untagged-routing safety guard. A TOML table keyed by ANY
 /// [`GestureDirection`] name must deserialize as [`Binding::Gesture`], never
 /// [`Binding::Single`]. If a future [`Action`] payload variant is ever named

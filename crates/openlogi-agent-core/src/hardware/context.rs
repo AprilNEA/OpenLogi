@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use openlogi_core::device::StandaloneDevice;
+use openlogi_core::device::{LightState, StandaloneDevice};
 use openlogi_core::hid::{LightCommand, PairingError, WriteError};
 use openlogi_hid::backend::{HidBackend, HotplugStream};
 use openlogi_hid::inventory::persist::ProbeCacheStore;
@@ -123,7 +123,7 @@ impl HardwareContext {
         route: &DeviceRoute,
         model: LitraModel,
         command: LightCommand,
-    ) -> Result<(), WriteError> {
+    ) -> Result<Option<LightState>, WriteError> {
         openlogi_hid::write::apply_litra(&*self.backend, route, model, command).await
     }
 

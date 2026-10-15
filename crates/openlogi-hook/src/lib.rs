@@ -142,6 +142,86 @@ pub fn scroll_inversion() -> bool {
     INVERT_SCROLL.load(Ordering::Relaxed)
 }
 
+/// Flip the vertical delta of a scroll [`MouseEvent`], leaving every other
+/// variant untouched.
+///
+/// What [`Delivery::run`] hands the callback when software scroll inversion
+/// applies: the callback must see the same inverted delta that a pass-through
+/// event gets written back with, so a suppressed impulse (smoothing, non-1x
+/// sensitivity) is reversed too instead of only a forwarded one (#1737).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn negate_scroll_y(event: MouseEvent) -> MouseEvent {
+    match event {
+        MouseEvent::Scroll {
+            delta,
+            from_trackpad,
+            device,
+        } => MouseEvent::Scroll {
+            delta: delta.negate_y(),
+            from_trackpad,
+            device,
+        },
+        other => other,
+    }
+}
+
+/// The callback's verdict on one captured event, plus what that verdict means
+/// for software scroll inversion.
+///
+/// Shared by every backend that inverts in software so the rule lives in one
+/// place: the callback always sees the reversed delta, and the native event is
+/// reversed only on its way through.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Delivery {
+    /// What the backend does with the native event.
+    pub(crate) disposition: EventDisposition,
+    /// Whether the backend reverses the native event's vertical scroll before
+    /// forwarding it.
+    ///
+    /// Set only for a pass-through, so the desktop sees the wheel reversed
+    /// exactly once: a suppressed impulse is replayed by the agent from the
+    /// delta the callback received, which is already reversed.
+    pub(crate) invert_native: bool,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl Delivery {
+    /// Hand `event` to `cb`, applying software scroll inversion when `invert`
+    /// is set.
+    ///
+    /// The callback receives the vertical delta already reversed, so an
+    /// impulse the agent intercepts and replays (smoothing, non-1x
+    /// sensitivity) comes out reversed as well, not only a forwarded one
+    /// (#1737).
+    pub(crate) fn run(
+        event: HookEvent,
+        invert: bool,
+        cb: impl FnOnce(HookEvent) -> EventDisposition,
+    ) -> Self {
+        let event = match event {
+            HookEvent::Mouse(mouse) if invert => HookEvent::Mouse(negate_scroll_y(mouse)),
+            other => other,
+        };
+        let disposition = cb(event);
+        Self {
+            disposition,
+            invert_native: invert && disposition == EventDisposition::PassThrough,
+        }
+    }
+
+    /// An event the backend forwards without consulting the callback, because
+    /// it does not translate into a [`MouseEvent`]. Its native form is still
+    /// reversed when `invert` is set, so it agrees with the rest of its report.
+    #[cfg(target_os = "linux")]
+    pub(crate) const fn forwarded(invert: bool) -> Self {
+        Self {
+            disposition: EventDisposition::PassThrough,
+            invert_native: invert,
+        }
+    }
+}
+
 /// Whether the OS hook may suppress/remap a button event from this source.
 ///
 /// Fail-closed on macOS-style attribution: only a known Logitech non-trackpad
@@ -180,7 +260,7 @@ pub enum HookEvent {
 }
 
 /// An event captured at the OS layer.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MouseEvent {
     /// A mouse button was pressed or released.
     Button {

@@ -30,8 +30,8 @@ use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptio
 use tracing::{debug, error, warn};
 
 use crate::{
-    CursorPosition, EventDisposition, EventTapInfo, ForegroundApp, HookBackend, HookError,
-    HookEvent, MouseEvent, TapLocation,
+    CursorPosition, Delivery, EventDisposition, EventTapInfo, ForegroundApp, HookBackend,
+    HookError, HookEvent, MouseEvent, TapLocation,
 };
 pub use foreground::ForegroundApplicationObserver;
 use foreground::observe_frontmost_application;
@@ -320,16 +320,24 @@ fn wheel_scroll_to_invert(event: &HookEvent) -> bool {
 /// would have to choose a unit, and a hi-res wheel reports pixels in one field
 /// while a detented one reports lines in another — writing back the same
 /// fields sidesteps the choice entirely.
+///
+/// Order matters: writing the line field makes CoreGraphics recompute the
+/// fixed-point and point fields from it, so writing it last clobbered the
+/// negated point delta and shrank an inverted scroll by a fifth (a three-line
+/// notch's 30 px came out as 24). Every field is read before any is written,
+/// the line field goes first, and the finer two follow it — even a zero one,
+/// which the line write may have filled in.
 fn invert_scroll_event(event: &CGEvent) {
-    for field in [VERTICAL.point, VERTICAL.fixed] {
-        let value = event.get_double_value_field(field);
-        if value != 0.0 {
-            event.set_double_value_field(field, -value);
-        }
-    }
     let lines = event.get_integer_value_field(VERTICAL.line);
+    let finer =
+        [VERTICAL.fixed, VERTICAL.point].map(|field| (field, event.get_double_value_field(field)));
     if lines != 0 {
         event.set_integer_value_field(VERTICAL.line, -lines);
+    }
+    for (field, value) in finer {
+        if lines != 0 || value != 0.0 {
+            event.set_double_value_field(field, -value);
+        }
     }
 }
 
@@ -352,15 +360,7 @@ fn run_tap_callback(
         // scroll (never a trackpad) is the only thing software inversion may
         // touch.
         let invert = crate::scroll_inversion() && wheel_scroll_to_invert(&hook_event);
-        match cb(hook_event) {
-            EventDisposition::PassThrough => {
-                if invert {
-                    invert_scroll_event(event);
-                }
-                CallbackResult::Keep
-            }
-            EventDisposition::Suppress => CallbackResult::Drop,
-        }
+        dispatch(cb, hook_event, invert, event)
     }));
     if let Ok(disposition) = result {
         disposition
@@ -370,6 +370,29 @@ fn run_tap_callback(
              avoid wedging system input"
         );
         CallbackResult::Keep
+    }
+}
+
+/// Deliver `hook_event` to the callback and carry its verdict out on the
+/// native `event`, reversing the event's vertical scroll first when software
+/// inversion applies and the event is passed through (#1737).
+///
+/// Split out of [`run_tap_callback`] because `invert` hinges on the event's
+/// source attribution, which only a real Logitech device produces; taking it
+/// as an argument lets a synthetic event exercise the inversion path.
+fn dispatch(
+    cb: &dyn Fn(HookEvent) -> EventDisposition,
+    hook_event: HookEvent,
+    invert: bool,
+    event: &CGEvent,
+) -> CallbackResult {
+    let delivery = Delivery::run(hook_event, invert, cb);
+    if delivery.invert_native {
+        invert_scroll_event(event);
+    }
+    match delivery.disposition {
+        EventDisposition::PassThrough => CallbackResult::Keep,
+        EventDisposition::Suppress => CallbackResult::Drop,
     }
 }
 
@@ -815,9 +838,13 @@ fn process_name(pid: i32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
+    use core_graphics::event::ScrollEventUnit;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     use super::*;
+    use crate::ScrollDelta;
 
     #[test]
     fn tap_callback_suppresses_normally_and_passes_through_panics() {
@@ -841,5 +868,126 @@ mod tests {
             ),
             CallbackResult::Keep
         ));
+    }
+
+    /// A detented wheel notch of `lines`, as a synthetic event.
+    fn wheel_notch(lines: i32) -> CGEvent {
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .expect("CGEventSourceCreate must succeed");
+        CGEvent::new_scroll_event(source, ScrollEventUnit::LINE, 1, lines, 0, 0)
+            .expect("CGEventCreateScrollWheelEvent must succeed")
+    }
+
+    /// Every vertical field [`invert_scroll_event`] negates.
+    fn vertical_fields(event: &CGEvent) -> (i64, f64, f64) {
+        (
+            event.get_integer_value_field(VERTICAL.line),
+            event.get_double_value_field(VERTICAL.point),
+            event.get_double_value_field(VERTICAL.fixed),
+        )
+    }
+
+    /// Whether every vertical field of a [`wheel_notch`] now points down. The
+    /// notch starts positive in all of them, so this holds after exactly one
+    /// reversal: none leaves it positive, and a second would restore it.
+    fn reversed_once(event: &CGEvent) -> bool {
+        let (line, point, fixed) = vertical_fields(event);
+        line < 0 && point < 0.0 && fixed < 0.0
+    }
+
+    /// Run a wheel notch through [`dispatch`] with a callback that answers
+    /// `disposition`, returning the delta the callback saw, the tap's verdict
+    /// and the native event as it would leave the tap.
+    fn dispatch_notch(
+        invert: bool,
+        disposition: EventDisposition,
+    ) -> (Option<ScrollDelta>, CallbackResult, CGEvent) {
+        let event = wheel_notch(3);
+        let hook_event = HookEvent::Mouse(
+            translate(CGEventType::ScrollWheel, &event).expect("a wheel notch translates"),
+        );
+        let seen = Cell::new(None);
+        let result = dispatch(
+            &|hook_event| {
+                if let HookEvent::Mouse(MouseEvent::Scroll { delta, .. }) = hook_event {
+                    seen.set(Some(delta));
+                }
+                disposition
+            },
+            hook_event,
+            invert,
+            &event,
+        );
+        (seen.get(), result, event)
+    }
+
+    /// The delta [`translate`] reads from an untouched wheel notch.
+    fn notch_delta() -> ScrollDelta {
+        match translate(CGEventType::ScrollWheel, &wheel_notch(3)) {
+            Some(MouseEvent::Scroll { delta, .. }) => delta,
+            other => panic!("a wheel notch translates to a scroll, got {other:?}"),
+        }
+    }
+
+    /// With inversion on, the callback sees the reversed delta whatever it
+    /// decides, so an impulse the agent suppresses and replays is reversed
+    /// too (#1737), and a forwarded event leaves the tap reversed exactly once.
+    #[test]
+    fn inverted_wheel_reaches_the_callback_reversed_and_the_desktop_reversed_once() {
+        let delta = notch_delta();
+        let untouched = vertical_fields(&wheel_notch(3));
+        assert!(
+            untouched.0 > 0 && untouched.1 > 0.0 && untouched.2 > 0.0,
+            "the notch carries every vertical field: {untouched:?}"
+        );
+
+        let (seen, result, event) = dispatch_notch(true, EventDisposition::PassThrough);
+        assert_eq!(seen, Some(delta.negate_y()));
+        assert!(matches!(result, CallbackResult::Keep));
+        assert!(
+            reversed_once(&event),
+            "forwarded {:?}, untouched {untouched:?}",
+            vertical_fields(&event)
+        );
+
+        let (seen, result, event) = dispatch_notch(true, EventDisposition::Suppress);
+        assert_eq!(seen, Some(delta.negate_y()));
+        assert!(matches!(result, CallbackResult::Drop));
+        assert_eq!(vertical_fields(&event), untouched);
+    }
+
+    /// With inversion off, neither the callback nor the desktop sees a change.
+    #[test]
+    fn wheel_is_left_alone_when_inversion_is_off() {
+        let delta = notch_delta();
+        let untouched = vertical_fields(&wheel_notch(3));
+        for disposition in [EventDisposition::PassThrough, EventDisposition::Suppress] {
+            let (seen, _, event) = dispatch_notch(false, disposition);
+            assert_eq!(seen, Some(delta));
+            assert_eq!(vertical_fields(&event), untouched);
+        }
+    }
+
+    /// Every vertical field comes out negated with its magnitude intact: a
+    /// line notch, and pixel scrolls with and without a whole line in them.
+    #[test]
+    fn invert_scroll_event_keeps_every_magnitude() {
+        for (unit, amount) in [
+            (ScrollEventUnit::LINE, 3),
+            (ScrollEventUnit::PIXEL, 40),
+            (ScrollEventUnit::PIXEL, 5),
+        ] {
+            let source = CGEventSource::new(CGEventSourceStateID::Private)
+                .expect("CGEventSourceCreate must succeed");
+            let event = CGEvent::new_scroll_event(source, unit, 1, amount, 0, 0)
+                .expect("CGEventCreateScrollWheelEvent must succeed");
+            let (line, point, fixed) = vertical_fields(&event);
+            invert_scroll_event(&event);
+            assert_eq!(
+                vertical_fields(&event),
+                (-line, -point, -fixed),
+                "unit {unit}, amount {amount}"
+            );
+        }
     }
 }
