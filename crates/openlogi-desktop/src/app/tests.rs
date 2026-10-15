@@ -165,6 +165,104 @@ fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext
     );
 }
 
+/// The Pointer tab's Scrolling card carries the smooth-wheel switch, shows the
+/// saved setting (a smooth wheel turned on earlier switches off) and knows this
+/// link has `0x2121` (so it switches back on).
+#[gpui::test]
+fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::{AppContext as _, Modifiers, px, size};
+    use gpui_component::Root;
+
+    use super::AppView;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
+    use crate::state::{AgentLink, AppState, Sources};
+    use openlogi_ipc::{AgentStatus, InventoryHealth, PROTOCOL_VERSION};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        inventory.paired[0]
+            .capabilities
+            .as_mut()
+            .expect("the fixture mouse has capabilities")
+            .hires_wheel = true;
+        let mut config = openlogi_core::config::Config::ephemeral();
+        config.set_smooth_wheel(KNOWN_MOUSE_KEY, true);
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources {
+                inventories: &[inventory],
+                ..Sources::in_memory(config, &resolver, commands)
+            });
+            // Past the connecting frame and the accessibility gate.
+            let _ = state.set_agent_link(AgentLink::Ready(AgentStatus {
+                accessibility_granted: true,
+                hook_installed: true,
+                launch_at_login: false,
+                inventory: InventoryHealth::Ready,
+                protocol_version: PROTOCOL_VERSION,
+                agent_version: "smooth-wheel-test".to_string(),
+                input_monitoring_granted: true,
+                hid_open_failures: false,
+            }));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let hosted = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&hosted);
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        *slot.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let app_view = hosted
+        .borrow_mut()
+        .take()
+        .expect("the window hosts the app view");
+    cx.simulate_resize(size(px(1280.), px(900.)));
+    cx.update(|window, cx| {
+        let record_key = AppState::try_read(cx)
+            .expect("state is installed")
+            .devices()[0]
+            .record_key()
+            .clone();
+        app_view.update(cx, |view, cx| {
+            view.open_device(record_key, cx);
+            view.active_tab = DetailTab::Pointer;
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    });
+
+    let switch = cx
+        .debug_bounds("smooth-wheel-row-control")
+        .expect("the Scrolling card offers the smooth wheel");
+    let mut click_and_read = || {
+        cx.simulate_click(switch.center(), Modifiers::none());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            AppState::try_read(cx)
+                .expect("state is installed")
+                .current_smooth_wheel()
+        })
+    };
+    assert!(
+        !click_and_read(),
+        "the switch shows the saved setting, so a click turns it off"
+    );
+    assert!(
+        click_and_read(),
+        "this link has 0x2121, so it turns back on"
+    );
+}
+
 /// "Charging" replaces the bogus percentage only when charging *and* the
 /// reading is still 0% or absent with no level (cold start, no cached
 /// pre-charge value). A non-zero charge, a real 0% while discharging, or a

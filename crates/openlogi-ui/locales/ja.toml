@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "物理的なラチェット1段ごと�
 high_resolution_scrolling_description = "ラチェットの段間にある細かな動きを検出します。"
 wheel_resolution_unsupported = "このデバイスはホイール解像度の制御に対応していません。"
 wheel_resolution_other_connection = "別の接続方式ではホイール解像度に対応していますが、現在の接続では利用できません。"
+smooth_wheel = "スムーズホイール"
+smooth_wheel_description = "このマウスのホイールの1段ごとの入力をOpenLogiが受け取り、スムーズスクロールがオフでも滑らかにスクロールします。"
+smooth_wheel_unsupported = "このデバイスはスムーズホイールに対応していません。"
+smooth_wheel_other_connection = "別の接続方式ではスムーズホイールに対応していますが、現在の接続では利用できません。"
 smartshift = "SmartShift"
 
 [actions]

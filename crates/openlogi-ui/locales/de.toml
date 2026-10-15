@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Scrollt einmal pro physischer Rasterst
 high_resolution_scrolling_description = "Erkennt feinere Bewegungen zwischen den Rasterstufen."
 wheel_resolution_unsupported = "Dieses Gerät unterstützt keine Steuerung der Mausradauflösung."
 wheel_resolution_other_connection = "Dieses Gerät unterstützt die Mausradauflösung über seine andere Verbindung, aber nicht über diese."
+smooth_wheel = "Weiches Mausrad"
+smooth_wheel_description = "OpenLogi empfängt jeden Schritt des Mausrads und scrollt weich, auch wenn „Weiches Scrollen“ ausgeschaltet ist."
+smooth_wheel_unsupported = "Dieses Gerät unterstützt kein weiches Mausrad."
+smooth_wheel_other_connection = "Dieses Gerät unterstützt das weiche Mausrad über seine andere Verbindung, aber nicht über diese."
 smartshift = "SmartShift"
 
 [actions]

@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Ruller én gang pr. fysisk rastertrin.
 high_resolution_scrolling_description = "Registrerer finere bevægelser mellem rastertrin."
 wheel_resolution_unsupported = "Denne enhed understøtter ikke styring af hjulopløsning."
 wheel_resolution_other_connection = "Enheden understøtter hjulopløsning via sin anden forbindelse, men ikke denne."
+smooth_wheel = "Jævnt hjul"
+smooth_wheel_description = "OpenLogi modtager hvert trin fra musens hjul og ruller jævnt, også når Jævn rulning er slået fra."
+smooth_wheel_unsupported = "Denne enhed understøtter ikke jævnt hjul."
+smooth_wheel_other_connection = "Enheden understøtter jævnt hjul via sin anden forbindelse, men ikke denne."
 smartshift = "SmartShift"
 
 [actions]

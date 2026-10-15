@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Прокручивает один ра
 high_resolution_scrolling_description = "Обнаруживает более мелкие движения между шагами трещотки."
 wheel_resolution_unsupported = "Это устройство не поддерживает управление разрешением колеса."
 wheel_resolution_other_connection = "Устройство поддерживает настройку разрешения колеса при другом типе подключения, но не при текущем."
+smooth_wheel = "Плавное колесо"
+smooth_wheel_description = "OpenLogi получает каждый шаг колеса этой мыши и прокручивает плавно, даже когда «Плавная прокрутка» выключена."
+smooth_wheel_unsupported = "Это устройство не поддерживает плавное колесо."
+smooth_wheel_other_connection = "Устройство поддерживает плавное колесо при другом типе подключения, но не при текущем."
 smartshift = "SmartShift"
 
 [actions]

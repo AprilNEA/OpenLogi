@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Прокручує один раз н�
 high_resolution_scrolling_description = "Розпізнає дрібніші рухи між кроками покрокового обертання."
 wheel_resolution_unsupported = "Цей пристрій не підтримує керування роздільністю коліщатка."
 wheel_resolution_other_connection = "Пристрій підтримує налаштування роздільності коліщатка за іншого типу з'єднання, але не за поточного."
+smooth_wheel = "Плавне коліщатко"
+smooth_wheel_description = "OpenLogi отримує кожен крок коліщатка цієї миші й прокручує плавно, навіть коли «Плавне прокручування» вимкнено."
+smooth_wheel_unsupported = "Цей пристрій не підтримує плавне коліщатко."
+smooth_wheel_other_connection = "Пристрій підтримує плавне коліщатко за іншого типу з'єднання, але не за поточного."
 smartshift = "SmartShift"
 
 [actions]

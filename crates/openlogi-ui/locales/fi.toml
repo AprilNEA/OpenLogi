@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Vierittää kerran fyysistä pykälä�
 high_resolution_scrolling_description = "Tunnistaa hienovaraisemman liikkeen pykälien välillä."
 wheel_resolution_unsupported = "Tämä laite ei tue vierityspyörän tarkkuuden hallintaa."
 wheel_resolution_other_connection = "Laite tukee rullan tarkkuutta toisella yhteydellään, mutta ei tällä."
+smooth_wheel = "Tasainen rulla"
+smooth_wheel_description = "OpenLogi vastaanottaa hiiren rullan jokaisen askeleen ja vierittää tasaisesti, vaikka Tasainen vieritys olisi pois päältä."
+smooth_wheel_unsupported = "Tämä laite ei tue tasaista rullaa."
+smooth_wheel_other_connection = "Laite tukee tasaista rullaa toisella yhteydellään, mutta ei tällä."
 smartshift = "SmartShift"
 
 [actions]

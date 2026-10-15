@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Se desplaza una vez por cada paso fís
 high_resolution_scrolling_description = "Detecta movimientos más finos entre los pasos del trinquete."
 wheel_resolution_unsupported = "Este dispositivo no admite el control de resolución de la rueda."
 wheel_resolution_other_connection = "Este dispositivo admite la resolución de la rueda en su otra conexión, pero no en esta."
+smooth_wheel = "Rueda suave"
+smooth_wheel_description = "OpenLogi recibe cada paso de la rueda de este ratón y desplaza con suavidad, incluso con Desplazamiento suave desactivado."
+smooth_wheel_unsupported = "Este dispositivo no admite la rueda suave."
+smooth_wheel_other_connection = "Este dispositivo admite la rueda suave en su otra conexión, pero no en esta."
 smartshift = "SmartShift"
 
 [actions]

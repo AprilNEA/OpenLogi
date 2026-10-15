@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Rullar en gång per fysiskt spärrsteg
 high_resolution_scrolling_description = "Upptäcker finare rörelser mellan spärrstegen."
 wheel_resolution_unsupported = "Den här enheten stöder inte styrning av hjulupplösning."
 wheel_resolution_other_connection = "Enheten stöder hjulupplösning via den andra anslutningen, men inte denna."
+smooth_wheel = "Mjukt hjul"
+smooth_wheel_description = "OpenLogi tar emot varje steg från musens hjul och rullar mjukt, även när Mjuk rullning är avstängd."
+smooth_wheel_unsupported = "Den här enheten stöder inte mjukt hjul."
+smooth_wheel_other_connection = "Enheten stöder mjukt hjul via den andra anslutningen, men inte denna."
 smartshift = "SmartShift"
 
 [actions]

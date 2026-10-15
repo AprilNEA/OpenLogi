@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "每个物理棘轮刻度滚动一次�
 high_resolution_scrolling_description = "检测棘轮刻度之间更细微的移动。"
 wheel_resolution_unsupported = "此设备不支持滚轮分辨率控制。"
 wheel_resolution_other_connection = "此设备通过其他连接时支持滚轮分辨率控制，但当前连接不支持。"
+smooth_wheel = "平滑滚轮"
+smooth_wheel_description = "OpenLogi 接收这只鼠标滚轮的每一格并平滑滚动，关闭平滑滚动设置时也有效。"
+smooth_wheel_unsupported = "此设备不支持平滑滚轮。"
+smooth_wheel_other_connection = "此设备通过其他连接时支持平滑滚轮，但当前连接不支持。"
 smartshift = "SmartShift"
 
 [actions]

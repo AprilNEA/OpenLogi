@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Scrolt één keer per fysieke ratelsta
 high_resolution_scrolling_description = "Detecteert fijnere bewegingen tussen ratelstappen."
 wheel_resolution_unsupported = "Dit apparaat ondersteunt geen regeling van de wielresolutie."
 wheel_resolution_other_connection = "Dit apparaat ondersteunt wielresolutie via de andere verbinding, maar niet via deze."
+smooth_wheel = "Vloeiend wiel"
+smooth_wheel_description = "OpenLogi ontvangt elke stap van het wiel van deze muis en scrolt vloeiend, ook als Vloeiend scrollen uit staat."
+smooth_wheel_unsupported = "Dit apparaat ondersteunt geen vloeiend wiel."
+smooth_wheel_other_connection = "Dit apparaat ondersteunt een vloeiend wiel via de andere verbinding, maar niet via deze."
 smartshift = "SmartShift"
 
 [actions]

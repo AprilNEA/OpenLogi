@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Rola uma vez por etapa física da catr
 high_resolution_scrolling_description = "Detecta movimentos mais sutis entre as etapas da catraca."
 wheel_resolution_unsupported = "Este dispositivo não oferece controle de resolução da roda."
 wheel_resolution_other_connection = "O dispositivo oferece resolução da roda na outra conexão, mas não nesta."
+smooth_wheel = "Roda suave"
+smooth_wheel_description = "O OpenLogi recebe cada passo da roda deste mouse e rola com suavidade, mesmo com Rolagem suave desativada."
+smooth_wheel_unsupported = "Este dispositivo não oferece roda suave."
+smooth_wheel_other_connection = "O dispositivo oferece roda suave na outra conexão, mas não nesta."
 smartshift = "SmartShift"
 
 [actions]

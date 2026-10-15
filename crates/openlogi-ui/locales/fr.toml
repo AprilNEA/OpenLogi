@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Défile une fois par cran physique."
 high_resolution_scrolling_description = "Détecte les mouvements plus fins entre les crans."
 wheel_resolution_unsupported = "Cet appareil ne prend pas en charge le réglage de la résolution de la molette."
 wheel_resolution_other_connection = "L’appareil prend en charge la résolution de molette avec son autre connexion, mais pas celle-ci."
+smooth_wheel = "Molette fluide"
+smooth_wheel_description = "OpenLogi reçoit chaque cran de la molette de cette souris et la fait défiler en douceur, même si Défilement fluide est désactivé."
+smooth_wheel_unsupported = "Cet appareil ne prend pas en charge la molette fluide."
+smooth_wheel_other_connection = "L’appareil prend en charge la molette fluide avec son autre connexion, mais pas celle-ci."
 smartshift = "SmartShift"
 
 [actions]

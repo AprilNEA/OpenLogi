@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Κύλιση μία φορά ανά φ
 high_resolution_scrolling_description = "Ανιχνεύει λεπτότερη κίνηση μεταξύ των βημάτων καστάνιας."
 wheel_resolution_unsupported = "Αυτή η συσκευή δεν υποστηρίζει έλεγχο ανάλυσης τροχού."
 wheel_resolution_other_connection = "Η συσκευή υποστηρίζει ανάλυση τροχού στην άλλη σύνδεσή της, όχι όμως σε αυτή."
+smooth_wheel = "Ομαλός τροχός"
+smooth_wheel_description = "Το OpenLogi λαμβάνει κάθε βήμα του τροχού αυτού του ποντικιού και κάνει ομαλή κύλιση, ακόμη κι όταν η Ομαλή κύλιση είναι απενεργοποιημένη."
+smooth_wheel_unsupported = "Αυτή η συσκευή δεν υποστηρίζει ομαλό τροχό."
+smooth_wheel_other_connection = "Η συσκευή υποστηρίζει ομαλό τροχό στην άλλη σύνδεσή της, όχι όμως σε αυτή."
 smartshift = "SmartShift"
 
 [actions]

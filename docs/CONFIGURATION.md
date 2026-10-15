@@ -96,7 +96,10 @@ Common device fields are:
   reporting when the switch goes off, the mouse is disabled, or the agent
   exits. If the agent crashes first, the wheel does not scroll until the agent
   runs again (the launch-at-login service restarts it) or the mouse reconnects,
-  which drops the diversion. Absent or `false` leaves the wheel native
+  which drops the diversion. The desktop's Scrolling card offers it as
+  **Smooth wheel** when the current connection has `0x2121`; a smooth wheel
+  turned on over another connection can still be turned off there. Absent or
+  `false` leaves the wheel native
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and

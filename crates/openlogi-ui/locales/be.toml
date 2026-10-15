@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Прагортвае адзін раз
 high_resolution_scrolling_description = "Выяўляе драбнейшыя рухі паміж крокамі кола."
 wheel_resolution_unsupported = "Гэта прылада не падтрымлівае кіраванне раздзяляльнасцю кола."
 wheel_resolution_other_connection = "Гэта прылада падтрымлівае раздзяляльнасць кола на іншым падключэнні, але не на гэтым."
+smooth_wheel = "Плаўнае кола"
+smooth_wheel_description = "OpenLogi атрымлівае кожны крок кола гэтай мышы і пракручвае плаўна, нават калі «Плаўная пракрутка» выключана."
+smooth_wheel_unsupported = "Гэта прылада не падтрымлівае плаўнае кола."
+smooth_wheel_other_connection = "Гэта прылада падтрымлівае плаўнае кола на іншым падключэнні, але не на гэтым."
 smartshift = "SmartShift"
 
 [actions]

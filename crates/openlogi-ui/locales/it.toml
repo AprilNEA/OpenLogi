@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Scorre una volta per ogni scatto fisic
 high_resolution_scrolling_description = "Rileva movimenti più fini tra gli scatti."
 wheel_resolution_unsupported = "Questo dispositivo non supporta il controllo della risoluzione della rotellina."
 wheel_resolution_other_connection = "Il dispositivo supporta la risoluzione della rotellina con l'altra connessione, ma non con questa."
+smooth_wheel = "Rotellina fluida"
+smooth_wheel_description = "OpenLogi riceve ogni passo della rotellina di questo mouse e scorre in modo fluido, anche con Scorrimento fluido disattivato."
+smooth_wheel_unsupported = "Questo dispositivo non supporta la rotellina fluida."
+smooth_wheel_other_connection = "Il dispositivo supporta la rotellina fluida con la connessione alternativa, ma non con questa."
 smartshift = "SmartShift"
 
 [actions]

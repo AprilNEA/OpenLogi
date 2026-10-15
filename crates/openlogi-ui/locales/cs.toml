@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Posune obsah jednou při každém fyzi
 high_resolution_scrolling_description = "Rozpoznává jemnější pohyb mezi kroky kolečka."
 wheel_resolution_unsupported = "Toto zařízení nepodporuje nastavení rozlišení kolečka."
 wheel_resolution_other_connection = "Zařízení podporuje rozlišení kolečka při jiném typu připojení, ale ne při tomto."
+smooth_wheel = "Plynulé kolečko"
+smooth_wheel_description = "OpenLogi přijímá každý krok kolečka této myši a posouvá plynule, i když je Plynulé posouvání vypnuté."
+smooth_wheel_unsupported = "Toto zařízení nepodporuje plynulé kolečko."
+smooth_wheel_other_connection = "Zařízení podporuje plynulé kolečko při jiném typu připojení, ale ne při tomto."
 smartshift = "SmartShift"
 
 [actions]

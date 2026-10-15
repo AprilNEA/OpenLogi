@@ -60,6 +60,7 @@ mod profile_scope;
 mod reload;
 mod report_rate;
 mod smartshift;
+mod smooth_wheel;
 mod transient_identity;
 mod wheel_hold;
 mod wheel_resolution;

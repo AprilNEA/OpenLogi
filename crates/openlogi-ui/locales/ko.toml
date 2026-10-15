@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "물리적 래칫 한 단계마다 한 
 high_resolution_scrolling_description = "래칫 단계 사이의 미세한 움직임을 감지합니다."
 wheel_resolution_unsupported = "이 기기는 휠 해상도 제어를 지원하지 않습니다."
 wheel_resolution_other_connection = "다른 연결 방식에서는 휠 해상도를 지원하지만 현재 연결에서는 지원하지 않습니다."
+smooth_wheel = "부드러운 휠"
+smooth_wheel_description = "OpenLogi가 이 마우스 휠의 모든 단계를 받아 부드러운 스크롤이 꺼져 있어도 부드럽게 스크롤합니다."
+smooth_wheel_unsupported = "이 기기는 부드러운 휠을 지원하지 않습니다."
+smooth_wheel_other_connection = "다른 연결 방식에서는 부드러운 휠을 지원하지만 현재 연결에서는 지원하지 않습니다."
 smartshift = "SmartShift"
 
 [actions]

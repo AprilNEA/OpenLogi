@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Przewija raz na każdy fizyczny skok z
 high_resolution_scrolling_description = "Wykrywa drobniejsze ruchy między skokami zapadki."
 wheel_resolution_unsupported = "To urządzenie nie obsługuje sterowania rozdzielczością kółka."
 wheel_resolution_other_connection = "To urządzenie obsługuje rozdzielczość kółka przy innym rodzaju połączenia, ale nie przy tym."
+smooth_wheel = "Płynne kółko"
+smooth_wheel_description = "OpenLogi odbiera każdy krok kółka tej myszy i przewija płynnie, nawet gdy Płynne przewijanie jest wyłączone."
+smooth_wheel_unsupported = "To urządzenie nie obsługuje płynnego kółka."
+smooth_wheel_other_connection = "To urządzenie obsługuje płynne kółko przy innym rodzaju połączenia, ale nie przy tym."
 smartshift = "SmartShift"
 
 [actions]

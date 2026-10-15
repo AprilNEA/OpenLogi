@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Scrolls once per physical ratchet step
 high_resolution_scrolling_description = "Detects finer movement between ratchet steps."
 wheel_resolution_unsupported = "This device does not support wheel resolution control."
 wheel_resolution_other_connection = "This device supports wheel resolution on its other connection, but not this one."
+smooth_wheel = "Smooth wheel"
+smooth_wheel_description = "OpenLogi receives every step of this mouse's wheel and scrolls it smoothly, even with Smooth scrolling turned off."
+smooth_wheel_unsupported = "This device does not support a smooth wheel."
+smooth_wheel_other_connection = "This device supports a smooth wheel on its other connection, but not this one."
 smartshift = "SmartShift"
 
 [actions]

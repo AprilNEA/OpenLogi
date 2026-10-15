@@ -292,6 +292,10 @@ scrolls_once_per_physical_ratchet_step = "Her fiziksel kademe adımında bir kez
 high_resolution_scrolling_description = "Kademeler arasındaki daha ince hareketi algılar."
 wheel_resolution_unsupported = "Bu cihaz tekerlek çözünürlüğü denetimini desteklemiyor."
 wheel_resolution_other_connection = "Bu cihaz diğer bağlantısında tekerlek çözünürlüğünü destekliyor, ancak bu bağlantıda desteklemiyor."
+smooth_wheel = "Yumuşak tekerlek"
+smooth_wheel_description = "OpenLogi bu farenin tekerleğinin her adımını alır ve Yumuşak kaydırma kapalı olsa bile yumuşak kaydırır."
+smooth_wheel_unsupported = "Bu cihaz yumuşak tekerleği desteklemiyor."
+smooth_wheel_other_connection = "Bu cihaz diğer bağlantısında yumuşak tekerleği destekliyor, ancak bu bağlantıda desteklemiyor."
 smartshift = "SmartShift"
 
 [actions]
