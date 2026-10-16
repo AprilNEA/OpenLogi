@@ -185,12 +185,13 @@ impl Backend for Native {
     }
 }
 
-/// What one adjacent-Space switch posts, prepared in full before the gate so
-/// a failed allocation cannot leave a half-posted chord or gesture.
+/// What one adjacent-Space switch posts, chosen before the gate. The
+/// DockSwipe is built in full before the gate; the shortcut builds every
+/// edge before posting any, against the held modifiers at that moment.
 enum Output {
     /// The user's enabled Space shortcut, typed as a physical keyboard would.
     /// The Dock animates it exactly like the keyboard does.
-    Shortcut(Vec<core_graphics::event::CGEvent>),
+    Shortcut(super::symbolic_hotkey::SpaceShortcut),
     /// A DockSwipe, for when that shortcut is disabled. The Dock switches
     /// without the slide animation (#1722).
     Swipe([CFRetained<CGEvent>; 2]),
@@ -198,8 +199,8 @@ enum Output {
 
 impl Output {
     fn prepare(direction: Direction) -> Option<Self> {
-        if let Some(events) = super::symbolic_hotkey::space_shortcut(direction) {
-            return Some(Self::Shortcut(events));
+        if let Some(shortcut) = super::symbolic_hotkey::space_shortcut(direction) {
+            return Some(Self::Shortcut(shortcut));
         }
         tracing::debug!(?direction, "no usable Space shortcut — posting a DockSwipe");
         swipe_events(direction).map(Self::Swipe)
@@ -207,11 +208,7 @@ impl Output {
 
     fn post(&self) {
         match self {
-            Self::Shortcut(events) => {
-                for event in events {
-                    event.post(core_graphics::event::CGEventTapLocation::HID);
-                }
-            }
+            Self::Shortcut(shortcut) => shortcut.post(),
             Self::Swipe(events) => {
                 for event in events {
                     CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));

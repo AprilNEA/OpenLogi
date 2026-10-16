@@ -38,14 +38,20 @@ pub(super) fn capture_region() {
     post_symbolic_hotkey(SELECTED_AREA_TO_CLIPBOARD);
 }
 
-/// The keystroke of the user's own "Move left/right a space" shortcut, ready
-/// to post, or `None` when it is disabled or cannot be read.
+/// The user's own "Move left/right a space" shortcut.
+pub(super) struct SpaceShortcut {
+    virtual_key: u16,
+    flags: CGEventFlags,
+}
+
+/// The user's own "Move left/right a space" shortcut, or `None` when it is
+/// disabled or cannot be read.
 ///
 /// Read-only: unlike the screenshot hotkeys, a disabled Space shortcut is
-/// never enabled — the caller falls back to a DockSwipe instead. Posting the
+/// never enabled — the caller falls back to a DockSwipe instead. Typing the
 /// shortcut lets the Dock play the same slide it plays for the keyboard,
 /// which a synthesized swipe does not (#1722).
-pub(super) fn space_shortcut(direction: Direction) -> Option<Vec<CGEvent>> {
+pub(super) fn space_shortcut(direction: Direction) -> Option<SpaceShortcut> {
     let hotkey = match direction {
         Direction::Previous => SPACE_LEFT,
         Direction::Next => SPACE_RIGHT,
@@ -57,23 +63,44 @@ pub(super) fn space_shortcut(direction: Direction) -> Option<Vec<CGEvent>> {
         return None;
     }
     let (virtual_key, modifiers) = hotkey_value(cgs, hotkey)?;
-    keystroke(
+    Some(SpaceShortcut {
         virtual_key,
-        CGEventFlags::from_bits_truncate(u64::from(modifiers)),
-    )
+        flags: CGEventFlags::from_bits_truncate(u64::from(modifiers)),
+    })
 }
 
-/// The edges a physical keyboard sends for `virtual_key` under `flags`: each
-/// modifier key down, the key down and up, then the modifiers up in reverse.
+impl SpaceShortcut {
+    /// Type the shortcut on top of whatever modifiers held chords keep down.
+    ///
+    /// The events are built and posted under the held-chord lock, so none
+    /// releases a modifier another binding still holds, and every one is
+    /// built before the first is posted.
+    pub(super) fn post(&self) {
+        super::super::with_held_modifiers(|held| {
+            let Some(events) = keystroke(self.virtual_key, self.flags, held) else {
+                tracing::warn!("could not build the Space shortcut's key events");
+                return;
+            };
+            for event in events {
+                event.post(CGEventTapLocation::HID);
+            }
+        });
+    }
+}
+
+/// The edges a physical keyboard sends for `virtual_key` under `flags` while
+/// `held` modifiers are already down: each missing modifier key down, the
+/// key down and up, then those modifiers up in reverse. A modifier already
+/// held stays down throughout, as it would on a physical keyboard.
 ///
 /// WindowServer matches a synthesized symbolic hotkey only in this shape: a
 /// key event that merely carries the modifier flags is ignored, as is an
 /// arrow key without the numeric-pad flag every Apple keyboard sets on it
 /// (#1653).
-fn keystroke(virtual_key: u16, flags: CGEventFlags) -> Option<Vec<CGEvent>> {
-    let held: Vec<HeldKey> = MODIFIER_KEYS
+fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Option<Vec<CGEvent>> {
+    let pressed: Vec<HeldKey> = MODIFIER_KEYS
         .iter()
-        .filter(|(flag, _)| flags.contains(*flag))
+        .filter(|&&(flag, key)| flags.contains(flag) && !held.contains(key))
         .map(|&(_, key)| key)
         .collect();
     let mut key_flags = MODIFIER_KEYS
@@ -83,19 +110,23 @@ fn keystroke(virtual_key: u16, flags: CGEventFlags) -> Option<Vec<CGEvent>> {
         key_flags |= CGEventFlags::CGEventFlagNumericPad;
     }
 
-    let mut modifiers = HeldModifiers::default();
-    let mut events = Vec::with_capacity(held.len() * 2 + 2);
-    for &key in &held {
+    let mut modifiers = held;
+    let mut events = Vec::with_capacity(pressed.len() * 2 + 2);
+    for &key in &pressed {
         let (vk, edge_flags) = super::held_key_event(key, KeyPhase::Down, &mut modifiers)?;
         events.push(super::key_event(vk, edge_flags, KeyPhase::Down)?);
     }
     let chord = super::held_modifier_flags(modifiers) | key_flags;
     events.push(super::key_event(virtual_key, chord, KeyPhase::Down)?);
     events.push(super::key_event(virtual_key, chord, KeyPhase::Up)?);
-    for &key in held.iter().rev() {
+    for &key in pressed.iter().rev() {
         let (vk, edge_flags) = super::held_key_event(key, KeyPhase::Up, &mut modifiers)?;
         events.push(super::key_event(vk, edge_flags, KeyPhase::Up)?);
     }
+    debug_assert_eq!(
+        modifiers, held,
+        "a keystroke leaves held modifiers as it found them"
+    );
     Some(events)
 }
 
@@ -235,7 +266,7 @@ mod tests {
 
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventType, EventField};
 
-    use super::{HotkeyRestore, keystroke};
+    use super::{HeldKey, HeldModifiers, HotkeyRestore, keystroke};
 
     const NONE: CGEventFlags = CGEventFlags::CGEventFlagNull;
     const COMMAND: CGEventFlags = CGEventFlags::CGEventFlagCommand;
@@ -279,7 +310,8 @@ mod tests {
     /// is how Apple keyboards report arrow keys.
     #[test]
     fn space_shortcut_presses_control_as_a_key_and_flags_the_arrow_like_a_keyboard() {
-        let events = keystroke(0x7c, CONTROL | FN).expect("keyboard events");
+        let events =
+            keystroke(0x7c, CONTROL | FN, HeldModifiers::default()).expect("keyboard events");
         assert_eq!(
             edges(&events),
             [
@@ -295,7 +327,8 @@ mod tests {
     /// its modifiers are released in the reverse of their press order.
     #[test]
     fn keystroke_nests_several_modifiers_and_flags_only_arrows_as_numeric_pad() {
-        let events = keystroke(0x14, COMMAND | SHIFT).expect("keyboard events");
+        let events =
+            keystroke(0x14, COMMAND | SHIFT, HeldModifiers::default()).expect("keyboard events");
         assert_eq!(
             edges(&events),
             [
@@ -309,10 +342,43 @@ mod tests {
         );
     }
 
+    /// A modifier a held chord already owns is neither pressed again nor
+    /// released: releasing it would end that chord's hold early. Other held
+    /// modifiers ride on the key, as they would on a physical keyboard.
+    #[test]
+    fn keystroke_leaves_modifiers_held_by_other_chords_down() {
+        let mut held = HeldModifiers::default();
+        held.set(HeldKey::Control, true);
+        held.set(HeldKey::Shift, true);
+        let events = keystroke(0x7c, CONTROL | FN, held).expect("keyboard events");
+        assert_eq!(
+            edges(&events),
+            [
+                (0x7c, Down, CONTROL | SHIFT | FN | PAD),
+                (0x7c, Up, CONTROL | SHIFT | FN | PAD),
+            ]
+        );
+
+        let mut held = HeldModifiers::default();
+        held.set(HeldKey::Shift, true);
+        let events = keystroke(0x7c, CONTROL | FN, held).expect("keyboard events");
+        assert_eq!(
+            edges(&events),
+            [
+                (0x3b, Flags, CONTROL | SHIFT),
+                (0x7c, Down, CONTROL | SHIFT | FN | PAD),
+                (0x7c, Up, CONTROL | SHIFT | FN | PAD),
+                (0x3b, Flags, SHIFT),
+            ]
+        );
+    }
+
     /// The hook skips OpenLogi's own key edges only by their tag.
     #[test]
     fn every_keystroke_edge_carries_the_synthetic_tag() {
-        for event in keystroke(0x7b, CONTROL | FN).expect("keyboard events") {
+        for event in
+            keystroke(0x7b, CONTROL | FN, HeldModifiers::default()).expect("keyboard events")
+        {
             assert_eq!(
                 event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
                 crate::SYNTHETIC_EVENT_USER_DATA

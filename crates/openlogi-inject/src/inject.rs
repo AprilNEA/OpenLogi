@@ -440,6 +440,17 @@ fn hold_transition(
     }
 }
 
+/// Run `post` with the synthetic modifiers held chords keep down, under the
+/// lock that orders held-chord edges.
+///
+/// A one-shot keystroke posted through this neither releases a modifier a
+/// held chord still owns nor interleaves with a held transition.
+#[cfg(target_os = "macos")]
+fn with_held_modifiers<R>(post: impl FnOnce(HeldModifiers) -> R) -> R {
+    let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    post(output.modifiers())
+}
+
 /// Let the frontmost app's menus answer shortcuts the keyboard layout
 /// remaps, such as Back and Forward on Spanish or German layouts. Call once
 /// on the main thread before its run loop starts.
