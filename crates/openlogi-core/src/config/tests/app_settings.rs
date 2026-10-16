@@ -65,6 +65,24 @@ fn app_settings_smooth_scroll_is_opt_in_and_roundtrips() {
 }
 
 #[test]
+fn app_settings_macos_battery_widget_is_opt_in_and_roundtrips() {
+    for body in [
+        "schema_version = 6",
+        "schema_version = 6\n[app_settings]\nlaunch_at_login = false",
+    ] {
+        let parsed: Config = toml::from_str(body).expect("config predating the setting loads");
+        assert!(!parsed.app_settings.macos_battery_widget);
+    }
+
+    let mut cfg = Config::default();
+    assert!(!cfg.app_settings.macos_battery_widget);
+    cfg.app_settings.macos_battery_widget = true;
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("macos_battery_widget = true"));
+    assert!(write_and_read(&cfg).app_settings.macos_battery_widget);
+}
+
+#[test]
 fn app_settings_vertical_scroll_sensitivity_defaults_and_roundtrips() {
     let default: Config = toml::from_str("schema_version = 5").expect("parse defaults");
     assert_eq!(

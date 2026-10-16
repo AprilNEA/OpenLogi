@@ -442,6 +442,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             agent_version: "/private/Agent.app".to_string(),
             input_monitoring_granted: false,
             hid_open_failures: true,
+            battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
         },
         inventory: profile.inventories.clone(),
         standalone: profile.standalone.clone(),
