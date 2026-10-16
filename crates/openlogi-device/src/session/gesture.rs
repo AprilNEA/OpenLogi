@@ -124,7 +124,7 @@ pub enum CapturedInput {
 /// as divertable — the same mechanism Options+ uses to rebind a tilt. Arming
 /// only ever diverts what a device's own `getCtrlIdInfo` reports, so listing
 /// them here is inert on a mouse whose wheel does not tilt.
-pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 9] = {
+pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 10] = {
     // Destructured rather than indexed: a family that gains a CID stops
     // compiling here instead of silently staying out of the table.
     let [
@@ -133,7 +133,7 @@ pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 9] = {
         back_multiplatform_alt,
         back_generic,
     ] = reprog_controls::BACK_CIDS;
-    let [forward, forward_multiplatform] = reprog_controls::FORWARD_CIDS;
+    let [forward, forward_multiplatform, forward_presenter] = reprog_controls::FORWARD_CIDS;
     [
         (0x0052, ButtonId::MiddleClick),
         (back, ButtonId::Back),
@@ -142,6 +142,7 @@ pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 9] = {
         (back_generic, ButtonId::Back),
         (forward, ButtonId::Forward),
         (forward_multiplatform, ButtonId::Forward),
+        (forward_presenter, ButtonId::Forward),
         (0x005b, ButtonId::WheelTiltLeft),
         (0x005d, ButtonId::WheelTiltRight),
     ]

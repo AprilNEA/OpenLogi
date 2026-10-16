@@ -20,7 +20,7 @@ ignores:
 rule:
   all:
     - kind: integer_literal
-    - regex: '^0x00(53|56|[bB][dD]|[cC][eE]|[cC][fF]|[dD][bB])$'
+    - regex: '^0x00(53|56|[bB][dD]|[cC][eE]|[cC][fF]|[dD]9|[dD][bB])$'
     - not:
         inside:
           kind: mod_item
