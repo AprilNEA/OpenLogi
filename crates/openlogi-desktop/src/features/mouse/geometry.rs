@@ -229,7 +229,9 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
             Some(MouseControlId::Button(ButtonId::WheelTiltRight))
         }
         "SLOT_NAME_BACK_BUTTON" => Some(MouseControlId::Button(ButtonId::Back)),
-        "SLOT_NAME_FORWARD_BUTTON" => Some(MouseControlId::Button(ButtonId::Forward)),
+        "SLOT_NAME_FORWARD_BUTTON" | "SLOT_NAME_NEXT_BUTTON" => {
+            Some(MouseControlId::Button(ButtonId::Forward))
+        }
         // MX Ergo names its precision-mode/DPI-shift button after its
         // Options+ function rather than "DPI" or "ModeShift".
         "SLOT_NAME_MODESHIFT_BUTTON"
@@ -304,6 +306,20 @@ mod tests {
             assert_eq!(
                 map_slot_name(name),
                 Some(MouseControlId::Button(ButtonId::WheelTiltRight))
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_slot_names_map_to_back_and_forward() {
+        assert_eq!(
+            map_slot_name("SLOT_NAME_BACK_BUTTON"),
+            Some(MouseControlId::Button(ButtonId::Back))
+        );
+        for name in ["SLOT_NAME_FORWARD_BUTTON", "SLOT_NAME_NEXT_BUTTON"] {
+            assert_eq!(
+                map_slot_name(name),
+                Some(MouseControlId::Button(ButtonId::Forward))
             );
         }
     }

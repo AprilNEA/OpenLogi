@@ -220,6 +220,10 @@ impl Capabilities {
                 lighting: true,
                 ..Self::default()
             },
+            DeviceKind::Presenter => Self {
+                buttons: true,
+                ..Self::default()
+            },
             _ => Self::default(),
         }
     }
@@ -800,6 +804,7 @@ mod tests {
         assert!(mouse.buttons && mouse.pointer && !mouse.lighting);
         assert!(!mouse.thumbwheel);
         assert!(Capabilities::presumed_from_kind(DeviceKind::Keyboard).lighting);
+        assert!(Capabilities::presumed_from_kind(DeviceKind::Presenter).buttons);
         // An unidentified device presumes nothing — it must be measured.
         assert_eq!(
             Capabilities::presumed_from_kind(DeviceKind::Unknown),

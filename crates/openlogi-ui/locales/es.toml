@@ -673,3 +673,7 @@ triangle_key = "Tecla Triángulo"
 diamond_key = "Tecla Rombo"
 star_key = "Tecla Estrella"
 control_key = "Control"
+
+[presenter]
+next_long_press = "Botón Siguiente (pulsación larga)"
+back_long_press = "Botón Atrás (pulsación larga)"

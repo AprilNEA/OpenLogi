@@ -673,3 +673,7 @@ triangle_key = "Πλήκτρο τριγώνου"
 diamond_key = "Πλήκτρο ρόμβου"
 star_key = "Πλήκτρο αστεριού"
 control_key = "Στοιχείο ελέγχου"
+
+[presenter]
+next_long_press = "Κουμπί Επόμενο (παρατεταμένο πάτημα)"
+back_long_press = "Κουμπί Πίσω (παρατεταμένο πάτημα)"

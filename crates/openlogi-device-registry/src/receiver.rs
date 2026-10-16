@@ -95,6 +95,8 @@ pub const RECEIVERS: &[ReceiverDescriptor] = &[
         ReceiverProtocol::Unifying,
     ),
     ReceiverDescriptor::logitech(0xc548, ReceiverBrand::Bolt, ReceiverProtocol::Bolt),
+    // Logitech R500 / R500s presentation remote USB receiver (C-U0016).
+    ReceiverDescriptor::logitech(0xc540, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
     // Lightspeed receiver, verified with a PRO X SUPERLIGHT 2 DEX (WPID 0x40b8).
     ReceiverDescriptor::logitech(
         0xc54d,
@@ -128,6 +130,14 @@ mod tests {
                 receiver.product_id
             );
         }
+    }
+
+    #[test]
+    fn r500_receiver_is_nano_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc540).expect("c540 receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Nano);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
     }
 
     #[test]

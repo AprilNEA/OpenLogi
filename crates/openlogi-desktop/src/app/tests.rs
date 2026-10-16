@@ -1139,6 +1139,44 @@ fn keyboard_without_asset_hides_buttons_tab() {
 }
 
 #[test]
+fn presenter_without_asset_hides_buttons_tab() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        ..Capabilities::default()
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Presenter, caps));
+    assert!(
+        !tabs.contains(&DetailTab::Buttons),
+        "mouse model shown for presenter without asset"
+    );
+}
+
+#[test]
+fn presenter_with_asset_shows_buttons_tab() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        ..Capabilities::default()
+    });
+    let mut presenter = record(DeviceKind::Presenter, caps);
+    presenter.asset = Some(ResolvedAsset {
+        depot: "r500".to_string(),
+        display_name: "Logitech R500".to_string(),
+        kind: Some(DeviceKind::Presenter),
+        image_path: std::path::PathBuf::from("/tmp/r500.png"),
+        hero_image_path: None,
+        glow: None,
+        metadata: openlogi_assets::Metadata::default(),
+        png_width: 400,
+        png_height: 800,
+    });
+    let tabs = DetailTab::tabs_for(&presenter);
+    assert!(
+        tabs.contains(&DetailTab::Buttons),
+        "buttons tab missing for presenter with asset"
+    );
+}
+
+#[test]
 fn keyboard_with_buttons_shows_keys_tab() {
     let caps = Some(Capabilities {
         buttons: true,

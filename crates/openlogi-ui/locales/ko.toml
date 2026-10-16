@@ -673,3 +673,7 @@ triangle_key = "삼각형 키"
 diamond_key = "마름모 키"
 star_key = "별 키"
 control_key = "컨트롤"
+
+[presenter]
+next_long_press = "다음 버튼(길게 누르기)"
+back_long_press = "뒤로 버튼(길게 누르기)"

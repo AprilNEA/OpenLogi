@@ -673,3 +673,7 @@ triangle_key = "Dreieck-Taste"
 diamond_key = "Raute-Taste"
 star_key = "Stern-Taste"
 control_key = "Steuerelement"
+
+[presenter]
+next_long_press = "Weiter-Taste (langes Drücken)"
+back_long_press = "Zurück-Taste (langes Drücken)"

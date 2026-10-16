@@ -673,3 +673,7 @@ triangle_key = "Klawisz trójkąta"
 diamond_key = "Klawisz rombu"
 star_key = "Klawisz gwiazdy"
 control_key = "Element sterujący"
+
+[presenter]
+next_long_press = "Przycisk Dalej (długie naciśnięcie)"
+back_long_press = "Przycisk Wstecz (długie naciśnięcie)"

@@ -88,7 +88,8 @@ pub const BACK_CIDS: [u16; 4] = [0x0053, 0x00BD, 0x00CE, 0x00DB];
 /// Known CIDs:
 /// - `0x0056` — Forward (classic mouse CID, used by MX Vertical)
 /// - `0x00CF` — Multiplatform Forward
-pub const FORWARD_CIDS: [u16; 2] = [0x0056, 0x00CF];
+/// - `0x00D9` — Next button (Logi R500 / presentation remotes)
+pub const FORWARD_CIDS: [u16; 3] = [0x0056, 0x00CF, 0x00D9];
 
 /// Identity and capabilities of one reprogrammable control, as returned by
 /// `getCtrlIdInfo`.

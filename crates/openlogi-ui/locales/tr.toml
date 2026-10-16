@@ -673,3 +673,7 @@ triangle_key = "Üçgen tuşu"
 diamond_key = "Baklava tuşu"
 star_key = "Yıldız tuşu"
 control_key = "Denetim"
+
+[presenter]
+next_long_press = "İleri Düğmesi (Uzun Basma)"
+back_long_press = "Geri Düğmesi (Uzun Basma)"
