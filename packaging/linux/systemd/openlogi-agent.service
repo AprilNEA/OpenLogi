@@ -13,6 +13,7 @@
 [Unit]
 Description=OpenLogi background agent (Logitech HID++ device control)
 After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
