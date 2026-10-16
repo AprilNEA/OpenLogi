@@ -114,8 +114,11 @@ impl DetailTab {
         // its own stated "gated on Capabilities, not DeviceKind" design) — a
         // real keyboard never reports a pointer sensor, so trusting a
         // positive measured reading here can't misfire the other way.
-        let can_show_mouse_model =
-            caps.pointer || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        let can_show_mouse_model = caps.pointer
+            || matches!(
+                record.kind,
+                DeviceKind::Mouse | DeviceKind::Trackball | DeviceKind::Presenter
+            );
         let mut tabs = Vec::new();
         // A webcam is a UVC device with no HID++ capabilities; its detail screen
         // leads with the live preview, then the generic info tab.
