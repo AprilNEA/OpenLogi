@@ -673,3 +673,7 @@ triangle_key = "三角形鍵"
 diamond_key = "菱形鍵"
 star_key = "星形鍵"
 control_key = "控制項"
+
+[presenter]
+next_long_press = "「前進」按鈕（長按）"
+back_long_press = "「後退」按鈕（長按）"

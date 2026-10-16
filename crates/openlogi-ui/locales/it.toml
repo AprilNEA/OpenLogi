@@ -673,3 +673,7 @@ triangle_key = "Tasto Triangolo"
 diamond_key = "Tasto Rombo"
 star_key = "Tasto Stella"
 control_key = "Controllo"
+
+[presenter]
+next_long_press = "Pulsante Avanti (pressione prolungata)"
+back_long_press = "Pulsante Indietro (pressione prolungata)"

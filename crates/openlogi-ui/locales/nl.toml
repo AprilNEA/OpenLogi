@@ -673,3 +673,7 @@ triangle_key = "Driehoek-toets"
 diamond_key = "Ruit-toets"
 star_key = "Ster-toets"
 control_key = "Bediening"
+
+[presenter]
+next_long_press = "Volgende-knop (lang indrukken)"
+back_long_press = "Vorige-knop (lang indrukken)"

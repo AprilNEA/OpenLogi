@@ -673,3 +673,7 @@ triangle_key = "Kolmio-näppäin"
 diamond_key = "Vinoneliö-näppäin"
 star_key = "Tähti-näppäin"
 control_key = "Ohjain"
+
+[presenter]
+next_long_press = "Seuraava-painike (pitkä painallus)"
+back_long_press = "Takaisin-painike (pitkä painallus)"

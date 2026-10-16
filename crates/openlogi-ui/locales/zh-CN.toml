@@ -673,3 +673,7 @@ triangle_key = "三角形键"
 diamond_key = "菱形键"
 star_key = "星形键"
 control_key = "控件"
+
+[presenter]
+next_long_press = "“前进”按钮（长按）"
+back_long_press = "“后退”按钮（长按）"

@@ -673,3 +673,7 @@ triangle_key = "Клавіша «Трохкутнік»"
 diamond_key = "Клавіша «Ромб»"
 star_key = "Клавіша «Зорка»"
 control_key = "Элемент кіравання"
+
+[presenter]
+next_long_press = "Кнопка «Наперад» (доўгі націск)"
+back_long_press = "Кнопка «Назад» (доўгі націск)"

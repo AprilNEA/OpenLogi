@@ -673,3 +673,7 @@ triangle_key = "Klávesa trojúhelníku"
 diamond_key = "Klávesa kosočtverce"
 star_key = "Klávesa hvězdy"
 control_key = "Control"
+
+[presenter]
+next_long_press = "Tlačítko Další (dlouhé stisknutí)"
+back_long_press = "Tlačítko Zpět (dlouhé stisknutí)"

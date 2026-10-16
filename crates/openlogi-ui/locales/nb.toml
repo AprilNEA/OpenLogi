@@ -673,3 +673,7 @@ triangle_key = "Trekant-tast"
 diamond_key = "Rombe-tast"
 star_key = "Stjerne-tast"
 control_key = "Kontroll"
+
+[presenter]
+next_long_press = "Neste-knapp (langt trykk)"
+back_long_press = "Tilbake-knapp (langt trykk)"

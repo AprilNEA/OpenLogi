@@ -673,3 +673,7 @@ triangle_key = "Touche Triangle"
 diamond_key = "Touche Losange"
 star_key = "Touche Étoile"
 control_key = "Commande"
+
+[presenter]
+next_long_press = "Bouton Suivant (pression longue)"
+back_long_press = "Bouton Précédent (pression longue)"

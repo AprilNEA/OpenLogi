@@ -673,3 +673,7 @@ triangle_key = "Triangle Key"
 diamond_key = "Diamond Key"
 star_key = "Star Key"
 control_key = "Control"
+
+[presenter]
+next_long_press = "Next Button (Long Press)"
+back_long_press = "Back Button (Long Press)"

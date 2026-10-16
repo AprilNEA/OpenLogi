@@ -673,3 +673,7 @@ triangle_key = "Triangel-tangent"
 diamond_key = "Romb-tangent"
 star_key = "Stjärn-tangent"
 control_key = "Kontroll"
+
+[presenter]
+next_long_press = "Nästa-knapp (långt tryck)"
+back_long_press = "Bakåt-knapp (långt tryck)"
