@@ -57,17 +57,20 @@ mod main_thread;
 )]
 mod menu_shortcut;
 mod scroll;
-/// DockSwipe events with read-only, per-display Space confirmation.
+/// Space switches — the user's Space shortcut, or a DockSwipe when it is
+/// disabled — with read-only, per-display Space confirmation.
 #[expect(
     unsafe_code,
     reason = "read-only SkyLight SPI and AppKit notification registration require FFI"
 )]
 mod spaces;
-/// Screenshots, posted through their system symbolic hotkey records.
+/// Screenshots and Space switches, posted through their system symbolic
+/// hotkey records.
 ///
-/// That respects the user's configured shortcut instead of assuming one, is
-/// independent of the keyboard layout because each record names a physical
-/// key, and temporarily enables a hotkey the user has disabled.
+/// That respects the user's configured shortcut instead of assuming one, and
+/// is independent of the keyboard layout because each record names a
+/// physical key. Screenshots temporarily enable a hotkey the user has
+/// disabled; Space switches only read theirs.
 #[expect(
     unsafe_code,
     reason = "CGS symbolic hotkey SPI is only reachable via dlopen/dlsym FFI"
