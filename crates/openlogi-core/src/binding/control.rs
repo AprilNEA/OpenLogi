@@ -363,6 +363,19 @@ pub const KNOWN_CONTROLS: &[KnownControl] = &[
     ),
     known(0x01a5, "KeyDiamond", "Diamond Key", "keyboard.diamond_key"),
     known(0x01a6, "KeyStar", "Star Key", "keyboard.star_key"),
+    // Presenter long-press controls (Logi R500 / Spotlight).
+    known(
+        0x00da,
+        "PresenterNextLongPress",
+        "Next Button (Long Press)",
+        "presenter.next_long_press",
+    ),
+    known(
+        0x00dc,
+        "PresenterBackLongPress",
+        "Back Button (Long Press)",
+        "presenter.back_long_press",
+    ),
 ];
 
 #[cfg(test)]
