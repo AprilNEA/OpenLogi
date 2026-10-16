@@ -147,13 +147,8 @@ impl DetailTab {
         // (it's in the generic action catalog, not gated on haptics or a
         // mouse model), so any keyboard that gets a Keys tab needs the ring
         // editor too — otherwise the ring opens but has nothing configured
-        // in it and no way to configure it (#1833). Presenters are handheld
-        // remotes, not pointer devices, and do not use the cursor-centred
-        // Actions Ring overlay.
-        let shows_actions_ring_tab =
-            (caps.haptic_panel || (caps.buttons && can_show_mouse_model) || shows_keys_tab)
-                && !matches!(record.kind, DeviceKind::Presenter);
-        if shows_actions_ring_tab {
+        // in it and no way to configure it (#1833).
+        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) || shows_keys_tab {
             tabs.push(Self::ActionsRing);
         }
         if caps.pointer || caps.scroll_inversion || caps.hires_wheel {

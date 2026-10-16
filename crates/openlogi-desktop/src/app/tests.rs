@@ -1174,10 +1174,6 @@ fn presenter_with_asset_shows_buttons_tab() {
         tabs.contains(&DetailTab::Buttons),
         "buttons tab missing for presenter with asset"
     );
-    assert!(
-        !tabs.contains(&DetailTab::ActionsRing),
-        "Actions Ring tab should not be shown for presenter"
-    );
 }
 
 #[test]
