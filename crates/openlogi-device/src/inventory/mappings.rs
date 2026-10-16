@@ -241,6 +241,7 @@ pub(crate) fn legacy_battery_info(
         ),
     };
     BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage,
         level,
         status,

@@ -7,8 +7,8 @@
 //!
 //! The menu is smaller than macOS's: Settings / About / Check-for-Updates go
 //! through `openlogi://` deeplinks there, and Windows has no scheme
-//! registration yet — so just "Show Main Window" (also the left-click action)
-//! and "Quit OpenLogi". Show focuses the running GUI if there is one (a
+//! registration yet. Device battery rows sit between "Show Main Window"
+//! (also the left-click action) and "Quit OpenLogi". Show focuses the running GUI if there is one (a
 //! second launch would exit on the `openlogi.lock` singleton) or spawns the
 //! sibling `OpenLogi.exe` / `openlogi-desktop.exe`. Quit terminates the GUI
 //! first — a surviving GUI's IPC retry loop would immediately respawn the
@@ -17,33 +17,53 @@
 //! Everything runs on one dedicated thread: the hidden window, its message
 //! pump, and the menu. The icon is re-added when Explorer restarts (the
 //! `TaskbarCreated` broadcast), and the glyph tracks the taskbar theme
-//! (black on a light taskbar, white on a dark one) at install time.
+//! (black on a light taskbar, white on a dark one), with orange/red warnings.
+//! Device rows are owner-drawn inside the native menu with MSAA labels.
 
 #![expect(
     unsafe_code,
     reason = "raw win32: Shell_NotifyIconW + a hidden window's message pump — localized here"
 )]
-use std::cell::RefCell;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::HBRUSH;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_STATE, NIF_TIP, NIIF_WARNING, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NIS_HIDDEN, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CW_USEDEFAULT, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW,
-    GetWindowThreadProcessId, HICON, IDI_APPLICATION, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR,
-    LoadIconW, MF_SEPARATOR, MF_STRING, MSG, RegisterClassW, RegisterWindowMessageW, SW_RESTORE,
-    SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
+    AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassW,
+    RegisterWindowMessageW, SW_RESTORE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    SetForegroundWindow, SetWindowPos, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_DRAWITEM, WM_LBUTTONUP,
+    WM_MEASUREITEM, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW,
     WS_OVERLAPPED,
 };
 
 use crate::shutdown::{self, ShutdownRequestSender};
+
+mod battery;
+mod icon;
+
+const WM_BATTERY: u32 = WM_APP + 2;
+const WM_BATTERY_NOTIFY: u32 = WM_APP + 3;
+static TRAY_HWND: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+// Adapted from yuzi-co’s PR #964: keep payloads in process-owned memory.
+// Window messages are bare wakeups, never pointers supplied by other processes.
+struct Balloon {
+    title: String,
+    body: String,
+}
+static BALLOONS: Mutex<VecDeque<Balloon>> = Mutex::new(VecDeque::new());
 
 /// Tray callback message the icon posts to the hidden window.
 const WM_TRAY: u32 = WM_APP + 1;
@@ -57,25 +77,21 @@ const ID_QUIT: usize = 2;
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
-    /// Where the win32 tray callback hands process termination to the async
-    /// lifecycle. The callback and message pump share this one tray thread.
+    static VISIBLE: Cell<bool> = const { Cell::new(true) };
+    static CURRENT_ICON: RefCell<Option<icon::Icon>> = const { RefCell::new(None) };
+    /// The callback hands termination to the async lifecycle on this tray thread.
     static SHUTDOWN_TX: RefCell<Option<ShutdownRequestSender>> = const { RefCell::new(None) };
 }
 
-/// Host the tray icon on its own thread. No-op when the user disabled the
-/// menu-bar/tray preference (same `show_in_menu_bar` setting macOS honors;
-/// takes effect on the agent's next launch, as there).
+/// Host the tray icon on its own thread. The disabled tray remains hidden so
+/// independent battery notifications still have a Windows notification source.
 ///
 /// Failures are logged, never fatal — the agent's real work (hook, HID++,
 /// IPC) must not die because a shell icon couldn't be installed.
 pub fn spawn(show_in_tray: bool, shutdown_tx: ShutdownRequestSender) {
-    if !show_in_tray {
-        info!("tray icon disabled by preference — agent stays invisible");
-        return;
-    }
     if let Err(e) = std::thread::Builder::new()
         .name("openlogi-tray".into())
-        .spawn(move || run_tray_loop(shutdown_tx))
+        .spawn(move || run_tray_loop(show_in_tray, shutdown_tx))
     {
         warn!(error = %e, "could not spawn the tray thread");
     }
@@ -83,12 +99,16 @@ pub fn spawn(show_in_tray: bool, shutdown_tx: ShutdownRequestSender) {
 
 /// Create the hidden window, install the icon, and pump messages for the
 /// agent's lifetime.
-fn run_tray_loop(shutdown_tx: ShutdownRequestSender) {
+fn run_tray_loop(show_in_tray: bool, shutdown_tx: ShutdownRequestSender) {
+    VISIBLE.set(show_in_tray);
     SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
     let class_name = wide("OpenLogiAgentTray");
     // SAFETY: plain win32 registration/creation calls with pointers that
     // outlive the calls; the class name buffer lives until thread exit.
     unsafe {
+        windows_sys::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(
+            windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
         let hinstance = GetModuleHandleW(std::ptr::null());
         let wc = WNDCLASSW {
             style: 0,
@@ -131,7 +151,9 @@ fn run_tray_loop(shutdown_tx: ShutdownRequestSender) {
             RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             Ordering::Relaxed,
         );
+        TRAY_HWND.store(hwnd, Ordering::Release);
         add_tray_icon(hwnd);
+        drain_balloons(hwnd);
         info!("tray icon installed");
 
         let mut msg: MSG = std::mem::zeroed();
@@ -139,6 +161,8 @@ fn run_tray_loop(shutdown_tx: ShutdownRequestSender) {
             TranslateMessage(&raw const msg);
             DispatchMessageW(&raw const msg);
         }
+        TRAY_HWND.store(std::ptr::null_mut(), Ordering::Release);
+        CURRENT_ICON.with_borrow_mut(|icon| *icon = None);
     }
 }
 
@@ -154,6 +178,33 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_BATTERY | WM_SETTINGCHANGE | WM_THEMECHANGED => {
+            // SAFETY: own tray window, on its message-pump thread.
+            unsafe { update_tray_icon(hwnd, NIM_MODIFY) };
+            0
+        }
+        WM_BATTERY_NOTIFY => {
+            drain_balloons(hwnd);
+            0
+        }
+        WM_MEASUREITEM => {
+            // SAFETY: the OS supplies the measurement struct for this message.
+            if unsafe { battery::measure(lparam) } {
+                1
+            } else {
+                // SAFETY: unchanged OS message and live window.
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
+        }
+        WM_DRAWITEM => {
+            // SAFETY: the OS supplies the drawing struct and DC for this message.
+            if unsafe { battery::draw(lparam) } {
+                1
+            } else {
+                // SAFETY: unchanged OS message and live window.
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
+        }
         WM_TRAY => {
             match lparam as u32 {
                 WM_LBUTTONUP => open_or_focus_gui(),
@@ -182,61 +233,112 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
-/// Install the icon (idempotent enough for the re-add path: a duplicate
-/// `NIM_ADD` fails silently and the existing icon stays).
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "NOTIFYICONDATAW is a few hundred bytes"
-)]
+/// Install or restore the current brand color after Explorer restarts.
 unsafe fn add_tray_icon(hwnd: HWND) {
-    // SAFETY: `nid` is fully initialized below; the tip buffer is bounded.
+    // SAFETY: same live tray window and owning thread as the caller.
     unsafe {
-        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = 1;
-        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-        nid.uCallbackMessage = WM_TRAY;
-        nid.hIcon = tray_icon();
-        let tip = wide("OpenLogi");
-        nid.szTip[..tip.len()].copy_from_slice(&tip);
-        if Shell_NotifyIconW(NIM_ADD, &raw const nid) == 0 {
-            warn!("Shell_NotifyIconW(NIM_ADD) failed — no tray icon");
+        update_tray_icon(hwnd, NIM_ADD);
+    }
+}
+
+unsafe fn update_tray_icon(hwnd: HWND, operation: u32) {
+    let icon = icon::Icon::new(crate::battery::snapshot().severity);
+    // SAFETY: fully initialized notification data; icon remains owned until
+    // replaced successfully. Windows receives only bounded NUL-terminated text.
+    unsafe {
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: u32::try_from(size_of::<NOTIFYICONDATAW>()).unwrap_or(0),
+            hWnd: hwnd,
+            uID: 1,
+            uFlags: NIF_ICON,
+            hIcon: icon.handle,
+            ..NOTIFYICONDATAW::default()
+        };
+        if operation == NIM_ADD {
+            nid.uFlags |= NIF_MESSAGE | NIF_TIP | NIF_STATE;
+            nid.uCallbackMessage = WM_TRAY;
+            nid.dwStateMask = NIS_HIDDEN;
+            nid.dwState = if VISIBLE.get() { 0 } else { NIS_HIDDEN };
+            copy_truncated(&mut nid.szTip, "OpenLogi");
+        }
+        if Shell_NotifyIconW(operation, &raw const nid) == 0 {
+            warn!(operation, "could not update the Windows tray icon");
+        } else {
+            CURRENT_ICON.with_borrow_mut(|slot| *slot = Some(icon));
         }
     }
 }
 
-/// The tray glyph: the brand mark in black on a light taskbar, white on a
-/// dark one (`SystemUsesLightTheme`, default dark). Both variants are the
-/// macOS status-item asset; `CreateIconFromResourceEx` accepts raw PNG
-/// buffers (the same PNG-compressed form .ico files carry since Vista).
-/// Falls back to the stock application icon rather than showing nothing.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the PNG is embedded at build time and is a few kilobytes"
-)]
-unsafe fn tray_icon() -> HICON {
-    const BLACK: &[u8] = include_bytes!("../assets/tray-icon@2x.png");
-    const WHITE: &[u8] = include_bytes!("../assets/tray-icon-white@2x.png");
-    let png: &[u8] = if taskbar_is_light() { BLACK } else { WHITE };
-    // SAFETY: the buffer is a valid embedded PNG; the call copies it.
-    let icon = unsafe {
-        CreateIconFromResourceEx(
-            png.as_ptr(),
-            png.len() as u32,
-            1, // fIcon (not a cursor)
-            0x0003_0000,
-            0, // cx/cy 0: use the resource's own size
-            0,
-            LR_DEFAULTCOLOR,
-        )
-    };
-    if icon.is_null() {
-        warn!("tray icon PNG rejected — falling back to the stock icon");
-        // SAFETY: loading a stock system icon.
-        unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) }
-    } else {
-        icon
+/// Refresh the tray from the shared snapshot, from any agent thread.
+pub fn battery_changed() {
+    wake_tray(WM_BATTERY);
+}
+
+/// Queue one native battery notification. The tray thread owns shell interaction.
+pub fn notify_battery(alert: &crate::battery::Alert) {
+    balloons().push_back(Balloon {
+        title: alert.title(),
+        body: alert.body(),
+    });
+    wake_tray(WM_BATTERY_NOTIFY);
+}
+
+fn wake_tray(message: u32) {
+    let hwnd = TRAY_HWND.load(Ordering::Acquire);
+    if hwnd.is_null() {
+        return;
+    } // startup reads the snapshot and drains alerts
+    // SAFETY: no message payload pointers; the atomic publishes our live window.
+    if unsafe { PostMessageW(hwnd, message, 0, 0) } == 0 {
+        warn!(message, "could not wake the Windows tray thread");
+    }
+}
+
+fn balloons() -> std::sync::MutexGuard<'static, VecDeque<Balloon>> {
+    BALLOONS.lock().unwrap_or_else(|error| {
+        warn!("recovering the battery notification queue after a thread panic");
+        error.into_inner()
+    })
+}
+
+fn drain_balloons(hwnd: HWND) {
+    loop {
+        let next = balloons().pop_front();
+        let Some(balloon) = next else {
+            break;
+        };
+        // SAFETY: called on the tray thread for its live window. Drop the queue
+        // lock before calling into the shell, which may run nested messages.
+        unsafe {
+            let mut nid = NOTIFYICONDATAW {
+                cbSize: u32::try_from(size_of::<NOTIFYICONDATAW>()).unwrap_or(0),
+                hWnd: hwnd,
+                uID: 1,
+                uFlags: NIF_INFO,
+                dwInfoFlags: NIIF_WARNING,
+                ..NOTIFYICONDATAW::default()
+            };
+            copy_truncated(&mut nid.szInfoTitle, &balloon.title);
+            copy_truncated(&mut nid.szInfo, &balloon.body);
+            if Shell_NotifyIconW(NIM_MODIFY, &raw const nid) == 0 {
+                warn!("Windows rejected a low-battery notification");
+            }
+        }
+    }
+}
+
+/// Preserve complete Unicode scalars and reserve the final UTF-16 NUL.
+fn copy_truncated(buffer: &mut [u16], text: &str) {
+    buffer.fill(0);
+    let mut used = 0;
+    for character in text.chars() {
+        let mut units = [0; 2];
+        let encoded = character.encode_utf16(&mut units);
+        if used + encoded.len() >= buffer.len() {
+            break;
+        }
+        buffer[used..used + encoded.len()].copy_from_slice(encoded);
+        used += encoded.len();
     }
 }
 
@@ -257,6 +359,11 @@ fn taskbar_is_light() -> bool {
     reason = "TrackPopupMenu returns the command id it was given, never negative"
 )]
 unsafe fn show_menu(hwnd: HWND) {
+    // TrackPopupMenu runs a nested message loop. Ignore repeated tray clicks
+    // until the current menu releases its owner-draw/MSAA row storage.
+    if battery::is_open() {
+        return;
+    }
     // SAFETY: menu handles are created and destroyed here; the
     // SetForegroundWindow/WM_NULL bracket is the documented TrackPopupMenu
     // dance for tray menus (without it the menu won't dismiss on outside
@@ -266,6 +373,20 @@ unsafe fn show_menu(hwnd: HWND) {
         if menu.is_null() {
             return;
         }
+        let mut pt = POINT { x: 0, y: 0 };
+        GetCursorPos(&raw mut pt);
+        // The never-shown window follows the clicked monitor so its DPI and
+        // native menu font match the taskbar which opened this menu.
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            pt.x,
+            pt.y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let devices = battery::DeviceMenu::new(hwnd);
         // Built fresh on every right-click, so `t!` follows a live language
         // switch with no rebuild plumbing.
         AppendMenuW(
@@ -274,6 +395,9 @@ unsafe fn show_menu(hwnd: HWND) {
             ID_SHOW,
             wide(&rust_i18n::t!("app.show_main_window")).as_ptr(),
         );
+        if let Some(devices) = &devices {
+            devices.append(menu);
+        }
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(
             menu,
@@ -282,8 +406,6 @@ unsafe fn show_menu(hwnd: HWND) {
             wide(&rust_i18n::t!("app.quit_openlogi")).as_ptr(),
         );
 
-        let mut pt = POINT { x: 0, y: 0 };
-        GetCursorPos(&raw mut pt);
         SetForegroundWindow(hwnd);
         let cmd = TrackPopupMenu(
             menu,
@@ -296,11 +418,16 @@ unsafe fn show_menu(hwnd: HWND) {
         );
         windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, WM_NULL, 0, 0);
         DestroyMenu(menu);
+        battery::clear();
 
         match cmd as usize {
             ID_SHOW => open_or_focus_gui(),
             ID_QUIT => quit(hwnd),
-            _ => {}
+            id => {
+                if let Some(devices) = devices {
+                    devices.activate(id);
+                }
+            }
         }
     }
 }
@@ -466,12 +593,24 @@ fn wide(s: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_gui_process_name;
+    use super::{copy_truncated, is_gui_process_name};
 
     #[test]
     fn the_cli_binary_is_not_the_gui() {
         assert!(is_gui_process_name("OpenLogi.exe"));
         assert!(is_gui_process_name("openlogi-desktop.exe"));
         assert!(!is_gui_process_name("openlogi.exe")); // the CLI
+    }
+
+    #[test]
+    fn notification_truncation_preserves_surrogate_pairs_and_nul() {
+        let mut short = [99; 4];
+        copy_truncated(&mut short, "AB😀C");
+        assert_eq!(short, [65, 66, 0, 0]);
+        let mut exact = [99; 5];
+        copy_truncated(&mut exact, "AB😀C");
+        assert_eq!(String::from_utf16(&exact[..4]).unwrap(), "AB😀");
+        assert_eq!(exact[4], 0);
+        copy_truncated(&mut [], "ignored");
     }
 }

@@ -46,15 +46,7 @@ pub(crate) fn battery_charging_no_reading(battery: &BatteryInfo) -> bool {
 /// Whether a discharging battery should draw the user's attention: 20% or
 /// less, or a low or critical level from a device without a percentage.
 pub(crate) fn battery_needs_attention(battery: &BatteryInfo) -> bool {
-    let low = match charge_reading(battery) {
-        ChargeReading::Percent(percentage) => percentage <= 20,
-        ChargeReading::Level(level) => matches!(level, BatteryLevel::Low | BatteryLevel::Critical),
-        ChargeReading::NoReading => false,
-    };
-    low && !matches!(
-        battery.status,
-        BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
-    )
+    battery.needs_attention()
 }
 
 /// A battery readout with presentations sized for each desktop context.
@@ -591,6 +583,7 @@ mod tests {
         ];
         for (percentage, level, status, expected) in cases {
             let battery = BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: Some(percentage),
                 level,
                 status,
@@ -601,6 +594,7 @@ mod tests {
 
     fn level_only(level: BatteryLevel, status: BatteryStatus) -> BatteryInfo {
         BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: None,
             level,
             status,
@@ -655,6 +649,7 @@ mod tests {
         ];
         for (percentage, level, status, expected) in cases {
             let battery = BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage,
                 level,
                 status,

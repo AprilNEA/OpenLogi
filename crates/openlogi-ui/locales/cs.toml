@@ -78,6 +78,16 @@ notification_area_visibility_description = "Zobrazovat ikonu OpenLogi v oznamova
 openlogi = "OpenLogi"
 
 [device]
+battery_preferences = "Baterie"
+battery_show_in_menu = "Zobrazit baterii v nabídce"
+battery_warn_low = "Upozornit na slabou baterii"
+battery_warn_description = "Upozornit při 20 % nebo méně a změnit barvu ikony OpenLogi."
+battery_unknown = "Procento nabití baterie není k dispozici"
+battery_tray_charging = "Nabíjení"
+battery_tray_low = "Slabá"
+battery_tray_critical = "Kritická"
+battery_alert_title = "%{name}: slabá baterie"
+battery_alert_body = "Zbývá %{percentage} %. Nabijte zařízení nebo vyměňte baterii."
 no_devices_connected = "Žádná připojená zařízení"
 devices = "Zařízení"
 device_count_plural = "Počet zařízení: %{count}"

@@ -440,15 +440,16 @@ fn agent_snapshot() {
         // Pinned on its own in `foreground_apps` below, like the inventory and
         // pairing fields.
         foreground: ForegroundApps::default(),
+        device_selection: None,
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000");
+    assert_wire(&observed, "03010001010705302e362e36010000000000000000");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:
@@ -499,11 +500,12 @@ fn device_inventory() {
     // A level-only battery (no state-of-charge gauge) carries no percentage.
     assert_wire(
         &BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: None,
             level: BatteryLevel::Good,
             status: BatteryStatus::Discharging,
         },
-        "000200",
+        "00020000",
     );
     let inventory = vec![DeviceInventory {
         receiver: ReceiverInfo {
@@ -519,6 +521,7 @@ fn device_inventory() {
             kind: DeviceKind::Mouse,
             online: true,
             battery: Some(BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: Some(80),
                 level: BatteryLevel::Good,
                 status: BatteryStatus::Discharging,
@@ -558,7 +561,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b0000101015002000001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010107",
     );
 }
 
@@ -888,5 +891,29 @@ fn report_rate_dtos_and_errors() {
             ],
         },
         "fbe803037dfbf401fbe803",
+    );
+}
+
+#[test]
+fn battery_preferences_and_device_selection() {
+    use openlogi_core::config::BatteryPreferences;
+    use openlogi_ipc::DeviceSelection;
+    assert_wire(&BatteryPreferences::default(), "0101");
+    assert_wire(
+        &BatteryPreferences {
+            show_in_menu: false,
+            warn_low: true,
+        },
+        "0001",
+    );
+    let request = DeviceSelection {
+        agent: Identity::new(Run::from_raw(7), Compat::from_raw(32)),
+        request_id: 2,
+        device_key: "unit:aa".into(),
+    };
+    assert_wire(&request, "07200207756e69743a6161");
+    assert_wire(
+        &AgentRequest::AcknowledgeDeviceSelection { request },
+        "2407200207756e69743a6161",
     );
 }
