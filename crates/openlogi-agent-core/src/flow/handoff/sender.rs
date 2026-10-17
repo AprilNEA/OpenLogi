@@ -28,6 +28,11 @@ pub(in crate::flow) fn start_outgoing(state: Arc<GenerationState>, crossing: Edg
         return;
     }
     tokio::spawn(async move {
+        // A crossing here means the devices are here: settle any transfer
+        // still waiting for the inventory to notice them.
+        if let Some(completed) = state.handoffs.complete_on_departure().await {
+            super::finish_incoming(Arc::clone(&state), completed).await;
+        }
         // Once the switch is issued the devices are leaving: the hold expires
         // on its own. Anything short of that gives the pointer back now.
         if !run_outgoing(&state, crossing).await {

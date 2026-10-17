@@ -11,7 +11,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::time::Instant;
 use tracing::{debug, info};
 
-use super::runtime::GenerationState;
+use super::runtime::{GenerationState, Presence};
 use super::{RuntimeDevice, is_pointing_device};
 
 /// How long a receiver waits for arrival evidence. A Bolt device reconnects
@@ -19,6 +19,8 @@ use super::{RuntimeDevice, is_pointing_device};
 /// the device up again, which on Windows took longer than three seconds.
 const ARM_TIMEOUT: Duration = Duration::from_secs(8);
 const COMPLETED_LIMIT: usize = 64;
+/// Time for a switched device to reconnect to this receiver.
+const RECONNECT_SETTLE: Duration = Duration::from_millis(1500);
 
 mod sender;
 
@@ -182,6 +184,37 @@ impl HandoffBook {
         true
     }
 
+    /// Config keys of the devices the pending `transfer_id` brings here.
+    async fn pending_keys(&self, peer: PublicKey, transfer_id: u64) -> Vec<String> {
+        let ledger = self.incoming.lock().await;
+        ledger
+            .pending
+            .as_ref()
+            .filter(|pending| pending.peer == peer && pending.transfer_id == transfer_id)
+            .map(|pending| {
+                pending
+                    .devices
+                    .iter()
+                    .map(|device| device.key.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Settle the pending incoming transfer as arrived: this machine is sending
+    /// the devices on, which it can only do once they are here, however far
+    /// behind the inventory is.
+    async fn complete_on_departure(&self) -> Option<CompletedTransfer> {
+        let mut ledger = self.incoming.lock().await;
+        let pending = ledger.pending.as_mut()?;
+        let accepted = pending.accepted_at?;
+        let now = Instant::now();
+        for device in &mut pending.devices {
+            device.arrived_at.get_or_insert(now);
+        }
+        Some(complete_pending(&mut ledger, accepted, false))
+    }
+
     /// Where the pointer enters for the pending `transfer_id`, when it moves a
     /// pointing device.
     async fn pointer_entry(&self, peer: PublicKey, transfer_id: u64) -> Option<proto::EntryPoint> {
@@ -315,10 +348,7 @@ pub(super) async fn handle_rpc(state: Arc<GenerationState>, peer: PublicKey, eve
     else {
         return;
     };
-    let devices = state
-        .devices
-        .read()
-        .map_or_else(|_| Vec::new(), |guard| guard.clone());
+    let devices = state.effective_devices();
     let decision = state
         .handoffs
         .arm(
@@ -394,6 +424,9 @@ async fn accept_pending(state: Arc<GenerationState>, peer: PublicKey, transfer_i
             if let Some(entry) = state.handoffs.pointer_entry(peer, transfer_id).await {
                 super::runtime::warp_entry(&entry);
             }
+            let keys = state.handoffs.pending_keys(peer, transfer_id).await;
+            state.note_presence(keys.iter().map(String::as_str), Presence::Arrived);
+            spawn_prepare_after_arrival(Arc::clone(&state));
             spawn_arm_timeout(Arc::clone(&state), peer, transfer_id);
             state.handoffs.observe(&state.devices_snapshot()).await
         } else {
@@ -403,6 +436,17 @@ async fn accept_pending(state: Arc<GenerationState>, peer: PublicKey, transfer_i
     if let Some(completed) = completed {
         finish_incoming(state, completed).await;
     }
+}
+
+/// Prepare one-write switches for the devices that are arriving, once they have
+/// had time to reconnect, so sending them straight back is fast too.
+fn spawn_prepare_after_arrival(state: Arc<GenerationState>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(RECONNECT_SETTLE).await;
+        if state.is_active() {
+            super::runtime::prepare_switch_targets(&state);
+        }
+    });
 }
 
 fn spawn_arm_timeout(state: Arc<GenerationState>, peer: PublicKey, transfer_id: u64) {

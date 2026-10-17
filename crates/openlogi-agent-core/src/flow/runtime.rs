@@ -180,10 +180,31 @@ pub(super) struct GenerationState {
     /// Online devices already prepared for a one-write switch; `None` while
     /// a preparation is in flight.
     switch_targets: std::sync::Mutex<Vec<(DeviceRoute, Option<Arc<HostSwitchTarget>>)>>,
+    /// Where Flow itself last moved each device, by config key, and when.
+    presence: std::sync::Mutex<HashMap<String, (Presence, std::time::Instant)>>,
 }
+
+/// What Flow knows first-hand about a device's whereabouts.
+///
+/// The inventory takes seconds to notice a device arriving over or leaving a
+/// receiver. Flow moved it, so for a while its own record is the better one:
+/// without it a device that just arrived cannot be sent on ("no online
+/// devices"), and a peer's request for one that just left is refused as
+/// "already online".
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Presence {
+    /// A handoff to this machine was accepted for the device.
+    Arrived,
+    /// This machine switched the device to a peer.
+    Departed,
+}
+
+/// How long Flow's own record outranks the inventory.
+const PRESENCE_TTL: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Clone)]
 pub(super) struct OutgoingDevice {
+    key: String,
     route: DeviceRoute,
     host: u8,
     pub(super) identity: proto::DeviceIdentity,
@@ -214,7 +235,45 @@ impl GenerationState {
             handoffs: HandoffBook::default(),
             pointer_hold,
             switch_targets: std::sync::Mutex::new(Vec::new()),
+            presence: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Record that Flow moved the devices with these config keys.
+    pub(super) fn note_presence<'a>(
+        &self,
+        keys: impl IntoIterator<Item = &'a str>,
+        presence: Presence,
+    ) {
+        if let Ok(mut record) = self.presence.lock() {
+            let now = std::time::Instant::now();
+            for key in keys {
+                record.insert(key.to_owned(), (presence, now));
+            }
+        }
+    }
+
+    /// The devices with their inventory online state corrected by what Flow
+    /// itself did within [`PRESENCE_TTL`].
+    pub(super) fn effective_devices(&self) -> Vec<RuntimeDevice> {
+        let record = self.presence.lock().ok();
+        self.devices_snapshot()
+            .into_iter()
+            .map(|mut device| {
+                let recent = record.as_ref().and_then(|record| {
+                    record
+                        .get(&device.snapshot.config_key)
+                        .filter(|(_, at)| at.elapsed() < PRESENCE_TTL)
+                        .map(|(presence, _)| *presence)
+                });
+                match recent {
+                    Some(Presence::Arrived) => device.snapshot.online = true,
+                    Some(Presence::Departed) => device.snapshot.online = false,
+                    None => {}
+                }
+                device
+            })
+            .collect()
     }
 
     pub(super) fn is_active(&self) -> bool {
@@ -290,7 +349,7 @@ impl GenerationState {
 
     pub(super) fn outgoing_devices(&self, peer: &str) -> Vec<OutgoingDevice> {
         let mut devices: Vec<_> = self
-            .devices_snapshot()
+            .effective_devices()
             .into_iter()
             .filter(|device| device.snapshot.online)
             .filter_map(|device| {
@@ -299,6 +358,7 @@ impl GenerationState {
                 Some((
                     device.snapshot.kind,
                     OutgoingDevice {
+                        key: device.snapshot.config_key,
                         route,
                         host,
                         identity: device.identity,
@@ -356,6 +416,10 @@ impl GenerationState {
                 .collect();
             openlogi_hid::switch_hosts(&targets, &self.channel_pool).await?;
         }
+        self.note_presence(
+            devices.iter().map(|device| device.key.as_str()),
+            Presence::Departed,
+        );
         info!(
             lease_ms = leased.as_millis(),
             switch_ms = started.elapsed().saturating_sub(leased).as_millis(),
@@ -648,9 +712,9 @@ fn platform() -> proto::Platform {
 /// the switch at the screen edge skips the HID++ feature lookups. Preparation
 /// runs in the background under an ordinary I/O lease; a device that cannot be
 /// prepared now is retried on the next inventory change.
-fn prepare_switch_targets(state: &Arc<GenerationState>) {
+pub(super) fn prepare_switch_targets(state: &Arc<GenerationState>) {
     let wanted: Vec<(DeviceRoute, Vec<u8>)> = state
-        .devices_snapshot()
+        .effective_devices()
         .into_iter()
         .filter(|device| device.snapshot.online)
         .filter_map(|device| {
