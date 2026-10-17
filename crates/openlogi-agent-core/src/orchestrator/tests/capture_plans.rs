@@ -374,15 +374,15 @@ fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(
         .hook_maps
         .read()
         .expect("hook maps should not be poisoned");
-    if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") && button != ButtonId::MiddleClick {
         assert!(!hook_maps.bindings.contains_key(&button));
         assert!(!hook_maps.gestures.contains_key(&button));
         assert!(side_gesture_is_requested(&orch));
-    } else if cfg!(target_os = "windows") {
+    } else if cfg!(any(target_os = "macos", target_os = "windows")) {
         assert!(hook_maps.gestures.contains_key(&button));
         assert!(
             side_gesture_is_requested(&orch),
-            "Windows must request HID++ raw XY while retaining the passive hook fallback"
+            "{button} must request HID++ raw XY while retaining the passive hook fallback"
         );
     } else {
         assert!(hook_maps.gestures.contains_key(&button));
