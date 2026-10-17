@@ -270,6 +270,9 @@ pub enum HidppOperation {
     /// Write an Easy-Switch slot's `0x1815` host name. Appended last —
     /// variant order is wire format.
     RenameHost,
+    /// Write an image to a keypad's LCD key over the vendor image report.
+    /// Appended last — variant order is wire format.
+    WriteKeyImage,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

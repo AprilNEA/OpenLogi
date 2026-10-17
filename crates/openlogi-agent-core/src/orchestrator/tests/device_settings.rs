@@ -317,7 +317,7 @@ fn keyboard_spec_diverts_exactly_the_bound_controls() {
     let mut orch = orchestrator(config);
     orch.devices = vec![keyboard("kbd", 1, true)];
 
-    let spec = orch.keyboard_spec_for().expect("bound keys publish a spec");
+    let spec = sole_keyboard_spec(&orch).expect("bound keys publish a spec");
     assert_eq!(
         spec.wanted,
         BTreeMap::from([
@@ -330,13 +330,44 @@ fn keyboard_spec_diverts_exactly_the_bound_controls() {
     assert_eq!(spec.config_key, "kbd");
 }
 
+/// Bound keypad grid keys carry the same gate as controls but change no
+/// firmware: they publish the spec — the observed set is capture identity —
+/// keyed by their wire index, and an `Action::None` one is left native like
+/// any other unbound key.
+#[test]
+fn grid_only_bindings_publish_their_index_set() {
+    let mut config = Config::default();
+    config.set_binding(
+        "keypad",
+        ButtonId::grid(GridKey::Middle),
+        Binding::Single(Action::Screenshot),
+    );
+    config.set_binding(
+        "keypad",
+        ButtonId::grid(GridKey::BottomRight),
+        Binding::Single(Action::None),
+    );
+    let mut orch = orchestrator(config);
+    let mut keypad = dev("keypad", 1, true);
+    keypad.kind = DeviceKind::Numpad;
+    orch.devices = vec![keypad];
+
+    let spec = sole_keyboard_spec(&orch).expect("the bound grid key publishes a spec");
+    assert_eq!(
+        spec.grid,
+        // `Middle` is the vendor report's index 5.
+        BTreeMap::from([(5, ButtonId::grid(GridKey::Middle))])
+    );
+    assert!(spec.wanted.is_empty(), "grid keys divert nothing");
+}
+
 #[test]
 fn keyboard_spec_is_absent_without_a_real_binding_or_for_a_disabled_keyboard() {
     let config = Config::default();
     let mut orch = orchestrator(config);
     orch.devices = vec![keyboard("kbd", 1, true)];
     assert!(
-        orch.keyboard_spec_for().is_none(),
+        sole_keyboard_spec(&orch).is_none(),
         "an unconfigured key is never diverted"
     );
 
@@ -350,30 +381,75 @@ fn keyboard_spec_is_absent_without_a_real_binding_or_for_a_disabled_keyboard() {
     let mut orch = orchestrator(config);
     orch.devices = vec![keyboard("kbd", 1, true)];
     assert!(
-        orch.keyboard_spec_for().is_none(),
+        sole_keyboard_spec(&orch).is_none(),
         "a disabled keyboard is left fully native"
     );
 }
 
+/// Every bound keyboard-family device captures at once, each on its own
+/// route with its own keys and bindings — asleep or not — so a keyboard and
+/// a keypad never compete for one session.
 #[test]
-fn keyboard_spec_prefers_the_online_keyboard_over_a_sleeping_slot() {
-    // The same MX Keys Mini paired three times (#1581): the stale slots sort
-    // first but must not take the session from the keyboard that is typing.
+fn every_bound_keyboard_publishes_its_own_spec() {
     let mut config = Config::default();
-    for key in ["stale", "live"] {
+    config.set_binding(
+        "kbd",
+        ButtonId::control(0x010a),
+        Binding::Single(Action::Screenshot),
+    );
+    config.set_binding(
+        "keypad",
+        ButtonId::grid(GridKey::Middle),
+        Binding::Single(Action::Copy),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("kbd", 1, false), wired_keypad("keypad", true)];
+
+    let specs = orch.keyboard_specs_for();
+    let summary: Vec<_> = specs
+        .iter()
+        .map(|spec| {
+            (
+                spec.config_key.as_str(),
+                spec.wanted.keys().copied().collect::<Vec<_>>(),
+                spec.grid.keys().copied().collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [("kbd", vec![0x010a], vec![]), ("keypad", vec![], vec![5])]
+    );
+    assert_ne!(specs[0].route, specs[1].route);
+    assert_eq!(
+        specs[1].bindings.get(&ButtonId::grid(GridKey::Middle)),
+        Some(&Binding::Single(Action::Copy)),
+        "each spec dispatches its own device's bindings"
+    );
+}
+
+/// Two inventory entries on one route — a direct route names only a VID/PID —
+/// still reach one device, so they publish one spec: the online entry's, and
+/// with both asleep the first in inventory order.
+#[test]
+fn entries_sharing_a_route_publish_one_spec_preferring_the_online_one() {
+    let mut config = Config::default();
+    for key in ["first", "second"] {
         config.set_binding(
             key,
-            ButtonId::control(0x010a),
-            Binding::Single(Action::Screenshot),
+            ButtonId::grid(GridKey::Middle),
+            Binding::Single(Action::Copy),
         );
     }
     let mut orch = orchestrator(config);
-    orch.devices = vec![keyboard("stale", 1, false), keyboard("live", 2, true)];
-    assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "live");
+    orch.devices = vec![wired_keypad("first", false), wired_keypad("second", true)];
+    assert_eq!(
+        sole_keyboard_spec(&orch).expect("spec").config_key,
+        "second"
+    );
 
-    // With every bound keyboard asleep, inventory order breaks the tie.
-    orch.devices = vec![keyboard("stale", 1, false), keyboard("live", 2, false)];
-    assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "stale");
+    orch.devices = vec![wired_keypad("first", false), wired_keypad("second", false)];
+    assert_eq!(sole_keyboard_spec(&orch).expect("spec").config_key, "first");
 }
 
 #[test]
@@ -388,12 +464,12 @@ fn keyboard_spec_skips_a_keyboard_with_no_bound_controls() {
     );
     let mut orch = orchestrator(config);
     orch.devices = vec![keyboard("unbound", 1, true), keyboard("bound", 2, true)];
-    assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "bound");
+    assert_eq!(sole_keyboard_spec(&orch).expect("spec").config_key, "bound");
 
     // An unbound keyboard being online does not make it a candidate: the
     // bound one holds the session even while asleep.
     orch.devices = vec![keyboard("unbound", 1, true), keyboard("bound", 2, false)];
-    assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "bound");
+    assert_eq!(sole_keyboard_spec(&orch).expect("spec").config_key, "bound");
 }
 
 #[test]
@@ -409,7 +485,7 @@ fn keyboard_spec_ignores_an_unbound_stale_slot_while_the_live_keyboard_sleeps() 
     );
     let mut orch = orchestrator(config);
     orch.devices = vec![keyboard("stale", 1, false), keyboard("live", 2, false)];
-    assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "live");
+    assert_eq!(sole_keyboard_spec(&orch).expect("spec").config_key, "live");
 }
 
 #[test]
@@ -430,7 +506,7 @@ fn keyboard_spec_never_diverts_reserved_controls() {
     );
     let mut orch = orchestrator(config);
     orch.devices = vec![keyboard("kbd", 1, true)];
-    assert!(orch.keyboard_spec_for().is_none());
+    assert!(sole_keyboard_spec(&orch).is_none());
 
     let mut config = Config::default();
     config.set_binding(
@@ -446,7 +522,228 @@ fn keyboard_spec_never_diverts_reserved_controls() {
     let mut orch = orchestrator(config);
     orch.devices = vec![keyboard("kbd", 1, true)];
     assert_eq!(
-        orch.keyboard_spec_for().expect("spec").wanted,
+        sole_keyboard_spec(&orch).expect("spec").wanted,
         BTreeMap::from([(0x010a, ButtonId::control(0x010a))])
     );
+}
+
+/// The registry's MX Creative Keypad, wired: a route the LCD lookup knows.
+fn wired_keypad(key: &str, online: bool) -> AgentDevice {
+    let keypad = &openlogi_device_registry::keypad::KEYPADS[0];
+    AgentDevice {
+        route: Some(DeviceRoute::Direct {
+            vendor_id: keypad.vendor_id,
+            product_id: keypad.product_id,
+        }),
+        slot: DIRECT_DEVICE_INDEX,
+        kind: DeviceKind::Numpad,
+        ..dev(key, DIRECT_DEVICE_INDEX, online)
+    }
+}
+
+/// Each grid key shows its bound action's glyph, and a key that does nothing
+/// — unbound, or bound to `None` — shows nothing: the same "bound" rule the
+/// capture set uses, so a lit key always does something.
+#[test]
+fn keypad_key_faces_follow_the_bound_actions() {
+    use crate::watchers::key_display::KeyFace;
+    use openlogi_core::binding::ActionRingIcon;
+
+    let mut config = Config::default();
+    config.set_binding(
+        "keypad",
+        ButtonId::grid(GridKey::Middle),
+        Binding::Single(Action::Copy),
+    );
+    config.set_binding(
+        "keypad",
+        ButtonId::grid(GridKey::BottomRight),
+        Binding::Single(Action::None),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![wired_keypad("keypad", true)];
+
+    let specs = orch.key_display_specs_for();
+    let [spec] = specs.as_slice() else {
+        panic!("one keypad publishes one spec: {specs:?}");
+    };
+    assert_eq!(spec.faces.len(), 9);
+    assert_eq!(
+        spec.faces[&GridKey::Middle],
+        KeyFace::Icon(ActionRingIcon::for_action(&Action::Copy))
+    );
+    assert_eq!(spec.faces[&GridKey::BottomRight], KeyFace::Blank);
+    assert_eq!(spec.faces[&GridKey::TopLeft], KeyFace::Blank);
+    assert_eq!(spec.display.key_size, 118);
+}
+
+/// Only a device whose panel the registry describes gets a spec — a bound
+/// numpad-kind device on another route does not — and a keypad that is
+/// offline or disabled publishes nothing to paint.
+#[test]
+fn key_display_specs_need_a_present_enabled_display_keypad() {
+    let mut config = Config::default();
+    config.set_binding(
+        "other",
+        ButtonId::grid(GridKey::Middle),
+        Binding::Single(Action::Copy),
+    );
+    let mut orch = orchestrator(config);
+    let mut other = dev("other", 1, true);
+    other.kind = DeviceKind::Numpad;
+    orch.devices = vec![other, wired_keypad("asleep", false)];
+    assert!(orch.key_display_specs_for().is_empty());
+
+    let mut config = Config::default();
+    config.set_device_enabled("keypad", false);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![wired_keypad("keypad", true)];
+    assert!(orch.key_display_specs_for().is_empty());
+}
+
+/// A reconnect or wake bumps the re-arm generation, and the published spec
+/// carries it so the watcher repaints a panel that may have reset.
+#[test]
+fn key_display_specs_carry_the_rearm_generation() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![wired_keypad("keypad", true)];
+    let before = orch.key_display_specs_for()[0].generation;
+
+    orch.shared
+        .capture_rearm_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    assert_eq!(orch.key_display_specs_for()[0].generation, before + 1);
+}
+
+fn page(number: u8) -> openlogi_core::binding::KeypadPage {
+    openlogi_core::binding::KeypadPage::new(number).expect("a valid page")
+}
+
+fn on_page(number: u8, key: GridKey) -> ButtonId {
+    ButtonId::Grid(openlogi_core::binding::GridSlot {
+        page: page(number),
+        key,
+    })
+}
+
+/// A two-page keypad: Copy on page 1's middle key, Paste on page 2's middle
+/// and Undo on page 2's top-left.
+fn paged_keypad() -> Orchestrator {
+    let mut config = Config::default();
+    config.set_keypad_pages("keypad", page(2));
+    config.set_binding(
+        "keypad",
+        on_page(1, GridKey::Middle),
+        Binding::Single(Action::Copy),
+    );
+    config.set_binding(
+        "keypad",
+        on_page(2, GridKey::Middle),
+        Binding::Single(Action::Paste),
+    );
+    config.set_binding(
+        "keypad",
+        on_page(2, GridKey::TopLeft),
+        Binding::Single(Action::Undo),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![wired_keypad("keypad", true)];
+    orch
+}
+
+/// The capture session observes every key bound on any page, so turning the
+/// page swaps only what a press dispatches — the capture identity, and with
+/// it the running session, stays put.
+#[test]
+fn a_page_turn_swaps_dispatch_without_changing_the_observed_keys() {
+    use crate::runtime::PageTurn;
+    let mut orch = paged_keypad();
+
+    let first = sole_keyboard_spec(&orch).expect("bound keys publish a spec");
+    assert_eq!(
+        first.grid,
+        BTreeMap::from([
+            (1, ButtonId::grid(GridKey::TopLeft)),
+            (5, ButtonId::grid(GridKey::Middle)),
+        ])
+    );
+    assert_eq!(
+        first.bindings.get(&ButtonId::grid(GridKey::Middle)),
+        Some(&Binding::Single(Action::Copy))
+    );
+    assert!(
+        !first
+            .bindings
+            .contains_key(&ButtonId::grid(GridKey::TopLeft))
+    );
+    // Two pages: the paging buttons are bound to the page actions.
+    assert_eq!(
+        first.bindings.get(&ButtonId::Control(
+            openlogi_core::binding::Cid::RIGHT_PAGING
+        )),
+        Some(&Binding::Single(Action::NextKeypadPage))
+    );
+
+    orch.turn_keypad_page(Some("keypad"), PageTurn::Next);
+    let second = sole_keyboard_spec(&orch).expect("spec");
+    assert_eq!(
+        second.grid, first.grid,
+        "the observed set is page-independent"
+    );
+    assert_eq!(second.wanted, first.wanted);
+    assert_eq!(
+        second.bindings.get(&ButtonId::grid(GridKey::Middle)),
+        Some(&Binding::Single(Action::Paste))
+    );
+    assert_eq!(
+        second.bindings.get(&ButtonId::grid(GridKey::TopLeft)),
+        Some(&Binding::Single(Action::Undo))
+    );
+}
+
+#[test]
+fn the_lcd_follows_the_current_page_and_turns_wrap() {
+    use crate::runtime::PageTurn;
+    use crate::watchers::key_display::KeyFace;
+    use openlogi_core::binding::ActionRingIcon;
+    let mut orch = paged_keypad();
+    let face = |orch: &Orchestrator, key| orch.key_display_specs_for()[0].faces[&key];
+    let icon = |action: Action| KeyFace::Icon(ActionRingIcon::for_action(&action));
+
+    assert_eq!(face(&orch, GridKey::Middle), icon(Action::Copy));
+    assert_eq!(face(&orch, GridKey::TopLeft), KeyFace::Blank);
+
+    orch.turn_keypad_page(Some("keypad"), PageTurn::Previous);
+    assert_eq!(
+        face(&orch, GridKey::Middle),
+        icon(Action::Paste),
+        "1 wraps back to 2"
+    );
+    assert_eq!(face(&orch, GridKey::TopLeft), icon(Action::Undo));
+
+    orch.turn_keypad_page(Some("keypad"), PageTurn::Next);
+    assert_eq!(
+        face(&orch, GridKey::Middle),
+        icon(Action::Copy),
+        "2 wraps on to 1"
+    );
+}
+
+/// A single-page device has nothing to turn, a turn with no device is
+/// dropped, and a page the config has since removed reads as page 1.
+#[test]
+fn page_turns_need_pages_and_a_removed_page_falls_back_to_the_first() {
+    use crate::runtime::PageTurn;
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![wired_keypad("keypad", true)];
+    orch.turn_keypad_page(Some("keypad"), PageTurn::Next);
+    orch.turn_keypad_page(None, PageTurn::Next);
+    assert_eq!(orch.keypad_page("keypad"), page(1));
+
+    let mut orch = paged_keypad();
+    orch.turn_keypad_page(Some("keypad"), PageTurn::Next);
+    assert_eq!(orch.keypad_page("keypad"), page(2));
+    orch.config.set_keypad_pages("keypad", page(1));
+    assert_eq!(orch.keypad_page("keypad"), page(1));
 }

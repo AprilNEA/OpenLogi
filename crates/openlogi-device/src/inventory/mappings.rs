@@ -12,6 +12,7 @@ use hidpp::feature::unified_battery::{
 use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 use hidpp::receiver::unifying::DeviceKind as UnifyingDeviceKind;
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
+use openlogi_device_registry::keypad::find_keypad;
 
 /// Trim NUL padding and whitespace from a `DeviceInformation` serial; an
 /// all-padding serial collapses to `None`.
@@ -72,9 +73,11 @@ pub(crate) fn map_device_type(ty: HidppDeviceType) -> DeviceKind {
 
 /// First step of the device-kind precedence chain:
 ///
-/// > asset registry > **HID++ `0x0005`** > **Bolt pairing register**
+/// > asset registry > **HID++ `0x0005`** > **register**
 ///
-/// This folds the two HID++ sources; the GUI applies the final asset-registry
+/// where *register* is the Bolt pairing register on the receiver path and the
+/// curated identity registry (`direct_identity_kind`) on the direct path. This
+/// folds the two HID++ sources; the GUI applies the final asset-registry
 /// override in `effective_kind` (`crates/openlogi-desktop/src/state/devices.rs`).
 /// Adding a kind source means slotting it into this one chain — and updating
 /// both docs.
@@ -84,12 +87,26 @@ pub(crate) fn map_device_type(ty: HidppDeviceType) -> DeviceKind {
 /// MX Anywhere 3S surfacing as `Keyboard`, which strips its button/pointer tabs
 /// — issue #127). We therefore trust `probed` whenever it names a kind we model,
 /// falling back to `register` when the device was offline (no probe → `None`),
-/// didn't answer `0x0005`, or reported a type we don't map (`Unknown`). On the
-/// receiver-less direct path `register` is simply `Unknown`.
+/// didn't answer `0x0005`, or reported a type we don't map (`Unknown`).
 pub(crate) fn resolve_device_kind(probed: Option<DeviceKind>, register: DeviceKind) -> DeviceKind {
     match probed {
         Some(kind) if kind != DeviceKind::Unknown => kind,
         _ => register,
+    }
+}
+
+/// The direct path's register: a per-product kind claim over the identity
+/// registry, for attached devices that answer HID++ but report no usable
+/// `0x0005` type and have no pairing register to fall back on. Without it
+/// such a device classifies `Unknown` and silently leaves the keyboard capture
+/// plane, so its bound keys stay native (the MX Creative Keypad, whose
+/// `DeviceType` is `None`, is why this exists). Unknown products return
+/// `Unknown`, exactly what the direct path passed before this source existed.
+pub(crate) fn direct_identity_kind(vendor_id: u16, product_id: u16) -> DeviceKind {
+    if find_keypad(vendor_id, product_id).is_some() {
+        DeviceKind::Numpad
+    } else {
+        DeviceKind::Unknown
     }
 }
 
@@ -266,8 +283,8 @@ pub(crate) fn legacy_battery_level_from_percentage(percentage: u8) -> BatteryLev
 mod tests {
     use super::{
         BatteryLevel, BatteryStatus, DeviceKind, HidppVoltageChargingStatus, UnifyingDeviceKind,
-        legacy_battery_level_from_percentage, map_unifying_kind, map_voltage_battery_status,
-        resolve_device_kind, voltage_battery_percentage,
+        direct_identity_kind, legacy_battery_level_from_percentage, map_unifying_kind,
+        map_voltage_battery_status, resolve_device_kind, voltage_battery_percentage,
     };
 
     #[test]
@@ -389,6 +406,19 @@ mod tests {
             .ok()
             .map(map_legacy_battery_status);
         assert_eq!(mapped, Some(BatteryStatus::Unknown));
+    }
+
+    #[test]
+    fn direct_identity_kind_only_claims_known_keypads() {
+        // The MX Creative Keypad gets a kind despite reporting DeviceType None;
+        // every other product must stay Unknown so no other device is affected.
+        assert_eq!(
+            direct_identity_kind(0x046d, 0xc354),
+            DeviceKind::Numpad,
+            "known wired keypad must claim a kind"
+        );
+        assert_eq!(direct_identity_kind(0x046d, 0xb034), DeviceKind::Unknown);
+        assert_eq!(direct_identity_kind(0x1234, 0xc354), DeviceKind::Unknown);
     }
 
     #[test]

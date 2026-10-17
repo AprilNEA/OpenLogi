@@ -13,7 +13,33 @@ fn target() -> KeyboardTarget {
             product_id: 0xc548,
         },
         wanted: BTreeMap::new(),
+        grid: BTreeMap::new(),
     }
+}
+
+/// A published spec for the keyboard at `route`, named `config_key`.
+fn spec_at(config_key: &str, route: DeviceRoute) -> KeyboardSpec {
+    KeyboardSpec {
+        config_key: config_key.to_owned(),
+        route,
+        wanted: target().wanted,
+        grid: target().grid,
+        bindings: dispatch(Action::MissionControl).bindings,
+    }
+}
+
+/// A second keyboard: a keypad wired next to the receiver keyboard.
+fn keypad_route() -> DeviceRoute {
+    DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc354,
+    }
+}
+
+fn slots(
+    entries: impl IntoIterator<Item = (DeviceRoute, KeyboardSlot)>,
+) -> HashMap<DeviceRoute, KeyboardSlot> {
+    entries.into_iter().collect()
 }
 
 fn session_id(epoch: u64) -> HidppSessionId {
@@ -48,22 +74,27 @@ fn draining_session(epoch: u64) -> RunningKeyboardSession {
 
 #[tokio::test]
 async fn publication_and_receiver_request_change_wanted_state_immediately() {
-    let (spec_tx, mut spec_rx) = watch::channel(None);
+    let (spec_tx, mut spec_rx) = watch::channel(Arc::new(Vec::new()));
     let access = ReceiverAccess::default();
     let mut requests = access.subscribe_requests();
-    let published = KeyboardSpec {
-        config_key: "keyboard-a".to_owned(),
-        route: target().route,
-        wanted: target().wanted,
-        bindings: dispatch(Action::MissionControl).bindings,
-    };
 
-    spec_tx.send_replace(Some(Arc::new(published)));
+    spec_tx.send_replace(Arc::new(vec![
+        spec_at("keyboard-a", target().route),
+        spec_at("keypad", keypad_route()),
+    ]));
     spec_rx
         .changed()
         .await
         .expect("spec publication should remain open");
-    assert!(wanted_session(*requests.borrow(), &spec_rx).is_some());
+    let wanted = wanted_sessions(*requests.borrow(), &spec_rx.borrow());
+    assert_eq!(
+        wanted
+            .iter()
+            .map(|(target, dispatch)| (&target.route, dispatch.config_key.as_str()))
+            .collect::<Vec<_>>(),
+        [(&target().route, "keyboard-a"), (&keypad_route(), "keypad")],
+        "every published keyboard is wanted, each with its own dispatch"
+    );
 
     let session_lease = access
         .try_acquire_for_session()
@@ -81,8 +112,8 @@ async fn publication_and_receiver_request_change_wanted_state_immediately() {
         .await
         .expect("request publication should remain open");
     assert!(
-        wanted_session(*requests.borrow(), &spec_rx).is_none(),
-        "a queued request should retire capture without waiting for a tick"
+        wanted_sessions(*requests.borrow(), &spec_rx.borrow()).is_empty(),
+        "a queued request should retire every keyboard's capture without waiting for a tick"
     );
 
     exclusive.abort();
@@ -144,14 +175,17 @@ fn target_changes_freeze_dispatch_until_teardown_finishes() {
 #[test]
 fn suspended_device_io_disables_retry_deadlines() {
     let retry_at = tokio::time::Instant::now() + RETRY_DELAY;
-    let slot = KeyboardSlot::recovering(None, Some(retry_at));
+    let slots = slots([(
+        target().route,
+        KeyboardSlot::recovering(None, Some(retry_at)),
+    )]);
 
     assert_eq!(
-        next_deadline(ReceiverRequestState::default(), true, Some(&slot)),
+        next_deadline(ReceiverRequestState::default(), true, &slots),
         Some(retry_at),
     );
     assert_eq!(
-        next_deadline(ReceiverRequestState::default(), false, Some(&slot)),
+        next_deadline(ReceiverRequestState::default(), false, &slots),
         None,
         "keyboard retries must stay dormant until visible resume",
     );
@@ -165,14 +199,65 @@ async fn exclusive_receiver_access_disables_expired_recovery_deadlines() {
         .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing)
         .await;
     let restart_at = tokio::time::Instant::now();
-    let slot = KeyboardSlot::recovering(None, Some(restart_at));
+    let slots = slots([(
+        target().route,
+        KeyboardSlot::recovering(None, Some(restart_at)),
+    )]);
 
-    assert_eq!(next_deadline(*requests.borrow(), true, Some(&slot)), None);
+    assert_eq!(next_deadline(*requests.borrow(), true, &slots), None);
     drop(exclusive);
     assert_eq!(
-        next_deadline(*requests.borrow(), true, Some(&slot)),
+        next_deadline(*requests.borrow(), true, &slots),
         Some(restart_at),
         "release makes the retry actionable without adding another backoff"
+    );
+}
+
+#[test]
+fn the_earliest_keyboard_retry_sets_the_deadline() {
+    let now = tokio::time::Instant::now();
+    let slots = slots([
+        (
+            target().route,
+            KeyboardSlot::recovering(None, Some(now + RETRY_DELAY * 2)),
+        ),
+        (
+            keypad_route(),
+            KeyboardSlot::recovering(None, Some(now + RETRY_DELAY)),
+        ),
+    ]);
+
+    assert_eq!(
+        next_deadline(ReceiverRequestState::default(), true, &slots),
+        Some(now + RETRY_DELAY)
+    );
+}
+
+#[test]
+fn input_is_matched_to_its_own_keyboard_route() {
+    let wanted = vec![
+        (target(), dispatch(Action::MissionControl)),
+        (
+            KeyboardTarget {
+                route: keypad_route(),
+                ..target()
+            },
+            dispatch(Action::ShowDesktop),
+        ),
+    ];
+
+    let (found, plan) = wanted_for(&wanted, &keypad_route()).expect("the keypad is wanted");
+    assert_eq!(found.route, keypad_route());
+    assert_eq!(plan, &dispatch(Action::ShowDesktop));
+    assert!(
+        wanted_for(
+            &wanted,
+            &DeviceRoute::Bolt {
+                receiver_uid: "AA00".into(),
+                slot: 3,
+            }
+        )
+        .is_none()
     );
 }
 
@@ -181,12 +266,10 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
     use futures_lite::future::poll_once;
 
     for shutdown_requested in [false, true] {
-        let (spec_tx, spec) = watch::channel(Some(Arc::new(KeyboardSpec {
-            config_key: "keyboard-a".to_owned(),
-            route: target().route,
-            wanted: target().wanted,
-            bindings: dispatch(Action::MissionControl).bindings,
-        })));
+        let (spec_tx, specs) = watch::channel(Arc::new(vec![
+            spec_at("keyboard-a", target().route),
+            spec_at("keypad", keypad_route()),
+        ]));
         let capture = CaptureChannelSlot::default();
         // A missing inventory channel makes the real session task fail without
         // opening hardware; ordered Done then drives normal restart recovery.
@@ -206,7 +289,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
                 .unwrap();
         let (shutdown_tx, shutdown) = oneshot::channel();
         let mut manager = std::pin::pin!(manage(KeyboardManagerContext {
-            spec,
+            specs,
             receiver_requests: access.subscribe_requests(),
             access: device_access,
             dispatcher: actions.dispatcher(),
@@ -233,4 +316,63 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
         assert_eq!(tokio::time::Instant::now(), before_event);
         actions.shutdown();
     }
+}
+
+/// Two published keyboards get two concurrent sessions, one per route, and
+/// withdrawing one retires only its own.
+#[tokio::test(start_paused = true)]
+async fn each_published_keyboard_runs_its_own_session() {
+    let access = ReceiverAccess::default();
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: ChannelRegistry::default(),
+        receiver_access: access.clone(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring).unwrap();
+    let (events, _event_rx) = mpsc::unbounded_channel();
+    let channels = KeyboardSessionChannels {
+        access: device_access,
+        events,
+    };
+    let mut state = KeyboardManagerState::new(actions.dispatcher());
+    let both = [
+        spec_at("keyboard-a", target().route),
+        spec_at("keypad", keypad_route()),
+    ];
+
+    state
+        .reconcile(ReceiverRequestState::default(), true, &both, &channels)
+        .await;
+    for route in [target().route, keypad_route()] {
+        assert!(
+            state
+                .slots
+                .get(&route)
+                .and_then(KeyboardSlot::session)
+                .is_some(),
+            "{route:?} has its own session"
+        );
+    }
+
+    state
+        .reconcile(ReceiverRequestState::default(), true, &both[..1], &channels)
+        .await;
+    assert!(
+        state.slots[&target().route]
+            .session()
+            .is_some_and(CaptureSession::is_active),
+        "the still-published keyboard keeps capturing"
+    );
+    assert!(
+        state.slots[&keypad_route()]
+            .session()
+            .is_some_and(|session| !session.is_active()),
+        "the withdrawn keypad's session retires"
+    );
+    actions.shutdown();
 }

@@ -803,13 +803,15 @@ fn demo_keyboard() -> DeviceRecord {
 
 /// Last step of the device-kind precedence chain:
 ///
-/// > **asset registry** > HID++ `0x0005` > Bolt pairing register
+/// > **asset registry** > HID++ `0x0005` > register
 ///
-/// The two HID++ sources are already folded into `hid_kind` by
-/// `resolve_device_kind` (`crates/openlogi-hid/src/inventory/mappings.rs`); this applies
-/// the final override. Adding a kind source means slotting it into this one
-/// chain — here if it should beat the HID++ sources, in `resolve_device_kind`
-/// otherwise — and updating both docs.
+/// where *register* is the Bolt pairing register for receiver-attached
+/// devices and the curated identity registry (`direct_identity_kind`) on the
+/// direct path. The two HID++ sources are already folded into `hid_kind` by
+/// `resolve_device_kind` (`crates/openlogi-device/src/inventory/mappings.rs`);
+/// this applies the final override. Adding a kind source means slotting it
+/// into this one chain — here if it should beat the HID++ sources, in
+/// `resolve_device_kind` otherwise — and updating both docs.
 ///
 /// The registry type wins because it is per-model and human-maintained, so a
 /// device that matched a known depot is classified by what that model *is* —

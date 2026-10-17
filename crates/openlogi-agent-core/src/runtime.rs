@@ -25,6 +25,35 @@ pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
 use crate::{DpiCycleState, DpiCycles};
 
+/// Which way a keypad page action turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageTurn {
+    /// [`Action::PreviousKeypadPage`].
+    Previous,
+    /// [`Action::NextKeypadPage`].
+    Next,
+}
+
+/// An action the agent itself carries out rather than the OS injector,
+/// handed from the dispatcher to the agent's lifecycle loop, which owns the
+/// state it changes. Each carries the config key of the device it was pressed
+/// on, when the source knows one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionRequest {
+    /// Open the Actions Ring ([`Action::ShowActionsRing`]).
+    ShowActionsRing {
+        /// The pressing device.
+        device_key: Option<String>,
+    },
+    /// Turn the pressing keypad's binding page.
+    TurnKeypadPage {
+        /// The pressing device.
+        device_key: Option<String>,
+        /// Which way.
+        turn: PageTurn,
+    },
+}
+
 /// Application identity captured with a physical press and retained through
 /// asynchronous button dispatch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,7 +128,7 @@ impl HeldShortcuts {
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
     access: DeviceAccess,
-    action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    requests: tokio::sync::mpsc::UnboundedSender<ActionRequest>,
 }
 
 impl ActionExecutor {
@@ -112,14 +141,26 @@ impl ActionExecutor {
         // no pointer target gates it. It must not: while the ring is showing,
         // the pointer is over the ring's own floating window, which classifies
         // as `PointerTarget::Unavailable`, and a gated second trigger press
-        // could never close the ring.
-        if matches!(action, Action::ShowActionsRing) {
-            if self
-                .action_ring
-                .send(device_key.map(str::to_owned))
-                .is_err()
-            {
-                warn!("Actions Ring runtime unavailable — trigger ignored");
+        // could never close the ring. A keypad page turn acts on the keypad
+        // alone, so no window gates it either.
+        let pressed_on = || device_key.map(str::to_owned);
+        let request = match action {
+            Action::ShowActionsRing => Some(ActionRequest::ShowActionsRing {
+                device_key: pressed_on(),
+            }),
+            Action::PreviousKeypadPage => Some(ActionRequest::TurnKeypadPage {
+                device_key: pressed_on(),
+                turn: PageTurn::Previous,
+            }),
+            Action::NextKeypadPage => Some(ActionRequest::TurnKeypadPage {
+                device_key: pressed_on(),
+                turn: PageTurn::Next,
+            }),
+            _ => None,
+        };
+        if let Some(request) = request {
+            if self.requests.send(request).is_err() {
+                warn!(action = %action.label(), "agent runtime unavailable — request ignored");
             }
             return;
         }
@@ -280,12 +321,12 @@ impl ActionRuntime {
     pub fn new(
         dpi_cycle: Arc<RwLock<DpiCycles>>,
         access: DeviceAccess,
-        action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+        requests: tokio::sync::mpsc::UnboundedSender<ActionRequest>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
             access,
-            action_ring,
+            requests,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;
@@ -550,7 +591,7 @@ mod tests {
         // own overlay window, which the pointer hit test reports as
         // unavailable.
         let (_signal, device_io) = openlogi_hid::device_io_channel();
-        let (action_ring, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (requests, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
         let executor = ActionExecutor {
             dpi_cycle: Arc::default(),
             access: DeviceAccess {
@@ -560,7 +601,7 @@ mod tests {
                 device_io,
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
-            action_ring,
+            requests,
         };
 
         executor.dispatch_to(
@@ -572,8 +613,51 @@ mod tests {
             ),
         );
 
-        assert_eq!(ring_rx.try_recv(), Ok(Some("mouse".to_owned())));
+        assert_eq!(
+            ring_rx.try_recv(),
+            Ok(ActionRequest::ShowActionsRing {
+                device_key: Some("mouse".to_owned())
+            })
+        );
     }
+    /// Page actions go to the agent, keyed by the pressing keypad, and — like
+    /// the ring — no pointer target gates them: the press acts on the keypad.
+    #[test]
+    fn page_actions_reach_the_agent_as_page_turns() {
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let executor = ActionExecutor {
+            dpi_cycle: Arc::default(),
+            access: DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
+            },
+            requests,
+        };
+        let unavailable = || {
+            ActionDispatchTarget::for_pointer(
+                Some(openlogi_hook::PointerTarget::Unavailable),
+                || None,
+            )
+        };
+
+        executor.dispatch_to(&Action::NextKeypadPage, Some("keypad"), unavailable());
+        executor.dispatch_to(&Action::PreviousKeypadPage, Some("keypad"), unavailable());
+
+        for turn in [PageTurn::Next, PageTurn::Previous] {
+            assert_eq!(
+                received.try_recv(),
+                Ok(ActionRequest::TurnKeypadPage {
+                    device_key: Some("keypad".to_owned()),
+                    turn,
+                })
+            );
+        }
+    }
+
     #[test]
     fn instantaneous_actions_do_not_enter_held_state() {
         let press = PressToken::hook_for_test(1, ButtonId::Back);

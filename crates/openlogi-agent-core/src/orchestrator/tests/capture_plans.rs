@@ -468,9 +468,7 @@ fn a_control_the_keyboard_session_owns_leaves_the_keyboard_capture_plan() {
     orch.devices = vec![keyboard];
     orch.rebuild();
 
-    let spec = orch
-        .keyboard_spec_for()
-        .expect("the bound key publishes a spec");
+    let spec = sole_keyboard_spec(&orch).expect("the bound key publishes a spec");
     assert_eq!(
         spec.wanted.keys().copied().collect::<Vec<_>>(),
         [multiplatform_back]
@@ -508,7 +506,7 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     orch.devices = vec![keyboard];
     orch.rebuild();
 
-    assert!(orch.keyboard_spec_for().is_none());
+    assert!(sole_keyboard_spec(&orch).is_none());
     let published = orch.shared.capture_plans.borrow();
     let diverted: Vec<u16> = published.plans()[0]
         .target

@@ -4,6 +4,7 @@ use super::super::DetailTab;
 use crate::services::assets::AssetResolver;
 use crate::state::{AppState, DeviceRecord, Sources, tests::device_list::snapshot_candidate};
 use openlogi_core::{config::Config, hid::DeviceRoute};
+use openlogi_fixture::fs::Fixture;
 
 #[test]
 fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
@@ -27,44 +28,7 @@ fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
                 .sum::<usize>()
                 + fixture.profile().standalone.len()
         );
-        for inventory in &fixture.profile().inventories {
-            for device in &inventory.paired {
-                let route = DeviceRoute::for_slot(inventory, device.slot).expect("recorded route");
-                let record = state
-                    .devices()
-                    .iter()
-                    .find(|record| record.route.as_ref() == Some(&route))
-                    .expect("recorded device is visible");
-                let model = device.model_info.as_ref().expect("recorded model identity");
-                assert_eq!(record.unit_id, model.unit_id);
-                assert_eq!(record.serial_number, model.serial_number);
-                assert_eq!(record.model_info.as_ref(), Some(model));
-                assert_eq!(record.kind, device.kind);
-                assert_eq!(record.capabilities, device.capabilities);
-                assert_eq!(record.battery, device.battery);
-                assert_eq!(record.online, device.online);
-                let expected = match fixture.manifest().id.as_str() {
-                    "mx-ergo-001" => vec![
-                        DetailTab::Buttons,
-                        DetailTab::ActionsRing,
-                        DetailTab::Device,
-                    ],
-                    "mx-master-4-001" | "mx-master-3s-001" | "mx-anywhere-3s-001" => vec![
-                        DetailTab::Buttons,
-                        DetailTab::ActionsRing,
-                        DetailTab::Pointer,
-                        DetailTab::Device,
-                    ],
-                    id => panic!("{id}: add reviewed desktop panel expectations"),
-                };
-                assert_eq!(
-                    DetailTab::tabs_for(record),
-                    expected,
-                    "{}",
-                    fixture.manifest().id
-                );
-            }
-        }
+        assert_paired_devices_match_the_record(&fixture, &state);
         // A sleeping device retains measured feature availability and stable identity.
         let keys: Vec<_> = state
             .devices()
@@ -105,5 +69,55 @@ fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
                 .collect::<Vec<_>>(),
             keys
         );
+    }
+}
+
+/// Every paired device in a fixture must surface as a visible record with
+/// its recorded identity, capabilities, battery, and online state — and
+/// behind it the panel expectations reviewed for that manifest.
+fn assert_paired_devices_match_the_record(fixture: &Fixture, state: &AppState) {
+    for inventory in &fixture.profile().inventories {
+        for device in &inventory.paired {
+            let route = DeviceRoute::for_slot(inventory, device.slot).expect("recorded route");
+            let record = state
+                .devices()
+                .iter()
+                .find(|record| record.route.as_ref() == Some(&route))
+                .expect("recorded device is visible");
+            let model = device.model_info.as_ref().expect("recorded model identity");
+            assert_eq!(record.unit_id, model.unit_id);
+            assert_eq!(record.serial_number, model.serial_number);
+            assert_eq!(record.model_info.as_ref(), Some(model));
+            assert_eq!(record.kind, device.kind);
+            assert_eq!(record.capabilities, device.capabilities);
+            assert_eq!(record.battery, device.battery);
+            assert_eq!(record.online, device.online);
+            let expected = match fixture.manifest().id.as_str() {
+                "mx-ergo-001" => vec![
+                    DetailTab::Buttons,
+                    DetailTab::ActionsRing,
+                    DetailTab::Device,
+                ],
+                "mx-master-4-001" | "mx-master-3s-001" | "mx-anywhere-3s-001" => vec![
+                    DetailTab::Buttons,
+                    DetailTab::ActionsRing,
+                    DetailTab::Pointer,
+                    DetailTab::Device,
+                ],
+                // Kind Numpad with a measured 0x1b04 table and no pointer
+                // sensor: the Keys panel is its configuration screen, and a key
+                // can open the Actions Ring, so the ring editor follows it.
+                "mx-creative-keypad-001" => {
+                    vec![DetailTab::Keys, DetailTab::ActionsRing, DetailTab::Device]
+                }
+                id => panic!("{id}: add reviewed desktop panel expectations"),
+            };
+            assert_eq!(
+                DetailTab::tabs_for(record),
+                expected,
+                "{}",
+                fixture.manifest().id
+            );
+        }
     }
 }

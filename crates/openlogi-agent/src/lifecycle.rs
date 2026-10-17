@@ -30,7 +30,7 @@ use futures::StreamExt as _;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
-use openlogi_agent_core::runtime::hook;
+use openlogi_agent_core::runtime::{ActionRequest, hook};
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
 use openlogi_agent_core::watchers::light::LightEvent;
@@ -323,9 +323,18 @@ impl Armed {
                 Some(event) = watchers.next() => {
                     running.apply_watcher(event, &inventory_refresh).await;
                 }
-                Some(device_key) = running.inputs.triggers.recv() => {
-                    running.begin_action_ring(device_key.as_deref()).await;
-                }
+                Some(request) = running.inputs.triggers.recv() => match request {
+                    ActionRequest::ShowActionsRing { device_key } => {
+                        running.begin_action_ring(device_key.as_deref()).await;
+                    }
+                    ActionRequest::TurnKeypadPage { device_key, turn } => {
+                        running
+                            .orchestrator
+                            .lock()
+                            .await
+                            .turn_keypad_page(device_key.as_deref(), turn);
+                    }
+                },
                 Ok(()) = ring.changed() => {
                     running.apply_held_pointer().await;
                 }

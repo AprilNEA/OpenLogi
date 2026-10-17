@@ -49,4 +49,6 @@ objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
 workspace = true
 
 [dev-dependencies]
+# The keypad LCD probe example encodes its test tiles as JPEG.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 tempfile = "3"

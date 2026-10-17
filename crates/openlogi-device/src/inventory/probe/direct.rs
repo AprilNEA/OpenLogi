@@ -5,14 +5,14 @@
 use std::sync::Arc;
 
 use hidpp::channel::HidppChannel;
-use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
+use openlogi_core::device::{DeviceInventory, PairedDevice, ReceiverInfo};
 use tracing::debug;
 
 use super::{NodeProbe, PassContext, ProbeVerdict};
 use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
 use crate::inventory::cache::{CacheKey, CacheOutcome, probe_or_reuse, seen};
-use crate::inventory::mappings::resolve_device_kind;
+use crate::inventory::mappings::{direct_identity_kind, resolve_device_kind};
 
 /// Prefer the device's own HID++ marketing name over the host HID collection
 /// label. Windows Bluetooth frequently exposes only a generic `"Mouse"`, while
@@ -128,10 +128,15 @@ pub(super) async fn probe_direct(
             slot: DIRECT_DEVICE_INDEX,
             codename: Some(codename),
             wpid: None,
-            // No receiver pairing register here, so `0x0005` is the only kind
-            // hint — but kind is just identity now; the UI gates on the
-            // capabilities below, so a misread kind can't hide the panels (#127).
-            kind: resolve_device_kind(probe.kind, DeviceKind::Unknown),
+            // No receiver pairing register here, so the kind comes from `0x0005`
+            // with the identity registry as this path's register (the MX Creative
+            // Keypad reports no DeviceType). Kind is just identity now; the UI
+            // gates on the capabilities below, so a misread kind can't hide the
+            // panels (#127).
+            kind: resolve_device_kind(
+                probe.kind,
+                direct_identity_kind(info.vendor_id, info.product_id),
+            ),
             // The HID node is present, but for a headset dongle that says
             // nothing about the headset: its battery feature does.
             online: !probe.unlinked,

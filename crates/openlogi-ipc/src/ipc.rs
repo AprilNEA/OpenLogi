@@ -111,6 +111,11 @@ pub use succession::Identity;
 ///      change made on a light unless the save holds its value, removes the
 ///      control's value, or the user chose that control. A file at another
 ///      revision loads as a plain reload.
+///      `HidppOperation::WriteKeyImage` appended — an image written to one
+///      of the MX Creative Keypad's LCD keys;
+///      `Action::{PreviousKeypadPage, NextKeypadPage}` appended and `ButtonId`
+///      grid keys gain page-qualified names (`page2:gridMiddle`) — the
+///      keypad's binding pages.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the

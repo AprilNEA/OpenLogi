@@ -272,6 +272,8 @@ impl Action {
             | Action::SetDpiPreset(_)
             | Action::ToggleSmartShift
             | Action::ShowActionsRing
+            | Action::PreviousKeypadPage
+            | Action::NextKeypadPage
             | Action::OpenApplication(_) => Effect::AgentSide,
 
             Action::ScrollUp => Effect::Scroll { dx: 0, dy: 1 },
