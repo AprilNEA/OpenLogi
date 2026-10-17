@@ -39,6 +39,7 @@ use evdev::{
     AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, EventType, InputEvent, KeyCode,
     PropType, RelativeAxisCode,
 };
+use openlogi_inject::uinput;
 use tracing::{debug, error, warn};
 use x11rb::protocol::xproto::ConnectionExt as _;
 
@@ -50,16 +51,6 @@ use foreground::{FRONTMOST, X11Source};
 pub(crate) use foreground::{
     ForegroundApplicationObserver, watch_frontmost_application_activations,
 };
-
-/// Prefix carried by every uinput device OpenLogi creates — the hook's
-/// pass-through mice ([`VIRTUAL_DEVICE_NAME`]) and openlogi-inject's
-/// "OpenLogi action injector" (which also advertises mouse buttons).
-/// Enumeration refuses anything with this prefix so the hook can never grab
-/// one of our own virtual devices.
-const OPENLOGI_DEVICE_PREFIX: &str = "OpenLogi ";
-
-/// Name stamped on every uinput pass-through device.
-const VIRTUAL_DEVICE_NAME: &str = "OpenLogi virtual mouse";
 
 /// Hi-res scroll resolution: 120 units per standard wheel tick, matching the
 /// Linux kernel's `REL_WHEEL_HI_RES` convention and Windows HID semantics.
@@ -258,9 +249,10 @@ fn is_hookable_mouse(
     props: &AttributeSetRef<PropType>,
     vendor_id: u32,
 ) -> bool {
-    // Never hook one of our own uinput devices (an unnamed device is fine —
-    // ours are always named).
-    if name.is_some_and(|n| n.starts_with(OPENLOGI_DEVICE_PREFIX)) {
+    // Never hook one of our own uinput devices: the pass-through mice and
+    // the action injector, which also advertises mouse buttons. An unnamed
+    // device is fine — ours are always named.
+    if name.is_some_and(uinput::is_own_device) {
         return false;
     }
     // OpenLogi only remaps Logitech hardware — never grab foreign vendors.
@@ -297,9 +289,7 @@ fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDev
     // look identical and unrecognized, so those settings silently fell back
     // to their defaults instead of the ones configured for this hardware
     // (issue #1075).
-    let builder = VirtualDevice::builder()?
-        .name(VIRTUAL_DEVICE_NAME)
-        .input_id(device.input_id());
+    let builder = uinput::builder(uinput::Device::PassThroughMouse)?.input_id(device.input_id());
 
     let builder = if let Some(keys) = device.supported_keys() {
         builder.with_keys(keys)?
@@ -1092,22 +1082,16 @@ mod tests {
 
     #[test]
     fn own_virtual_devices_are_not_hookable() {
-        // Both uinput devices OpenLogi creates carry the prefix; even with
-        // fully mouse-like capabilities they must never be grabbed.
-        for name in ["OpenLogi virtual mouse", "OpenLogi action injector"] {
+        // Even with fully mouse-like capabilities, a uinput device OpenLogi
+        // created must never be grabbed.
+        for device in [
+            uinput::Device::PassThroughMouse,
+            uinput::Device::ActionInjector,
+        ] {
             let mut caps = Caps::mouse();
-            caps.name = Some(name);
-            assert!(!caps.is_hookable(), "{name:?} must be excluded by prefix");
+            caps.name = Some(device.name());
+            assert!(!caps.is_hookable(), "{device:?} must be excluded");
         }
-    }
-
-    #[test]
-    fn virtual_device_name_carries_exclusion_prefix() {
-        assert!(
-            VIRTUAL_DEVICE_NAME.starts_with(OPENLOGI_DEVICE_PREFIX),
-            "renaming the virtual device away from the prefix would let the \
-             hook grab its own pass-through mice"
-        );
     }
 
     #[test]

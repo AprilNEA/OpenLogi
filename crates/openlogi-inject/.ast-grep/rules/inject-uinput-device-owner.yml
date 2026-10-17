@@ -1,0 +1,27 @@
+# Owner: openlogi_inject::uinput — the names of OpenLogi's uinput devices and
+# the check that recognizes them.
+id: inject-uinput-device-owner
+language: rust
+severity: error
+message: Create uinput devices with openlogi_inject::uinput::builder and recognize them with uinput::is_own_device, the uinput device-name owner.
+note: |
+  The Linux hook refused devices by a name prefix that openlogi-inject
+  repeated by hand when it named its action injector, so a rename had to
+  change both copies in lockstep. The names also carried "OpenLogi", whose
+  "pen" made GNOME Shell's X11 backend treat both devices as a stylus and
+  swap the middle and right buttons (#1842). Name and recognize uinput
+  devices only through the owner. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-inject/src/uinput.rs
+rule:
+  any:
+    - pattern: VirtualDevice::builder()
+    - pattern: $PATH::VirtualDevice::builder()
+    - pattern: VirtualDeviceBuilder::new()
+    - pattern: $PATH::VirtualDeviceBuilder::new()
+    - pattern: $NAME.starts_with($PREFIX)
+constraints:
+  PREFIX:
+    regex: '^"(OL|OpenLogi) "$'

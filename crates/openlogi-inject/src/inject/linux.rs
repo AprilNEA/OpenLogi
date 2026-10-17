@@ -235,8 +235,6 @@ pub(super) fn run_shell_command(cmd: &str) {
         .output();
 }
 
-const DEVICE_NAME: &str = "OpenLogi action injector";
-
 /// Settle time after creating the uinput device, before its first emit.
 ///
 /// `/dev/uinput` creation is synchronous, but udev, libinput, and the display
@@ -318,8 +316,7 @@ fn build() -> io::Result<VirtualDevice> {
         axes.insert(a);
     }
 
-    VirtualDevice::builder()?
-        .name(DEVICE_NAME)
+    crate::uinput::builder(crate::uinput::Device::ActionInjector)?
         .with_keys(&keys)?
         .with_relative_axes(&axes)?
         .build()
