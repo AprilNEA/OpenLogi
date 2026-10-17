@@ -9,12 +9,15 @@ use openlogi_flow::sas::PublicKey;
 use openlogi_flow::transport::{IncomingRpc, NotificationEvent, RpcEvent, message_envelope};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::Instant;
-use tracing::debug;
+use tracing::{debug, info};
 
 use super::runtime::GenerationState;
 use super::{RuntimeDevice, is_pointing_device};
 
-const ARM_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a receiver waits for arrival evidence. A Bolt device reconnects
+/// within a second, but the receiver only sees it once its inventory picks
+/// the device up again, which on Windows took longer than three seconds.
+const ARM_TIMEOUT: Duration = Duration::from_secs(8);
 const COMPLETED_LIMIT: usize = 64;
 
 mod sender;
@@ -177,6 +180,18 @@ impl HandoffBook {
         }
         pending.accepted_at = Some(Instant::now());
         true
+    }
+
+    /// Where the pointer enters for the pending `transfer_id`, when it moves a
+    /// pointing device.
+    async fn pointer_entry(&self, peer: PublicKey, transfer_id: u64) -> Option<proto::EntryPoint> {
+        let ledger = self.incoming.lock().await;
+        ledger
+            .pending
+            .as_ref()
+            .filter(|pending| pending.peer == peer && pending.transfer_id == transfer_id)
+            .filter(|pending| pending.devices.iter().any(|device| device.pointing))
+            .map(|pending| pending.entry.clone())
     }
 
     async fn observe(&self, devices: &[RuntimeDevice]) -> Option<CompletedTransfer> {
@@ -372,6 +387,13 @@ async fn accept_pending(state: Arc<GenerationState>, peer: PublicKey, transfer_i
             return;
         }
         if state.handoffs.mark_accepted(peer, transfer_id).await {
+            // Place the pointer as soon as the sender is committed to switching,
+            // not once arrival is proven: by then the user has been moving the
+            // mouse from wherever this screen's pointer last was, which can be
+            // on an armed edge that sends the devices straight back.
+            if let Some(entry) = state.handoffs.pointer_entry(peer, transfer_id).await {
+                super::runtime::warp_entry(&entry);
+            }
             spawn_arm_timeout(Arc::clone(&state), peer, transfer_id);
             state.handoffs.observe(&state.devices_snapshot()).await
         } else {
@@ -410,9 +432,18 @@ async fn finish_incoming(state: Arc<GenerationState>, completed: CompletedTransf
             .await;
         return;
     }
-    if completed.warp_pointer {
-        super::runtime::warp_entry(&completed.entry);
-    }
+    info!(
+        transfer_id = completed.result.transfer_id,
+        outcome = completed.result.outcome.to_i32(),
+        arrived = completed
+            .result
+            .arrivals
+            .iter()
+            .filter(|arrival| arrival.arrived)
+            .count(),
+        requested = completed.result.arrivals.len(),
+        "Flow incoming handoff finished"
+    );
     state.send_result(completed.peer, completed.result).await;
 }
 
@@ -463,9 +494,7 @@ pub(super) async fn handle_notification(
 
 struct CompletedTransfer {
     peer: PublicKey,
-    entry: proto::EntryPoint,
     result: proto::HandoffResult,
-    warp_pointer: bool,
 }
 
 fn complete_pending(
@@ -527,12 +556,7 @@ fn complete_pending(
     }
     CompletedTransfer {
         peer: pending.peer,
-        entry: pending.entry,
         result,
-        warp_pointer: pending
-            .devices
-            .iter()
-            .any(|device| device.pointing && device.arrived_at.is_some()),
     }
 }
 
@@ -540,7 +564,7 @@ fn accept(transfer_id: u64) -> proto::HandoffAccept {
     proto::HandoffAccept {
         transfer_id,
         arm_timeout_ms: u32::try_from(ARM_TIMEOUT.as_millis())
-            .unwrap_or_else(|_| unreachable!("three seconds fits in u32 milliseconds")),
+            .unwrap_or_else(|_| unreachable!("eight seconds fits in u32 milliseconds")),
         ..Default::default()
     }
 }

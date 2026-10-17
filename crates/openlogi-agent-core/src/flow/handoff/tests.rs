@@ -61,6 +61,23 @@ async fn receiver_arms_before_accept_and_dedupes_same_transfer() {
 }
 
 #[tokio::test]
+async fn the_pointer_entry_is_known_before_any_device_arrives() {
+    let book = HandoffBook::default();
+    let peer = PublicKey::new([7; 32]);
+    let devices = vec![device("mouse", 1, false)];
+    book.arm(peer, &request(43, &devices), &devices, true).await;
+    assert!(book.mark_accepted(peer, 43).await);
+
+    let entry = book
+        .pointer_entry(peer, 43)
+        .await
+        .expect("a moving mouse has an entry point to warp to");
+
+    assert_eq!(entry.side.as_known(), Some(proto::Side::Left));
+    assert!(book.pointer_entry(peer, 44).await.is_none());
+}
+
+#[tokio::test]
 async fn receiver_rejects_conflict_unknown_and_already_online() {
     let book = HandoffBook::default();
     let peer = PublicKey::new([7; 32]);
