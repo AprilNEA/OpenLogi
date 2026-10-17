@@ -806,6 +806,7 @@ impl Orchestrator {
             pointer_target,
             selected_device: key.map(str::to_owned),
             shift_bindings,
+            scroll_delivery: self.config.scroll_delivery(app),
             ..HookMaps::default()
         }
     }

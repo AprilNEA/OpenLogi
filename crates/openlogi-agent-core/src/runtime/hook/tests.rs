@@ -605,6 +605,90 @@ fn native_thumbwheel_scroll_stays_os_native() {
 }
 
 #[test]
+fn native_wheel_routes_a_rebound_before_the_delivery_lane() {
+    use openlogi_hook::ScrollDelta;
+
+    fn maps(
+        bindings: &BTreeMap<ButtonId, Binding>,
+        scroll_delivery: ScrollDelivery,
+        selected_device: Option<&str>,
+    ) -> HookMaps {
+        HookMaps {
+            bindings: bindings.clone(),
+            scroll_delivery,
+            selected_device: selected_device.map(str::to_owned),
+            ..HookMaps::default()
+        }
+    }
+    let native = BTreeMap::from([
+        (
+            ButtonId::ThumbwheelScrollUp,
+            default_binding(ButtonId::ThumbwheelScrollUp).into(),
+        ),
+        (
+            ButtonId::ThumbwheelScrollDown,
+            default_binding(ButtonId::ThumbwheelScrollDown).into(),
+        ),
+    ]);
+    let rebound = BTreeMap::from([
+        (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
+        (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
+    ]);
+    let right = ScrollDelta::wheel_ticks(1.0, 0.0);
+
+    for delta in [right, ScrollDelta::wheel_ticks(-0.25, 0.0)] {
+        assert_eq!(
+            native_hwheel_route(&maps(&native, ScrollDelivery::ShiftWheel, None), delta),
+            NativeWheelRoute::Deliver(ScrollDelivery::ShiftWheel)
+        );
+        assert_eq!(
+            native_hwheel_route(
+                &maps(&BTreeMap::new(), ScrollDelivery::CtrlWheel, None),
+                delta
+            ),
+            NativeWheelRoute::Deliver(ScrollDelivery::CtrlWheel),
+            "no recorded binding means the native defaults"
+        );
+        assert_eq!(
+            native_hwheel_route(&maps(&native, ScrollDelivery::Native, None), delta),
+            NativeWheelRoute::PassThrough
+        );
+    }
+    assert_eq!(
+        native_hwheel_route(&maps(&rebound, ScrollDelivery::ShiftWheel, None), right),
+        NativeWheelRoute::Rebound(ButtonId::ThumbwheelScrollDown, Action::PrevTab),
+        "a rebound direction wins over the delivery lane"
+    );
+    assert_eq!(
+        native_hwheel_route(
+            &maps(
+                &rebound,
+                ScrollDelivery::ShiftWheel,
+                Some("not-learned-yet")
+            ),
+            right
+        ),
+        NativeWheelRoute::Deliver(ScrollDelivery::ShiftWheel),
+        "a rebound that cannot resolve its direction leaves native scroll to the lane"
+    );
+    for delta in [
+        ScrollDelta::wheel_ticks(0.0, 1.0),
+        ScrollDelta::wheel_ticks(1.0, -1.0),
+        ScrollDelta::wheel_ticks(0.0, 0.0),
+    ] {
+        for delivery in ScrollDelivery::ALL {
+            for bindings in [&native, &rebound] {
+                assert_eq!(
+                    native_hwheel_route(&maps(bindings, delivery, None), delta),
+                    NativeWheelRoute::PassThrough,
+                    "{delta:?} {delivery:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn long_press_never_passes_through_as_a_native_click() {
     let binding = Binding::LongPress(LongPressBinding::new(
         default_binding(ButtonId::Back),

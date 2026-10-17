@@ -24,6 +24,7 @@ mod per_app;
 mod per_device;
 mod revision;
 mod settings;
+mod thumbwheel;
 mod wheel_hold;
 
 // Stacked, not `all(test, …)`: clippy reads the combined form as a test
@@ -50,6 +51,7 @@ pub use settings::{
     SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
     VerticalScrollSensitivity, WheelMode,
 };
+pub use thumbwheel::ThumbwheelAppRule;
 
 use crate::app::AppAliases;
 use crate::binding::Action;
@@ -95,9 +97,10 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// v5 adds the app-wide `ui_scale` preference. Older files default to the
 /// standard 100% scale.
 ///
-/// Per-device custom names and the Home gallery view preference are optional
-/// and did not require a version bump: absent fields use the model name and
-/// responsive grid respectively.
+/// Per-device custom names, the Home gallery view preference and the
+/// `[thumbwheel_apps]` table are optional and did not require a version bump:
+/// absent fields use the model name, the responsive grid and the native
+/// horizontal wheel respectively.
 ///
 /// v4 removes the one-gesture-button-per-device owner lock: gesture mode is a
 /// per-button fact read from the binding shape, so `gesture_owner` no longer
@@ -164,6 +167,9 @@ pub struct Config {
     /// rejects an `app:` profile key that names no alias here.
     #[serde(default, skip_serializing_if = "AppAliases::is_empty")]
     pub apps: AppAliases,
+    /// Per-application thumb-wheel rules, keyed by application selector.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub thumbwheel_apps: BTreeMap<String, ThumbwheelAppRule>,
 }
 
 impl Default for Config {
@@ -176,6 +182,7 @@ impl Default for Config {
             ephemeral: false,
             keyboard: KeyboardConfig::default(),
             apps: AppAliases::default(),
+            thumbwheel_apps: BTreeMap::new(),
         }
     }
 }

@@ -823,3 +823,71 @@ fn two_mouse_hidpp_plans_are_device_scoped_while_hook_fallback_is_selected_devic
         "the passive Windows fallback is one selected-device map, not a per-source map"
     );
 }
+
+#[test]
+fn the_pointer_app_selects_the_scroll_delivery_unless_focus_does() {
+    use openlogi_core::config::{MouseProfileTarget, ThumbwheelAppRule};
+    use openlogi_core::scroll::ScrollDelivery;
+    use openlogi_hook::{PointerContext, PointerTarget};
+
+    fn published(orch: &Orchestrator) -> (ScrollDelivery, Option<ScrollDelivery>) {
+        let hook = orch
+            .shared
+            .hook_maps
+            .read()
+            .expect("hook maps")
+            .scroll_delivery;
+        let plan = orch
+            .shared
+            .capture_plans
+            .borrow()
+            .plans()
+            .first()
+            .map(|plan| plan.dispatch.scroll_delivery);
+        (hook, plan)
+    }
+    let excel = r"c:\program files\microsoft office\root\office16\excel.exe";
+    let over_excel = || PointerContext {
+        app: Some(ForegroundApp::unnamed(excel.into())),
+        target: PointerTarget::Window {
+            process_id: 41,
+            window_id: 7,
+        },
+    };
+    let native = (ScrollDelivery::Native, Some(ScrollDelivery::Native));
+    let lane = (
+        ScrollDelivery::CtrlShiftWheel,
+        Some(ScrollDelivery::CtrlShiftWheel),
+    );
+
+    let mut config = Config::default();
+    config.thumbwheel_apps.insert(
+        "exe:excel.exe".to_string(),
+        ThumbwheelAppRule {
+            delivery: Some(ScrollDelivery::CtrlShiftWheel),
+        },
+    );
+    let mut orch = orchestrator(config.clone());
+    orch.devices = vec![dev("a", 1, true)];
+    orch.set_current_app(Some(ForegroundApp::unnamed("browser".into())));
+    assert_eq!(published(&orch), native);
+
+    orch.set_pointer_context(over_excel());
+    assert_eq!(published(&orch), lane);
+    orch.set_pointer_context(PointerContext {
+        app: None,
+        target: PointerTarget::Desktop,
+    });
+    assert_eq!(published(&orch), native);
+
+    config.app_settings.mouse_profile_target = MouseProfileTarget::Focused;
+    orch.reload_config(config);
+    orch.set_pointer_context(over_excel());
+    assert_eq!(
+        published(&orch),
+        native,
+        "the focused policy ignores the application under the pointer"
+    );
+    orch.set_current_app(Some(ForegroundApp::unnamed(excel.into())));
+    assert_eq!(published(&orch), lane);
+}

@@ -62,6 +62,36 @@ pub fn pointer_context() -> PointerContext {
     }
 }
 
+/// The native root window under the pointer, with the same value a
+/// [`PointerTarget::Window`] lookup reports as its `window_id`. `None` when
+/// the cursor cannot be read, and on platforms other than Windows.
+///
+/// Unlike [`pointer_context`] this never asks who owns the window, so it is
+/// cheap enough to re-check a target before each injected scroll notch; it
+/// still must never run in an input hook.
+#[must_use]
+pub fn pointer_root_window() -> Option<u64> {
+    #[cfg(target_os = "windows")]
+    return platform::pointer_root_window();
+    #[cfg(not(target_os = "windows"))]
+    None
+}
+
+/// Whether the root window under the pointer belongs to the process that owns
+/// the foreground window. `false` when either lookup fails, and on platforms
+/// other than Windows. The bare desktop is excluded even when Explorer is focused.
+///
+/// As cheap as [`pointer_root_window`], for re-checking that delivery modifiers
+/// belong to the application under the pointer; it still must never run in an
+/// input hook.
+#[must_use]
+pub fn pointer_over_focused_process() -> bool {
+    #[cfg(target_os = "windows")]
+    return platform::pointer_over_focused_process();
+    #[cfg(not(target_os = "windows"))]
+    false
+}
+
 /// Whether this session has a pointer-window backend; does not probe permissions
 /// or connect to the window server. Unsupported Wayland never falls back to X11.
 #[must_use]

@@ -980,8 +980,51 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         "a pointer-only refresh must not end the hold that caused it"
     );
 
+    // A delivery-only refresh follows the pointer-only precedent: update the
+    // lane without ending an unrelated held gesture.
+    moved.dispatch.scroll_delivery = openlogi_core::scroll::ScrollDelivery::AltWheel;
+    reconcile_session(
+        &mut session,
+        Some((&moved.target, &moved.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(
+        dispatcher.holds_gesture_press(&id, ButtonId::GestureButton),
+        "a delivery-only refresh must not end an unchanged gesture hold"
+    );
+    assert_eq!(
+        session.dispatch().scroll_delivery,
+        moved.dispatch.scroll_delivery
+    );
+
+    // Changing the gesture action together with its delivery is real dispatch
+    // state, without cycling firmware diversion.
+    let mut relaned = moved;
+    relaned.dispatch.scroll_delivery = openlogi_core::scroll::ScrollDelivery::ShiftWheel;
+    relaned.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [(GestureDirection::Left, Action::Paste)].into(),
+    );
+    assert_eq!(session.target(), &relaned.target);
+    reconcile_session(
+        &mut session,
+        Some((&relaned.target, &relaned.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(session.is_active(), "a lane change must not rearm capture");
+    assert!(
+        !dispatcher.holds_gesture_press(&id, ButtonId::GestureButton),
+        "a gesture binding change must cancel the prior session's dispatch state"
+    );
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+    );
+    assert!(dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
+
     // A real binding change still ends every admitted press.
-    let mut rebound = moved;
+    let mut rebound = relaned;
     rebound.dispatch.gesture_bindings.insert(
         ButtonId::GestureButton,
         [(GestureDirection::Left, Action::Copy)].into(),

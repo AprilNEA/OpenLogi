@@ -80,8 +80,18 @@ impl GestureOutputs {
         self.scroll.cancel_hidpp_session(session);
     }
 
-    fn post_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {
-        if !self.scroll.try_hidpp_scroll(session, delta) {
+    fn post_scroll(&self, session: &HidppSessionId, plan: &DispatchPlan, delta: ScrollDelta) {
+        // Delivery lanes are a Windows remedy; elsewhere the delivery is
+        // ignored and the wheel keeps its ordinary output.
+        let delivered = cfg!(target_os = "windows")
+            && !plan.scroll_delivery.is_native()
+            && self.scroll.try_hidpp_deliver(
+                session,
+                delta,
+                plan.scroll_delivery,
+                plan.pointer_target,
+            );
+        if !delivered && !self.scroll.try_hidpp_scroll(session, delta) {
             // HID++ diversion consumed the physical input already, so direct
             // synthesis is this source's fail-open path.
             openlogi_inject::post_scroll(delta);
@@ -287,7 +297,7 @@ fn wanted_sessions(
 }
 
 /// Whether two dispatch plans resolve every input to the same action, differing
-/// at most in the hovered window they were selected for.
+/// at most in the hovered window or horizontal scroll delivery.
 fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
     let DispatchPlan {
         config_key,
@@ -298,6 +308,7 @@ fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
         invert_wheel,
         pointer_target: _,
         shift_bindings,
+        scroll_delivery: _,
     } = a;
     *config_key == b.config_key
         && *bindings == b.bindings

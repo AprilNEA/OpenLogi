@@ -1,5 +1,50 @@
 //! Platform-neutral scroll distances.
 
+use serde::{Deserialize, Serialize};
+
+/// How horizontal scrolling reaches an application, for applications that
+/// ignore the native horizontal wheel.
+///
+/// Every lane except [`Self::Native`] turns a horizontal wheel notch into a
+/// vertical one, pressed under the lane's modifiers. Scrolling right becomes
+/// wheel-down, so with [`Self::CtrlWheel`] scrolling left zooms in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum ScrollDelivery {
+    /// The native horizontal wheel, untouched.
+    #[default]
+    Native,
+    /// Shift held over the vertical wheel.
+    ShiftWheel,
+    /// Ctrl and Shift held over the vertical wheel.
+    CtrlShiftWheel,
+    /// Alt held over the vertical wheel.
+    AltWheel,
+    /// The vertical wheel with no modifier.
+    VerticalWheel,
+    /// Ctrl held over the vertical wheel, which most applications read as zoom.
+    CtrlWheel,
+}
+
+impl ScrollDelivery {
+    /// Every lane, in declaration order.
+    pub const ALL: [Self; 6] = [
+        Self::Native,
+        Self::ShiftWheel,
+        Self::CtrlShiftWheel,
+        Self::AltWheel,
+        Self::VerticalWheel,
+        Self::CtrlWheel,
+    ];
+
+    /// Whether horizontal scrolling stays the native horizontal wheel.
+    #[must_use]
+    pub const fn is_native(self) -> bool {
+        matches!(self, Self::Native)
+    }
+}
+
 /// A signed two-axis scroll distance with an explicit unit.
 ///
 /// Positive horizontal values scroll right; positive vertical values scroll

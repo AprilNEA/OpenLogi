@@ -144,3 +144,8 @@ name = "Google Chrome"
 macos = "com.google.Chrome"
 linux = ["google-chrome", "Google-chrome"]
 windows = "exe:chrome.exe"
+
+# Windows only: horizontal scrolling for an application that ignores the
+# horizontal wheel, sent as Shift plus the vertical wheel.
+[thumbwheel_apps."exe:example.exe"]
+delivery = "shift_wheel"

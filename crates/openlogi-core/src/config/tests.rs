@@ -17,6 +17,7 @@ mod links;
 mod migrations;
 mod per_app;
 mod schema;
+mod thumbwheel;
 mod wheel_hold;
 
 fn write_and_read(config: &Config) -> Config {
