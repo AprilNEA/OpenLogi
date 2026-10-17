@@ -104,7 +104,12 @@ fn main() {
     // reaches the running agent through `reload_config`.
     openlogi_core::locale::activate(config.app_settings.language.as_deref());
 
+    // Device reads, OS hooks, the button and scroll workers and background
+    // HID++ writes all own dedicated threads, so this runtime only multiplexes
+    // IPC, watchers and the lifecycle. Two workers keep one free while the
+    // other runs a handler, instead of one idle thread per logical CPU.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
     {
