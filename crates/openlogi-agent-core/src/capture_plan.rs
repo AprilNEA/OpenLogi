@@ -228,6 +228,21 @@ pub(crate) fn hidpp_middle_gesture_maps_for(
         .collect()
 }
 
+/// The standard-button CIDs whose gesture maps `maps` holds, requested as
+/// raw-XY sources only while the OS mouse hook runs.
+fn raw_xy_requests_for(
+    maps: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    os_mouse_hook_available: bool,
+) -> Vec<(u16, ButtonId)> {
+    if !os_mouse_hook_available {
+        return Vec::new();
+    }
+    DIVERTABLE_STANDARD_BUTTONS
+        .into_iter()
+        .filter(|(_, button)| maps.contains_key(button))
+        .collect()
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
@@ -252,20 +267,10 @@ pub fn plan_for_device(
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key), app);
-    let mut divert_gesture_buttons = Vec::new();
-    let mut divert_gesture_navigation = Vec::new();
-    if os_mouse_hook_available {
-        divert_gesture_buttons.extend(
-            DIVERTABLE_STANDARD_BUTTONS
-                .into_iter()
-                .filter(|(_, button)| side_gesture_bindings.contains_key(button)),
-        );
-        divert_gesture_navigation.extend(
-            DIVERTABLE_STANDARD_BUTTONS
-                .into_iter()
-                .filter(|(_, button)| middle_gesture_bindings.contains_key(button)),
-        );
-    }
+    let mut divert_gesture_buttons =
+        raw_xy_requests_for(&side_gesture_bindings, os_mouse_hook_available);
+    let divert_gesture_navigation =
+        raw_xy_requests_for(&middle_gesture_bindings, os_mouse_hook_available);
     if gesture_bindings.contains_key(&ButtonId::DpiToggle) {
         divert_gesture_buttons.extend(
             DPI_MODE_SHIFT_CIDS
