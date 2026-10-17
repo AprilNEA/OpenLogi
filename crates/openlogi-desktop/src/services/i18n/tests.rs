@@ -1,5 +1,6 @@
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ButtonId, GestureDirection, GridKey, KNOWN_CONTROLS, KeyCombo,
+    Action, ActionRingIcon, ButtonId, GestureDirection, GridKey, Host, KNOWN_CONTROLS, KeyCombo,
+    LinuxDesktop,
 };
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
@@ -52,6 +53,24 @@ fn typed_translation_keys_resolve() {
             a.category()
         );
     }
+    // Host-specific names are only picked on that host, so the test host
+    // alone would leave most of them unresolved; walk every host instead.
+    for host in [
+        Host::MacOs,
+        Host::Windows,
+        Host::Linux(LinuxDesktop::Gnome),
+        Host::Linux(LinuxDesktop::Kde),
+        Host::Linux(LinuxDesktop::Hyprland),
+        Host::Linux(LinuxDesktop::Other),
+    ] {
+        for a in Action::catalog() {
+            let key = a
+                .translation_key_on(host)
+                .expect("every catalog action is payload-free");
+            assert!(covered(key), "no catalog key for Action::{a:?} on {host:?}");
+        }
+    }
+    assert!(covered("actions.unavailable_here"));
     for icon in ActionRingIcon::ALL {
         assert!(
             covered(icon.translation_key()),

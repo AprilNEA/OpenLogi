@@ -47,6 +47,20 @@ pub enum PowerUserKind {
 }
 
 impl PowerUserKind {
+    /// Whether this host can run the action this editor builds; the payload
+    /// does not affect availability, so an empty one stands in for it.
+    pub(crate) fn is_available(self) -> bool {
+        let action = match self {
+            // Opens through `opener` on every host.
+            Self::OpenApplication => return true,
+            Self::TypeText => Action::TypeText(String::new()),
+            Self::RunAppleScript => Action::RunAppleScript(String::new()),
+            Self::RunShellCommand => Action::RunShellCommand(String::new()),
+            Self::Workflow => Action::Workflow(Vec::new()),
+        };
+        crate::ui::action::is_available(&action)
+    }
+
     pub(crate) fn heading_key(self) -> &'static str {
         match self {
             Self::OpenApplication => "action_ring.open_application_or_folder",
