@@ -190,8 +190,9 @@ impl Backend for Native {
 /// edge before posting any, against the held modifiers at that moment.
 enum Output {
     /// The user's enabled Space shortcut, typed as a physical keyboard would.
-    /// The Dock animates it exactly like the keyboard does.
-    Shortcut(super::symbolic_hotkey::SpaceShortcut),
+    /// The Dock animates it exactly like the keyboard does. Falls back to a
+    /// DockSwipe in `direction` if a held chord owns the shortcut's key.
+    Shortcut(super::symbolic_hotkey::SpaceShortcut, Direction),
     /// A DockSwipe, for when that shortcut is disabled. The Dock switches
     /// without the slide animation (#1722).
     Swipe([CFRetained<CGEvent>; 2]),
@@ -200,7 +201,7 @@ enum Output {
 impl Output {
     fn prepare(direction: Direction) -> Option<Self> {
         if let Some(shortcut) = super::symbolic_hotkey::space_shortcut(direction) {
-            return Some(Self::Shortcut(shortcut));
+            return Some(Self::Shortcut(shortcut, direction));
         }
         tracing::debug!(?direction, "no usable Space shortcut — posting a DockSwipe");
         swipe_events(direction).map(Self::Swipe)
@@ -208,13 +209,23 @@ impl Output {
 
     fn post(&self) {
         match self {
-            Self::Shortcut(shortcut) => shortcut.post(),
-            Self::Swipe(events) => {
-                for event in events {
-                    CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
+            Self::Shortcut(shortcut, direction) => {
+                if !shortcut.post() {
+                    tracing::debug!("Space shortcut not typed — posting a DockSwipe");
+                    match swipe_events(*direction) {
+                        Some(events) => post_swipe(&events),
+                        None => tracing::warn!("could not build the fallback DockSwipe"),
+                    }
                 }
             }
+            Self::Swipe(events) => post_swipe(events),
         }
+    }
+}
+
+fn post_swipe(events: &[CFRetained<CGEvent>; 2]) {
+    for event in events {
+        CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
     }
 }
 

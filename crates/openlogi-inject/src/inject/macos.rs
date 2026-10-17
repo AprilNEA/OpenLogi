@@ -506,6 +506,16 @@ fn held_key(usage: KeyboardUsage, phase: KeyPhase, modifiers: HeldModifiers) -> 
     }
 }
 
+/// Whether a held chord keeps the ordinary key `vk` down. Only meaningful
+/// under the held-chord lock, which orders every held-key edge.
+fn held_key_down(vk: u16) -> bool {
+    HELD_KEY_PRESSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .values()
+        .any(|&held| held == vk)
+}
+
 fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
     if modifiers.contains(HeldKey::Command) {

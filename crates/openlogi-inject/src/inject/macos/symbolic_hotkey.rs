@@ -76,16 +76,24 @@ impl SpaceShortcut {
     /// modifier another binding holds is lifted only for the keystroke and
     /// restored before the lock is released, and every event is built before
     /// the first is posted.
-    pub(super) fn post(&self) {
+    ///
+    /// Returns `false`, posting nothing, when a held chord keeps the
+    /// shortcut's own key down: its key-up would end that hold early.
+    pub(super) fn post(&self) -> bool {
         super::super::with_held_modifiers(|held| {
+            if super::held_key_down(self.virtual_key) {
+                tracing::debug!("a held chord owns the Space shortcut's key");
+                return false;
+            }
             let Some(events) = keystroke(self.virtual_key, self.flags, held) else {
                 tracing::warn!("could not build the Space shortcut's key events");
-                return;
+                return false;
             };
             for event in events {
                 event.post(CGEventTapLocation::HID);
             }
-        });
+            true
+        })
     }
 }
 
