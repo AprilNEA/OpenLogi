@@ -1067,6 +1067,25 @@ fn tabs_follow_capabilities_not_kind() {
 }
 
 #[test]
+fn trackball_with_software_scroll_shows_pointer_tab() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        pointer: false,
+        scroll_inversion: false,
+        hires_wheel: false,
+        dpi_gestures: true,
+        easy_switch: true,
+        ..Capabilities::default()
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Trackball, caps));
+    if openlogi_hook::SOFTWARE_SCROLL_INVERSION {
+        assert!(tabs.contains(&DetailTab::Pointer));
+    } else {
+        assert!(!tabs.contains(&DetailTab::Pointer));
+    }
+}
+
+#[test]
 fn wheel_controls_show_pointer_tab_without_adjustable_dpi() {
     for caps in [
         Capabilities {
