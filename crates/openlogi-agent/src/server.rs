@@ -1070,6 +1070,13 @@ impl RingHapticPlayer {
     }
 }
 
+/// The pause after a failed IPC accept, doubled on each consecutive failure up
+/// to [`ACCEPT_RETRY_MAX`]: a listener failing every call would otherwise spin
+/// [`run`]'s loop and flood the log.
+const ACCEPT_RETRY_MIN: Duration = Duration::from_millis(50);
+/// The longest pause between failed IPC accepts.
+const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(5);
+
 /// Bind the agent's IPC socket and serve [`Agent`] requests until the process
 /// exits. A stale socket left by a prior crash is reclaimed by the listener —
 /// `main` holds the single-instance lock (`agent.lock`), so no other live agent
@@ -1084,11 +1091,17 @@ pub async fn run(server: AgentServer) {
     };
     info!("IPC server listening");
 
+    let mut retry_in = ACCEPT_RETRY_MIN;
     loop {
         let stream = match listener.accept().await {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                retry_in = ACCEPT_RETRY_MIN;
+                stream
+            }
             Err(e) => {
-                warn!(error = %e, "IPC accept failed");
+                warn!(error = %e, ?retry_in, "IPC accept failed");
+                tokio::time::sleep(retry_in).await;
+                retry_in = retry_in.saturating_mul(2).min(ACCEPT_RETRY_MAX);
                 continue;
             }
         };
