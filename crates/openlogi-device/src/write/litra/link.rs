@@ -165,6 +165,10 @@ enum Woke {
     Written,
 }
 
+/// How many times one wake reads the light while notifications keep
+/// arriving during the reads. The next call reads again without waiting.
+const READS_PER_WAKE: usize = 3;
+
 /// The notifications of one light reached over HID++ `0x1990`.
 pub struct LightWatch {
     route: DeviceRoute,
@@ -174,9 +178,13 @@ pub struct LightWatch {
     retired: watch::Receiver<bool>,
     /// The state last reported.
     state: LightState,
-    /// The brightness a clamp reported since the last read, when a request
-    /// rather than the light's button made it.
+    /// The brightness a clamp reported since the watcher last compared a
+    /// read with the state before it, when a request rather than the light's
+    /// button made it.
     clamped: Option<u16>,
+    /// Notifications kept arriving while the light was read, so the next
+    /// call reads it without waiting for another one.
+    read_again: bool,
 }
 
 impl LightWatch {
@@ -195,6 +203,7 @@ impl LightWatch {
             retired,
             state,
             clamped: None,
+            read_again: false,
         }
     }
 
@@ -219,29 +228,36 @@ impl LightWatch {
     /// whether the light announces it or not — unless a read after a
     /// notification already took its place.
     ///
+    /// A notification that arrives while the light is read makes the watcher
+    /// read it again, so a press the read had already passed is not lost. A
+    /// light that keeps notifying during the reads is read again on the next
+    /// call, without waiting for another notification.
+    ///
     /// Returns `None` once the link is gone — the light stopped answering, or
     /// came back as another node — and the caller should watch it again.
     pub async fn next(&mut self) -> Option<LightChange> {
         loop {
-            // In this order: a notification the light sent before a write
-            // finished — its echo among them — is matched against the value
-            // noted for the write before the write's own state is taken.
-            let woke = tokio::select! {
-                biased;
-                _ = self.retired.wait_for(|retired| *retired) => return None,
-                event = self.events.next() => match event {
-                    Some(event) => Woke::Notified(event),
-                    None => return None,
-                },
-                Ok(()) = self.written.changed() => Woke::Written,
-            };
-            match woke {
-                Woke::Notified(event) => self.note(event),
-                Woke::Written => {
-                    let state = *self.written.borrow_and_update();
-                    match self.report(state, LightControls::default()) {
-                        Some(change) => return Some(change),
-                        None => continue,
+            if !std::mem::take(&mut self.read_again) {
+                // In this order: a notification the light sent before a write
+                // finished — its echo among them — is matched against the value
+                // noted for the write before the write's own state is taken.
+                let woke = tokio::select! {
+                    biased;
+                    _ = self.retired.wait_for(|retired| *retired) => return None,
+                    event = self.events.next() => match event {
+                        Some(event) => Woke::Notified(event),
+                        None => return None,
+                    },
+                    Ok(()) = self.written.changed() => Woke::Written,
+                };
+                match woke {
+                    Woke::Notified(event) => self.note(event),
+                    Woke::Written => {
+                        let state = *self.written.borrow_and_update();
+                        match self.report(state, LightControls::default()) {
+                            Some(change) => return Some(change),
+                            None => continue,
+                        }
                     }
                 }
             }
@@ -249,25 +265,25 @@ impl LightWatch {
             // Each write read the light back and noted it under this lock, so
             // the read below is newer than every state a write noted so far.
             self.written.mark_unchanged();
-            let state = match tokio::time::timeout(RESOLVE_TIMEOUT, self.link.light.read_state())
-                .await
-            {
-                Ok(Ok(state)) => state,
-                Ok(Err(error)) => {
-                    debug!(route = %self.route, %error, "could not read the Litra after its notification");
-                    return None;
+            let mut state = self.read().await?;
+            // A notification taken after a read may come from a control the
+            // read had already passed, so read again until none is waiting:
+            // the last read then shows every notification taken.
+            let mut reads = 1;
+            while self.take_queued().await {
+                if reads == READS_PER_WAKE {
+                    self.read_again = true;
+                    break;
                 }
-                Err(_elapsed) => {
-                    debug!(route = %self.route, "the Litra did not answer after its notification");
-                    return None;
-                }
-            };
-            // The light sent these before it answered the read, so the read
-            // already shows them.
-            while let Some(Some(event)) = poll_once(self.events.next()).await {
-                self.note(event);
+                state = self.read().await?;
+                reads += 1;
             }
-            let clamped = self.clamped.take();
+            // A clamp taken after the last read may explain the next one.
+            let clamped = if self.read_again {
+                self.clamped
+            } else {
+                self.clamped.take()
+            };
             let before = std::mem::replace(&mut *self.link.last(), state);
             // The limit shows in the state read even when another
             // notification is read before the light's own limit notification.
@@ -282,6 +298,32 @@ impl LightWatch {
                 return Some(change);
             }
         }
+    }
+
+    /// Read the light, or `None` when it does not answer. Takes `&mut self`
+    /// so that [`Self::next`] stays `Send`: the event stream is not `Sync`.
+    async fn read(&mut self) -> Option<LightState> {
+        match tokio::time::timeout(RESOLVE_TIMEOUT, self.link.light.read_state()).await {
+            Ok(Ok(state)) => Some(state),
+            Ok(Err(error)) => {
+                debug!(route = %self.route, %error, "could not read the Litra after its notification");
+                None
+            }
+            Err(_elapsed) => {
+                debug!(route = %self.route, "the Litra did not answer after its notification");
+                None
+            }
+        }
+    }
+
+    /// Take the notifications already waiting, and whether there were any.
+    async fn take_queued(&mut self) -> bool {
+        let mut took = false;
+        while let Some(Some(event)) = poll_once(self.events.next()).await {
+            self.note(event);
+            took = true;
+        }
+        took
     }
 
     /// Keep the evidence of a clamp a request made.

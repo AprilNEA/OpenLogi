@@ -51,10 +51,12 @@ state, and writes a value only when it differs from the one it read.
   press read together with a limit it stays under is still the user's. Nor is
   a brightness a request was clamped to: the light sends the clamp when a
   request asks for more than the limit, and holds the limit, which nobody
-  chose. A clamp the light's button made still follows a press on it. The
-  published state still follows the write: the watcher reports the state a
-  write read back once, whether or not the light echoes it, unless a later
-  read replaced it.
+  chose. A clamp the light's button made still follows a press on it. A
+  notification that arrives while the light is read makes the watcher read it
+  again, at most three times per notification; a light that keeps notifying is
+  read again on the next call without waiting. The published state still
+  follows the write: the watcher reports the state a write read back once,
+  whether or not the light echoes it, unless a later read replaced it.
 
 Verified against scripted lights only; the repository has no Litra capture yet.
 

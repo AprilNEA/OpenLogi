@@ -66,6 +66,10 @@ struct Light {
     requests: Vec<(u8, [u8; 2])>,
     /// Where the light's notifications go once a HID++ channel is open.
     notify: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    /// Brightnesses the button sets while the light answers
+    /// `getColorTemperature`, one per answer, each announced before the
+    /// answer: a read that already passed the brightness misses it.
+    presses_during_reads: Vec<u16>,
 }
 
 impl Light {
@@ -83,6 +87,7 @@ impl Light {
             effective_max: 0,
             requests: Vec::new(),
             notify: None,
+            presses_during_reads: Vec::new(),
         }
     }
 
@@ -163,7 +168,13 @@ impl Light {
                         self.echo(1, &self.lumens.to_be_bytes());
                     }
                     7 => info(&mut payload, LINEAR, self.temperature),
-                    8 => payload[..2].copy_from_slice(&self.kelvin.to_be_bytes()),
+                    8 => {
+                        if !self.presses_during_reads.is_empty() {
+                            self.lumens = self.presses_during_reads.remove(0);
+                            self.announce(1, &self.lumens.to_be_bytes());
+                        }
+                        payload[..2].copy_from_slice(&self.kelvin.to_be_bytes());
+                    }
                     9 => {
                         self.kelvin = argument;
                         self.echo(2, &self.kelvin.to_be_bytes());
@@ -836,6 +847,18 @@ fn a_control_range_keeps_its_top_on_the_resolution_grid() {
 }
 
 /// The watcher's next change, failing the test rather than hanging.
+/// The agent awaits [`LightWatch::next`] inside `tokio::spawn`, so its
+/// future must be `Send`. This fails to compile otherwise.
+#[test]
+fn a_watch_can_be_awaited_on_another_thread() {
+    fn next_is_send(
+        watch: &mut LightWatch,
+    ) -> impl Future<Output = Option<LightChange>> + Send + '_ {
+        watch.next()
+    }
+    let _ = next_is_send;
+}
+
 async fn next_change(watch: &mut LightWatch) -> Option<LightChange> {
     tokio::time::timeout(Duration::from_secs(5), watch.next())
         .await
@@ -1227,6 +1250,58 @@ async fn a_press_read_with_a_limit_it_stays_under_is_still_a_change_on_the_light
         stays_quiet(&mut watch).await,
         "the limit notification read later finds nothing new"
     );
+}
+
+#[tokio::test]
+async fn a_press_while_the_light_is_read_is_read_again() {
+    let backend = LitraBackend::new("press-during-read", Opens::Hidpp, Light::glow());
+    let mut watch = watching(&backend).await;
+    // The temperature button wakes the watcher. The brightness button goes
+    // to 150 lm after the read passed the brightness.
+    backend.press(2, |light| {
+        light.kelvin = 5000;
+        light.presses_during_reads = vec![150];
+        5000u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("both presses are reported");
+    assert_eq!(
+        change.on_light,
+        LightControls {
+            brightness: true,
+            temperature: true,
+            ..LightControls::default()
+        }
+    );
+    assert_eq!(change.state.brightness, Some(150));
+    assert_eq!(change.state.temperature_kelvin, Some(5000));
+    assert!(stays_quiet(&mut watch).await);
+}
+
+#[tokio::test]
+async fn a_light_that_keeps_notifying_during_reads_is_read_again_next_time() {
+    let backend = LitraBackend::new("presses-during-reads", Opens::Hidpp, Light::glow());
+    let mut watch = watching(&backend).await;
+    // A press lands during each of the first four reads. One wake reads the
+    // light three times and reports the brightness its third read found.
+    backend.press(2, |light| {
+        light.kelvin = 5000;
+        light.presses_during_reads = vec![110, 120, 130, 140];
+        5000u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the reads so far are reported");
+    assert_eq!(change.state.brightness, Some(120));
+    // The next call reads without another notification, until no press is
+    // waiting.
+    let change = next_change(&mut watch)
+        .await
+        .expect("the presses still waiting are read");
+    assert!(change.on_light.brightness);
+    assert_eq!(change.state.brightness, Some(140));
+    assert!(stays_quiet(&mut watch).await);
 }
 
 /// A light at 100 lm under a steady 120 lm limit.
