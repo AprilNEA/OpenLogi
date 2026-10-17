@@ -243,11 +243,13 @@ pub(super) struct OutgoingDevice {
 }
 
 /// When a device that should have left is checked for still answering here.
-const DEPARTURE_CHECK_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
+/// Early: on two PCs a keyboard missed the switch about once in thirty
+/// crossings, and each check-and-resend round is typing delay.
+const DEPARTURE_CHECK_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 /// How long that check waits for an answer.
-const DEPARTURE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(600);
+const DEPARTURE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
 /// How many times a device that did not leave is told again.
-const DEPARTURE_RETRIES: u32 = 2;
+const DEPARTURE_RETRIES: u32 = 3;
 /// When modifiers a departed keyboard left down here are released.
 const MODIFIER_RELEASE_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 

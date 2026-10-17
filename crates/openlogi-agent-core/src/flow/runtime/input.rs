@@ -19,6 +19,10 @@ const ARRIVAL_WINDOW: Duration = Duration::from_secs(2);
 /// moving: it is the motion the mouse accumulated while it reconnected,
 /// released in one report and amplified by pointer acceleration.
 const BURST_PX: f64 = 150.0;
+/// How long after the first movement of an arrival reports still count as the
+/// burst. The accumulated motion comes in the first few reports; past this, a
+/// long report is a hand moving fast and must pass, or the pointer lags it.
+const BURST_SPAN: Duration = Duration::from_millis(40);
 /// How long key presses are swallowed while a keyboard that stayed behind is
 /// sent on, so they land on neither machine rather than on the wrong one.
 const KEY_SUPPRESS: Duration = Duration::from_millis(400);
@@ -30,9 +34,9 @@ const KEYBOARD_FOLLOW_SPACING: Duration = Duration::from_millis(600);
 /// release what it accumulated over a few consecutive reports.
 const BURST_COLLECT: Duration = Duration::from_millis(16);
 /// The longest glide. The rest of a large burst is dropped, not flung.
-const GLIDE_MAX_PX: f64 = 240.0;
-/// Glide frames, and the time between them: about 100 ms in all.
-const GLIDE_STEPS: u32 = 12;
+const GLIDE_MAX_PX: f64 = 320.0;
+/// Glide frames, and the time between them: about 120 ms in all.
+const GLIDE_STEPS: u32 = 15;
 const GLIDE_FRAME: Duration = Duration::from_millis(8);
 
 /// Glide each arrival burst in, decelerating, instead of letting it jump.
@@ -229,12 +233,19 @@ impl FlowInput {
             self.arrival.open.store(false, Ordering::Release);
             return false;
         }
-        let _ = self.arrival.first_move_ms.compare_exchange(
+        let first_move = match self.arrival.first_move_ms.compare_exchange(
             0,
             since.max(1),
             Ordering::AcqRel,
-            Ordering::Relaxed,
-        );
+            Ordering::Acquire,
+        ) {
+            Ok(_) => since.max(1),
+            Err(recorded) => recorded,
+        };
+        if since.saturating_sub(first_move) > Self::ms(BURST_SPAN) {
+            self.arrival.open.store(false, Ordering::Release);
+            return false;
+        }
         let length = f64::from(delta_x).hypot(f64::from(delta_y));
         if length < BURST_PX {
             // Ordinary motion: the mouse is back and reporting normally.
@@ -319,7 +330,26 @@ impl FlowInput {
 
 #[cfg(test)]
 mod tests {
-    use super::FlowInput;
+    use std::time::Duration;
+
+    use super::{BURST_SPAN, FlowInput};
+
+    #[test]
+    fn past_the_burst_span_a_fast_hand_is_not_held_back() {
+        let input = FlowInput::new();
+        input.arrived();
+        assert!(
+            input.pointer_moved(-900, 0),
+            "the reconnect burst glides in"
+        );
+
+        std::thread::sleep(BURST_SPAN + Duration::from_millis(20));
+
+        assert!(
+            !input.pointer_moved(-400, 0),
+            "a long report after the burst is the hand moving fast"
+        );
+    }
 
     #[test]
     fn a_hold_swallows_movement_until_released() {

@@ -541,6 +541,14 @@ pub fn start(
             &dispatcher,
             ActionDispatchTarget::capture,
         ),
+        // Any other key going down: only Flow's keyboard-activity tracking.
+        HookEvent::KeyPressed => {
+            if flow.key_pressed() {
+                EventDisposition::Suppress
+            } else {
+                EventDisposition::PassThrough
+            }
+        }
     });
 
     match result {
