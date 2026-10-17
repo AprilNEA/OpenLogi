@@ -131,7 +131,10 @@ Common device fields are:
   its buttons or by another program also replaces the saved value while the
   agent runs, so a reconnect writes the new value back, as in Logi Options+.
   The agent publishes the change to clients and keeps it until a save or a
-  write from OpenLogi sets that control. With `auto_camera` on, a power change
+  write from OpenLogi sets that control; a write that fails leaves it. The
+  desktop app saves the change as the light's setting. While one of its own
+  writes to that light is in flight, it waits for the write to settle and
+  saves only what the agent still reports. With `auto_camera` on, a power change
   on the light is a manual choice until the next camera transition, like the
   power switch in the settings app
 - `host_switch_targets` and `fn_lock` for compatible keyboards

@@ -52,6 +52,8 @@ use crate::{DpiCycleState, DpiCycles};
 mod devices;
 mod lights;
 
+pub use lights::{TakenLightChange, write_light};
+
 #[cfg(test)]
 use devices::reapply_targets;
 use devices::{
@@ -1048,7 +1050,7 @@ impl Orchestrator {
     fn effective_light_settings(&self, key: &str) -> Option<LightSettings> {
         let mut light = self.config.light(key)?;
         if let Some(changed) = self.lights_changed_on_light.get(key) {
-            lights::apply_changes_on_light(&mut light, *changed);
+            light.apply_changes_on_light(*changed);
         }
         if light.auto_camera {
             if let Some(override_enabled) = self.manual_light_overrides.get(key) {

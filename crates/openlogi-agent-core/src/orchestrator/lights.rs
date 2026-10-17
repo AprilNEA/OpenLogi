@@ -7,14 +7,27 @@
 //! such a change the new setting, so a reconnect or an unrelated save must
 //! not undo it.
 
-use openlogi_core::config::{Config, LightSettings};
+use openlogi_core::config::Config;
 use openlogi_core::device::{ChangedOnLight, LightState};
+use openlogi_core::hid::WriteError;
 use openlogi_hid::{DeviceRoute, LightChange, LightCommand, LightControls, litra_model_for_route};
 use openlogi_ipc::ObservedLight;
+use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use super::Orchestrator;
 use crate::watchers::light::WatchedLight;
+
+/// The change made on a light that [`Orchestrator::light_writing`] took for a
+/// GUI write. It keeps the light's config key, so a failed write puts the
+/// change back even when the light went offline during the write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TakenLightChange {
+    /// Config key of the light the change was taken from.
+    pub key: String,
+    /// The values taken.
+    pub changed: ChangedOnLight,
+}
 
 impl Orchestrator {
     /// The online lights to watch: those with light controls on a Litra
@@ -87,25 +100,59 @@ impl Orchestrator {
         self.publish_lights();
     }
 
-    /// Forget the change made on the light for the control a GUI write just
-    /// set: the light now holds what the user chose in OpenLogi.
-    pub fn light_written(&mut self, route: &DeviceRoute, command: LightCommand) {
-        let Some(key) = self.online_light_key(route) else {
-            return;
-        };
-        let Some(changed) = self.lights_changed_on_light.get_mut(&key) else {
-            return;
-        };
+    /// Take the change made on the light for the control a GUI write is about
+    /// to set: from here on the light is given the user's choice in OpenLogi,
+    /// so no state published during the write still offers the older value as
+    /// the setting. A change the light announces after this is newer than the
+    /// write and stands. Returns what was taken, if anything, for
+    /// [`Self::light_write_failed`].
+    pub fn light_writing(
+        &mut self,
+        route: &DeviceRoute,
+        command: LightCommand,
+    ) -> Option<TakenLightChange> {
+        let key = self.online_light_key(route)?;
+        let changed = self.lights_changed_on_light.get_mut(&key)?;
+        let mut taken = ChangedOnLight::default();
         match command {
-            LightCommand::Power(_) => changed.enabled = None,
+            LightCommand::Power(_) => taken.enabled = changed.enabled.take(),
             LightCommand::BrightnessPercent(_) | LightCommand::BrightnessNative(_) => {
-                changed.brightness_percent = None;
+                taken.brightness_percent = changed.brightness_percent.take();
             }
-            LightCommand::TemperatureKelvin(_) => changed.temperature_kelvin = None,
+            LightCommand::TemperatureKelvin(_) => {
+                taken.temperature_kelvin = changed.temperature_kelvin.take();
+            }
         }
         if changed.is_empty() {
             self.lights_changed_on_light.remove(&key);
         }
+        if taken.is_empty() {
+            return None;
+        }
+        self.publish_lights();
+        Some(TakenLightChange {
+            key,
+            changed: taken,
+        })
+    }
+
+    /// Put back what [`Self::light_writing`] took once the write failed: the
+    /// light may still hold the value changed on it. That holds as well for a
+    /// light that went offline during the write, so its reconnect writes the
+    /// change back too. A newer change the light announced during the write
+    /// is kept instead.
+    pub fn light_write_failed(&mut self, taken: TakenLightChange) {
+        let TakenLightChange {
+            key,
+            changed: taken,
+        } = taken;
+        if taken.is_empty() {
+            return;
+        }
+        let changed = self.lights_changed_on_light.entry(key).or_default();
+        changed.enabled = changed.enabled.or(taken.enabled);
+        changed.brightness_percent = changed.brightness_percent.or(taken.brightness_percent);
+        changed.temperature_kelvin = changed.temperature_kelvin.or(taken.temperature_kelvin);
         self.publish_lights();
     }
 
@@ -165,17 +212,28 @@ impl Orchestrator {
     }
 }
 
-/// Put the values changed on the light in place of the saved ones.
-pub(super) fn apply_changes_on_light(light: &mut LightSettings, changed: ChangedOnLight) {
-    if let Some(enabled) = changed.enabled {
-        light.enabled = enabled;
+/// Run `write`, a GUI write of `command` to the light on `route`, with the
+/// change made on the light for that control taken before it starts and put
+/// back if it fails. The GUI saves the light's published changes as its
+/// settings and receives the snapshots answered during a write after the
+/// write's own result, so a snapshot from inside the write must already show
+/// the control as the user's choice.
+///
+/// # Errors
+///
+/// Returns the write's error.
+pub async fn write_light(
+    orchestrator: &Mutex<Orchestrator>,
+    route: &DeviceRoute,
+    command: LightCommand,
+    write: impl Future<Output = Result<(), WriteError>>,
+) -> Result<(), WriteError> {
+    let taken = orchestrator.lock().await.light_writing(route, command);
+    let written = write.await;
+    if let (Err(_), Some(taken)) = (&written, taken) {
+        orchestrator.lock().await.light_write_failed(taken);
     }
-    if let Some(percent) = changed.brightness_percent {
-        light.brightness_percent = percent;
-    }
-    if let Some(kelvin) = changed.temperature_kelvin {
-        light.temperature_kelvin = Some(kelvin);
-    }
+    written
 }
 
 /// Forget one value changed on a light once the saved value changed or

@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 
 use openlogi_core::config::LightSettings;
+use openlogi_core::device::LightState;
 use openlogi_core::hid::{DeviceRoute, LightCommand, WriteError};
+use openlogi_ipc::ObservedLight;
 use tracing::debug;
 
 use super::device_key::DeviceKey;
@@ -398,12 +400,78 @@ impl AppState {
     /// The standalone-light settings for any persistent or runtime device key.
     #[must_use]
     pub fn light_for(&self, key: &DeviceKey) -> LightSettings {
+        self.saved_light_for(key).unwrap_or_default()
+    }
+
+    /// The standalone-light settings kept for `key` — this session's or the
+    /// saved ones — if any.
+    fn saved_light_for(&self, key: &DeviceKey) -> Option<LightSettings> {
         self.devices
             .sessions
             .get(key)
             .and_then(|entry| entry.light.volatile_settings)
             .or_else(|| self.config.light(key.as_str()))
-            .unwrap_or_default()
+    }
+
+    /// Keep each change made on a light itself as its setting, as Options+
+    /// does: the values the agent reports as changed on the light replace
+    /// the kept ones. A light with a GUI write in flight is left until the
+    /// write settles. The agent takes the controls a write sets before it
+    /// writes, so a later report offers only the changes still the light's.
+    pub(super) fn adopt_changes_on_lights(&mut self, lights: &[ObservedLight]) -> StateEvents {
+        let mut events = StateEvents::none();
+        let mut saved_any = false;
+        for light in lights {
+            if light.changed_on_light.is_empty() {
+                continue;
+            }
+            let Some((runtime_key, persistent_key)) = self
+                .devices
+                .records
+                .iter()
+                .find(|record| record.online && record.route.as_ref() == Some(&light.route))
+                .map(|record| {
+                    (
+                        record.device_key(),
+                        record.persistent_config_key().map(str::to_string),
+                    )
+                })
+            else {
+                continue;
+            };
+            if self
+                .devices
+                .sessions
+                .get(&runtime_key)
+                .is_some_and(|entry| entry.light.pending.is_some())
+            {
+                continue;
+            }
+            let kept = self.saved_light_for(&runtime_key);
+            let adopted = adopted_light(kept, light);
+            if kept == Some(adopted) {
+                continue;
+            }
+            if let Some(key) = persistent_key {
+                if let Some(entry) = self.devices.sessions.get_mut(&runtime_key) {
+                    entry.light.volatile_settings = None;
+                }
+                self.config.edit(|config| config.set_light(&key, adopted));
+                saved_any = true;
+            } else {
+                self.devices
+                    .sessions
+                    .entry(runtime_key.clone())
+                    .or_default()
+                    .light
+                    .volatile_settings = Some(adopted);
+            }
+            events = events.and(StateEvent::LightingChanged(runtime_key));
+        }
+        if saved_any {
+            self.persist_and_reload("light");
+        }
+        events
     }
 
     /// The rollback point for a new optimistic light write: inherited from an
@@ -625,6 +693,30 @@ impl AppState {
             self.persist_and_reload("manual light power");
         }
         events
+    }
+}
+
+/// `kept` with the values changed on the light in their place. A light with
+/// no kept settings starts from what it reads back, so the controls the
+/// change left alone keep the light's own values too.
+fn adopted_light(kept: Option<LightSettings>, light: &ObservedLight) -> LightSettings {
+    let mut adopted = kept.unwrap_or_else(|| read_back_light(&light.state));
+    adopted.apply_changes_on_light(light.changed_on_light);
+    adopted
+}
+
+/// The settings that reproduce what a light reads back.
+fn read_back_light(state: &LightState) -> LightSettings {
+    let defaults = LightSettings::default();
+    LightSettings {
+        enabled: state.on,
+        brightness_percent: state
+            .brightness
+            .zip(state.capabilities.brightness)
+            .and_then(|(native, range)| range.percent_for_native(native))
+            .unwrap_or(defaults.brightness_percent),
+        temperature_kelvin: state.temperature_kelvin.or(defaults.temperature_kelvin),
+        ..defaults
     }
 }
 

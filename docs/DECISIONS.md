@@ -41,7 +41,12 @@ state, and writes a value only when it differs from the one it read.
   in place of the saved one, so a reconnect writes it back instead of undoing
   it, and publishes it so the settings app can save it. A save of that control
   or a write from OpenLogi replaces it; the power of a camera-linked light is
-  a manual choice until the next camera transition instead.
+  a manual choice until the next camera transition instead. The desktop app
+  saves each published change, except on a light with one of its own writes
+  in flight. The agent takes the controls a write sets before it writes and
+  gives them back only if the write fails, so a state published during the
+  write never offers the old change, and the app cannot save it over the
+  value the user just chose.
 - **OpenLogi's own writes are not changes on the light.** The light echoes
   every setter as a notification. A notification that matches the value the
   agent just wrote is the echo. A brightness the light's effective maximum

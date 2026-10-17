@@ -12,7 +12,7 @@ use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
+use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
@@ -346,13 +346,14 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         command: LightCommand,
     ) -> Result<(), WriteError> {
-        self.shared.hardware().apply_light(&route, command).await?;
-        // The light now holds the user's choice, not one made on the light.
-        self.orchestrator
-            .lock()
-            .await
-            .light_written(&route, command);
-        Ok(())
+        let hardware = self.shared.hardware();
+        orchestrator::write_light(
+            &self.orchestrator,
+            &route,
+            command,
+            hardware.apply_light(&route, command),
+        )
+        .await
     }
 
     async fn set_light_manual_power(
