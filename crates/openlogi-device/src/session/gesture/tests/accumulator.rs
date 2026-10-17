@@ -109,6 +109,8 @@ fn motion_streams_from_the_commit_on() {
     acc.backdate_hold_for_test();
     let xy = |dx| RawControlEvent::RawXy { dx, dy: 0 };
 
+    // A fresh hold's first report predates the press and is discarded.
+    handle_reprog(&mut acc, xy(500), GESTURE, &[], &[], &tx);
     handle_reprog(&mut acc, xy(20), GESTURE, &[], &[], &tx);
     handle_reprog(&mut acc, xy(40), GESTURE, &[], &[], &tx);
     handle_reprog(&mut acc, xy(7), GESTURE, &[], &[], &tx);
@@ -474,6 +476,14 @@ fn the_dedicated_buttons_first_sample_is_discarded_as_stale() {
             GestureDirection::Right
         )),
         "the stroke made during the hold decides"
+    );
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        )),
+        "191 units of continued travel past the commit repeat it once"
     );
 
     // Every press opens with its own stale report, not just the first.

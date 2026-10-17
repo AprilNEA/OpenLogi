@@ -781,7 +781,6 @@ async fn pending_restore_follows_a_disabled_devices_latest_route() {
     );
 }
 
-
 #[tokio::test]
 async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
     use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
@@ -793,6 +792,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         registry: openlogi_hid::ChannelRegistry::default(),
         receiver_access: ReceiverAccess::default(),
         device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
     };
     let mut actions =
         crate::runtime::ActionRuntime::new(Arc::default(), device_access, ring).unwrap();
@@ -874,6 +874,7 @@ async fn a_desktop_swipe_drives_one_live_transition_until_release() {
         registry: openlogi_hid::ChannelRegistry::default(),
         receiver_access: ReceiverAccess::default(),
         device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
     };
     let mut actions =
         crate::runtime::ActionRuntime::new(Arc::default(), device_access, ring).unwrap();
