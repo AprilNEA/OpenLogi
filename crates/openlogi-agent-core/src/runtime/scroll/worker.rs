@@ -854,10 +854,6 @@ mod tests {
     /// not overwrite a newer device's already-published scale, or a neutral
     /// reset, once it completes late.
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "resolution_scale is an exact integer-to-f64 conversion, no rounding possible"
-    )]
     fn stale_generation_resolution_scale_read_does_not_overwrite_a_newer_value() {
         let preferences = preferences(false, 7);
 
@@ -882,10 +878,6 @@ mod tests {
     /// goes offline) — the orchestrator's neutral reset
     /// (`publish_resolution_scale`) must also win over the stale read.
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "resolution_scale is an exact integer-to-f64 conversion, no rounding possible"
-    )]
     fn stale_generation_resolution_scale_read_does_not_override_a_neutral_reset() {
         let preferences = preferences(false, 7);
         let stale_generation = preferences.begin_resolution_scale_refresh();
@@ -952,10 +944,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "resolution_scale is an exact integer-to-f64 conversion, no rounding possible"
-    )]
     fn resolution_scale_of_zero_or_one_is_neutral() {
         assert_eq!(
             ScrollPreferences::new(false, sensitivity(7)).resolution_scale(),
