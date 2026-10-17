@@ -49,10 +49,11 @@ use openlogi_core::hid::{
     SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
-    Identity, InventoryHealth, MonitorEvent, Observation, ObservedLight, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    AcknowledgedLightChange, ActionRingCommandError, ActionRingInvocation, ActionRingPresentation,
+    AgentRequest, AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps,
+    FoundDevice, Identity, InventoryHealth, MonitorEvent, Observation, ObservedLight,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
+    RingObservation,
 };
 use succession::{Compat, Run};
 
@@ -311,6 +312,30 @@ fn semantic_read_requests() {
             name: "Desk".into(),
         },
         "23000846303044434146450101044465736b",
+    );
+}
+
+/// The GUI acknowledges the changes on a light it saved, ahead of a reload.
+#[test]
+fn acknowledged_light_changes() {
+    assert_wire(
+        &AgentRequest::AcknowledgeLightChanges {
+            acknowledged: vec![AcknowledgedLightChange {
+                route: DeviceRoute::RawHid {
+                    vendor_id: 0x046d,
+                    product_id: 0xc900,
+                    usage_page: 0xff43,
+                    usage_id: 0x0202,
+                    identity: "serial:ABC123".into(),
+                },
+                changed: ChangedOnLight {
+                    enabled: None,
+                    brightness_percent: Some(57),
+                    temperature_kelvin: Some(4000),
+                },
+            }],
+        },
+        "240103fb6d04fb00c9fb43fffb02020d73657269616c3a41424331323300013901fba00f",
     );
 }
 

@@ -46,10 +46,13 @@ state, and writes a value only when it differs from the one it read.
   in flight. The agent takes the controls a write sets before it writes and
   gives them back only if the write fails, so a state published during the
   write never offers the old change, and the app cannot save it over the
-  value the user just chose. A save of a value the light reported earlier for
-  a control acknowledges that report: a newer change on the light stands, so
-  a press that reaches the agent after the app saved the previous one is not
-  written over. Only the reports since that control's change began count.
+  value the user just chose. Before it reloads a save, the app tells the agent
+  which change it saved for which light (`acknowledge_light_changes`). A save
+  of an acknowledged value leaves a newer change on the light in place, so a
+  press that reaches the agent after the app saved the previous one is not
+  written over. A save the app did not acknowledge, such as a hand edit of
+  `config.toml`, replaces the change even when it matches an earlier report.
+  An acknowledgement lasts for one reload.
 - **OpenLogi's own writes are not changes on the light.** The light echoes
   every setter as a notification. A notification that matches the value the
   agent just wrote is the echo. A brightness the light's effective maximum

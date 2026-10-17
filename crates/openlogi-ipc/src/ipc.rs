@@ -105,7 +105,10 @@ pub use succession::Identity;
 /// v37: `Capabilities::virtual_thumbwheel` appended — Back/Forward can hold
 ///      the main wheel as a virtual thumb wheel; `AgentSnapshot::lights`
 ///      appended — what each standalone light reached over HID++ `0x1990`
-///      reads back, and the settings changed on the light itself.
+///      reads back, and the settings changed on the light itself;
+///      `Agent::acknowledge_light_changes` appended — the settings app says
+///      which values it saved because the light reported them, so the reload
+///      of that save keeps a newer change on the light.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -200,6 +203,16 @@ pub struct ObservedLight {
     /// Settings changed on the light itself that the saved settings do not
     /// hold yet. The agent already uses them; the GUI saves them.
     pub changed_on_light: ChangedOnLight,
+}
+
+/// Settings changed on a standalone light that the GUI saved as its settings,
+/// as [`Agent::acknowledge_light_changes`] tells the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcknowledgedLightChange {
+    /// The route the light was reported on, as in [`ObservedLight::route`].
+    pub route: DeviceRoute,
+    /// The values the GUI saved, from [`ObservedLight::changed_on_light`].
+    pub changed: ChangedOnLight,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -677,4 +690,11 @@ pub trait Agent {
         slot: u8,
         name: String,
     ) -> Result<EasySwitchHosts, WriteError>;
+    /// Tell the agent which settings changed on a light the GUI saved
+    /// because the agent reported them, ahead of the
+    /// [`Agent::reload_config`] that loads the save. That reload keeps a
+    /// newer change on the light over a value acknowledged here; any other
+    /// newly saved value still replaces the change. An acknowledgement lasts
+    /// until the next reload.
+    async fn acknowledge_light_changes(acknowledged: Vec<AcknowledgedLightChange>);
 }

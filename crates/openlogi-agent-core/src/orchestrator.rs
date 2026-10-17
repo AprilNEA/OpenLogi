@@ -365,11 +365,9 @@ pub struct Orchestrator {
     /// yet, by config key. They stand in for the saved values until a save
     /// or a GUI write of that control replaces them.
     lights_changed_on_light: BTreeMap<String, ChangedOnLight>,
-    /// The values each light reported as changed on it for each control
-    /// since that control's change began, by config key. The GUI saves what
-    /// it is told, so a save of an earlier report acknowledges that report
-    /// and leaves a newer change standing.
-    lights_reported_on_light: BTreeMap<String, lights::ReportedOnLight>,
+    /// The changes on each light the GUI said it saved, by config key, until
+    /// the next reload loads the save.
+    light_acknowledgements: BTreeMap<String, ChangedOnLight>,
     /// The keyboards whose "keep OS layout" is in effect, shared with the
     /// layout writes queued for them so a write withdraws itself once a
     /// reload turns the setting off or disables the device.
@@ -476,7 +474,7 @@ impl Orchestrator {
             manual_light_overrides: BTreeMap::new(),
             light_states: BTreeMap::new(),
             lights_changed_on_light: BTreeMap::new(),
-            lights_reported_on_light: BTreeMap::new(),
+            light_acknowledgements: BTreeMap::new(),
             kept_os_layouts: Arc::default(),
             os_mouse_hook_available: false,
             capture_plans_tx,

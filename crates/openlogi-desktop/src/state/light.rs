@@ -5,13 +5,14 @@ use std::collections::BTreeMap;
 use openlogi_core::config::LightSettings;
 use openlogi_core::device::LightState;
 use openlogi_core::hid::{DeviceRoute, LightCommand, WriteError};
-use openlogi_ipc::ObservedLight;
+use openlogi_ipc::{AcknowledgedLightChange, ObservedLight};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
 use super::device_session::DeviceSession;
 use super::events::StateEvents;
 use super::{AppState, StateEvent};
+use crate::services::ipc::{AcknowledgeLightChanges, ReloadConfig};
 
 const fn camera_policy_applies(light: LightSettings) -> bool {
     cfg!(target_os = "macos") && light.auto_camera
@@ -420,7 +421,7 @@ impl AppState {
     /// writes, so a later report offers only the changes still the light's.
     pub(super) fn adopt_changes_on_lights(&mut self, lights: &[ObservedLight]) -> StateEvents {
         let mut events = StateEvents::none();
-        let mut saved_any = false;
+        let mut acknowledged = Vec::new();
         for light in lights {
             if light.changed_on_light.is_empty() {
                 continue;
@@ -457,7 +458,10 @@ impl AppState {
                     entry.light.volatile_settings = None;
                 }
                 self.config.edit(|config| config.set_light(&key, adopted));
-                saved_any = true;
+                acknowledged.push(AcknowledgedLightChange {
+                    route: light.route.clone(),
+                    changed: light.changed_on_light,
+                });
             } else {
                 self.devices
                     .sessions
@@ -468,8 +472,11 @@ impl AppState {
             }
             events = events.and(StateEvent::LightingChanged(runtime_key));
         }
-        if saved_any {
-            self.persist_and_reload("light");
+        // The agent hears which saved values answer its reports before the
+        // reload that loads them, so a newer change on a light outlives it.
+        if !acknowledged.is_empty() && self.persist_config("light") {
+            self.send_ipc(AcknowledgeLightChanges { acknowledged });
+            self.send_ipc(ReloadConfig);
         }
         events
     }

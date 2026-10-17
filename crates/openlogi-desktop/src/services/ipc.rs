@@ -64,10 +64,10 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
-    ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
-    SetBacklight, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting, SetReportRate,
-    SetSmartShift, StartPairing, UnpairDevice,
+    AcknowledgeLightChanges, CancelPairing, Command, PairDevice, ReadBacklight, ReadDpi,
+    ReadEasySwitchHosts, ReadFnLock, ReadReportRate, ReadSmartShift, ReloadConfig,
+    RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight,
+    SetLightManualPower, SetLighting, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -324,11 +324,12 @@ mod tests {
 
     use std::sync::Mutex;
 
+    use openlogi_core::device::ChangedOnLight;
     use openlogi_core::hid::DeviceRoute;
     use openlogi_ipc::testing::in_memory_agent;
     use openlogi_ipc::{
-        AgentRequest, AgentResponse, AgentStatus, ForegroundApps, InventoryHealth, Observation,
-        PROTOCOL_VERSION,
+        AcknowledgedLightChange, AgentRequest, AgentResponse, AgentStatus, ForegroundApps,
+        InventoryHealth, Observation, PROTOCOL_VERSION,
     };
     use tokio::sync::oneshot;
 
@@ -494,6 +495,70 @@ mod tests {
         );
         assert_eq!(dying_reloads.load(Ordering::SeqCst), 1);
         assert_eq!(successor_reloads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_acknowledgement_reaches_the_agent_before_the_reload_it_precedes() {
+        // The agent keeps a newer change on a light over a saved one only if
+        // it hears which values the GUI saved before the reload that loads
+        // the save. The state queues the acknowledgement first, and the loop
+        // runs a held reload after the command of the same turn.
+        let acked = Arc::new(AtomicUsize::new(0));
+        let acked_at_reload = Arc::new(AtomicUsize::new(usize::MAX));
+        let (counted, seen) = (acked.clone(), acked_at_reload.clone());
+        let agent = in_memory_agent(
+            move |request| {
+                let (counted, seen) = (counted.clone(), seen.clone());
+                Box::pin(async move {
+                    match request {
+                        AgentRequest::AcknowledgeLightChanges { acknowledged } => {
+                            counted.fetch_add(acknowledged.len(), Ordering::SeqCst);
+                            Ok(AgentResponse::AcknowledgeLightChanges(()))
+                        }
+                        AgentRequest::ReloadConfig {} => {
+                            seen.store(counted.load(Ordering::SeqCst), Ordering::SeqCst);
+                            Ok(AgentResponse::ReloadConfig(Ok(())))
+                        }
+                        AgentRequest::Observe { .. } => std::future::pending().await,
+                        other => panic!("the client loop sent an unexpected request: {other:?}"),
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+        let mut effects = ScriptedEffects::answering([Ok(agent)]);
+        let (update_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        commands
+            .send(
+                AcknowledgeLightChanges {
+                    acknowledged: vec![AcknowledgedLightChange {
+                        route: some_route(),
+                        changed: ChangedOnLight {
+                            brightness_percent: Some(60),
+                            ..ChangedOnLight::default()
+                        },
+                    }],
+                }
+                .into(),
+            )
+            .unwrap();
+        commands.send(ReloadConfig.into()).unwrap();
+
+        let verdict = tokio::select! {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+                panic!("the loop ends only once the GUI hangs up")
+            }
+            verdict = reload_verdict(&mut updates) => verdict,
+        };
+
+        assert_eq!(verdict, Ok(()));
+        assert_eq!(acked.load(Ordering::SeqCst), 1, "delivered exactly once");
+        assert_eq!(
+            acked_at_reload.load(Ordering::SeqCst),
+            1,
+            "the reload arrives after the acknowledgement"
+        );
     }
 
     #[tokio::test(start_paused = true)]

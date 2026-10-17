@@ -7,13 +7,11 @@
 //! such a change the new setting, so a reconnect or an unrelated save must
 //! not undo it.
 
-use std::collections::BTreeSet;
-
 use openlogi_core::config::Config;
 use openlogi_core::device::{ChangedOnLight, LightState};
 use openlogi_core::hid::WriteError;
 use openlogi_hid::{DeviceRoute, LightChange, LightCommand, LightControls, litra_model_for_route};
-use openlogi_ipc::ObservedLight;
+use openlogi_ipc::{AcknowledgedLightChange, ObservedLight};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -29,34 +27,6 @@ pub struct TakenLightChange {
     pub key: String,
     /// The values taken.
     pub changed: ChangedOnLight,
-}
-
-/// The values a light reported as changed on it for each control, since the
-/// change of that control began.
-#[derive(Debug, Default)]
-pub(super) struct ReportedOnLight {
-    enabled: BTreeSet<bool>,
-    brightness_percent: BTreeSet<u8>,
-    temperature_kelvin: BTreeSet<u16>,
-}
-
-impl ReportedOnLight {
-    /// Keep the reports in step with `changed`: forget the controls it no
-    /// longer holds, and note each value it holds now.
-    fn follow(&mut self, changed: ChangedOnLight) {
-        follow(&mut self.enabled, changed.enabled);
-        follow(&mut self.brightness_percent, changed.brightness_percent);
-        follow(&mut self.temperature_kelvin, changed.temperature_kelvin);
-    }
-}
-
-fn follow<T: Ord>(reported: &mut BTreeSet<T>, changed: Option<T>) {
-    match changed {
-        Some(value) => {
-            reported.insert(value);
-        }
-        None => reported.clear(),
-    }
 }
 
 impl Orchestrator {
@@ -122,7 +92,6 @@ impl Orchestrator {
         if changed.is_empty() {
             self.lights_changed_on_light.remove(&key);
         }
-        self.sync_reported(&key);
         if on_light == LightControls::default() {
             debug!(device = %key, ?state, "a light reads back a new state");
         } else {
@@ -157,7 +126,6 @@ impl Orchestrator {
         if changed.is_empty() {
             self.lights_changed_on_light.remove(&key);
         }
-        self.sync_reported(&key);
         if taken.is_empty() {
             return None;
         }
@@ -181,69 +149,59 @@ impl Orchestrator {
         if taken.is_empty() {
             return;
         }
-        let changed = self.lights_changed_on_light.entry(key.clone()).or_default();
+        let changed = self.lights_changed_on_light.entry(key).or_default();
         changed.enabled = changed.enabled.or(taken.enabled);
         changed.brightness_percent = changed.brightness_percent.or(taken.brightness_percent);
         changed.temperature_kelvin = changed.temperature_kelvin.or(taken.temperature_kelvin);
-        self.sync_reported(&key);
         self.publish_lights();
+    }
+
+    /// Note the changes on lights the GUI said it saved, for the reload that
+    /// loads the save. A light no longer online is skipped: the GUI saves
+    /// only what an online light reported.
+    pub fn acknowledge_light_changes(&mut self, acknowledged: &[AcknowledgedLightChange]) {
+        for AcknowledgedLightChange { route, changed } in acknowledged {
+            let Some(key) = self.online_light_key(route) else {
+                continue;
+            };
+            let noted = self.light_acknowledgements.entry(key).or_default();
+            noted.enabled = changed.enabled.or(noted.enabled);
+            noted.brightness_percent = changed.brightness_percent.or(noted.brightness_percent);
+            noted.temperature_kelvin = changed.temperature_kelvin.or(noted.temperature_kelvin);
+        }
     }
 
     /// Drop the changes made on a light that the new config saved or
     /// replaced. A value the config now holds needs no stand-in, and any
-    /// other newly saved value is the user's newer choice. A save of a value
-    /// the light reported earlier is the GUI acknowledging that report, so
-    /// a change the light made since then stands.
+    /// other newly saved value is the user's newer choice, unless the GUI
+    /// acknowledged it: then it saved an earlier report, and a change the
+    /// light made since then stands. Acknowledgements last for one reload.
     pub(super) fn forget_saved_light_changes(&mut self, previous: &Config) {
         let config = &self.config;
-        let reported = &self.lights_reported_on_light;
+        let acknowledgements = std::mem::take(&mut self.light_acknowledgements);
         self.lights_changed_on_light.retain(|key, changed| {
             let (before, after) = (previous.light(key), config.light(key));
-            let reported = reported.get(key);
+            let acknowledged = acknowledgements.get(key).copied().unwrap_or_default();
             forget_saved(
                 &mut changed.enabled,
-                reported.map(|reported| &reported.enabled),
+                acknowledged.enabled,
                 before.map(|light| light.enabled),
                 after.map(|light| light.enabled),
             );
             forget_saved(
                 &mut changed.brightness_percent,
-                reported.map(|reported| &reported.brightness_percent),
+                acknowledged.brightness_percent,
                 before.map(|light| light.brightness_percent),
                 after.map(|light| light.brightness_percent),
             );
             forget_saved(
                 &mut changed.temperature_kelvin,
-                reported.map(|reported| &reported.temperature_kelvin),
+                acknowledged.temperature_kelvin,
                 before.and_then(|light| light.temperature_kelvin),
                 after.and_then(|light| light.temperature_kelvin),
             );
             !changed.is_empty()
         });
-        let changed = &self.lights_changed_on_light;
-        self.lights_reported_on_light
-            .retain(|key, reported| match changed.get(key) {
-                Some(changed) => {
-                    reported.follow(*changed);
-                    true
-                }
-                None => false,
-            });
-    }
-
-    /// Keep the reported values of the light `key` in step with the change
-    /// it holds now.
-    fn sync_reported(&mut self, key: &str) {
-        match self.lights_changed_on_light.get(key) {
-            Some(changed) => self
-                .lights_reported_on_light
-                .entry(key.to_owned())
-                .or_default()
-                .follow(*changed),
-            None => {
-                self.lights_reported_on_light.remove(key);
-            }
-        }
     }
 
     /// Publish what each online light last read back, with the changes made
@@ -301,10 +259,10 @@ pub async fn write_light(
 }
 
 /// Forget one value changed on a light once the config holds it, or once a
-/// save replaced it with a value the light did not report earlier.
-fn forget_saved<T: Copy + Ord>(
+/// save replaced it with a value the GUI did not acknowledge.
+fn forget_saved<T: Copy + PartialEq>(
     changed: &mut Option<T>,
-    reported: Option<&BTreeSet<T>>,
+    acknowledged: Option<T>,
     before: Option<T>,
     after: Option<T>,
 ) {
@@ -312,8 +270,7 @@ fn forget_saved<T: Copy + Ord>(
         return;
     };
     let adopted = after == Some(value);
-    let acknowledged_earlier =
-        after.is_some_and(|saved| reported.is_some_and(|reported| reported.contains(&saved)));
+    let acknowledged_earlier = after.is_some() && acknowledged == after;
     if adopted || (before != after && !acknowledged_earlier) {
         *changed = None;
     }

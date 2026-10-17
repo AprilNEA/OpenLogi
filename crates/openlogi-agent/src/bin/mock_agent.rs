@@ -60,10 +60,10 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
-    ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
-    MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingPhase, PairingUpdate, RingObservation,
+    AcknowledgedLightChange, ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot,
+    AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity,
+    InventoryHealth, MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -950,6 +950,13 @@ impl Agent for MockAgent {
         }
         info!(%route, slot, "rename_easy_switch_host");
         Ok(stored.clone())
+    }
+    /// The mock reports no changes on its lights, so it has none to keep.
+    async fn acknowledge_light_changes(
+        self,
+        _: Context,
+        _acknowledged: Vec<AcknowledgedLightChange>,
+    ) {
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

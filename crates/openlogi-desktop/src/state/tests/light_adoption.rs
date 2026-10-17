@@ -2,11 +2,11 @@
 //! keeps them as the light's settings, as Options+ does.
 
 use openlogi_core::device::{ChangedOnLight, LightState};
-use openlogi_ipc::ObservedLight;
+use openlogi_ipc::{AcknowledgedLightChange, ObservedLight};
 
 use super::fn_lock::drain;
 use super::*;
-use crate::services::ipc::Command;
+use crate::services::ipc::{AcknowledgeLightChanges, Command};
 
 fn lumens() -> LightValueRange {
     LightValueRange::new(20, 250, 1, LightValueUnit::Lumens).expect("valid range")
@@ -92,8 +92,23 @@ fn brightness_changed_to(percent: u8) -> ChangedOnLight {
     }
 }
 
-fn only_a_reload(commands: &[Command]) -> bool {
-    matches!(commands, [Command::ReloadConfig(_)])
+/// The adoption tells the agent what it saved, then reloads it: exactly an
+/// acknowledgement of the changes `lights` reported, and one reload.
+fn acknowledged_then_reloaded(commands: &[Command], lights: &[ObservedLight]) -> bool {
+    let reported: Vec<_> = lights
+        .iter()
+        .map(|light| AcknowledgedLightChange {
+            route: light.route.clone(),
+            changed: light.changed_on_light,
+        })
+        .collect();
+    matches!(
+        commands,
+        [
+            Command::AcknowledgeLightChanges(AcknowledgeLightChanges { acknowledged }),
+            Command::ReloadConfig(_),
+        ] if *acknowledged == reported
+    )
 }
 
 #[test]
@@ -119,7 +134,7 @@ fn a_change_on_a_saved_light_replaces_only_that_value_and_reloads_once() {
         Some(LightSettings::new(true, 50, Some(4000)))
     );
     assert_eq!(state.light(), LightSettings::new(true, 50, Some(4000)));
-    assert!(only_a_reload(&drain(&mut receiver)));
+    assert!(acknowledged_then_reloaded(&drain(&mut receiver), &lights));
 
     // The agent reports the change until its reload; keeping it again saves
     // nothing.
@@ -147,7 +162,7 @@ fn a_light_never_saved_keeps_what_it_reads_back_for_the_other_controls() {
         state.config.light(key.as_str()),
         Some(LightSettings::new(false, 50, Some(5000)))
     );
-    assert!(only_a_reload(&drain(&mut receiver)));
+    assert!(acknowledged_then_reloaded(&drain(&mut receiver), &lights));
 }
 
 #[test]
@@ -192,7 +207,7 @@ fn a_light_with_a_gui_write_in_flight_keeps_its_change_until_the_write_settles()
         state.config.light(key.as_str()),
         Some(LightSettings::new(true, 17, None))
     );
-    assert!(only_a_reload(&drain(&mut receiver)));
+    assert!(acknowledged_then_reloaded(&drain(&mut receiver), &lights));
 }
 
 #[test]
@@ -239,7 +254,7 @@ fn a_light_saved_after_keeping_a_session_value_shows_the_change_it_saves() {
         LightSettings::new(false, 50, Some(3000)),
         "the saved settings are shown, not the value kept for the session"
     );
-    assert!(only_a_reload(&drain(&mut receiver)));
+    assert!(acknowledged_then_reloaded(&drain(&mut receiver), &lights));
 }
 
 #[test]

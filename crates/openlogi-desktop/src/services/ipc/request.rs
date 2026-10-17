@@ -21,7 +21,9 @@ use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
-use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
+use openlogi_ipc::{
+    AcknowledgedLightChange, AgentClient, ConfigReloadError, PairingCommandError, PairingFailure,
+};
 use tarpc::client::RpcError;
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
@@ -492,6 +494,27 @@ impl Request for ReloadConfig {
     }
 }
 
+/// Tell the agent which changes on its lights the GUI saved, ahead of the
+/// [`ReloadConfig`] that loads the save. The loop runs commands in order and
+/// delivers a held reload after the command of the same turn, so the agent
+/// hears this first. Without a connection it is dropped: the held reload
+/// then lands as a plain one, which the agent reads as a new choice.
+pub struct AcknowledgeLightChanges {
+    pub acknowledged: Vec<AcknowledgedLightChange>,
+}
+
+impl Request for AcknowledgeLightChanges {
+    type Answer = ();
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .acknowledge_light_changes(context::current(), self.acknowledged.clone())
+            .await
+    }
+
+    fn deliver(self, _: Result<Self::Answer, Unavailable>, _: &UpdateSender) {}
+}
+
 /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
 /// CGEventTap, so the system dialog must name (and authorize) the *agent*
 /// binary, not the GUI — prompting locally would grant the wrong process. An
@@ -691,6 +714,7 @@ commands! {
     ReadReportRate,
     ReadBacklight,
     ReadEasySwitchHosts,
+    AcknowledgeLightChanges,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,

@@ -24,9 +24,9 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
-    ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingUpdate, RingObservation,
+    AcknowledgedLightChange, ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot,
+    AgentStatus, ClientKind, ConfigReloadError, Generation, Identity, MonitorEvent, Observation,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate, RingObservation,
 };
 use succession::Compat;
 
@@ -322,6 +322,16 @@ impl Agent for AgentServer {
         self.shared
             .rename_easy_switch_host(&route, slot, name)
             .await
+    }
+    async fn acknowledge_light_changes(
+        self,
+        _: Context,
+        acknowledged: Vec<AcknowledgedLightChange>,
+    ) {
+        self.orchestrator
+            .lock()
+            .await
+            .acknowledge_light_changes(&acknowledged);
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {
