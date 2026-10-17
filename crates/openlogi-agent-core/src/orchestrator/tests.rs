@@ -28,6 +28,7 @@ mod camera;
 mod capture_plans;
 mod device_list;
 mod device_settings;
+mod light_reload;
 mod os_layout;
 mod publication;
 mod reapply;

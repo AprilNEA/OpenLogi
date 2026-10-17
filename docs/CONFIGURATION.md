@@ -123,7 +123,11 @@ Common device fields are:
 - `action_ring`: default and complete per-application eight-slot layouts;
   `action_ring.per_app` takes the same selectors as `per_app_bindings`,
   including the Windows `exe:<filename>` fallback
-- `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
+- `lighting`, `smartshift`, and camera controls / profiles
+- standalone `light`: the agent writes it when the light connects, when a save
+  changes it, and, with `auto_camera` on, when camera use starts or stops.
+  Saving another setting leaves a change made with the light's own buttons in
+  place
 - `host_switch_targets` and `fn_lock` for compatible keyboards
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+

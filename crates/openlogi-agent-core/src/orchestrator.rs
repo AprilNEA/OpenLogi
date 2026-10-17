@@ -25,7 +25,7 @@ use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, ReportRate,
-    ReportRateInfo, WriteError, is_reserved_keyboard_control,
+    ReportRateInfo, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -1239,6 +1239,19 @@ impl Orchestrator {
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     pub fn reload_config(&mut self, config: Config) {
+        for write in self.replace_config(config) {
+            self.shared.hardware.set_light_in_background(
+                Some(write.route),
+                &write.light,
+                write.capabilities,
+            );
+        }
+    }
+
+    /// Everything [`Self::reload_config`] does except the light writes, which
+    /// it returns instead: one per online light whose settings changed.
+    fn replace_config(&mut self, config: Config) -> Vec<LightWrite> {
+        let previous_lights = self.effective_online_lights();
         let previous = std::mem::replace(&mut self.config, config);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
@@ -1265,7 +1278,7 @@ impl Orchestrator {
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
         self.apply_enabled_os_layouts(&previous);
-        self.reapply_light_settings();
+        self.changed_lights(&previous_lights)
     }
 
     /// Put each keyboard whose "keep OS layout" just took effect — turned on,
@@ -1302,25 +1315,57 @@ impl Orchestrator {
         }
     }
 
-    /// Re-apply standalone-light settings after a config reload.
-    fn reapply_light_settings(&self) {
-        for dev in self
-            .devices
-            .iter()
-            .filter(|dev| dev.online && dev.route.is_some() && dev.light_capabilities.is_some())
-        {
-            if let (Some(light), Some(capabilities)) = (
-                self.effective_light_settings(&dev.config_key),
-                dev.light_capabilities,
-            ) {
-                self.shared.hardware.set_light_in_background(
-                    dev.route.clone(),
-                    &light,
-                    capabilities,
-                );
-            }
-        }
+    /// The effective settings of every online standalone light, keyed by its
+    /// config key: what [`Self::changed_lights`] compares a reload against.
+    fn effective_online_lights(&self) -> HashMap<String, LightSettings> {
+        self.online_lights()
+            .filter_map(|(dev, _, _)| {
+                let light = self.effective_light_settings(&dev.config_key)?;
+                Some((dev.config_key.clone(), light))
+            })
+            .collect()
     }
+
+    /// The online lights a config reload has to write: those whose effective
+    /// settings now send other commands than they did in `previous`. Only a
+    /// changed light is written, so an unrelated save never undoes a change
+    /// made on the light itself — the same rule as
+    /// [`Self::apply_changed_fn_locks`]. A flipped camera policy or a dropped
+    /// manual override changes the effective power, so it is written too.
+    fn changed_lights(&self, previous: &HashMap<String, LightSettings>) -> Vec<LightWrite> {
+        self.online_lights()
+            .filter_map(|(dev, route, capabilities)| {
+                let light = self.effective_light_settings(&dev.config_key)?;
+                let unchanged = previous.get(&dev.config_key).is_some_and(|before| {
+                    commands_for_light_settings(*before, capabilities)
+                        == commands_for_light_settings(light, capabilities)
+                });
+                (!unchanged).then(|| LightWrite {
+                    route: route.clone(),
+                    light,
+                    capabilities,
+                })
+            })
+            .collect()
+    }
+
+    /// Every online device with a route and standalone-light controls.
+    fn online_lights(
+        &self,
+    ) -> impl Iterator<Item = (&AgentDevice, &DeviceRoute, LightCapabilities)> {
+        self.devices
+            .iter()
+            .filter(|dev| dev.online)
+            .filter_map(|dev| Some((dev, dev.route.as_ref()?, dev.light_capabilities?)))
+    }
+}
+
+/// One standalone-light write a config reload queues.
+#[derive(Debug, PartialEq)]
+struct LightWrite {
+    route: DeviceRoute,
+    light: LightSettings,
+    capabilities: LightCapabilities,
 }
 
 /// Replace the value behind an `RwLock`, logging (not panicking) on poison so a
