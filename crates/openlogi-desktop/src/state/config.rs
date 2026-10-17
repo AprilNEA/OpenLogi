@@ -2,7 +2,7 @@
 
 use std::ops::Deref;
 
-use openlogi_core::config::{Config, ConfigFile};
+use openlogi_core::config::{Config, ConfigFile, ConfigRevision};
 use tracing::warn;
 
 /// Where [`super::AppState`] may persist configuration mutations.
@@ -68,6 +68,18 @@ impl ConfigState {
 
     pub(super) fn should_reload_agent(&self) -> bool {
         self.issue.is_none() && matches!(&self.persistence, ConfigPersistence::UserFile(_))
+    }
+
+    /// The revision of `config.toml` as this process last loaded or saved
+    /// it. Without a user file there is no such file, so the revision matches
+    /// no file the agent reads.
+    pub(super) fn revision(&self) -> ConfigRevision {
+        match &self.persistence {
+            ConfigPersistence::UserFile(file) => file.revision(),
+            ConfigPersistence::ReadOnly(_) | ConfigPersistence::MemoryOnly => {
+                ConfigRevision::default()
+            }
+        }
     }
 
     /// Scope an uncommitted edit to this rollback boundary. Runtime callers
