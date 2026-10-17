@@ -171,6 +171,32 @@ pub struct SetDpiParameters {
     pub lod: Lod,
 }
 
+impl SetDpiParameters {
+    /// Parameters for a sensor reporting `capabilities`.
+    ///
+    /// `dpi_y` is sent only when the sensor advertises
+    /// [`SensorCapabilities::DPI_Y`] and `lod` only when it advertises
+    /// [`SensorCapabilities::LOD`]; otherwise each goes out as the wire zero
+    /// the spec requires. The capability bits decide this, not the values a
+    /// `getSensorDpiParameters` read happened to return.
+    #[must_use]
+    pub fn for_sensor(capabilities: SensorCapabilities, dpi_x: u16, dpi_y: u16, lod: Lod) -> Self {
+        Self {
+            dpi_x,
+            dpi_y: if capabilities.contains(SensorCapabilities::DPI_Y) {
+                dpi_y
+            } else {
+                0
+            },
+            lod: if capabilities.contains(SensorCapabilities::LOD) {
+                lod
+            } else {
+                Lod::NotSupported
+            },
+        }
+    }
+}
+
 /// Parameters for [`ExtendedDpiFeature::show_sensor_dpi_status`].
 ///
 /// [`ExtendedDpiFeature::show_sensor_dpi_status`]:

@@ -8,7 +8,7 @@
 //! Opening itself belongs to a [`crate::backend::HidBackend`]; nothing here
 //! names a HID stack.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use hidpp::channel::HidppChannel;
 
@@ -57,7 +57,92 @@ impl SharedChannel {
         self.route.device_index()
     }
 
-    pub(crate) fn route(&self) -> &DeviceRoute {
+    /// The physical route this channel addresses, used to serialize complete
+    /// native lighting transactions rather than just individual HID reports.
+    #[must_use]
+    pub fn route(&self) -> &DeviceRoute {
         &self.route
+    }
+
+    /// A handle to this same connection that does not keep it open, for
+    /// state that must not outlive the connection it was set through.
+    #[must_use]
+    pub fn downgrade(&self) -> WeakSharedChannel {
+        WeakSharedChannel {
+            channel: Arc::downgrade(&self.channel),
+            route: self.route.clone(),
+        }
+    }
+}
+
+/// A [`SharedChannel`] that does not keep its connection open. Two handles are
+/// equal when they name the same connection to the same route, so a replug or
+/// another device answering on the route compares unequal.
+#[derive(Clone)]
+pub struct WeakSharedChannel {
+    channel: Weak<HidppChannel>,
+    route: DeviceRoute,
+}
+
+impl WeakSharedChannel {
+    /// The channel, while its connection is still open.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<SharedChannel> {
+        self.channel
+            .upgrade()
+            .map(|channel| SharedChannel::new(channel, self.route.clone()))
+    }
+}
+
+impl PartialEq for WeakSharedChannel {
+    fn eq(&self, other: &Self) -> bool {
+        self.route == other.route && Weak::ptr_eq(&self.channel, &other.channel)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scripted::{ScriptedRawHidChannel, scripted_channel};
+    use super::*;
+
+    fn route(slot: u8) -> DeviceRoute {
+        DeviceRoute::Unifying {
+            receiver_uid: "weak-channel".into(),
+            slot,
+        }
+    }
+
+    async fn connection() -> Arc<HidppChannel> {
+        let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(|_| None);
+        scripted_channel(raw).await
+    }
+
+    #[tokio::test]
+    async fn a_weak_channel_names_one_connection_without_keeping_it_open() {
+        let receiver = connection().await;
+        let shared = SharedChannel::new(Arc::clone(&receiver), route(1));
+        let weak = shared.downgrade();
+        assert!(weak == shared.downgrade());
+        assert!(
+            weak.upgrade()
+                .is_some_and(|channel| channel.matches(&route(1)))
+        );
+
+        let reconnected = SharedChannel::new(connection().await, route(1));
+        assert!(
+            weak != reconnected.downgrade(),
+            "a reconnect is another connection"
+        );
+        let other_slot = SharedChannel::new(Arc::clone(&receiver), route(2));
+        assert!(
+            weak != other_slot.downgrade(),
+            "the same receiver, another slot"
+        );
+
+        drop((receiver, shared, other_slot));
+        assert!(
+            weak.upgrade().is_none(),
+            "a closed connection is not reopened"
+        );
     }
 }

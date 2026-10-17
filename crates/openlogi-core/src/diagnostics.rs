@@ -432,12 +432,14 @@ fn connection_label(connection: ConnectionKind) -> &'static str {
 
 fn battery_label(battery: Option<&BatteryInfo>) -> String {
     match battery {
-        Some(b) => format!(
-            "{}% ({}, {})",
-            b.percentage,
-            battery_status_label(b.status),
-            battery_level_label(b.level),
-        ),
+        Some(b) => {
+            let status = battery_status_label(b.status);
+            let level = battery_level_label(b.level);
+            match b.percentage {
+                Some(percentage) => format!("{percentage}% ({status}, {level})"),
+                None => format!("no percentage ({status}, {level})"),
+            }
+        }
         None => "n/a".to_string(),
     }
 }
@@ -564,7 +566,7 @@ mod tests {
                     connection: ConnectionKind::BoltReceiver,
                     online: true,
                     battery: Some(BatteryInfo {
-                        percentage: 80,
+                        percentage: Some(80),
                         level: BatteryLevel::Good,
                         status: BatteryStatus::Discharging,
                     }),
@@ -597,6 +599,13 @@ mod tests {
                         thumbwheel: false,
                         haptic_feedback: false,
                         haptic_panel: false,
+                        dpi_gestures: false,
+                        fn_lock: false,
+                        os_layout: false,
+                        report_rate: false,
+                        backlight: false,
+                        easy_switch: false,
+                        virtual_thumbwheel: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),
@@ -650,6 +659,19 @@ mod tests {
         assert!(md.contains("Transports: USB"));
         assert!(md.contains("Render: mx_master_3s · Slot 1"));
         assert!(md.contains("Battery: n/a"));
+    }
+
+    #[test]
+    fn a_level_only_battery_does_not_render_as_zero_percent() {
+        let mut report = sample();
+        report.devices[0].battery = Some(BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        });
+        let md = report.to_markdown();
+        assert!(md.contains("Battery: no percentage (discharging, good)"));
+        assert!(!md.contains("Battery: 0%"));
     }
 
     #[test]

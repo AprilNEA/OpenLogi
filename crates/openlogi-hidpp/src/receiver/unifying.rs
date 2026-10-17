@@ -17,7 +17,10 @@ use crate::{
     channel::{HidppChannel, MessageListenerGuard},
     emitter::EventEmitter,
     protocol::v10,
-    receiver::{RECEIVER_DEVICE_INDEX, ReceiverError},
+    receiver::{
+        NotificationFlags, RECEIVER_DEVICE_INDEX, ReceiverError, read_notification_flags,
+        write_notification_flags,
+    },
 };
 
 /// All known registers of the Unifying receiver.
@@ -62,7 +65,7 @@ pub enum InfoSubRegister {
     ///
     /// NOTE: `0x60` is the *Bolt* base. Wire-verified Unifying receivers store
     /// names at base `0x40 + (n-1)` instead, so name reads go directly through
-    /// `read_codename_unifying` in `inventory.rs` rather than this constant —
+    /// `inventory::probe::unifying::read_codename` rather than this constant —
     /// don't reuse `DeviceCodename` for Unifying name reads.
     DeviceCodename = 0x60,
 }
@@ -140,31 +143,20 @@ impl Receiver {
     /// device can fail to enumerate. Solaar enables this before listing.
     ///
     /// Read-modify-write of just the `WIRELESS` bit so it can't clobber other
-    /// flags already set on register `0x00` — notably `SOFTWARE_PRESENT` (0x08),
-    /// which the pairing flow enables (`pairing.rs` writes `[0x00, 0x09, 0x00]`)
-    /// and a concurrent inventory poll would otherwise drop.
+    /// [`NotificationFlags`] — notably `SOFTWARE_PRESENT`, which the pairing
+    /// flow enables and a concurrent inventory poll would otherwise drop.
     pub async fn set_wireless_notifications(&self, enabled: bool) -> Result<(), ReceiverError> {
-        // Notification flags are a 3-byte big-endian word; the receiver-reporting
-        // bits live in byte 1 (WIRELESS = 0x000100, SOFTWARE_PRESENT = 0x000800).
-        let mut flags = self
-            .chan
-            .read_register(
-                RECEIVER_DEVICE_INDEX,
-                Register::Notifications.into(),
-                [0; 3],
-            )
-            .await?;
+        let current = read_notification_flags(&self.chan).await?;
+        let mut flags = current;
+        flags.set(NotificationFlags::WIRELESS, enabled);
         // This flag persists in receiver RAM. Avoid issuing an identical
         // register write on every inventory tick: Lightspeed receiver c54d
         // has been observed to occasionally omit the ACK for that no-op,
         // parking the otherwise healthy shared channel until timeout.
-        if !update_wireless_notification_flag(&mut flags, enabled) {
+        if flags == current {
             return Ok(());
         }
-        self.chan
-            .write_register(RECEIVER_DEVICE_INDEX, Register::Notifications.into(), flags)
-            .await?;
-
+        write_notification_flags(&self.chan, flags).await?;
         Ok(())
     }
 
@@ -189,10 +181,11 @@ impl Receiver {
     pub async fn get_receiver_info(&self) -> Result<ReceiverInfo, ReceiverError> {
         let response = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [InfoSubRegister::ReceiverInfo.into(), 0, 0],
+                InfoSubRegister::ReceiverInfo.into(),
+                [0, 0],
             )
             .await?;
 
@@ -210,14 +203,11 @@ impl Receiver {
     ) -> Result<DevicePairingInformation, ReceiverError> {
         let response = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [
-                    u8::from(InfoSubRegister::DevicePairingInformation) | (device_index & 0x0f),
-                    0x00,
-                    0x00,
-                ],
+                u8::from(InfoSubRegister::DevicePairingInformation) | (device_index & 0x0f),
+                [0x00, 0x00],
             )
             .await?;
 
@@ -236,20 +226,6 @@ impl Receiver {
     pub async fn get_unique_id(&self) -> Result<String, ReceiverError> {
         self.get_receiver_info().await.map(|i| i.serial_number)
     }
-}
-
-/// Update the wireless-notification bit and report whether a register write is
-/// needed. Kept separate so the preservation of unrelated flags is testable
-/// without a receiver transport.
-fn update_wireless_notification_flag(flags: &mut [u8; 3], enabled: bool) -> bool {
-    const WIRELESS: u8 = 0x01;
-    let previous = *flags;
-    if enabled {
-        flags[1] |= WIRELESS;
-    } else {
-        flags[1] &= !WIRELESS;
-    }
-    *flags != previous
 }
 
 /// The sub-id of the only notification this receiver emits: a paired slot's
@@ -280,8 +256,9 @@ pub fn decode_notification(msg: &v10::Message) -> Option<Event> {
         kind: DeviceKind::from(payload[1] & 0x0f),
         // Device-info high nibble: bit 6 = link not established, bit 5 = link
         // encrypted, bit 4 = software present (same layout as Bolt; Solaar
-        // decodes both receivers with one mask table).
-        encrypted: payload[1] & (1 << 5) != 0,
+        // decodes both receivers with one mask table). A Bolt protocol byte
+        // also means encrypted.
+        encrypted: crate::receiver::connection_encrypted(payload[0], payload[1]),
         online: payload[1] & (1 << 6) == 0,
         wpid: u16::from_le_bytes([payload[2], payload[3]]),
     }))
@@ -385,9 +362,9 @@ mod tests {
 
     use super::{
         DeviceConnection, DeviceKind, DevicePairingInformation, Event, InfoSubRegister, Receiver,
-        Register, decode_notification, update_wireless_notification_flag,
+        Register, decode_notification,
     };
-    use crate::channel::tests::{MockRawHidChannel, channel_with_reader};
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
     use crate::protocol::v10::{Message, MessageHeader, MessageType};
 
     /// Builds the long notification the receiver broadcasts, with `payload`
@@ -403,15 +380,38 @@ mod tests {
     }
 
     #[test]
-    fn wireless_notification_flag_only_writes_on_a_real_change() {
-        let mut disabled = [0x00, 0x08, 0x55];
-        assert!(update_wireless_notification_flag(&mut disabled, true));
-        assert_eq!(disabled, [0x00, 0x09, 0x55]);
-        assert!(!update_wireless_notification_flag(&mut disabled, true));
+    fn wireless_notifications_edit_only_their_bit_and_skip_no_op_writes() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let chan = Arc::new(channel_with_reader(raw).await);
+            let receiver =
+                Receiver::new(chan).expect("the mock's VID/PID routes as a Unifying receiver");
+            let register = |sub_id: MessageType, value: [u8; 3]| {
+                Message::Short(
+                    MessageHeader {
+                        device_index: super::RECEIVER_DEVICE_INDEX,
+                        sub_id: sub_id.into(),
+                    },
+                    [Register::Notifications.into(), value[0], value[1], value[2]],
+                )
+                .into()
+            };
+            // SOFTWARE_PRESENT and an unnamed low bit, set by another host.
+            handle.queue_response(register(MessageType::GetRegister, [0x00, 0x08, 0x55]));
+            handle.queue_response(register(MessageType::SetRegister, [0; 3]));
+            receiver.set_wireless_notifications(true).await.unwrap();
+            // Already enabled: read only, no write.
+            handle.queue_response(register(MessageType::GetRegister, [0x00, 0x09, 0x55]));
+            receiver.set_wireless_notifications(true).await.unwrap();
 
-        assert!(update_wireless_notification_flag(&mut disabled, false));
-        assert_eq!(disabled, [0x00, 0x08, 0x55]);
-        assert!(!update_wireless_notification_flag(&mut disabled, false));
+            let writes: Vec<_> = handle
+                .written_reports()
+                .into_iter()
+                .filter(|report| report[2] == u8::from(MessageType::SetRegister))
+                .map(|report| report[3..7].to_vec())
+                .collect();
+            assert_eq!(writes, vec![vec![0x00, 0x00, 0x09, 0x55]]);
+        });
     }
 
     #[test]
@@ -450,6 +450,25 @@ mod tests {
 
         assert!(connection(1 << 5).encrypted);
         assert!(!connection(1 << 4).encrypted);
+    }
+
+    #[test]
+    fn a_bolt_protocol_byte_means_an_encrypted_link() {
+        // Byte 3 is the link protocol: 0x04 is a Unifying (eQuad step 4 DJ)
+        // link and keeps bit 5 as the only source, while 0x10 is Bolt and is
+        // encrypted even with bit 5 clear.
+        let connection = |protocol: u8, status: u8| {
+            let mut payload = [0u8; 17];
+            payload[0] = protocol;
+            payload[1] = status;
+            match decode_notification(&notification(1, 0x41, payload)) {
+                Some(Event::DeviceConnection(connection)) => connection,
+                other => panic!("expected a device connection, got {other:?}"),
+            }
+        };
+        assert!(!connection(0x04, 0x02).encrypted);
+        assert!(connection(0x04, (1 << 5) | 0x02).encrypted);
+        assert!(connection(0x10, 0x02).encrypted);
     }
 
     #[test]

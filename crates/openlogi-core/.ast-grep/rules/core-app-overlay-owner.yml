@@ -1,0 +1,25 @@
+# Owner: openlogi_core::app::overlay_for — how a per-app map is matched
+# against the foreground identifier: exact key first, then the Windows
+# `exe:<filename>` fallback. Every per-app map (button overrides, Actions Ring
+# layouts) resolves through it, so one selector means one thing everywhere.
+# An editor's exact-key lookup (`per_app_overrides`) is a different question
+# and is not matched here.
+id: core-app-overlay-owner
+language: rust
+severity: error
+message: Matching a per-app key against the foreground identifier is openlogi_core::app::overlay_for's; call it instead of building an `exe:` key or indexing the ring's per_app map by the raw identifier here.
+note: |
+  action_ring.per_app looked the identifier up verbatim while
+  per_app_bindings fell back to `exe:<filename>` (#643), so a Windows Store
+  app kept its button overrides across an update and lost its ring layout.
+  See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/app.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: format!("exe:$$$")
+    - pattern: $MAP.per_app.get($$$)

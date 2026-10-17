@@ -1,0 +1,18 @@
+# Owner: ActionRingManager::expire_and_publish publishes expired sessions before
+# an interaction can return an error. State only stores and validates sessions.
+id: agent-action-ring-expiry-owner
+language: rust
+severity: error
+message: Use ActionRingManager::expire_and_publish so subscribers observe an expired session even when the interaction fails.
+note: |
+  hover published expiration on error, but activate returned SessionNotFound
+  without waking the subscriber that restores the pointer context.
+files:
+  - crates/openlogi-agent-core/src/action_ring.rs
+rule:
+  all:
+    - pattern: $STATE.expire()
+    - not:
+        inside:
+          pattern: 'fn expire_and_publish(&self, state: &mut State) { $$$BODY }'
+          stopBy: end

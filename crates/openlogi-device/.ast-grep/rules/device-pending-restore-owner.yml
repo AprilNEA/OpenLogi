@@ -1,0 +1,24 @@
+# Owner: openlogi_device::session::restore — the pending-restore token: the
+# weak reference to the retired channel, the policy that says whether a retry
+# may write through it, and the retry that accepts a restore only on a
+# publication that stayed current. A session supplies a RestorePlan.
+id: device-pending-restore-owner
+language: rust
+severity: error
+message: A restore that outlives its session is session::restore::PendingRestore; give it a RestorePlan instead of tracking a retired channel here.
+note: |
+  The capture and host-switch sessions each defined RetiredChannelPolicy and
+  each kept a Weak to the retired channel beside an identical retry. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-device/src/session/**/*.rs
+ignores:
+  - crates/openlogi-device/src/session/restore.rs
+rule:
+  any:
+    - pattern: Arc::downgrade($SHARED.channel())
+    - all:
+        - kind: enum_item
+        - has:
+            field: name
+            regex: '^RetiredChannelPolicy$'

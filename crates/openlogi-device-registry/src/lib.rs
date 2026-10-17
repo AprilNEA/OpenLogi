@@ -11,6 +11,8 @@
 #![deny(rustdoc::bare_urls)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod camera;
+pub mod headset;
 pub mod litra;
 pub mod receiver;
 
