@@ -193,8 +193,13 @@ pub async fn run_host_switch_session(
     let reuse_armed_channel = match stop {
         // A press does not retire the channel: teardown may write through it
         // for as long as inventory still publishes it.
-        HostSwitchStop::Pressed(_) => registry.is_current(&shared),
-        HostSwitchStop::Shutdown => true,
+        HostSwitchStop::Pressed(_) => !matches!(
+            HostSwitchStop::for_current_publication(registry, &shared),
+            HostSwitchStop::ChannelChanged
+        ),
+        // A withdrawn receiver slot may return on the same USB connection.
+        // The token still requires a live exact-route publication before writes.
+        HostSwitchStop::Shutdown | HostSwitchStop::ReceiverSlotGone => true,
         HostSwitchStop::ChannelChanged => false,
     };
     if reuse_armed_channel {
@@ -225,6 +230,9 @@ enum HostSwitchStop {
     /// Teardown was requested while inventory still published the channel
     /// that armed the session.
     Shutdown,
+    /// The keyboard's receiver slot went offline, but inventory still owns
+    /// the USB transport. Restoration may reuse it once the slot returns.
+    ReceiverSlotGone,
     /// The channel that armed the session must not be written through again:
     /// inventory removed or replaced it, or the owner reported the keyboard
     /// lost.
@@ -235,7 +243,7 @@ impl HostSwitchStop {
     fn requested_host(self) -> Option<u8> {
         match self {
             Self::Pressed(host) => Some(host),
-            Self::Shutdown | Self::ChannelChanged => None,
+            Self::Shutdown | Self::ReceiverSlotGone | Self::ChannelChanged => None,
         }
     }
 
@@ -244,6 +252,21 @@ impl HostSwitchStop {
     fn for_current_publication(registry: &ChannelRegistry, shared: &SharedChannel) -> Self {
         if registry.is_current(shared) {
             Self::Shutdown
+        } else {
+            Self::for_lost_publication(registry, shared)
+        }
+    }
+
+    /// Losing a receiver slot does not retire its still-published transport.
+    /// A lost owner on an otherwise current route remains conservative.
+    fn for_lost_publication(registry: &ChannelRegistry, shared: &SharedChannel) -> Self {
+        if matches!(
+            shared.route(),
+            DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. }
+        ) && registry.lookup(shared.route()).is_none()
+            && registry.contains_transport(shared)
+        {
+            Self::ReceiverSlotGone
         } else {
             Self::ChannelChanged
         }
@@ -261,7 +284,7 @@ async fn monitor_host_switch(
     loop {
         if !registry.is_current(shared) {
             info!(route = %shared.route(), "inventory replaced or removed host-switch channel");
-            return HostSwitchStop::ChannelChanged;
+            return HostSwitchStop::for_current_publication(registry, shared);
         }
         tokio::select! {
             biased;
@@ -276,7 +299,9 @@ async fn monitor_host_switch(
                     HostSwitchStopReason::Graceful => {
                         HostSwitchStop::for_current_publication(registry, shared)
                     }
-                    HostSwitchStopReason::DeviceLost => HostSwitchStop::ChannelChanged,
+                    HostSwitchStopReason::DeviceLost => {
+                        HostSwitchStop::for_lost_publication(registry, shared)
+                    }
                 };
             }
             host = presses.recv() => {
