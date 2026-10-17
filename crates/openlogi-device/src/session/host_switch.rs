@@ -368,6 +368,60 @@ pub async fn switch_hosts(
     Ok(())
 }
 
+/// A device whose ChangeHost feature is already located and whose destination
+/// slots are already validated, so moving it costs one HID++ write.
+///
+/// Locating the feature and checking slots takes several round trips per
+/// device — a few hundred milliseconds over a receiver. Flow prepares this
+/// while the device is idle so the move at the screen edge is only the write.
+/// The handle addresses one connection: drop it when the device goes offline.
+pub struct HostSwitchTarget {
+    feature: Arc<ChangeHostFeature>,
+}
+
+impl HostSwitchTarget {
+    /// Move the device to the zero-based `host`. Fire-and-forget like every
+    /// ChangeHost write: success means the write was issued.
+    pub async fn switch_to(&self, host: u8) -> Result<(), HostSwitchError> {
+        timed_hidpp("writing current host", self.feature.set_current_host(host)).await
+    }
+}
+
+/// Prepare `route` for one-write moves to any of the zero-based `hosts`.
+///
+/// Each host must be within the device's channel count and not reported as an
+/// empty slot, under the same rules as [`switch_hosts`].
+pub async fn prepare_host_switch_target(
+    route: &DeviceRoute,
+    hosts: &[u8],
+    channel_pool: &ChannelPool,
+) -> Result<HostSwitchTarget, HostSwitchError> {
+    let channel = open_channel(channel_pool, route, "opening host-switch target channel")
+        .await?
+        .ok_or(HostSwitchError::TargetNotFound)?;
+    let mut device = timed_hidpp(
+        "opening host-change device",
+        Device::new(Arc::clone(&channel), route.device_index()),
+    )
+    .await?;
+    let info = timed_hidpp(
+        "locating host-change feature",
+        device.root().get_feature(ChangeHostFeature::ID),
+    )
+    .await?
+    .ok_or(HostSwitchError::FeatureUnsupported)?;
+    let feature = device.add_feature::<ChangeHostFeature>(info.index);
+    let state = timed_hidpp("reading current host", feature.get_host_info()).await?;
+    for &host in hosts {
+        if host_change_required(state.current_host, state.host_count, host)?
+            && host_slot_is_empty(&mut device, host).await
+        {
+            return Err(HostSwitchError::HostSlotEmpty { host });
+        }
+    }
+    Ok(HostSwitchTarget { feature })
+}
+
 /// Switch one device on an already-open shared channel to the zero-based `host`.
 ///
 /// The device's reported host count is validated before writing, and an

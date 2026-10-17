@@ -481,8 +481,12 @@ pub fn start(
                     delta_y,
                     modifiers,
                 } => {
-                    flow.try_moved(modifiers.control);
-                    handle_moved(delta_x, delta_y, &hooks, &dispatcher)
+                    if flow.try_moved(modifiers.control) {
+                        // A Flow handoff holds the pointer on the edge it crossed.
+                        EventDisposition::Suppress
+                    } else {
+                        handle_moved(delta_x, delta_y, &hooks, &dispatcher)
+                    }
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);

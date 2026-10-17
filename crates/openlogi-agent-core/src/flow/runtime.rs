@@ -21,13 +21,13 @@ use openlogi_flow::transport::{
     FlowConnection, FlowEndpoint, MachineIdentity, NotificationEvent, PeerTrust, RpcEvent,
     message_envelope,
 };
-use openlogi_hid::{ChannelPool, DeviceRoute};
+use openlogi_hid::{ChannelPool, DeviceRoute, HostSwitchTarget};
 use openlogi_hook::edge::{EdgeSide, ExposedEdges};
 use openlogi_ipc::{FlowLinkState, FlowPeerStatus, FlowStatus};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::config::CompiledFlowConfig;
 use super::handoff::{HandoffBook, handle_notification, handle_rpc, inventory_changed};
@@ -41,6 +41,7 @@ const PROTOCOL_MAX: u32 = 1;
 
 mod controller;
 
+pub(crate) use controller::PointerHold;
 pub use controller::{FlowController, FlowInputHandle};
 
 struct FlowGeneration {
@@ -58,6 +59,7 @@ impl FlowGeneration {
         observable: Arc<ObservableState>,
         channel_pool: ChannelPool,
         receiver_access: ReceiverAccess,
+        pointer_hold: Arc<PointerHold>,
     ) -> Result<Self, FlowRuntimeError> {
         let identity = tokio::task::spawn_blocking(load_machine_identity)
             .await
@@ -113,7 +115,9 @@ impl FlowGeneration {
             observable,
             channel_pool,
             receiver_access,
+            pointer_hold,
         ));
+        prepare_switch_targets(&state);
         let provider: Arc<dyn TrustedStateProvider> = state.clone();
         let sessions = SessionManager::start(
             Arc::clone(&endpoint),
@@ -142,6 +146,7 @@ impl FlowGeneration {
 
     async fn update_devices(&self, snapshots: &[FlowDeviceSnapshot]) {
         self.state.update_devices(snapshots);
+        prepare_switch_targets(&self.state);
         self.state.publish_device_state().await;
         inventory_changed(Arc::clone(&self.state)).await;
     }
@@ -171,6 +176,10 @@ pub(super) struct GenerationState {
     active: AtomicBool,
     pub(super) lifecycle: Mutex<()>,
     pub(super) handoffs: HandoffBook,
+    pub(super) pointer_hold: Arc<PointerHold>,
+    /// Online devices already prepared for a one-write switch; `None` while
+    /// a preparation is in flight.
+    switch_targets: std::sync::Mutex<Vec<(DeviceRoute, Option<Arc<HostSwitchTarget>>)>>,
 }
 
 #[derive(Clone)]
@@ -187,6 +196,7 @@ impl GenerationState {
         observable: Arc<ObservableState>,
         channel_pool: ChannelPool,
         receiver_access: ReceiverAccess,
+        pointer_hold: Arc<PointerHold>,
     ) -> Self {
         let devices = runtime_devices(&config, snapshots);
         Self {
@@ -202,6 +212,8 @@ impl GenerationState {
             active: AtomicBool::new(true),
             lifecycle: Mutex::new(()),
             handoffs: HandoffBook::default(),
+            pointer_hold,
+            switch_targets: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -310,19 +322,73 @@ impl GenerationState {
         &self,
         devices: &[OutgoingDevice],
     ) -> Result<bool, openlogi_hid::HostSwitchError> {
+        let started = std::time::Instant::now();
         let _lease = self
             .receiver_access
             .acquire_exclusive(ExclusiveAccessReason::HostTransition)
             .await;
+        let leased = started.elapsed();
         if !self.is_active() {
             return Ok(false);
         }
-        let targets: Vec<_> = devices
-            .iter()
-            .map(|device| (device.route.clone(), device.host))
-            .collect();
-        openlogi_hid::switch_hosts(&targets, &self.channel_pool).await?;
+        let prepared = self.prepared_targets(devices);
+        let fast = match &prepared {
+            Some(prepared) => {
+                let mut outcome = Ok(());
+                for (target, host) in prepared {
+                    if let Err(error) = target.switch_to(*host).await {
+                        outcome = Err(error);
+                        break;
+                    }
+                }
+                if let Err(error) = &outcome {
+                    warn!(%error, "prepared Flow host switch failed — re-preparing");
+                    self.forget_switch_targets();
+                }
+                outcome.is_ok()
+            }
+            None => false,
+        };
+        if !fast {
+            let targets: Vec<_> = devices
+                .iter()
+                .map(|device| (device.route.clone(), device.host))
+                .collect();
+            openlogi_hid::switch_hosts(&targets, &self.channel_pool).await?;
+        }
+        info!(
+            lease_ms = leased.as_millis(),
+            switch_ms = started.elapsed().saturating_sub(leased).as_millis(),
+            devices = devices.len(),
+            prepared = fast,
+            "Flow host switch issued"
+        );
         Ok(true)
+    }
+
+    /// The prepared switch handle and destination for every device, or `None`
+    /// when any of them is not prepared yet.
+    fn prepared_targets(
+        &self,
+        devices: &[OutgoingDevice],
+    ) -> Option<Vec<(Arc<HostSwitchTarget>, u8)>> {
+        let cache = self.switch_targets.lock().ok()?;
+        devices
+            .iter()
+            .map(|device| {
+                cache
+                    .iter()
+                    .find(|(route, _)| *route == device.route)
+                    .and_then(|(_, target)| target.clone())
+                    .map(|target| (target, device.host))
+            })
+            .collect()
+    }
+
+    fn forget_switch_targets(&self) {
+        if let Ok(mut cache) = self.switch_targets.lock() {
+            cache.clear();
+        }
     }
 
     pub(super) async fn send_result(&self, peer: PublicKey, result: proto::HandoffResult) {
@@ -575,6 +641,58 @@ fn platform() -> proto::Platform {
         proto::Platform::Windows
     } else {
         proto::Platform::Other
+    }
+}
+
+/// Keep a one-write switch prepared for every online device Flow can move, so
+/// the switch at the screen edge skips the HID++ feature lookups. Preparation
+/// runs in the background under an ordinary I/O lease; a device that cannot be
+/// prepared now is retried on the next inventory change.
+fn prepare_switch_targets(state: &Arc<GenerationState>) {
+    let wanted: Vec<(DeviceRoute, Vec<u8>)> = state
+        .devices_snapshot()
+        .into_iter()
+        .filter(|device| device.snapshot.online)
+        .filter_map(|device| {
+            let route = device.snapshot.route.clone()?;
+            let hosts: Vec<u8> = device.channels.values().copied().collect();
+            (!hosts.is_empty()).then_some((route, hosts))
+        })
+        .collect();
+    let missing: Vec<_> = {
+        let Ok(mut cache) = state.switch_targets.lock() else {
+            return;
+        };
+        cache.retain(|(route, _)| wanted.iter().any(|(online, _)| online == route));
+        let missing: Vec<_> = wanted
+            .into_iter()
+            .filter(|(route, _)| !cache.iter().any(|(cached, _)| cached == route))
+            .collect();
+        cache.extend(missing.iter().map(|(route, _)| (route.clone(), None)));
+        missing
+    };
+    for (route, hosts) in missing {
+        let state = Arc::clone(state);
+        tokio::spawn(async move {
+            let prepared = {
+                let _lease = state.receiver_access.acquire_for_io().await;
+                openlogi_hid::prepare_host_switch_target(&route, &hosts, &state.channel_pool).await
+            };
+            let Ok(mut cache) = state.switch_targets.lock() else {
+                return;
+            };
+            match prepared {
+                Ok(target) => {
+                    if let Some(entry) = cache.iter_mut().find(|(cached, _)| *cached == route) {
+                        entry.1 = Some(Arc::new(target));
+                    }
+                }
+                Err(error) => {
+                    debug!(%error, %route, "Flow could not prepare a device switch yet");
+                    cache.retain(|(cached, _)| *cached != route);
+                }
+            }
+        });
     }
 }
 

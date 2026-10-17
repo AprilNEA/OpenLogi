@@ -15,16 +15,24 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PEER_ARM_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(in crate::flow) fn start_outgoing(state: Arc<GenerationState>, crossing: EdgeCrossing) {
-    if !state.is_active()
-        || state
-            .handoffs
-            .sender_busy
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
+    if !state.is_active() {
+        state.pointer_hold.release();
+        return;
+    }
+    // A handoff already in flight owns the pointer hold.
+    if state
+        .handoffs
+        .sender_busy
+        .swap(true, std::sync::atomic::Ordering::AcqRel)
     {
         return;
     }
     tokio::spawn(async move {
-        run_outgoing(&state, crossing).await;
+        // Once the switch is issued the devices are leaving: the hold expires
+        // on its own. Anything short of that gives the pointer back now.
+        if !run_outgoing(&state, crossing).await {
+            state.pointer_hold.release();
+        }
         state
             .handoffs
             .sender_busy
@@ -32,28 +40,29 @@ pub(in crate::flow) fn start_outgoing(state: Arc<GenerationState>, crossing: Edg
     });
 }
 
-async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
+/// Run one outgoing handoff; returns whether the host switch was issued.
+async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) -> bool {
     // A config reload deactivates a generation at this lock boundary. Once a
     // peer accepts, keep the bounded handoff transaction on one generation
     // through its arrival acknowledgment so stale config cannot switch hosts.
     let _lifecycle = state.lifecycle.lock().await;
     if !state.is_active() {
-        return;
+        return false;
     }
     let Some(&peer_index) = state.config.layout.get(&crossing.side) else {
-        return;
+        return false;
     };
     let Some(peer) = state.config.peers.get(peer_index) else {
-        return;
+        return false;
     };
     let Some(connection) = state.connection(peer.public_key) else {
         debug!(peer = %peer.name, "Flow edge ignored while peer is disconnected");
-        return;
+        return false;
     };
     let targets = state.outgoing_devices(&peer.name);
     if targets.is_empty() {
         warn!(peer = %peer.name, "Flow edge has no online configured devices to hand off");
-        return;
+        return false;
     }
 
     let transfer_id = random_transfer_id();
@@ -68,7 +77,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
     };
     *request.entry.get_or_insert_default() = entry_from_crossing(crossing);
     let Ok(envelope) = message_envelope(FrameKind::HandoffRequest, &request) else {
-        return;
+        return false;
     };
     // Register before opening the RPC stream: QUIC does not order the response
     // stream against the receiver's HandoffResult notification stream.
@@ -76,11 +85,18 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
         .handoffs
         .register_outgoing(peer.public_key, transfer_id)
         .await;
+    let started = std::time::Instant::now();
     let Some(deadline) = request_acceptance(&connection, &peer.name, transfer_id, envelope).await
     else {
         state.handoffs.remove_outgoing(transfer_id).await;
-        return;
+        return false;
     };
+    info!(
+        peer = %peer.name,
+        transfer_id,
+        accept_ms = started.elapsed().as_millis(),
+        "Flow handoff accepted"
+    );
     match state.switch_devices(&targets).await {
         Ok(true) => {}
         Ok(false) => {
@@ -92,7 +108,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
                     proto::HandoffCancelReason::Shutdown,
                 )
                 .await;
-            return;
+            return false;
         }
         Err(error) => {
             state.handoffs.remove_outgoing(transfer_id).await;
@@ -104,7 +120,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
                     proto::HandoffCancelReason::SwitchFailed,
                 )
                 .await;
-            return;
+            return false;
         }
     }
 
@@ -114,6 +130,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
                 peer = %peer.name,
                 transfer_id,
                 outcome = result.outcome.to_i32(),
+                total_ms = started.elapsed().as_millis(),
                 "Flow handoff completed"
             );
         }
@@ -125,6 +142,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
             warn!(peer = %peer.name, transfer_id, "Flow arrival acknowledgment timed out");
         }
     }
+    true
 }
 
 async fn request_acceptance(
