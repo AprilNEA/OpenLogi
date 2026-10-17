@@ -12,6 +12,7 @@ schema_version = 6
 [flow]
 enabled = true
 require_modifier = false
+clipboard = false
 
 [[flow.peers]]
 name = "work-laptop"
@@ -31,6 +32,7 @@ peer_channels = { self = 0, "work-laptop" = 1 }
     let flow = FlowConfig {
         enabled: true,
         require_modifier: false,
+        clipboard: false,
         peers: vec![FlowPeer {
             name: "work-laptop".into(),
             public_key: "ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -67,9 +69,33 @@ fn empty_flow_section_uses_defaults() {
 }
 
 #[test]
+fn clipboard_sync_defaults_on_and_is_written_only_when_off() {
+    let config: Config = toml::from_str("schema_version = 6\n\n[flow]\nenabled = true\n")
+        .expect("Flow config without the clipboard key must parse");
+    assert!(config.flow.clipboard, "clipboard sync must default to on");
+    assert!(
+        !toml::to_string_pretty(&config)
+            .expect("serialize Flow config")
+            .contains("clipboard"),
+        "the default clipboard setting should be omitted"
+    );
+
+    let mut config = config;
+    config.flow.clipboard = false;
+    assert!(
+        toml::to_string_pretty(&config)
+            .expect("serialize Flow config")
+            .contains("clipboard = false"),
+        "a disabled clipboard setting must be written"
+    );
+    assert!(!write_and_read(&config).flow.clipboard);
+}
+
+#[test]
 fn malformed_flow_entries_are_rejected() {
     for source in [
         "schema_version = 6\n[flow]\nunknown = true\n",
+        "schema_version = 6\n[flow]\nclipboard = \"text\"\n",
         "schema_version = 6\n[[flow.peers]]\nname = \"peer\"\n",
         "schema_version = 6\n[[flow.peers]]\nname = \"peer\"\npublic_key = \"ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\naddresses = \"peer.example\"\n",
         "schema_version = 6\n[[flow.layout]]\nedge = \"diagonal\"\npeer = \"peer\"\n",

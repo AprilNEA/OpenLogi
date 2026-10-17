@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// This is persisted configuration only. Discovery, transport, and device
 /// handoff live outside `openlogi-core`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlowConfig {
     /// Whether Flow handoff is enabled.
@@ -18,6 +18,12 @@ pub struct FlowConfig {
     /// screen edge.
     #[serde(default)]
     pub require_modifier: bool,
+    /// Whether text copied on this machine follows the pointer to the peer it
+    /// crosses to, and text arriving that way replaces this machine's
+    /// clipboard. Both machines must have it on. Defaults to `true` and is only
+    /// serialized when disabled.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub clipboard: bool,
     /// Trusted peer machines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<FlowPeer>,
@@ -29,6 +35,19 @@ pub struct FlowConfig {
     pub devices: Vec<FlowDevice>,
 }
 
+impl Default for FlowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            require_modifier: false,
+            clipboard: true,
+            peers: Vec::new(),
+            layout: Vec::new(),
+            devices: Vec::new(),
+        }
+    }
+}
+
 impl FlowConfig {
     /// Whether this value is exactly the implicit default and can be omitted
     /// from `config.toml`.
@@ -36,6 +55,20 @@ impl FlowConfig {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
+}
+
+/// serde default for [`FlowConfig::clipboard`], so a `[flow]` section written
+/// before the field existed keeps clipboard sync on.
+const fn default_true() -> bool {
+    true
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+const fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// One trusted Flow peer and its optional manual address hints.

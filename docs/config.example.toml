@@ -27,6 +27,9 @@ app_icon = "openlogi"
 # [flow]
 # enabled = true
 # require_modifier = false
+# # Text copied here follows the pointer to the peer it crosses to (on by
+# # default; both machines must have it on).
+# clipboard = true
 #
 # [[flow.peers]]
 # name = "work-laptop"

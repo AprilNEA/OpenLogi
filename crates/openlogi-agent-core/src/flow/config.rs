@@ -193,6 +193,7 @@ mod tests {
         let config = FlowConfig {
             enabled: true,
             require_modifier: true,
+            clipboard: true,
             peers: vec![FlowPeer {
                 name: "desk".into(),
                 public_key: key("ab"),
