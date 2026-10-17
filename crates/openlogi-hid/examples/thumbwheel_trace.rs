@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use openlogi_hid::thumbwheel::{self, Thumbwheel};
+use openlogi_hid::thumbwheel::{self, Thumbwheel, WheelDirection};
 use openlogi_hid::{ChannelPool, DeviceRoute, host};
 
 /// Seconds the wheel stays diverted while reports are printed.
@@ -53,6 +53,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(info) => println!("getThumbwheelInfo: {info:?}"),
         Err(e) => println!("getThumbwheelInfo failed: {e:?}"),
     }
+    let original = match tw.get_status().await {
+        Ok(status) => {
+            println!("getThumbwheelStatus: {status:?}");
+            Some(status)
+        }
+        Err(e) => {
+            println!("getThumbwheelStatus failed: {e:?}");
+            None
+        }
+    };
 
     println!("0x2150 resolved at feature index {}", feature.index);
     let feature_index = feature.index;
@@ -88,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     });
 
-    tw.set_reporting(true, false)
+    tw.divert(WheelDirection::Default)
         .await
         .map_err(|e| format!("could not divert the wheel: {e:?}"))?;
     println!("\n>>> diverted — roll the wheel, then lift your thumb off it ({WATCH:?})\n");
@@ -100,7 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     drop(listener);
-    if let Err(e) = tw.set_reporting(false, false).await {
+    let native = thumbwheel::native_direction_to_restore(original);
+    if let Err(e) = tw.undivert(native).await {
         println!("could not restore native reporting: {e:?}");
     }
     println!("\n<<< native reporting restored");

@@ -27,26 +27,29 @@ use std::{collections::HashMap, sync::Arc};
 
 use hidpp::{
     channel::{HidppChannel, HidppMessage},
-    receiver::{self, Receiver},
+    receiver::{self, NotificationFlags, Receiver},
 };
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 // Click / PasskeyMethod / ReceiverSelector / PairingError are pure data with
-// no HID++/backend I/O, so they live in `openlogi_core::hid::pairing`;
-// re-exported here unchanged so this module's own API surface doesn't churn.
+// no HID++/backend I/O, so they live in `openlogi_core::hid::pairing`; the
+// pairing API names them through here.
 pub use openlogi_core::hid::pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 
-use crate::backend::HidBackend;
+use openlogi_core::hid::DeviceRoute;
+
+use crate::backend::{HidBackend, NodeId};
+use crate::host_lock::{RECEIVER_REGISTER_TIMEOUT, ReceiverRegisterPhase, lock_receiver_registers};
 
 mod notification;
 mod registers;
 
 use notification::{Notification, decode, parse_notification, subscribe};
 use registers::{
-    BOLT_DISCOVERY, BOLT_PAIRING, NOTIFICATION_FLAGS, NOTIFICATIONS, UNIFYING_PAIRING,
-    write_long_register, write_register,
+    BOLT_DISCOVERY, BOLT_PAIRING, PAIRING_NOTIFICATIONS, UNIFYING_PAIRING, read_notification_flags,
+    write_long_register, write_notification_flags, write_register,
 };
 
 /// HID++ device index addressing the receiver itself (not a paired device).
@@ -61,20 +64,80 @@ pub enum ReceiverFamily {
     Unifying,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum PairingPhase {
-    BoltDiscovery,
-    BoltPairing,
+enum SessionState {
+    BoltDiscovery(BoltDiscovery),
+    BoltPairing(BoltPairing),
+    /// Unifying: the receiver acknowledged the lock-open write but has not yet
+    /// confirmed with a `0x4a` notification that the lock is open. The write
+    /// ACK only says the receiver took the request.
+    UnifyingOpening,
+    /// Unifying: the receiver confirmed the pairing lock is open.
     UnifyingPairing,
 }
 
-impl From<ReceiverFamily> for PairingPhase {
+impl From<ReceiverFamily> for SessionState {
     fn from(family: ReceiverFamily) -> Self {
         match family {
-            ReceiverFamily::Bolt => Self::BoltDiscovery,
-            ReceiverFamily::Unifying => Self::UnifyingPairing,
+            ReceiverFamily::Bolt => Self::BoltDiscovery(BoltDiscovery::default()),
+            ReceiverFamily::Unifying => Self::UnifyingOpening,
         }
     }
+}
+
+impl SessionState {
+    async fn open(&self, channel: &HidppChannel) -> Result<(), PairingError> {
+        match self {
+            Self::BoltDiscovery(_) => {
+                write_register(channel, BOLT_DISCOVERY, [DISCOVERY_TIMEOUT, 0x01, 0x00]).await
+            }
+            Self::UnifyingOpening => {
+                write_register(channel, UNIFYING_PAIRING, [0x01, 0x00, DISCOVERY_TIMEOUT]).await
+            }
+            Self::BoltPairing(_) | Self::UnifyingPairing => {
+                unreachable!("a session starts in receiver-open state")
+            }
+        }
+    }
+
+    fn select_bolt_device(&mut self, device: &DiscoveredDevice) -> Result<(), PairingError> {
+        match self {
+            Self::BoltDiscovery(_) | Self::BoltPairing(_) => {
+                *self = Self::BoltPairing(BoltPairing {
+                    authentication: device.authentication,
+                });
+                Ok(())
+            }
+            Self::UnifyingOpening | Self::UnifyingPairing => Err(PairingError::UnsupportedCommand),
+        }
+    }
+
+    /// Applies a Unifying `0x4a` lock-state notification. `Ok(true)` when it
+    /// confirms the lock just opened, which starts the search.
+    fn unifying_lock(&mut self, open: bool, error: u8) -> Result<bool, PairingError> {
+        if error != 0 {
+            return Err(PairingError::Device(error));
+        }
+        match (open, &*self) {
+            (true, Self::UnifyingOpening) => {
+                *self = Self::UnifyingPairing;
+                Ok(true)
+            }
+            (true, _) => Ok(false),
+            // Closed before it was ever reported open.
+            (false, Self::UnifyingOpening) => Err(lock_not_opened()),
+            // Lock closed without a connection notification: nothing paired.
+            (false, _) => Err(PairingError::Timeout),
+        }
+    }
+}
+
+#[derive(Default)]
+struct BoltDiscovery {
+    partial: HashMap<u16, PartialDevice>,
+}
+
+struct BoltPairing {
+    authentication: u8,
 }
 
 fn family_for(product_id: u16) -> Option<ReceiverFamily> {
@@ -180,7 +243,7 @@ pub async fn list_pairing_receivers(
             continue;
         };
         let uid = match family {
-            ReceiverFamily::Bolt => read_bolt_uid(&channel).await,
+            ReceiverFamily::Bolt => read_receiver_uid(&channel, &node.id).await,
             ReceiverFamily::Unifying => None,
         };
         out.push(PairingReceiver {
@@ -192,19 +255,51 @@ pub async fn list_pairing_receivers(
     Ok(out)
 }
 
-/// Reads a Bolt receiver's unique ID via the crate's `BoltReceiver`.
-async fn read_bolt_uid(channel: &Arc<HidppChannel>) -> Option<String> {
-    let Some(Receiver::Bolt(bolt)) = receiver::detect(Arc::clone(channel)) else {
-        return None;
-    };
-    bolt.get_unique_id().await.ok()
+/// Reads a receiver's unique ID under its register phase. `None` when the
+/// read fails — or when another OpenLogi process still holds the phase, which
+/// is not read into.
+async fn read_receiver_uid(channel: &Arc<HidppChannel>, node: &NodeId) -> Option<String> {
+    let receiver = receiver::detect(Arc::clone(channel))?;
+    let _registers = lock_receiver_registers(node, RECEIVER_REGISTER_TIMEOUT).await?;
+    match receiver {
+        Receiver::Bolt(bolt) => bolt.get_unique_id().await.ok(),
+        Receiver::Unifying(unifying) => unifying.get_unique_id().await.ok(),
+        // `Receiver` is non-exhaustive; a family this crate cannot pair has no
+        // UID worth matching.
+        _ => None,
+    }
 }
 
-/// Opens the channel for the receiver named by `target`.
+/// Which receiver an operation addresses.
+enum ReceiverTarget<'a> {
+    /// The receiver a pairing session was asked to open.
+    Selector(&'a ReceiverSelector),
+    /// The receiver a paired device's route names.
+    Route {
+        family: ReceiverFamily,
+        uid: &'a str,
+    },
+}
+
+/// An open receiver channel and the register phase a session runs under.
+struct OpenReceiver {
+    channel: Arc<HidppChannel>,
+    family: ReceiverFamily,
+    /// Held for the whole session: every register write in the flow — the
+    /// notification flags, discovery, pairing — is receiver register I/O,
+    /// and the flow waits on the user between them, so the phase is taken
+    /// once up front rather than around each write. Inventory probes in
+    /// every OpenLogi process defer to it meanwhile, replaying their last
+    /// snapshot, and pick the new pairing up once it is released.
+    _registers: ReceiverRegisterPhase,
+}
+
+/// Opens the channel for the receiver named by `target` and takes its
+/// register phase.
 async fn open_receiver(
     backend: &dyn HidBackend,
-    target: &ReceiverSelector,
-) -> Result<(Arc<HidppChannel>, ReceiverFamily), PairingError> {
+    target: &ReceiverTarget<'_>,
+) -> Result<OpenReceiver, PairingError> {
     for node in backend.enumerate_hidpp().await? {
         let Some(channel) = backend.open_hidpp(&node).await? else {
             continue;
@@ -212,18 +307,36 @@ async fn open_receiver(
         let Some(family) = family_for(channel.product_id) else {
             continue;
         };
-        match target {
-            ReceiverSelector::First => return Ok((channel, family)),
-            ReceiverSelector::BoltUid(want) => {
-                if family == ReceiverFamily::Bolt
-                    && read_bolt_uid(&channel)
-                        .await
-                        .is_some_and(|uid| uid.eq_ignore_ascii_case(want))
-                {
-                    return Ok((channel, family));
-                }
+        let (want_family, want_uid) = match target {
+            ReceiverTarget::Selector(ReceiverSelector::First) => (None, None),
+            ReceiverTarget::Selector(ReceiverSelector::BoltUid(uid)) => {
+                (Some(ReceiverFamily::Bolt), Some(uid.as_str()))
             }
+            ReceiverTarget::Route { family, uid } => (Some(*family), Some(*uid)),
+        };
+        if want_family.is_some_and(|want| want != family) {
+            continue;
         }
+        let matched = match want_uid {
+            None => true,
+            Some(want) => read_receiver_uid(&channel, &node.id)
+                .await
+                .is_some_and(|uid| uid.eq_ignore_ascii_case(want)),
+        };
+        if !matched {
+            continue;
+        }
+        let Some(registers) = lock_receiver_registers(&node.id, RECEIVER_REGISTER_TIMEOUT).await
+        else {
+            return Err(PairingError::Register(
+                "the receiver's registers are held by another OpenLogi process".to_string(),
+            ));
+        };
+        return Ok(OpenReceiver {
+            channel,
+            family,
+            _registers: registers,
+        });
     }
     Err(PairingError::ReceiverNotFound)
 }
@@ -232,6 +345,17 @@ async fn open_receiver(
 const SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 /// Discovery / lock window opened on the receiver, in seconds.
 const DISCOVERY_TIMEOUT: u8 = 30;
+/// How long a Unifying receiver has, after acknowledging the lock-open write,
+/// to confirm with a `0x4a` notification that the lock is open. Solaar gives
+/// up after about 1.5 s (three 500 ms checks of `lock_open`); this is a little
+/// more lenient.
+const LOCK_CONFIRMATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The error for a Unifying pairing lock that the receiver never confirmed
+/// open, or reported closed while the session waited for it to open.
+fn lock_not_opened() -> PairingError {
+    PairingError::Register("the receiver did not open the pairing lock".to_owned())
+}
 
 /// Runs a pairing session against `target`, streaming [`PairingEvent`]s to
 /// `events` and consuming [`PairingCommand`]s from `commands`. Returns when the
@@ -246,22 +370,43 @@ pub async fn run_pairing(
     mut commands: mpsc::UnboundedReceiver<PairingCommand>,
     events: mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    let (channel, family) = match open_receiver(backend, &target).await {
+    let receiver = match open_receiver(backend, &ReceiverTarget::Selector(&target)).await {
         Ok(receiver) => receiver,
         Err(e) => {
             let _ = events.send(PairingEvent::Failed(e.clone()));
             return Err(e);
         }
     };
-    let (listener, mut notifications) = subscribe(&channel);
+    let OpenReceiver {
+        channel, family, ..
+    } = &receiver;
+    let (listener, mut notifications) = subscribe(channel);
 
-    let result = run_session(&channel, family, &mut commands, &mut notifications, &events).await;
+    let original = read_notification_flags(channel).await;
+    let result = match &original {
+        Ok(original) => {
+            run_session(
+                channel,
+                *family,
+                *original,
+                &mut commands,
+                &mut notifications,
+                &events,
+            )
+            .await
+        }
+        Err(e) => Err(e.clone()),
+    };
 
     drop(listener);
-    // Best-effort restore: clear notification flags we set.
-    let _ = channel
-        .write_register(RECEIVER_INDEX, NOTIFICATIONS, [0, 0, 0])
-        .await;
+    // Best-effort restore of the flags found before the session: inventory
+    // owns WIRELESS and other host software sets bits of its own, so pairing
+    // hands back exactly what it read. A failed read wrote nothing.
+    if let Ok(original) = original {
+        let _ = write_notification_flags(channel, original).await;
+    }
+    // The register phase is released with the receiver, after that write.
+    drop(receiver);
 
     if let Err(ref e) = result {
         let _ = events.send(PairingEvent::Failed(e.clone()));
@@ -270,17 +415,28 @@ pub async fn run_pairing(
 }
 
 /// Runs the core flow and phase-correct cancellation on every unsuccessful exit.
+/// `notifications_found` is the receiver's flag word before the session; the
+/// caller restores it.
 async fn run_session(
     channel: &HidppChannel,
     family: ReceiverFamily,
+    notifications_found: NotificationFlags,
     commands: &mut mpsc::UnboundedReceiver<PairingCommand>,
     notifications: &mut mpsc::UnboundedReceiver<HidppMessage>,
     events: &mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    let mut phase = PairingPhase::from(family);
-    let result = drive(channel, family, &mut phase, commands, notifications, events).await;
+    let mut state = SessionState::from(family);
+    let result = drive(
+        channel,
+        &mut state,
+        notifications_found,
+        commands,
+        notifications,
+        events,
+    )
+    .await;
     if result.is_err() {
-        cancel(channel, phase).await;
+        cancel(channel, &state).await;
     }
     result
 }
@@ -288,41 +444,36 @@ async fn run_session(
 /// Core session loop.
 async fn drive(
     channel: &HidppChannel,
-    family: ReceiverFamily,
-    phase: &mut PairingPhase,
+    state: &mut SessionState,
+    notifications_found: NotificationFlags,
     commands: &mut mpsc::UnboundedReceiver<PairingCommand>,
     notifications: &mut mpsc::UnboundedReceiver<HidppMessage>,
     events: &mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    write_register(channel, NOTIFICATIONS, NOTIFICATION_FLAGS).await?;
-
-    match family {
-        ReceiverFamily::Bolt => {
-            write_register(channel, BOLT_DISCOVERY, [DISCOVERY_TIMEOUT, 0x01, 0x00]).await?;
-        }
-        ReceiverFamily::Unifying => {
-            write_register(channel, UNIFYING_PAIRING, [0x01, 0x00, DISCOVERY_TIMEOUT]).await?;
-        }
+    write_notification_flags(channel, notifications_found | PAIRING_NOTIFICATIONS).await?;
+    state.open(channel).await?;
+    // Bolt discovery is reported open once its write is acknowledged. A
+    // Unifying lock is open only once the receiver says so with `0x4a`; the
+    // listener was installed before the write, so a notification that beat
+    // the ACK is already queued.
+    if !matches!(state, SessionState::UnifyingOpening) {
+        let _ = events.send(PairingEvent::Searching);
     }
-    let _ = events.send(PairingEvent::Searching);
 
-    // Partial Bolt discovery frames, keyed by discovery counter.
-    let mut partial: HashMap<u16, PartialDevice> = HashMap::new();
-    // Auth byte of the device the user chose to pair, for passkey rendering.
-    let mut pairing_auth: Option<u8> = None;
     let deadline = tokio::time::sleep(SESSION_TIMEOUT);
     tokio::pin!(deadline);
+    let lock_confirmation = tokio::time::sleep(LOCK_CONFIRMATION_TIMEOUT);
+    tokio::pin!(lock_confirmation);
 
     loop {
+        let awaiting_lock = matches!(state, SessionState::UnifyingOpening);
         tokio::select! {
             () = &mut deadline => return Err(PairingError::Timeout),
+            () = &mut lock_confirmation, if awaiting_lock => return Err(lock_not_opened()),
 
             cmd = commands.recv() => match cmd {
                 Some(PairingCommand::Pair(device)) => {
-                    pairing_auth = Some(device.authentication);
-                    if *phase == PairingPhase::BoltDiscovery {
-                        *phase = PairingPhase::BoltPairing;
-                    }
+                    state.select_bolt_device(&device)?;
                     pair_bolt_device(channel, &device).await?;
                 }
                 Some(PairingCommand::Cancel) | None => {
@@ -341,9 +492,14 @@ async fn drive(
                 let Some(note) = parse_notification(sub_id, device_index, payload) else {
                     continue;
                 };
+                // Discovery is phase-bound: a late DeviceFound would move the
+                // event owner back from Pairing to Found after selection.
                 match note {
                     Notification::DiscoveryInfo { counter, kind, address, authentication } => {
-                        let entry = partial.entry(counter).or_default();
+                        let SessionState::BoltDiscovery(discovery) = state else {
+                            continue;
+                        };
+                        let entry = discovery.partial.entry(counter).or_default();
                         entry.kind = Some(kind);
                         entry.address = Some(address);
                         entry.authentication = Some(authentication);
@@ -352,15 +508,22 @@ async fn drive(
                         }
                     }
                     Notification::DiscoveryName { counter, name } => {
-                        let entry = partial.entry(counter).or_default();
+                        let SessionState::BoltDiscovery(discovery) = state else {
+                            continue;
+                        };
+                        let entry = discovery.partial.entry(counter).or_default();
                         entry.name = Some(name);
                         if let Some(device) = entry.build() {
                             let _ = events.send(PairingEvent::DeviceFound(device));
                         }
                     }
                     Notification::Passkey { digits, value } => {
-                        let method = match pairing_auth {
-                            Some(auth) if auth & 0x01 != 0 => PasskeyMethod::Keyboard(digits),
+                        let method = match state {
+                            SessionState::BoltPairing(pairing)
+                                if pairing.authentication & 0x01 != 0 =>
+                            {
+                                PasskeyMethod::Keyboard(digits)
+                            }
                             _ => PasskeyMethod::Pointer {
                                 clicks: passkey_to_clicks(value),
                                 passkey: digits,
@@ -376,7 +539,8 @@ async fn drive(
                         return Ok(());
                     }
                     Notification::PairingError(code) => return Err(PairingError::Device(code)),
-                    Notification::Connected { slot, established } if family == ReceiverFamily::Unifying => {
+                    Notification::Connected { slot, established }
+                        if matches!(state, SessionState::UnifyingPairing) => {
                         if established {
                             let _ = events.send(PairingEvent::Paired { slot });
                             return Ok(());
@@ -384,12 +548,8 @@ async fn drive(
                     }
                     Notification::Connected { .. } => {}
                     Notification::UnifyingLock { open, error } => {
-                        if error != 0 {
-                            return Err(PairingError::Device(error));
-                        }
-                        if !open {
-                            // Lock closed without a connection notification: nothing paired.
-                            return Err(PairingError::Timeout);
+                        if state.unifying_lock(open, error)? {
+                            let _ = events.send(PairingEvent::Searching);
                         }
                     }
                 }
@@ -445,41 +605,57 @@ async fn pair_bolt_device(
 }
 
 /// Best-effort cancel of an in-progress flow.
-async fn cancel(channel: &HidppChannel, phase: PairingPhase) {
-    let res = match phase {
-        PairingPhase::BoltDiscovery => {
+async fn cancel(channel: &HidppChannel, state: &SessionState) {
+    let res = match state {
+        SessionState::BoltDiscovery(_) => {
             write_register(channel, BOLT_DISCOVERY, [DISCOVERY_TIMEOUT, 0x02, 0x00]).await
         }
-        PairingPhase::BoltPairing => {
+        SessionState::BoltPairing(_) => {
             let mut payload = [0u8; 16];
             payload[0] = 0x02;
             write_long_register(channel, BOLT_PAIRING, payload).await
         }
-        PairingPhase::UnifyingPairing => {
+        // The lock may have opened without the notification arriving, so a
+        // session still waiting for it closes the lock as well.
+        SessionState::UnifyingOpening | SessionState::UnifyingPairing => {
             write_register(channel, UNIFYING_PAIRING, [0x02, 0x00, 0x00]).await
         }
     };
     if let Err(e) = res {
-        debug!(?phase, ?e, "cancel write failed");
+        let phase = match state {
+            SessionState::BoltDiscovery(_) => "Bolt discovery",
+            SessionState::BoltPairing(_) => "Bolt pairing",
+            SessionState::UnifyingOpening | SessionState::UnifyingPairing => "Unifying pairing",
+        };
+        debug!(phase, ?e, "cancel write failed");
     }
 }
 
-/// Removes the device on `slot` from the receiver named by `target`.
-pub async fn unpair(
-    backend: &dyn HidBackend,
-    target: ReceiverSelector,
-    slot: u8,
-) -> Result<(), PairingError> {
-    let (channel, family) = open_receiver(backend, &target).await?;
-    match family {
+/// Removes the device `route` reaches from the receiver it is paired to. The
+/// slot is freed: the device reaches this host through that receiver again
+/// only once it is paired again. A route that names no receiver slot has no
+/// receiver to find.
+pub async fn unpair(backend: &dyn HidBackend, route: &DeviceRoute) -> Result<(), PairingError> {
+    let (family, uid, slot) = match route {
+        DeviceRoute::Bolt { receiver_uid, slot } => (ReceiverFamily::Bolt, receiver_uid, *slot),
+        DeviceRoute::Unifying { receiver_uid, slot } => {
+            (ReceiverFamily::Unifying, receiver_uid, *slot)
+        }
+        DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. } => {
+            return Err(PairingError::ReceiverNotFound);
+        }
+    };
+    let receiver = open_receiver(backend, &ReceiverTarget::Route { family, uid }).await?;
+    let channel = &receiver.channel;
+    match receiver.family {
         ReceiverFamily::Bolt => {
             let mut payload = [0u8; 16];
             payload[0] = 0x03; // action: unpair
             payload[1] = slot;
-            write_long_register(&channel, BOLT_PAIRING, payload).await
+            write_long_register(channel, BOLT_PAIRING, payload).await
         }
         ReceiverFamily::Unifying => {
-            write_register(&channel, UNIFYING_PAIRING, [0x03, slot, 0x00]).await
+            write_register(channel, UNIFYING_PAIRING, [0x03, slot, 0x00]).await
         }
     }
 }

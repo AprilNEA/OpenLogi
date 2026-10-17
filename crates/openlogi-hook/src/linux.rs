@@ -23,27 +23,32 @@
     reason = "the wake pipe and the Wayland toplevel listener call libc directly"
 )]
 
+mod foreground;
+pub(crate) mod pointer;
+
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{
-    Arc, LazyLock,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
-    AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, KeyCode, PropType, RelativeAxisCode,
+    AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, EventType, InputEvent, KeyCode,
+    PropType, RelativeAxisCode,
 };
 use tracing::{debug, error, warn};
-use x11rb::connection::Connection as _;
-use x11rb::properties::WmClass;
-use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
-use x11rb::rust_connection::RustConnection;
+use x11rb::protocol::xproto::ConnectionExt as _;
 
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
-    LOGITECH_VENDOR_ID, MouseEvent,
+    ButtonId, CursorPosition, Delivery, EventDisposition, ForegroundApp, HookBackend, HookError,
+    HookEvent, LOGITECH_VENDOR_ID, MouseEvent,
+};
+use foreground::{FRONTMOST, X11Source};
+pub(crate) use foreground::{
+    ForegroundApplicationObserver, watch_frontmost_application_activations,
 };
 
 /// Prefix carried by every uinput device OpenLogi creates — the hook's
@@ -129,9 +134,7 @@ impl HookBackend for Backend {
     /// backend. No Linux source reports an application name separate from its
     /// identifier, so the two are the same string here.
     fn frontmost_app() -> Option<ForegroundApp> {
-        FRONTMOST_SOURCE
-            .frontmost_app_id()
-            .map(ForegroundApp::unnamed)
+        FRONTMOST.frontmost_app()
     }
 
     /// Read the global cursor position through X11 when an X server is available.
@@ -286,7 +289,17 @@ fn is_hookable_mouse(
 }
 
 fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDevice> {
-    let builder = VirtualDevice::builder()?.name(VIRTUAL_DEVICE_NAME);
+    // Mirror the physical device's bus/vendor/product/version rather than
+    // uinput's default sample ID (0x1234/0x5678): libinput and desktop
+    // environments key per-device settings — pointer acceleration, scroll
+    // behavior, GNOME's remembered mouse speed — off the reported vendor and
+    // product ID. Leaving the sample ID in place made every re-injected mouse
+    // look identical and unrecognized, so those settings silently fell back
+    // to their defaults instead of the ones configured for this hardware
+    // (issue #1075).
+    let builder = VirtualDevice::builder()?
+        .name(VIRTUAL_DEVICE_NAME)
+        .input_id(device.input_id());
 
     let builder = if let Some(keys) = device.supported_keys() {
         builder.with_keys(keys)?
@@ -352,12 +365,11 @@ fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
     }
 }
 
-fn scroll(delta_x: f32, delta_y: f32) -> MouseEvent {
+fn scroll(delta_x: f64, delta_y: f64) -> MouseEvent {
     // evdev delivers the wheel and the trackpad as distinct devices, so a wheel
     // event is always a mouse wheel — never a trackpad gesture.
     MouseEvent::Scroll {
-        delta_x,
-        delta_y,
+        delta: crate::ScrollDelta::wheel_ticks(delta_x, delta_y),
         from_trackpad: false,
         device: None,
     }
@@ -389,18 +401,14 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
                 delta_y: value,
             }),
             _ => {
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "scroll deltas fit comfortably in the f32 mantissa"
-                )]
-                let v = value as f32;
+                let v = f64::from(value);
                 if hires_scroll {
                     match axis {
                         RelativeAxisCode::REL_WHEEL_HI_RES => {
-                            Some(scroll(0.0, v / HIRES_UNITS_PER_TICK))
+                            Some(scroll(0.0, v / f64::from(HIRES_UNITS_PER_TICK)))
                         }
                         RelativeAxisCode::REL_HWHEEL_HI_RES => {
-                            Some(scroll(v / HIRES_UNITS_PER_TICK, 0.0))
+                            Some(scroll(v / f64::from(HIRES_UNITS_PER_TICK), 0.0))
                         }
                         // Low-res ticks are redundant when hi-res is active.
                         _ => None,
@@ -418,6 +426,28 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
     }
 }
 
+/// Negate a vertical wheel event when software scroll inversion is on.
+///
+/// Applied at re-emission, on the original event, so the value written back is
+/// in the same evdev units the device produced — no conversion, no rounding.
+/// Both wheel axes carry vertical motion (`REL_WHEEL_HI_RES` on a hi-res
+/// wheel, `REL_WHEEL` otherwise); on a hi-res wheel the `REL_WHEEL`
+/// companion is negated as it is released, so both stay in agreement. Horizontal scrolling is left
+/// alone: the setting reverses the wheel, not the thumb wheel.
+fn invert_wheel(event: InputEvent, inverted: bool) -> InputEvent {
+    if !inverted {
+        return event;
+    }
+    match event.destructure() {
+        EventSummary::RelativeAxis(
+            _,
+            axis @ (RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_WHEEL_HI_RES),
+            value,
+        ) => InputEvent::new(EventType::RELATIVE.0, axis.0, value.saturating_neg()),
+        _ => event,
+    }
+}
+
 fn key_to_button(key: KeyCode) -> Option<ButtonId> {
     match key {
         KeyCode::BTN_LEFT => Some(ButtonId::LeftClick),
@@ -430,6 +460,86 @@ fn key_to_button(key: KeyCode) -> Option<ButtonId> {
         // BTN_TASK is the closest generic match for a mode/DPI toggle button.
         KeyCode::BTN_TASK => Some(ButtonId::DpiToggle),
         _ => None,
+    }
+}
+
+/// Low-res wheel events (`REL_WHEEL`/`REL_HWHEEL`) held back for one report.
+///
+/// A hi-res device emits both a hi-res and a low-res event per notch. libinput
+/// ignores the low-res one when the hi-res one is present, but desktops that
+/// read the *discrete* axis value (mutter 42) derive it from the low-res count,
+/// so a pass-through that drops it scrolls nothing. The low-res event is
+/// therefore forwarded exactly when the hi-res event on the same axis was; when
+/// the hi-res one was suppressed, the action injector re-emits both and a
+/// forwarded companion would double the scroll distance.
+#[derive(Default)]
+struct LowResCompanions {
+    held: Vec<evdev::InputEvent>,
+    vertical_forwarded: bool,
+    horizontal_forwarded: bool,
+}
+
+impl LowResCompanions {
+    fn is_low_res(axis: RelativeAxisCode) -> bool {
+        matches!(
+            axis,
+            RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_HWHEEL
+        )
+    }
+
+    fn hold(&mut self, event: evdev::InputEvent) {
+        self.held.push(event);
+    }
+
+    /// Record that the hi-res event for `axis` is being passed through.
+    fn hires_forwarded(&mut self, axis: RelativeAxisCode) {
+        match axis {
+            RelativeAxisCode::REL_WHEEL_HI_RES => self.vertical_forwarded = true,
+            RelativeAxisCode::REL_HWHEEL_HI_RES => self.horizontal_forwarded = true,
+            _ => {}
+        }
+    }
+
+    /// Move the companions whose hi-res event was forwarded into `pending` and
+    /// reset for the next report. `inverted` applies software scroll inversion
+    /// to the low-res vertical companion too, so it agrees with its hi-res
+    /// event for clients that read the discrete axis.
+    fn release_into(&mut self, pending: &mut Vec<evdev::InputEvent>, inverted: bool) {
+        for event in self.held.drain(..) {
+            let forwarded = match RelativeAxisCode(event.code()) {
+                RelativeAxisCode::REL_WHEEL => self.vertical_forwarded,
+                RelativeAxisCode::REL_HWHEEL => self.horizontal_forwarded,
+                _ => false,
+            };
+            if forwarded {
+                pending.push(invert_wheel(event, inverted));
+            }
+        }
+        self.vertical_forwarded = false;
+        self.horizontal_forwarded = false;
+    }
+}
+
+/// Run one event past the callback and return what to forward to the desktop
+/// for it, if anything. Held low-res companions never get here.
+///
+/// `invert` is the report's software-inversion setting, already narrowed by
+/// the caller to vertical wheel events. Through [`Delivery`] the callback
+/// sees the reversed delta, so a suppressed impulse the agent replays is
+/// reversed too (#1737), and a forwarded event is negated once on its way out.
+fn dispatch(
+    event: InputEvent,
+    hires_scroll: bool,
+    invert: bool,
+    cb: &dyn Fn(HookEvent) -> EventDisposition,
+) -> Option<InputEvent> {
+    let delivery = translate(&event, hires_scroll).map_or_else(
+        || Delivery::forwarded(invert),
+        |mouse| Delivery::run(HookEvent::Mouse(mouse), invert, cb),
+    );
+    match delivery.disposition {
+        EventDisposition::PassThrough => Some(invert_wheel(event, delivery.invert_native)),
+        EventDisposition::Suppress => None,
     }
 }
 
@@ -464,6 +574,10 @@ fn device_thread(
     let stop_fd = stop_rx.as_raw_fd();
     // Events that will be re-injected at the next SYN_REPORT.
     let mut pending: Vec<evdev::InputEvent> = Vec::new();
+    let mut companions = LowResCompanions::default();
+    // Software scroll inversion, read once per report so a hi-res event and its
+    // low-res companion never disagree if the setting flips mid-report.
+    let mut report_inverted: Option<bool> = None;
 
     debug!("hook started on {}", path.display());
 
@@ -488,6 +602,10 @@ fn device_thread(
                 // Flush the report. `emit()` appends its own SYN_REPORT, so the
                 // incoming sync event is dropped rather than re-emitted — pushing
                 // it would send a redundant second SYN_REPORT.
+                let inverted = report_inverted
+                    .take()
+                    .unwrap_or_else(crate::scroll_inversion);
+                companions.release_into(&mut pending, inverted);
                 if !pending.is_empty() {
                     if let Err(e) = virtual_device.emit(&pending) {
                         // The physical device is grabbed, so these pass-through
@@ -504,27 +622,30 @@ fn device_thread(
                     pending.clear();
                 }
             } else {
-                let disposition = match translate(&event, hires_scroll) {
-                    Some(me) => cb(HookEvent::Mouse(me)),
-                    // Low-res companions (REL_WHEEL/REL_HWHEEL) must be suppressed when hi-res
-                    // is active — passing them through would double the scroll distance.
-                    None if hires_scroll
-                        && matches!(
-                            event.destructure(),
-                            EventSummary::RelativeAxis(
-                                _,
-                                RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_HWHEEL,
-                                _
-                            )
-                        ) =>
-                    {
-                        EventDisposition::Suppress
+                if hires_scroll
+                    && let EventSummary::RelativeAxis(_, axis, _) = event.destructure()
+                    && LowResCompanions::is_low_res(axis)
+                {
+                    // Redundant for the callback; whether it reaches the desktop
+                    // depends on what happens to the hi-res event in this report.
+                    companions.hold(event);
+                    continue;
+                }
+                let is_vertical_wheel = matches!(
+                    event.destructure(),
+                    EventSummary::RelativeAxis(
+                        _,
+                        RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_WHEEL_HI_RES,
+                        _
+                    )
+                );
+                let invert = is_vertical_wheel
+                    && *report_inverted.get_or_insert_with(crate::scroll_inversion);
+                if let Some(forwarded) = dispatch(event, hires_scroll, invert, &*cb) {
+                    if let EventSummary::RelativeAxis(_, axis, _) = event.destructure() {
+                        companions.hires_forwarded(axis);
                     }
-                    None => EventDisposition::PassThrough,
-                };
-                match disposition {
-                    EventDisposition::PassThrough => pending.push(event),
-                    EventDisposition::Suppress => {}
+                    pending.push(forwarded);
                 }
             }
         }
@@ -533,211 +654,6 @@ fn device_thread(
     debug!("hook stopped on {}", path.display());
     // Dropping `device` releases the exclusive grab, restoring normal input delivery.
 }
-
-// ── frontmost_app_id ─────────────────────────────────────────────────────────
-
-// The frontmost-app reader is backend-driven so that Wayland support can be
-// added without touching callers. Exactly one backend is selected at startup
-// from the session environment (see `detect_frontmost_source`) and cached in
-// `FRONTMOST_SOURCE` for the process lifetime. The X11, wlr-foreign-toplevel,
-// and gnome-shell backends are all available; see `wayland_candidates`.
-
-mod gnome_shell;
-mod wlr_foreign_toplevel;
-
-/// A backend that reports which application is currently frontmost.
-///
-/// Implementations are display-server / desktop specific. The string returned
-/// by `frontmost_app_id` is compared against per-app profile keys by exact
-/// match (`openlogi_core::Config::effective_bindings`), so its exact form
-/// matters and is backend-specific. The X11 and gnome-shell backends both
-/// return the `WM_CLASS` class component (e.g. "Firefox"); the wlr backend
-/// returns the xdg-shell `app_id` (e.g. "org.mozilla.firefox"). These two
-/// namespaces do not map onto each other by any simple string rule, so a
-/// per-app profile created under wlroots will not match under GNOME/X11 and
-/// vice versa. This is a known limitation: reconciling it needs a canonical-id
-/// scheme or per-profile aliases rather than naive normalization, and is
-/// deliberately out of scope for the backends themselves.
-trait FrontmostSource: Send + Sync {
-    /// Opaque identifier of the frontmost application, or `None` when there is
-    /// no frontmost window or it cannot be read.
-    fn frontmost_app_id(&self) -> Option<String>;
-
-    /// Short backend identifier, for diagnostics / logging only.
-    fn name(&self) -> &'static str;
-}
-
-/// Frontmost backend backed by X11 `_NET_ACTIVE_WINDOW` + `WM_CLASS`.
-///
-/// Works on an X11 session, and on a Wayland session for XWayland windows;
-/// native Wayland windows are invisible through this path and yield `None`.
-struct X11Source {
-    conn: RustConnection,
-    root: Window,
-    net_active_window: Atom,
-}
-
-impl X11Source {
-    /// Connect to the X server and resolve the `_NET_ACTIVE_WINDOW` atom.
-    /// Returns `None` when no X display is reachable (a Wayland session without
-    /// XWayland, or `$DISPLAY` unset).
-    fn connect() -> Option<Self> {
-        let (conn, screen_num) = RustConnection::connect(None)
-            .map_err(|e| debug!("X11 not available, frontmost will return None: {e}"))
-            .ok()?;
-        let root = conn.setup().roots[screen_num].root;
-        let net_active_window = conn
-            .intern_atom(false, b"_NET_ACTIVE_WINDOW")
-            .ok()?
-            .reply()
-            .ok()?
-            .atom;
-        Some(Self {
-            conn,
-            root,
-            net_active_window,
-        })
-    }
-}
-
-impl FrontmostSource for X11Source {
-    fn frontmost_app_id(&self) -> Option<String> {
-        // _NET_ACTIVE_WINDOW on the root window holds the focused window's XID.
-        let window: Window = self
-            .conn
-            .get_property(
-                false,
-                self.root,
-                self.net_active_window,
-                AtomEnum::WINDOW,
-                0,
-                1,
-            )
-            .ok()?
-            .reply()
-            .ok()?
-            .value32()?
-            .next()?;
-        if window == 0 {
-            return None;
-        }
-
-        // WM_CLASS is instance_name\0class_name\0; the class component is more
-        // stable across window instances and is what profiles should key on
-        // (e.g. "Firefox", not "Navigator").
-        let wm = WmClass::get(&self.conn, window)
-            .ok()?
-            .reply_unchecked()
-            .ok()??;
-        std::str::from_utf8(wm.class())
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-    }
-
-    fn name(&self) -> &'static str {
-        "x11"
-    }
-}
-
-/// Fallback used when no backend is available (e.g. a pure Wayland session
-/// before any Wayland backend lands). Always reports `None`, so per-app
-/// profile switching simply no-ops rather than erroring.
-struct NullSource;
-
-impl FrontmostSource for NullSource {
-    fn frontmost_app_id(&self) -> Option<String> {
-        None
-    }
-
-    fn name(&self) -> &'static str {
-        "null"
-    }
-}
-
-/// Coarse classification of the graphical session, used to order the frontmost
-/// backend candidates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionKind {
-    X11,
-    Wayland,
-    Unknown,
-}
-
-/// Classify the session from the environment. `XDG_SESSION_TYPE` is
-/// authoritative when set to `x11` or `wayland`; otherwise fall back to the
-/// presence of `WAYLAND_DISPLAY` / `DISPLAY`.
-fn detect_session_kind() -> SessionKind {
-    if let Ok(kind) = std::env::var("XDG_SESSION_TYPE") {
-        match kind.as_str() {
-            "wayland" => return SessionKind::Wayland,
-            "x11" => return SessionKind::X11,
-            _ => {}
-        }
-    }
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        SessionKind::Wayland
-    } else if std::env::var_os("DISPLAY").is_some() {
-        SessionKind::X11
-    } else {
-        SessionKind::Unknown
-    }
-}
-
-/// A backend constructor: returns the backend if it can initialize on this
-/// system, or `None` to fall through to the next candidate.
-type Candidate = fn() -> Option<Box<dyn FrontmostSource>>;
-
-fn x11_candidate() -> Option<Box<dyn FrontmostSource>> {
-    X11Source::connect().map(|s| Box::new(s) as Box<dyn FrontmostSource>)
-}
-
-/// Wayland-native frontmost backends, in priority order: the wlroots
-/// foreign-toplevel protocol (sway, Hyprland, river, …) and the GNOME Shell
-/// D-Bus extension (Mutter). AT-SPI remains a future fallback. Compositors that
-/// support none of these fall through to the X11/XWayland path (which resolves
-/// XWayland windows, `None` for native Wayland apps).
-fn wayland_candidates() -> Vec<Candidate> {
-    vec![wlr_foreign_toplevel::candidate, gnome_shell::candidate]
-}
-
-/// Pick the frontmost backend for this session, trying each candidate in order
-/// and keeping the first that initializes. Called once, lazily, per process.
-fn detect_frontmost_source() -> Box<dyn FrontmostSource> {
-    let session = detect_session_kind();
-    debug!("frontmost: session kind = {session:?}");
-
-    let mut candidates: Vec<Candidate> = match session {
-        SessionKind::Wayland => wayland_candidates(),
-        SessionKind::X11 | SessionKind::Unknown => Vec::new(),
-    };
-    // X11 / XWayland: the primary path on an X11 session and the universal
-    // fallback everywhere else.
-    candidates.push(x11_candidate);
-
-    for candidate in candidates {
-        if let Some(source) = candidate() {
-            debug!("frontmost: using '{}' backend", source.name());
-            // On Wayland, landing on the X11 backend means no native Wayland
-            // frontmost source was available, so native Wayland windows will
-            // report None (only XWayland windows resolve). Hint at the fix.
-            if session == SessionKind::Wayland && source.name() == "x11" {
-                debug!(
-                    "frontmost: on Wayland but using the X11/XWayland backend; \
-                     native Wayland windows will report None. Install the OpenLogi \
-                     GNOME Shell extension (GNOME) or use a wlroots compositor."
-                );
-            }
-            return source;
-        }
-    }
-
-    debug!("frontmost: no usable backend; frontmost_app_id will return None");
-    Box::new(NullSource)
-}
-
-static FRONTMOST_SOURCE: LazyLock<Box<dyn FrontmostSource>> =
-    LazyLock::new(detect_frontmost_source);
 
 #[cfg(test)]
 mod tests {
@@ -876,9 +792,9 @@ mod tests {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_WHEEL.0, 3);
         let result = translate(&event, false);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
-                if delta_x.abs() < f32::EPSILON && (delta_y - 3.0).abs() < f32::EPSILON),
-            "expected Scroll {{ delta_x: 0.0, delta_y: 3.0 }}, got {result:?}"
+            matches!(result, Some(MouseEvent::Scroll { delta, .. })
+                if delta == crate::ScrollDelta::wheel_ticks(0.0, 3.0)),
+            "expected a three-tick vertical scroll, got {result:?}"
         );
     }
 
@@ -887,9 +803,9 @@ mod tests {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, -2);
         let result = translate(&event, false);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
-                if (delta_x - -2.0).abs() < f32::EPSILON && delta_y.abs() < f32::EPSILON),
-            "expected Scroll {{ delta_x: -2.0, delta_y: 0.0 }}, got {result:?}"
+            matches!(result, Some(MouseEvent::Scroll { delta, .. })
+                if delta == crate::ScrollDelta::wheel_ticks(-2.0, 0.0)),
+            "expected a negative two-tick horizontal scroll, got {result:?}"
         );
     }
 
@@ -905,9 +821,9 @@ mod tests {
         );
         let result = translate(&event, true);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
-                if delta_x.abs() < f32::EPSILON && (delta_y - 0.5).abs() < f32::EPSILON),
-            "expected Scroll {{ delta_x: 0.0, delta_y: 0.5 }}, got {result:?}"
+            matches!(result, Some(MouseEvent::Scroll { delta, .. })
+                if delta == crate::ScrollDelta::wheel_ticks(0.0, 0.5)),
+            "expected a half-tick vertical scroll, got {result:?}"
         );
     }
 
@@ -920,9 +836,9 @@ mod tests {
         );
         let result = translate(&event, true);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
-                if (delta_x - -1.0).abs() < f32::EPSILON && delta_y.abs() < f32::EPSILON),
-            "expected Scroll {{ delta_x: -1.0, delta_y: 0.0 }}, got {result:?}"
+            matches!(result, Some(MouseEvent::Scroll { delta, .. })
+                if delta == crate::ScrollDelta::wheel_ticks(-1.0, 0.0)),
+            "expected a negative one-tick horizontal scroll, got {result:?}"
         );
     }
 
@@ -936,6 +852,57 @@ mod tests {
     fn translate_low_res_hwheel_skipped_when_hires_active() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, 1);
         assert!(translate(&event, true).is_none());
+    }
+
+    // ── LowResCompanions ─────────────────────────────────────────────────────
+
+    fn rel(axis: RelativeAxisCode, value: i32) -> InputEvent {
+        InputEvent::new(EventType::RELATIVE.0, axis.0, value)
+    }
+
+    fn pending_codes(pending: &[InputEvent]) -> Vec<u16> {
+        pending.iter().map(InputEvent::code).collect()
+    }
+
+    #[test]
+    fn low_res_wheel_forwarded_when_hires_forwarded() {
+        let mut companions = LowResCompanions::default();
+        let mut pending = Vec::new();
+        companions.hold(rel(RelativeAxisCode::REL_WHEEL, -1));
+        companions.hires_forwarded(RelativeAxisCode::REL_WHEEL_HI_RES);
+        companions.release_into(&mut pending, false);
+        assert_eq!(pending_codes(&pending), [RelativeAxisCode::REL_WHEEL.0]);
+    }
+
+    #[test]
+    fn low_res_wheel_dropped_when_hires_suppressed() {
+        let mut companions = LowResCompanions::default();
+        let mut pending = Vec::new();
+        companions.hold(rel(RelativeAxisCode::REL_WHEEL, -1));
+        companions.release_into(&mut pending, false);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn low_res_axes_are_matched_independently() {
+        let mut companions = LowResCompanions::default();
+        let mut pending = Vec::new();
+        companions.hold(rel(RelativeAxisCode::REL_WHEEL, 1));
+        companions.hold(rel(RelativeAxisCode::REL_HWHEEL, 1));
+        companions.hires_forwarded(RelativeAxisCode::REL_HWHEEL_HI_RES);
+        companions.release_into(&mut pending, false);
+        assert_eq!(pending_codes(&pending), [RelativeAxisCode::REL_HWHEEL.0]);
+    }
+
+    #[test]
+    fn forwarded_state_does_not_leak_into_next_report() {
+        let mut companions = LowResCompanions::default();
+        let mut pending = Vec::new();
+        companions.hires_forwarded(RelativeAxisCode::REL_WHEEL_HI_RES);
+        companions.release_into(&mut pending, false);
+        companions.hold(rel(RelativeAxisCode::REL_WHEEL, 1));
+        companions.release_into(&mut pending, false);
+        assert!(pending.is_empty());
     }
 
     #[test]
@@ -1150,5 +1117,158 @@ mod tests {
         let mut caps = Caps::mouse();
         caps.abs = Some([AbsoluteAxisCode::ABS_MISC].into_iter().collect());
         assert!(caps.is_hookable());
+    }
+}
+
+#[cfg(test)]
+mod scroll_inversion_tests {
+    use std::cell::Cell;
+
+    use super::*;
+    use crate::ScrollDelta;
+
+    fn rel(axis: RelativeAxisCode, value: i32) -> InputEvent {
+        InputEvent::new(EventType::RELATIVE.0, axis.0, value)
+    }
+
+    fn value_of(event: InputEvent) -> i32 {
+        event.value()
+    }
+
+    /// Both wheel axes are negated: a hi-res wheel reports `REL_WHEEL_HI_RES`
+    /// and a detented one `REL_WHEEL`, and the Signature M650 this was
+    /// verified against advertises both.
+    #[test]
+    fn inversion_negates_either_vertical_wheel_axis() {
+        for axis in [
+            RelativeAxisCode::REL_WHEEL,
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+        ] {
+            assert_eq!(value_of(invert_wheel(rel(axis, 120), true)), -120);
+            assert_eq!(value_of(invert_wheel(rel(axis, -1), true)), 1);
+        }
+    }
+
+    /// Off is a pass-through, byte for byte — the setting must cost nothing
+    /// when it is not in use.
+    #[test]
+    fn inversion_off_leaves_the_wheel_alone() {
+        let event = rel(RelativeAxisCode::REL_WHEEL, 120);
+        assert_eq!(value_of(invert_wheel(event, false)), 120);
+    }
+
+    /// The setting reverses the wheel, not the thumb wheel or the pointer.
+    #[test]
+    fn inversion_leaves_horizontal_and_pointer_axes_alone() {
+        for axis in [
+            RelativeAxisCode::REL_HWHEEL,
+            RelativeAxisCode::REL_HWHEEL_HI_RES,
+            RelativeAxisCode::REL_X,
+            RelativeAxisCode::REL_Y,
+        ] {
+            assert_eq!(value_of(invert_wheel(rel(axis, 7), true)), 7);
+        }
+    }
+
+    /// A forwarded low-res companion is negated with its hi-res event, so a
+    /// client reading the discrete axis scrolls the same way as one reading
+    /// the hi-res axis.
+    #[test]
+    fn inversion_negates_the_released_low_res_companion() {
+        let mut companions = LowResCompanions::default();
+        companions.hold(rel(RelativeAxisCode::REL_WHEEL, 1));
+        companions.hires_forwarded(RelativeAxisCode::REL_WHEEL_HI_RES);
+        let mut pending = Vec::new();
+        companions.release_into(&mut pending, true);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(value_of(pending[0]), -1);
+    }
+
+    /// `i32::MIN` has no positive counterpart; saturating keeps the scroll
+    /// pinned at the extreme instead of wrapping it back to the same sign.
+    #[test]
+    fn inversion_saturates_instead_of_wrapping() {
+        assert_eq!(
+            value_of(invert_wheel(
+                rel(RelativeAxisCode::REL_WHEEL, i32::MIN),
+                true
+            )),
+            i32::MAX
+        );
+    }
+
+    /// A detented notch and a hi-res one, each with the `hires_scroll` mode
+    /// its device runs in.
+    const NOTCHES: [(RelativeAxisCode, bool, i32); 2] = [
+        (RelativeAxisCode::REL_WHEEL, false, 1),
+        (RelativeAxisCode::REL_WHEEL_HI_RES, true, 120),
+    ];
+
+    /// Run a wheel event through [`dispatch`] with a callback that answers
+    /// `disposition`, returning the delta the callback saw and the value
+    /// forwarded to the desktop, if any.
+    fn dispatch_wheel(
+        event: InputEvent,
+        hires_scroll: bool,
+        invert: bool,
+        disposition: EventDisposition,
+    ) -> (Option<ScrollDelta>, Option<i32>) {
+        let seen = Cell::new(None);
+        let forwarded = dispatch(event, hires_scroll, invert, &|hook_event| {
+            if let HookEvent::Mouse(MouseEvent::Scroll { delta, .. }) = hook_event {
+                seen.set(Some(delta));
+            }
+            disposition
+        });
+        (seen.get(), forwarded.map(value_of))
+    }
+
+    /// The delta [`translate`] reads from an untouched wheel event.
+    fn wheel_delta(event: InputEvent, hires_scroll: bool) -> ScrollDelta {
+        match translate(&event, hires_scroll) {
+            Some(MouseEvent::Scroll { delta, .. }) => delta,
+            other => panic!("a wheel event translates to a scroll, got {other:?}"),
+        }
+    }
+
+    /// With inversion on, the callback sees the reversed delta whatever it
+    /// decides, so an impulse the agent suppresses and replays is reversed
+    /// too (#1737), and a forwarded event reaches the desktop negated exactly
+    /// once.
+    #[test]
+    fn inverted_wheel_reaches_the_callback_reversed_and_the_desktop_reversed_once() {
+        for (axis, hires_scroll, value) in NOTCHES {
+            let event = rel(axis, value);
+            let reversed = wheel_delta(event, hires_scroll).negate_y();
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, true, EventDisposition::PassThrough),
+                (Some(reversed), Some(-value)),
+                "{axis:?} passed through"
+            );
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, true, EventDisposition::Suppress),
+                (Some(reversed), None),
+                "{axis:?} suppressed"
+            );
+        }
+    }
+
+    /// With inversion off, neither the callback nor the desktop sees a change.
+    #[test]
+    fn wheel_is_left_alone_when_inversion_is_off() {
+        for (axis, hires_scroll, value) in NOTCHES {
+            let event = rel(axis, value);
+            let delta = wheel_delta(event, hires_scroll);
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, false, EventDisposition::PassThrough),
+                (Some(delta), Some(value)),
+                "{axis:?} passed through"
+            );
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, false, EventDisposition::Suppress),
+                (Some(delta), None),
+                "{axis:?} suppressed"
+            );
+        }
     }
 }

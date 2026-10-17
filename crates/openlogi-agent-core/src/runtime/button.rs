@@ -1,4 +1,4 @@
-//! Source-independent button lifecycle state.
+//! Source-independent button and key lifecycle state.
 //!
 //! Capture backends report different raw shapes: OS hooks carry discrete
 //! edges, while HID++ diverted-control reports carry complete held-control
@@ -12,30 +12,61 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle, ThreadId};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, LONG_PRESS_THRESHOLD};
 use tracing::warn;
+
+use super::ActionDispatchTarget;
 
 /// OS-hook callbacks must fail open rather than block.
 const EVENT_QUEUE_CAPACITY: usize = 128;
 /// Bounds how long graceful process exit waits for terminal handlers.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Lets the worker observe the out-of-band shutdown channel even while idle.
-const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const SHUTDOWN_POLL_PERIOD: Duration = Duration::from_millis(10);
 
-/// Stable identity of one HID++ capture-session incarnation.
+/// Process-unique identity of one HID++ hardware capture incarnation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct CaptureEpoch(u64);
+
+mod worker;
+use worker::run_worker;
+#[cfg(test)]
+use worker::{emit_canceled, emit_selected_long_presses, process_input, settle_due_long_presses};
+
+/// A capture epoch bound to the config namespace its actions currently use.
+/// The namespace can hot-swap while the epoch remains the task's stable input
+/// identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct HidppSessionId {
     device_key: Arc<str>,
-    epoch: u64,
+    epoch: CaptureEpoch,
 }
 
+/// Feeds [`HidppSessionId::new`] — one counter for the whole process.
+static NEXT_SESSION_EPOCH: AtomicU64 = AtomicU64::new(1);
+
 impl HidppSessionId {
-    pub(crate) fn new(device_key: &str, epoch: u64) -> Self {
+    /// Mint the identity for a fresh capture-session incarnation. The epoch
+    /// is allocated here rather than by the calling manager, so uniqueness
+    /// holds by construction: the gesture and keyboard managers both run a
+    /// session for an online bound keyboard, and manager-local counters would
+    /// deterministically collide on its first sessions.
+    pub(crate) fn new(device_key: &str) -> Self {
         Self {
             device_key: Arc::from(device_key),
-            epoch,
+            epoch: CaptureEpoch(NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed)),
+        }
+    }
+
+    /// Test-only: an id with a chosen epoch, so stale-vs-current cases are
+    /// constructible regardless of minting order.
+    #[cfg(test)]
+    pub(crate) fn with_epoch(device_key: &str, epoch: u64) -> Self {
+        Self {
+            device_key: Arc::from(device_key),
+            epoch: CaptureEpoch(epoch),
         }
     }
 
@@ -44,7 +75,19 @@ impl HidppSessionId {
     }
 
     pub(crate) fn epoch(&self) -> u64 {
-        self.epoch
+        self.epoch.0
+    }
+
+    /// Whether two IDs name the same hardware capture incarnation even when
+    /// its hot-swappable config namespace has changed.
+    pub(crate) fn same_epoch(&self, other: &Self) -> bool {
+        self.epoch == other.epoch
+    }
+
+    /// Move future dispatch from this hardware epoch to a different config
+    /// namespace. Managers cancel the old action lifecycle before calling it.
+    pub(crate) fn rekey(&mut self, device_key: &str) {
+        self.device_key = Arc::from(device_key);
     }
 }
 
@@ -70,16 +113,35 @@ impl ButtonSource {
     }
 }
 
+/// Physical control carried through a press lifecycle.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PressControl {
+    /// A mouse or HID++ control represented in the shared binding schema.
+    Button(ButtonId),
+    /// A function key represented by its platform-neutral macOS keycode.
+    Key(u16),
+}
+
 /// Correlation key shared by consecutive edges from one physical control.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct PressKey {
     source: ButtonSource,
-    button: ButtonId,
+    control: PressControl,
 }
 
 impl PressKey {
     fn new(source: ButtonSource, button: ButtonId) -> Self {
-        Self { source, button }
+        Self {
+            source,
+            control: PressControl::Button(button),
+        }
+    }
+
+    fn for_key(source: ButtonSource, keycode: u16) -> Self {
+        Self {
+            source,
+            control: PressControl::Key(keycode),
+        }
     }
 }
 
@@ -90,7 +152,7 @@ struct PressId(u64);
 /// Capability used to run a gesture action only while its originating press
 /// remains active. Future timers and repeat workers can use the same token to
 /// reject work scheduled by a superseded press.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PressToken {
     id: PressId,
     key: PressKey,
@@ -112,20 +174,130 @@ impl PressToken {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ActivePress {
     token: PressToken,
-    action: Option<Action>,
+    behavior: PressBehavior,
+    target: ActionDispatchTarget,
+}
+
+/// Runtime-only state of the action semantics attached to one active press.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PressBehavior {
+    /// Gesture lifecycles dispatch their semantic action separately.
+    LifecycleOnly,
+    /// Existing behavior: fire once when the press starts.
+    Immediate(Action),
+    /// Wait for either release or the threshold, whichever occurs first.
+    LongPressPending {
+        short: Action,
+        long: Action,
+        deadline: Instant,
+    },
+    /// The long action fired; release must not also fire the short action.
+    LongPressFired,
+    /// Wait for release, which fires `click` unless the wheel moved first.
+    WheelHoldPending { click: Action },
+    /// The wheel moved during the press, which made it a virtual thumb wheel;
+    /// release fires nothing.
+    WheelHoldScrolled,
+}
+
+impl PressBehavior {
+    fn new(binding: Option<&Binding>, pressed_at: Instant) -> Self {
+        match binding {
+            None => Self::LifecycleOnly,
+            Some(Binding::Single(action)) => Self::Immediate(action.clone()),
+            Some(binding @ Binding::Gesture(_)) => Self::Immediate(binding.click_action()),
+            Some(Binding::LongPress(binding)) => Self::LongPressPending {
+                short: binding.short().clone(),
+                long: binding.long().clone(),
+                deadline: pressed_at + LONG_PRESS_THRESHOLD,
+            },
+            Some(Binding::WheelHold(binding)) => Self::WheelHoldPending {
+                click: binding.click().clone(),
+            },
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        match self {
+            Self::LongPressPending { deadline, .. } => Some(*deadline),
+            Self::LifecycleOnly
+            | Self::Immediate(_)
+            | Self::LongPressFired
+            | Self::WheelHoldPending { .. }
+            | Self::WheelHoldScrolled => None,
+        }
+    }
+
+    fn start_action(&self) -> Option<&Action> {
+        match self {
+            Self::Immediate(action) => Some(action),
+            Self::LifecycleOnly
+            | Self::LongPressPending { .. }
+            | Self::LongPressFired
+            | Self::WheelHoldPending { .. }
+            | Self::WheelHoldScrolled => None,
+        }
+    }
+
+    fn release_action(&self) -> Option<&Action> {
+        match self {
+            Self::LongPressPending { short, .. } => Some(short),
+            Self::WheelHoldPending { click } => Some(click),
+            Self::LifecycleOnly
+            | Self::Immediate(_)
+            | Self::LongPressFired
+            | Self::WheelHoldScrolled => None,
+        }
+    }
+
+    /// The wheel moved while this press was down. A wheel-hold press stops
+    /// owing its click; any other press is left as it is.
+    fn wheel_moved(&mut self) {
+        if matches!(self, Self::WheelHoldPending { .. }) {
+            *self = Self::WheelHoldScrolled;
+        }
+    }
+
+    fn fire_long(&mut self, now: Instant) -> Option<Action> {
+        let Self::LongPressPending { long, deadline, .. } = self else {
+            return None;
+        };
+        if now < *deadline {
+            return None;
+        }
+        let action = long.clone();
+        *self = Self::LongPressFired;
+        Some(action)
+    }
 }
 
 impl ActivePress {
-    pub(crate) fn button(&self) -> ButtonId {
-        self.token.key.button
+    pub(crate) fn token(&self) -> &PressToken {
+        &self.token
+    }
+
+    pub(crate) fn control(&self) -> &PressControl {
+        &self.token.key.control
     }
 
     pub(crate) fn device_key(&self) -> Option<&str> {
         self.token.key.source.device_key()
     }
 
-    pub(crate) fn action(&self) -> Option<&Action> {
-        self.action.as_ref()
+    pub(crate) fn start_action(&self) -> Option<&Action> {
+        self.behavior.start_action()
+    }
+
+    pub(crate) fn target(&self) -> ActionDispatchTarget {
+        self.target
+    }
+
+    fn release_action(&self) -> Option<&Action> {
+        self.behavior.release_action()
+    }
+
+    fn fire_long(&mut self, now: Instant) -> Option<Action> {
+        self.behavior.fire_long(now)
     }
 }
 
@@ -160,7 +332,8 @@ pub(crate) enum ButtonRuntimeEvent {
         press: ActivePress,
         reason: EndReason,
     },
-    /// A semantic gesture action admitted only while `press` is still active.
+    /// An action admitted by an active press: a gesture, a long-press
+    /// threshold, or a short release.
     Triggered {
         press: ActivePress,
         action: Action,
@@ -170,9 +343,19 @@ pub(crate) enum ButtonRuntimeEvent {
 /// Inputs cannot represent `Up + action` or a source-authored `Cancel`.
 enum ButtonInput {
     Down(ActivePress),
-    Up(PressKey),
+    Up {
+        key: PressKey,
+        released_at: Instant,
+    },
     Pulse(ActivePress),
-    TriggerWhilePressed { token: PressToken, action: Action },
+    TriggerWhilePressed {
+        token: PressToken,
+        action: Action,
+    },
+    /// The wheel moved while the press `token` was down.
+    WheelWhilePressed {
+        token: PressToken,
+    },
 }
 
 enum ButtonCommand {
@@ -180,6 +363,7 @@ enum ButtonCommand {
     CancelStalePress(PressToken),
     CancelSource(ButtonSource),
     CancelHooks,
+    CancelPointerExcept(openlogi_hook::PointerTarget),
     Wake,
 }
 
@@ -213,6 +397,15 @@ impl ButtonState {
         self.active.remove(&token.key)
     }
 
+    /// Record wheel movement on the exact press `token`, if it is still live.
+    fn wheel_moved(&mut self, token: &PressToken) {
+        if let Some(press) = self.active.get_mut(&token.key)
+            && press.token == *token
+        {
+            press.behavior.wheel_moved();
+        }
+    }
+
     fn cancel_source(&mut self, source: &ButtonSource) -> Vec<ActivePress> {
         self.cancel_where(|key| key.source == *source)
     }
@@ -223,6 +416,49 @@ impl ButtonState {
 
     fn cancel_all(&mut self) -> Vec<ActivePress> {
         self.active.drain().map(|(_, press)| press).collect()
+    }
+
+    fn cancel_pointer_except(&mut self, current: openlogi_hook::PointerTarget) -> Vec<ActivePress> {
+        self.active.extract_if(|_, press| matches!(press.target, ActionDispatchTarget::Pointer { target, .. } if target != current))
+            .map(|(_, press)| press)
+            .collect()
+    }
+
+    fn fire_selected_long_presses(
+        &mut self,
+        tokens: &[PressToken],
+        now: Instant,
+    ) -> Vec<(ActivePress, Action)> {
+        tokens
+            .iter()
+            .filter_map(|token| {
+                let press = self.active.get_mut(&token.key)?;
+                if press.token != *token {
+                    return None;
+                }
+                press.fire_long(now).map(|action| (press.clone(), action))
+            })
+            .collect()
+    }
+
+    fn has_due_long_press(&self, now: Instant) -> bool {
+        self.active
+            .values()
+            .filter_map(|press| press.behavior.deadline())
+            .any(|deadline| deadline <= now)
+    }
+
+    fn due_long_presses(&self, now: Instant) -> Vec<PressToken> {
+        self.active
+            .values()
+            .filter(|press| {
+                press
+                    .behavior
+                    .deadline()
+                    .is_some_and(|deadline| deadline <= now)
+            })
+            .map(|press| press.token.clone())
+            .collect()
     }
 
     fn cancel_where(&mut self, matches: impl Fn(&PressKey) -> bool) -> Vec<ActivePress> {
@@ -248,16 +484,55 @@ pub(crate) struct ButtonInputHandle {
 }
 
 impl ButtonInputHandle {
+    #[cfg(test)]
     pub(crate) fn try_hook_down(
         &self,
         button: ButtonId,
-        action: Option<&Action>,
+        binding: Option<&Binding>,
     ) -> Option<PressToken> {
-        self.try_down(ButtonSource::current_hook(), button, action)
+        self.try_hook_down_with_target(button, binding, ActionDispatchTarget::capture())
+    }
+
+    pub(crate) fn try_hook_down_with_target(
+        &self,
+        button: ButtonId,
+        binding: Option<&Binding>,
+        target: ActionDispatchTarget,
+    ) -> Option<PressToken> {
+        self.try_down(ButtonSource::current_hook(), button, binding, target)
     }
 
     pub(crate) fn try_hook_up(&self, button: ButtonId) -> bool {
         self.try_up(ButtonSource::current_hook(), button)
+    }
+
+    pub(crate) fn try_hook_key_down(
+        &self,
+        keycode: u16,
+        action: &Action,
+        target: ActionDispatchTarget,
+    ) -> Option<PressToken> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let press = self.new_press(
+            PressKey::for_key(ButtonSource::current_hook(), keycode),
+            PressBehavior::Immediate(action.clone()),
+            generation,
+            target,
+        );
+        let token = press.token.clone();
+        self.try_input(generation, ButtonInput::Down(press))
+            .then_some(token)
+    }
+
+    pub(crate) fn try_hook_key_up(&self, keycode: u16) -> bool {
+        let generation = self.generation.load(Ordering::Acquire);
+        self.try_input(
+            generation,
+            ButtonInput::Up {
+                key: PressKey::for_key(ButtonSource::current_hook(), keycode),
+                released_at: Instant::now(),
+            },
+        )
     }
 
     pub(crate) fn cancel_hook_thread(&self) {
@@ -268,13 +543,23 @@ impl ButtonInputHandle {
         self.try_command(ButtonCommand::CancelHooks);
     }
 
+    pub(crate) fn cancel_pointer_except(&self, current: openlogi_hook::PointerTarget) {
+        self.try_command(ButtonCommand::CancelPointerExcept(current));
+    }
+
     pub(crate) fn try_hidpp_down(
         &self,
         session: &HidppSessionId,
         button: ButtonId,
-        action: Option<&Action>,
+        binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> Option<PressToken> {
-        self.try_down(ButtonSource::Hidpp(session.clone()), button, action)
+        self.try_down(
+            ButtonSource::Hidpp(session.clone()),
+            button,
+            binding,
+            target,
+        )
     }
 
     pub(crate) fn try_hidpp_up(&self, session: &HidppSessionId, button: ButtonId) -> bool {
@@ -285,14 +570,15 @@ impl ButtonInputHandle {
         &self,
         session: &HidppSessionId,
         button: ButtonId,
-        action: Option<&Action>,
+        binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> bool {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
-            ButtonSource::Hidpp(session.clone()),
-            button,
-            action,
+            PressKey::new(ButtonSource::Hidpp(session.clone()), button),
+            PressBehavior::new(binding, Instant::now()),
             generation,
+            target,
         );
         self.try_input(generation, ButtonInput::Pulse(press))
     }
@@ -307,6 +593,21 @@ impl ButtonInputHandle {
             ButtonInput::TriggerWhilePressed {
                 token: token.clone(),
                 action: action.clone(),
+            },
+        )
+    }
+
+    /// Tell the press `token` that the wheel moved while it was down, so a
+    /// wheel-hold press does not also fire its click on release.
+    pub(crate) fn try_wheel_while_pressed(&self, token: &PressToken) -> bool {
+        let generation = self.generation.load(Ordering::Acquire);
+        if token.generation != generation {
+            return false;
+        }
+        self.try_input(
+            generation,
+            ButtonInput::WheelWhilePressed {
+                token: token.clone(),
             },
         )
     }
@@ -330,10 +631,16 @@ impl ButtonInputHandle {
         &self,
         source: ButtonSource,
         button: ButtonId,
-        action: Option<&Action>,
+        binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> Option<PressToken> {
         let generation = self.generation.load(Ordering::Acquire);
-        let press = self.new_press(source, button, action, generation);
+        let press = self.new_press(
+            PressKey::new(source, button),
+            PressBehavior::new(binding, Instant::now()),
+            generation,
+            target,
+        );
         let token = press.token.clone();
         self.try_input(generation, ButtonInput::Down(press))
             .then_some(token)
@@ -341,24 +648,31 @@ impl ButtonInputHandle {
 
     fn try_up(&self, source: ButtonSource, button: ButtonId) -> bool {
         let generation = self.generation.load(Ordering::Acquire);
-        self.try_input(generation, ButtonInput::Up(PressKey::new(source, button)))
+        self.try_input(
+            generation,
+            ButtonInput::Up {
+                key: PressKey::new(source, button),
+                released_at: Instant::now(),
+            },
+        )
     }
 
     fn new_press(
         &self,
-        source: ButtonSource,
-        button: ButtonId,
-        action: Option<&Action>,
+        key: PressKey,
+        behavior: PressBehavior,
         generation: u64,
+        target: ActionDispatchTarget,
     ) -> ActivePress {
         let id = PressId(self.next_press.fetch_add(1, Ordering::Relaxed));
         ActivePress {
             token: PressToken {
                 id,
-                key: PressKey::new(source, button),
+                key,
                 generation,
             },
-            action: action.cloned(),
+            behavior,
+            target,
         }
     }
 
@@ -386,7 +700,6 @@ impl ButtonInputHandle {
 
     fn stop_accepting(&self) {
         self.accepting.store(false, Ordering::Release);
-        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -399,7 +712,7 @@ pub(crate) struct ButtonRuntimeOwner {
 
 impl ButtonRuntimeOwner {
     pub(crate) fn spawn(
-        on_event: impl Fn(ButtonRuntimeEvent) + Send + 'static,
+        mut on_event: impl FnMut(ButtonRuntimeEvent) + Send + 'static,
     ) -> io::Result<Self> {
         let (events, event_rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         let (shutdown, shutdown_rx) = mpsc::channel();
@@ -412,7 +725,7 @@ impl ButtonRuntimeOwner {
         };
         let worker = thread::Builder::new()
             .name("openlogi-buttons".into())
-            .spawn(move || run_worker(&event_rx, &shutdown_rx, &generation, &on_event))?;
+            .spawn(move || run_worker(&event_rx, &shutdown_rx, &generation, &mut on_event))?;
         Ok(Self {
             input,
             shutdown,
@@ -455,116 +768,6 @@ impl ButtonRuntimeOwner {
 impl Drop for ButtonRuntimeOwner {
     fn drop(&mut self) {
         let _ = self.shutdown();
-    }
-}
-
-fn run_worker(
-    events: &mpsc::Receiver<ButtonCommand>,
-    shutdown: &mpsc::Receiver<ShutdownRequest>,
-    shared_generation: &AtomicU64,
-    emit: &impl Fn(ButtonRuntimeEvent),
-) {
-    let mut state = ButtonState::default();
-    let mut generation = shared_generation.load(Ordering::Acquire);
-    loop {
-        if let Ok(request) = shutdown.try_recv() {
-            emit_canceled(state.cancel_all(), CancelReason::Shutdown, emit);
-            let _ = request.done.send(());
-            return;
-        }
-        let command = match events.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
-            Ok(command) => command,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                emit_canceled(state.cancel_all(), CancelReason::SourceEnded, emit);
-                return;
-            }
-        };
-        let current = shared_generation.load(Ordering::Acquire);
-        if current != generation {
-            emit_canceled(state.cancel_all(), CancelReason::Invalidated, emit);
-            generation = current;
-        }
-        match command {
-            ButtonCommand::Input {
-                generation: input_generation,
-                input,
-            } if input_generation == generation => process_input(&mut state, input, emit),
-            ButtonCommand::Input { .. } | ButtonCommand::Wake => {}
-            ButtonCommand::CancelStalePress(token) => {
-                if let Some(press) = state.cancel_press(&token) {
-                    emit(ButtonRuntimeEvent::Ended {
-                        press,
-                        reason: EndReason::Canceled(CancelReason::StaleHold),
-                    });
-                }
-            }
-            ButtonCommand::CancelSource(source) => {
-                emit_canceled(
-                    state.cancel_source(&source),
-                    CancelReason::SourceEnded,
-                    emit,
-                );
-            }
-            ButtonCommand::CancelHooks => {
-                emit_canceled(state.cancel_hooks(), CancelReason::SourceEnded, emit);
-            }
-        }
-    }
-}
-
-fn process_input(state: &mut ButtonState, input: ButtonInput, emit: &impl Fn(ButtonRuntimeEvent)) {
-    match input {
-        ButtonInput::Down(press) => {
-            if let Some(stale) = state.press(press.clone()) {
-                emit(ButtonRuntimeEvent::Ended {
-                    press: stale,
-                    reason: EndReason::Canceled(CancelReason::RepeatedDown),
-                });
-            }
-            emit(ButtonRuntimeEvent::Started(press));
-        }
-        ButtonInput::Up(key) => {
-            if let Some(press) = state.release(&key) {
-                emit(ButtonRuntimeEvent::Ended {
-                    press,
-                    reason: EndReason::Released,
-                });
-            }
-        }
-        ButtonInput::Pulse(press) => {
-            if let Some(stale) = state.press(press.clone()) {
-                emit(ButtonRuntimeEvent::Ended {
-                    press: stale,
-                    reason: EndReason::Canceled(CancelReason::RepeatedDown),
-                });
-            }
-            emit(ButtonRuntimeEvent::Started(press.clone()));
-            if let Some(press) = state.release(&press.token.key) {
-                emit(ButtonRuntimeEvent::Ended {
-                    press,
-                    reason: EndReason::Released,
-                });
-            }
-        }
-        ButtonInput::TriggerWhilePressed { token, action } => {
-            if let Some(press) = state.active(&token).cloned() {
-                emit(ButtonRuntimeEvent::Triggered { press, action });
-            }
-        }
-    }
-}
-
-fn emit_canceled(
-    presses: Vec<ActivePress>,
-    reason: CancelReason,
-    emit: &impl Fn(ButtonRuntimeEvent),
-) {
-    for press in presses {
-        emit(ButtonRuntimeEvent::Ended {
-            press,
-            reason: EndReason::Canceled(reason),
-        });
     }
 }
 

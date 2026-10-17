@@ -7,11 +7,17 @@
 //! id (`0x046d`) rather than any per-model quirk — plug in *any* Logitech
 //! camera and it's recognised, with no model table to maintain.
 //!
+//! Naming is the one exception. A camera's name is its USB product string, and
+//! a few older models ship without one, so the OS reports a placeholder built
+//! from the raw ids. Those models are named from
+//! [`openlogi_device_registry::camera`] instead.
+//!
 //! macOS has the full backend (AVFoundation capture + IOKit UVC controls);
 //! Windows matches it with Media Foundation capture and DirectShow controls;
 //! Linux uses V4L2 for both, through the kernel's `uvcvideo` driver. Other
 //! platforms return an empty list.
 
+use openlogi_device_registry::camera::find_unnamed_camera;
 use serde::Serialize;
 
 mod controls;
@@ -24,9 +30,9 @@ pub use capture_types::{CaptureError, Frame};
 mod macos;
 
 #[cfg(target_os = "macos")]
-mod capture;
+mod capture_macos;
 #[cfg(target_os = "macos")]
-pub use capture::{
+pub use capture_macos::{
     CameraStream, camera_access_granted, camera_authorization, capture_frame,
     request_camera_access, start_stream,
 };
@@ -43,9 +49,9 @@ pub use capture_windows::{
 };
 
 #[cfg(target_os = "macos")]
-mod uvc;
+mod uvc_macos;
 #[cfg(target_os = "macos")]
-pub use uvc::{
+pub use uvc_macos::{
     apply_settings, control_range, control_ranges, read_camera_state, set_auto, set_control,
 };
 
@@ -246,6 +252,16 @@ impl Camera {
             format!("camera:{:04x}:{:04x}", self.vendor_id, self.product_id)
         }
     }
+
+    /// Give a camera whose firmware reports no USB product string its marketed
+    /// name, replacing the placeholder the OS built from the raw ids. Cameras
+    /// that name themselves keep the OS-reported name.
+    fn with_registry_name(mut self) -> Self {
+        if let Some(known) = find_unnamed_camera(self.vendor_id, self.product_id) {
+            known.name.clone_into(&mut self.name);
+        }
+        self
+    }
 }
 
 /// Whether this platform has a live-capture backend (preview + snapshot).
@@ -278,6 +294,7 @@ pub fn enumerate_cameras() -> Vec<Camera> {
     enumerate_all()
         .into_iter()
         .filter(|camera| camera.vendor_id == LOGITECH_VID)
+        .map(Camera::with_registry_name)
         .collect()
 }
 
@@ -289,7 +306,7 @@ fn enumerate_all() -> Vec<Camera> {
     let _quiesce = USB_QUIESCE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let serials = uvc::usb_serials_by_location();
+    let serials = uvc_macos::usb_serials_by_location();
     macos::enumerate()
         .iter()
         .filter_map(|raw| {
@@ -300,7 +317,7 @@ fn enumerate_all() -> Vec<Camera> {
             if raw.max_fps > 0 {
                 camera.max_fps = Some(raw.max_fps);
             }
-            if let Some(location) = uvc::location_hint(&raw.unique_id) {
+            if let Some(location) = uvc_macos::location_hint(&raw.unique_id) {
                 camera.serial_number = serials.get(&location).cloned();
             }
             Some(camera)
@@ -315,7 +332,7 @@ fn enumerate_all() -> Vec<Camera> {
 
 #[cfg(target_os = "linux")]
 fn enumerate_all() -> Vec<Camera> {
-    linux::nodes().iter().map(linux::describe).collect()
+    linux::cameras()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -405,6 +422,35 @@ mod tests {
             Camera::from_raw("FaceTime HD Camera", "uuid", "FaceTime HD Camera"),
             None
         );
+    }
+
+    #[test]
+    fn camera_without_a_product_string_takes_its_registry_name() {
+        // What macOS reports for a C510, whose descriptor has no product string.
+        let c510 = Camera::from_raw(
+            "USB Camera VID:1133 PID:2077",
+            "0x2141000046d081d",
+            "UVC Camera VendorID_1133 ProductID_2077",
+        )
+        .expect("USB camera")
+        .with_registry_name();
+        assert_eq!(c510.name, "Logitech HD Webcam C510");
+        assert_eq!(c510.product_id, 0x081d);
+        // Naming must not disturb the ids the preview and settings key on.
+        assert_eq!(c510.unique_id, "0x2141000046d081d");
+        assert_eq!(c510.config_key(), "camera:046d:081d");
+    }
+
+    #[test]
+    fn camera_that_names_itself_keeps_the_os_name() {
+        let streamcam = Camera::from_raw(
+            "Logitech StreamCam",
+            "0x1123000046d0893",
+            "UVC Camera VendorID_1133 ProductID_2195",
+        )
+        .expect("USB camera")
+        .with_registry_name();
+        assert_eq!(streamcam.name, "Logitech StreamCam");
     }
 
     #[test]

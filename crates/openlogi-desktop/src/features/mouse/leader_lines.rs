@@ -1,8 +1,8 @@
 //! Canvas-painted leader lines from each hotspot to its side-label anchor.
 //!
-//! Per UI.md Phase 7. Each polyline is hotspot-centre → short horizontal
-//! stub → diagonal to the label anchor. The active hotspot's line is
-//! coloured blue and stroked thicker; everything else stays muted.
+//! Each polyline is hotspot-centre → short horizontal stub → diagonal to the
+//! label anchor. The control being interacted with gets a blue, thicker line;
+//! the other controls keep muted lines so their mapping remains visible.
 
 use gpui::{Bounds, PathBuilder, Pixels, Point, Window, hsla, point, px, rgb};
 
