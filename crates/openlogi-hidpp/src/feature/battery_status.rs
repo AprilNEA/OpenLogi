@@ -7,8 +7,10 @@
 //! enhanced-then-legacy pattern `SmartShift` uses for `0x2111` / `0x2110`.
 //!
 //! Only `getBatteryLevelStatus` (function `0`) is implemented; the optional
-//! `getBatteryCapability` (function `1`) and the broadcast event aren't needed
-//! to display a charge reading.
+//! `getBatteryCapability` (function `1`) isn't needed to display a charge
+//! reading. The device also broadcasts event `0` when its level or charging
+//! status changes; [`BatteryStatusFeature::is_status_broadcast`] recognises it
+//! so a listener can re-read the battery instead of waiting for a poll.
 
 use std::hash::Hash;
 
@@ -26,6 +28,19 @@ pub struct BatteryStatusFeature {
 }
 
 impl BatteryStatusFeature {
+    /// Whether an unsolicited report on this feature's index is its
+    /// battery-level broadcast (event `0`; the Linux driver's
+    /// `EVENT_BATTERY_LEVEL_STATUS_BROADCAST`).
+    ///
+    /// Deliberately independent of the payload: the broadcast carries the same
+    /// three bytes as [`Self::get_battery_level_status`], and a listener that
+    /// only needs to know *that* the reading changed should re-read it rather
+    /// than drop a broadcast whose status value this crate does not know.
+    #[must_use]
+    pub const fn is_status_broadcast(function_id: u8) -> bool {
+        function_id == 0
+    }
+
     /// Reads the current battery level and charging status (function `0`,
     /// `getBatteryLevelStatus`).
     pub async fn get_battery_level_status(&self) -> Result<LegacyBatteryInfo, Hidpp20Error> {
@@ -47,6 +62,10 @@ impl BatteryStatusFeature {
 pub struct LegacyBatteryInfo {
     /// Current battery charge as a percentage (`0`–`100`). Logitech firmware
     /// reports this in coarse steps rather than a continuous value.
+    ///
+    /// A reading only while [`status`](Self::status) is
+    /// [`LegacyBatteryStatus::Discharging`]. In every other state the firmware
+    /// reports `0`, meaning unknown, as the Linux HID++ driver reads it.
     pub discharge_level: u8,
 
     /// The next lower discharge step the firmware will report — a hint at the

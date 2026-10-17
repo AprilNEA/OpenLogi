@@ -48,6 +48,8 @@ in
       sccache
       prek
       typos
+      # The `ast-grep` CI job and the prek hook of the same name.
+      ast-grep
       # The `shell` CI job and the prek hooks of the same name.
       shellcheck
       shfmt

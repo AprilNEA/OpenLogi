@@ -32,6 +32,7 @@ fn locale_files_have_the_same_keys() {
 
     let catalogs = [
         ("be", include_str!("../locales/be.toml")),
+        ("cs", include_str!("../locales/cs.toml")),
         ("ja", include_str!("../locales/ja.toml")),
         ("ru", include_str!("../locales/ru.toml")),
         ("uk", include_str!("../locales/uk.toml")),

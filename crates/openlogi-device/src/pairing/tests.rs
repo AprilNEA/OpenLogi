@@ -8,7 +8,9 @@ use std::{
 };
 
 use hidpp::{
-    channel::{LONG_REPORT_ID, LONG_REPORT_LENGTH, RawHidChannel, SHORT_REPORT_ID},
+    channel::{
+        LONG_REPORT_ID, LONG_REPORT_LENGTH, RawHidChannel, SHORT_REPORT_ID, SHORT_REPORT_LENGTH,
+    },
     protocol::v10::MessageType,
 };
 
@@ -79,7 +81,7 @@ fn session_state_keeps_bolt_phases_separate_from_unifying() {
         unifying.select_bolt_device(&device),
         Err(PairingError::UnsupportedCommand)
     ));
-    assert!(matches!(unifying, SessionState::UnifyingPairing));
+    assert!(matches!(unifying, SessionState::UnifyingOpening));
 }
 
 #[tokio::test]
@@ -138,6 +140,7 @@ async fn queued_discovery_notifications_after_selection_do_not_emit_device_found
             run_session(
                 &channel,
                 ReceiverFamily::Bolt,
+                NotificationFlags::empty(),
                 &mut commands,
                 &mut notifications,
                 &event_tx,
@@ -187,6 +190,7 @@ async fn unifying_session_rejects_bolt_pair_command_before_writing_it() {
         run_session(
             &channel,
             ReceiverFamily::Unifying,
+            NotificationFlags::empty(),
             &mut commands,
             &mut notifications,
             &event_tx,
@@ -206,7 +210,7 @@ async fn unifying_session_rejects_bolt_pair_command_before_writing_it() {
                 SHORT_REPORT_ID,
                 RECEIVER_INDEX,
                 u8::from(MessageType::SetRegister),
-                NOTIFICATIONS,
+                0x00, // notification-flags register
                 0x00,
                 0x09,
                 0x00,
@@ -285,6 +289,7 @@ async fn malformed_passkey_after_pair_cancels_bolt_pairing() {
             run_session(
                 &channel,
                 ReceiverFamily::Bolt,
+                NotificationFlags::empty(),
                 &mut commands,
                 &mut notifications,
                 &event_tx,
@@ -352,6 +357,7 @@ async fn failed_bolt_pair_write_cancels_bolt_pairing() {
         run_session(
             &channel,
             ReceiverFamily::Bolt,
+            NotificationFlags::empty(),
             &mut commands,
             &mut notifications,
             &event_tx,
@@ -388,6 +394,233 @@ async fn failed_bolt_pair_write_cancels_bolt_pairing() {
         "a failed pair write must cancel the Bolt pairing register, not discovery"
     );
     assert!(reports[3][5..].iter().all(|byte| *byte == 0));
+}
+
+/// The register writes a Unifying session makes: notification flags, then the
+/// lock-open request.
+fn unifying_setup_reports() -> Vec<Vec<u8>> {
+    vec![
+        vec![
+            SHORT_REPORT_ID,
+            RECEIVER_INDEX,
+            u8::from(MessageType::SetRegister),
+            0x00, // notification-flags register
+            0x00,
+            0x09,
+            0x00,
+        ],
+        vec![
+            SHORT_REPORT_ID,
+            RECEIVER_INDEX,
+            u8::from(MessageType::SetRegister),
+            UNIFYING_PAIRING,
+            0x01,
+            0x00,
+            DISCOVERY_TIMEOUT,
+        ],
+    ]
+}
+
+/// The Unifying lock-close write a failed session ends with.
+fn unifying_close_report() -> Vec<u8> {
+    vec![
+        SHORT_REPORT_ID,
+        RECEIVER_INDEX,
+        u8::from(MessageType::SetRegister),
+        UNIFYING_PAIRING,
+        0x02,
+        0x00,
+        0x00,
+    ]
+}
+
+/// Runs a Unifying session against notifications already queued, returning
+/// its result, the events it sent, every register write it made, and how long
+/// it ran. `HidppChannel` reads on an OS thread, so a paused tokio clock would
+/// auto-advance past its reply timeouts; these tests use the real clock.
+async fn run_unifying_session(
+    queued: Vec<HidppMessage>,
+) -> (
+    Result<(), PairingError>,
+    Vec<PairingEvent>,
+    Vec<Vec<u8>>,
+    Duration,
+) {
+    let (raw, mut written_reports) = EchoRawHidChannel::new();
+    let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
+        panic!("mock must support HID++");
+    };
+    let (_command_tx, mut commands) = mpsc::unbounded_channel();
+    let (notification_tx, mut notifications) = mpsc::unbounded_channel();
+    let (event_tx, mut events) = mpsc::unbounded_channel();
+    for message in queued {
+        notification_tx.send(message).expect("queue a notification");
+    }
+    let started = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        LOCK_CONFIRMATION_TIMEOUT * 5,
+        run_session(
+            &channel,
+            ReceiverFamily::Unifying,
+            NotificationFlags::empty(),
+            &mut commands,
+            &mut notifications,
+            &event_tx,
+        ),
+    )
+    .await
+    .expect("pairing session did not terminate");
+    let elapsed = started.elapsed();
+    let events = std::iter::from_fn(|| events.try_recv().ok()).collect();
+    let reports = std::iter::from_fn(|| written_reports.try_recv().ok()).collect();
+    (result, events, reports, elapsed)
+}
+
+#[tokio::test]
+async fn unifying_reports_searching_only_once_the_receiver_confirms_the_lock() {
+    let (raw, mut written_reports) = EchoRawHidChannel::new();
+    let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
+        panic!("mock must support HID++");
+    };
+    let (_command_tx, mut commands) = mpsc::unbounded_channel();
+    let (notification_tx, mut notifications) = mpsc::unbounded_channel();
+    let (event_tx, mut events) = mpsc::unbounded_channel();
+    let started = tokio::time::Instant::now();
+
+    // `event_tx` outlives the session, so a session that fails before
+    // reporting would leave `events.recv()` waiting forever. Bound the whole
+    // exchange so a regression fails instead of hanging.
+    tokio::time::timeout(LOCK_CONFIRMATION_TIMEOUT * 5, async {
+        let exchange = async {
+            for _ in 0..2 {
+                written_reports
+                    .recv()
+                    .await
+                    .expect("notification setup and lock-open writes");
+            }
+            // The lock-open write is acknowledged; the receiver has not said the
+            // lock is open yet, so the UI must not be told to start searching.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                events.try_recv().is_err(),
+                "an acknowledged lock-open write alone must not report Searching"
+            );
+            notification_tx
+                .send(unifying_lock(true, 0))
+                .expect("lock-open notification");
+            assert!(matches!(events.recv().await, Some(PairingEvent::Searching)));
+            // Past the confirmation window: once confirmed, the session is
+            // pairing and that window no longer applies.
+            tokio::time::sleep_until(
+                started + LOCK_CONFIRMATION_TIMEOUT + Duration::from_millis(500),
+            )
+            .await;
+            notification_tx
+                .send(device_connection(2, true))
+                .expect("device connection");
+        };
+
+        let (result, ()) = tokio::join!(
+            run_session(
+                &channel,
+                ReceiverFamily::Unifying,
+                NotificationFlags::empty(),
+                &mut commands,
+                &mut notifications,
+                &event_tx,
+            ),
+            exchange,
+        );
+        result.expect("a connection after the lock opened pairs the device");
+        assert!(matches!(
+            events.recv().await,
+            Some(PairingEvent::Paired { slot: 2 })
+        ));
+    })
+    .await
+    .expect("the pairing exchange did not finish");
+}
+
+#[tokio::test]
+async fn an_unconfirmed_unifying_lock_fails_the_session_and_closes_the_lock() {
+    // A connection notification before the lock opened is an already-paired
+    // device reconnecting, not a pairing.
+    let (result, events, reports, elapsed) =
+        run_unifying_session(vec![device_connection(1, true)]).await;
+    assert!(
+        matches!(&result, Err(PairingError::Register(message)) if message.contains("pairing lock")),
+        "{result:?}"
+    );
+    assert!(events.is_empty(), "nothing may be reported: {events:?}");
+    let mut expected = unifying_setup_reports();
+    expected.push(unifying_close_report());
+    assert_eq!(reports, expected);
+    // The confirmation window ended it, not the 90 s session guard.
+    assert!(elapsed >= LOCK_CONFIRMATION_TIMEOUT, "{elapsed:?}");
+    assert!(elapsed < LOCK_CONFIRMATION_TIMEOUT * 2, "{elapsed:?}");
+}
+
+#[tokio::test]
+async fn a_refused_unifying_lock_fails_the_session_at_once() {
+    // An error code is the receiver's own reason, e.g. 0x03 too many devices.
+    let (result, events, reports, elapsed) =
+        run_unifying_session(vec![unifying_lock(false, 0x03)]).await;
+    assert!(
+        matches!(result, Err(PairingError::Device(0x03))),
+        "{result:?}"
+    );
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(reports.last(), Some(&unifying_close_report()));
+    assert!(elapsed < LOCK_CONFIRMATION_TIMEOUT, "{elapsed:?}");
+
+    // Closed without ever opening and without a code.
+    let (result, events, reports, elapsed) =
+        run_unifying_session(vec![unifying_lock(false, 0)]).await;
+    assert!(
+        matches!(result, Err(PairingError::Register(_))),
+        "{result:?}"
+    );
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(reports.last(), Some(&unifying_close_report()));
+    assert!(elapsed < LOCK_CONFIRMATION_TIMEOUT, "{elapsed:?}");
+}
+
+#[tokio::test]
+async fn a_lock_confirmation_that_beat_the_write_ack_still_counts() {
+    // The listener is installed before the write, so a 0x4a that arrives
+    // ahead of the ACK is queued and read once the session starts waiting.
+    let (result, events, reports, _) =
+        run_unifying_session(vec![unifying_lock(true, 0), device_connection(4, true)]).await;
+    result.expect("the queued confirmation opens the session");
+    assert!(
+        matches!(
+            events.as_slice(),
+            [PairingEvent::Searching, PairingEvent::Paired { slot: 4 }]
+        ),
+        "{events:?}"
+    );
+    assert_eq!(reports, unifying_setup_reports());
+}
+
+/// A Unifying `0x4a` lock-state notification.
+fn unifying_lock(open: bool, error: u8) -> HidppMessage {
+    let mut data = [0u8; SHORT_REPORT_LENGTH - 1];
+    data[0] = RECEIVER_INDEX;
+    data[1] = notification::id::UNIFYING_LOCK;
+    data[2] = u8::from(open);
+    data[3] = error;
+    HidppMessage::Short(data)
+}
+
+/// A `0x41` device-connection notification for `slot`.
+fn device_connection(slot: u8, established: bool) -> HidppMessage {
+    let mut data = [0u8; SHORT_REPORT_LENGTH - 1];
+    data[0] = slot;
+    data[1] = notification::id::DEVICE_CONNECTION;
+    data[2] = 0x04; // Unifying protocol
+    data[3] = if established { 0x02 } else { 0x42 }; // mouse, bit 6 = offline
+    data[4..6].copy_from_slice(&0x4069u16.to_le_bytes());
+    HidppMessage::Short(data)
 }
 
 fn discovery_info(counter: u16, address: [u8; 6], authentication: u8) -> HidppMessage {

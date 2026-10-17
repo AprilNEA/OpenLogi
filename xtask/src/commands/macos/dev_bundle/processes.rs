@@ -16,11 +16,14 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
 /// How long to wait for a signalled process to actually go, so the agent the
 /// GUI is about to spawn does not lose the singleton lock to a corpse.
-const EXIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
-const EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const EXIT_POLL_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The processes this checkout owns.
-const OURS: [&str; 2] = ["openlogi-agent", "openlogi-overlay"];
+const OURS: [&str; 2] = [
+    openlogi_core::brand::Helper::Agent.executable(),
+    openlogi_core::brand::Helper::Overlay.executable(),
+];
 
 /// Stop this checkout's leftovers, and refuse to share the machine with an
 /// agent from anywhere else.
@@ -51,7 +54,7 @@ pub(super) fn reap_leftovers(app: &Path, target: &Path) -> Result<()> {
         };
         if exe.starts_with(app) || exe.starts_with(target) {
             ours.push(*pid);
-        } else if name == "openlogi-agent" {
+        } else if name == openlogi_core::brand::Helper::Agent.executable() {
             external.push((*pid, exe.to_path_buf()));
         }
     }
@@ -102,12 +105,12 @@ pub(super) fn reap_leftovers(app: &Path, target: &Path) -> Result<()> {
 fn wait_for_exit(pids: &[sysinfo::Pid]) {
     let mut system = System::new();
     let started = std::time::Instant::now();
-    while started.elapsed() < EXIT_DEADLINE {
+    while started.elapsed() < EXIT_TIMEOUT {
         system.refresh_processes(ProcessesToUpdate::Some(pids), true);
         if pids.iter().all(|pid| system.process(*pid).is_none()) {
             return;
         }
-        std::thread::sleep(EXIT_POLL);
+        std::thread::sleep(EXIT_POLL_PERIOD);
     }
     println!(
         "    warning: a leftover dev process is still running; the new agent may lose the lock"

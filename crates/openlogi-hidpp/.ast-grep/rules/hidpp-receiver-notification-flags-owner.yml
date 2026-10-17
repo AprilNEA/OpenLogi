@@ -1,0 +1,31 @@
+# Owner: hidpp::receiver::{read,write}_notification_flags — receiver register
+# 0x00 and its NotificationFlags bit layout, unknown bits retained.
+id: hidpp-receiver-notification-flags-owner
+language: rust
+severity: error
+message: Access receiver register 0x00 through hidpp::receiver::{read,write}_notification_flags, the NotificationFlags owner.
+note: |
+  Pairing wrote [0x00, 0x09, 0x00] and then [0, 0, 0] to this register directly,
+  clearing the WIRELESS bit inventory relies on and every bit other host
+  software set, while Bolt and Unifying each kept their own copy of the layout.
+  Read the flags, edit only the bits you own, and write them back through the
+  owner. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-hidpp/src/receiver.rs
+rule:
+  any:
+    # Channel register I/O addressed to the receiver itself.
+    - pattern: $CHAN.read_register($RECEIVER, $REGISTER, $VALUE)
+    - pattern: $CHAN.write_register($RECEIVER, $REGISTER, $VALUE)
+    # Receiver-only wrappers taking (channel, register, value).
+    - pattern: read_register($CHANNEL, $NAMED, $VALUE)
+    - pattern: write_register($CHANNEL, $NAMED, $VALUE)
+constraints:
+  RECEIVER:
+    regex: '(?i)receiver|^0xff$|^255$'
+  REGISTER:
+    regex: '(?i)notification|^0x0*0$|^0$'
+  NAMED:
+    regex: '(?i)notification'

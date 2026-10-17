@@ -9,11 +9,11 @@
 //! and re-synthesises horizontal scroll from the rotation deltas to keep
 //! scrolling working.
 //!
-//! `hidpp 0.2` ships no typed wrapper, so we re-implement the three functions
+//! `hidpp 0.2` ships no typed wrapper, so we re-implement the functions
 //! OpenLogi needs: `getThumbwheelInfo` (capabilities — notably whether the wheel
-//! reports a single tap), `setThumbwheelReporting` (enter/leave diverted mode),
-//! and decode the unsolicited `thumbwheelEvent`. Wire format from
-//! `x2150_thumbwheel_v0.pdf`.
+//! reports a single tap), `getThumbwheelStatus` (the reporting state to hand
+//! back), `setThumbwheelReporting` (enter/leave diverted mode), and decode the
+//! unsolicited `thumbwheelEvent`. Wire format from `x2150_thumbwheel_v0.pdf`.
 
 use std::sync::Arc;
 
@@ -29,6 +29,8 @@ pub const FEATURE_ID: u16 = 0x2150;
 
 /// `getThumbwheelInfo` function ID.
 const FN_GET_INFO: u8 = 0;
+/// `getThumbwheelStatus` function ID.
+const FN_GET_STATUS: u8 = 1;
 /// `setThumbwheelReporting` function ID.
 const FN_SET_REPORTING: u8 = 2;
 
@@ -39,6 +41,8 @@ const MODE_DIVERTED: u8 = 1;
 
 /// `c_single_tap` capability bit in `getThumbwheelInfo` byte 5.
 const CAP_SINGLE_TAP: u8 = 0x08;
+/// `invert` bit in `getThumbwheelStatus` byte 1.
+const STATUS_INVERTED: u8 = 0x01;
 /// `single_tap` bit in `thumbwheelEvent` byte 5.
 const EV_SINGLE_TAP: u8 = 0x08;
 /// `proxy` bit in `thumbwheelEvent` byte 5.
@@ -85,7 +89,8 @@ impl RotationStatus {
     /// reports something else has said nothing about a roll, and the caller
     /// still has the report's own `rotation` to go on. Claiming a roll here
     /// instead would let one unrecognised value make the tap permanently
-    /// undeliverable.
+    /// undeliverable. Logi Options+ maps an unrecognised value to the same
+    /// state as `Inactive` too (`devio_feature_2150::convert`).
     #[must_use]
     fn from_byte(byte: u8) -> Self {
         match byte {
@@ -101,6 +106,13 @@ impl RotationStatus {
     #[must_use]
     pub fn is_rolling(self) -> bool {
         !matches!(self, Self::Inactive)
+    }
+
+    /// Whether the roll this report belongs to is still under way after it:
+    /// the roll began or continued here, and its `Stop` is still to come.
+    #[must_use]
+    pub fn leaves_roll_open(self) -> bool {
+        matches!(self, Self::Start | Self::Active)
     }
 }
 
@@ -165,6 +177,61 @@ impl ThumbwheelInfo {
     #[must_use]
     pub fn positive_is_forward(self) -> bool {
         self.default_dir == 1
+    }
+}
+
+/// Where the wheel's rotation reports go (`getThumbwheelStatus` byte 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportingMode {
+    /// Native HID horizontal scroll.
+    Native,
+    /// HID++ `thumbwheelEvent` reports.
+    Diverted,
+}
+
+/// The reporting state returned by `getThumbwheelStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThumbwheelStatus {
+    /// Current reporting mode.
+    pub mode: ReportingMode,
+    /// Rotation sign applied in that mode.
+    pub direction: WheelDirection,
+}
+
+impl ThumbwheelStatus {
+    fn from_payload(p: &[u8; 16]) -> Result<Self, Hidpp20Error> {
+        let mode = match p[0] {
+            MODE_NATIVE => ReportingMode::Native,
+            MODE_DIVERTED => ReportingMode::Diverted,
+            _ => return Err(Hidpp20Error::UnsupportedResponse),
+        };
+        Ok(Self {
+            mode,
+            direction: WheelDirection::from_inverted(p[1] & STATUS_INVERTED != 0),
+        })
+    }
+}
+
+/// The native rotation sign to hand back when undiverting a wheel whose
+/// status before diversion was `original`.
+///
+/// A diverter owns only the reporting mode, so it keeps the native inversion
+/// found before diverting. A wheel already diverted then is left over from an
+/// owner that never tore down: its sign is that owner's diverted
+/// normalisation, not the user's native preference. With no readable status
+/// there is no evidence of native inversion either; both get the default sign.
+#[must_use]
+pub fn native_direction_to_restore(original: Option<ThumbwheelStatus>) -> WheelDirection {
+    match original {
+        Some(ThumbwheelStatus {
+            mode: ReportingMode::Native,
+            direction,
+        }) => direction,
+        Some(ThumbwheelStatus {
+            mode: ReportingMode::Diverted,
+            ..
+        })
+        | None => WheelDirection::Default,
     }
 }
 
@@ -273,20 +340,28 @@ impl Thumbwheel {
         })
     }
 
+    /// Read the wheel's current reporting mode and rotation sign.
+    pub async fn get_status(&self) -> Result<ThumbwheelStatus, Hidpp20Error> {
+        ThumbwheelStatus::from_payload(&self.call(FN_GET_STATUS, [0; 16]).await?)
+    }
+
     /// Enter diverted reporting; wheel events then arrive on this feature
     /// index instead of moving the native scroll.
     pub async fn divert(&self, direction: WheelDirection) -> Result<(), Hidpp20Error> {
-        let mut params = [0u8; 16];
-        params[0] = MODE_DIVERTED;
-        params[1] = u8::from(direction == WheelDirection::Inverted);
-        self.call(FN_SET_REPORTING, params).await?;
-        Ok(())
+        self.set_reporting(MODE_DIVERTED, direction).await
     }
 
-    /// Hand native scrolling back to the firmware.
-    pub async fn undivert(&self) -> Result<(), Hidpp20Error> {
+    /// Hand native scrolling back to the firmware with `direction` as the
+    /// native rotation sign. `setThumbwheelReporting` always writes both, so
+    /// the caller supplies the native inversion it means to keep.
+    pub async fn undivert(&self, direction: WheelDirection) -> Result<(), Hidpp20Error> {
+        self.set_reporting(MODE_NATIVE, direction).await
+    }
+
+    async fn set_reporting(&self, mode: u8, direction: WheelDirection) -> Result<(), Hidpp20Error> {
         let mut params = [0u8; 16];
-        params[0] = MODE_NATIVE;
+        params[0] = mode;
+        params[1] = u8::from(direction == WheelDirection::Inverted);
         self.call(FN_SET_REPORTING, params).await?;
         Ok(())
     }
@@ -300,6 +375,16 @@ pub enum WheelDirection {
     Default,
     /// Invert the rotation sign.
     Inverted,
+}
+
+impl WheelDirection {
+    fn from_inverted(inverted: bool) -> Self {
+        if inverted {
+            Self::Inverted
+        } else {
+            Self::Default
+        }
+    }
 }
 
 #[cfg(test)]
@@ -384,5 +469,34 @@ mod tests {
         assert_eq!(decode_event(&event(0, 5, p), 2, 6), None);
         // Wrong feature index.
         assert_eq!(decode_event(&event(0, 0, p), 2, 9), None);
+    }
+
+    #[test]
+    fn decodes_reporting_status_and_rejects_unknown_modes() {
+        let status = |mode, flags| {
+            let mut p = [0u8; 16];
+            p[0] = mode;
+            p[1] = flags;
+            ThumbwheelStatus::from_payload(&p)
+        };
+        assert_eq!(
+            status(0, 0b001).unwrap(),
+            ThumbwheelStatus {
+                mode: ReportingMode::Native,
+                direction: WheelDirection::Inverted,
+            }
+        );
+        // touch (bit 1) and proxy (bit 2) do not read as inversion.
+        assert_eq!(
+            status(1, 0b110).unwrap(),
+            ThumbwheelStatus {
+                mode: ReportingMode::Diverted,
+                direction: WheelDirection::Default,
+            }
+        );
+        assert!(matches!(
+            status(2, 0),
+            Err(Hidpp20Error::UnsupportedResponse)
+        ));
     }
 }

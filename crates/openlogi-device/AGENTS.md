@@ -33,3 +33,9 @@ owns the layer. `crates/openlogi-hid/AGENTS.md` points back here.
   bounded repair, and channel retirement/reopen ordering — run the inventory/watcher
   tests and cover event bursts or loss, partial failure, and recovery, not just clean
   enumeration.
+  Setting broadcasts (`0x40a2`/`0x40a3` Fn inversion, `0x2202` DPI, `0x4531` platform
+  change, `0x8061` report rate, `0x1982` backlight info) also bump the device's `PairedDevice::settings_revision`, before the
+  re-enumeration they request, so clients re-read the setting. The revision is per
+  channel and survives re-probes; it must never trigger replaying persisted settings
+  onto the device. The one consumer that writes is keep-OS-layout (Options+ parity):
+  it re-reads the keyboard's platform and sets the host's only when they differ.
