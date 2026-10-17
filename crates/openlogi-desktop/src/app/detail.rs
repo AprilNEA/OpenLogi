@@ -404,6 +404,13 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
     };
     let memory = state.current_onboard_active();
     let host = memory == Some(OnboardMemory::Off);
+    // The agent takes control only of a model whose buttons it knows.
+    let openlogi = state.current_gaming_layout().map(|_| {
+        (
+            OnboardMemory::Off,
+            tr!("pointer.onboard_openlogi").to_string(),
+        )
+    });
     let profiles = reading.as_ref().map_or_else(Vec::new, |r| {
         r.profiles
             .iter()
@@ -429,7 +436,7 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
             v_flex().gap_4().child(setting_row(
                 tr!("pointer.onboard_active"),
                 memory_description,
-                onboard_memory_control(memory, profiles),
+                onboard_memory_control(memory, openlogi.into_iter().chain(profiles).collect()),
                 pal,
             )),
         )
@@ -465,14 +472,8 @@ fn setting_row(
 
 fn onboard_memory_control(
     selected: Option<OnboardMemory>,
-    profiles: Vec<(OnboardMemory, String)>,
+    choices: Vec<(OnboardMemory, String)>,
 ) -> impl IntoElement {
-    let choices: Vec<(OnboardMemory, String)> = std::iter::once((
-        OnboardMemory::Off,
-        tr!("pointer.onboard_openlogi").to_string(),
-    ))
-    .chain(profiles)
-    .collect();
     let values: Vec<OnboardMemory> = choices.iter().map(|(value, _)| *value).collect();
     choices
         .into_iter()
