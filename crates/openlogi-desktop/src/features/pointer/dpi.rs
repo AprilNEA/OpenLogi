@@ -7,13 +7,14 @@
 //! exposes exact device-supported values once the list is known.
 
 use gpui::{
-    AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
-    div, px,
+    AnyElement, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement,
+    Render, Styled, Subscription, Window, div, px,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{InputEvent, InputState},
     slider::{Slider, SliderState},
     v_flex,
 };
@@ -23,7 +24,7 @@ use tracing::debug;
 use super::report_rate::{ReportRateFacts, report_rate_section};
 use crate::state::{AppState, DeviceKey, DpiLoad, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::components::PresetChip;
+use crate::ui::components::{PresetChip, control_input};
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -31,7 +32,18 @@ pub struct DpiPanel {
     /// Rebuilt whenever the selected device or its reported range changes,
     /// because a slider's range is fixed when it is built.
     slider: Option<DpiSlider>,
+    /// The numeric field beside the slider, letting an exact value be typed
+    /// instead of dragged. Keyed by device like the slider, but reused across
+    /// capability re-reads for the same device since only its displayed text
+    /// needs to track those, not its identity.
+    numeric: Option<DpiNumericInput>,
     _state_obs: Subscription,
+}
+
+struct DpiNumericInput {
+    key: DeviceKey,
+    state: Entity<InputState>,
+    _sub: Subscription,
 }
 
 /// The slider together with what it was built for.
@@ -75,6 +87,7 @@ impl DpiPanel {
 
         Self {
             slider: None,
+            numeric: None,
             _state_obs: state_obs,
         }
     }
@@ -141,6 +154,65 @@ impl DpiPanel {
             slider,
         });
     }
+
+    /// Build (or refresh) the numeric field beside the slider. Rebuilt only
+    /// when the active device changes; otherwise its displayed text is
+    /// resynced to `dpi` on every render, mirroring how the slider thumb
+    /// tracks external changes — except while the field is focused, so a
+    /// value landing mid-edit can't overwrite what the user is typing.
+    fn ensure_numeric_input(
+        &mut self,
+        key: &DeviceKey,
+        capabilities: &DpiCapabilities,
+        dpi: Dpi,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = format!("{}", capabilities.nearest(dpi));
+
+        if let Some(current) = self.numeric.as_ref().filter(|current| current.key == *key) {
+            let focused = current.state.focus_handle(cx).is_focused(window);
+            if !focused && current.state.read(cx).value().as_ref() != text.as_str() {
+                current.state.update(cx, |state, cx| {
+                    state.set_value(text, window, cx);
+                });
+            }
+            return;
+        }
+
+        let state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(text)
+                .validate(|text, _cx| text.chars().all(|c| c.is_ascii_digit()))
+        });
+        let sub = cx.subscribe(&state, |_panel, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                commit_numeric_dpi(&input, cx);
+            }
+        });
+        self.numeric = Some(DpiNumericInput {
+            key: key.clone(),
+            state,
+            _sub: sub,
+        });
+    }
+}
+
+/// Parse the numeric field's current text and write it as the active
+/// device's DPI through the same [`AppState::normalize_active_dpi`] path the
+/// slider commits through — so typing a value the device doesn't support
+/// snaps it exactly as dragging to it would.
+///
+/// Unparsable or empty text is a no-op: the field keeps whatever the user
+/// left in it until it next loses focus, at which point
+/// [`DpiPanel::ensure_numeric_input`] reflects the last known-good DPI back.
+fn commit_numeric_dpi(input: &Entity<InputState>, cx: &mut Context<DpiPanel>) {
+    let Some(dpi) = parse_dpi_input(&input.read(cx).value()) else {
+        return;
+    };
+    let dpi = AppState::try_read(cx).map_or(dpi, |state| state.normalize_active_dpi(dpi));
+    debug!(%dpi, "numeric field commit → AppState.dpi");
+    AppState::apply(cx, |state| state.commit_dpi(dpi));
 }
 
 impl Render for DpiPanel {
@@ -150,8 +222,16 @@ impl Render for DpiPanel {
 
         if let (DpiLoad::Ready(info), Some(key)) = (&snapshot.status, &snapshot.device_key) {
             self.ensure_slider(key, &info.capabilities, snapshot.dpi, window, cx);
+            // A device with a single supported DPI has nothing to type either —
+            // `slider_element` shows a fixed-value line instead of a control.
+            if info.capabilities.min() == info.capabilities.max() {
+                self.numeric = None;
+            } else {
+                self.ensure_numeric_input(key, &info.capabilities, snapshot.dpi, window, cx);
+            }
         } else {
             self.slider = None;
+            self.numeric = None;
         }
 
         // Highlight at most one chip: when several presets snap to the same
@@ -178,6 +258,10 @@ impl Render for DpiPanel {
             snapshot.device_key.clone(),
             pal,
         );
+        let numeric_input = self
+            .numeric
+            .as_ref()
+            .map(|current| control_input(&current.state).w(px(64.)).into_any_element());
 
         v_flex()
             .gap_3()
@@ -199,7 +283,13 @@ impl Render for DpiPanel {
                             .child(format!("{}", snapshot.dpi)),
                     ),
             )
-            .child(slider)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().child(slider))
+                    .children(numeric_input),
+            )
             .child(
                 div()
                     .text_caption()
@@ -323,6 +413,27 @@ fn slider_element(
     }
 }
 
+/// Parse the DPI numeric field's raw text into a device value.
+///
+/// `None` for empty or non-numeric input — [`commit_numeric_dpi`] treats that
+/// as "leave the last known-good DPI alone" rather than writing garbage. A
+/// digit run too large for the wire format's `u16` saturates to its maximum
+/// instead of being rejected, so the commit still snaps to the device's top
+/// supported value.
+fn parse_dpi_input(text: &str) -> Option<Dpi> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    match text.parse::<u16>() {
+        Ok(value) => Some(Dpi::new(value)),
+        Err(error) if *error.kind() == std::num::IntErrorKind::PosOverflow => {
+            Some(Dpi::new(u16::MAX))
+        }
+        Err(_) => None,
+    }
+}
+
 const CHIP_H: f32 = 28.;
 
 /// One DPI preset rendered as a chip. Clicking the chip writes that DPI to
@@ -385,4 +496,50 @@ fn add_preset_chip() -> impl IntoElement {
                 state.commit_dpi_presets(presets)
             });
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_plain_digit_string() {
+        assert_eq!(parse_dpi_input("1600"), Some(Dpi::new(1600)));
+    }
+
+    #[test]
+    fn trims_surrounding_whitespace() {
+        assert_eq!(parse_dpi_input("  800  "), Some(Dpi::new(800)));
+    }
+
+    #[test]
+    fn rejects_empty_input() {
+        assert_eq!(parse_dpi_input(""), None);
+        assert_eq!(parse_dpi_input("   "), None);
+    }
+
+    #[test]
+    fn rejects_non_numeric_input() {
+        assert_eq!(parse_dpi_input("abc"), None);
+        assert_eq!(parse_dpi_input("16.5"), None);
+        assert_eq!(parse_dpi_input("-100"), None);
+    }
+
+    /// The field itself only lets digits through via `InputState::validate`,
+    /// so this is reachable only by typing an implausibly long run of them —
+    /// but it must still not panic or wrap.
+    #[test]
+    fn saturates_a_value_above_the_wire_format() {
+        assert_eq!(parse_dpi_input("999999"), Some(Dpi::new(u16::MAX)));
+    }
+
+    /// A digit string far beyond any machine integer must still saturate
+    /// rather than silently fail to commit.
+    #[test]
+    fn saturates_a_value_that_overflows_any_integer_width() {
+        assert_eq!(
+            parse_dpi_input("99999999999999999999"),
+            Some(Dpi::new(u16::MAX))
+        );
+    }
 }
