@@ -150,7 +150,10 @@ impl DetailTab {
         if caps.haptic_panel || (caps.buttons && can_show_mouse_model) || shows_keys_tab {
             tabs.push(Self::ActionsRing);
         }
-        if caps.pointer || caps.scroll_inversion || caps.hires_wheel {
+        let has_software_scroll = openlogi_hook::SOFTWARE_SCROLL_INVERSION
+            && record.capabilities.is_some()
+            && matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        if caps.pointer || caps.scroll_inversion || caps.hires_wheel || has_software_scroll {
             tabs.push(Self::Pointer);
         }
         if caps.lighting {
