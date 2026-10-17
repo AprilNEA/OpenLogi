@@ -157,6 +157,7 @@ impl AppState {
             })
             .map(DeviceRecord::device_key)
             .collect();
+        let settings_moved = settings_moved(&self.devices.records, &merged_list);
 
         self.devices.replace(merged_list, new_index);
         for key in &rerouted {
@@ -164,6 +165,10 @@ impl AppState {
             if let Some(entry) = self.devices.sessions.get_mut(key) {
                 entry.smartshift.reset();
             }
+        }
+        for key in &settings_moved {
+            // The old readings stay on screen until the device answers.
+            self.pointer.reads.revalidate_device_settings(key);
         }
         let present: HashSet<_> = self
             .devices
@@ -608,6 +613,24 @@ pub(super) fn adopt_routes(config: &mut Config, list: &[DeviceRecord]) -> bool {
         adopted |= config.adopt_route(&key, &record.route_key, record.capabilities);
     }
     adopted
+}
+
+/// The devices in `new` that changed a setting themselves since `old` — Fn
+/// lock toggled on the keyboard, a DPI button — and whose readings must be
+/// re-read. Only a record still on its route qualifies: a revision is
+/// counted per channel, and a device that moved has its reads dropped
+/// instead.
+pub(super) fn settings_moved(old: &[DeviceRecord], new: &[DeviceRecord]) -> Vec<DeviceKey> {
+    new.iter()
+        .filter(|new| {
+            old.iter().any(|old| {
+                old.config_key == new.config_key
+                    && old.route == new.route
+                    && old.settings_revision != new.settings_revision
+            })
+        })
+        .map(DeviceRecord::device_key)
+        .collect()
 }
 
 /// Reset `key`'s consecutive-miss counter — the device was just confirmed

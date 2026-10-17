@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use gpui::{
@@ -20,7 +20,9 @@ use super::geometry::{
     default_labels, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
-use super::inspector::{ActionPickerContext, BindingInspectorData, binding_inspector};
+use super::inspector::{
+    ActionPickerContext, BindingInspectorData, ShortcutMode, binding_inspector,
+};
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::profiles::{friendly_app_name, profile_canvas_status};
@@ -65,6 +67,8 @@ struct MouseWorkspaceData<'a> {
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     thumbwheel: bool,
     dpi_gestures: bool,
+    virtual_thumbwheel: bool,
+    wheel_hold: &'a BTreeSet<ButtonId>,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
@@ -92,6 +96,11 @@ impl<'a> MouseWorkspaceData<'a> {
                 .current_record()
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.dpi_gestures),
+            virtual_thumbwheel: state
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|capabilities| capabilities.virtual_thumbwheel),
+            wheel_hold: state.wheel_hold_buttons(),
             editing_app: state.editing_app().map(|app| {
                 state
                     .recent_app_name(app)
@@ -101,19 +110,22 @@ impl<'a> MouseWorkspaceData<'a> {
         })
     }
 
-    fn empty(
-        bindings: &'a BTreeMap<ButtonId, Action>,
-        gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    ) -> Self {
+    fn empty() -> Self {
+        static NO_BINDINGS: BTreeMap<ButtonId, Action> = BTreeMap::new();
+        static NO_GESTURE_MAPS: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> =
+            BTreeMap::new();
+        static NO_WHEEL_HOLD: BTreeSet<ButtonId> = BTreeSet::new();
         Self {
             device_key: None,
             asset: None,
             active: None,
-            bindings,
-            gesture_maps,
+            bindings: &NO_BINDINGS,
+            gesture_maps: &NO_GESTURE_MAPS,
             glow: None,
             thumbwheel: false,
             dpi_gestures: false,
+            virtual_thumbwheel: false,
+            wheel_hold: &NO_WHEEL_HOLD,
             editing_app: None,
             overridden: None,
         }
@@ -135,6 +147,7 @@ pub struct MouseModelView {
     /// Whether the last "Add" attempt on the corresponding custom editor
     /// failed to parse, so its caption can show an inline error.
     pub(super) custom_shortcut_invalid: bool,
+    pub(super) shortcut_mode: ShortcutMode,
     pub(super) custom_application_invalid: bool,
     _state_obs: Subscription,
 }
@@ -194,6 +207,7 @@ impl MouseModelView {
             custom_shortcut_input,
             custom_application_input,
             custom_shortcut_invalid: false,
+            shortcut_mode: ShortcutMode::Tap,
             custom_application_invalid: false,
             _state_obs: state_obs,
         }
@@ -213,6 +227,7 @@ impl MouseModelView {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.custom_shortcut_invalid = false;
         self.custom_application_invalid = false;
+        self.shortcut_mode = ShortcutMode::Tap;
     }
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
@@ -300,7 +315,6 @@ impl MouseModelView {
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.localize_action_picker_inputs(window, cx);
-        let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let MouseWorkspaceData {
             device_key,
             asset,
@@ -310,10 +324,11 @@ impl Render for MouseModelView {
             glow,
             thumbwheel,
             dpi_gestures,
+            virtual_thumbwheel,
+            wheel_hold,
             editing_app,
             overridden,
-        } = MouseWorkspaceData::read(cx)
-            .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
+        } = MouseWorkspaceData::read(cx).unwrap_or_else(MouseWorkspaceData::empty);
 
         self.reset_for_device(device_key);
 
@@ -387,6 +402,8 @@ impl Render for MouseModelView {
                 bindings,
                 gesture_maps,
                 dpi_gestures,
+                virtual_thumbwheel,
+                wheel_hold,
                 editing_app: editing_app.as_deref(),
                 overridden,
             },
@@ -396,6 +413,7 @@ impl Render for MouseModelView {
                 shortcut_input: &self.custom_shortcut_input,
                 application_input: &self.custom_application_input,
                 shortcut_invalid: self.custom_shortcut_invalid,
+                shortcut_mode: self.shortcut_mode,
                 application_invalid: self.custom_application_invalid,
                 view: &view,
             },

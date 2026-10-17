@@ -25,7 +25,7 @@ mod value;
 #[cfg(test)]
 mod tests;
 
-pub use action::{Action, WorkflowStep};
+pub use action::{Action, HeldKeys, WorkflowStep};
 pub use action_ring::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
     RingAction, RingActionError,
@@ -42,4 +42,4 @@ pub use swipe::{
     GESTURE_HOLD_FOR_SWIPE, GESTURE_SWIPE_DEADZONE, GESTURE_SWIPE_THRESHOLD, SwipeAccumulator,
     detect_swipe,
 };
-pub use value::{Binding, LONG_PRESS_THRESHOLD, LongPressBinding};
+pub use value::{Binding, HeldWheel, LONG_PRESS_THRESHOLD, LongPressBinding, WheelHoldBinding};

@@ -245,13 +245,13 @@ fn hid_event(class: &AnyClass, kind: u32) -> Option<Retained<AnyObject>> {
 }
 
 /// Whether trackpad/mouse scrolling is set to "natural" direction — read
-/// fresh on every swipe since it's a user preference that can change at
+/// fresh on every call since it's a user preference that can change at
 /// runtime without restarting the agent. `com.apple.swipescrolldirection`
 /// lives in `NSGlobalDomain`, which `standardUserDefaults` already searches
 /// as the last entry in its domain list, and is absent (meaning on, the
 /// macOS default since 10.7) until the user has touched the Trackpad/Mouse
 /// settings pane at least once.
-fn natural_scrolling() -> bool {
+pub(in crate::inject) fn natural_scrolling() -> bool {
     let defaults = NSUserDefaults::standardUserDefaults();
     let key = ns_string!("com.apple.swipescrolldirection");
     defaults.objectForKey(key).is_none() || defaults.boolForKey(key)

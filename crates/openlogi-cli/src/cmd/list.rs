@@ -218,10 +218,14 @@ struct BatteryDisplay<'a>(&'a BatteryInfo);
 impl fmt::Display for BatteryDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let battery = self.0;
+        write!(f, "battery=")?;
+        // A device without a state-of-charge gauge reports only its level.
+        if let Some(percentage) = battery.percentage {
+            write!(f, "{percentage}% ")?;
+        }
         write!(
             f,
-            "battery={}% {} ({})",
-            battery.percentage,
+            "{} ({})",
             LowercaseDebug(battery.level),
             LowercaseDebug(battery.status)
         )
@@ -311,6 +315,7 @@ mod format_tests {
             battery: None,
             model_info: None,
             capabilities: None,
+            settings_revision: 0,
         }
     }
 
@@ -342,7 +347,7 @@ mod format_tests {
     fn battery_info_is_embedded_when_present() {
         let mut d = base_device();
         d.battery = Some(BatteryInfo {
-            percentage: 42,
+            percentage: Some(42),
             level: BatteryLevel::Low,
             status: BatteryStatus::Discharging,
         });
@@ -351,11 +356,21 @@ mod format_tests {
     }
 
     #[test]
+    fn a_level_only_battery_prints_no_percentage() {
+        let b = BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        assert_eq!(BatteryDisplay(&b).to_string(), "battery=good (discharging)");
+    }
+
+    #[test]
     fn battery_status_debug_names_are_lowercased_verbatim() {
         // `ChargingSlow`'s Debug form has no separator; lowercasing alone
         // yields "chargingslow", not "charging_slow" or "charging slow".
         let b = BatteryInfo {
-            percentage: 10,
+            percentage: Some(10),
             level: BatteryLevel::Critical,
             status: BatteryStatus::ChargingSlow,
         };

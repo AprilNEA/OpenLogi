@@ -14,7 +14,6 @@ use gpui::{
 use gpui_component::{
     Disableable as _, button::ButtonVariants as _, h_flex, scroll::ScrollableElement as _, v_flex,
 };
-use gpui_updater::Updater;
 
 use crate::app::menu::{CloseWindow, Minimize, Zoom};
 use crate::state::AppState;
@@ -62,11 +61,12 @@ pub fn open(cx: &mut App) {
     );
 }
 
-/// Persist the user's answer, run one check if they opted in, and close.
+/// Persist the user's answer, run one check if they opted in, and close. The
+/// check is the launch check's: no window, the result in Settings → Updates.
 fn answer(enabled: bool, window: &mut Window, cx: &mut App) {
     AppState::apply(cx, |state| state.record_update_consent(enabled));
-    if enabled && let Some(updater) = crate::platform::updater::shared(cx) {
-        updater.update(cx, Updater::check);
+    if enabled {
+        crate::platform::updater::check_in_background(cx);
     }
     window.remove_window();
 }

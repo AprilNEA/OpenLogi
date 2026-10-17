@@ -168,23 +168,23 @@ async fn change_wheel_mode_on_channel(
         }
     }
 
-    let current = read_mode(&feature).await?;
+    let device_mode = read_device_mode(&feature).await?;
+    let current = mode_from_hidpp(device_mode)?;
     let desired = desired_mode(current, resolution, inverted);
     if current == desired {
         debug!(index, ?desired, "wheel mode already set; skipping");
         return Ok(current);
     }
 
-    let written = feature
-        .set_wheel_mode(
-            target_to_hidpp(desired.target),
-            resolution_to_hidpp(desired.resolution),
-            desired.inverted,
-        )
-        .await
-        .map_err(|error| {
-            classify_hidpp_error(error, HidppOperation::WriteWheelMode, HiResWheelFeature::ID)
-        })?;
+    // Edit the mode the device reported rather than building a new one, so the
+    // firmware-owned fields outside resolution/invert/target are written back.
+    let mut request = device_mode;
+    request.target = target_to_hidpp(desired.target);
+    request.resolution = resolution_to_hidpp(desired.resolution);
+    request.inverted = desired.inverted;
+    let written = feature.set_wheel_mode(request).await.map_err(|error| {
+        classify_hidpp_error(error, HidppOperation::WriteWheelMode, HiResWheelFeature::ID)
+    })?;
     validate_applied(mode_from_hidpp(written)?, desired)?;
 
     let read_back = read_mode(&feature).await?;
@@ -200,10 +200,13 @@ async fn open_device(channel: &Arc<HidppChannel>, index: u8) -> Result<Device, W
 }
 
 async fn read_mode(feature: &HiResWheelFeature) -> Result<ScrollWheelMode, WriteError> {
-    let mode = feature.get_wheel_mode().await.map_err(|error| {
+    mode_from_hidpp(read_device_mode(feature).await?)
+}
+
+async fn read_device_mode(feature: &HiResWheelFeature) -> Result<HidppWheelMode, WriteError> {
+    feature.get_wheel_mode().await.map_err(|error| {
         classify_hidpp_error(error, HidppOperation::ReadWheelMode, HiResWheelFeature::ID)
-    })?;
-    mode_from_hidpp(mode)
+    })
 }
 
 fn desired_mode(
@@ -284,7 +287,95 @@ fn unsupported_read_response() -> WriteError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+    use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+
+    const HIRES_WHEEL_INDEX: u8 = 0x05;
+
+    /// A wheel whose firmware keeps the analytics bit (byte 0 bit 3) and the
+    /// two extension bytes Options+ writes as priority and rate (bytes 1 and 2).
+    /// The responder stores whatever `setWheelMode` sends, like the device does.
+    fn stateful_wheel(
+        initial: [u8; 3],
+    ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
+        let state = Mutex::new(initial);
+        ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            if request.len() < 7 || request[0] != 0x10 {
+                return None;
+            }
+            let mut payload = [0u8; 3];
+            match (request[2], request[3] >> 4) {
+                (0x00, 0x01) => payload[0] = 4,
+                (0x00, 0x00) => {
+                    if u16::from_be_bytes([request[4], request[5]]) == HiResWheelFeature::ID {
+                        payload[0] = HIRES_WHEEL_INDEX;
+                    }
+                }
+                // Capabilities: multiplier 8, invert + ratchet switch, 24 ratchets.
+                (HIRES_WHEEL_INDEX, 0x00) => payload = [8, 0b1100, 24],
+                (HIRES_WHEEL_INDEX, 0x01) => payload = *state.lock().expect("wheel state"),
+                (HIRES_WHEEL_INDEX, 0x02) => {
+                    let mut current = state.lock().expect("wheel state");
+                    current.copy_from_slice(&request[4..7]);
+                    payload = *current;
+                }
+                _ => return None,
+            }
+            let mut response = request[..4].to_vec();
+            response.extend_from_slice(&payload);
+            Some(response)
+        })
+    }
+
+    fn mode_writes(handle: &crate::replay::ReplayChannelHandle) -> Vec<[u8; 3]> {
+        handle
+            .written_reports()
+            .into_iter()
+            .filter(|report| {
+                report.len() >= 7 && report[2] == HIRES_WHEEL_INDEX && report[3] >> 4 == 0x02
+            })
+            .map(|report| [report[4], report[5], report[6]])
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn resolution_write_preserves_firmware_mode_extension_fields() -> Result<(), WriteError> {
+        // Low resolution, native, not inverted; analytics on, priority 5, rate 7.
+        let (raw, handle) = stateful_wheel([0b1000, 0x05, 0x07]);
+        let shared = SharedChannel::new(
+            scripted_channel(raw).await,
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb035,
+            },
+        );
+
+        let applied = set_scroll_resolution_on(&shared, ScrollResolution::High).await?;
+
+        assert_eq!(applied, native(ScrollResolution::High, false));
+        // Only the resolution bit changes; analytics, priority and rate survive.
+        assert_eq!(mode_writes(&handle), vec![[0b1010, 0x05, 0x07]]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inversion_write_preserves_firmware_mode_extension_fields() -> Result<(), WriteError> {
+        let (raw, handle) = stateful_wheel([0b1010, 0x02, 0x09]);
+        let shared = SharedChannel::new(
+            scripted_channel(raw).await,
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb035,
+            },
+        );
+
+        set_scroll_inversion_on(&shared, true).await?;
+
+        assert_eq!(mode_writes(&handle), vec![[0b1110, 0x02, 0x09]]);
+        Ok(())
+    }
 
     fn native(resolution: ScrollResolution, inverted: bool) -> ScrollWheelMode {
         ScrollWheelMode {

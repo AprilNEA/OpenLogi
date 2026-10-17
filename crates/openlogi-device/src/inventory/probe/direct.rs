@@ -138,6 +138,7 @@ pub(super) async fn probe_direct(
             battery: probe.battery,
             model_info: probe.model_info,
             capabilities,
+            settings_revision: pass.settings_revision(DIRECT_DEVICE_INDEX),
         }],
     };
     NodeProbe {

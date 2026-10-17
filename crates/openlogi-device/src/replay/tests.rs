@@ -6,6 +6,7 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
     PairedDevice, ReceiverInfo,
 };
+use openlogi_core::hid::{ReportRate, ReportRateInfo};
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, CassetteExchange, DeviceProfile, FIXTURE_SCHEMA_VERSION,
     FixtureError, HidCassette, ProfileDeviceSettings, ProfileSetting, ProfileSupport,
@@ -14,8 +15,9 @@ use openlogi_fixture::{
 
 use crate::backend::{HidBackend, RawWriter};
 use crate::{
-    BacklightMode, BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, Dpi,
-    DpiCapabilities, DpiInfo, Enumerator, HotplugEvent, NodeId, NodeInfo, get_dpi,
+    BacklightControls, BacklightMode, BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX,
+    DeviceRoute, Dpi, DpiCapabilities, DpiInfo, Enumerator, HotplugEvent, NodeId, NodeInfo,
+    get_dpi,
 };
 
 use super::*;
@@ -263,11 +265,68 @@ fn profile_validator_rejects_route_and_setting_inconsistencies() {
         status: BacklightStatus::PermanentManual,
         current_level: 4,
         nb_levels: 4,
+        power_save: false,
+        controls: BacklightControls::default(),
     });
     let error = invalid_backlight
         .validate()
         .expect_err("backlight level must fit its declared range");
     assert!(error.to_string().contains("backlight level 4 exceeds"));
+}
+
+#[test]
+fn profile_validator_checks_report_rate_values_and_support() {
+    let info = |current: u16, supported: &[u16]| {
+        ProfileSetting::Supported(ReportRateInfo {
+            current: ReportRate::new(current),
+            supported: supported.iter().copied().map(ReportRate::new).collect(),
+        })
+    };
+    let mut profile = direct_probe_fixture().profile;
+    profile.settings[0].report_rate = info(1000, &[125, 500, 1000]);
+    let error = profile
+        .validate()
+        .expect_err("a report rate the inventory does not advertise is inconsistent");
+    assert!(
+        error
+            .to_string()
+            .contains("report rate support does not match")
+    );
+
+    profile.inventories[0].paired[0]
+        .capabilities
+        .as_mut()
+        .expect("direct fixture has capabilities")
+        .report_rate = true;
+    profile
+        .validate()
+        .expect("an advertised report rate with a valid reading");
+
+    for (setting, message) in [
+        (info(1000, &[]), "empty report-rate list"),
+        (info(1000, &[1000, 500]), "sorted and unique"),
+        (info(1000, &[500, 500, 1000]), "sorted and unique"),
+        (info(1000, &[0, 1000]), "zero report rate"),
+        (
+            info(1000, &[125, 500]),
+            "current report rate 1000 is not supported",
+        ),
+    ] {
+        let mut invalid = profile.clone();
+        invalid.settings[0].report_rate = setting;
+        let error = invalid.validate().expect_err(message);
+        assert!(error.to_string().contains(message), "{error}");
+    }
+
+    profile.settings[0].report_rate = ProfileSetting::Unsupported;
+    let error = profile
+        .validate()
+        .expect_err("an advertised report rate needs a declared setting");
+    assert!(
+        error
+            .to_string()
+            .contains("report rate support does not match")
+    );
 }
 
 #[test]
@@ -358,7 +417,7 @@ fn profile_validator_rejects_duplicate_identities_and_invalid_ranges() {
 
     let mut invalid_battery = direct_probe_fixture().profile;
     invalid_battery.inventories[0].paired[0].battery = Some(BatteryInfo {
-        percentage: 101,
+        percentage: Some(101),
         level: BatteryLevel::Full,
         status: BatteryStatus::Full,
     });
@@ -704,6 +763,7 @@ fn direct_probe_fixture() -> SyntheticFixture {
                     pointer: true,
                     ..Capabilities::default()
                 }),
+                settings_revision: 0,
             }],
         }],
         standalone: Vec::new(),
@@ -779,6 +839,7 @@ fn receiver_dpi_fixture() -> SyntheticFixture {
                     pointer: true,
                     ..Capabilities::default()
                 }),
+                settings_revision: 0,
             }],
         }],
         standalone: Vec::new(),
@@ -833,6 +894,8 @@ fn dpi_settings(route: DeviceRoute, current: u16, supported: Vec<u16>) -> Profil
         wheel: ProfileSetting::Unsupported,
         backlight: ProfileSetting::Unsupported,
         fn_lock: ProfileSetting::Unsupported,
+        easy_switch: ProfileSetting::Unsupported,
+        report_rate: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: ProfileSupport::Unsupported,
     }

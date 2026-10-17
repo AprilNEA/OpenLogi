@@ -33,7 +33,12 @@ fn catalog_excludes_custom_shortcut() {
     let catalog = Action::catalog();
     for action in &catalog {
         assert!(
-            !matches!(action, Action::CustomShortcut(_) | Action::HoldShortcut(_)),
+            !matches!(
+                action,
+                Action::CustomShortcut(_)
+                    | Action::HoldShortcut(_)
+                    | Action::TapKeyHoldingModifiers(_)
+            ),
             "catalog must not contain recorded shortcut actions"
         );
     }
@@ -46,9 +51,45 @@ fn hold_shortcut_has_distinct_lifecycle_semantics() {
 
     assert_eq!(held.label(), "Hold Alt+Space");
     assert_eq!(held.category(), Category::Editing);
-    assert_eq!(held.held_combo(), Some(&combo));
+    assert_eq!(held.held_chord(), Some((&combo, HeldKeys::WholeChord)));
     assert_matches!(held.effect(), Effect::HeldKey(actual) if actual == &combo);
-    assert_eq!(Action::CustomShortcut(combo).held_combo(), None);
+    assert_eq!(Action::CustomShortcut(combo).held_chord(), None);
+}
+
+/// The switcher case the other two shortcut actions cannot express: the
+/// modifiers are held for the press while the ordinary key is tapped once.
+#[test]
+fn tap_key_holding_modifiers_holds_only_the_modifiers() {
+    let combo: KeyCombo = "Cmd+Tab".parse().expect("valid shortcut failed");
+    let action = Action::TapKeyHoldingModifiers(combo.clone());
+
+    assert_eq!(action.label(), "Hold Cmd, tap Tab");
+    assert_eq!(action.category(), Category::Editing);
+    assert_eq!(action.held_chord(), Some((&combo, HeldKeys::ModifiersOnly)));
+
+    // Same chord, same one-shot fallback, different held set. The two actions
+    // are distinguishable only through `held_chord`.
+    assert_matches!(action.effect(), Effect::HeldKey(actual) if actual == &combo);
+    assert_eq!(
+        Action::HoldShortcut(combo)
+            .held_chord()
+            .map(|(_, keys)| keys),
+        Some(HeldKeys::WholeChord)
+    );
+}
+
+/// A chord with no modifier has nothing to hold, so its label drops the
+/// "Hold" half rather than rendering an empty one.
+#[test]
+fn tap_key_holding_modifiers_labels_a_bare_key_without_a_hold() {
+    let action = Action::TapKeyHoldingModifiers("F5".parse().expect("valid shortcut failed"));
+    assert_eq!(action.label(), "Tap F5");
+}
+
+#[test]
+fn tap_key_holding_modifiers_roundtrips_toml() {
+    let action = Action::TapKeyHoldingModifiers("Cmd+Tab".parse().expect("valid shortcut failed"));
+    assert_eq!(roundtrip(&action), action);
 }
 
 #[test]
@@ -219,6 +260,50 @@ fn binding_long_press_requires_exact_short_and_long_fields() {
     toml::from_str::<BindingWrapper>(unknown).expect_err("a long press rejects unknown fields");
 }
 
+#[test]
+fn binding_wheel_hold_roundtrips_without_overlapping_other_table_shapes() {
+    let binding = Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::BrowserBack));
+    let back = binding_roundtrip(BTreeMap::from([(ButtonId::Back, binding.clone())]));
+    assert_eq!(back[&ButtonId::Back], binding);
+
+    let toml = toml::to_string_pretty(&BindingWrapper { bindings: back }).expect("serialize");
+    assert!(toml.contains("click = \"BrowserBack\""));
+    assert!(toml.contains("wheel = \"HorizontalScroll\""));
+    assert!(!toml.contains("WheelHold"));
+}
+
+#[test]
+fn binding_wheel_hold_requires_exact_click_and_wheel_fields() {
+    // Lowercase `click` is not the `Click` gesture direction: without `wheel`
+    // the table is no binding at all rather than a one-armed gesture map.
+    let missing_wheel = "[bindings.Back]\nclick = \"Copy\"";
+    toml::from_str::<BindingWrapper>(missing_wheel).expect_err("a wheel hold needs its wheel");
+
+    let unknown_wheel = "[bindings.Back]\nclick = \"Copy\"\nwheel = \"Zoom\"";
+    toml::from_str::<BindingWrapper>(unknown_wheel)
+        .expect_err("a wheel hold rejects a wheel behavior it does not know");
+
+    let unknown =
+        "[bindings.Back]\nclick = \"Copy\"\nwheel = \"HorizontalScroll\"\nlong = \"Paste\"";
+    toml::from_str::<BindingWrapper>(unknown).expect_err("a wheel hold rejects unknown fields");
+}
+
+#[test]
+fn wheel_hold_clicks_with_its_click_action_and_has_no_directions() {
+    let mut binding = Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::Copy));
+    assert!(binding.is_wheel_hold());
+    assert!(!binding.is_gesture());
+    assert_eq!(binding.click_action(), Action::Copy);
+    assert_eq!(binding.direction_action(GestureDirection::Click), None);
+    assert!(!Binding::Single(Action::Copy).is_wheel_hold());
+
+    binding.upgrade_to_gesture();
+    assert_eq!(
+        binding,
+        Binding::Gesture(BTreeMap::from([(GestureDirection::Click, Action::Copy)]))
+    );
+}
+
 /// The untagged-routing safety guard. A TOML table keyed by ANY
 /// [`GestureDirection`] name must deserialize as [`Binding::Gesture`], never
 /// [`Binding::Single`]. If a future [`Action`] payload variant is ever named
@@ -317,6 +402,11 @@ fn persisted_action_variant_names_are_stable() {
             "F2".parse()
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
+        Action::TapKeyHoldingModifiers(
+            "Cmd+Tab"
+                .parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+        ),
     ]);
     let mut actual: Vec<String> = actions
         .into_iter()
@@ -381,6 +471,7 @@ fn persisted_action_variant_names_are_stable() {
         "ShowActionsRing",
         "ShowDesktop",
         "Sleep",
+        "TapKeyHoldingModifiers",
         "ToggleSmartShift",
         "TypeText",
         "Undo",
@@ -611,6 +702,13 @@ fn power_user_and_device_side_actions_lower_to_the_expected_bucket() {
             .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
     );
     assert_matches!(hold_shortcut.effect(), Effect::HeldKey(_));
+
+    let tap_key_holding_modifiers = Action::TapKeyHoldingModifiers(
+        "Cmd+Tab"
+            .parse()
+            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+    );
+    assert_matches!(tap_key_holding_modifiers.effect(), Effect::HeldKey(_));
 
     let type_text = Action::TypeText("hi".into());
     assert_matches!(type_text.effect(), Effect::Text("hi"));

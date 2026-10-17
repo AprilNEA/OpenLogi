@@ -1,5 +1,6 @@
 //! What a config reload or an app switch publishes to the hook and the capture managers.
 
+use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::reprog_controls::BACK_CIDS;
 
 use super::*;
@@ -29,13 +30,82 @@ fn config_reload_publishes_scroll_preferences_without_restarting_the_hook() {
 
 /// The published capture plan's Back binding for the first device, if any.
 fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
-    let plans = orch.shared.capture_plans.borrow();
-    plans.first().and_then(|plan| {
+    let published = orch.shared.capture_plans.borrow();
+    published.plans().first().and_then(|plan| {
         plan.dispatch
             .bindings
             .get(&ButtonId::Back)
             .map(Binding::click_action)
     })
+}
+
+/// The published plan carries the held-wheel inversion of the device's
+/// link, which `plan_for_device` alone cannot resolve.
+#[test]
+fn published_plans_carry_the_held_wheel_inversion_of_the_link() {
+    let mut config = Config::default();
+    config.set_invert_scroll("a", false);
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        scroll_inversion: true,
+        ..Capabilities::default()
+    });
+    let mut link = LinkConfig::default();
+    link.overrides.invert_scroll = Some(true);
+    config
+        .devices
+        .entry("a".to_owned())
+        .or_default()
+        .links
+        .insert(stable_id(&device).route_key(), link);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![device];
+    orch.rebuild();
+    let published = orch.shared.capture_plans.borrow();
+    let plan = published
+        .plans()
+        .first()
+        .expect("the online device is planned");
+    assert!(plan.dispatch.invert_wheel);
+}
+
+/// A smooth-wheel device's published plan asks its session to divert the
+/// wheel once the hook may post the scrolling, and leaves it native again
+/// when the hook goes away.
+#[test]
+fn published_plans_divert_the_main_wheel_only_while_the_hook_runs() {
+    let mut config = Config::default();
+    config.set_smooth_wheel("a", true);
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        hires_wheel: true,
+        ..Capabilities::default()
+    });
+    let mut orch = orchestrator(config);
+    orch.devices = vec![device];
+    let main_wheel = |orch: &Orchestrator| {
+        orch.shared
+            .capture_plans
+            .borrow()
+            .plans()
+            .first()
+            .expect("the online device is planned")
+            .target
+            .spec
+            .divert_main_wheel
+    };
+    orch.set_os_mouse_hook_available(true);
+    orch.rebuild();
+    assert_eq!(
+        main_wheel(&orch),
+        Some(openlogi_hid::session::gesture::MainWheelDivert {
+            resolution: None,
+            inverted: None,
+        })
+    );
+    orch.set_os_mouse_hook_available(false);
+    orch.rebuild();
+    assert_eq!(main_wheel(&orch), None);
 }
 
 #[test]
@@ -103,8 +173,9 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
         );
         assert_eq!(maps.pointer_target, Some(PointerTarget::Desktop));
     }
-    let plans = orch.shared.capture_plans.borrow();
-    let keyboard = plans
+    let published = orch.shared.capture_plans.borrow();
+    let keyboard = published
+        .plans()
         .iter()
         .find(|plan| plan.dispatch.config_key == "keyboard")
         .expect("keyboard plan");
@@ -113,7 +184,7 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
         Action::Copy
     );
     assert_eq!(keyboard.dispatch.pointer_target, None);
-    drop(plans);
+    drop(published);
     assert_eq!(orch.current_app.as_deref(), Some("browser"));
 
     // The explicit option takes effect immediately without moving the pointer.
@@ -149,6 +220,7 @@ fn unidentified_pointer_context_uses_the_focused_profile_never_the_desktop() {
             .shared
             .capture_plans
             .borrow()
+            .plans()
             .first()
             .expect("mouse plan")
             .dispatch
@@ -267,7 +339,7 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
 }
 
 #[test]
-fn macos_side_gesture_capture_follows_mouse_hook_availability() {
+fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
     let mut config = Config::default();
     config.set_gesture_mode("a", ButtonId::Forward, true);
     let mut orch = orchestrator(config);
@@ -276,8 +348,8 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
     let mut capture_plans = orch.shared.capture_plans.clone();
     let _ = capture_plans.borrow_and_update();
 
-    let side_gesture_is_armed = |orch: &Orchestrator| {
-        orch.shared.capture_plans.borrow()[0]
+    let side_gesture_is_requested = |orch: &Orchestrator| {
+        orch.shared.capture_plans.borrow().plans()[0]
             .target
             .spec
             .divert_gesture_buttons
@@ -285,7 +357,7 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
             .any(|&(_, button)| button == ButtonId::Forward)
     };
     assert!(
-        !side_gesture_is_armed(&orch),
+        !side_gesture_is_requested(&orch),
         "HID++ diversion must wait for the movement hook"
     );
 
@@ -294,39 +366,41 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
         capture_plans
             .has_changed()
             .expect("publication remains open"),
-        cfg!(target_os = "macos"),
+        cfg!(any(target_os = "macos", target_os = "windows")),
         "only a semantic capture-plan change should wake reconciliation"
     );
     let _ = capture_plans.borrow_and_update();
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
     if cfg!(target_os = "macos") {
-        let hook_maps = orch
-            .shared
-            .hook_maps
-            .read()
-            .expect("hook maps should not be poisoned");
         assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
         assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
-        assert!(side_gesture_is_armed(&orch));
-    } else {
-        let hook_maps = orch
-            .shared
-            .hook_maps
-            .read()
-            .expect("hook maps should not be poisoned");
+        assert!(side_gesture_is_requested(&orch));
+    } else if cfg!(target_os = "windows") {
         assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
-        assert!(!side_gesture_is_armed(&orch));
+        assert!(
+            side_gesture_is_requested(&orch),
+            "Windows must request HID++ raw XY while retaining the passive hook fallback"
+        );
+    } else {
+        assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
+        assert!(!side_gesture_is_requested(&orch));
     }
+    drop(hook_maps);
 
     orch.set_os_mouse_hook_available(false);
     assert_eq!(
         capture_plans
             .has_changed()
             .expect("publication remains open"),
-        cfg!(target_os = "macos"),
+        cfg!(any(target_os = "macos", target_os = "windows")),
         "only a semantic capture-plan change should wake reconciliation"
     );
     assert!(
-        !side_gesture_is_armed(&orch),
+        !side_gesture_is_requested(&orch),
         "revoking the movement hook must restore native HID++ controls"
     );
 }
@@ -349,8 +423,8 @@ fn keyboard_control_bindings_never_enter_the_mouse_capture_plan() {
     orch.devices = vec![keyboard];
     orch.rebuild();
 
-    let plans = orch.shared.capture_plans.borrow();
-    let plan = plans.first().expect("keyboard plan");
+    let published = orch.shared.capture_plans.borrow();
+    let plan = published.plans().first().expect("keyboard plan");
     let spec = &plan.target.spec;
     let diverted_controls: Vec<u16> = spec
         .divert_buttons
@@ -401,8 +475,8 @@ fn a_control_the_keyboard_session_owns_leaves_the_keyboard_capture_plan() {
         spec.wanted.keys().copied().collect::<Vec<_>>(),
         [multiplatform_back]
     );
-    let plans = orch.shared.capture_plans.borrow();
-    let diverted: Vec<u16> = plans[0]
+    let published = orch.shared.capture_plans.borrow();
+    let diverted: Vec<u16> = published.plans()[0]
         .target
         .spec
         .divert_buttons
@@ -435,8 +509,8 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     orch.rebuild();
 
     assert!(orch.keyboard_spec_for().is_none());
-    let plans = orch.shared.capture_plans.borrow();
-    let diverted: Vec<u16> = plans[0]
+    let published = orch.shared.capture_plans.borrow();
+    let diverted: Vec<u16> = published.plans()[0]
         .target
         .spec
         .divert_buttons
@@ -446,4 +520,118 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     for cid in BACK_CIDS {
         assert!(diverted.contains(&cid), "{cid:#06x}");
     }
+}
+
+#[test]
+fn a_disabled_mouse_keeps_its_latest_route_for_restore() {
+    let mut config = Config::default();
+    config.set_device_enabled("mouse", false);
+    let mut orch = orchestrator(config);
+    let mut mouse = dev("mouse", 2, true);
+    mouse.unit_id = [0x01, 0x02, 0x03, 0x04];
+    mouse.route = Some(DeviceRoute::Bolt {
+        receiver_uid: "receiver-b".to_owned(),
+        slot: 2,
+    });
+    orch.devices = vec![dev("other", 1, true), mouse];
+    orch.rebuild();
+
+    let key = PhysicalDeviceKey::parse("unit:01020304").expect("unit id should be a physical key");
+    {
+        let published = orch.shared.capture_plans.borrow();
+        assert!(
+            published
+                .plans()
+                .iter()
+                .all(|plan| plan.dispatch.config_key != "mouse"),
+            "disabling capture must not arm a session"
+        );
+        assert!(
+            published
+                .plans()
+                .iter()
+                .any(|plan| plan.dispatch.config_key == "other"),
+            "an enabled device still publishes a capture plan"
+        );
+        assert_eq!(
+            published.restore_route(&key).cloned(),
+            Some(mouse_route("receiver-b", 2))
+        );
+    }
+
+    let mut publication = orch.shared.capture_plans.clone();
+    let _ = publication.borrow_and_update();
+    orch.devices[1].route = Some(DeviceRoute::Bolt {
+        receiver_uid: "receiver-c".to_owned(),
+        slot: 1,
+    });
+    orch.devices[1].slot = 1;
+    orch.rebuild();
+
+    assert!(
+        publication.has_changed().expect("publication remains open"),
+        "a route change must wake restoration even when capture stays disabled"
+    );
+    let published = orch.shared.capture_plans.borrow();
+    assert!(
+        published
+            .plans()
+            .iter()
+            .all(|plan| plan.dispatch.config_key != "mouse")
+    );
+    assert_eq!(
+        published.restore_route(&key).cloned(),
+        Some(mouse_route("receiver-c", 1))
+    );
+}
+
+/// Bolt route named by the disabled-mouse restore test.
+fn mouse_route(receiver_uid: &str, slot: u8) -> DeviceRoute {
+    DeviceRoute::Bolt {
+        receiver_uid: receiver_uid.to_owned(),
+        slot,
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn two_mouse_hidpp_plans_are_device_scoped_while_hook_fallback_is_selected_device_global() {
+    let mut config = Config::default();
+    config.set_gesture_mode("selected", ButtonId::Forward, true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("selected", 1, true), dev("other", 2, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+
+    let published = orch.shared.capture_plans.borrow();
+    let selected = published
+        .plans()
+        .iter()
+        .find(|plan| plan.dispatch.config_key == "selected")
+        .expect("selected device plan");
+    let other = published
+        .plans()
+        .iter()
+        .find(|plan| plan.dispatch.config_key == "other")
+        .expect("other device plan");
+    assert!(
+        selected
+            .dispatch
+            .side_gesture_bindings
+            .contains_key(&ButtonId::Forward),
+        "HID++ input keeps the selected device's dispatch plan"
+    );
+    assert!(other.dispatch.side_gesture_bindings.is_empty());
+    drop(published);
+
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
+    assert_eq!(hook_maps.selected_device.as_deref(), Some("selected"));
+    assert!(
+        hook_maps.gestures.contains_key(&ButtonId::Forward),
+        "the passive Windows fallback is one selected-device map, not a per-source map"
+    );
 }

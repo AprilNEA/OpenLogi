@@ -48,6 +48,18 @@ pub enum InventoryError {
     AmbiguousRawDevice,
 }
 
+/// How long a successful feature-table probe is reused.
+///
+/// [`probe_cache_is_stale`] stays false through this age and becomes true only
+/// after it. A scan at exactly this age still hits the cache.
+pub const PROBE_CACHE_FRESHNESS: Duration = cache::REFRESH_INTERVAL;
+
+/// Reports whether a probe stamped at `probed_at` must be walked again at `now`.
+#[must_use]
+pub fn probe_cache_is_stale(probed_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(probed_at) > PROBE_CACHE_FRESHNESS
+}
+
 /// Stateful device enumerator: owns persistent channels and the per-device
 /// probe cache so the event-first watcher reuses immutable data across
 /// reconciliations. One-shot callers use the [`enumerate`] free function, which
@@ -396,6 +408,8 @@ impl Enumerator {
         let mut seen_nodes = HashSet::new();
         let mut open_failures = Vec::new();
         let mut retiring = Vec::new();
+        let mut to_open = Vec::new();
+        let mut queued_to_open = HashSet::new();
         for info in candidates {
             let node = info.id.clone();
             seen_nodes.insert(node.clone());
@@ -415,7 +429,34 @@ impl Enumerator {
                 ));
                 continue;
             }
-            match backend.open_hidpp(&info).await {
+            // A backend can report the same node twice in one pass; the cache
+            // stays empty for every occurrence until the concurrent opens
+            // below finish and fold their results back in, so without this
+            // check a duplicate would queue here again and end up open
+            // through two live channels — the exact split-delivery state
+            // `ChannelCache` exists to prevent.
+            if !queued_to_open.insert(node) {
+                continue;
+            }
+            to_open.push(info);
+        }
+
+        // Open every not-yet-cached node concurrently, mirroring the probe
+        // step below: a slow BLE-direct connection handshake for one device
+        // (measured at ~10-15s) must not delay another's.
+        let opened = to_open
+            .into_iter()
+            .map(|info| async move {
+                let result = backend.open_hidpp(&info).await;
+                (info, result)
+            })
+            .collect::<Vec<_>>()
+            .join()
+            .await;
+
+        for (info, result) in opened {
+            let node = info.id.clone();
+            match result {
                 Ok(Some(channel)) => {
                     // A channel that actually opened must not inherit probe or
                     // arrival-replay eviction counts from its predecessor.

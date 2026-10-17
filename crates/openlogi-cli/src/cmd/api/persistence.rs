@@ -4,7 +4,7 @@ use std::path::Path;
 
 use openlogi_core::config::{Config, ConfigError, ConfigFile, SmartShift};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
-use openlogi_core::hid::{DeviceRoute, Dpi, SmartShiftStatus};
+use openlogi_core::hid::{DeviceRoute, Dpi, ReportRate, SmartShiftStatus};
 use openlogi_ipc::{AgentClient, AgentSnapshot};
 use tarpc::context;
 
@@ -31,11 +31,22 @@ impl Save {
             | ApiCommand::FnLock {
                 device,
                 set: Some(_),
-            } => device,
+            }
+            | ApiCommand::ReportRate {
+                device,
+                set: Some(_),
+            }
+            | ApiCommand::OsLayout { device, .. } => device,
             ApiCommand::Smartshift(args)
                 if args.mode.is_some() || args.auto_disengage.is_some() =>
             {
                 &args.device
+            }
+            ApiCommand::EasySwitch { .. } => {
+                return Err(ApiError::new(
+                    "invalid_value",
+                    "the device keeps Easy-Switch names itself; drop --save",
+                ));
             }
             _ => {
                 return Err(ApiError::new(
@@ -118,6 +129,13 @@ impl Save {
 
     pub(super) fn fn_lock(&mut self, value: bool) {
         self.config.set_fn_lock(&self.key, value);
+    }
+
+    pub(super) fn keep_os_layout(&mut self, keep: bool) {
+        self.config.set_keep_os_layout(&self.key, keep);
+    }
+    pub(super) fn report_rate(&mut self, rate: ReportRate) {
+        self.config.set_report_rate(&self.key, rate);
     }
 
     pub(super) fn smartshift(&mut self, state: SmartShiftStatus) -> Result<(), ApiError> {

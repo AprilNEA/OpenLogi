@@ -318,6 +318,10 @@ fn handle_button(
     SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s))
 }
 
+/// Whether the hook should let the press through natively. A long press
+/// always needs the runtime to time it. A wheel-hold binding reaching the hook
+/// was not armed over HID++ (no raw-wheel diversion), so it degrades to its
+/// click, which stays native when that is the button's own action.
 fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
     !matches!(binding, Binding::LongPress(_)) && is_native_click(id, &binding.click_action())
 }
@@ -419,7 +423,7 @@ fn handle_key(
 
     info!(keycode, action = %action.label(), "key → executing bound action");
     let action_target = capture_target();
-    let queued = if action.held_combo().is_some() {
+    let queued = if action.held_chord().is_some() {
         let queued = dispatcher.try_hook_key_down(keycode, &action, action_target);
         if queued {
             HELD_KEYS.with_borrow_mut(|keys| {

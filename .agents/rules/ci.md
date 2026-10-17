@@ -116,7 +116,8 @@ backstop, not a substitute for running the gate yourself after a rebase.
 4. If cfg-gated files changed (any `#[cfg(target_os = …)]` block, in any crate):
    cross-lint or hand-audit against master — macOS-green proves nothing there; see
    `.agents/rules/cross-platform.md`.
-5. If wire types changed: `PROTOCOL_VERSION` bumped and
+5. If wire types changed: `PROTOCOL_VERSION` above the latest release's (moved once
+   per release, not once per change) and
    `cargo test -p openlogi-ipc --test wire_format` green — see
    `crates/openlogi-ipc/AGENTS.md`.
 6. If locales changed: every `crates/openlogi-ui/locales/*.toml` carries the same keys
@@ -166,6 +167,8 @@ CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, and
 job deliberately skips sccache setup. `rust-cache` stores only Cargo registry/git
 inputs (`cache-targets: false`); sccache owns compiler outputs. PRs read the
 default branch's sccache objects but do not write their isolated merge-ref cache.
+
+The `fmt` job selects all workspace test jobs with the path filter in `ci.yml`. Source, fixture, test-resource, dependency, toolchain, and CI changes run those jobs; pure Markdown and unrelated design assets skip them. The workflow still reports each skipped job, so required checks do not remain pending. PRs use the full PR diff; pushes use the full pushed range. Local test commands always run, regardless of changed paths.
 
 ### ast-grep rules
 

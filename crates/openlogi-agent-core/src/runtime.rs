@@ -76,15 +76,15 @@ struct HeldShortcuts {
 
 impl HeldShortcuts {
     fn start(&mut self, press: &PressToken, action: &Action) -> bool {
-        let Some(combo) = action.held_combo() else {
+        let Some((combo, keys)) = action.held_chord() else {
             return false;
         };
         match self.by_press.entry(press.clone()) {
             std::collections::hash_map::Entry::Occupied(mut held) => {
-                held.get_mut().replace(combo);
+                held.get_mut().replace(combo, keys);
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(openlogi_inject::press_hold(combo));
+                slot.insert(openlogi_inject::press_hold(combo, keys));
             }
         }
         true
@@ -249,7 +249,7 @@ impl ButtonEventHandler {
         device_key: Option<&str>,
         target: ActionDispatchTarget,
     ) {
-        if action.held_combo().is_some() && target.resolve(action).is_none() {
+        if action.held_chord().is_some() && target.resolve(action).is_none() {
             return;
         }
         if !self.held.start(press, action) {
@@ -367,6 +367,12 @@ impl ActionDispatcher {
     /// Execute a semantic gesture action only if its exact press is still live.
     pub(crate) fn try_dispatch_while_pressed(&self, press: &PressToken, action: &Action) -> bool {
         self.buttons.try_trigger_while_pressed(press, action)
+    }
+
+    /// Record that the wheel moved while `press` was down, so a wheel-hold
+    /// button's release does not also fire its click.
+    pub(crate) fn try_wheel_while_pressed(&self, press: &PressToken) -> bool {
+        self.buttons.try_wheel_while_pressed(press)
     }
 
     /// End a gesture hold whose release was lost before another button takes
@@ -552,6 +558,7 @@ mod tests {
                 registry: openlogi_hid::ChannelRegistry::default(),
                 receiver_access: crate::receiver_access::ReceiverAccess::default(),
                 device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
             },
             action_ring,
         };
