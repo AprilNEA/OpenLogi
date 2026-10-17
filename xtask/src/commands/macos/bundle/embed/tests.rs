@@ -6,7 +6,7 @@ use crate::support::fs::repo_root;
 use crate::support::info_plist::read_plist_string;
 
 /// Identity work iterates every `Component`, so a component added without a
-/// `Helper` to embed it would only surface as a stamping failure during a
+/// `EmbeddedHelper` to embed it would only surface as a stamping failure during a
 /// real build.
 #[test]
 fn every_nested_component_is_embedded_by_a_helper() {
@@ -14,7 +14,7 @@ fn every_nested_component_is_embedded_by_a_helper() {
         assert!(
             component == Component::App
                 || HELPERS.iter().any(|helper| helper.component == component),
-            "{component} has no Helper entry to embed it"
+            "{component} has no EmbeddedHelper entry to embed it"
         );
     }
 }

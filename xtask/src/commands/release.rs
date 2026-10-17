@@ -1,3 +1,4 @@
+pub(crate) mod appcast;
 pub(crate) mod changelog;
 pub(crate) mod check_publish;
 pub(crate) mod checkout_version_bump;
@@ -8,6 +9,8 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Write the EdDSA-signed Sparkle appcast for each macOS architecture.
+    Appcast(appcast::Args),
     /// Write the next workspace version's section into CHANGELOG.md with git-cliff.
     Changelog(changelog::Args),
     /// Verify that crates.io packages have a publishable workspace dependency closure.
@@ -20,6 +23,7 @@ pub(crate) enum Command {
 
 pub(crate) fn run(command: Command) -> Result<()> {
     match command {
+        Command::Appcast(args) => appcast::run(&args),
         Command::Changelog(args) => changelog::run(&args),
         Command::CheckPublish => check_publish::run(),
         Command::CheckoutVersionBump => checkout_version_bump::run(),

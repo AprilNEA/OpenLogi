@@ -75,8 +75,8 @@ fn shipped_identities_are_distinct_per_component() {
 fn the_channels_never_share_a_helper_directory() {
     for &component in Component::VARIANTS {
         match (
-            component.nested_bundle(Channel::Production),
-            component.nested_bundle(Channel::Dev),
+            component.nested_bundle_dir(Channel::Production),
+            component.nested_bundle_dir(Channel::Dev),
         ) {
             // The app itself is not nested; its two channels are kept apart
             // by living in different build directories.

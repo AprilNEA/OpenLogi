@@ -1,0 +1,15 @@
+# Owner: inject::macos::app_services — cached framework handles and symbol lookup.
+id: inject-private-symbol-owner
+language: rust
+severity: error
+message: Resolve injector SPI through macos::app_services so framework lifetime and lookup policy have one owner.
+files:
+  - crates/openlogi-inject/src/**/*.rs
+ignores:
+  - crates/openlogi-inject/src/inject/macos/app_services.rs
+rule:
+  any:
+    - pattern: dlopen($$$ARGS)
+    - pattern: dlsym($$$ARGS)
+    - pattern: $MODULE::dlopen($$$ARGS)
+    - pattern: $MODULE::dlsym($$$ARGS)

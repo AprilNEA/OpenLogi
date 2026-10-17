@@ -12,12 +12,14 @@
 
 use std::sync::Arc;
 
-use derive_builder::Builder;
 use futures::{FutureExt, pin_mut, select};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use openlogi_device_registry::receiver::{ReceiverProtocol, find_receiver};
 
-use super::{RECEIVER_DEVICE_INDEX, ReceiverError};
+use super::{
+    NotificationFlags, RECEIVER_DEVICE_INDEX, ReceiverError, read_notification_flags,
+    write_notification_flags,
+};
 use crate::{
     channel::{HidppChannel, MessageListenerGuard},
     emitter::EventEmitter,
@@ -143,37 +145,19 @@ impl Receiver {
         self.emitter.create_receiver()
     }
 
-    /// Queries the current information about what notifications are enabled.
-    pub async fn get_notification_state(&self) -> Result<NotificationState, ReceiverError> {
-        let response = self
-            .chan
-            .read_register(
-                RECEIVER_DEVICE_INDEX,
-                Register::Notifications.into(),
-                [0u8; 3],
-            )
-            .await?;
-
-        Ok(NotificationState {
-            wireless_notifications: (response[1] & 1) != 0,
-        })
+    /// Queries which notifications are enabled.
+    pub async fn get_notification_flags(&self) -> Result<NotificationFlags, ReceiverError> {
+        Ok(read_notification_flags(&self.chan).await?)
     }
 
-    /// Configures what notifications are enabled and thus reported by the
-    /// receiver.
-    pub async fn set_notification_state(
+    /// Configures which notifications are enabled. Edit the value from
+    /// [`Self::get_notification_flags`]: the write replaces every bit,
+    /// including ones other host software set.
+    pub async fn set_notification_flags(
         &self,
-        state: NotificationState,
+        flags: NotificationFlags,
     ) -> Result<(), ReceiverError> {
-        self.chan
-            .write_register(
-                RECEIVER_DEVICE_INDEX,
-                Register::Notifications.into(),
-                [0, u8::from(state.wireless_notifications), 0],
-            )
-            .await?;
-
-        Ok(())
+        Ok(write_notification_flags(&self.chan, flags).await?)
     }
 
     /// Counts the amount of devices currently paired to this receiver. The
@@ -195,8 +179,8 @@ impl Receiver {
     /// Triggers device arrival notifications for all devices currently
     /// connected to the receiver. This is useful for device enumeration.
     ///
-    /// Check [`Self::get_notification_state`] first to make sure that
-    /// [`NotificationState::wireless_notifications`] is enabled.
+    /// Check [`Self::get_notification_flags`] first to make sure that
+    /// [`NotificationFlags::WIRELESS`] is enabled.
     pub async fn trigger_device_arrival(&self) -> Result<(), ReceiverError> {
         self.chan
             .write_register(
@@ -213,8 +197,8 @@ impl Receiver {
     /// [`Self::trigger_device_arrival`] and collecting incoming
     /// [`Event::DeviceConnection`] events.
     ///
-    /// Check [`Self::get_notification_state`] first to make sure that
-    /// [`NotificationState::wireless_notifications`] is enabled.
+    /// Check [`Self::get_notification_flags`] first to make sure that
+    /// [`NotificationFlags::WIRELESS`] is enabled.
     pub async fn collect_paired_devices(&self) -> Result<Vec<DeviceConnection>, ReceiverError> {
         // The idea here is that, when triggering fake device arrival notifications, the
         // receiver will send the register write confirmation message only AFTER sending
@@ -274,14 +258,11 @@ impl Receiver {
     ) -> Result<DevicePairingInformation, ReceiverError> {
         let response = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [
-                    u8::from(InfoSubRegister::DevicePairingInformation) + (device_index & 0x0f),
-                    0x00,
-                    0x00,
-                ],
+                u8::from(InfoSubRegister::DevicePairingInformation) + (device_index & 0x0f),
+                [0x00, 0x00],
             )
             .await?;
 
@@ -304,14 +285,11 @@ impl Receiver {
 
         let response = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [
-                    u8::from(InfoSubRegister::DeviceCodename) + (device_index & 0x0f),
-                    0x01,
-                    0x00,
-                ],
+                u8::from(InfoSubRegister::DeviceCodename) + (device_index & 0x0f),
+                [0x01, 0x00],
             )
             .await?;
 
@@ -407,17 +385,6 @@ fn parse_codename(response: &[u8; 16]) -> Option<&str> {
     let end = 3usize.saturating_add(usize::from(response[2]));
     let raw = response.get(3..end.min(response.len()))?;
     str::from_utf8(raw).ok()
-}
-
-/// Indicates which notifications are enabled and thus sent by the receiver.
-///
-/// This information can be queried using [`Receiver::get_notification_state`].
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Builder)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
-pub struct NotificationState {
-    /// Whether the receiver sends device arrival/removal notifications.
-    pub wireless_notifications: bool,
 }
 
 /// Represents information about a paired device.

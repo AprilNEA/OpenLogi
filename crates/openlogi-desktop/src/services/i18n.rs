@@ -8,14 +8,14 @@
 //! change — `openlogi-ui`'s parity test enforces a key-for-key match. Crowdin
 //! improves non-English values over time and the workflow downloads only real
 //! translations (`skip_untranslated_strings`). Call sites use
-//! [`tr!`](crate::tr) / `rust_i18n::t!` with product-domain keys such as
+//! `tr!` (declared in `main.rs`) / `rust_i18n::t!` with product-domain keys such as
 //! `device.connected`. Missing keys render as the key, so catalogs must not lag.
 //!
 //! The current locale is a process-global atomic inside `rust_i18n`. Setting it
 //! re-localizes both our own call sites *and* gpui-component's built-in widget
 //! strings, since the framework reads the same global. Apply it once at startup
 //! via [`apply`] and on a live switch via
-//! [`AppState::set_language`](crate::state::AppState::set_language); each must be
+//! [`AppState::commit_language`](crate::state::AppState::commit_language); each must be
 //! followed by a window refresh so open views re-render with the new locale.
 //!
 //! Which catalog a BCP-47 code resolves to is decided in

@@ -1,0 +1,24 @@
+# Owner: openlogi_core::worker — the current-thread runtime OpenLogi's
+# dedicated worker threads run on (`runtime`), and the named thread that owns
+# one (`spawn`).
+id: core-worker-owner
+language: rust
+severity: error
+message: Worker runtimes come from openlogi_core::worker (runtime() for one you drive yourself, spawn(name, run) for a named thread that owns one); do not build one here.
+note: |
+  Eleven sites once built the same current-thread runtime by hand — the two
+  GPUI client loops, five agent watchers, three hardware writers, and the
+  takeover probe. The agent's main multi-thread runtime is a different
+  decision and stays where it is. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/**
+rule:
+  # However the builder is reached: fully qualified, through `tokio::runtime`,
+  # or after a `use`.
+  any:
+    - pattern: tokio::runtime::Builder::new_current_thread()
+    - pattern: runtime::Builder::new_current_thread()
+    - pattern: Builder::new_current_thread()
