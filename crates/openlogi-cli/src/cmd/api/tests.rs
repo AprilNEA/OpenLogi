@@ -14,7 +14,9 @@ use openlogi_ipc::{AgentRequest, AgentResponse, AgentStatus, ForegroundApps, Inv
 
 use super::*;
 
+mod easy_switch;
 mod persistence;
+mod report_rate;
 
 type Step = Box<dyn FnOnce(AgentRequest) -> AgentResponse + Send>;
 
@@ -56,6 +58,7 @@ fn snapshot() -> AgentSnapshot {
             current: None,
             recent: Vec::new(),
         },
+        lights: Vec::new(),
     }
 }
 

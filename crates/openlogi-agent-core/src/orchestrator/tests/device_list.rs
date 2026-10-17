@@ -23,6 +23,7 @@ fn raw_light_dev(key: &str) -> AgentDevice {
             ..openlogi_core::device::LightCapabilities::default()
         }),
         online: true,
+        settings_revision: 0,
     }
 }
 

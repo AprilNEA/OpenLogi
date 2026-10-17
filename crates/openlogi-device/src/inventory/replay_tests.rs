@@ -508,7 +508,7 @@ async fn headset_stale_reprobe_preserves_unavailable_link_state() {
             .get_mut(&key)
             .expect("the initial probe is cached")
             .probed_at = Instant::now()
-            .checked_sub(REFRESH_INTERVAL)
+            .checked_sub(REFRESH_INTERVAL + Duration::from_nanos(1))
             .expect("the refresh interval fits the monotonic clock");
         assert_eq!(
             headset_state(&mut enumerator).await,

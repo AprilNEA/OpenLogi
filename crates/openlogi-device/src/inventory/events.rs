@@ -19,12 +19,15 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use hidpp::channel::{HidppChannel, HidppMessage, MessageListenerGuard};
 use hidpp::feature::adc_measurement::AdcMeasurementFeature;
+use hidpp::feature::backlight::BacklightFeature;
 use hidpp::feature::battery_status::BatteryStatusFeature;
 use hidpp::feature::battery_voltage::BatteryVoltageFeature;
 use hidpp::feature::extended_dpi::ExtendedDpiFeature;
+use hidpp::feature::extended_report_rate::ExtendedReportRateFeature;
 use hidpp::feature::fn_inversion::{
     FnInversionMultiHostFeature, FnInversionWithDefaultStateFeature,
 };
+use hidpp::feature::multi_platform::PlatformChange;
 use hidpp::feature::unified_battery::BatteryEvent;
 use hidpp::feature::wireless_device_status::WirelessDeviceStatusEvent;
 use hidpp::protocol::{v10, v20};
@@ -61,13 +64,31 @@ pub enum HidppEventSource {
     /// A mouse's `ExtendedAdjustableDpi` (`0x2202`) feature reported its
     /// sensor DPI changing on the device, as a DPI button does.
     ExtendedDpi,
+    /// A keyboard's `MultiPlatform` (`0x4531`) feature reported its key
+    /// layout platform changing on the device, as a platform key combination
+    /// does.
+    MultiPlatform,
+    /// A mouse's `ExtendedAdjustableReportRate` (`0x8061`) feature reported
+    /// its report rate changing on the device.
+    ExtendedReportRate,
+    /// A keyboard's `Backlight` (`0x1982`) feature reported its backlight
+    /// changing on the device — the backlight keys, the ambient-light
+    /// sensor, or the battery.
+    Backlight,
 }
 
 impl HidppEventSource {
     /// Whether this source announces a change to a device setting a client
     /// shows, rather than to the device's presence or battery.
     const fn changes_settings(self) -> bool {
-        matches!(self, Self::FnInversion | Self::ExtendedDpi)
+        matches!(
+            self,
+            Self::FnInversion
+                | Self::ExtendedDpi
+                | Self::MultiPlatform
+                | Self::ExtendedReportRate
+                | Self::Backlight
+        )
     }
 }
 
@@ -161,7 +182,8 @@ pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventOb
 /// unified `0x1004`, legacy `0x1000`, voltage `0x1001` and `0x1F20` ADC
 /// measurement — broadcasts its changes, so each has an index here. So do the
 /// settings a user can change on the device itself: Fn lock (`0x40a2`,
-/// `0x40a3`) and extended DPI (`0x2202`).
+/// `0x40a3`), extended DPI (`0x2202`), the keyboard platform (`0x4531`), the
+/// extended report rate (`0x8061`) and the keyboard backlight (`0x1982`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct EventFeatureIndices {
     pub(super) wireless_status: Option<u8>,
@@ -172,6 +194,9 @@ pub(super) struct EventFeatureIndices {
     pub(super) fn_inversion: Option<u8>,
     pub(super) fn_inversion_multi_host: Option<u8>,
     pub(super) extended_dpi: Option<u8>,
+    pub(super) multi_platform: Option<u8>,
+    pub(super) extended_report_rate: Option<u8>,
+    pub(super) backlight: Option<u8>,
 }
 
 impl EventFeatureIndices {
@@ -190,6 +215,9 @@ impl EventFeatureIndices {
                 0x40a2 => indices.fn_inversion = Some(index),
                 0x40a3 => indices.fn_inversion_multi_host = Some(index),
                 0x2202 => indices.extended_dpi = Some(index),
+                0x4531 => indices.multi_platform = Some(index),
+                0x8061 => indices.extended_report_rate = Some(index),
+                0x1982 => indices.backlight = Some(index),
                 _ => {}
             }
         }
@@ -246,6 +274,23 @@ impl EventFeatureIndices {
             && ExtendedDpiFeature::is_parameters_broadcast(function_id)
         {
             return Some(HidppEventSource::ExtendedDpi);
+        }
+        // Logi Options+ takes every unsolicited `0x4531` report for a platform
+        // change, whatever its function.
+        if self.multi_platform == Some(header.feature_index)
+            && PlatformChange::decode(&payload).is_some()
+        {
+            return Some(HidppEventSource::MultiPlatform);
+        }
+        if self.extended_report_rate == Some(header.feature_index)
+            && ExtendedReportRateFeature::is_rate_broadcast(function_id)
+        {
+            return Some(HidppEventSource::ExtendedReportRate);
+        }
+        if self.backlight == Some(header.feature_index)
+            && BacklightFeature::is_info_broadcast(function_id)
+        {
+            return Some(HidppEventSource::Backlight);
         }
         None
     }
@@ -452,6 +497,9 @@ mod tests {
                 fn_inversion: None,
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
+                multi_platform: None,
+                extended_report_rate: None,
+                backlight: None,
             }
         );
     }
@@ -491,6 +539,9 @@ mod tests {
                 fn_inversion: None,
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
+                multi_platform: None,
+                extended_report_rate: None,
+                backlight: None,
             },
         });
         state.receiver_snapshot_depth.store(1, Ordering::Release);
@@ -526,6 +577,9 @@ mod tests {
                 fn_inversion: None,
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
+                multi_platform: None,
+                extended_report_rate: None,
+                backlight: None,
             },
         });
 
@@ -590,6 +644,9 @@ mod tests {
                 fn_inversion: None,
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
+                multi_platform: None,
+                extended_report_rate: None,
+                backlight: None,
             },
         });
         let event = |function_id: u8, software_id: u8, bytes: [u8; 3]| {
@@ -802,6 +859,121 @@ mod tests {
         assert_eq!(handle.settings_revision(2), 0);
         assert_eq!(state.decode(long(3, 5, 0, 0), false), None);
         assert_eq!(handle.settings_revision(3), 0);
+    }
+
+    #[test]
+    fn platform_change_reports_bump_the_revision() {
+        let keyboard = EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x40a3, 0x4531]);
+        assert_eq!(keyboard.multi_platform, Some(4));
+
+        let state = state(Some(ReceiverProtocol::Bolt));
+        let handle = EventSubscriptionHandle {
+            state: Arc::clone(&state),
+        };
+        handle.register_device(1, keyboard);
+        let report = |function_id: u8, software_id: u8| {
+            v20::Message::Short(
+                v20::MessageHeader {
+                    device_index: 1,
+                    feature_index: 4,
+                    function_id: U4::from_lo(function_id),
+                    software_id: U4::from_lo(software_id),
+                },
+                [1, 2, 2],
+            )
+            .into()
+        };
+
+        // Options+ takes any unsolicited 0x4531 report for a platform change.
+        for (function_id, revision) in [(0, 1), (1, 2)] {
+            assert_eq!(
+                state.decode(report(function_id, 0), false),
+                Some(HidppEventSource::MultiPlatform)
+            );
+            assert_eq!(handle.settings_revision(1), revision);
+        }
+        // A reply to our own request is not.
+        assert_eq!(state.decode(report(2, 0), true), None);
+        assert_eq!(state.decode(report(2, 0xd), false), None);
+        assert_eq!(handle.settings_revision(1), 2);
+    }
+
+    #[test]
+    fn backlight_info_broadcasts_bump_the_revision() {
+        // An MX Keys S-shaped table: Fn lock, backlight, multi-platform.
+        let keyboard =
+            EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x40a3, 0x1982, 0x4531]);
+        assert_eq!(keyboard.backlight, Some(4));
+
+        let state = state(Some(ReceiverProtocol::Bolt));
+        let handle = EventSubscriptionHandle {
+            state: Arc::clone(&state),
+        };
+        handle.register_device(1, keyboard);
+        let report = |function_id: u8, software_id: u8| {
+            v20::Message::Long(
+                v20::MessageHeader {
+                    device_index: 1,
+                    feature_index: 4,
+                    function_id: U4::from_lo(function_id),
+                    software_id: U4::from_lo(software_id),
+                },
+                [8, 4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            )
+            .into()
+        };
+
+        // Options+ takes exactly event 0, `backlightInfoEvent`.
+        assert_eq!(
+            state.decode(report(0, 0), false),
+            Some(HidppEventSource::Backlight)
+        );
+        assert_eq!(handle.settings_revision(1), 1);
+        assert_eq!(state.decode(report(1, 0), false), None);
+        // A reply to our own `getBacklightConfig` is not one.
+        assert_eq!(state.decode(report(0, 0), true), None);
+        assert_eq!(state.decode(report(0, 0xd), false), None);
+        assert_eq!(handle.settings_revision(1), 1);
+    }
+
+    #[test]
+    fn report_rate_broadcasts_bump_the_revision() {
+        // A G502 X-shaped table: 0x8061 and, as the newer mice keep it, 0x8060.
+        let mouse =
+            EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x2202, 0x8060, 0x8061]);
+        assert_eq!(mouse.extended_report_rate, Some(5));
+
+        let state = state(Some(ReceiverProtocol::Bolt));
+        let handle = EventSubscriptionHandle {
+            state: Arc::clone(&state),
+        };
+        handle.register_device(1, mouse);
+        let report = |feature_index: u8, function_id: u8, software_id: u8| {
+            v20::Message::Short(
+                v20::MessageHeader {
+                    device_index: 1,
+                    feature_index,
+                    function_id: U4::from_lo(function_id),
+                    software_id: U4::from_lo(software_id),
+                },
+                [3, 0, 0],
+            )
+            .into()
+        };
+
+        // Options+ takes exactly function 0 for the rate broadcast.
+        assert_eq!(
+            state.decode(report(5, 0, 0), false),
+            Some(HidppEventSource::ExtendedReportRate)
+        );
+        assert_eq!(handle.settings_revision(1), 1);
+        assert_eq!(state.decode(report(5, 2, 0), false), None);
+        // A reply to our own request is not one.
+        assert_eq!(state.decode(report(5, 0, 0), true), None);
+        assert_eq!(state.decode(report(5, 0, 0xd), false), None);
+        // 0x8060 has no broadcast.
+        assert_eq!(state.decode(report(4, 0, 0), false), None);
+        assert_eq!(handle.settings_revision(1), 1);
     }
 
     #[test]

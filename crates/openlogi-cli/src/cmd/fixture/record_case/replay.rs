@@ -371,6 +371,59 @@ mod tests {
             .expect("control-table cassette consumed");
     }
 
+    /// The recorded mouse is one Logi Options+ offers its virtual thumb wheel
+    /// on, through Back and Forward: exactly the controls whose additional
+    /// flags (`0x0d`) carry raw wheel, which the middle button's (`0x05`) do
+    /// not.
+    #[tokio::test]
+    async fn mx_anywhere_3s_thumb_buttons_report_raw_wheel_and_the_middle_button_does_not() {
+        let Some((backend, route)) = mx_anywhere_3s_replay("reprogrammable-controls") else {
+            return;
+        };
+
+        let observed = FixtureOperation::ReprogrammableControls
+            .observe(&backend, &route)
+            .await;
+        let SemanticObservation::ReprogrammableControls(controls) = observed else {
+            panic!("expected a control-table observation, got {observed:?}");
+        };
+        let controls = controls.expect("recorded control table is readable");
+
+        let pointer = CidFlags::MOUSE
+            | CidFlags::REPROGRAMMABLE
+            | CidFlags::DIVERTABLE
+            | CidFlags::RAW_XY
+            | CidFlags::ANALYTICS_KEY_EVENTS;
+        for expected in [
+            ReprogControlEntry {
+                cid: 0x0052,
+                task_id: 0x003a,
+                flags: pointer,
+            },
+            ReprogControlEntry {
+                cid: 0x0053,
+                task_id: 0x003c,
+                flags: pointer | CidFlags::RAW_WHEEL,
+            },
+            ReprogControlEntry {
+                cid: 0x0056,
+                task_id: 0x003e,
+                flags: pointer | CidFlags::RAW_WHEEL,
+            },
+        ] {
+            assert_eq!(
+                controls
+                    .iter()
+                    .find(|control| control.cid == expected.cid)
+                    .copied(),
+                Some(expected)
+            );
+        }
+        backend
+            .require_complete()
+            .expect("control-table cassette consumed");
+    }
+
     #[tokio::test]
     async fn mx_master_3s_smartshift_read_uses_legacy_feature_without_tunable_torque() {
         let Some((backend, route)) = mx_master_3s_replay("smartshift-status") else {

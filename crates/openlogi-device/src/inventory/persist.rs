@@ -40,7 +40,15 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v6 records whether a `0x1004` battery reports a percentage.
 /// v7 adds the Fn-inversion `0x40a2`/`0x40a3` and extended-DPI `0x2202`
 /// event indexes.
-const SCHEMA_VERSION: u32 = 7;
+/// v8 adds the `0x4531` multi-platform event index and records whether the
+/// keyboard lets software set its platform (`Capabilities::os_layout`).
+/// v9 adds the extended report-rate `0x8061` event index and the
+/// `Capabilities::report_rate` flag.
+/// v10 adds the `0x1982` backlight event index.
+/// v11 adds the `Capabilities::easy_switch` flag (`0x1815` host slots).
+/// v12 adds the `Capabilities::virtual_thumbwheel` flag (Back/Forward
+/// raw-wheel reporting).
+const SCHEMA_VERSION: u32 = 12;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -225,6 +233,19 @@ mod tests {
             model_ids: [0xb042, 0, 0],
             extended_model_id: 0,
         };
+        let events = EventFeatureIndices {
+            wireless_status: Some(7),
+            unified_battery: Some(9),
+            battery_status: Some(12),
+            battery_voltage: Some(13),
+            adc_measurement: Some(11),
+            fn_inversion: None,
+            fn_inversion_multi_host: None,
+            extended_dpi: None,
+            multi_platform: Some(14),
+            extended_report_rate: Some(15),
+            backlight: Some(16),
+        };
         let mut cache = HashMap::new();
         cache.insert(
             CacheKey::Bolt {
@@ -245,16 +266,7 @@ mod tests {
                     index: 9,
                     state_of_charge: true,
                 }),
-                events: EventFeatureIndices {
-                    wireless_status: Some(7),
-                    unified_battery: Some(9),
-                    battery_status: Some(12),
-                    battery_voltage: Some(13),
-                    adc_measurement: Some(11),
-                    fn_inversion: None,
-                    fn_inversion_multi_host: None,
-                    extended_dpi: None,
-                },
+                events,
                 probed_at: Instant::now(),
             },
         );
@@ -290,17 +302,7 @@ mod tests {
             "the battery *feature index* is immutable and kept"
         );
         assert_eq!(
-            bolt.events,
-            EventFeatureIndices {
-                wireless_status: Some(7),
-                unified_battery: Some(9),
-                battery_status: Some(12),
-                battery_voltage: Some(13),
-                adc_measurement: Some(11),
-                fn_inversion: None,
-                fn_inversion_multi_host: None,
-                extended_dpi: None,
-            },
+            bolt.events, events,
             "event feature indexes are immutable and kept"
         );
         assert!(
