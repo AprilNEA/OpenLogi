@@ -26,6 +26,7 @@ use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    WheelCapabilities,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -132,6 +133,11 @@ pub async fn set_scroll_wheel_mode(
     inverted: bool,
 ) -> Result<ScrollWheelMode, WriteError> {
     device::set_scroll_wheel_mode(&*native_backend(), route, resolution, inverted).await
+}
+
+/// Read the static HiRes wheel capabilities of the device `route` reaches.
+pub async fn get_wheel_capabilities(route: &DeviceRoute) -> Result<WheelCapabilities, WriteError> {
+    device::get_wheel_capabilities(&*native_backend(), route).await
 }
 
 /// Read the Fn-lock state of the keyboard `route` reaches.

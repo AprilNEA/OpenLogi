@@ -56,7 +56,9 @@ optional physical device key.
   vertical wheel output stays a plain wheel. A mouse whose `smooth_wheel` is on
   eases its main wheel either way
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
-  continuous trackpad input remains native
+  continuous trackpad input remains native. Automatically normalized against
+  a HiRes-wheel device's `scroll_resolution` (Low/Standard vs. High), so the
+  same value feels consistent after switching modes
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
 - `mouse_profile_target`: `pointer` (default, including existing configs that
   omit this preference) or `focused`. Mouse button profiles follow the window
