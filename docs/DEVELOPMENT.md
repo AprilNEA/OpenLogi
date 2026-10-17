@@ -5,7 +5,7 @@ build instructions, see the [README](../README.md).
 
 ## Toolchain
 
-- Stable Rust (Edition 2024, MSRV 1.98 — the floor tracks current stable)
+- Stable Rust (Edition 2024, MSRV 1.99 — the floor tracks current stable)
 - macOS: Xcode 26+ with the optional **Metal Toolchain** component. The Metal
   Toolchain is what GPUI's `gpui_macos` build script compiles shaders with; the
   version floor is `actool`, which packaging uses to compile the app icon from

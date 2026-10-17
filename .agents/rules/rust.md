@@ -6,7 +6,7 @@ paths:
 
 # Rust standards
 
-Edition 2024, MSRV = current stable (1.98). OpenLogi ships as an app and no crate
+Edition 2024, MSRV = current stable (1.99). OpenLogi ships as an app and no crate
 here has an external reverse dependency, so the floor exists only to give
 `cargo install` users a clear error — it tracks stable rather than trailing it.
 Reaching for a newly stabilized API is fine: raise `rust-version` and the `msrv`
