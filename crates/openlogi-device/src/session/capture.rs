@@ -129,14 +129,15 @@ pub(super) trait ArmedCapture {
     fn reset_input_state(&self) {}
 
     /// Resolve once the owner wants this live session to capture different
-    /// controls. Never resolves for a capture that cannot be reconfigured.
+    /// controls, and again while that request stays unapplied (device I/O
+    /// was closed). Never resolves for a capture that cannot be reconfigured.
     async fn reconfigure_requested(&mut self) {
-        std::future::pending().await
+        std::future::pending::<()>().await;
     }
 
-    /// Apply the latest request on the session's own channel. `false` means
-    /// firmware may not match what reports are decoded for, so the session
-    /// stops and its successor arms from scratch.
+    /// Apply the latest request on the session's own channel, logging any
+    /// failure. `false` means firmware may not match what reports are decoded
+    /// for, so the session stops and its successor arms from scratch.
     async fn reconfigure(&mut self, _shared: &SharedChannel) -> bool {
         true
     }
@@ -361,11 +362,8 @@ async fn monitor<A: ArmedCapture>(
                     }
                 };
             }
-            () = context.armed.reconfigure_requested() => {
-                // With device I/O closed, the next turn waits for it to reopen
-                // and the still-pending request resolves again.
-                if device_io.allows_io() && !context.armed.reconfigure(context.shared).await {
-                    warn!(index = context.device_index, capture = A::NAME, "capture reload failed — restarting session");
+            () = context.armed.reconfigure_requested(), if device_io.allows_io() => {
+                if !context.armed.reconfigure(context.shared).await {
                     return stop_for_current_publication(context.registry, context.shared);
                 }
             }
@@ -401,20 +399,7 @@ async fn monitor<A: ArmedCapture>(
                 {
                     continue;
                 }
-                let outcome = match context.root.ping(0x5a).await {
-                    Err(v20::Hidpp20Error::Channel(
-                        hidpp::channel::ChannelError::Timeout
-                        | hidpp::channel::ChannelError::NoResponse,
-                    )) => PingOutcome::AllSilent,
-                    // A pong, feature error, or unsupported response all prove
-                    // that this channel still receives device replies.
-                    Ok(_)
-                    | Err(
-                        v20::Hidpp20Error::Feature(_)
-                        | v20::Hidpp20Error::UnsupportedResponse,
-                    ) => PingOutcome::Delivered,
-                    Err(_) => PingOutcome::ChannelFailed,
-                };
+                let outcome = PingOutcome::of(&context.root.ping(0x5a).await);
                 if watchdog.liveness.finish_ping(
                     Instant::now(),
                     watchdog.activity.seq(),

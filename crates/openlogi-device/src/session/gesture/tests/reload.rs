@@ -86,7 +86,7 @@ fn reporting_traffic(handle: &crate::replay::ReplayChannelHandle, from: usize) -
 
 fn diverted_buttons(cids: &[u16]) -> v20::Message {
     let mut payload = [0; 16];
-    for (slot, cid) in payload.chunks_exact_mut(2).zip(cids) {
+    for (slot, cid) in payload.as_chunks_mut::<2>().0.iter_mut().zip(cids) {
         slot.copy_from_slice(&cid.to_be_bytes());
     }
     v20::Message::Long(
@@ -160,7 +160,7 @@ async fn a_new_spec_reroutes_the_live_report_handler() {
     // The press began under the old routing; the reload forgets it rather
     // than reporting a release for a control that is now a gesture source.
     handler(&diverted_buttons(&[]));
-    assert!(inputs.try_recv().is_err());
+    inputs.try_recv().unwrap_err();
     handler(&diverted_buttons(&[CID]));
     handler(&diverted_buttons(&[]));
     let emitted: Vec<_> = std::iter::from_fn(|| inputs.try_recv().ok()).collect();

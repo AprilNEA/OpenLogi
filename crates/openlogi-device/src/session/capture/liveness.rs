@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use hidpp::protocol::v20;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
@@ -65,6 +66,23 @@ pub(super) enum PingOutcome {
     AllSilent,
     /// The channel failed before delivery could be established.
     ChannelFailed,
+}
+
+impl PingOutcome {
+    /// Classify the result of one root-feature ping.
+    pub(super) fn of<T>(result: &Result<T, v20::Hidpp20Error>) -> Self {
+        match result {
+            Err(v20::Hidpp20Error::Channel(
+                hidpp::channel::ChannelError::Timeout | hidpp::channel::ChannelError::NoResponse,
+            )) => Self::AllSilent,
+            // A pong, feature error, or unsupported response all prove
+            // that this channel still receives device replies.
+            Ok(_) | Err(v20::Hidpp20Error::Feature(_) | v20::Hidpp20Error::UnsupportedResponse) => {
+                Self::Delivered
+            }
+            Err(_) => Self::ChannelFailed,
+        }
+    }
 }
 
 /// What capture should do after accounting for a completed probe.

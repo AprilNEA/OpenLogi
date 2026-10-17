@@ -373,11 +373,6 @@ pub(super) async fn arm_controls_into(
         && let Some(info) = device.root().get_feature(HiResWheelFeature::ID).await?
     {
         arm_main_wheel(chan, slot, info.index, requested, armed).await?;
-        // A fresh divert rewrites the mode a live session armed before, so
-        // the wheel's earlier ownership passes to it instead of being handed back.
-        if armed.main_wheel.is_some() {
-            armed.superseded.main_wheel = None;
-        }
     }
     Ok(())
 }
@@ -407,6 +402,9 @@ async fn arm_main_wheel(
     // Same ownership rule as the thumb wheel: recorded before the write,
     // which a transport error leaves uncertain.
     let wheel = armed.main_wheel.insert(wheel);
+    // This divert rewrites any mode a live session armed before, so that
+    // earlier ownership passes to it instead of being handed back.
+    armed.superseded.main_wheel = None;
     match wheel.divert().await {
         Ok(()) => Ok(()),
         Err(error @ Hidpp20Error::Channel(_)) => Err(error.into()),
