@@ -42,17 +42,20 @@ state, and writes a value only when it differs from the one it read.
   it, and publishes it so the settings app can save it. A save of that control
   or a write from OpenLogi replaces it; the power of a camera-linked light is
   a manual choice until the next camera transition instead. The desktop app
-  saves each published change, except on a light with one of its own writes
-  in flight. The agent takes the controls a write sets before it writes and
-  gives them back only if the write fails, so a state published during the
-  write never offers the old change, and the app cannot save it over the
-  value the user just chose. Before it reloads a save, the app tells the agent
-  which change it saved for which light (`acknowledge_light_changes`). A save
-  of an acknowledged value leaves a newer change on the light in place, so a
-  press that reaches the agent after the app saved the previous one is not
-  written over. A save the app did not acknowledge, such as a hand edit of
-  `config.toml`, replaces the change even when it matches an earlier report.
-  An acknowledgement lasts for one reload.
+  saves each published change, except on a light with one of its own writes in
+  flight. The agent takes the controls a write sets before it writes and gives
+  them back only if the write fails, so a state published during the write
+  never offers the old change, and the app cannot save it over the value the
+  user just chose. The app reloads its own saves with `reload_saved_config`.
+  It writes each control it changes before it saves it, and the write takes
+  the change, so a saved value that differs from the one before is the app's
+  copy of an earlier report. That save leaves a newer change on the light in
+  place, so a press that reaches the agent after the app saved the previous
+  one is not written over. The save names the controls the user set without a
+  write, as on an offline light (`ChosenLight`): those, and the values the
+  save removed, replace the change. A plain `reload_config`, after a hand edit
+  of `config.toml`, a CLI edit or at startup, replaces the change wherever the
+  saved value differs, even when it matches an earlier report.
 - **OpenLogi's own writes are not changes on the light.** The light echoes
   every setter as a notification. A notification that matches the value the
   agent just wrote is the echo. A brightness the light's effective maximum

@@ -106,9 +106,10 @@ pub use succession::Identity;
 ///      the main wheel as a virtual thumb wheel; `AgentSnapshot::lights`
 ///      appended — what each standalone light reached over HID++ `0x1990`
 ///      reads back, and the settings changed on the light itself;
-///      `Agent::acknowledge_light_changes` appended — the settings app says
-///      which values it saved because the light reported them, so the reload
-///      of that save keeps a newer change on the light.
+///      `Agent::reload_saved_config` appended — the reload after a save of
+///      the settings app, which keeps a change made on a light unless the
+///      save holds its value, removes the control's value, or the user chose
+///      that control.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -205,14 +206,20 @@ pub struct ObservedLight {
     pub changed_on_light: ChangedOnLight,
 }
 
-/// Settings changed on a standalone light that the GUI saved as its settings,
-/// as [`Agent::acknowledge_light_changes`] tells the agent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcknowledgedLightChange {
-    /// The route the light was reported on, as in [`ObservedLight::route`].
-    pub route: DeviceRoute,
-    /// The values the GUI saved, from [`ObservedLight::changed_on_light`].
-    pub changed: ChangedOnLight,
+/// The controls of a standalone light that the user set in the GUI without
+/// a write to the light, as [`Agent::reload_saved_config`] tells the agent.
+/// A change made on the light to one of them gives way to the saved value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChosenLight {
+    /// The config key of the light, as `[lights.<key>]` in `config.toml`.
+    /// It names the light whether it is online or not.
+    pub device: String,
+    /// The user set the power.
+    pub power: bool,
+    /// The user set the brightness.
+    pub brightness: bool,
+    /// The user set the colour temperature.
+    pub temperature: bool,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -526,7 +533,9 @@ pub trait Agent {
     /// window is open).
     async fn inventory() -> Vec<DeviceInventory>;
     /// Re-read `config.toml` and rebuild the live binding/DPI maps. Called by
-    /// the GUI after it saves a config change.
+    /// the GUI at startup and by the CLI after it edits the file: a saved
+    /// light value that differs from the one the agent had replaces a change
+    /// made on the light, as a hand edit does.
     async fn reload_config() -> Result<(), ConfigReloadError>;
     /// Apply a DPI value to `route` now (slider preview / commit).
     async fn set_dpi(route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError>;
@@ -690,11 +699,11 @@ pub trait Agent {
         slot: u8,
         name: String,
     ) -> Result<EasySwitchHosts, WriteError>;
-    /// Tell the agent which settings changed on a light the GUI saved
-    /// because the agent reported them, ahead of the
-    /// [`Agent::reload_config`] that loads the save. That reload keeps a
-    /// newer change on the light over a value acknowledged here; any other
-    /// newly saved value still replaces the change. An acknowledgement lasts
-    /// until the next reload.
-    async fn acknowledge_light_changes(acknowledged: Vec<AcknowledgedLightChange>);
+    /// Re-read `config.toml` after the GUI saved it, as
+    /// [`Agent::reload_config`] does, except for changes made on lights. The
+    /// GUI writes a light it changes, and that write already takes the change
+    /// on the light. So this reload keeps such a change unless the save holds
+    /// its value, the save removes the control's value, or `chosen` names the
+    /// control: the user set it while the light could not be written.
+    async fn reload_saved_config(chosen: Vec<ChosenLight>) -> Result<(), ConfigReloadError>;
 }

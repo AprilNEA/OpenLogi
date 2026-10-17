@@ -7,7 +7,7 @@ use crate::watchers::light::WatchedLight;
 use openlogi_core::device::{ChangedOnLight, LightState, LightValueRange, LightValueUnit};
 use openlogi_core::hid::WriteError;
 use openlogi_hid::{LITRA_GLOW_PRODUCT_ID, LightChange, LightCommand, LightControls, LitraModel};
-use openlogi_ipc::{AcknowledgedLightChange, ObservedLight};
+use openlogi_ipc::{ChosenLight, ObservedLight};
 use tokio::sync::Mutex;
 
 const KEY: &str = "raw:046d:c900:ff43:0202:serial:glow";
@@ -593,29 +593,31 @@ fn writes_brightness(percent: u8) -> Vec<LightWrite> {
     }]
 }
 
-/// The GUI says it saved `changed` for the Glow.
-fn acknowledge(orch: &mut Orchestrator, changed: ChangedOnLight) {
-    orch.acknowledge_light_changes(&[AcknowledgedLightChange {
-        route: route(),
-        changed,
-    }]);
-}
-
-fn brightness(percent: u8) -> ChangedOnLight {
-    ChangedOnLight {
-        brightness_percent: Some(percent),
-        ..ChangedOnLight::default()
+/// The controls of the Glow the user set in the GUI without a write.
+fn chose(power: bool, brightness: bool, temperature: bool) -> ChosenLight {
+    ChosenLight {
+        device: KEY.to_owned(),
+        power,
+        brightness,
+        temperature,
     }
 }
 
+fn writes(light: LightSettings) -> Vec<LightWrite> {
+    vec![LightWrite {
+        route: route(),
+        light,
+        capabilities: capabilities(),
+    }]
+}
+
 #[test]
-fn an_acknowledged_earlier_report_keeps_the_newer_change_on_the_light() {
+fn a_gui_save_of_an_earlier_report_keeps_the_newer_change_on_the_light() {
     let mut orch = with_glow(config_with(settings(true, 80, 4000)));
     pressed_to_50_then_60(&mut orch);
     // The GUI saves the 50 % it was told before the press to 60 % reached it.
-    acknowledge(&mut orch, brightness(50));
     assert_eq!(
-        orch.replace_config(config_with(settings(true, 50, 4000))),
+        orch.replace_saved_config(config_with(settings(true, 50, 4000)), &[]),
         Vec::new()
     );
     assert_eq!(brightness_changed_on_light(&orch), Some(60));
@@ -624,16 +626,34 @@ fn an_acknowledged_earlier_report_keeps_the_newer_change_on_the_light() {
         Some(settings(true, 60, 4000))
     );
     // Its save of 60 % then adopts the newer press.
-    acknowledge(&mut orch, brightness(60));
     assert_eq!(
-        orch.replace_config(config_with(settings(true, 60, 4000))),
+        orch.replace_saved_config(config_with(settings(true, 60, 4000)), &[]),
         Vec::new()
     );
     assert!(orch.lights_changed_on_light.is_empty());
 }
 
 #[test]
-fn a_save_of_an_earlier_report_the_gui_did_not_acknowledge_replaces_the_change() {
+fn a_gui_save_keeps_the_newer_change_on_a_light_that_went_offline() {
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    pressed_to_50_then_60(&mut orch);
+    orch.devices[0].online = false;
+    // The GUI saves the 50 % it was told before the light went offline. An
+    // offline light gets no write, so the reload writes nothing.
+    orch.reload_saved_config(config_with(settings(true, 50, 4000)), &[]);
+    assert_eq!(
+        brightness_changed_on_light(&orch),
+        Some(60),
+        "the reconnect writes the newer press back"
+    );
+    assert_eq!(
+        orch.effective_light_settings(KEY),
+        Some(settings(true, 60, 4000))
+    );
+}
+
+#[test]
+fn a_loaded_file_with_an_earlier_report_replaces_the_change() {
     // A hand edit of config.toml that happens to match an earlier press.
     let mut orch = with_glow(config_with(settings(true, 80, 4000)));
     pressed_to_50_then_60(&mut orch);
@@ -645,84 +665,67 @@ fn a_save_of_an_earlier_report_the_gui_did_not_acknowledge_replaces_the_change()
 }
 
 #[test]
-fn an_acknowledgement_lasts_for_one_reload() {
+fn a_control_chosen_in_a_gui_save_replaces_the_change() {
     let mut orch = with_glow(config_with(settings(true, 80, 4000)));
     pressed_to_50_then_60(&mut orch);
-    acknowledge(&mut orch, brightness(50));
-    // A reload that saved nothing for the light still uses it up.
     assert_eq!(
-        orch.replace_config(config_with(settings(true, 80, 4000))),
-        Vec::new()
-    );
-    assert!(orch.light_acknowledgements.is_empty());
-    assert_eq!(brightness_changed_on_light(&orch), Some(60));
-    assert_eq!(
-        orch.replace_config(config_with(settings(true, 50, 4000))),
-        writes_brightness(50)
-    );
-    assert_eq!(brightness_changed_on_light(&orch), None);
-}
-
-#[test]
-fn an_acknowledgement_does_not_keep_a_change_over_another_value() {
-    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
-    pressed_to_50_then_60(&mut orch);
-    acknowledge(&mut orch, brightness(50));
-    assert_eq!(
-        orch.replace_config(config_with(settings(true, 70, 4000))),
+        orch.replace_saved_config(
+            config_with(settings(true, 70, 4000)),
+            &[chose(false, true, false)]
+        ),
         writes_brightness(70)
     );
     assert_eq!(brightness_changed_on_light(&orch), None);
 }
 
 #[test]
-fn the_acknowledgements_of_a_light_add_up_by_control() {
+fn a_control_chosen_in_a_gui_save_replaces_only_its_own_change() {
     let mut orch = with_glow(config_with(settings(true, 80, 4000)));
-    acknowledge(&mut orch, brightness(50));
-    acknowledge(
-        &mut orch,
-        ChangedOnLight {
-            enabled: Some(false),
-            temperature_kelvin: Some(3000),
-            ..ChangedOnLight::default()
-        },
-    );
-    acknowledge(&mut orch, brightness(60));
+    orch.light_changed(&route(), change(state(false, 135, 3000), true, true, true));
     assert_eq!(
-        orch.light_acknowledgements.get(KEY).copied(),
+        orch.replace_saved_config(
+            config_with(settings(true, 70, 3500)),
+            &[chose(false, true, false)]
+        ),
+        writes(settings(false, 70, 3000))
+    );
+    assert_eq!(
+        orch.lights_changed_on_light.get(KEY).copied(),
         Some(ChangedOnLight {
             enabled: Some(false),
-            brightness_percent: Some(60),
+            brightness_percent: None,
             temperature_kelvin: Some(3000),
         })
     );
 }
 
 #[test]
-fn an_acknowledgement_on_a_route_no_online_light_has_is_ignored() {
+fn a_control_chosen_for_another_light_keeps_the_change() {
     let mut orch = with_glow(config_with(settings(true, 80, 4000)));
-    orch.acknowledge_light_changes(&[AcknowledgedLightChange {
-        route: glow_route("serial:other"),
-        changed: brightness(50),
-    }]);
-    assert!(orch.light_acknowledgements.is_empty());
+    pressed_to_50_then_60(&mut orch);
+    let other = ChosenLight {
+        device: "raw:046d:c900:ff43:0202:serial:other".to_owned(),
+        ..chose(true, true, true)
+    };
+    assert_eq!(
+        orch.replace_saved_config(config_with(settings(true, 70, 4000)), &[other]),
+        Vec::new()
+    );
+    assert_eq!(brightness_changed_on_light(&orch), Some(60));
+}
+
+/// Power off at 3000 K on the Glow, then on at 3500 K.
+fn switched_and_warmed_twice(orch: &mut Orchestrator) {
+    orch.light_changed(&route(), change(state(false, 135, 3000), true, false, true));
+    orch.light_changed(&route(), change(state(true, 135, 3500), true, false, true));
 }
 
 #[test]
-fn an_acknowledged_earlier_power_and_temperature_keep_the_newer_change() {
+fn a_gui_save_of_an_earlier_power_and_temperature_keeps_the_newer_change() {
     let mut orch = with_glow(config_with(settings(true, 80, 4000)));
-    orch.light_changed(&route(), change(state(false, 135, 3000), true, false, true));
-    orch.light_changed(&route(), change(state(true, 135, 3500), true, false, true));
-    acknowledge(
-        &mut orch,
-        ChangedOnLight {
-            enabled: Some(false),
-            temperature_kelvin: Some(3000),
-            ..ChangedOnLight::default()
-        },
-    );
+    switched_and_warmed_twice(&mut orch);
     assert_eq!(
-        orch.replace_config(config_with(settings(false, 80, 3000))),
+        orch.replace_saved_config(config_with(settings(false, 80, 3000)), &[]),
         Vec::new()
     );
     assert_eq!(
@@ -736,9 +739,33 @@ fn an_acknowledged_earlier_power_and_temperature_keep_the_newer_change() {
 }
 
 #[test]
+fn a_chosen_power_and_temperature_replace_their_changes() {
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    switched_and_warmed_twice(&mut orch);
+    assert_eq!(
+        orch.replace_saved_config(
+            config_with(settings(false, 80, 3000)),
+            &[chose(true, false, true)]
+        ),
+        writes(settings(false, 80, 3000))
+    );
+    assert!(orch.lights_changed_on_light.is_empty());
+}
+
+#[test]
+fn a_gui_save_that_removes_a_control_drops_its_change_on_the_light() {
+    // A copy of a report always holds a value, so a removed one was the
+    // user's choice, as when the GUI resets the light.
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    orch.light_changed(&route(), change(state(false, 135, 3500), true, true, true));
+    orch.replace_saved_config(Config::default(), &[]);
+    assert_eq!(orch.lights_changed_on_light.get(KEY), None);
+}
+
+#[test]
 fn a_save_that_removes_a_control_drops_its_change_on_the_light() {
-    // An empty value is not an acknowledgement: no acknowledgement and no
-    // saved value must not count as the GUI saving an earlier report.
+    // A hand edit that removes the value: the file no longer holds the
+    // value the change stood in for.
     let mut orch = with_glow(config_with(settings(true, 80, 4000)));
     orch.light_changed(&route(), change(state(true, 135, 3500), false, false, true));
     orch.replace_config(config_with(LightSettings {
@@ -746,4 +773,15 @@ fn a_save_that_removes_a_control_drops_its_change_on_the_light() {
         ..settings(true, 80, 4000)
     }));
     assert_eq!(orch.lights_changed_on_light.get(KEY), None);
+}
+
+#[test]
+fn a_gui_save_of_other_settings_keeps_the_change_on_a_light_never_saved() {
+    // No saved value before or after: nothing was removed.
+    let mut orch = with_glow(Config::default());
+    orch.light_changed(&route(), change(state(false, 135, 3500), true, true, true));
+    let changed = orch.lights_changed_on_light.get(KEY).copied();
+    assert!(changed.is_some());
+    orch.replace_saved_config(Config::default(), &[]);
+    assert_eq!(orch.lights_changed_on_light.get(KEY).copied(), changed);
 }

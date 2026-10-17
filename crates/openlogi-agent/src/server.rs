@@ -24,8 +24,8 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    AcknowledgedLightChange, ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot,
-    AgentStatus, ClientKind, ConfigReloadError, Generation, Identity, MonitorEvent, Observation,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ChosenLight,
+    ClientKind, ConfigReloadError, Generation, Identity, MonitorEvent, Observation,
     PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate, RingObservation,
 };
 use succession::Compat;
@@ -87,6 +87,49 @@ impl AgentServer {
             declarations,
         )
     }
+
+    /// Re-read `config.toml` for [`Agent::reload_config`], or for
+    /// [`Agent::reload_saved_config`] when `chosen` is given.
+    async fn reload(self, chosen: Option<Vec<ChosenLight>>) -> Result<(), ConfigReloadError> {
+        match Config::load_or_default() {
+            Ok(config) => {
+                let launch_at_login = config.app_settings.launch_at_login;
+                #[cfg(target_os = "macos")]
+                let app_icon = config.app_settings.app_icon;
+                let language = config.app_settings.language.clone();
+                match chosen.as_deref() {
+                    None => self.orchestrator.lock().await.reload_config(config),
+                    Some(chosen) => self
+                        .orchestrator
+                        .lock()
+                        .await
+                        .reload_saved_config(config, chosen),
+                }
+                self.dispatcher.cancel_all_buttons();
+                // The GUI's launch-at-login toggle reaches us through this
+                // reload, so re-reconcile the autostart from the new config.
+                crate::autostart::reconcile(launch_at_login);
+                // So does the app icon, and the menu-bar item is ours to
+                // restyle — the GUI can only reach the Dock and the bundle.
+                #[cfg(target_os = "macos")]
+                crate::tray::set_icon(app_icon);
+                // And the interface language: re-resolve the process locale
+                // (the Windows popup rebuilds per show and picks it up alone)
+                // and rebuild the macOS menu, whose titles were stamped at
+                // install.
+                openlogi_core::locale::activate(language.as_deref());
+                #[cfg(target_os = "macos")]
+                crate::tray::relocalize();
+                Ok(())
+            }
+            Err(error) => {
+                warn!(error = %error, "reload_config: parse failed; keeping current config");
+                Err(ConfigReloadError {
+                    message: error.to_string(),
+                })
+            }
+        }
+    }
 }
 
 #[expect(
@@ -116,37 +159,7 @@ impl Agent for AgentServer {
     }
 
     async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
-        match Config::load_or_default() {
-            Ok(config) => {
-                let launch_at_login = config.app_settings.launch_at_login;
-                #[cfg(target_os = "macos")]
-                let app_icon = config.app_settings.app_icon;
-                let language = config.app_settings.language.clone();
-                self.orchestrator.lock().await.reload_config(config);
-                self.dispatcher.cancel_all_buttons();
-                // The GUI's launch-at-login toggle reaches us through this
-                // reload, so re-reconcile the autostart from the new config.
-                crate::autostart::reconcile(launch_at_login);
-                // So does the app icon, and the menu-bar item is ours to
-                // restyle — the GUI can only reach the Dock and the bundle.
-                #[cfg(target_os = "macos")]
-                crate::tray::set_icon(app_icon);
-                // And the interface language: re-resolve the process locale
-                // (the Windows popup rebuilds per show and picks it up alone)
-                // and rebuild the macOS menu, whose titles were stamped at
-                // install.
-                openlogi_core::locale::activate(language.as_deref());
-                #[cfg(target_os = "macos")]
-                crate::tray::relocalize();
-                Ok(())
-            }
-            Err(error) => {
-                warn!(error = %error, "reload_config: parse failed; keeping current config");
-                Err(ConfigReloadError {
-                    message: error.to_string(),
-                })
-            }
-        }
+        self.reload(None).await
     }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
@@ -323,15 +336,12 @@ impl Agent for AgentServer {
             .rename_easy_switch_host(&route, slot, name)
             .await
     }
-    async fn acknowledge_light_changes(
+    async fn reload_saved_config(
         self,
         _: Context,
-        acknowledged: Vec<AcknowledgedLightChange>,
-    ) {
-        self.orchestrator
-            .lock()
-            .await
-            .acknowledge_light_changes(&acknowledged);
+        chosen: Vec<ChosenLight>,
+    ) -> Result<(), ConfigReloadError> {
+        self.reload(Some(chosen)).await
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {

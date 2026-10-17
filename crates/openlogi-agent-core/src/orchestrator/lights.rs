@@ -11,7 +11,7 @@ use openlogi_core::config::Config;
 use openlogi_core::device::{ChangedOnLight, LightState};
 use openlogi_core::hid::WriteError;
 use openlogi_hid::{DeviceRoute, LightChange, LightCommand, LightControls, litra_model_for_route};
-use openlogi_ipc::{AcknowledgedLightChange, ObservedLight};
+use openlogi_ipc::{ChosenLight, ObservedLight};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -156,49 +156,65 @@ impl Orchestrator {
         self.publish_lights();
     }
 
-    /// Note the changes on lights the GUI said it saved, for the reload that
-    /// loads the save. A light no longer online is skipped: the GUI saves
-    /// only what an online light reported.
-    pub fn acknowledge_light_changes(&mut self, acknowledged: &[AcknowledgedLightChange]) {
-        for AcknowledgedLightChange { route, changed } in acknowledged {
-            let Some(key) = self.online_light_key(route) else {
-                continue;
-            };
-            let noted = self.light_acknowledgements.entry(key).or_default();
-            noted.enabled = changed.enabled.or(noted.enabled);
-            noted.brightness_percent = changed.brightness_percent.or(noted.brightness_percent);
-            noted.temperature_kelvin = changed.temperature_kelvin.or(noted.temperature_kelvin);
-        }
-    }
-
-    /// Drop the changes made on a light that the new config saved or
-    /// replaced. A value the config now holds needs no stand-in, and any
-    /// other newly saved value is the user's newer choice, unless the GUI
-    /// acknowledged it: then it saved an earlier report, and a change the
-    /// light made since then stands. Acknowledgements last for one reload.
-    pub(super) fn forget_saved_light_changes(&mut self, previous: &Config) {
+    /// Drop the changes made on a light that the new config holds or
+    /// replaced. A value the config now holds needs no stand-in. Whether
+    /// another saved value replaces a change depends on `source`.
+    pub(super) fn forget_saved_light_changes(
+        &mut self,
+        previous: &Config,
+        source: ConfigSource<'_>,
+    ) {
         let config = &self.config;
-        let acknowledgements = std::mem::take(&mut self.light_acknowledgements);
         self.lights_changed_on_light.retain(|key, changed| {
             let (before, after) = (previous.light(key), config.light(key));
-            let acknowledged = acknowledgements.get(key).copied().unwrap_or_default();
-            forget_saved(
-                &mut changed.enabled,
-                acknowledged.enabled,
+            let replaced =
+                |differs: bool, removed: bool, chose: fn(&ChosenLight) -> bool| match source {
+                    ConfigSource::Loaded => differs,
+                    ConfigSource::Saved { chosen } => {
+                        removed
+                            || chosen
+                                .iter()
+                                .any(|light| light.device == *key && chose(light))
+                    }
+                };
+            let (enabled_before, enabled_after) = (
                 before.map(|light| light.enabled),
                 after.map(|light| light.enabled),
             );
             forget_saved(
-                &mut changed.brightness_percent,
-                acknowledged.brightness_percent,
+                &mut changed.enabled,
+                enabled_after,
+                replaced(
+                    enabled_before != enabled_after,
+                    removed(enabled_before, enabled_after),
+                    |light| light.power,
+                ),
+            );
+            let (brightness_before, brightness_after) = (
                 before.map(|light| light.brightness_percent),
                 after.map(|light| light.brightness_percent),
             );
             forget_saved(
-                &mut changed.temperature_kelvin,
-                acknowledged.temperature_kelvin,
+                &mut changed.brightness_percent,
+                brightness_after,
+                replaced(
+                    brightness_before != brightness_after,
+                    removed(brightness_before, brightness_after),
+                    |light| light.brightness,
+                ),
+            );
+            let (temperature_before, temperature_after) = (
                 before.and_then(|light| light.temperature_kelvin),
                 after.and_then(|light| light.temperature_kelvin),
+            );
+            forget_saved(
+                &mut changed.temperature_kelvin,
+                temperature_after,
+                replaced(
+                    temperature_before != temperature_after,
+                    removed(temperature_before, temperature_after),
+                    |light| light.temperature,
+                ),
             );
             !changed.is_empty()
         });
@@ -258,20 +274,37 @@ pub async fn write_light(
     written
 }
 
-/// Forget one value changed on a light once the config holds it, or once a
-/// save replaced it with a value the GUI did not acknowledge.
-fn forget_saved<T: Copy + PartialEq>(
-    changed: &mut Option<T>,
-    acknowledged: Option<T>,
-    before: Option<T>,
-    after: Option<T>,
-) {
+/// Where the config a reload loads comes from, which decides whether a
+/// saved value replaces a change made on a light.
+#[derive(Debug, Clone, Copy)]
+pub enum ConfigSource<'a> {
+    /// A file the agent did not see saved: at startup, or after a hand edit
+    /// or a CLI edit. A saved value that differs from the one before is a
+    /// new choice and replaces the change.
+    Loaded,
+    /// A save of the GUI. The GUI writes a light it changes, and the write
+    /// takes the change first, so a saved value that differs is the GUI's
+    /// copy of an earlier report and the change stands. Only the controls
+    /// in `chosen`, which the user set without a write, give way, and the
+    /// values the save removed: a copy of a report always holds a value.
+    Saved {
+        /// The controls the user set without a write, by light.
+        chosen: &'a [ChosenLight],
+    },
+}
+
+/// Whether a reload removed a saved value.
+fn removed<T: Copy>(before: Option<T>, after: Option<T>) -> bool {
+    before.is_some() && after.is_none()
+}
+
+/// Forget one value changed on a light once the config holds it, or once
+/// the saved value replaced it.
+fn forget_saved<T: Copy + PartialEq>(changed: &mut Option<T>, after: Option<T>, replaced: bool) {
     let Some(value) = *changed else {
         return;
     };
-    let adopted = after == Some(value);
-    let acknowledged_earlier = after.is_some() && acknowledged == after;
-    if adopted || (before != after && !acknowledged_earlier) {
+    if after == Some(value) || replaced {
         *changed = None;
     }
 }

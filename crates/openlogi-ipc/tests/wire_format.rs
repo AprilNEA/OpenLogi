@@ -49,8 +49,8 @@ use openlogi_core::hid::{
     SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
-    AcknowledgedLightChange, ActionRingCommandError, ActionRingInvocation, ActionRingPresentation,
-    AgentRequest, AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps,
+    ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
+    AgentSnapshot, AgentStatus, ChosenLight, ClientKind, ConfigReloadError, ForegroundApps,
     FoundDevice, Identity, InventoryHealth, MonitorEvent, Observation, ObservedLight,
     PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
     RingObservation,
@@ -315,27 +315,20 @@ fn semantic_read_requests() {
     );
 }
 
-/// The GUI acknowledges the changes on a light it saved, ahead of a reload.
+/// After a save, the GUI names the controls of lights the user set without a
+/// write to the light.
 #[test]
-fn acknowledged_light_changes() {
+fn reload_saved_config() {
     assert_wire(
-        &AgentRequest::AcknowledgeLightChanges {
-            acknowledged: vec![AcknowledgedLightChange {
-                route: DeviceRoute::RawHid {
-                    vendor_id: 0x046d,
-                    product_id: 0xc900,
-                    usage_page: 0xff43,
-                    usage_id: 0x0202,
-                    identity: "serial:ABC123".into(),
-                },
-                changed: ChangedOnLight {
-                    enabled: None,
-                    brightness_percent: Some(57),
-                    temperature_kelvin: Some(4000),
-                },
+        &AgentRequest::ReloadSavedConfig {
+            chosen: vec![ChosenLight {
+                device: "serial:ABC123".into(),
+                power: false,
+                brightness: true,
+                temperature: true,
             }],
         },
-        "240103fb6d04fb00c9fb43fffb02020d73657269616c3a41424331323300013901fba00f",
+        "24010d73657269616c3a414243313233000101",
     );
 }
 

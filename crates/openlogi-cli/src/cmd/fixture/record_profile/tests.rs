@@ -18,9 +18,9 @@ use openlogi_fixture::{
 };
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
-    AcknowledgedLightChange, ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus,
-    ClientKind, ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth,
-    MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ChosenLight, ClientKind,
+    ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
     PairingUpdate, RingObservation,
 };
 use tarpc::client::RpcError;
@@ -372,12 +372,12 @@ impl Agent for TestAgent {
     ) -> Result<EasySwitchHosts, WriteError> {
         unreachable!("profile capture must never rename a host")
     }
-    async fn acknowledge_light_changes(
+    async fn reload_saved_config(
         self,
         _: TarpcContext,
-        _acknowledged: Vec<AcknowledgedLightChange>,
-    ) {
-        unreachable!("profile capture must never acknowledge a light change")
+        _chosen: Vec<ChosenLight>,
+    ) -> Result<(), ConfigReloadError> {
+        unreachable!("profile capture is read-only")
     }
 }
 

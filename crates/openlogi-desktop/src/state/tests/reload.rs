@@ -45,10 +45,11 @@ fn mouse_profile_target_persists_and_reloads_only_when_changed() {
         persistence: ConfigPersistence::UserFile(file),
         ..Sources::in_memory(config, &resolver, commands)
     });
-    // A file-backed AppState reloads once at startup, independently of edits.
+    // A file-backed AppState loads the file into the agent once at startup,
+    // independently of edits.
     assert!(matches!(
         receiver.try_recv(),
-        Ok(crate::services::ipc::Command::ReloadConfig(_))
+        Ok(crate::services::ipc::Command::LoadConfig(_))
     ));
     assert!(receiver.try_recv().is_err());
 

@@ -22,7 +22,7 @@ use openlogi_core::hid::{
     LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
-    AcknowledgedLightChange, AgentClient, ConfigReloadError, PairingCommandError, PairingFailure,
+    AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure,
 };
 use tarpc::client::RpcError;
 use tarpc::context;
@@ -473,14 +473,40 @@ impl Request for ReadFnLock {
     }
 }
 
-/// Have the agent re-read `config.toml`.
+/// Have the agent re-read the `config.toml` the GUI just saved
+/// ([`openlogi_ipc::Agent::reload_saved_config`]).
 ///
 /// The loop holds this one until a connection exists and never answers it
 /// locally (module doc), so `deliver` only ever reports the agent's own
 /// verdict: a reload that did not happen is not one the agent refused.
-pub struct ReloadConfig;
+#[derive(Debug, Default)]
+pub struct ReloadConfig {
+    /// The controls of lights the user set in the save without a write to
+    /// the light. A change made on the light to one of them gives way.
+    pub chosen: Vec<ChosenLight>,
+}
 
 impl Request for ReloadConfig {
+    type Answer = Result<(), ConfigReloadError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .reload_saved_config(context::current(), self.chosen.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_reload(outcome, updates);
+    }
+}
+
+/// Have the agent re-read a `config.toml` it did not see the GUI save, as at
+/// startup, so edits made while the GUI was closed apply
+/// ([`openlogi_ipc::Agent::reload_config`]). Held and answered like
+/// [`ReloadConfig`].
+pub struct LoadConfig;
+
+impl Request for LoadConfig {
     type Answer = Result<(), ConfigReloadError>;
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
@@ -488,31 +514,19 @@ impl Request for ReloadConfig {
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
-        if let Ok(verdict) = outcome {
-            let _ = updates.send(GuiUpdate::ConfigReloadResult(verdict));
-        }
+        report_reload(outcome, updates);
     }
 }
 
-/// Tell the agent which changes on its lights the GUI saved, ahead of the
-/// [`ReloadConfig`] that loads the save. The loop runs commands in order and
-/// delivers a held reload after the command of the same turn, so the agent
-/// hears this first. Without a connection it is dropped: the held reload
-/// then lands as a plain one, which the agent reads as a new choice.
-pub struct AcknowledgeLightChanges {
-    pub acknowledged: Vec<AcknowledgedLightChange>,
-}
-
-impl Request for AcknowledgeLightChanges {
-    type Answer = ();
-
-    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
-        client
-            .acknowledge_light_changes(context::current(), self.acknowledged.clone())
-            .await
+/// Report the agent's verdict on a held reload. A reload that did not happen
+/// is not one the agent refused, so it reports nothing.
+fn report_reload(
+    outcome: Result<Result<(), ConfigReloadError>, Unavailable>,
+    updates: &UpdateSender,
+) {
+    if let Ok(verdict) = outcome {
+        let _ = updates.send(GuiUpdate::ConfigReloadResult(verdict));
     }
-
-    fn deliver(self, _: Result<Self::Answer, Unavailable>, _: &UpdateSender) {}
 }
 
 /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
@@ -714,7 +728,7 @@ commands! {
     ReadReportRate,
     ReadBacklight,
     ReadEasySwitchHosts,
-    AcknowledgeLightChanges,
+    LoadConfig,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,
@@ -770,7 +784,8 @@ mod tests {
     fn a_reload_that_never_reached_the_agent_is_not_a_verdict() {
         let (updates, mut received) = mpsc::unbounded_channel();
 
-        ReloadConfig.deliver(Err(Unavailable), &updates);
+        ReloadConfig::default().deliver(Err(Unavailable), &updates);
+        LoadConfig.deliver(Err(Unavailable), &updates);
 
         assert!(received.try_recv().is_err());
     }

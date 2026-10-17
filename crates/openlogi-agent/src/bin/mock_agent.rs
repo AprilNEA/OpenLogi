@@ -60,8 +60,8 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    AcknowledgedLightChange, ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot,
-    AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ChosenLight,
+    ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity,
     InventoryHealth, MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
     PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation,
 };
@@ -952,11 +952,13 @@ impl Agent for MockAgent {
         Ok(stored.clone())
     }
     /// The mock reports no changes on its lights, so it has none to keep.
-    async fn acknowledge_light_changes(
+    async fn reload_saved_config(
         self,
         _: Context,
-        _acknowledged: Vec<AcknowledgedLightChange>,
-    ) {
+        _chosen: Vec<ChosenLight>,
+    ) -> Result<(), ConfigReloadError> {
+        info!("reload_saved_config (no-op in the mock)");
+        Ok(())
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

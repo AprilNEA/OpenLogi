@@ -2,11 +2,11 @@
 //! keeps them as the light's settings, as Options+ does.
 
 use openlogi_core::device::{ChangedOnLight, LightState};
-use openlogi_ipc::{AcknowledgedLightChange, ObservedLight};
+use openlogi_ipc::{ChosenLight, ObservedLight};
 
 use super::fn_lock::drain;
 use super::*;
-use crate::services::ipc::{AcknowledgeLightChanges, Command};
+use crate::services::ipc::{Command, ReloadConfig};
 
 fn lumens() -> LightValueRange {
     LightValueRange::new(20, 250, 1, LightValueUnit::Lumens).expect("valid range")
@@ -92,22 +92,12 @@ fn brightness_changed_to(percent: u8) -> ChangedOnLight {
     }
 }
 
-/// The adoption tells the agent what it saved, then reloads it: exactly an
-/// acknowledgement of the changes `lights` reported, and one reload.
-fn acknowledged_then_reloaded(commands: &[Command], lights: &[ObservedLight]) -> bool {
-    let reported: Vec<_> = lights
-        .iter()
-        .map(|light| AcknowledgedLightChange {
-            route: light.route.clone(),
-            changed: light.changed_on_light,
-        })
-        .collect();
+/// The adoption saves and reloads once, with no chosen controls: the saved
+/// values are copies of what the lights reported, not choices of the user.
+fn saved_and_reloaded(commands: &[Command]) -> bool {
     matches!(
         commands,
-        [
-            Command::AcknowledgeLightChanges(AcknowledgeLightChanges { acknowledged }),
-            Command::ReloadConfig(_),
-        ] if *acknowledged == reported
+        [Command::ReloadConfig(ReloadConfig { chosen })] if chosen.is_empty()
     )
 }
 
@@ -134,7 +124,7 @@ fn a_change_on_a_saved_light_replaces_only_that_value_and_reloads_once() {
         Some(LightSettings::new(true, 50, Some(4000)))
     );
     assert_eq!(state.light(), LightSettings::new(true, 50, Some(4000)));
-    assert!(acknowledged_then_reloaded(&drain(&mut receiver), &lights));
+    assert!(saved_and_reloaded(&drain(&mut receiver)));
 
     // The agent reports the change until its reload; keeping it again saves
     // nothing.
@@ -162,7 +152,7 @@ fn a_light_never_saved_keeps_what_it_reads_back_for_the_other_controls() {
         state.config.light(key.as_str()),
         Some(LightSettings::new(false, 50, Some(5000)))
     );
-    assert!(acknowledged_then_reloaded(&drain(&mut receiver), &lights));
+    assert!(saved_and_reloaded(&drain(&mut receiver)));
 }
 
 #[test]
@@ -207,7 +197,7 @@ fn a_light_with_a_gui_write_in_flight_keeps_its_change_until_the_write_settles()
         state.config.light(key.as_str()),
         Some(LightSettings::new(true, 17, None))
     );
-    assert!(acknowledged_then_reloaded(&drain(&mut receiver), &lights));
+    assert!(saved_and_reloaded(&drain(&mut receiver)));
 }
 
 #[test]
@@ -254,7 +244,7 @@ fn a_light_saved_after_keeping_a_session_value_shows_the_change_it_saves() {
         LightSettings::new(false, 50, Some(3000)),
         "the saved settings are shown, not the value kept for the session"
     );
-    assert!(acknowledged_then_reloaded(&drain(&mut receiver), &lights));
+    assert!(saved_and_reloaded(&drain(&mut receiver)));
 }
 
 #[test]
@@ -359,4 +349,112 @@ fn an_agent_snapshot_keeps_the_changes_it_reports() {
             .iter()
             .any(|command| matches!(command, Command::ReloadConfig(_)))
     );
+}
+
+/// The controls a save chose, if the commands are exactly one reload.
+fn chosen_by_reload(commands: &[Command]) -> Option<Vec<ChosenLight>> {
+    match commands {
+        [Command::ReloadConfig(ReloadConfig { chosen })] => Some(chosen.clone()),
+        _ => None,
+    }
+}
+
+/// The offline Glow, saved at 80 % and 4000 K.
+fn offline_saved_glow() -> (
+    AppState,
+    tokio::sync::mpsc::UnboundedReceiver<Command>,
+    String,
+) {
+    let light = glow("serial:glow-1", Some("glow-1"), false);
+    let (mut state, receiver) = state_with(&light, Config::ephemeral());
+    let key = state.current_record().expect("light record").device_key();
+    state.config.edit(|config| {
+        config.set_light(key.as_str(), LightSettings::new(true, 80, Some(4000)));
+    });
+    (state, receiver, key.as_str().to_owned())
+}
+
+#[test]
+fn a_save_without_a_write_chooses_the_controls_it_changed() {
+    // An offline light is saved without a write, so no write takes the
+    // change made on the light: the reload names the controls the user set.
+    let (mut state, mut receiver, key) = offline_saved_glow();
+    let _ = state.commit_light(LightSettings::new(true, 60, Some(3000)));
+    assert_eq!(
+        chosen_by_reload(&drain(&mut receiver)),
+        Some(vec![ChosenLight {
+            device: key,
+            power: false,
+            brightness: true,
+            temperature: true,
+        }])
+    );
+}
+
+#[test]
+fn a_save_without_a_write_that_keeps_the_light_values_chooses_nothing() {
+    let (mut state, mut receiver, key) = offline_saved_glow();
+    let _ = state.commit_light(LightSettings::new(false, 80, Some(4000)));
+    assert_eq!(
+        chosen_by_reload(&drain(&mut receiver)),
+        Some(vec![ChosenLight {
+            device: key.clone(),
+            power: true,
+            ..ChosenLight::default()
+        }])
+    );
+    let _ = state.commit_light(LightSettings::new(false, 80, Some(4000)));
+    assert_eq!(chosen_by_reload(&drain(&mut receiver)), Some(Vec::new()));
+}
+
+#[test]
+fn a_manual_power_saved_without_a_write_chooses_the_power() {
+    // With `auto_camera` on (macOS only), the power is a manual override
+    // with a save of its own; without it, the power is a plain light edit.
+    for auto_camera in [false, true] {
+        let (mut state, mut receiver, key) = offline_saved_glow();
+        state.config.edit(|config| {
+            let mut light = LightSettings::new(true, 80, Some(4000));
+            light.auto_camera = auto_camera;
+            config.set_light(key.as_str(), light);
+        });
+        let _ = state.commit_manual_light_power(false);
+        assert_eq!(
+            chosen_by_reload(&drain(&mut receiver)),
+            Some(vec![ChosenLight {
+                device: key,
+                power: true,
+                ..ChosenLight::default()
+            }]),
+            "auto_camera = {auto_camera}"
+        );
+    }
+}
+
+#[test]
+fn a_save_after_a_write_chooses_nothing() {
+    // The write took the change made on the light before it started.
+    let light = saved_glow();
+    let (mut state, mut receiver) = state_with(&light, Config::ephemeral());
+    let key = state.current_record().expect("light record").device_key();
+    let _ = state.commit_light(LightSettings::new(true, 60, Some(4000)));
+    let writes: Vec<_> = drain(&mut receiver)
+        .into_iter()
+        .map(|command| {
+            let Command::SetLight(SetLight {
+                command,
+                request_id,
+                ..
+            }) = command
+            else {
+                panic!("expected only light writes");
+            };
+            (command, request_id)
+        })
+        .collect();
+    assert!(!writes.is_empty());
+    for (command, request_id) in writes {
+        let _ = state.apply_light_command_result(key.clone(), request_id, command, Ok(()));
+    }
+    assert!(saved_and_reloaded(&drain(&mut receiver)));
 }

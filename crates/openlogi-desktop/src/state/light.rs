@@ -5,14 +5,13 @@ use std::collections::BTreeMap;
 use openlogi_core::config::LightSettings;
 use openlogi_core::device::LightState;
 use openlogi_core::hid::{DeviceRoute, LightCommand, WriteError};
-use openlogi_ipc::{AcknowledgedLightChange, ObservedLight};
+use openlogi_ipc::{ChosenLight, ObservedLight};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
 use super::device_session::DeviceSession;
 use super::events::StateEvents;
 use super::{AppState, StateEvent};
-use crate::services::ipc::{AcknowledgeLightChanges, ReloadConfig};
 
 const fn camera_policy_applies(light: LightSettings) -> bool {
     cfg!(target_os = "macos") && light.auto_camera
@@ -421,7 +420,7 @@ impl AppState {
     /// writes, so a later report offers only the changes still the light's.
     pub(super) fn adopt_changes_on_lights(&mut self, lights: &[ObservedLight]) -> StateEvents {
         let mut events = StateEvents::none();
-        let mut acknowledged = Vec::new();
+        let mut saved = false;
         for light in lights {
             if light.changed_on_light.is_empty() {
                 continue;
@@ -458,10 +457,7 @@ impl AppState {
                     entry.light.volatile_settings = None;
                 }
                 self.config.edit(|config| config.set_light(&key, adopted));
-                acknowledged.push(AcknowledgedLightChange {
-                    route: light.route.clone(),
-                    changed: light.changed_on_light,
-                });
+                saved = true;
             } else {
                 self.devices
                     .sessions
@@ -472,11 +468,10 @@ impl AppState {
             }
             events = events.and(StateEvent::LightingChanged(runtime_key));
         }
-        // The agent hears which saved values answer its reports before the
-        // reload that loads them, so a newer change on a light outlives it.
-        if !acknowledged.is_empty() && self.persist_config("light") {
-            self.send_ipc(AcknowledgeLightChanges { acknowledged });
-            self.send_ipc(ReloadConfig);
+        // The saved reload takes these values as copies of what the lights
+        // reported, so a newer change on a light outlives it.
+        if saved {
+            self.persist_and_reload("light");
         }
         events
     }
@@ -610,8 +605,9 @@ impl AppState {
             if let Some(entry) = self.devices.sessions.get_mut(&runtime_key) {
                 entry.light.volatile_settings = None;
             }
+            let chosen = chosen_light(&key, previous, light);
             self.config.edit(|config| config.set_light(&key, light));
-            self.persist_and_reload("light");
+            self.persist_and_reload_choosing("light", chosen);
         } else {
             self.devices
                 .sessions
@@ -696,8 +692,13 @@ impl AppState {
             if let Some(entry) = self.devices.sessions.get_mut(&runtime_key) {
                 entry.light.volatile_settings = None;
             }
+            let chosen = ChosenLight {
+                device: key.clone(),
+                power: true,
+                ..ChosenLight::default()
+            };
             self.config.edit(|config| config.set_light(&key, light));
-            self.persist_and_reload("manual light power");
+            self.persist_and_reload_choosing("manual light power", vec![chosen]);
         }
         events
     }
@@ -751,5 +752,21 @@ fn restore_manual_override(
             .or_default()
             .light
             .manual_override = rollback.previous;
+    }
+}
+
+/// The controls of the light saved under `key` that a save made without a
+/// write to the light changes, from its settings `before` and `after`.
+fn chosen_light(key: &str, before: LightSettings, after: LightSettings) -> Vec<ChosenLight> {
+    let chosen = ChosenLight {
+        device: key.to_string(),
+        power: before.enabled != after.enabled,
+        brightness: before.brightness_percent != after.brightness_percent,
+        temperature: before.temperature_kelvin != after.temperature_kelvin,
+    };
+    if chosen.power || chosen.brightness || chosen.temperature {
+        vec![chosen]
+    } else {
+        Vec::new()
     }
 }
