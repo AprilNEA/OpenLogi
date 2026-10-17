@@ -55,6 +55,42 @@ async fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() 
 }
 
 #[test]
+fn a_helper_with_nothing_to_show_leaves_after_the_idle_period() {
+    let start = Instant::now();
+    let idle = IdleClock::new(start);
+    assert!(start + IDLE_EXIT_AFTER / 2 < idle.deadline());
+    assert_eq!(idle.deadline(), start + IDLE_EXIT_AFTER);
+}
+
+#[test]
+fn every_ring_change_restarts_the_idle_period() {
+    let start = Instant::now();
+    let mut idle = IdleClock::new(start);
+    // A ring every nine minutes for an hour: never idle for long enough, so a
+    // version that kept the first deadline would have left in the second round.
+    for round in 1..=6 {
+        let ring = start + Duration::from_mins(9) * round;
+        assert!(ring < idle.deadline(), "round {round}");
+        idle.touch(ring);
+    }
+}
+
+/// The idle exit runs without asking GPUI whether a window is open, which is
+/// sound only while every ring closes long before the deadline it last moved.
+#[test]
+fn a_ring_closes_long_before_its_helper_may_idle_out() {
+    assert!(DISPLAY_LIFETIME * 10 < IDLE_EXIT_AFTER);
+}
+
+#[test]
+fn the_idle_status_is_none_this_process_otherwise_leaves_with() {
+    // A stand-down, `main` returning an error, and a Rust panic.
+    for other in [0, 1, 101] {
+        assert_ne!(OVERLAY_IDLE_EXIT_CODE, other);
+    }
+}
+
+#[test]
 fn activation_takes_priority_over_queued_hover_updates() {
     let hover = OverlayCommand::Hover {
         session_id: 1,
@@ -293,7 +329,8 @@ async fn losing_the_agent_clears_the_notices_it_was_showing() {
     };
     let mut hang_up = Some(hang_up);
     let mut shown = Vec::new();
-    let observing = observe(connect, NOTICES, |observed: NoticeObservation| {
+    let (idle, _) = watch::channel(IdleClock::new(Instant::now()));
+    let observing = observe(connect, NOTICES, &idle, |observed: NoticeObservation| {
         shown.push(observed.notices.len());
         // The agent goes away once its notice is on screen.
         if let Some(hang_up) = hang_up.take() {
@@ -351,7 +388,8 @@ async fn losing_the_agent_hides_the_lock_key_indicator() {
     };
     let mut hang_up = Some(hang_up);
     let mut shown = Vec::new();
-    let observing = observe(connect, LOCK_KEYS, |observed: LockKeyObservation| {
+    let (idle, _) = watch::channel(IdleClock::new(Instant::now()));
+    let observing = observe(connect, LOCK_KEYS, &idle, |observed: LockKeyObservation| {
         shown.push(observed.shown);
         // The agent goes away once its indicator is on screen.
         if let Some(hang_up) = hang_up.take() {

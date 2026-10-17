@@ -1,7 +1,12 @@
-//! Supervision of the warm Actions Ring overlay helper.
+//! Supervision of the Actions Ring overlay helper.
 //!
 //! The helper owns no device state and exits harmlessly when its binary is not
-//! packaged. Keeping it warm removes process-start latency from panel presses.
+//! packaged. A ring, notice or keyboard indicator starts it on demand; a late
+//! helper reads the state the agent has already published. A transition to an
+//! online device binding ShowActionsRing also pre-warms it. After ten idle
+//! minutes it leaves with [`OVERLAY_IDLE_EXIT_CODE`], even if that binding is
+//! still present. This is not a crash: the next ring or indicator cold-starts
+//! a helper, unless a new pre-warm transition starts one first ([`Schedule`]).
 //!
 //! Exactly one overlay may exist, and it belongs to one agent run. Both halves
 //! are enforced by the `succession` crate: this supervisor waits while the role
@@ -13,51 +18,288 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::time::{Duration, Instant};
 
 use openlogi_core::brand;
-use openlogi_ipc::RUN_ENV;
+use openlogi_ipc::{OVERLAY_IDLE_EXIT_CODE, RUN_ENV};
 use succession::eviction::{self, AnonymousOutcome, Policy};
-use succession::supervision::{Event, Supervisor};
+use succession::supervision::{Event, Restart, Supervisor};
 use succession::{Role, Run};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-/// Start the overlay supervisor on a dedicated thread.
-pub fn spawn() {
-    let Some(binary) = overlay_binary_path() else {
-        warn!("Actions Ring overlay binary not found — overlay disabled");
-        return;
-    };
-    let Ok(directory) = openlogi_core::paths::config_dir() else {
-        warn!("could not resolve the config directory — overlay disabled");
-        return;
-    };
+/// The agent's handle on the overlay supervisor thread.
+pub(crate) struct Overlay {
+    /// `None` when no helper can run here — no binary, no config directory,
+    /// or no thread — which makes every nudge a no-op.
+    nudges: Option<Sender<Nudge>>,
+}
+
+/// What the agent tells the supervisor thread.
+enum Nudge {
+    /// A ring, notice or keyboard indicator needs drawing.
+    RingOpened,
+    /// Whether a device in hand can open the ring changed to this answer.
+    Prewarm(bool),
+}
+
+impl Overlay {
+    /// Start the supervisor thread, parked: no helper runs until a ring opens
+    /// or [`Self::prewarm`] first says that a device in hand can open one.
+    ///
+    /// `ring_showing` runs on the supervisor thread and reports whether a
+    /// ring, notice or indicator is open that a helper has to draw.
+    pub(crate) fn start(ring_showing: impl Fn() -> bool + Send + 'static) -> Self {
+        let Some(binary) = overlay_binary_path() else {
+            warn!("Actions Ring overlay binary not found — overlay disabled");
+            return Self { nudges: None };
+        };
+        let Ok(directory) = openlogi_core::paths::config_dir() else {
+            warn!("could not resolve the config directory — overlay disabled");
+            return Self { nudges: None };
+        };
+        let (nudges, inbox) = mpsc::channel();
+        let result = std::thread::Builder::new()
+            .name("openlogi-overlay-supervisor".into())
+            .spawn(move || supervise(&binary, &directory, &inbox, ring_showing));
+        if let Err(error) = result {
+            warn!(%error, "could not start the Actions Ring overlay supervisor");
+            return Self { nudges: None };
+        }
+        Self {
+            nudges: Some(nudges),
+        }
+    }
+
+    /// Content needs drawing. Call after publishing it, so a supervisor
+    /// deciding about a helper that just exited sees the current demand.
+    pub(crate) fn show_requested(&self) {
+        self.nudge(Nudge::RingOpened);
+    }
+
+    /// The pre-warm answer changed: `wanted` says whether a device in hand
+    /// can now open the ring.
+    pub(crate) fn prewarm(&self, wanted: bool) {
+        self.nudge(Nudge::Prewarm(wanted));
+    }
+
+    fn nudge(&self, nudge: Nudge) {
+        if let Some(nudges) = &self.nudges {
+            // Only a supervisor thread that has gone drops the receiver, and
+            // then nothing is left to start a helper either way.
+            let _ = nudges.send(nudge);
+        }
+    }
+}
+
+/// The supervisor thread: park until [`Schedule`] wants a helper, then keep
+/// the role filled for as long as it does.
+fn supervise(
+    binary: &Path,
+    directory: &Path,
+    inbox: &Receiver<Nudge>,
+    ring_showing: impl Fn() -> bool,
+) {
     let mine = Run::mint();
-    let mut supervisor = Supervisor::new(Role::new(directory, "overlay"), mine);
-    let result = std::thread::Builder::new()
-        .name("openlogi-overlay-supervisor".into())
-        .spawn(move || {
-            let mut spawn = move || {
-                Command::new(&binary)
-                    .env(RUN_ENV, mine.get().to_string())
-                    .spawn()
+    // The crash backoff is applied below rather than by `succession`, whose
+    // sleep runs inside `tick` after every exit: there it would hold the next
+    // ring behind an idle exit too, and no ring opening could cut it short.
+    let backoff = Restart::default();
+    let mut supervisor = Supervisor::new(Role::new(directory, "overlay"), mine).restart(Restart {
+        base: Duration::ZERO,
+        ceiling: Duration::ZERO,
+        ..backoff
+    });
+    let mut delay = backoff.base;
+    let mut spawn = move || {
+        Command::new(binary)
+            .env(RUN_ENV, mine.get().to_string())
+            .spawn()
+    };
+    let mut schedule = Schedule::default();
+    // The anonymous verdict repeats every poll for as long as the tenant
+    // lives, and answering it walks the process table. Answer once per spell
+    // of anonymity and stay quiet until the role changes hands.
+    let mut pressed_anonymous = false;
+    loop {
+        if !schedule.active() {
+            let Ok(nudge) = inbox.recv() else {
+                return;
             };
-            // The anonymous verdict repeats every poll for as long as the
-            // tenant lives, and answering it walks the process table. Answer
-            // once per spell of anonymity and stay quiet until the role
-            // changes hands.
-            let mut pressed_anonymous = false;
-            loop {
-                if let Err(error) = supervisor.tick(&mut spawn, &mut |event| {
-                    report(&event, &mut pressed_anonymous);
-                }) {
-                    // A role that cannot be probed is treated as free by the
-                    // next tick; refusing to look again would wait forever.
-                    warn!(%error, "could not read the Actions Ring overlay role");
+            match nudge {
+                Nudge::RingOpened => {
+                    schedule.ring_opened();
+                    info!("starting the Actions Ring overlay for the ring that just opened");
+                }
+                Nudge::Prewarm(wanted) => {
+                    schedule.prewarm_answered(wanted);
+                    if schedule.active() {
+                        info!("starting the Actions Ring overlay ahead of its first ring");
+                    }
                 }
             }
-        });
-    if let Err(error) = result {
-        warn!(%error, "could not start the Actions Ring overlay supervisor");
+            continue;
+        }
+        let mut ended = None;
+        let mut ran_for = Duration::ZERO;
+        if let Err(error) = supervisor.tick(&mut spawn, &mut |event| {
+            if let Some(how) = Ended::from_event(&event) {
+                ended = Some(how);
+            }
+            if let Event::Exited { ran_for: run, .. } = &event {
+                ran_for = *run;
+            }
+            report(&event, &mut pressed_anonymous);
+        }) {
+            // A role that cannot be probed is treated as free by the next
+            // tick; refusing to look again would wait forever.
+            warn!(%error, "could not read the Actions Ring overlay role");
+        }
+        if ended.is_some() {
+            delay = backoff.next_delay(delay, ran_for);
+        }
+        // Rings opened while that helper ran were drawn by it, or are still
+        // open for the next one — `ring_showing` below tells which.
+        loop {
+            match inbox.try_recv() {
+                Ok(Nudge::RingOpened) => {}
+                Ok(Nudge::Prewarm(wanted)) => schedule.prewarm_answered(wanted),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return,
+            }
+        }
+        let ring = || {
+            if ring_showing() {
+                Ring::Open
+            } else {
+                Ring::Closed
+            }
+        };
+        schedule.ended(ended, ring());
+        // Only a helper that did not choose to leave is restarted after a
+        // pause. An idle exit is not a crash, and an occupied role was already
+        // waited on inside `tick`.
+        if schedule.active() && ended == Some(Ended::Other) {
+            info!("waiting {delay:.1?} before restarting the Actions Ring overlay");
+            if !back_off(inbox, delay, &mut schedule) {
+                return;
+            }
+            // Answers that arrived meanwhile may have withdrawn the restart.
+            schedule.ended(ended, ring());
+        }
+        if !schedule.active() {
+            match ended {
+                Some(Ended::Idle) => {
+                    info!("the Actions Ring overlay left after idling — the next ring starts it");
+                }
+                Some(Ended::Other) => info!(
+                    "not restarting the Actions Ring overlay — no device in hand opens the \
+                     ring, so the next ring starts it"
+                ),
+                None => debug!("Actions Ring overlay supervisor parked"),
+            }
+        }
+    }
+}
+
+/// Sit out a crash backoff of `delay`, cut short by a ring opening: that ring
+/// is waiting to be drawn, and one start per press cannot spin. Pre-warm
+/// answers that arrive meanwhile are recorded. Returns `false` once the agent
+/// is gone.
+fn back_off(inbox: &Receiver<Nudge>, delay: Duration, schedule: &mut Schedule) -> bool {
+    let deadline = Instant::now() + delay;
+    loop {
+        let rest = deadline.saturating_duration_since(Instant::now());
+        if rest.is_zero() {
+            return true;
+        }
+        match inbox.recv_timeout(rest) {
+            Ok(Nudge::RingOpened) | Err(RecvTimeoutError::Timeout) => return true,
+            Ok(Nudge::Prewarm(wanted)) => schedule.prewarm_answered(wanted),
+            Err(RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+}
+
+/// How a helper run ended, as far as starting another is concerned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ended {
+    /// It left with [`OVERLAY_IDLE_EXIT_CODE`]: nothing to show, so not wanted.
+    Idle,
+    /// Anything else — a crash, a failed start, a kill, a stand-down — which
+    /// is restarted while a helper is wanted, as every exit used to be.
+    Other,
+}
+
+impl Ended {
+    /// What a supervisor event says about the run, if it ended one.
+    fn from_event(event: &Event<'_>) -> Option<Self> {
+        match event {
+            Event::Exited { status, .. } => Some(Self::of_code(status.code())),
+            Event::SpawnFailed(_) => Some(Self::Other),
+            _ => None,
+        }
+    }
+
+    /// Classify an exit code; `None` is a Unix signal death.
+    fn of_code(code: Option<i32>) -> Self {
+        if code == Some(OVERLAY_IDLE_EXIT_CODE) {
+            Self::Idle
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// Whether a ring session is open that a helper has to draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ring {
+    Open,
+    Closed,
+}
+
+/// When a helper should be running: the decision, without the process.
+///
+/// Two things start a parked supervisor — a ring opening, and the pre-warm
+/// answer turning true. Once started it keeps a helper up across failures for
+/// as long as one is wanted; an idle exit is the helper saying it is not, and
+/// that stands until one of the two starters fires again. Whatever the exit,
+/// an open ring restarts it: that ring is waiting to be drawn, and the next
+/// helper joins late and draws it.
+#[derive(Debug, Default)]
+struct Schedule {
+    /// The last pre-warm answer: a device in hand can open the ring.
+    prewarm: bool,
+    /// Whether the supervisor should fill the role rather than park.
+    active: bool,
+}
+
+impl Schedule {
+    const fn active(&self) -> bool {
+        self.active
+    }
+
+    const fn ring_opened(&mut self) {
+        self.active = true;
+    }
+
+    const fn prewarm_answered(&mut self, wanted: bool) {
+        // Only the edge starts a helper. An answer that stays true across an
+        // idle exit must not undo that exit on the next rebinding.
+        if wanted && !self.prewarm {
+            self.active = true;
+        }
+        self.prewarm = wanted;
+    }
+
+    /// A supervisor round finished; `ended` is `None` when it started no
+    /// helper because the role was occupied.
+    const fn ended(&mut self, ended: Option<Ended>, ring: Ring) {
+        self.active = match (ring, ended) {
+            (Ring::Open, _) => true,
+            (Ring::Closed, Some(Ended::Idle)) => false,
+            (Ring::Closed, Some(Ended::Other) | None) => self.prewarm,
+        };
     }
 }
 
@@ -137,6 +379,8 @@ fn report(event: &Event<'_>, pressed_anonymous: &mut bool) {
             evict_unidentified_overlay();
         }
         Event::Occupied(_) => tracing::debug!("{event}"),
+        // Always zero here: `supervise` applies and logs the real backoff.
+        Event::BackingOff(_) => {}
         _ => info!("{event}"),
     }
 }
@@ -274,6 +518,147 @@ mod tests {
             images.iter().any(|image| image == legacy),
             "the pre-rename image must stay a candidate: {images:?}"
         );
+    }
+
+    /// A schedule that is running a helper, with the given pre-warm answer.
+    fn running(prewarm: bool) -> Schedule {
+        let mut schedule = Schedule::default();
+        schedule.prewarm_answered(prewarm);
+        schedule.ring_opened();
+        schedule
+    }
+
+    #[test]
+    fn only_the_idle_status_reads_as_idle() {
+        assert_eq!(Ended::of_code(Some(OVERLAY_IDLE_EXIT_CODE)), Ended::Idle);
+        // A stand-down, `main` returning an error, a Rust panic, and a Unix
+        // signal death are all exits the helper did not choose for idleness.
+        for code in [Some(0), Some(1), Some(101), None] {
+            assert_eq!(Ended::of_code(code), Ended::Other, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn nothing_runs_until_a_ring_or_a_ring_device_appears() {
+        let mut schedule = Schedule::default();
+        assert!(!schedule.active());
+        schedule.prewarm_answered(false);
+        assert!(
+            !schedule.active(),
+            "a desk with no ring device keeps no overlay"
+        );
+        schedule.ring_opened();
+        assert!(
+            schedule.active(),
+            "a ring is drawn whatever the pre-warm answer"
+        );
+    }
+
+    #[test]
+    fn a_device_that_can_open_the_ring_starts_the_overlay_ahead_of_time() {
+        let mut schedule = Schedule::default();
+        schedule.prewarm_answered(true);
+        assert!(schedule.active());
+    }
+
+    #[test]
+    fn an_idle_exit_stands_until_a_ring_or_a_new_ring_device() {
+        let mut schedule = running(true);
+        schedule.ended(Some(Ended::Idle), Ring::Closed);
+        assert!(!schedule.active(), "an idle exit is not a crash");
+        schedule.prewarm_answered(true);
+        assert!(
+            !schedule.active(),
+            "rebinding with the same answer must not undo the idle exit"
+        );
+        schedule.prewarm_answered(false);
+        schedule.prewarm_answered(true);
+        assert!(
+            schedule.active(),
+            "a ring device that comes back is warmed again"
+        );
+        schedule.ended(Some(Ended::Idle), Ring::Closed);
+        schedule.ring_opened();
+        assert!(schedule.active());
+    }
+
+    #[test]
+    fn a_wanted_overlay_survives_its_crashes_and_an_unwanted_one_does_not() {
+        let mut wanted = running(true);
+        wanted.ended(Some(Ended::Other), Ring::Closed);
+        assert!(wanted.active());
+
+        let mut unwanted = running(false);
+        unwanted.ended(Some(Ended::Other), Ring::Closed);
+        assert!(
+            !unwanted.active(),
+            "the next ring starts it, not the backoff"
+        );
+    }
+
+    #[test]
+    fn a_device_that_stops_opening_the_ring_lets_a_crashed_overlay_rest() {
+        let mut schedule = running(true);
+        schedule.prewarm_answered(false);
+        assert!(schedule.active(), "a running helper is left to idle out");
+        schedule.ended(Some(Ended::Other), Ring::Closed);
+        assert!(!schedule.active());
+    }
+
+    /// The whole decision after a round, for both pre-warm answers.
+    #[test]
+    fn a_finished_round_restarts_exactly_when_a_helper_is_still_wanted() {
+        let cases = [
+            // An open ring is waiting to be drawn, however the helper left.
+            (false, Ring::Open, Some(Ended::Idle), true),
+            (false, Ring::Open, Some(Ended::Other), true),
+            (false, Ring::Open, None, true),
+            (true, Ring::Open, Some(Ended::Idle), true),
+            (true, Ring::Open, Some(Ended::Other), true),
+            (true, Ring::Open, None, true),
+            // With none open, idleness is final and the rest follow pre-warm.
+            (false, Ring::Closed, Some(Ended::Idle), false),
+            (false, Ring::Closed, Some(Ended::Other), false),
+            (false, Ring::Closed, None, false),
+            (true, Ring::Closed, Some(Ended::Idle), false),
+            (true, Ring::Closed, Some(Ended::Other), true),
+            (true, Ring::Closed, None, true),
+        ];
+        for (prewarm, ring, ended, restarts) in cases {
+            let mut schedule = running(prewarm);
+            schedule.ended(ended, ring);
+            assert_eq!(
+                schedule.active(),
+                restarts,
+                "prewarm {prewarm}, ring {ring:?}, ended {ended:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ring_cuts_a_crash_backoff_short() {
+        let (nudges, inbox) = mpsc::channel();
+        let mut schedule = running(false);
+        nudges.send(Nudge::Prewarm(true)).unwrap();
+        nudges.send(Nudge::RingOpened).unwrap();
+        let started = Instant::now();
+        assert!(back_off(&inbox, Duration::from_mins(1), &mut schedule));
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the ring waited out the backoff"
+        );
+        assert!(schedule.prewarm, "an answer that arrived meanwhile is kept");
+    }
+
+    #[test]
+    fn a_backoff_ends_with_the_agent() {
+        let (nudges, inbox) = mpsc::channel::<Nudge>();
+        drop(nudges);
+        assert!(!back_off(
+            &inbox,
+            Duration::from_mins(1),
+            &mut Schedule::default()
+        ));
     }
 
     #[test]
