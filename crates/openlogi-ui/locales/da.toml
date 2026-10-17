@@ -467,8 +467,6 @@ relaunch_openlogi = "Genstart OpenLogi"
 device_scanning_is_unavailable = "Enhedsscanning er ikke tilgængelig"
 device_scan_failure_description = "Baggrundstjenesten kunne ikke scanne efter enheder. Se dens log for detaljer."
 agent_restarted_during_pairing = "Baggrundstjenesten blev genstartet. Prøv at parre igen."
-config_saved_agent_not_running = "saved, but the agent is not running, so it has not been applied yet"
-config_saved_agent_unreachable = "saved, but the agent could not be reached to apply it: %{error}"
 
 [updates]
 check_for_updates_dialog = "Søg efter opdateringer…"

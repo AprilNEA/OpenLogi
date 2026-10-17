@@ -467,8 +467,6 @@ relaunch_openlogi = "Uruchom OpenLogi ponownie"
 device_scanning_is_unavailable = "Skanowanie urządzeń jest niedostępne"
 device_scan_failure_description = "Usługa działająca w tle nie mogła przeskanować urządzeń. Szczegóły znajdziesz w jej dzienniku."
 agent_restarted_during_pairing = "Usługa działająca w tle została uruchomiona ponownie. Spróbuj sparować jeszcze raz."
-config_saved_agent_not_running = "saved, but the agent is not running, so it has not been applied yet"
-config_saved_agent_unreachable = "saved, but the agent could not be reached to apply it: %{error}"
 
 [updates]
 check_for_updates_dialog = "Sprawdź dostępność aktualizacji…"

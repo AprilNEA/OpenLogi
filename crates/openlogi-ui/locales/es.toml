@@ -467,8 +467,6 @@ relaunch_openlogi = "Reiniciar OpenLogi"
 device_scanning_is_unavailable = "La búsqueda de dispositivos no está disponible"
 device_scan_failure_description = "El agente en segundo plano no pudo buscar dispositivos: consulta su registro para más detalles."
 agent_restarted_during_pairing = "El agente en segundo plano se ha reiniciado. Vuelve a intentar el emparejamiento."
-config_saved_agent_not_running = "se ha guardado, pero el agente en segundo plano no se está ejecutando, así que todavía no se ha aplicado"
-config_saved_agent_unreachable = "se ha guardado, pero no se ha podido contactar con el agente en segundo plano para aplicarla: %{error}"
 
 [updates]
 check_for_updates_dialog = "Buscar actualizaciones…"

@@ -467,8 +467,6 @@ relaunch_openlogi = "重新啟動 OpenLogi"
 device_scanning_is_unavailable = "裝置掃描無法使用"
 device_scan_failure_description = "背景服務無法掃描裝置，詳情請查看其記錄。"
 agent_restarted_during_pairing = "背景服務已重新啟動，請再試一次配對。"
-config_saved_agent_not_running = "saved, but the agent is not running, so it has not been applied yet"
-config_saved_agent_unreachable = "saved, but the agent could not be reached to apply it: %{error}"
 
 [updates]
 check_for_updates_dialog = "檢查更新…"

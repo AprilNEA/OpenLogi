@@ -467,8 +467,6 @@ relaunch_openlogi = "OpenLogi を再起動"
 device_scanning_is_unavailable = "デバイススキャンを利用できません"
 device_scan_failure_description = "バックグラウンドサービスでデバイスを検索できませんでした。詳しくはログを確認してください。"
 agent_restarted_during_pairing = "バックグラウンドサービスが再起動しました。もう一度ペアリングしてください。"
-config_saved_agent_not_running = "saved, but the agent is not running, so it has not been applied yet"
-config_saved_agent_unreachable = "saved, but the agent could not be reached to apply it: %{error}"
 
 [updates]
 check_for_updates_dialog = "アップデートを確認…"

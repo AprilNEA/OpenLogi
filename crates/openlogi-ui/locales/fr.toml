@@ -467,8 +467,6 @@ relaunch_openlogi = "Relancer OpenLogi"
 device_scanning_is_unavailable = "La recherche d’appareils est indisponible"
 device_scan_failure_description = "Le service d’arrière-plan n’a pas pu rechercher d’appareils. Consultez son journal pour plus de détails."
 agent_restarted_during_pairing = "Le service d’arrière-plan a redémarré. Réessayez l’association."
-config_saved_agent_not_running = "saved, but the agent is not running, so it has not been applied yet"
-config_saved_agent_unreachable = "saved, but the agent could not be reached to apply it: %{error}"
 
 [updates]
 check_for_updates_dialog = "Rechercher des mises à jour…"
