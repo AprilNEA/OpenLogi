@@ -116,7 +116,7 @@ impl Job {
             Self::AstGrep => default_spec(
                 "ast-grep",
                 &["sg", "ssot"],
-                "The single-source-of-truth guards in .ast-grep/rules: each names the module that owns a decision and fails on its ingredients anywhere else. Needs ast-grep, which the devenv shell provides.",
+                "The single-source-of-truth guards registered in sgconfig.yml: each names the module that owns a decision and fails on its ingredients anywhere else. Needs ast-grep, which the devenv shell provides.",
             ),
             Self::PublishClosure => default_spec(
                 "publish closure",

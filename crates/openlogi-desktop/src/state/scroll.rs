@@ -1,4 +1,4 @@
-//! Per-device scroll inversion and wheel resolution.
+//! Per-device scroll inversion, wheel resolution and smooth wheel.
 
 use tracing::debug;
 
@@ -28,13 +28,35 @@ impl AppState {
             .and_then(|record| record.capabilities)
             .is_some_and(|capabilities| capabilities.scroll_inversion)
     }
+    /// Whether the toggle should be offered at all — natively, or through the
+    /// capture layer for a device whose firmware has no invert bit (#694,
+    /// #776). Requires a device with resolved capabilities either way, so an
+    /// unprobed device still reads as unavailable rather than silently
+    /// offering a control that would do nothing.
+    #[must_use]
+    pub fn current_scroll_inversion_available(&self) -> bool {
+        self.current_scroll_inversion_supported()
+            || (openlogi_hook::SOFTWARE_SCROLL_INVERSION
+                && self
+                    .current_record()
+                    .and_then(|record| record.capabilities)
+                    .is_some())
+    }
+    /// Whether inverting the active device's wheel goes through the capture
+    /// layer rather than the firmware — the case the GUI labels as a software
+    /// fallback.
+    #[must_use]
+    pub fn current_scroll_inversion_is_software(&self) -> bool {
+        self.current_scroll_inversion_available() && !self.current_scroll_inversion_supported()
+    }
     /// Set the active device's scroll-wheel inversion, persist it, and reload
-    /// the agent so it writes the device's native HID++ wheel inversion. No-op
-    /// when no device is selected or the active device does not report support.
+    /// the agent so it applies it — as a native HID++ write where the firmware
+    /// supports it, otherwise through the capture layer. No-op when no device
+    /// is selected or neither route is available.
     pub fn commit_invert_scroll(&mut self, invert: bool) -> StateEvents {
         let events = self.for_current_device(StateEvent::DeviceConfigChanged);
-        if !self.current_scroll_inversion_supported() {
-            debug!("active device does not support native scroll inversion");
+        if !self.current_scroll_inversion_available() {
+            debug!("active device cannot invert its scroll wheel");
             return events;
         }
         let Some(key) = self
@@ -119,6 +141,42 @@ impl AppState {
         self.persist_and_reload("wheel resolution");
         events
     }
+    /// Whether the active device's main wheel is smoothed by OpenLogi through
+    /// its diverted HID++ reports. `false` when no device is selected or it
+    /// hasn't opted in.
+    #[must_use]
+    pub fn current_smooth_wheel(&self) -> bool {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .is_some_and(|key| self.config.smooth_wheel(key))
+    }
+    /// Turn the active device's smooth wheel on or off, persist it, and reload
+    /// the agent so it diverts the wheel or hands it back. Turning it on needs
+    /// `0x2121 HiResWheel` on the current link; turning it off stays possible
+    /// without it, so a setting made on another link can always be removed.
+    /// Committing the current value saves and reloads nothing.
+    pub fn commit_smooth_wheel(&mut self, enabled: bool) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
+        if enabled && !self.current_hires_wheel_supported() {
+            debug!("smooth wheel requires HiResWheel on this link");
+            return events;
+        }
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!("no persistent device key — smooth-wheel change ignored");
+            return events;
+        };
+        if self.config.smooth_wheel(&key) == enabled {
+            return events;
+        }
+        self.config
+            .edit(|config| config.set_smooth_wheel(&key, enabled));
+        self.persist_and_reload("smooth wheel");
+        events
+    }
 }
 
 pub(crate) fn set_scroll_resolution_if_supported(
@@ -173,6 +231,7 @@ mod tests {
                 slot: 1,
                 online: true,
                 battery: None,
+                settings_revision: 0,
             };
             // #974 moved the record list and its selection into one store, so
             // the fixture installs both together.

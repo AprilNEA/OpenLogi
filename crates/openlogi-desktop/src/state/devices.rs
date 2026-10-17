@@ -12,10 +12,11 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{
     DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
 };
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, LOGITECH_VENDOR_ID};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
+use super::device_session::ObservedConnection;
 use crate::services::assets::{AssetResolver, ResolvedAsset};
 
 /// One paired device with everything the UI needs to switch to it in O(1):
@@ -85,6 +86,12 @@ pub struct DeviceRecord {
     pub slot: u8,
     pub online: bool,
     pub battery: Option<BatteryInfo>,
+    /// The agent's [`PairedDevice::settings_revision`]: a move between two
+    /// snapshots of one route means the device changed a setting itself.
+    /// `0` for a record with no HID++ device behind it.
+    ///
+    /// [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
+    pub settings_revision: u64,
 }
 
 impl DeviceRecord {
@@ -135,6 +142,39 @@ impl DeviceRecord {
             return self.inventory_key();
         }
         self.config_key.clone()
+    }
+}
+
+impl super::AppState {
+    /// Presentation-only connection mode last observed for an offline device.
+    /// After restart, only a sole recorded link is unambiguous: the saved link
+    /// index has no chronology. Never restore a hardware-write route from history.
+    pub(crate) fn offline_connection(&self, record: &DeviceRecord) -> Option<ObservedConnection> {
+        if record.route.is_some() {
+            return None;
+        }
+        if let Some(transport) = self
+            .devices
+            .sessions
+            .get(&record.device_key())
+            .and_then(|session| session.last_connection)
+        {
+            return Some(transport);
+        }
+        let mut links = self.config.devices.get(&record.config_key)?.links.keys();
+        let link = links.next()?;
+        if links.next().is_some() {
+            return None;
+        }
+        let (vendor, product) = link.strip_prefix("direct:")?.split_once(':')?;
+        if u16::from_str_radix(vendor, 16).ok()? != LOGITECH_VENDOR_ID {
+            return None;
+        }
+        record
+            .model_info
+            .as_ref()?
+            .transport_for_product_id(u16::from_str_radix(product, 16).ok()?)
+            .map(ObservedConnection::Direct)
     }
 }
 
@@ -235,6 +275,7 @@ pub(super) fn build_device_list(
                 slot: paired.slot,
                 online: paired.online,
                 battery: paired.battery.clone(),
+                settings_revision: paired.settings_revision,
             });
         }
     }
@@ -324,6 +365,7 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         slot: 0,
         online: true,
         battery: None,
+        settings_revision: 0,
     }
 }
 
@@ -401,6 +443,7 @@ fn append_standalone(
             slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
             online: device.online,
             battery: None,
+            settings_revision: 0,
         });
     }
 }
@@ -599,6 +642,7 @@ fn offline_record(
         slot: 0,
         online: false,
         battery: None,
+        settings_revision: 0,
     }
 }
 
@@ -661,6 +705,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         slot: live.slot,
         online: live.online,
         battery: live.battery.or_else(|| known.battery.clone()),
+        settings_revision: live.settings_revision,
     }
 }
 
@@ -752,6 +797,7 @@ fn demo_keyboard() -> DeviceRecord {
         slot: 0,
         online: true,
         battery: None,
+        settings_revision: 0,
     }
 }
 

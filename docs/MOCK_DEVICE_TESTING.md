@@ -2,8 +2,7 @@
 
 Status: implemented architecture for fixture contracts, replay, recording,
 CLI capture/verification, semantic mock profiles, and injected agent hardware.
-The root corpus is ready for reviewed captures, but fixture schema v1 remains
-unreleased and is not yet a stable public format.
+The root corpus contains reviewed captures with automatic device, Agent, IPC, and desktop regression suites. Fixture schema v1 remains unreleased and is not yet a stable public format. See [current guarantees and commands](../fixtures/README.md#automatic-verification).
 
 ## Why this needs more than one mock
 
@@ -33,7 +32,8 @@ Hardware complexity makes the distinction important:
 - A channel has a dedicated reader and can carry concurrent requests,
   responses, late responses, and unsolicited lifecycle/input notifications.
 - Some output uses request/response HID++ reports, some lighting uses 64-byte
-  `0x12` reports, and standalone Litra devices use raw writes with no response.
+  `0x12` reports, and standalone Litra devices are tried over HID++ `0x1990`
+  before falling back to raw writes with no response.
 - Enumeration is event-first and stateful. It reuses channels, caches immutable
   probe data, refreshes volatile battery state, replays last-good inventory
   through transient failures, and eventually retires and reopens unhealthy
@@ -674,6 +674,10 @@ Race tests should synchronize on explicit barriers such as “request written”
 “channel retirement started,” never millisecond sleeps.
 
 ## Test suites generated from the corpus
+
+The current implementation discovers all four contributed specimens and replays all 28 declared reads. `openlogi-fixture` owns strict filesystem loading behind its optional `fs` feature; the default schema and privacy APIs remain host-free. `ReplayTopology::for_device` owns capture and corpus topology. `ReplayBackend::from_profile` supports the single-device HID++ contributions currently recorded and rejects unsupported target shapes.
+
+CLI operation expectations, Agent lifecycle gates, mock RPC/socket behavior, and desktop projection are mandatory workspace tests. The following sections also describe extensions that require additional captures: firmware, complete enumeration sessions, physical writes, and hardware-in-loop validation are not covered by the current read corpus. See [the corpus contract](../fixtures/README.md#automatic-verification) for the exact boundary of each executed suite.
 
 ### Corpus integrity
 

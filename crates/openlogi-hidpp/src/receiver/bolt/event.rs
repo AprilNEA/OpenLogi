@@ -78,7 +78,7 @@ pub fn decode(msg: &v10::Message) -> Option<Event> {
             // instead of dropping the event, which would hide the device
             // entirely.
             kind: DeviceKind::from(payload[1] & 0x0f),
-            encrypted: payload[1] & (1 << 5) != 0,
+            encrypted: crate::receiver::connection_encrypted(payload[0], payload[1]),
             online: payload[1] & (1 << 6) == 0,
             wpid: u16::from_le_bytes([payload[2], payload[3]]),
         })),
@@ -163,14 +163,14 @@ fn passkey(payload: &[u8; 17]) -> Option<&str> {
 ///
 /// You can listen to these events using [`super::Receiver::listen`]. Only
 /// enabled notifications as indicated by
-/// [`super::Receiver::get_notification_state`] are emitted.
+/// [`super::Receiver::get_notification_flags`] are emitted.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub enum Event {
     /// Is emitted whenever a device connects to or disconnects from the
     /// receiver, but only if
-    /// [`NotificationState::wireless_notifications`](super::NotificationState::wireless_notifications)
+    /// [`NotificationFlags::WIRELESS`](crate::receiver::NotificationFlags::WIRELESS)
     /// is enabled.
     ///
     /// Can be triggered for all paired devices using
@@ -424,6 +424,29 @@ mod tests {
         let plain_offline = connection(1 << 6);
         assert!(!plain_offline.encrypted);
         assert!(!plain_offline.online);
+    }
+
+    #[test]
+    fn a_bolt_protocol_byte_means_an_encrypted_link() {
+        // Byte 3 of the notification is the link protocol; 0x10 is Bolt, which
+        // is encrypted even with bit 5 clear (Solaar: `address == 0x10`).
+        let connection = |protocol: u8, status: u8| {
+            let mut payload = [0u8; 17];
+            payload[0] = protocol;
+            payload[1] = status;
+            match decode(&notification(1, 0x41, payload)) {
+                Some(Event::DeviceConnection(connection)) => connection,
+                other => panic!("expected a device connection, got {other:?}"),
+            }
+        };
+        assert!(connection(0x10, 0x02).encrypted);
+        assert!(connection(0x10, 0x02).online);
+        let offline = connection(0x10, (1 << 6) | 0x02);
+        assert!(offline.encrypted);
+        assert!(!offline.online);
+        // Another protocol byte leaves bit 5 as the only source.
+        assert!(!connection(0x04, 0x02).encrypted);
+        assert!(connection(0x04, (1 << 5) | 0x02).encrypted);
     }
 
     #[test]

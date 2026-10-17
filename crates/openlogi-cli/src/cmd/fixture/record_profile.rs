@@ -216,6 +216,30 @@ async fn capture_inventory(
         selected_device
     };
     sanitize::inventory(&mut retained)?;
+
+    // A paired device with a zero unit id and no serial number gets no identity
+    // representation in the fixture's ledger (openlogi-fixture's generate step
+    // skips it on this exact condition), so it has no principal for a settings
+    // route — or even a presence in `inventories.paired` — to resolve to.
+    // Leaving it in the capture produces a profile the generator can record
+    // but never verify; drop it instead (#1666), never the selected device.
+    let selected_slot = retained
+        .paired
+        .get(retained_selected)
+        .ok_or_else(|| anyhow!("the selected device is absent from the retained inventory"))?
+        .slot;
+    let mut paired_with_routes: Vec<(DeviceRoute, PairedDevice)> =
+        source_routes.into_iter().zip(retained.paired).collect();
+    paired_with_routes.retain(|(_, device)| {
+        device.slot == selected_slot
+            || device
+                .model_info
+                .as_ref()
+                .is_some_and(|model| model.unit_id != [0; 4] || model.serial_number.is_some())
+    });
+    let (source_routes, paired): (Vec<_>, Vec<_>) = paired_with_routes.into_iter().unzip();
+    retained.paired = paired;
+
     let profile_routes = retained
         .paired
         .iter()
@@ -224,6 +248,11 @@ async fn capture_inventory(
                 .ok_or_else(|| anyhow!("a sanitized profile route is not addressable"))
         })
         .collect::<Result<Vec<_>>>()?;
+    let retained_selected = retained
+        .paired
+        .iter()
+        .position(|device| device.slot == selected_slot)
+        .ok_or_else(|| anyhow!("the selected device did not survive capture filtering"))?;
     let selected_route = profile_routes
         .get(retained_selected)
         .cloned()
@@ -282,19 +311,52 @@ async fn capture_hidpp_settings(
             .await?
         }
     };
-    // Schema v1 makes RGB lighting and keyboard backlight mutually exclusive,
-    // so observed RGB capability is a sufficient negative backlight fact.
-    let backlight = if capabilities.lighting {
-        ProfileSetting::Unsupported
-    } else if device.online {
-        semantic_read(
-            "backlight",
-            agent::call(client.read_backlight(context::current(), source_route.clone())),
-        )
-        .await?
-    } else {
-        return Err(unknown_offline_support("backlight"));
+    let backlight = match capability_setting(device.online, capabilities.backlight) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "backlight",
+                agent::call(client.read_backlight(context::current(), source_route.clone())),
+            )
+            .await?
+        }
     };
+
+    let fn_lock = match capability_setting(device.online, capabilities.fn_lock) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "fn-lock",
+                agent::call(client.read_fn_lock(context::current(), source_route.clone())),
+            )
+            .await?
+        }
+    };
+    let report_rate = match capability_setting(device.online, capabilities.report_rate) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "report-rate",
+                agent::call(client.read_report_rate(context::current(), source_route.clone())),
+            )
+            .await?
+        }
+    };
+    let mut easy_switch = match capability_setting(device.online, capabilities.easy_switch) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "Easy-Switch",
+                agent::call(
+                    client.read_easy_switch_hosts(context::current(), source_route.clone()),
+                ),
+            )
+            .await?
+        }
+    };
+    if let Some(hosts) = easy_switch.value_mut() {
+        sanitize::easy_switch_hosts(hosts);
+    }
 
     Ok(ProfileDeviceSettings {
         route: profile_route,
@@ -302,6 +364,9 @@ async fn capture_hidpp_settings(
         smartshift,
         wheel,
         backlight,
+        fn_lock,
+        report_rate,
+        easy_switch,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
@@ -359,6 +424,9 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         smartshift: ProfileSetting::Unsupported,
         wheel: ProfileSetting::Unsupported,
         backlight: ProfileSetting::Unsupported,
+        fn_lock: ProfileSetting::Unsupported,
+        report_rate: ProfileSetting::Unsupported,
+        easy_switch: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };

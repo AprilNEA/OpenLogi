@@ -11,6 +11,7 @@ use anyhow::Result;
 use xshell::{Shell, cmd};
 
 use super::identity::{Channel, Component};
+use super::sparkle;
 use crate::support::fs::{ensure_file, repo_root};
 
 /// The Developer ID identity a release is signed with — read by the bundle
@@ -73,6 +74,13 @@ pub(super) fn sign_app_with_timestamp(
     if overlay.exists() {
         codesign_runtime(identity, &overlay, timestamp, None)?;
     }
+    // Sparkle ships ad-hoc signed. The app's hardened runtime only loads a
+    // framework signed by its own team, so re-sign Sparkle's helpers and then
+    // the framework that seals them, before the app seals the framework.
+    let sparkle = sparkle::code_inside_out(&app);
+    for code in &sparkle {
+        codesign_runtime(identity, code, timestamp, None)?;
+    }
     // The embedded CLI is a second Mach-O under Contents/MacOS; sign it with the
     // hardened runtime before the outer app so it carries a Developer ID
     // signature (its as-built ad-hoc signature would fail notarization).
@@ -87,6 +95,11 @@ pub(super) fn sign_app_with_timestamp(
     }
     if overlay.exists() {
         cmd!(sh, "codesign --verify --strict {overlay}").run()?;
+    }
+    if let Some(framework) = sparkle.last() {
+        // `--deep` is fine for verifying (it is deprecated only for signing):
+        // it checks every nested signature the framework seals.
+        cmd!(sh, "codesign --verify --deep --strict {framework}").run()?;
     }
     if cli.exists() {
         cmd!(sh, "codesign --verify --strict {cli}").run()?;

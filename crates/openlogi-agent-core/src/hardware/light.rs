@@ -237,6 +237,7 @@ async fn apply_light_unlocked(
         hardware.apply_litra(route, model, command),
     )
     .await
+    .map(drop)
 }
 
 fn light_write_lock(route: &DeviceRoute) -> LightWriteLock {
@@ -266,7 +267,7 @@ mod tests {
     const USAGE_ID: u16 = 0x0202;
 
     #[tokio::test]
-    async fn injected_light_uses_raw_writer_and_context_gate_without_opening_hidpp() {
+    async fn injected_light_falls_back_to_the_raw_writer_and_remembers_it() {
         let node_id = NodeId::from("agent-litra-node".to_string());
         let route = DeviceRoute::RawHid {
             vendor_id: 0x046d,
@@ -294,8 +295,8 @@ mod tests {
         assert_eq!(writer.written_reports(), vec![expected]);
         assert_eq!(
             backend.open_count(&node_id).expect("known raw-light node"),
-            0,
-            "a standalone light command must not open a HID++ channel"
+            1,
+            "the first command asks the light for HID++ 0x1990 once"
         );
 
         writer.set_connection(ChannelConnection::Disconnected);
@@ -319,7 +320,8 @@ mod tests {
         assert_eq!(writer.written_reports().len(), 1);
         assert_eq!(
             backend.open_count(&node_id).expect("known raw-light node"),
-            0
+            1,
+            "a light that is not HID++ is not asked again"
         );
         backend
             .require_complete()

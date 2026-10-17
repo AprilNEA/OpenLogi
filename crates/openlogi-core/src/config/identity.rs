@@ -289,6 +289,9 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     if device.invert_scroll != legacy.invert_scroll && legacy.invert_scroll {
         link.overrides.invert_scroll = Some(legacy.invert_scroll);
     }
+    // `smooth_wheel` is a bare opt-in with no per-link slot: for the same
+    // reason only a legacy `true` is evidence of a choice, so it carries over.
+    device.smooth_wheel |= legacy.smooth_wheel;
 
     // Scalar values with no per-link override slot: take the legacy value
     // when the canonical side is unset. A genuine disagreement keeps the
@@ -314,6 +317,8 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(camera_profile);
     fold_option_field!(thumbwheel_sensitivity);
     fold_option_field!(fn_lock);
+    fold_option_field!(keep_os_layout);
+    fold_option_field!(report_rate);
     // The user-assigned alias. Without this a legacy entry carrying a name
     // folded into a canonical entry with none would drop it silently — the
     // one field here a user typed by hand, so the loss is the most visible.

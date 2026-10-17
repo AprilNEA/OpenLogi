@@ -6,6 +6,7 @@ preserve_hierarchy: true
 
 export_languages:
   - be
+  - cs
   - da
   - de
   - es-ES
@@ -36,6 +37,7 @@ files:
     languages_mapping:
       locale:
         be: "be"
+        cs: "cs"
         da: "da"
         de: "de"
         es-ES: "es"

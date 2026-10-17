@@ -8,8 +8,9 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
-    BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, LightCommand, PasskeyMethod,
-    ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
+    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Dpi,
+    DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, HostConnection, LightCommand,
+    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -19,8 +20,8 @@ use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingPhase, PairingUpdate,
-    RingObservation,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -39,6 +40,9 @@ enum ReadFamily {
     Smartshift,
     Wheel,
     Backlight,
+    FnLock,
+    ReportRate,
+    EasySwitch,
 }
 
 #[derive(Clone)]
@@ -146,6 +150,51 @@ impl Agent for TestAgent {
         _status: SmartShiftStatus,
     ) -> Result<(), WriteError> {
         unreachable!("profile capture must never write SmartShift")
+    }
+
+    async fn set_fn_lock(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        unreachable!("profile capture must never write Fn-lock")
+    }
+
+    async fn unpair_device(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<(), PairingFailure> {
+        unreachable!("profile capture must never unpair a device")
+    }
+    async fn read_report_rate(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<ReportRateInfo, WriteError> {
+        self.read(
+            ReadFamily::ReportRate,
+            &route,
+            |settings| &settings.report_rate,
+            0x8061,
+        )
+    }
+    async fn set_report_rate(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        unreachable!("profile capture must never write the report rate")
+    }
+    async fn set_backlight(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _change: BacklightChange,
+    ) -> Result<BacklightState, WriteError> {
+        unreachable!("profile capture must never write the backlight")
     }
 
     async fn read_dpi(self, _: TarpcContext, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
@@ -287,6 +336,42 @@ impl Agent for TestAgent {
             0x1982,
         )
     }
+
+    async fn read_fn_lock(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<FnLockState, WriteError> {
+        self.read(
+            ReadFamily::FnLock,
+            &route,
+            |settings| &settings.fn_lock,
+            0x40a3,
+        )
+    }
+
+    async fn read_easy_switch_hosts(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        self.read(
+            ReadFamily::EasySwitch,
+            &route,
+            |settings| &settings.easy_switch,
+            0x1815,
+        )
+    }
+
+    async fn rename_easy_switch_host(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _slot: u8,
+        _name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        unreachable!("profile capture must never rename a host")
+    }
 }
 
 /// The client end of an in-process agent, past the handshake `connect_as`
@@ -304,6 +389,12 @@ fn test_client(agent: TestAgent) -> AgentClient {
 }
 
 fn fixture_agent() -> TestAgent {
+    fixture_agent_with(|_| {})
+}
+
+/// [`fixture_agent`], with `edit` applied to the profile before the agent's
+/// snapshot is taken from it.
+fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
     let mut profile: DeviceProfile =
         serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile parses");
     profile.inventories[0]
@@ -334,9 +425,12 @@ fn fixture_agent() -> TestAgent {
         status: BacklightStatus::AlsAutomatic,
         current_level: 3,
         nb_levels: 8,
+        power_save: false,
+        controls: BacklightControls::default(),
     });
     profile.standalone[0].address.identity = RAW_STANDALONE_ID.to_string();
     profile.standalone[0].serial_number = Some("RAW-LIGHT-SERIAL".to_string());
+    edit(&mut profile);
 
     let snapshot = AgentSnapshot {
         status: AgentStatus {
@@ -362,6 +456,7 @@ fn fixture_agent() -> TestAgent {
             }),
             recent: Vec::new(),
         },
+        lights: Vec::new(),
     };
     TestAgent::from_profile(profile, snapshot)
 }
@@ -402,7 +497,8 @@ async fn receiver_capture_uses_agent_reads_and_writes_validated_profile_only() {
             ReadFamily::Dpi,
             ReadFamily::Smartshift,
             ReadFamily::Wheel,
-            ReadFamily::Backlight,
+            // A mouse has no `0x1982`, so its backlight is recorded
+            // unsupported without asking the agent.
             ReadFamily::Smartshift,
         ]
     );
@@ -764,4 +860,119 @@ fn profile_metadata_must_be_nonempty_before_agent_access() {
         })
         .expect_err("blank synthetic metadata must fail");
     }
+}
+
+#[tokio::test]
+async fn capture_replaces_every_easy_switch_computer_name() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = directory.path().join("profile.json");
+    let host = |index, name: Option<&str>, name_max_len| EasySwitchSlot {
+        index,
+        paired: name.is_some(),
+        connection: HostConnection::Bluetooth,
+        name: name.map(str::to_owned),
+        name_max_len,
+        os: None,
+    };
+    let agent = fixture_agent_with(|profile| {
+        let mouse = profile.inventories[0]
+            .paired
+            .iter_mut()
+            .find(|device| device.slot == 1)
+            .expect("mouse");
+        mouse
+            .capabilities
+            .as_mut()
+            .expect("mouse capabilities")
+            .easy_switch = true;
+        let settings = profile
+            .settings
+            .iter_mut()
+            .find(|settings| matches!(settings.route, DeviceRoute::Bolt { slot: 1, .. }))
+            .expect("mouse settings");
+        settings.easy_switch = ProfileSetting::Supported(EasySwitchHosts {
+            current: Some(0),
+            slots: vec![
+                host(0, Some("Alice's MacBook Pro"), 24),
+                // Too short for "Computer 2": the synthetic name is cut.
+                host(1, Some("Bob-PC"), 8),
+                host(2, None, 24),
+            ],
+            can_rename: true,
+        });
+    });
+    let inspection = agent.clone();
+    capture_connected(
+        args(output.clone(), Some("synthetic performance mouse")),
+        test_client(agent),
+    )
+    .await
+    .expect("semantic capture succeeds");
+
+    assert!(
+        inspection
+            .calls
+            .lock()
+            .expect("calls lock")
+            .iter()
+            .any(|(family, _)| *family == ReadFamily::EasySwitch)
+    );
+    let encoded = std::fs::read_to_string(&output).expect("profile output");
+    for secret in ["Alice", "Bob"] {
+        assert!(!encoded.contains(secret), "output leaked {secret}");
+    }
+    let profile: DeviceProfile = serde_json::from_str(&encoded).expect("typed profile");
+    profile.validate().expect("published profile validates");
+    let hosts = profile
+        .settings
+        .iter()
+        .find_map(|settings| settings.easy_switch.value())
+        .expect("captured hosts");
+    let names: Vec<_> = hosts
+        .slots
+        .iter()
+        .map(|slot| slot.name.as_deref())
+        .collect();
+    assert_eq!(names, [Some("Computer 1"), Some("Computer"), None]);
+}
+
+#[tokio::test]
+async fn receiver_capture_drops_a_sibling_device_with_no_identity() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = directory.path().join("profile.json");
+    let agent = fixture_agent_with(|profile| {
+        let keyboard = profile.inventories[0]
+            .paired
+            .iter_mut()
+            .find(|device| device.slot == 3)
+            .expect("synthetic RGB keyboard");
+        let model = keyboard.model_info.as_mut().expect("keyboard model info");
+        model.unit_id = [0; 4];
+        model.serial_number = None;
+    });
+
+    capture_connected(
+        args(output.clone(), Some("synthetic performance mouse")),
+        test_client(agent),
+    )
+    .await
+    .expect("semantic capture succeeds");
+
+    let profile: DeviceProfile =
+        serde_json::from_slice(&std::fs::read(output).expect("profile output"))
+            .expect("typed profile");
+    profile.validate().expect("published profile validates");
+    assert_eq!(
+        profile.inventories[0].paired.len(),
+        1,
+        "the identity-less sibling has no principal and no settings route to bind \
+         to, so it is dropped from the capture entirely rather than left as a \
+         profile the generator can record but never verify (#1666)"
+    );
+    assert_eq!(profile.inventories[0].paired[0].slot, 1);
+    assert_eq!(profile.settings.len(), 1);
+    assert!(matches!(
+        profile.settings[0].route,
+        DeviceRoute::Bolt { slot: 1, .. }
+    ));
 }

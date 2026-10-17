@@ -15,15 +15,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding};
+use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, MouseProfileTarget, canonical_device_key};
 use openlogi_core::device::{
-    Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
+    Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities, LightState,
+    StandaloneDevice,
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, KEYBOARD_KEY_CIDS,
+    BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
+    DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, ReportRate,
+    ReportRateInfo, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -31,24 +34,32 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
-use crate::hardware::{DeviceAccess, DeviceOp, HardwareContext, VolatileMouseSettings};
+use crate::hardware::{
+    DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
+};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
+use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
+use crate::watchers::light::{WatchedLight, WatchedLights};
 use crate::{DpiCycleState, DpiCycles};
 
 mod devices;
+mod lights;
 
 #[cfg(test)]
-use devices::{VOLATILE_REAPPLY_CONFIRM_RETRIES, reapply_targets};
+use devices::reapply_targets;
 use devices::{
-    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    is_hidpp_device, pick_current, plan_reapply, stable_id,
+    RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
+    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_report_rate,
+    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
+    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply, settings_moved,
+    stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -72,6 +83,10 @@ struct AgentDevice {
     /// transition is a reconnect — the device may have power-cycled, so its
     /// volatile settings need re-applying (#189).
     online: bool,
+    /// [`PairedDevice::settings_revision`](openlogi_core::device::PairedDevice::settings_revision):
+    /// it moves when the device reports a setting changed on it. Comparable
+    /// only between snapshots of the same route.
+    settings_revision: u64,
 }
 
 /// Cheaply cloneable handles handed to hooks and background managers.
@@ -93,9 +108,9 @@ pub struct SharedHandles {
     /// taking the orchestrator/config lock.
     pub scroll_preferences: Arc<ScrollPreferences>,
     pub dpi_cycle: Arc<RwLock<DpiCycles>>,
-    /// One capture plan per online device — what to divert and how to
-    /// dispatch, keyed by the device the events arrive on. Carries each
-    /// device's effective thumb-wheel sensitivity.
+    /// Capture plans for online enabled devices, plus the latest route of
+    /// every online physical device. A disabled device stays out of the plans
+    /// so capture leaves it native, but its route remains for restoration.
     pub capture_plans: SharedCapturePlans,
     pub capture_channel: CaptureChannelSlot,
     /// Exact-route channels owned and published by the inventory enumerator.
@@ -117,8 +132,26 @@ pub struct SharedHandles {
     /// Receiver access shared by HID++ sessions and pairing. Pairing/host
     /// transitions are exclusive; capture sessions share under read leases.
     pub receiver_access: ReceiverAccess,
+    /// Per-transport turns for agent-owned HID requests. Shared by every
+    /// device access built from these handles, so two slots of one receiver
+    /// queue behind each other before either starts its response timeout.
+    transport_turns: crate::hardware::TransportTurns,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// The online lights to watch for changes made on the light itself.
+    pub watched_lights: WatchedLights,
+    /// Orders every path's Fn-lock writes per keyboard.
+    fn_lock_order: WriteOrder,
+    /// Orders the GUI's report-rate writes and the reconnect reapply's per
+    /// mouse.
+    report_rate_order: WriteOrder,
+    /// Orders the GUI's backlight writes per keyboard.
+    backlight_order: WriteOrder,
+    /// Orders host renames per device.
+    host_name_order: WriteOrder,
+    /// The running inventory watcher's refresh handle, published at arming;
+    /// `None` while no watcher runs.
+    inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
 }
 
 impl SharedHandles {
@@ -150,6 +183,7 @@ impl SharedHandles {
             registry: self.channel_registry.clone(),
             receiver_access: self.receiver_access.clone(),
             device_io: self.device_io.clone(),
+            transport_turns: self.transport_turns.clone(),
         }
     }
 
@@ -163,6 +197,127 @@ impl SharedHandles {
     #[must_use]
     pub fn keyboard_device(&self, route: &DeviceRoute) -> DeviceOp {
         self.keyboard_access().op(route)
+    }
+
+    /// Return the `0x8071` software control this session's lighting writes
+    /// took to the firmware. The agent calls this once on a terminal exit,
+    /// while inventory still publishes its channels. A handover or replacement
+    /// skips it: the successor repaints on arrival, and its own exit hands
+    /// control back.
+    pub async fn release_rgb_control(&self) {
+        crate::hardware::release_session_rgb_control(&self.device_access()).await;
+    }
+
+    /// Write `fn_lock` to the keyboard at `route` and return its echo. When a
+    /// newer Fn-lock write for the keyboard is requested before this one gets
+    /// its turn, this one reads the keyboard instead of writing a value that
+    /// is about to be replaced. Waiting for the turn does not count against
+    /// the write's deadline.
+    pub async fn set_fn_lock(
+        &self,
+        route: &DeviceRoute,
+        fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        let ticket = self.fn_lock_order.request(route);
+        self.keyboard_device(route)
+            .run_in_turn(
+                HidppOperation::WriteFnLock,
+                &ticket,
+                |c| async move { openlogi_hid::set_fn_lock_on(&c, fn_lock).await },
+                |c| async move { openlogi_hid::get_fn_lock_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write `rate` to the mouse at `route` and return what it reads back.
+    /// When a newer report-rate write for the mouse is requested before this
+    /// one gets its turn, this one reads the mouse instead of writing a rate
+    /// that is about to be replaced. A reconnect reapply numbers its write
+    /// when it is scheduled, so it never lands over a pick made after that,
+    /// and a pick queued behind a reapply still gets the whole deadline once
+    /// its turn comes.
+    pub async fn set_report_rate(
+        &self,
+        route: &DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        let ticket = self.report_rate_order.request(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteReportRate,
+                &ticket,
+                |c| async move { openlogi_hid::set_report_rate_on(&c, rate).await },
+                |c| async move { openlogi_hid::get_report_rate_info_on(&c).await },
+            )
+            .await
+    }
+
+    /// Apply `change` to the backlight of the keyboard at `route` and return
+    /// what it reads back. Every change is applied, one at a time in request
+    /// order: each rewrites the whole configuration it read, so two that
+    /// overlapped would undo one another, and a newer change to another
+    /// control does not make an older one moot. Waiting for the earlier
+    /// changes does not count against the write's deadline.
+    pub async fn set_backlight(
+        &self,
+        route: &DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError> {
+        let ticket = self.backlight_order.request(route);
+        self.device(route)
+            .run_in_order(
+                HidppOperation::WriteBacklight,
+                ticket,
+                move |c| async move { openlogi_hid::update_backlight_on(&c, change).await },
+            )
+            .await
+    }
+
+    /// Name the computer on Easy-Switch `slot` of the device at `route` and
+    /// return the slots it reads back. Renames run one at a time in request
+    /// order, so the name asked for last is the one the device keeps.
+    /// Waiting for the earlier renames does not count against the write's
+    /// deadline.
+    pub async fn rename_easy_switch_host(
+        &self,
+        route: &DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        let ticket = self.host_name_order.request(route);
+        self.device(route)
+            .run_in_order(HidppOperation::RenameHost, ticket, move |c| async move {
+                openlogi_hid::rename_easy_switch_host_on(&c, slot, &name).await
+            })
+            .await
+    }
+
+    /// Hand requests to the inventory watcher started at arming.
+    pub fn publish_inventory_refresh(&self, refresh: InventoryRefresh) {
+        write_value(&self.inventory_refresh, Some(refresh), "inventory refresh");
+    }
+
+    /// Have the inventory watcher rescan receivers after a pairing-table
+    /// change. Nothing is scanning while the agent is unarmed, and arming
+    /// starts with a full scan, so there is then nothing to ask.
+    pub fn request_receiver_rescan(&self) {
+        let Ok(refresh) = self.inventory_refresh.read() else {
+            warn!("inventory refresh handle poisoned — receiver rescan skipped");
+            return;
+        };
+        if let Some(refresh) = refresh.as_ref() {
+            refresh.request_receiver_rescan();
+        }
+    }
+
+    /// [`Self::set_fn_lock`] without waiting, for the config-reload and
+    /// reconnect paths; the outcome is logged.
+    fn write_fn_lock_in_background(&self, route: &DeviceRoute, fn_lock: bool) {
+        crate::hardware::write_fn_lock_in_background(
+            self.keyboard_device(route),
+            self.fn_lock_order.request(route),
+            fn_lock,
+        );
     }
 }
 
@@ -180,10 +335,13 @@ pub struct Orchestrator {
     /// the distinction (as [`InventoryHealth`]) so the GUI can tell them
     /// apart.
     inventory: InventoryState,
-    /// Set after a system wake: devices may have power-cycled while their
-    /// set/route/online state looks identical across the sleep gap, so the
-    /// next refresh re-applies volatile settings to every online device.
-    reapply_all_next_refresh: bool,
+    /// Set after a system wake or a device's own reconnect broadcast: devices
+    /// may have power-cycled while their set/route/online state looks
+    /// identical across the gap, so the next refresh re-applies volatile
+    /// settings to every online device. The value is the confirming re-apply
+    /// budget the forced targets are queued with — a system wake keeps the
+    /// boot-race ladder, a device reconnect needs only a link-race confirm.
+    forced_reapply_budget: Option<u8>,
     /// Whether the last enumeration pass failed to open HID++ nodes; published
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
@@ -198,6 +356,17 @@ pub struct Orchestrator {
     /// Transient manual power choices for camera-linked lights. A camera-use
     /// transition clears them; they are never written to the config.
     manual_light_overrides: BTreeMap<String, bool>,
+    /// What each light reached over HID++ last read back, by config key,
+    /// with the route it was read on.
+    light_states: BTreeMap<String, (DeviceRoute, LightState)>,
+    /// Settings changed on each light itself that the config does not hold
+    /// yet, by config key. They stand in for the saved values until a save
+    /// or a GUI write of that control replaces them.
+    lights_changed_on_light: BTreeMap<String, ChangedOnLight>,
+    /// The keyboards whose "keep OS layout" is in effect, shared with the
+    /// layout writes queued for them so a write withdraws itself once a
+    /// reload turns the setting off or disables the device.
+    kept_os_layouts: Arc<KeptOsLayouts>,
     /// Whether the OS mouse hook is currently installed. Back/Forward gesture
     /// motion comes from HID++, but diversion is published only while the
     /// broader mouse-remapping path is available so losing the hook leaves the
@@ -205,9 +374,10 @@ pub struct Orchestrator {
     os_mouse_hook_available: bool,
     /// Private producer halves for the read-only runtime projections in
     /// `shared`, keeping the orchestrator's single-writer contract structural.
-    capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
+    capture_plans_tx: watch::Sender<Arc<CapturePublication>>,
     keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
     host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
+    watched_lights_tx: watch::Sender<Arc<Vec<WatchedLight>>>,
     shared: SharedHandles,
     /// The state the GUI observes. Every mutator below that changes one of its
     /// facts republishes here, so the cell cannot go stale behind a new code
@@ -250,9 +420,11 @@ impl Orchestrator {
         observable: Arc<ObservableState>,
         hardware: HardwareContext,
     ) -> Self {
-        let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
+        let (capture_plans_tx, capture_plans) =
+            watch::channel(Arc::new(CapturePublication::default()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
+        let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
         let shared = SharedHandles {
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),
@@ -271,7 +443,14 @@ impl Orchestrator {
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
+            transport_turns: crate::hardware::TransportTurns::default(),
             host_switch_links,
+            watched_lights,
+            fn_lock_order: WriteOrder::default(),
+            report_rate_order: WriteOrder::default(),
+            backlight_order: WriteOrder::default(),
+            host_name_order: WriteOrder::default(),
+            inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
             config,
@@ -283,15 +462,19 @@ impl Orchestrator {
                 target: openlogi_hook::PointerTarget::Unavailable,
             },
             inventory: InventoryState::Pending,
-            reapply_all_next_refresh: false,
+            forced_reapply_budget: None,
             hid_open_failures: false,
             reapply_followup: HashMap::new(),
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
+            light_states: BTreeMap::new(),
+            lights_changed_on_light: BTreeMap::new(),
+            kept_os_layouts: Arc::default(),
             os_mouse_hook_available: false,
             capture_plans_tx,
             keyboard_spec_tx,
             host_switch_links_tx,
+            watched_lights_tx,
             shared,
             observable,
         };
@@ -314,17 +497,28 @@ impl Orchestrator {
             .map(|d| d.config_key.as_str())
     }
 
+    /// The app whose mouse profile applies, and the pointer target dispatch
+    /// revalidates (`None`: dispatch follows focus, unrevalidated).
+    ///
+    /// An unidentified target (an overlay, a failed lookup) can last a whole
+    /// session. It selects the focused profile, never the desktop's, yet stays
+    /// pointer-scoped: its presses still end when the pointer reaches an
+    /// identified target, whose profile they were not resolved against. With
+    /// no focused application there is no such profile and the global bindings
+    /// apply, as focused mode applies them in the same state.
     fn mouse_context(&self) -> (Option<&str>, Option<openlogi_hook::PointerTarget>) {
+        let target = self.pointer_context.target;
         if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused
-            || self.pointer_context.target == openlogi_hook::PointerTarget::Unsupported
+            || target == openlogi_hook::PointerTarget::Unsupported
         {
-            (self.current_app.as_deref(), None)
-        } else {
-            (
-                self.pointer_context.app.as_ref().map(|app| app.id.as_str()),
-                Some(self.pointer_context.target),
-            )
+            return (self.current_app.as_deref(), None);
         }
+        let app = if target == openlogi_hook::PointerTarget::Unavailable {
+            self.current_app.as_deref()
+        } else {
+            self.pointer_context.app.as_ref().map(|app| app.id.as_str())
+        };
+        (app, Some(target))
     }
 
     /// Build the OS-hook callback's maps for `key` and its mouse context. Both hook
@@ -341,11 +535,13 @@ impl Orchestrator {
         let (app, pointer_target) = self.mouse_context();
         let mut bindings = button_bindings_for(&self.config, key, app);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
-        if let Some(key) = key {
+        if cfg!(target_os = "macos")
+            && let Some(key) = key
+        {
             for button in hidpp_side_gesture_maps_for(&self.config, key, app).keys() {
-                // HID++ owns both edges for these controls. Keeping their
-                // projected click or gesture map in the global hook would
-                // reintroduce a second, unattributed dispatch path.
+                // macOS gives HID++ exclusive ownership of both edges.
+                // Windows deliberately keeps this global map as a passive
+                // fallback when the physical control cannot arm raw XY.
                 bindings.remove(button);
                 gestures.remove(button);
             }
@@ -376,11 +572,24 @@ impl Orchestrator {
         }
     }
 
-    /// The keyboard key-capture spec for the first known keyboard, or `None`
-    /// when no keyboard is paired or none of its capturable keys carries a
-    /// real binding (an unbound key must never be diverted).
+    /// The keyboard key-capture spec for the managed keyboard, or `None` when
+    /// no enabled keyboard carries a real binding (an unbound key must never
+    /// be diverted).
     ///
-    /// Deliberately does NOT require the keyboard to be online: an idle
+    /// The bound keys *are* the divert set: every
+    /// [`ButtonId::Control`] in the
+    /// keyboard's effective bindings names the `0x1b04` control to divert, and
+    /// the capture session arms whichever of those the device's own control
+    /// table reports as divertable. No fixed key table sits in between, so a
+    /// keyboard OpenLogi has never seen is remappable the day it ships.
+    ///
+    /// One session at a time, and only a keyboard with something bound can
+    /// hold it: an online bound keyboard wins over an asleep one, so a stale
+    /// receiver slot for the same model (#1581) — which carries no bindings —
+    /// never takes the session from the keyboard that is actually typing, and
+    /// never shadows it while it naps. Among bound keyboards in the same
+    /// online state, inventory order breaks the tie. Beyond that the spec
+    /// deliberately does NOT require the keyboard to be online: an idle
     /// keyboard sleeps within minutes and probe timeouts can flap it offline,
     /// and tearing the capture session down on every nap would hand the
     /// diverted keys back to the firmware (dead bindings) until the re-arm
@@ -388,33 +597,41 @@ impl Orchestrator {
     /// channel is to the always-present receiver — and re-arms diversion on
     /// the device's `0x1d4b` reconnection broadcast.
     fn keyboard_spec_for(&self) -> Option<KeyboardSpec> {
-        let dev = self
+        let candidates: Vec<KeyboardCandidate<'_>> = self
             .devices
             .iter()
-            .find(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())?;
-        let bindings = button_bindings_for(
-            &self.config,
-            Some(&dev.config_key),
-            self.current_app.as_deref(),
-        );
-        let wanted: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
-            .iter()
-            .filter(|(_, button)| {
-                bindings.get(button).is_some_and(|binding| {
-                    matches!(binding, Binding::LongPress(_))
-                        || binding.click_action() != Action::None
+            .filter(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())
+            .filter(|d| self.config.device_enabled(&d.config_key))
+            .filter_map(|dev| {
+                let bindings = button_bindings_for(
+                    &self.config,
+                    Some(&dev.config_key),
+                    self.current_app.as_deref(),
+                );
+                let divert = keyboard_divert_set(&bindings);
+                (!divert.wanted.is_empty()).then_some(KeyboardCandidate {
+                    dev,
+                    bindings,
+                    divert,
                 })
             })
-            .copied()
             .collect();
-        if wanted.is_empty() {
-            return None;
+        let chosen = candidates
+            .iter()
+            .find(|candidate| candidate.dev.online)
+            .or_else(|| candidates.first())?;
+        for &cid in &chosen.divert.reserved {
+            warn!(
+                cid = format_args!("{cid:#06x}"),
+                key = %chosen.dev.config_key,
+                "binding names a control OpenLogi never diverts as a key — left native"
+            );
         }
         Some(KeyboardSpec {
-            config_key: dev.config_key.clone(),
-            route: dev.route.clone()?,
-            wanted,
-            bindings,
+            config_key: chosen.dev.config_key.clone(),
+            route: chosen.dev.route.clone()?,
+            wanted: chosen.divert.wanted.clone(),
+            bindings: chosen.bindings.clone(),
         })
     }
 
@@ -422,7 +639,33 @@ impl Orchestrator {
     fn rebuild(&self) {
         let key = self.current_key();
         self.publish_hook_maps(self.hook_maps_for(key));
+        self.publish_scroll_inversion(key);
         self.publish_device_runtime();
+    }
+
+    /// Tell the capture layer whether to reverse the wheel for the selected
+    /// device.
+    ///
+    /// Only for devices with no native `0x2121` invert bit: one that has it
+    /// gets the firmware write from [`configured_wheel_mode`] instead, and
+    /// doing both would cancel out. A device that is disabled, unselected or
+    /// not asking for inversion turns the flag off, so the hook stops
+    /// transforming as soon as the setting is withdrawn.
+    fn publish_scroll_inversion(&self, key: Option<&str>) {
+        let wanted = key.is_some_and(|key| {
+            self.config.device_enabled(key)
+                && self.config.invert_scroll(key)
+                && self
+                    .devices
+                    .iter()
+                    .find(|device| device.config_key == key)
+                    .is_some_and(|device| {
+                        device
+                            .capabilities
+                            .is_some_and(|capabilities| !capabilities.scroll_inversion)
+                    })
+        });
+        openlogi_hook::set_scroll_inversion(wanted);
     }
 
     /// Republish the runtime views derived from the device set + config: the
@@ -447,10 +690,12 @@ impl Orchestrator {
             host_switch_links(&self.config, &self.devices),
         );
         publish_optional_arc_if_changed(&self.keyboard_spec_tx, self.keyboard_spec_for());
+        publish_arc_if_changed(&self.watched_lights_tx, self.watched_lights());
+        self.publish_lights();
     }
 
     fn publish_capture_plans(&self) {
-        publish_arc_if_changed(&self.capture_plans_tx, self.capture_plans_for());
+        publish_arc_if_changed(&self.capture_plans_tx, self.capture_publication());
     }
 
     /// Rewrite the per-device DPI-cycle map for every online device,
@@ -490,35 +735,72 @@ impl Orchestrator {
         guard.by_key = by_key;
     }
 
-    /// One capture plan per online device, from the current config + app.
-    fn capture_plans_for(&self) -> Vec<DeviceCapturePlan> {
+    /// Capture plans for enabled devices, and a route for every online device.
+    ///
+    /// A `0x1b04` control has one owner per device. The keyboard session owns
+    /// every control the keyboard spec names, so those are released from the
+    /// keyboard's own plan here: a hand-edited `Back = …` on a K380 would
+    /// otherwise have both sessions divert the multiplatform Back key
+    /// (`0x00bd`, a [`BACK_CIDS`](openlogi_hid::reprog_controls::BACK_CIDS)
+    /// member), each reading the other's diverted state back as "original".
+    ///
+    /// Disabled devices are omitted from the plans so capture leaves them
+    /// native. Their route is still published: a restore owed from an earlier
+    /// handoff has to follow the mouse after capture stops.
+    fn capture_publication(&self) -> CapturePublication {
         let rearm_generation = self.shared.capture_rearm_generation.load(Ordering::Relaxed);
-        self.devices
-            .iter()
-            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
-            .filter_map(|dev| {
-                let route = dev.route.clone()?;
-                let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
-                let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
-                    .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
-                let (app, pointer_target) = if dev.kind == DeviceKind::Keyboard {
-                    (self.current_app.as_deref(), None)
-                } else {
-                    self.mouse_context()
-                };
-                let mut plan = plan_for_device(
-                    &self.config,
-                    physical_key,
-                    &dev.config_key,
-                    route,
-                    app,
-                    rearm_generation,
-                    self.os_mouse_hook_available,
-                );
-                plan.dispatch.pointer_target = pointer_target;
-                Some(plan)
-            })
-            .collect()
+        let keyboard = self.keyboard_spec_for();
+        let mut plans = Vec::new();
+        let mut routes = BTreeMap::new();
+        for dev in &self.devices {
+            let Some((physical_key, route)) = Self::capture_identity(dev) else {
+                continue;
+            };
+            routes
+                .entry(physical_key.clone())
+                .or_insert_with(|| route.clone());
+            if !self.config.device_enabled(&dev.config_key) {
+                continue;
+            }
+            let (app, pointer_target) = if dev.kind == DeviceKind::Keyboard {
+                (self.current_app.as_deref(), None)
+            } else {
+                self.mouse_context()
+            };
+            let mut plan = plan_for_device(
+                &self.config,
+                physical_key,
+                &dev.config_key,
+                route,
+                app,
+                rearm_generation,
+                self.os_mouse_hook_available,
+            );
+            plan.dispatch.pointer_target = pointer_target;
+            plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
+            plan.target.spec.divert_main_wheel =
+                main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
+            if let Some(keyboard) = keyboard
+                .as_ref()
+                .filter(|keyboard| keyboard.route == plan.target.route)
+            {
+                plan.release_controls(&keyboard.wanted);
+            }
+            plans.push(plan);
+        }
+        CapturePublication::new(plans, routes)
+    }
+
+    /// Physical key and route of one online device inventory can still address.
+    fn capture_identity(dev: &AgentDevice) -> Option<(PhysicalDeviceKey, DeviceRoute)> {
+        if !dev.online {
+            return None;
+        }
+        let route = dev.route.clone()?;
+        let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
+        let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
+            .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
+        Some((physical_key, route))
     }
 
     /// Publish whether the OS movement hook is currently usable.
@@ -562,15 +844,29 @@ impl Orchestrator {
         // wheel mode) live in device RAM and reset on a power cycle. Every
         // reconnect shape re-applies the persisted values (#189): a first
         // sighting, a replug (new route), a wake from device sleep
-        // (offline→online), or — via the
-        // flag — a system wake where none of those are observable.
-        let reapply_all = std::mem::take(&mut self.reapply_all_next_refresh);
+        // (offline→online), or — via the forced budget — a system wake or a
+        // device's own `0x1d4b` reconnect broadcast, where none of those
+        // transitions are observable.
+        let forced = self.forced_reapply_budget.take();
         let next_current = pick_current(&devices, self.config.selected_device());
-        let rearm_capture = any_device_needs_capture_rearm(&self.devices, &devices, reapply_all);
+        let rearm_capture =
+            any_device_needs_capture_rearm(&self.devices, &devices, forced.is_some());
         let followup = std::mem::take(&mut self.reapply_followup);
-        let (targets, next_followup) =
-            plan_reapply(&self.devices, &devices, &followup, reapply_all);
+        let (targets, next_followup) = plan_reapply(&self.devices, &devices, &followup, forced);
         self.reapply_followup = next_followup;
+        // A keyboard switched to another platform on the device (a platform
+        // key combination) is put back, as Logi Options+ does on its
+        // platform-change report. So is one whose `0x4531` support shows up
+        // only after it came online. A reapply below already covers both.
+        let mut layout_checks = settings_moved(&self.devices, &devices);
+        layout_checks.extend(os_layout_appeared(&self.devices, &devices));
+        layout_checks.sort_unstable();
+        layout_checks.dedup();
+        for idx in layout_checks {
+            if !targets.contains(&idx) {
+                self.keep_os_layout(&devices[idx]);
+            }
+        }
         for idx in targets {
             self.reapply_volatile_settings(&devices[idx]);
         }
@@ -619,7 +915,28 @@ impl Orchestrator {
     /// can look identical to the last pre-sleep one (same set, same routes,
     /// already online), so the per-device transition triggers never fire.
     pub fn reapply_volatile_on_next_refresh(&mut self) {
-        self.reapply_all_next_refresh = true;
+        self.force_reapply(VOLATILE_REAPPLY_CONFIRM_RETRIES);
+    }
+
+    /// Force a volatile-settings re-apply on the next inventory refresh
+    /// because a device broadcast its own reconnection (`0x1d4b`). The
+    /// firmware is explicitly asking to be reconfigured, and — as after a
+    /// system wake — the snapshot that follows can look identical to the last
+    /// one (a nap short enough that no reconciliation ever observed the
+    /// device offline), so the offline→online trigger cannot be relied on.
+    /// The event channel is identity-free by design, so every online device
+    /// re-applies; the writes are idempotent and the confirm budget is the
+    /// short link-race one, not the boot ladder.
+    pub fn reapply_reconnected_on_next_refresh(&mut self) {
+        self.force_reapply(RECONNECT_REAPPLY_CONFIRM_RETRIES);
+    }
+
+    /// Coalesce forced re-apply requests, keeping the largest confirm budget:
+    /// a device reconnect arriving between a system wake and its snapshot must
+    /// not shrink the wake's boot-race ladder.
+    fn force_reapply(&mut self, confirm_retries: u8) {
+        self.forced_reapply_budget =
+            Some(self.forced_reapply_budget.unwrap_or(0).max(confirm_retries));
     }
 
     /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
@@ -639,8 +956,9 @@ impl Orchestrator {
         let route_key = stable_id(dev).route_key();
         let device = self.config.devices.get(key.as_str());
         let settings = VolatileMouseSettings {
-            wheel: configured_wheel_mode(&self.config, dev),
+            wheel: self.wheel_mode_change(dev),
             dpi: device.and_then(|d| d.effective_dpi(&route_key)),
+            report_rate: configured_report_rate(&self.config, dev),
             smartshift: device
                 .and_then(|d| d.effective_smartshift(&route_key))
                 .map(openlogi_hid::SmartShiftStatus::from),
@@ -649,20 +967,20 @@ impl Orchestrator {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
                 settings,
+                &self.shared.report_rate_order,
+                &self.shared.capture_plans,
             );
         }
-        if let Some(lighting) = device
-            .and_then(|d| d.effective_lighting(&route_key))
-            .filter(|l| l.enabled)
-        {
+        // A disabled entry is re-applied too: it writes black, and a device
+        // whose firmware powers its lighting back on would otherwise ignore the
+        // user's "off" after every reconnect.
+        if let Some(lighting) = device.and_then(|d| d.effective_lighting(&route_key)) {
             crate::hardware::set_lighting_in_background(self.shared.device(&route), lighting);
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
-            crate::hardware::write_fn_lock_in_background(
-                self.shared.keyboard_device(&route),
-                fn_lock,
-            );
+            self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
+        self.keep_os_layout(dev);
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
         {
@@ -670,6 +988,24 @@ impl Orchestrator {
                 .hardware
                 .set_light_in_background(Some(route), &light, capabilities);
         }
+    }
+
+    /// Put `dev`'s keyboard on the host OS's key layout when the config keeps
+    /// it there. Writes only when the current slot holds another platform.
+    fn keep_os_layout(&self, dev: &AgentDevice) {
+        if !dev.online || !keeps_os_layout(&self.config, dev) {
+            return;
+        }
+        self.kept_os_layouts.keep(&dev.config_key);
+        let (Some(route), Some(host)) = (dev.route.as_ref(), HostOs::current()) else {
+            return;
+        };
+        crate::hardware::keep_os_layout_in_background(
+            self.shared.device(route),
+            host,
+            Arc::clone(&self.kept_os_layouts),
+            dev.config_key.clone(),
+        );
     }
 
     /// Apply an aggregate camera-use transition to every opted-in online
@@ -706,10 +1042,14 @@ impl Orchestrator {
         info!(previous = ?previous, active, lights = applied, "applied camera-linked light state");
     }
 
-    /// Resolve settings for reconnect/config re-application. Camera policy and
-    /// a transient manual override replace only the effective power field.
+    /// Resolve settings for reconnect/config re-application. A value changed
+    /// on the light itself stands in for the saved one; camera policy and a
+    /// transient manual override then replace only the effective power field.
     fn effective_light_settings(&self, key: &str) -> Option<LightSettings> {
         let mut light = self.config.light(key)?;
+        if let Some(changed) = self.lights_changed_on_light.get(key) {
+            lights::apply_changes_on_light(&mut light, *changed);
+        }
         if light.auto_camera {
             if let Some(override_enabled) = self.manual_light_overrides.get(key) {
                 light.enabled = *override_enabled;
@@ -748,15 +1088,25 @@ impl Orchestrator {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            let Some(change) = configured_wheel_mode(&self.config, dev) else {
+            let Some(change) = self.wheel_mode_change(dev) else {
                 debug!("no configured wheel mode fields — write skipped");
                 continue;
             };
             crate::hardware::write_scroll_wheel_mode_in_background(
                 self.shared.device(&route),
                 change,
+                self.shared.capture_plans.clone(),
             );
         }
+    }
+
+    /// The native wheel mode the agent's own writes (the reconnect re-apply
+    /// and the reload push) give `dev`, or `None` for no write. That includes
+    /// a wheel its capture session diverts: the session writes the same
+    /// fields with its divert, and a write here would select native
+    /// reporting under it.
+    fn wheel_mode_change(&self, dev: &AgentDevice) -> Option<crate::hardware::WheelModeChange> {
+        configured_wheel_mode(&self.config, dev, self.os_mouse_hook_available)
     }
 
     /// The latest inventory snapshot (for the IPC `inventory()` poll). Empty
@@ -913,9 +1263,23 @@ impl Orchestrator {
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     pub fn reload_config(&mut self, config: Config) {
+        for write in self.replace_config(config) {
+            self.shared.hardware.set_light_in_background(
+                Some(write.route),
+                &write.light,
+                write.capabilities,
+            );
+        }
+    }
+
+    /// Everything [`Self::reload_config`] does except the light writes, which
+    /// it returns instead: one per online light whose settings changed.
+    fn replace_config(&mut self, config: Config) -> Vec<LightWrite> {
+        let previous_lights = self.effective_online_lights();
+        let previous = std::mem::replace(&mut self.config, config);
+        self.forget_saved_light_changes(&previous);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
-        self.config = config;
         self.shared.scroll_preferences.publish(
             self.config.app_settings.smooth_scroll,
             self.config.app_settings.vertical_scroll_sensitivity,
@@ -937,47 +1301,96 @@ impl Orchestrator {
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
         self.apply_native_wheel_modes();
-        self.apply_fn_locks();
-        self.reapply_light_settings();
+        self.apply_changed_fn_locks(&previous);
+        self.apply_enabled_os_layouts(&previous);
+        self.changed_lights(&previous_lights)
     }
 
-    /// Push the saved Fn-lock state to every online keyboard that has one.
-    /// Runs on config reloads (the reconnect path is
-    /// [`Self::reapply_volatile_settings`]); the write is a single HID++ call,
-    /// so re-applying an unchanged state is cheap.
-    fn apply_fn_locks(&self) {
+    /// Put each keyboard whose "keep OS layout" just took effect — turned on,
+    /// or its device re-enabled — on the host OS's layout. Turning it off
+    /// leaves the keyboard's layout where it is, as in Logi Options+, and
+    /// withdraws a layout write still queued for it.
+    fn apply_enabled_os_layouts(&self, previous: &Config) {
+        self.kept_os_layouts
+            .retain(|key| config_keeps_os_layout(&self.config, key));
+        for dev in newly_kept_os_layouts(previous, &self.config, &self.devices) {
+            self.keep_os_layout(dev);
+        }
+    }
+
+    /// Push a changed Fn-lock setting to the online keyboard it belongs to.
+    /// Only the values that differ from `previous` are written, so an
+    /// unrelated save never undoes an Fn+Esc the user pressed on the keyboard.
+    /// The GUI toggle also writes directly through
+    /// [`SharedHandles::set_fn_lock`]; both writes are ordered per keyboard,
+    /// so the newest request is the one that stays. The reconnect path is
+    /// [`Self::reapply_volatile_settings`].
+    fn apply_changed_fn_locks(&self, previous: &Config) {
         for dev in self.devices.iter().filter(|dev| dev.online) {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            if let Some(fn_lock) = self.config.fn_lock(&dev.config_key) {
-                crate::hardware::write_fn_lock_in_background(
-                    self.shared.keyboard_device(&route),
-                    fn_lock,
-                );
+            let fn_lock = self.config.fn_lock(&dev.config_key);
+            if fn_lock == previous.fn_lock(&dev.config_key) {
+                continue;
+            }
+            if let Some(fn_lock) = fn_lock {
+                self.shared.write_fn_lock_in_background(&route, fn_lock);
             }
         }
     }
 
-    /// Re-apply standalone-light settings after a config reload.
-    fn reapply_light_settings(&self) {
-        for dev in self
-            .devices
-            .iter()
-            .filter(|dev| dev.online && dev.route.is_some() && dev.light_capabilities.is_some())
-        {
-            if let (Some(light), Some(capabilities)) = (
-                self.effective_light_settings(&dev.config_key),
-                dev.light_capabilities,
-            ) {
-                self.shared.hardware.set_light_in_background(
-                    dev.route.clone(),
-                    &light,
-                    capabilities,
-                );
-            }
-        }
+    /// The effective settings of every online standalone light, keyed by its
+    /// config key: what [`Self::changed_lights`] compares a reload against.
+    fn effective_online_lights(&self) -> HashMap<String, LightSettings> {
+        self.online_lights()
+            .filter_map(|(dev, _, _)| {
+                let light = self.effective_light_settings(&dev.config_key)?;
+                Some((dev.config_key.clone(), light))
+            })
+            .collect()
     }
+
+    /// The online lights a config reload has to write: those whose effective
+    /// settings now send other commands than they did in `previous`. Only a
+    /// changed light is written, so an unrelated save never undoes a change
+    /// made on the light itself — the same rule as
+    /// [`Self::apply_changed_fn_locks`]. A flipped camera policy or a dropped
+    /// manual override changes the effective power, so it is written too.
+    fn changed_lights(&self, previous: &HashMap<String, LightSettings>) -> Vec<LightWrite> {
+        self.online_lights()
+            .filter_map(|(dev, route, capabilities)| {
+                let light = self.effective_light_settings(&dev.config_key)?;
+                let unchanged = previous.get(&dev.config_key).is_some_and(|before| {
+                    commands_for_light_settings(*before, capabilities)
+                        == commands_for_light_settings(light, capabilities)
+                });
+                (!unchanged).then(|| LightWrite {
+                    route: route.clone(),
+                    light,
+                    capabilities,
+                })
+            })
+            .collect()
+    }
+
+    /// Every online device with a route and standalone-light controls.
+    fn online_lights(
+        &self,
+    ) -> impl Iterator<Item = (&AgentDevice, &DeviceRoute, LightCapabilities)> {
+        self.devices
+            .iter()
+            .filter(|dev| dev.online)
+            .filter_map(|dev| Some((dev, dev.route.as_ref()?, dev.light_capabilities?)))
+    }
+}
+
+/// One standalone-light write a config reload queues.
+#[derive(Debug, PartialEq)]
+struct LightWrite {
+    route: DeviceRoute,
+    light: LightSettings,
+    capabilities: LightCapabilities,
 }
 
 /// Replace the value behind an `RwLock`, logging (not panicking) on poison so a
@@ -991,6 +1404,47 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 }
 
 /// Publish a fresh immutable snapshot only when its projected value changed.
+/// A keyboard that could hold the key-capture session: it is enabled, has a
+/// route, and at least one of its keys is bound.
+struct KeyboardCandidate<'a> {
+    dev: &'a AgentDevice,
+    bindings: BTreeMap<ButtonId, Binding>,
+    divert: KeyboardDivertSet,
+}
+
+/// The `0x1b04` controls a keyboard's bindings ask to divert, split into the
+/// ones the session will arm and the reserved ones it refuses.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct KeyboardDivertSet {
+    wanted: BTreeMap<u16, ButtonId>,
+    reserved: Vec<u16>,
+}
+
+/// Which of `bindings` carry a stored binding on a keyboard control — a
+/// control is diverted whenever it is present at all, even as
+/// [`openlogi_core::binding::Action::None`] (which means "suppress this key," not "leave native"):
+/// `button_bindings_for` seeds no default for a [`ButtonId::Control`], so
+/// presence here is always an explicit user choice (#1747).
+fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivertSet {
+    let mut set = KeyboardDivertSet::default();
+    for button in bindings.keys() {
+        let Some(cid) = button.cid().map(openlogi_core::binding::Cid::raw) else {
+            continue;
+        };
+        // A keyboard key never seeds a default (see `ButtonId::ALL`'s own
+        // doc), so its presence here means the user explicitly bound it —
+        // even to `Action::None`, which means "suppress", not "leave
+        // native" (#1747). Only a key truly absent from the stored config
+        // is left on its firmware function.
+        if is_reserved_keyboard_control(cid) {
+            set.reserved.push(cid);
+        } else {
+            set.wanted.insert(cid, *button);
+        }
+    }
+    set
+}
+
 fn publish_arc_if_changed<T: PartialEq>(publication: &watch::Sender<Arc<T>>, value: T) {
     publication.send_if_modified(|current| {
         if current.as_ref() == &value {

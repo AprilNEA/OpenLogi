@@ -4,6 +4,7 @@ use openlogi_core::device::{
 };
 
 use crate::services::assets::AssetResolver;
+use crate::services::i18n::LOCALE_LOCK;
 
 use std::collections::HashSet;
 
@@ -25,6 +26,7 @@ fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
         battery: None,
         model_info: None,
         capabilities: None,
+        settings_revision: 0,
     }
 }
 
@@ -57,6 +59,7 @@ fn direct_inventory(model_info: DeviceModelInfo) -> DeviceInventory {
             battery: None,
             model_info: Some(model_info),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }
@@ -88,6 +91,7 @@ fn receiver_inventory() -> DeviceInventory {
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }
@@ -120,6 +124,7 @@ fn cabled_inventory() -> DeviceInventory {
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }
@@ -172,6 +177,7 @@ fn online_record(key: &str) -> DeviceRecord {
         slot: 1,
         online: true,
         battery: None,
+        settings_revision: 0,
     }
 }
 
@@ -268,6 +274,12 @@ fn mouse_identity(name: &str) -> DeviceIdentity {
             haptic_feedback: false,
             haptic_panel: false,
             dpi_gestures: false,
+            fn_lock: false,
+            os_layout: false,
+            report_rate: false,
+            backlight: false,
+            easy_switch: false,
+            virtual_thumbwheel: false,
         },
         light_capabilities: None,
         model_info: None,
@@ -340,6 +352,8 @@ fn no_model_info_falls_back_to_slot_when_no_wpid() {
 
 #[test]
 fn no_model_info_display_name_falls_back_to_slot() {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
     let inv = inventory_with(vec![paired_device_no_model_info(2, Some(0x4051))]);
     let resolver = AssetResolver::new();
     let list = build_device_list(&[inv], &[], &resolver, &Config::default(), &[]);
@@ -348,6 +362,8 @@ fn no_model_info_display_name_falls_back_to_slot() {
 
 #[test]
 fn saved_custom_name_identifies_the_device_without_replacing_its_model_name() {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
     let inv = inventory_with(vec![paired_device_no_model_info(2, Some(0x4051))]);
     let mut config = Config::default();
     config.set_device_custom_name("receiver:da2699e1:slot:2", Some("Office keyboard".into()));

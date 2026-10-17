@@ -209,3 +209,50 @@ pub struct LightCapabilities {
     #[serde(default)]
     pub zones: bool,
 }
+
+/// A standalone light's state as the light itself reports it.
+///
+/// Read back from the device rather than taken from saved settings: the
+/// light's own buttons, another program, or a brightness limit can make the
+/// two differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LightState {
+    /// The controls and ranges the light reports for itself.
+    pub capabilities: LightCapabilities,
+    /// Whether the light is on.
+    pub on: bool,
+    /// Current brightness in the unit of [`LightCapabilities::brightness`],
+    /// when the light has a brightness control.
+    pub brightness: Option<u16>,
+    /// Current colour temperature in Kelvin, when the light has a
+    /// colour-temperature control.
+    pub temperature_kelvin: Option<u16>,
+    /// The highest brightness the light allows right now, when that is below
+    /// the top of its brightness range — for instance on a USB port that
+    /// cannot supply full power. A brighter request is lowered to it.
+    pub brightness_limit: Option<u16>,
+}
+
+/// Light settings changed on the light itself — its buttons or another
+/// program — that the saved settings do not hold yet.
+///
+/// Each field is `None` until that control changes on the light. The agent
+/// uses the values in place of the saved ones, so a reconnect or an unrelated
+/// save does not undo them, until the GUI saves them or writes the control.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangedOnLight {
+    /// The power the light was switched to.
+    pub enabled: Option<bool>,
+    /// The brightness the light was set to, in percent of its range.
+    pub brightness_percent: Option<u8>,
+    /// The colour temperature the light was set to, in Kelvin.
+    pub temperature_kelvin: Option<u16>,
+}
+
+impl ChangedOnLight {
+    /// Whether no control has changed on the light.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}

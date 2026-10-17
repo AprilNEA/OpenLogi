@@ -18,14 +18,15 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand,
-    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    HapticWaveform, HidppOperation, LightCommand, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingUpdate, RingObservation,
+    PairingCommandError, PairingFailure, PairingUpdate, RingObservation,
 };
 use succession::Compat;
 
@@ -37,7 +38,7 @@ use openlogi_hook::Hook;
 use tarpc::context::Context;
 use tarpc::server::{BaseChannel, Channel as _};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Shared handle to the agent's state, cloned per connection (and per request).
 #[derive(Clone)]
@@ -228,6 +229,24 @@ impl Agent for AgentServer {
             .await
     }
 
+    async fn read_fn_lock(self, _: Context, route: DeviceRoute) -> Result<FnLockState, WriteError> {
+        self.shared
+            .keyboard_device(&route)
+            .run(HidppOperation::ReadFnLock, |c| async move {
+                openlogi_hid::get_fn_lock_on(&c).await
+            })
+            .await
+    }
+
+    async fn set_fn_lock(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        self.shared.set_fn_lock(&route, fn_lock).await
+    }
+
     async fn request_accessibility_prompt(self, _: Context) {
         Hook::prompt_accessibility();
     }
@@ -246,6 +265,63 @@ impl Agent for AgentServer {
 
     async fn cancel_pairing(self, _: Context) -> Result<(), PairingCommandError> {
         self.pairing.cancel()
+    }
+
+    async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {
+        self.pairing.unpair(&route).await
+    }
+    async fn read_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ReportRateInfo, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadReportRate, |c| async move {
+                openlogi_hid::get_report_rate_info_on(&c).await
+            })
+            .await
+    }
+    async fn set_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        self.shared.set_report_rate(&route, rate).await
+    }
+    async fn set_backlight(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError> {
+        self.shared.set_backlight(&route, change).await
+    }
+
+    async fn read_easy_switch_hosts(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadHosts, |c| async move {
+                openlogi_hid::get_easy_switch_hosts_on(&c).await
+            })
+            .await
+    }
+
+    async fn rename_easy_switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        self.shared
+            .rename_easy_switch_host(&route, slot, name)
+            .await
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {
@@ -270,7 +346,13 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         command: LightCommand,
     ) -> Result<(), WriteError> {
-        self.shared.hardware().apply_light(&route, command).await
+        self.shared.hardware().apply_light(&route, command).await?;
+        // The light now holds the user's choice, not one made on the light.
+        self.orchestrator
+            .lock()
+            .await
+            .light_written(&route, command);
+        Ok(())
     }
 
     async fn set_light_manual_power(
@@ -416,7 +498,7 @@ async fn arm_firmware_haptics(shared: &SharedHandles, route: &DeviceRoute) {
     }
 }
 
-/// Play one waveform, retrying within [`PLAY_BUDGET`]. Returns whether it played.
+/// Play one waveform, retrying within [`PLAY_BUDGET`].
 ///
 /// A busy receiver drops HID++ replies under concurrent pointer traffic, so a
 /// single attempt fails exactly when the user is actively hovering. Retrying
@@ -429,7 +511,7 @@ async fn play_within_budget(
     route: &DeviceRoute,
     waveform: HapticWaveform,
     interaction: &'static str,
-) -> bool {
+) -> PlayOutcome {
     let budget = Budget::starting_at(Instant::now(), PLAY_BUDGET);
     for attempt in 1..=3u8 {
         let Some(remaining) = budget.remaining(Instant::now()) else {
@@ -437,7 +519,7 @@ async fn play_within_budget(
                 interaction,
                 "ring haptic gave up — out of time to be feedback"
             );
-            return false;
+            return PlayOutcome::Failed;
         };
         match tokio::time::timeout(
             remaining,
@@ -449,12 +531,17 @@ async fn play_within_budget(
         )
         .await
         {
-            Ok(Ok(())) => return true,
+            Ok(Ok(())) => return PlayOutcome::Played,
+            Ok(Err(error)) if !is_worth_retrying(&error) => {
+                // Nothing was sent, and every hover asks again: no warning.
+                debug!(%error, interaction, "Actions Ring haptic skipped");
+                return PlayOutcome::Skipped;
+            }
             Ok(Err(error)) => {
                 let superseded = rx.has_changed().unwrap_or(true);
                 if attempt == 3 || superseded {
                     warn!(%error, interaction, attempt, superseded, "Actions Ring haptic failed");
-                    return false;
+                    return PlayOutcome::Failed;
                 }
             }
             // Out of budget mid-attempt; the loop head reports it and stops,
@@ -462,7 +549,78 @@ async fn play_within_budget(
             Err(_elapsed) => {}
         }
     }
-    false
+    PlayOutcome::Failed
+}
+
+/// What one interaction's play came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlayOutcome {
+    Played,
+    /// Refused before anything was sent: the device does not advertise the
+    /// waveform. Says nothing about the link.
+    Skipped,
+    /// Lost, refused by the device, or out of budget.
+    Failed,
+}
+
+/// The circuit breaker over lost plays. When replies keep getting lost,
+/// further attempts only keep the channel saturated (and starve unrelated
+/// writes), so haptics pause for a short cool-down while the pipe drains;
+/// feedback resumes on the next buzz after.
+#[derive(Debug, Default)]
+struct HapticBreaker {
+    consecutive_failures: u32,
+    cooldown_until: Option<Instant>,
+}
+
+impl HapticBreaker {
+    const TRIP_AFTER: u32 = 3;
+    const COOL_DOWN: Duration = Duration::from_secs(4);
+
+    /// Whether a play may be attempted at `now`. An expired cool-down ends.
+    fn allows(&mut self, now: Instant) -> bool {
+        match self.cooldown_until {
+            Some(until) if now < until => false,
+            Some(_) => {
+                self.cooldown_until = None;
+                true
+            }
+            None => true,
+        }
+    }
+
+    /// Count `outcome`; returns whether it opened a cool-down. A skipped play
+    /// neither counts nor resets the streak: no request went out, so it says
+    /// nothing about whether replies are getting through.
+    fn record(&mut self, outcome: PlayOutcome, now: Instant) -> bool {
+        match outcome {
+            PlayOutcome::Played => {
+                self.consecutive_failures = 0;
+                false
+            }
+            PlayOutcome::Skipped => false,
+            PlayOutcome::Failed => {
+                self.consecutive_failures += 1;
+                if self.consecutive_failures < Self::TRIP_AFTER {
+                    return false;
+                }
+                self.consecutive_failures = 0;
+                self.cooldown_until = Some(now + Self::COOL_DOWN);
+                true
+            }
+        }
+    }
+}
+
+/// Whether a failed play can succeed on a retry. A waveform the device does
+/// not advertise, and a play while the device reports a non-zero haptic
+/// status, are refused before anything is sent, so retrying either would
+/// only spend the budget the next interaction is waiting on.
+fn is_worth_retrying(error: &WriteError) -> bool {
+    !matches!(
+        error,
+        WriteError::HapticWaveformUnsupported { .. } | WriteError::HapticsUnavailable { .. }
+    )
 }
 
 /// A wall-clock allowance shared by every attempt at one interaction.
@@ -502,8 +660,7 @@ impl RingHapticPlayer {
         let pending_arm = Arc::new(std::sync::Mutex::new(None::<DeviceRoute>));
         let worker_arm = Arc::clone(&pending_arm);
         tokio::spawn(async move {
-            let mut consecutive_failures = 0u32;
-            let mut cooldown_until: Option<Instant> = None;
+            let mut breaker = HapticBreaker::default();
             while rx.changed().await.is_ok() {
                 // Firmware arming is sequenced through this worker so it is
                 // guaranteed to complete before the session's first buzz —
@@ -514,41 +671,27 @@ impl RingHapticPlayer {
                     .ok()
                     .and_then(|mut pending| pending.take());
                 if let Some(route) = arm_route {
-                    // A new session starts the breaker over. Both counters are
+                    // A new session starts the breaker over. It is
                     // worker-lifetime state, so without this a session that
                     // ended two failures deep makes the next session's first
                     // failure trip the cool-down, and a cool-down opened at the
                     // tail of one ring silences the opening of the next.
-                    consecutive_failures = 0;
-                    cooldown_until = None;
+                    breaker = HapticBreaker::default();
                     arm_firmware_haptics(&shared, &route).await;
                 }
                 let request = rx.borrow_and_update().clone();
                 let Some((route, waveform, interaction)) = request else {
                     continue;
                 };
-                // Circuit breaker: when replies keep getting lost, further
-                // attempts only keep the channel saturated (and starve
-                // unrelated writes). Skip haptics for a short cool-down so
-                // the pipe drains; feedback resumes on the next buzz after.
-                if let Some(until) = cooldown_until {
-                    if Instant::now() < until {
-                        continue;
-                    }
-                    cooldown_until = None;
+                if !breaker.allows(Instant::now()) {
+                    continue;
                 }
-                if play_within_budget(&shared, &rx, &route, waveform, interaction).await {
-                    consecutive_failures = 0;
-                } else {
-                    consecutive_failures += 1;
-                    if consecutive_failures >= 3 {
-                        cooldown_until = Some(Instant::now() + Duration::from_secs(4));
-                        consecutive_failures = 0;
-                        info!(
-                            interaction,
-                            "ring haptics cooling down after repeated HID++ loss"
-                        );
-                    }
+                let outcome = play_within_budget(&shared, &rx, &route, waveform, interaction).await;
+                if breaker.record(outcome, Instant::now()) {
+                    info!(
+                        interaction,
+                        "ring haptics cooling down after repeated HID++ loss"
+                    );
                 }
             }
         });
@@ -618,7 +761,9 @@ pub async fn run(server: AgentServer) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ARM_BUDGET, Budget, PLAY_BUDGET};
+    use super::{
+        ARM_BUDGET, Budget, HapticBreaker, PLAY_BUDGET, PlayOutcome, WriteError, is_worth_retrying,
+    };
     use std::time::{Duration, Instant};
 
     /// Attempts share one allowance, so the second gets what the first left —
@@ -653,5 +798,71 @@ mod tests {
     fn the_budgets_stay_within_a_ring_session() {
         assert!(ARM_BUDGET < PLAY_BUDGET);
         assert!(ARM_BUDGET + PLAY_BUDGET < Duration::from_secs(15));
+    }
+
+    #[test]
+    fn a_play_refused_before_sending_is_not_retried_but_a_lost_reply_is() {
+        assert!(!is_worth_retrying(&WriteError::HapticWaveformUnsupported {
+            waveform: 1
+        }));
+        assert!(!is_worth_retrying(&WriteError::HapticsUnavailable {
+            status: 2
+        }));
+        assert!(is_worth_retrying(&WriteError::DeviceUnreachable {
+            index: 1
+        }));
+    }
+
+    #[test]
+    fn unadvertised_hovers_never_cool_down_a_supported_activation() {
+        let now = Instant::now();
+        let mut breaker = HapticBreaker::default();
+        // Three hovers the device does not advertise, then an activation
+        // whose waveform it does.
+        for _ in 0..3 {
+            assert!(breaker.allows(now));
+            assert!(!breaker.record(PlayOutcome::Skipped, now));
+        }
+        assert!(
+            breaker.allows(now),
+            "skipped hovers must not open the cool-down"
+        );
+        assert!(!breaker.record(PlayOutcome::Played, now));
+    }
+
+    #[test]
+    fn three_lost_plays_cool_down_until_the_window_ends() {
+        let now = Instant::now();
+        let mut breaker = HapticBreaker::default();
+        assert!(!breaker.record(PlayOutcome::Failed, now));
+        assert!(!breaker.record(PlayOutcome::Failed, now));
+        assert!(breaker.record(PlayOutcome::Failed, now), "the third trips");
+        assert!(!breaker.allows(now + Duration::from_millis(3999)));
+        assert!(breaker.allows(now + HapticBreaker::COOL_DOWN));
+        // The window ended and the streak restarted from zero.
+        assert!(breaker.allows(now + HapticBreaker::COOL_DOWN));
+        assert!(!breaker.record(PlayOutcome::Failed, now + HapticBreaker::COOL_DOWN));
+    }
+
+    #[test]
+    fn a_skip_neither_counts_nor_resets_a_failure_streak_but_a_play_does() {
+        let now = Instant::now();
+        let mut skipped = HapticBreaker::default();
+        assert!(!skipped.record(PlayOutcome::Failed, now));
+        assert!(!skipped.record(PlayOutcome::Failed, now));
+        assert!(!skipped.record(PlayOutcome::Skipped, now));
+        assert!(
+            skipped.record(PlayOutcome::Failed, now),
+            "the skip left the two failures standing"
+        );
+
+        let mut played = HapticBreaker::default();
+        assert!(!played.record(PlayOutcome::Failed, now));
+        assert!(!played.record(PlayOutcome::Failed, now));
+        assert!(!played.record(PlayOutcome::Played, now));
+        assert!(
+            !played.record(PlayOutcome::Failed, now),
+            "a play reset the streak"
+        );
     }
 }

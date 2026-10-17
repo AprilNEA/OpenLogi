@@ -18,15 +18,19 @@ use crate::channel::route::{DeviceRoute, open_route_channel};
 mod backlight;
 mod diagnostics;
 mod dpi;
+mod easy_switch;
 mod error;
 mod fn_lock;
 mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod os_layout;
+mod pointer_scaling;
+mod report_rate;
 mod smartshift;
 
-pub use backlight::{get_backlight, get_backlight_on, set_backlight_enabled};
+pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
     dump_firmware_entities, dump_reprog_controls, read_battery_raw,
@@ -34,24 +38,39 @@ pub use diagnostics::{
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
 };
+pub use easy_switch::{
+    get_easy_switch_hosts, get_easy_switch_hosts_on, rename_easy_switch_host,
+    rename_easy_switch_host_on,
+};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
-pub use fn_lock::{set_fn_lock, set_fn_lock_on};
+pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on};
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
+pub use hidpp::feature::multi_platform::OsMask;
 pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,
     get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
 };
 pub use lighting::{
-    LightingMethod, LightingWrite, set_keyboard_color, set_keyboard_color_on,
-    set_keyboard_color_with, set_keyboard_color_with_on,
+    LightingMethod, LightingWrite, RgbControlLease, release_rgb_control, set_keyboard_color,
+    set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
 };
 pub(crate) use litra::litra_capabilities;
 pub use litra::{
-    LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
-    apply as apply_litra, encode_command as encode_litra_command, find_litra,
-    litra_model_for_route, matches_litra,
+    LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightChange, LightCommand, LightControls,
+    LightWatch, LitraDescriptor, LitraModel, apply as apply_litra,
+    encode_command as encode_litra_command, find_litra, litra_model_for_route, matches_litra,
+    read_state as read_litra_state, watch as watch_litra,
+};
+pub use openlogi_core::hid::{
+    EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
+};
+pub use openlogi_core::hid::{ReportRate, ReportRateInfo};
+pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
+pub use pointer_scaling::{PointerScaling, get_pointer_scaling, set_pointer_scaling};
+pub use report_rate::{
+    get_report_rate_info, get_report_rate_info_on, set_report_rate, set_report_rate_on,
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
@@ -76,13 +95,23 @@ pub(crate) use error::classify_hidpp_error;
 pub(crate) async fn open_feature<F: CreatableFeature + 'static>(
     device: &mut Device,
 ) -> Result<Arc<F>, WriteError> {
+    open_feature_with_version::<F>(device)
+        .await
+        .map(|(feature, _)| feature)
+}
+
+/// [`open_feature`], also returning the feature version the device reports
+/// in the same root `getFeature` reply.
+pub(crate) async fn open_feature_with_version<F: CreatableFeature + 'static>(
+    device: &mut Device,
+) -> Result<(Arc<F>, u8), WriteError> {
     let info = device
         .root()
         .get_feature(F::ID)
         .await
         .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, F::ID))?
         .ok_or(WriteError::FeatureUnsupported { feature_hex: F::ID })?;
-    Ok(device.add_feature::<F>(info.index))
+    Ok((device.add_feature::<F>(info.index), info.version))
 }
 
 /// Boilerplate-eater: open the channel that reaches `route`, then run `f` once
