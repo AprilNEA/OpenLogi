@@ -10,7 +10,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use openlogi_core::hid::{
     DeviceRoute, Dpi, EasySwitchSlot, HostConnection, ReportRate, SmartShiftMode, WriteError,
 };
-use openlogi_ipc::{AgentClient, AgentSnapshot};
+use openlogi_ipc::{AgentClient, AgentSnapshot, FlowLinkState, FlowStatus};
 use serde_json::{Value, json};
 use tarpc::context;
 
@@ -91,6 +91,9 @@ pub enum ApiCommand {
         #[arg(long, requires = "channel")]
         name: Option<String>,
     },
+    /// Read Flow: this computer's public key, which a peer pins in its
+    /// `[[flow.peers]]`, and each configured peer's link state.
+    Flow,
 }
 
 /// A partial SmartShift update; omitted fields are read from the device.
@@ -268,12 +271,37 @@ async fn execute(
             )
             .await
         }
+        ApiCommand::Flow => Ok(flow(&snapshot.flow)),
     }?;
     if let Some(save) = save {
         save.commit(client).await?;
         result["persistence"] = json!("saved");
     }
     Ok(result)
+}
+
+/// Flow's state as the agent publishes it.
+fn flow(status: &FlowStatus) -> Value {
+    let peers: Vec<_> = status
+        .peers
+        .iter()
+        .map(|peer| {
+            json!({
+                "name": peer.name,
+                "public_key": peer.public_key,
+                "state": match peer.state {
+                    FlowLinkState::Connected => "connected",
+                    FlowLinkState::Degraded => "degraded",
+                    FlowLinkState::Lost => "lost",
+                },
+            })
+        })
+        .collect();
+    json!({
+        "enabled": status.enabled,
+        "local_public_key": status.local_public_key,
+        "peers": peers,
+    })
 }
 
 /// Read the Fn lock, or set it to `set` first and check that it took.

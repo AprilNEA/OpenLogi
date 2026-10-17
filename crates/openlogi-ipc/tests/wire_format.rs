@@ -589,19 +589,22 @@ fn agent_snapshot() {
         lights: Vec::new(),
         flow: FlowStatus::default(),
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000000000");
+    assert_wire(
+        &observed,
+        "03010001010705302e362e36010000000000000000000000",
+    );
 }
 
 #[test]
 fn flow_status() {
-    assert_wire(&FlowStatus::default(), "0000");
+    assert_wire(&FlowStatus::default(), "000000");
     assert_wire(
         &FlowStatus {
             enabled: true,
@@ -610,8 +613,9 @@ fn flow_status() {
                 public_key: format!("ed25519:{}", "ab".repeat(32)),
                 state: FlowLinkState::Degraded,
             }],
+            local_public_key: Some(format!("ed25519:{}", "cd".repeat(32))),
         },
-        "0101046465736b48656432353531393a6162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616201",
+        "0101046465736b48656432353531393a61626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162010148656432353531393a63646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364",
     );
     assert_wire(&FlowLinkState::Connected, "00");
     assert_wire(&FlowLinkState::Degraded, "01");

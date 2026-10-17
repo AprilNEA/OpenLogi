@@ -107,6 +107,7 @@ impl CompiledFlowConfig {
                     state: FlowLinkState::Lost,
                 })
                 .collect(),
+            local_public_key: None,
         }
     }
 }

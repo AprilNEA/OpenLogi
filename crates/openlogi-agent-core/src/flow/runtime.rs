@@ -272,6 +272,7 @@ impl GenerationState {
                         .map_or(FlowLinkState::Lost, ipc_link_state),
                 })
                 .collect(),
+            local_public_key: None,
         });
     }
 

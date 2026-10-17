@@ -122,7 +122,8 @@ pub use succession::Identity;
 ///      off over HID++ `0x4220`, for the overlay's transient indicator.
 /// v38: `Agent::switch_host` + [`SwitchHostError`] appended — software-initiated
 ///      multi-host device switching. `AgentSnapshot::flow` appended — configured
-///      Flow peers and their coarse connection state.
+///      Flow peers and their coarse connection state, and this machine's own
+///      Flow public key.
 pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -259,6 +260,10 @@ pub struct FlowStatus {
     pub enabled: bool,
     /// Configured peers in config order.
     pub peers: Vec<FlowPeerStatus>,
+    /// This machine's Flow identity, `ed25519:<64 lowercase hex>`: the key a
+    /// peer pins in its `[[flow.peers]]`. `None` until the agent has armed and
+    /// loaded it.
+    pub local_public_key: Option<String>,
 }
 
 /// One configured Flow peer's display identity and coarse link state.

@@ -13,7 +13,7 @@ use tracing::warn;
 
 use super::FlowGeneration;
 use crate::flow::FlowDeviceSnapshot;
-use crate::flow::config::CompiledFlowConfig;
+use crate::flow::config::{CompiledFlowConfig, format_public_key};
 use crate::flow::handoff::start_outgoing;
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
@@ -137,6 +137,9 @@ impl FlowController {
             Arc::clone(&self.inner.edge_settings),
             self.inner.control_tx.clone(),
         ));
+        // Published whether or not Flow is enabled: a peer needs this key in
+        // its config before either side can connect.
+        tokio::spawn(publish_identity(Arc::clone(&self.inner.observable)));
     }
 
     /// Apply a live `[flow]` config reload.
@@ -190,6 +193,15 @@ impl FlowInputHandle {
     }
 }
 
+/// Load (or create) this machine's Flow identity and publish its public key.
+async fn publish_identity(observable: Arc<ObservableState>) {
+    match tokio::task::spawn_blocking(super::load_machine_identity).await {
+        Ok(Ok(identity)) => observable.set_flow_identity(format_public_key(identity.public_key())),
+        Ok(Err(error)) => warn!(%error, "Flow identity unavailable"),
+        Err(error) => warn!(%error, "Flow identity task failed"),
+    }
+}
+
 fn status_from_config(config: &FlowConfig) -> FlowStatus {
     CompiledFlowConfig::compile(config).map_or_else(
         |_| FlowStatus {
@@ -203,6 +215,7 @@ fn status_from_config(config: &FlowConfig) -> FlowStatus {
                     state: FlowLinkState::Lost,
                 })
                 .collect(),
+            local_public_key: None,
         },
         |compiled| compiled.status(),
     )

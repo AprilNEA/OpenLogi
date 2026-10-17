@@ -252,12 +252,31 @@ impl ObservableState {
     }
 
     /// Publish configured Flow peers and their coarse connection states.
-    pub fn set_flow(&self, flow: FlowStatus) {
+    ///
+    /// The local public key is owned by [`Self::set_flow_identity`]: a status
+    /// derived from config or a peer session does not know it, so the
+    /// published key is kept unless `flow` names one.
+    pub fn set_flow(&self, mut flow: FlowStatus) {
         self.update(|snapshot| {
+            if flow.local_public_key.is_none() {
+                flow.local_public_key
+                    .clone_from(&snapshot.flow.local_public_key);
+            }
             if snapshot.flow == flow {
                 return false;
             }
             snapshot.flow = flow;
+            true
+        });
+    }
+
+    /// Publish this machine's Flow identity, the key a peer pins.
+    pub fn set_flow_identity(&self, public_key: String) {
+        self.update(|snapshot| {
+            if snapshot.flow.local_public_key.as_deref() == Some(public_key.as_str()) {
+                return false;
+            }
+            snapshot.flow.local_public_key = Some(public_key);
             true
         });
     }
@@ -359,6 +378,22 @@ mod tests {
             .into_iter()
             .map(|app| app.id)
             .collect()
+    }
+
+    #[test]
+    fn a_flow_status_update_keeps_the_published_local_key() {
+        let state = state();
+        let key = format!("ed25519:{}", "ab".repeat(32));
+        state.set_flow_identity(key.clone());
+
+        state.set_flow(openlogi_ipc::FlowStatus {
+            enabled: true,
+            ..openlogi_ipc::FlowStatus::default()
+        });
+
+        let flow = state.snapshot().flow;
+        assert!(flow.enabled);
+        assert_eq!(flow.local_public_key, Some(key));
     }
 
     #[test]
