@@ -12,6 +12,10 @@
 //! multitouch `EV_ABS` stream (and the input properties libinput keys
 //! behavior on) with no way to re-inject it — killing the built-in pointer.
 //!
+//! A supervisor thread owns the per-mouse threads and grabs a mouse again
+//! when its event node is re-created by a power cycle, a Bluetooth
+//! reconnect, or a resume (see [`supervisor`]).
+//!
 //! # Permissions
 //!
 //! The process needs read access to `/dev/input/eventN` (typically the `input`
@@ -20,11 +24,12 @@
 //! [`crate::HookError::Linux`].
 #![expect(
     unsafe_code,
-    reason = "the wake pipe and the Wayland toplevel listener call libc directly"
+    reason = "the wake pipes, the /dev/input watch, and the Wayland toplevel listener call libc directly"
 )]
 
 mod foreground;
 pub(crate) mod pointer;
+mod supervisor;
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -32,7 +37,6 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::thread;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
@@ -56,12 +60,7 @@ pub(crate) use foreground::{
 /// Linux kernel's `REL_WHEEL_HI_RES` convention and Windows HID semantics.
 const HIRES_UNITS_PER_TICK: f32 = 120.0;
 
-pub(crate) struct HookInner {
-    stop: Arc<AtomicBool>,
-    /// One pipe write-end per device thread; writing wakes the blocking poll.
-    stop_pipes: Vec<OwnedFd>,
-    threads: Vec<thread::JoinHandle<()>>,
-}
+pub(crate) struct HookInner(supervisor::Running);
 
 /// The Linux backend: one `evdev` reader thread per mouse, re-injecting
 /// pass-through events through a `uinput` device.
@@ -73,52 +72,20 @@ impl HookBackend for Backend {
     fn start(
         cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
     ) -> Result<HookInner, HookError> {
-        let devices = find_mouse_devices();
-        if devices.is_empty() {
-            return Err(HookError::NoDeviceFound);
-        }
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
-        let mut threads: Vec<thread::JoinHandle<()>> = Vec::with_capacity(devices.len());
-        let mut stop_pipes: Vec<OwnedFd> = Vec::with_capacity(devices.len());
-
-        let result = (|| -> io::Result<()> {
-            for (path, device) in devices {
-                let virtual_device = build_virtual_device(&device)?;
-                let (rx, tx) = create_pipe()?;
-                let stop_clone = Arc::clone(&stop);
-                let cb_clone = Arc::clone(&cb);
-                let handle = thread::Builder::new()
-                    .name(format!("openlogi-hook:{}", path.display()))
-                    .spawn(move || {
-                        device_thread(path, device, virtual_device, cb_clone, stop_clone, rx);
-                    })?;
-                threads.push(handle);
-                stop_pipes.push(tx);
-            }
-            Ok(())
-        })();
-
-        if let Err(e) = result {
-            shutdown(&stop, &stop_pipes, threads);
-            return Err(HookError::Linux(e));
-        }
-
-        Ok(HookInner {
-            stop,
-            stop_pipes,
-            threads,
-        })
+        supervisor::start(Arc::new(cb)).map(HookInner)
     }
 
     fn stop(inner: HookInner) {
-        shutdown(&inner.stop, &inner.stop_pipes, inner.threads);
+        inner.0.stop();
     }
 
-    /// Device threads end when their mouse disconnects.
+    /// Whether the supervisor still runs. A device thread ending with its
+    /// mouse does not stop the hook: the supervisor grabs the mouse again
+    /// when it comes back. Only a supervisor that exited — which then also
+    /// stopped every device thread — lets the agent retire and reinstall
+    /// the hook.
     fn is_running(inner: &HookInner) -> bool {
-        inner.threads.iter().any(|thread| !thread.is_finished())
+        inner.0.is_running()
     }
 
     /// Return the currently frontmost application, or `None` when unavailable.
@@ -145,19 +112,11 @@ impl HookBackend for Backend {
     }
 }
 
-fn shutdown(stop: &AtomicBool, pipes: &[OwnedFd], threads: Vec<thread::JoinHandle<()>>) {
-    stop.store(true, Ordering::Relaxed);
-    for fd in pipes {
-        signal_pipe(fd);
-    }
-    for handle in threads {
-        if let Err(e) = handle.join() {
-            error!("hook thread panicked on shutdown: {e:?}");
-        }
-    }
-}
-
 /// Write one wake-up byte to a pipe, retrying on EINTR.
+///
+/// `EPIPE` means the reading thread has already exited and closed its end,
+/// so there is nothing left to wake: a device thread whose mouse went away
+/// still gets a stop signal at shutdown.
 fn signal_pipe(fd: &OwnedFd) {
     loop {
         // SAFETY: fd is a valid open pipe write end; writing one byte is safe.
@@ -166,8 +125,10 @@ fn signal_pipe(fd: &OwnedFd) {
             return;
         }
         let err = io::Error::last_os_error();
-        if err.kind() == io::ErrorKind::Interrupted {
-            continue;
+        match err.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::BrokenPipe => return,
+            _ => {}
         }
         error!("failed to signal hook thread pipe ({err}): hook thread may not wake");
         return;
