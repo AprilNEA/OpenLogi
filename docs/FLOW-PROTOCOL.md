@@ -196,18 +196,27 @@ IDLE ──edge trigger──► REQUESTED ──Accept──► SWITCHING ─�
 
 ## Clipboard & files
 
-Lazy, pull-based: bytes move only on paste. Every target OS supports
-promised/delayed clipboard rendering (NSPasteboard promises, Windows delayed
-rendering, X11/Wayland are lazy by construction).
+Pull-based: a holder announces what it has, a peer fetches what it wants.
+When announces go out and when a peer fetches are each side's policy; the
+frames are the contract. At the lazy end, bytes move only on paste, through
+the promised/delayed rendering every target OS supports (NSPasteboard
+promises, Windows delayed rendering, X11/Wayland are lazy by construction).
+OpenLogi today sits at the eager end, which needs no rendering hooks: it
+announces its clipboard to a peer as soon as that peer accepts a handoff, and
+the peer fetches the text at once and places it on its own clipboard, ahead
+of the keyboard that is arriving to paste it.
 
-- On local clipboard change: `ClipboardAnnounce{sequence, formats}` to every
-  connected trusted peer that listed `CLIPBOARD_TEXT`. `sequence` is a
-  monotonic per-peer generation; announces for stale sequences are ignored,
-  fetches quoting a superseded sequence are answered `Error INVALID`.
-- On paste at a peer: `ClipboardFetch{sequence, mime, offset}` →
-  `ClipboardData` + `Chunk`* + `ChunkEnd`. `offset` resumes an interrupted
-  transfer; `ChunkEnd.sha256` (when present) covers the assembled bytes from
-  the requested offset.
+- `ClipboardAnnounce{sequence, formats}` goes only to a connected trusted
+  peer that listed `CLIPBOARD_TEXT`. `sequence` is a monotonic per-peer
+  generation; announces for stale sequences are ignored, fetches quoting a
+  superseded sequence are answered `Error INVALID`.
+- `ClipboardFetch{sequence, mime, offset}` → `ClipboardData` + `Chunk`* +
+  `ChunkEnd`. `offset` resumes an interrupted transfer; `ChunkEnd.sha256`
+  (when present) covers the assembled bytes from the requested offset.
+- Text is `text/plain;charset=utf-8`. OpenLogi neither offers nor fetches
+  more than 1 MiB of it (larger text is skipped whole, never truncated), and
+  it always announces `sha256`, so a receiver that already holds the text
+  skips the fetch.
 - Files (`CLIPBOARD_FILES`): the announce lists mime
   `application/x-openlogi-files`; its fetched payload decodes as `FileList`;
   each file then streams via `FileFetch{sequence, file_index, offset}` with
