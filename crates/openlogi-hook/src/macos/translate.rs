@@ -6,7 +6,6 @@
 //! [`super::sender`], which caches its registry walk per device.
 
 use std::cell::RefCell;
-use std::time::{Duration, Instant};
 
 use core_graphics::event::{CGEvent, CGEventField, CGEventFlags, CGEventType, EventField};
 use tracing::debug;
@@ -29,13 +28,9 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
     }
 }
 
-/// How stale the remembered attribution must be before a pointer move refreshes
-/// it. Moves arrive at pointer rates; refreshing on every one would run two
-/// CoreGraphics/IOKit calls per event on the tap callback's hot path.
-const ATTRIBUTION_REFRESH: Duration = Duration::from_millis(200);
-
 thread_local! {
-    /// Last successful device attribution, with when it was taken.
+    /// Last successful device attribution, keyed by the HID sender id it came
+    /// from.
     ///
     /// Some devices produce `CGEvent`s with no backing `IOHIDEvent` for a
     /// subset of their event types: a Bluetooth-direct MX Anywhere 3 attributes
@@ -48,50 +43,73 @@ thread_local! {
     /// The attribution does not expire: a mouse left still for any length of
     /// time is still the device under the user's hand, and any other pointing
     /// device that moves replaces it, so the remap policy judges that device.
-    static LAST_ATTRIBUTION: RefCell<Option<(crate::EventDevice, Instant)>> =
+    static LAST_ATTRIBUTION: RefCell<Option<(u64, crate::EventDevice)>> =
         const { RefCell::new(None) };
+
+    /// The identity each held button's press resolved to, so its release is
+    /// judged as the same device even if another device moved in between.
+    static HELD_SOURCES: RefCell<Vec<(ButtonId, Option<crate::EventDevice>)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 /// Record a successful attribution for later unattributed events.
-fn remember_attribution(device: &crate::EventDevice) {
-    LAST_ATTRIBUTION.with_borrow_mut(|slot| {
-        *slot = Some((device.clone(), Instant::now()));
-    });
+fn remember_attribution(sender: u64, device: &crate::EventDevice) {
+    LAST_ATTRIBUTION.with_borrow_mut(|slot| *slot = Some((sender, device.clone())));
 }
 
 /// The device the tap most recently attributed an event to.
 fn last_attribution() -> Option<crate::EventDevice> {
-    LAST_ATTRIBUTION.with_borrow(|slot| slot.as_ref().map(|(device, _)| device.clone()))
-}
-
-/// Whether a pointer move should spend a lookup refreshing the attribution.
-fn attribution_needs_refresh() -> bool {
-    LAST_ATTRIBUTION.with_borrow(|slot| {
-        slot.as_ref()
-            .is_none_or(|(_, at)| at.elapsed() >= ATTRIBUTION_REFRESH)
-    })
+    LAST_ATTRIBUTION.with_borrow(|slot| slot.as_ref().map(|(_, device)| device.clone()))
 }
 
 /// Refresh the remembered attribution from an event that has a HID backing.
 /// Called from the pointer-move path so the fallback follows whichever device
-/// last moved the pointer, even when no attributable button was clicked.
+/// last moved the pointer, even when no attributable button was clicked. The
+/// device lookup only runs when the sender changes.
 fn refresh_attribution(event: &CGEvent) {
-    if attribution_needs_refresh()
-        && let Some(device) = event_sender_id(event).map(|id| sender_device_info(id).event_device)
-    {
-        remember_attribution(&device);
+    let Some(sender) = event_sender_id(event) else {
+        return;
+    };
+    let unchanged =
+        LAST_ATTRIBUTION.with_borrow(|slot| slot.as_ref().is_some_and(|(id, _)| *id == sender));
+    if !unchanged {
+        remember_attribution(sender, &sender_device_info(sender).event_device);
     }
 }
 
 /// Best-effort device identity for a button event's HID sender.
-fn button_source(event: &CGEvent) -> Option<crate::EventDevice> {
-    if let Some(device) = event_sender_id(event).map(|id| sender_device_info(id).event_device) {
-        remember_attribution(&device);
-        return Some(device);
-    }
-    // No backing IOHIDEvent. Fall back to the device the tap most recently
-    // attributed, rather than dropping the event as unattributable.
-    last_attribution()
+fn button_source(event: &CGEvent, id: ButtonId, pressed: bool) -> Option<crate::EventDevice> {
+    let attributed = event_sender_id(event).map(|sender| {
+        let device = sender_device_info(sender).event_device;
+        remember_attribution(sender, &device);
+        device
+    });
+    resolve_button_source(attributed, id, pressed)
+}
+
+/// Pick a button event's identity. With no backing IOHIDEvent, a press falls
+/// back to the device the tap most recently attributed, and a release to the
+/// identity its press resolved to, rather than being dropped as unattributable.
+fn resolve_button_source(
+    attributed: Option<crate::EventDevice>,
+    id: ButtonId,
+    pressed: bool,
+) -> Option<crate::EventDevice> {
+    HELD_SOURCES.with_borrow_mut(|held| {
+        let press = held
+            .iter()
+            .position(|(held_id, _)| *held_id == id)
+            .map(|index| held.swap_remove(index).1);
+        if pressed {
+            let device = attributed.or_else(last_attribution);
+            held.push((id, device.clone()));
+            device
+        } else {
+            attributed
+                .or_else(|| press.flatten())
+                .or_else(last_attribution)
+        }
+    })
 }
 
 /// Map the macOS modifier flags on a `CGEvent` to our [`KeyModifiers`].
@@ -160,29 +178,29 @@ pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEven
         CGEventType::LeftMouseDown => Some(MouseEvent::Button {
             id: ButtonId::LeftClick,
             pressed: true,
-            device: button_source(event),
+            device: button_source(event, ButtonId::LeftClick, true),
         }),
         CGEventType::LeftMouseUp => Some(MouseEvent::Button {
             id: ButtonId::LeftClick,
             pressed: false,
-            device: button_source(event),
+            device: button_source(event, ButtonId::LeftClick, false),
         }),
         CGEventType::RightMouseDown => Some(MouseEvent::Button {
             id: ButtonId::RightClick,
             pressed: true,
-            device: button_source(event),
+            device: button_source(event, ButtonId::RightClick, true),
         }),
         CGEventType::RightMouseUp => Some(MouseEvent::Button {
             id: ButtonId::RightClick,
             pressed: false,
-            device: button_source(event),
+            device: button_source(event, ButtonId::RightClick, false),
         }),
         CGEventType::OtherMouseDown => {
             let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
             button_number_to_id(n).map(|id| MouseEvent::Button {
                 id,
                 pressed: true,
-                device: button_source(event),
+                device: button_source(event, id, true),
             })
         }
         CGEventType::OtherMouseUp => {
@@ -190,7 +208,7 @@ pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEven
             button_number_to_id(n).map(|id| MouseEvent::Button {
                 id,
                 pressed: false,
-                device: button_source(event),
+                device: button_source(event, id, false),
             })
         }
         CGEventType::ScrollWheel => {
@@ -339,14 +357,13 @@ fn line_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
 #[cfg(test)]
 mod tests {
     use core_graphics::event::{CGEvent, CGEventType, EventField};
-    use std::time::{Duration, Instant};
-
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     use super::{
-        LAST_ATTRIBUTION, attribution_needs_refresh, last_attribution, remember_attribution,
+        LAST_ATTRIBUTION, last_attribution, remember_attribution, resolve_button_source,
         translate_key,
     };
+    use crate::ButtonId;
 
     fn key_down(vk: u16) -> CGEvent {
         let source = CGEventSource::new(CGEventSourceStateID::Private).expect("an event source");
@@ -365,32 +382,52 @@ mod tests {
         assert!(translate_key(CGEventType::KeyDown, &event).is_none());
     }
 
-    /// An unattributed event falls back to the last attribution, however long
-    /// the device has been idle, so a device whose CGEvents carry no backing
-    /// IOHIDEvent for some event types is not dropped by the fail-closed remap
-    /// policy.
-    #[test]
-    fn last_attribution_backs_an_unattributed_event() {
-        let mouse = crate::EventDevice {
+    fn device(product_id: u32, name: &str) -> crate::EventDevice {
+        crate::EventDevice {
             vendor_id: Some(crate::LOGITECH_VENDOR_ID),
-            product_id: Some(0xb025),
-            product_name: Some("MX Anywhere 3".into()),
-        };
+            product_id: Some(product_id),
+            product_name: Some(name.into()),
+        }
+    }
+
+    /// An unattributed press falls back to the last attribution, so a device
+    /// whose CGEvents carry no backing IOHIDEvent for some event types is not
+    /// dropped by the fail-closed remap policy.
+    #[test]
+    fn last_attribution_backs_an_unattributed_press() {
+        let mouse = device(0xb025, "MX Anywhere 3");
         LAST_ATTRIBUTION.with_borrow_mut(|slot| *slot = None);
-        assert_eq!(last_attribution(), None);
-        assert!(attribution_needs_refresh());
+        assert_eq!(resolve_button_source(None, ButtonId::Back, true), None);
+        assert_eq!(resolve_button_source(None, ButtonId::Back, false), None);
 
-        remember_attribution(&mouse);
+        remember_attribution(1, &mouse);
         assert_eq!(last_attribution(), Some(mouse.clone()));
-        assert!(!attribution_needs_refresh());
+        assert_eq!(
+            resolve_button_source(None, ButtonId::MiddleClick, true),
+            Some(mouse)
+        );
+    }
 
-        LAST_ATTRIBUTION.with_borrow_mut(|slot| {
-            let idle = Instant::now()
-                .checked_sub(Duration::from_secs(60))
-                .expect("clock must support the test offset");
-            *slot = Some((mouse.clone(), idle));
-        });
-        assert_eq!(last_attribution(), Some(mouse));
-        assert!(attribution_needs_refresh());
+    /// A release keeps its press's identity even when another device was
+    /// attributed while the button was held.
+    #[test]
+    fn an_unattributed_release_keeps_its_press_identity() {
+        let mouse = device(0xb025, "MX Anywhere 3");
+        let other = device(0xb034, "MX Master 3S");
+        remember_attribution(1, &mouse);
+        assert_eq!(
+            resolve_button_source(None, ButtonId::MiddleClick, true),
+            Some(mouse.clone())
+        );
+
+        remember_attribution(2, &other);
+        assert_eq!(
+            resolve_button_source(None, ButtonId::MiddleClick, false),
+            Some(mouse)
+        );
+        assert_eq!(
+            resolve_button_source(None, ButtonId::MiddleClick, false),
+            Some(other)
+        );
     }
 }
