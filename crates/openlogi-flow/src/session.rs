@@ -56,6 +56,11 @@ pub struct SessionPolicy {
     pub ping_interval: Duration,
     /// Time without a valid Pong before [`LinkState::Degraded`].
     pub degraded_after: Duration,
+    /// How long after a connection is established a second one from the same
+    /// peer is still a simultaneous dial, settled by the key-order tiebreak.
+    /// Later, the peer dialing again means it lost this connection — it
+    /// restarted, or its network changed — so the new connection replaces it.
+    pub redial_grace: Duration,
 }
 
 impl Default for SessionPolicy {
@@ -65,6 +70,7 @@ impl Default for SessionPolicy {
             retry_max: Duration::from_secs(30),
             ping_interval: Duration::from_secs(5),
             degraded_after: Duration::from_secs(15),
+            redial_grace: Duration::from_secs(2),
         }
     }
 }
@@ -599,6 +605,15 @@ async fn run_connection(
                 let Some(candidate) = candidate else {
                     return LiveOutcome::Closed;
                 };
+                // A peer dials only while it holds no connection. Past the
+                // simultaneous-dial window, a new one means the peer lost
+                // this connection — after a restart its old one lingers here
+                // until QUIC's idle timeout, and refusing the redial kept the
+                // link down for that long.
+                if Instant::now().duration_since(now) >= policy.redial_grace {
+                    connection.close();
+                    return LiveOutcome::Replace(Arc::new(candidate));
+                }
                 if connection.direction() == ConnectionDirection::Outgoing
                     && connection.close_if_outgoing_loses_tie()
                 {
@@ -674,6 +689,7 @@ mod tests {
             retry_max: Duration::from_secs(2),
             ping_interval: Duration::from_secs(1),
             degraded_after: Duration::from_secs(3),
+            redial_grace: Duration::from_secs(2),
         }
     }
 

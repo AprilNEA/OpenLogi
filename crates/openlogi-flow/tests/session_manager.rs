@@ -243,6 +243,76 @@ async fn manager_reconnects_after_peer_session_is_dropped() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_peer_replaces_a_connection_that_still_looks_alive() -> TestResult {
+    // A peer that crashes and restarts never closes its old connection, which
+    // stays alive here until QUIC's idle timeout. The dead process is played
+    // by an incoming-only manager that keeps answering pings and never
+    // redials; the restarted one dials from a new endpoint, same identity.
+    //
+    // Keys are ordered so that `first`'s outgoing connection wins the
+    // simultaneous-dial tiebreak: only the redial grace can let the restarted
+    // peer in.
+    let (first_identity, second_identity) = {
+        let a = MachineIdentity::generate()?;
+        let b = MachineIdentity::generate()?;
+        if a.public_key() > b.public_key() {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    };
+    let old_second = endpoint(&second_identity, first_identity.public_key(), [7; 16])?;
+    let old_manager = SessionManager::start(
+        Arc::clone(&old_second),
+        [incoming_only_peer(first_identity.public_key())],
+        Arc::new(CountingProvider::new(1)),
+        test_policy(),
+    )?;
+    let first = endpoint(&first_identity, second_identity.public_key(), [8; 16])?;
+    let first_manager = SessionManager::start(
+        Arc::clone(&first),
+        [peer_with_address(
+            second_identity.public_key(),
+            old_second.local_addr()?,
+        )],
+        Arc::new(CountingProvider::new(2)),
+        test_policy(),
+    )?;
+    let first_handle = first_manager
+        .peer(second_identity.public_key())
+        .ok_or("first manager omitted its peer handle")?
+        .clone();
+    let old_connection = wait_for_connection(&first_handle).await?;
+    tokio::time::sleep(test_policy().redial_grace * 2).await;
+
+    let restarted_second = endpoint(&second_identity, first_identity.public_key(), [9; 16])?;
+    let restarted_manager = SessionManager::start(
+        Arc::clone(&restarted_second),
+        [peer_with_address(
+            first_identity.public_key(),
+            first.local_addr()?,
+        )],
+        Arc::new(CountingProvider::new(3)),
+        test_policy(),
+    )?;
+    let restarted_handle = restarted_manager
+        .peer(first_identity.public_key())
+        .ok_or("restarted manager omitted its peer handle")?
+        .clone();
+    wait_for_state(&restarted_handle, LinkState::Connected).await?;
+    let current = wait_for_connection(&first_handle).await?;
+    assert!(
+        !Arc::ptr_eq(&current, &old_connection),
+        "the restarted peer's connection must replace the one that looked alive"
+    );
+
+    old_manager.shutdown().await;
+    first_manager.shutdown().await;
+    restarted_manager.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_pong_degrades_then_transport_close_marks_lost() -> TestResult {
     let managed_identity = MachineIdentity::generate()?;
     let silent_identity = MachineIdentity::generate()?;
@@ -325,6 +395,7 @@ fn test_policy() -> SessionPolicy {
         retry_max: Duration::from_millis(100),
         ping_interval: Duration::from_millis(25),
         degraded_after: Duration::from_millis(100),
+        redial_grace: Duration::from_millis(50),
     }
 }
 
