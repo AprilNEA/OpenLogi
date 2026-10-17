@@ -34,7 +34,7 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
-use openlogi_core::config::{Lighting, ScrollResolution};
+use openlogi_core::config::{ConfigRevision, Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
     DeviceKind, DeviceModelInfo, DeviceTransports, LightCapabilities, LightState, LightValueRange,
@@ -50,9 +50,10 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
-    Identity, InventoryHealth, MonitorEvent, Observation, ObservedLight, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    AgentSnapshot, AgentStatus, ChosenLight, ClientKind, ConfigReloadError, ForegroundApps,
+    FoundDevice, Identity, InventoryHealth, MonitorEvent, Observation, ObservedLight,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
+    RingObservation, SavedConfig,
 };
 use succession::{Compat, Run};
 
@@ -311,6 +312,28 @@ fn semantic_read_requests() {
             name: "Desk".into(),
         },
         "23000846303044434146450101044465736b",
+    );
+}
+
+/// After a save, the GUI names the revision of the file it wrote, as the 32
+/// bytes of its digest, and the controls of lights the user set without a
+/// write to the light.
+#[test]
+fn reload_saved_config() {
+    assert_wire(
+        &AgentRequest::ReloadSavedConfig {
+            saved: SavedConfig {
+                revision: ConfigRevision::of(""),
+                chosen: vec![ChosenLight {
+                    device: "serial:ABC123".into(),
+                    power: false,
+                    brightness: true,
+                    temperature: true,
+                }],
+            },
+        },
+        "24e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\
+         010d73657269616c3a414243313233000101",
     );
 }
 

@@ -509,3 +509,25 @@ fn symlink_resolution_follows_the_full_hop_limit() {
         "41 hops exceeds the limit"
     );
 }
+
+/// A reader of a save agrees with its writer on the revision, and an edit
+/// after the save changes it.
+#[test]
+fn a_saved_file_reads_back_at_the_revision_of_its_save() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let (mut config, mut writer) = ConfigFile::load_from_path(&path).expect("a missing file loads");
+    assert_eq!(writer.revision(), ConfigRevision::of(""));
+    config.selected_device = Some("saved".to_string());
+    writer.save(&config).expect("save");
+    assert_ne!(writer.revision(), ConfigRevision::of(""));
+    assert_ne!(writer.revision(), ConfigRevision::default());
+    let (_, reader) = ConfigFile::load_from_path(&path).expect("load the save");
+    assert_eq!(reader.revision(), writer.revision());
+
+    let mut edited = fs::read_to_string(&path).expect("read the save");
+    edited.push_str("# a hand edit\n");
+    fs::write(&path, edited).expect("edit the save");
+    let (_, reader) = ConfigFile::load_from_path(&path).expect("load the edit");
+    assert_ne!(reader.revision(), writer.revision());
+}
