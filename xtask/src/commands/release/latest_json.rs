@@ -11,8 +11,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 // both come from one constant.
 use openlogi_core::brand::APP_ID;
 
-const CHANNEL: &str = "stable";
-const MACOS_MINIMUM_OS_VERSION: &str = "13.0";
+use crate::support::update_feed::{BASE_URL_ENV, CHANNEL, MACOS_MINIMUM_OS_VERSION};
+
 /// Windows 10+. Informational — the client updater doesn't gate on it today,
 /// and everything that can run OpenLogi reports at least 10.0.
 const WINDOWS_MINIMUM_OS_VERSION: &str = "10.0";
@@ -29,7 +29,7 @@ pub(crate) struct Args {
     #[arg(long, env = "GITHUB_REF_NAME")]
     tag: String,
     /// Public update base URL, for example `https://updates.openlogi.org`.
-    #[arg(long, env = "OPENLOGI_UPDATE_BASE_URL")]
+    #[arg(long, env = BASE_URL_ENV)]
     base_url: String,
     /// Also emit the per-arch Windows `.msi`/`.zip` entries. Off by default so
     /// the manifest can never reference objects the release workflow's R2
@@ -209,117 +209,4 @@ fn platform_arch(stem: &str, marker: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn collect_assets_requires_minisign_signature_for_each_dmg() {
-        let dist = tempfile::tempdir().unwrap();
-        fs_err::write(dist.path().join("OpenLogi-v1.2.3-macos-arm64.dmg"), b"dmg").unwrap();
-
-        assert!(
-            collect_assets(
-                dist.path(),
-                "https://updates.example/releases/v1.2.3",
-                false
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn collect_assets_publishes_signature_url() {
-        let dist = tempfile::tempdir().unwrap();
-        fs_err::write(dist.path().join("OpenLogi-v1.2.3-macos-arm64.dmg"), b"dmg").unwrap();
-        fs_err::write(
-            dist.path().join("OpenLogi-v1.2.3-macos-arm64.dmg.minisig"),
-            b"signature",
-        )
-        .unwrap();
-
-        let assets = collect_assets(
-            dist.path(),
-            "https://updates.example/releases/v1.2.3",
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(
-            assets[0].signature_url,
-            "https://updates.example/releases/v1.2.3/OpenLogi-v1.2.3-macos-arm64.dmg.minisig"
-        );
-    }
-
-    #[test]
-    fn collect_assets_skips_windows_artifacts_unless_opted_in() {
-        // Off by default: the manifest must never reference Windows objects
-        // the release workflow's R2 upload step doesn't ship.
-        let dist = tempfile::tempdir().unwrap();
-        for name in [
-            "OpenLogi-v1.2.3-windows-x86_64.msi",
-            "OpenLogi-v1.2.3-windows-x86_64.zip",
-        ] {
-            fs_err::write(dist.path().join(name), b"artifact").unwrap();
-            fs_err::write(dist.path().join(format!("{name}.minisig")), b"signature").unwrap();
-        }
-
-        let assets = collect_assets(
-            dist.path(),
-            "https://updates.example/releases/v1.2.3",
-            false,
-        )
-        .unwrap();
-
-        assert!(assets.is_empty());
-    }
-
-    #[test]
-    fn collect_assets_includes_windows_msi_and_zip_per_arch() {
-        let dist = tempfile::tempdir().unwrap();
-        for name in [
-            "OpenLogi-v1.2.3-windows-x86_64.msi",
-            "OpenLogi-v1.2.3-windows-arm64.msi",
-            "OpenLogi-v1.2.3-windows-x86_64.zip",
-        ] {
-            fs_err::write(dist.path().join(name), b"artifact").unwrap();
-            fs_err::write(dist.path().join(format!("{name}.minisig")), b"signature").unwrap();
-        }
-
-        let assets =
-            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", true).unwrap();
-
-        assert_eq!(assets.len(), 3);
-        assert!(assets.iter().all(|a| a.os == "windows"));
-        let msi = assets
-            .iter()
-            .find(|a| a.name.ends_with("x86_64.msi"))
-            .unwrap();
-        assert_eq!((msi.arch.as_str(), msi.format), ("x86_64", "msi"));
-        let zip = assets
-            .iter()
-            .find(|a| a.name.ends_with("x86_64.zip"))
-            .unwrap();
-        assert_eq!((zip.arch.as_str(), zip.format), ("x86_64", "zip"));
-        assert!(assets.iter().any(|a| a.arch == "arm64"));
-    }
-
-    #[test]
-    fn collect_assets_skips_linux_packages_and_foreign_archives() {
-        let dist = tempfile::tempdir().unwrap();
-        for name in [
-            "openlogi-v1.2.3-linux-amd64.deb",
-            "openlogi-v1.2.3-linux-amd64.rpm",
-            "not-an-artifact.zip",
-            "SHA256SUMS",
-        ] {
-            fs_err::write(dist.path().join(name), b"artifact").unwrap();
-            fs_err::write(dist.path().join(format!("{name}.minisig")), b"signature").unwrap();
-        }
-
-        let assets =
-            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", true).unwrap();
-
-        assert!(assets.is_empty());
-    }
-}
+mod tests;

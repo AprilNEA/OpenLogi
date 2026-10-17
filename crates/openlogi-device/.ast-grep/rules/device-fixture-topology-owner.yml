@@ -1,0 +1,14 @@
+# Owner: openlogi_device::replay::ReplayTopology::for_device.
+id: device-fixture-topology-owner
+language: rust
+severity: error
+message: Use ReplayTopology::for_device or ReplayBackend::from_profile for sanitized contribution replay.
+note: Capture self-replay and downstream corpus tests must use the same route topology.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-device/src/replay/fixture.rs
+rule:
+  kind: string_literal
+  regex: 'openlogi-sanitized-replay-node'

@@ -11,33 +11,17 @@
 use std::sync::Arc;
 
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
+use openlogi_device_registry::receiver::{ReceiverProtocol, find_receiver};
 
 use crate::{
     channel::{HidppChannel, MessageListenerGuard},
-    event::EventEmitter,
+    emitter::EventEmitter,
     protocol::v10,
-    receiver::{RECEIVER_DEVICE_INDEX, ReceiverError},
+    receiver::{
+        NotificationFlags, RECEIVER_DEVICE_INDEX, ReceiverError, read_notification_flags,
+        write_notification_flags,
+    },
 };
-
-/// All USB vendor & product ID pairs that are known to identify Unifying
-/// receivers.
-///
-/// `046d:c539` is the Lightspeed gaming receiver; `046d:c53f` is the Lightspeed
-/// nano receiver (bundled with G-series wireless mice such as the G305);
-/// `046d:c547` is the Lightspeed receiver bundled with newer G-series devices
-/// such as the G915 keyboard and the G502 X LIGHTSPEED. All answer the same
-/// HID++ 1.0 registers (pairing count, connection state, pairing information)
-/// as Unifying receivers. Callers that surface a user-facing receiver name
-/// label Lightspeed PIDs separately (see `openlogi-hid`).
-/// `0xc53f` was verified against a G305 (paired device wpid `0x4074`);
-/// `0xc547` against a G915 (paired device wpid `0x407c`).
-pub const VPID_PAIRS: &[(u16, u16)] = &[
-    (0x046d, 0xc52b),
-    (0x046d, 0xc532),
-    (0x046d, 0xc539),
-    (0x046d, 0xc53f),
-    (0x046d, 0xc547),
-];
 
 /// All known registers of the Unifying receiver.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, TryFromPrimitive)]
@@ -81,7 +65,7 @@ pub enum InfoSubRegister {
     ///
     /// NOTE: `0x60` is the *Bolt* base. Wire-verified Unifying receivers store
     /// names at base `0x40 + (n-1)` instead, so name reads go directly through
-    /// `read_codename_unifying` in `inventory.rs` rather than this constant —
+    /// `inventory::probe::unifying::read_codename` rather than this constant —
     /// don't reuse `DeviceCodename` for Unifying name reads.
     DeviceCodename = 0x60,
 }
@@ -100,7 +84,9 @@ impl Receiver {
     /// Returns [`ReceiverError::UnknownReceiver`] when the channel's VID/PID
     /// doesn't match any known Unifying receiver.
     pub fn new(chan: Arc<HidppChannel>) -> Result<Self, ReceiverError> {
-        if !VPID_PAIRS.contains(&(chan.vendor_id, chan.product_id)) {
+        if find_receiver(chan.vendor_id, chan.product_id)
+            .is_none_or(|receiver| receiver.protocol != ReceiverProtocol::Unifying)
+        {
             return Err(ReceiverError::UnknownReceiver);
         }
 
@@ -157,35 +143,27 @@ impl Receiver {
     /// device can fail to enumerate. Solaar enables this before listing.
     ///
     /// Read-modify-write of just the `WIRELESS` bit so it can't clobber other
-    /// flags already set on register `0x00` — notably `SOFTWARE_PRESENT` (0x08),
-    /// which the pairing flow enables (`pairing.rs` writes `[0x00, 0x09, 0x00]`)
-    /// and a concurrent inventory poll would otherwise drop.
+    /// [`NotificationFlags`] — notably `SOFTWARE_PRESENT`, which the pairing
+    /// flow enables and a concurrent inventory poll would otherwise drop.
     pub async fn set_wireless_notifications(&self, enabled: bool) -> Result<(), ReceiverError> {
-        // Notification flags are a 3-byte big-endian word; the receiver-reporting
-        // bits live in byte 1 (WIRELESS = 0x000100, SOFTWARE_PRESENT = 0x000800).
-        const WIRELESS: u8 = 0x01;
-        let mut flags = self
-            .chan
-            .read_register(
-                RECEIVER_DEVICE_INDEX,
-                Register::Notifications.into(),
-                [0; 3],
-            )
-            .await?;
-        if enabled {
-            flags[1] |= WIRELESS;
-        } else {
-            flags[1] &= !WIRELESS;
+        let current = read_notification_flags(&self.chan).await?;
+        let mut flags = current;
+        flags.set(NotificationFlags::WIRELESS, enabled);
+        // This flag persists in receiver RAM. Avoid issuing an identical
+        // register write on every inventory tick: Lightspeed receiver c54d
+        // has been observed to occasionally omit the ACK for that no-op,
+        // parking the otherwise healthy shared channel until timeout.
+        if flags == current {
+            return Ok(());
         }
-        self.chan
-            .write_register(RECEIVER_DEVICE_INDEX, Register::Notifications.into(), flags)
-            .await?;
-
+        write_notification_flags(&self.chan, flags).await?;
         Ok(())
     }
 
-    /// Triggers device-arrival notifications for all currently connected
-    /// devices. Used to enumerate online devices at startup.
+    /// Triggers device-arrival notifications for every paired slot, online or
+    /// not — the notification's link-status bit distinguishes (Solaar uses the
+    /// same trigger as its "scan all devices" pass). Used to enumerate paired
+    /// devices at startup.
     pub async fn trigger_device_arrival(&self) -> Result<(), ReceiverError> {
         self.chan
             .write_register(
@@ -203,10 +181,11 @@ impl Receiver {
     pub async fn get_receiver_info(&self) -> Result<ReceiverInfo, ReceiverError> {
         let response = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [InfoSubRegister::ReceiverInfo.into(), 0, 0],
+                InfoSubRegister::ReceiverInfo.into(),
+                [0, 0],
             )
             .await?;
 
@@ -224,14 +203,11 @@ impl Receiver {
     ) -> Result<DevicePairingInformation, ReceiverError> {
         let response = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [
-                    u8::from(InfoSubRegister::DevicePairingInformation) | (device_index & 0x0f),
-                    0x00,
-                    0x00,
-                ],
+                u8::from(InfoSubRegister::DevicePairingInformation) | (device_index & 0x0f),
+                [0x00, 0x00],
             )
             .await?;
 
@@ -240,7 +216,7 @@ impl Receiver {
             // Kind is identity-only: an unrecognised nibble folds to
             // `Unknown` instead of failing the whole pairing-info read.
             kind: DeviceKind::from(response[1] & 0x0f),
-            encrypted: response[1] & (1 << 4) != 0,
+            encrypted: response[1] & (1 << 5) != 0,
             online: response[1] & (1 << 6) == 0,
             unit_id: [response[4], response[5], response[6], response[7]],
         })
@@ -252,16 +228,18 @@ impl Receiver {
     }
 }
 
-/// The sub-id of the only notification this receiver emits: a paired device
-/// came online.
+/// The sub-id of the only notification this receiver emits: a paired slot's
+/// connection status changed, or was re-reported by
+/// [`Receiver::trigger_device_arrival`].
 const DEVICE_CONNECTION_SUB_ID: u8 = 0x41;
 
 /// Decodes an unsolicited receiver message into the event it carries, or
 /// `None` for a report this crate does not model.
 ///
-/// Kept separate from the message listener in [`Receiver::new`] so the wire
-/// layout is reachable from tests without a HID channel behind it.
-fn decode_notification(msg: &v10::Message) -> Option<Event> {
+/// Public so consumers can decode captured reports and fabricate events from
+/// wire bytes in their own tests without a HID channel behind them.
+#[must_use]
+pub fn decode_notification(msg: &v10::Message) -> Option<Event> {
     let header = msg.header();
     if header.sub_id != DEVICE_CONNECTION_SUB_ID {
         return None;
@@ -276,7 +254,11 @@ fn decode_notification(msg: &v10::Message) -> Option<Event> {
         // dropping the event would hide the device entirely, since arrival
         // notifications are the only device source on this path.
         kind: DeviceKind::from(payload[1] & 0x0f),
-        encrypted: payload[1] & (1 << 4) != 0,
+        // Device-info high nibble: bit 6 = link not established, bit 5 = link
+        // encrypted, bit 4 = software present (same layout as Bolt; Solaar
+        // decodes both receivers with one mask table). A Bolt protocol byte
+        // also means encrypted.
+        encrypted: crate::receiver::connection_encrypted(payload[0], payload[1]),
         online: payload[1] & (1 << 6) == 0,
         wpid: u16::from_le_bytes([payload[2], payload[3]]),
     }))
@@ -342,7 +324,8 @@ pub enum DeviceKind {
 }
 
 /// Represents a device-connection event fired by the receiver when a paired
-/// device comes online (or in response to [`Receiver::trigger_device_arrival`]).
+/// device's link status changes, or re-broadcast for a paired slot in
+/// response to [`Receiver::trigger_device_arrival`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -353,7 +336,9 @@ pub struct DeviceConnection {
     pub kind: DeviceKind,
     /// Whether the link is encrypted.
     pub encrypted: bool,
-    /// Whether the device is currently online.
+    /// Whether the device's link is currently established (payload bit 6
+    /// clear). Trigger-driven re-broadcasts report offline paired slots with
+    /// `false`, so a `0x41` alone is a slot report, not proof of liveness.
     pub online: bool,
     /// Wireless product ID of the device.
     pub wpid: u16,
@@ -364,20 +349,23 @@ pub struct DeviceConnection {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub enum Event {
-    /// Fired whenever a paired device connects or reconnects, and for all
-    /// online devices in response to [`Receiver::trigger_device_arrival`].
+    /// Fired whenever a paired device connects or reconnects, and for *every*
+    /// paired slot — offline ones included — in response to
+    /// [`Receiver::trigger_device_arrival`], with
+    /// [`DeviceConnection::online`] carrying the link status.
     DeviceConnection(DeviceConnection),
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 mod tests {
-    use super::{DeviceConnection, DeviceKind, Event, decode_notification};
-    use crate::protocol::v10::{Message, MessageHeader};
+    use std::sync::Arc;
+
+    use super::{
+        DeviceConnection, DeviceKind, DevicePairingInformation, Event, InfoSubRegister, Receiver,
+        Register, decode_notification,
+    };
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::protocol::v10::{Message, MessageHeader, MessageType};
 
     /// Builds the long notification the receiver broadcasts, with `payload`
     /// laid out exactly as the 17 bytes following the header.
@@ -389,6 +377,41 @@ mod tests {
             },
             payload,
         )
+    }
+
+    #[test]
+    fn wireless_notifications_edit_only_their_bit_and_skip_no_op_writes() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let chan = Arc::new(channel_with_reader(raw).await);
+            let receiver =
+                Receiver::new(chan).expect("the mock's VID/PID routes as a Unifying receiver");
+            let register = |sub_id: MessageType, value: [u8; 3]| {
+                Message::Short(
+                    MessageHeader {
+                        device_index: super::RECEIVER_DEVICE_INDEX,
+                        sub_id: sub_id.into(),
+                    },
+                    [Register::Notifications.into(), value[0], value[1], value[2]],
+                )
+                .into()
+            };
+            // SOFTWARE_PRESENT and an unnamed low bit, set by another host.
+            handle.queue_response(register(MessageType::GetRegister, [0x00, 0x08, 0x55]));
+            handle.queue_response(register(MessageType::SetRegister, [0; 3]));
+            receiver.set_wireless_notifications(true).await.unwrap();
+            // Already enabled: read only, no write.
+            handle.queue_response(register(MessageType::GetRegister, [0x00, 0x09, 0x55]));
+            receiver.set_wireless_notifications(true).await.unwrap();
+
+            let writes: Vec<_> = handle
+                .written_reports()
+                .into_iter()
+                .filter(|report| report[2] == u8::from(MessageType::SetRegister))
+                .map(|report| report[3..7].to_vec())
+                .collect();
+            assert_eq!(writes, vec![vec![0x00, 0x00, 0x09, 0x55]]);
+        });
     }
 
     #[test]
@@ -412,9 +435,10 @@ mod tests {
     }
 
     #[test]
-    fn encryption_sits_on_bit_4_unlike_bolt() {
-        // Unifying reports link encryption on bit 4; Bolt uses bit 5. Reading
-        // Bolt's bit here would report every encrypted link as plaintext.
+    fn encryption_sits_on_bit_5_and_bit_4_is_software_present() {
+        // Both receivers report link encryption on bit 5 of the device-info
+        // byte; bit 4 is the software-present flag. This decoder used to read
+        // bit 4, reporting "Options+ seen" as link encryption.
         let connection = |status: u8| {
             let mut payload = [0u8; 17];
             payload[1] = status;
@@ -424,8 +448,82 @@ mod tests {
             }
         };
 
-        assert!(connection(1 << 4).encrypted);
-        assert!(!connection(1 << 5).encrypted);
+        assert!(connection(1 << 5).encrypted);
+        assert!(!connection(1 << 4).encrypted);
+    }
+
+    #[test]
+    fn a_bolt_protocol_byte_means_an_encrypted_link() {
+        // Byte 3 is the link protocol: 0x04 is a Unifying (eQuad step 4 DJ)
+        // link and keeps bit 5 as the only source, while 0x10 is Bolt and is
+        // encrypted even with bit 5 clear.
+        let connection = |protocol: u8, status: u8| {
+            let mut payload = [0u8; 17];
+            payload[0] = protocol;
+            payload[1] = status;
+            match decode_notification(&notification(1, 0x41, payload)) {
+                Some(Event::DeviceConnection(connection)) => connection,
+                other => panic!("expected a device connection, got {other:?}"),
+            }
+        };
+        assert!(!connection(0x04, 0x02).encrypted);
+        assert!(connection(0x04, (1 << 5) | 0x02).encrypted);
+        assert!(connection(0x10, 0x02).encrypted);
+    }
+
+    #[test]
+    fn pairing_information_reads_encryption_from_bit_5() {
+        // The pairing register carries the same device-info byte as the 0x41
+        // notification, decoded independently — pin its bits too so the two
+        // paths cannot diverge unnoticed.
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let chan = Arc::new(channel_with_reader(raw).await);
+            let receiver =
+                Receiver::new(chan).expect("the mock's VID/PID routes as a Unifying receiver");
+
+            // First response: bit 5 + bit 6 — encrypted, offline. Second:
+            // bit 4 only (software present), which must not read as
+            // encryption.
+            for status in [0x62, 0x12] {
+                let mut payload = [0u8; 17];
+                payload[0] = Register::ReceiverInfo.into(); // RAP matches on the address echo
+                payload[1] = u8::from(InfoSubRegister::DevicePairingInformation) | 0x02;
+                payload[2] = status;
+                payload[3] = 0x69; // wpid, little-endian
+                payload[4] = 0x40;
+                payload[5..9].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+                handle.queue_response(
+                    Message::Long(
+                        MessageHeader {
+                            device_index: super::RECEIVER_DEVICE_INDEX,
+                            sub_id: MessageType::GetLongRegister.into(),
+                        },
+                        payload,
+                    )
+                    .into(),
+                );
+            }
+
+            let encrypted_offline = receiver.get_device_pairing_information(2).await.unwrap();
+            assert_eq!(
+                encrypted_offline,
+                DevicePairingInformation {
+                    wpid: 0x4069,
+                    kind: DeviceKind::Mouse,
+                    encrypted: true,
+                    online: false,
+                    unit_id: [0xde, 0xad, 0xbe, 0xef],
+                }
+            );
+
+            let software_present = receiver.get_device_pairing_information(2).await.unwrap();
+            assert!(
+                !software_present.encrypted,
+                "bit 4 is software-present, not encryption"
+            );
+            assert!(software_present.online);
+        });
     }
 
     #[test]

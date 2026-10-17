@@ -54,6 +54,59 @@ pub(super) fn variant_image_for(
         .map(str::to_string)
 }
 
+/// Helper that checks variants against candidate model IDs, including the depot name and
+/// any stripped `_ext\d+` stem (e.g. for depots like `pro_keyboard_ext1`).
+pub(super) fn find_variant_in_manifest<'a, F>(
+    manifest: &DepotManifest,
+    entry: &'a openlogi_assets::DeviceEntry,
+    depot: &'a str,
+    ext: u8,
+    lookup: F,
+) -> Option<String>
+where
+    F: Fn(&DepotManifest, &str, u8) -> Option<String>,
+{
+    let candidates = candidate_manifest_bases(entry, depot);
+    for base in candidates {
+        if let Some(res) = lookup(manifest, &base, ext) {
+            return Some(res);
+        }
+    }
+    None
+}
+
+/// Enumerate candidate manifest bases: model IDs, the depot name, and any stripped `_ext\d+` stem.
+pub(super) fn candidate_manifest_bases(
+    entry: &openlogi_assets::DeviceEntry,
+    depot: &str,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for id in entry.model_id_candidates() {
+        if !candidates
+            .iter()
+            .any(|c: &String| c.eq_ignore_ascii_case(id))
+        {
+            candidates.push(id.to_string());
+        }
+    }
+    if !candidates
+        .iter()
+        .any(|c: &String| c.eq_ignore_ascii_case(depot))
+    {
+        candidates.push(depot.to_string());
+    }
+    if let Some((stem, suffix)) = depot.rsplit_once("_ext")
+        && !suffix.is_empty()
+        && suffix.chars().all(|c| c.is_ascii_digit())
+        && !candidates
+            .iter()
+            .any(|c: &String| c.eq_ignore_ascii_case(stem))
+    {
+        candidates.push(stem.to_string());
+    }
+    candidates
+}
+
 /// Like [`variant_image_for`] but returns the `device_buttons_image`
 /// resource (typically `side_*.png`) — that's the view Logi calibrates
 /// the assignment markers against, so the mouse-model render uses it.
@@ -64,6 +117,22 @@ pub(super) fn buttons_image_for(
 ) -> Option<String> {
     manifest
         .resource_for_variant(base_model_id, ext, "device_buttons_image")
+        .map(str::to_string)
+}
+
+/// Like [`variant_image_for`] but returns the `image_metadata` resource —
+/// the hotspot-metadata JSON calibrated against this colour variant's
+/// renders. Depots whose variants are *handed* rather than coloured ship no
+/// well-known metadata name at all (Lift keys its metadata as
+/// `core_metadata_left.json` / `core_metadata_right.json`), so the manifest
+/// is the only place their filename appears.
+pub(super) fn metadata_for(
+    manifest: &DepotManifest,
+    base_model_id: &str,
+    ext: u8,
+) -> Option<String> {
+    manifest
+        .resource_for_variant(base_model_id, ext, "image_metadata")
         .map(str::to_string)
 }
 

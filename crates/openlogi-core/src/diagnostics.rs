@@ -136,8 +136,11 @@ pub struct AppInfo {
     /// Explicit UI-language override, or `None` for "follow system".
     pub ui_language: Option<String>,
     /// Input-monitoring/Accessibility permission state — macOS gates the
-    /// input hook on it.
-    pub accessibility_granted: bool,
+    /// input hook on it. `None` when the agent is unreachable: the permission
+    /// belongs to the agent process, so with the agent down its state is
+    /// unknown, not denied — a support ticket claiming "denied" here sent
+    /// triage down the wrong path.
+    pub accessibility_granted: Option<bool>,
     /// `None` when the agent status is unavailable.
     pub hook_installed: Option<bool>,
     /// Launch-at-login setting, `None` when unknown.
@@ -239,7 +242,7 @@ impl DiagnosticsReport {
         let _ = writeln!(
             out,
             "- Accessibility: {} · Input hook: {}",
-            granted(a.accessibility_granted),
+            opt_state(a.accessibility_granted, "granted", "denied"),
             opt_state(a.hook_installed, "installed", "not installed"),
         );
         let _ = writeln!(
@@ -429,12 +432,14 @@ fn connection_label(connection: ConnectionKind) -> &'static str {
 
 fn battery_label(battery: Option<&BatteryInfo>) -> String {
     match battery {
-        Some(b) => format!(
-            "{}% ({}, {})",
-            b.percentage,
-            battery_status_label(b.status),
-            battery_level_label(b.level),
-        ),
+        Some(b) => {
+            let status = battery_status_label(b.status);
+            let level = battery_level_label(b.level);
+            match b.percentage {
+                Some(percentage) => format!("{percentage}% ({status}, {level})"),
+                None => format!("no percentage ({status}, {level})"),
+            }
+        }
         None => "n/a".to_string(),
     }
 }
@@ -486,10 +491,6 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
-fn granted(value: bool) -> &'static str {
-    if value { "granted" } else { "denied" }
-}
-
 fn opt_state(value: Option<bool>, yes: &'static str, no: &'static str) -> &'static str {
     match value {
         Some(true) => yes,
@@ -503,7 +504,6 @@ fn opt_num<T: std::fmt::Display>(value: Option<T>) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::{
         AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport,
@@ -526,7 +526,7 @@ mod tests {
             arch: "arm64".to_string(),
             system_locale: Some("en-US".to_string()),
             ui_language: None,
-            accessibility_granted: true,
+            accessibility_granted: Some(true),
             hook_installed: Some(true),
             launch_at_login: Some(true),
             show_in_menu_bar: Some(true),
@@ -566,7 +566,7 @@ mod tests {
                     connection: ConnectionKind::BoltReceiver,
                     online: true,
                     battery: Some(BatteryInfo {
-                        percentage: 80,
+                        percentage: Some(80),
                         level: BatteryLevel::Good,
                         status: BatteryStatus::Discharging,
                     }),
@@ -599,6 +599,13 @@ mod tests {
                         thumbwheel: false,
                         haptic_feedback: false,
                         haptic_panel: false,
+                        dpi_gestures: false,
+                        fn_lock: false,
+                        os_layout: false,
+                        report_rate: false,
+                        backlight: false,
+                        easy_switch: false,
+                        virtual_thumbwheel: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),
@@ -655,6 +662,19 @@ mod tests {
     }
 
     #[test]
+    fn a_level_only_battery_does_not_render_as_zero_percent() {
+        let mut report = sample();
+        report.devices[0].battery = Some(BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        });
+        let md = report.to_markdown();
+        assert!(md.contains("Battery: no percentage (discharging, good)"));
+        assert!(!md.contains("Battery: 0%"));
+    }
+
+    #[test]
     fn flags_version_and_protocol_mismatch() {
         let mut report = sample();
         report.app.agent_version = Some("0.6.5".to_string());
@@ -708,12 +728,17 @@ mod tests {
         report.app.agent_version = None;
         report.app.protocol_agent = None;
         report.app.inventory = None;
+        report.app.accessibility_granted = None;
         report.app.hook_installed = None;
         report.app.launch_at_login = None;
         let md = report.to_markdown();
         assert!(md.contains("- Agent: not connected"));
         assert!(md.contains("GUI 1 / agent —"));
         assert!(md.contains("- Inventory: —"));
+        assert!(
+            md.contains("Accessibility: unknown"),
+            "an unreachable agent must not claim the permission was denied"
+        );
         assert!(md.contains("Input hook: unknown"));
     }
 

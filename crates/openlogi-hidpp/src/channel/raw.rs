@@ -29,6 +29,15 @@ const LONG_REPORT_USAGE: u16 = 0x0002;
 /// communication. If a specific channel supports HID++ is determined at a later
 /// stage and is not directly related to potential implementations of this
 /// trait.
+// Not `expect`: the lint is raised inside `async_trait`'s expansion, which rustc
+// does not credit to an expectation. Clippy 1.99 flags the `#[must_use]` the
+// macro puts on each boxed future; rust-clippy#17547 (1.100) stops linting
+// macro-generated code.
+#[expect(clippy::allow_attributes, reason = "see above")]
+#[allow(
+    clippy::double_must_use,
+    reason = "raised on `async_trait`'s generated methods, not on this source"
+)]
 #[async_trait]
 pub trait RawHidChannel: Sync + Send + 'static {
     /// Provides the vendor ID of the connected HID device.

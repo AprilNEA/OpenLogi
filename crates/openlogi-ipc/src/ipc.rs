@@ -12,18 +12,22 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    DeviceRoute, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
-    SmartShiftMode, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    LightCommand, PairingError, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
 
-/// Wire-protocol version. Bumped only on a breaking change to the types below —
-/// independent of the crate version. The GUI checks it via
+/// Wire-protocol version. Bumped on a breaking change to the types below, at
+/// most once per release: a change made while this is already above the latest
+/// release's value joins that unreleased version (`crates/openlogi-ipc/AGENTS.md`).
+/// Independent of the crate version. The GUI checks it via
 /// [`Agent::protocol_version`] on connect and refuses to drive a mismatch
 /// (transient only: both binaries ship in one `.app` and update atomically).
 ///
@@ -50,7 +54,57 @@ pub use succession::Identity;
 ///      not a stream of steps (see [`PairingPhase`]).
 /// v21: `observe_action_ring` appended — the showing ring is state too (see
 ///      [`RingObservation`]).
-pub const PROTOCOL_VERSION: u32 = 21;
+/// v22: DPI scalar values use the validated [`Dpi`] type end to end.
+/// v23: SmartShift writes carry one typed [`SmartShiftStatus`] value.
+/// v24: `StandaloneDevice::registry_model_id` is always encoded (bincode fix).
+/// v25: `AgentStatus::input_monitoring_granted` appended.
+/// v26: `AgentStatus::hid_open_failures` appended.
+/// v27: `AgentSnapshot::foreground` appended — the frontmost application the
+///      agent matches per-app profiles against, plus the ones it saw recently.
+/// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
+/// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
+///      the macOS dormancy gate.
+/// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
+/// v31: `Capabilities::dpi_gestures` appended.
+/// v32: `Agent::read_fn_lock`, `Agent::set_fn_lock` and
+///      `HidppOperation::ReadFnLock` appended.
+/// v33: `Agent::unpair_device` appended.
+/// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
+/// v35: `HidppOperation::{ReadPointerScaling, WritePointerScaling}` appended.
+/// v36: `Action::TapKeyHoldingModifiers` appended for switcher-style output
+///      that holds the modifiers and taps the ordinary key once;
+///      `WriteError::{DpiUnsupported, DpiNotApplied}` appended — `set_dpi`
+///      rejects unsupported values and reports a write the device kept;
+///      `BatteryInfo::percentage` became `Option<u8>` — `None` when the
+///      device reports only a level (a `0x1004` without the state-of-charge
+///      capability) or has no reading yet; `PairedDevice::settings_revision`
+///      appended — it moves when the device reports a setting changed on it;
+///      `FnLockState::default_fn_lock` became `Option<bool>` — `None` for a
+///      `0x40a0` keyboard, which reports no default;
+///      `WriteError::HapticWaveformUnsupported` appended — a haptic play of a
+///      waveform the device does not advertise is refused before it is sent;
+///      `Capabilities::os_layout` and `HidppOperation::WriteOsLayout`
+///      appended — a `0x4531` keyboard whose platform software can set is kept
+///      on the host OS's key layout; `Agent::{read_report_rate,
+///      set_report_rate}`, `Capabilities::report_rate`,
+///      `HidppOperation::{ReadReportRate, WriteReportRate}` and
+///      `WriteError::{ReportRateUnsupported, ReportRateNotApplied}` appended —
+///      the `0x8061`/`0x8060` report rate in hertz; `BacklightState::{power_save,
+///      controls}` and `WriteError::{BacklightChangeUnsupported,
+///      BacklightNotApplied}` appended — `0x1982` battery saving and the
+///      backlight changes a keyboard offers; `Agent::set_backlight` and
+///      `Capabilities::backlight` appended — the keyboard backlight set from
+///      the settings app; `WriteError::HapticsUnavailable` appended — a
+///      haptic play is refused before it is sent while the device reports a
+///      non-zero `0x19b0` haptic status; `Agent::{read_easy_switch_hosts,
+///      rename_easy_switch_host}`, `Capabilities::easy_switch`,
+///      `HidppOperation::{ReadHosts, RenameHost}` and
+///      `WriteError::{HostRenameUnsupported, HostSlotEmpty, HostNameRejected,
+///      HostNameNotApplied}` appended — the `0x1815` Easy-Switch host names
+///      and OS, and renaming a slot's computer.
+/// v37: `Capabilities::virtual_thumbwheel` appended — Back/Forward can hold
+///      the main wheel as a virtual thumb wheel.
+pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -89,6 +143,10 @@ pub enum InventoryHealth {
 /// Agent health the GUI surfaces: the Accessibility gate, whether the hook is
 /// live, the autostart toggle state, and enumeration progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "AgentStatus is a serialized health DTO; bools keep the IPC shape explicit"
+)]
 pub struct AgentStatus {
     pub accessibility_granted: bool,
     pub hook_installed: bool,
@@ -97,6 +155,12 @@ pub struct AgentStatus {
     pub inventory: InventoryHealth,
     pub protocol_version: u32,
     pub agent_version: String,
+    /// Whether the agent process holds Input Monitoring (HID) access.
+    pub input_monitoring_granted: bool,
+    /// Whether the last enumeration tick failed to open at least one HID++
+    /// node. Paired with [`Self::input_monitoring_granted`] it distinguishes
+    /// a missing grant from an exclusive open or a stale permission session.
+    pub hid_open_failures: bool,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never
@@ -114,7 +178,40 @@ pub struct AgentSnapshot {
     pub camera_active: bool,
     /// The pairing session the agent has open, if any. See [`PairingPhase`].
     pub pairing: Option<PairingPhase>,
+    /// Which application per-app profiles are resolving against. See
+    /// [`ForegroundApps`].
+    pub foreground: ForegroundApps,
 }
+
+/// The application the agent currently resolves per-app profiles against, and
+/// the ones it recently saw in front.
+///
+/// `recent` carries identifiers defined by [`ForegroundApp::id`] that the agent
+/// observed in front. These are the exact keys the matcher compares, so a client
+/// can create a profile without guessing an installed application's runtime
+/// identifier.
+///
+/// It also answers the case [`Self::current`] cannot: while a client's own
+/// window is in front, *it* is the foreground application, so the app the user
+/// means is the previous entry, not the current one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForegroundApps {
+    /// The application whose profile is live right now, or `None` when nothing
+    /// is frontmost or the platform cannot say (a pure-Wayland session with no
+    /// usable backend). OpenLogi's own processes are reported here like any
+    /// other application — this is the matcher's view, not a filtered one.
+    pub current: Option<ForegroundApp>,
+    /// The most recently frontmost applications, newest first, deduplicated by
+    /// identifier and capped at [`RECENT_APPS`]. Excludes OpenLogi's own
+    /// processes, which are never a sensible profile target. Includes
+    /// [`Self::current`] when it is not one of them.
+    pub recent: Vec<ForegroundApp>,
+}
+
+/// How many applications [`ForegroundApps::recent`] remembers: enough to fill a
+/// picker with what the user was just doing, few enough that the list stays a
+/// rounding error in every observation.
+pub const RECENT_APPS: usize = 12;
 
 /// Where a pairing session stands.
 ///
@@ -262,6 +359,11 @@ impl From<PairingError> for PairingFailure {
             PairingError::Timeout => Self::Timeout,
             PairingError::Device(code) => Self::Device { code },
             PairingError::Cancelled => Self::Cancelled,
+            // The public agent API prevents this library-boundary rejection;
+            // retain the existing wire enum if an in-process caller violates it.
+            PairingError::UnsupportedCommand => Self::Hid {
+                message: "pairing command is not supported by the active receiver".into(),
+            },
             // Carried as the generic transport-failure message so the wire
             // format stays unchanged (PairingFailure variants are append-only).
             PairingError::MalformedNotification(what) => Self::Hid {
@@ -357,6 +459,21 @@ pub enum ActionRingCommandError {
     SlotEmpty,
 }
 
+/// What kind of client a connection is, declared through
+/// [`Agent::declare_client`] right after the version handshake.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientKind {
+    /// The desktop app. The only kind whose declaration arms a dormant agent.
+    Gui,
+    /// The `openlogi` CLI reading a snapshot; served without arming.
+    Cli,
+    /// The Actions Ring overlay helper; served without arming — one that
+    /// connects on its own is an orphan of a previous run.
+    Overlay,
+}
+
 #[tarpc::service]
 pub trait Agent {
     /// Wire-protocol version, for the connect handshake.
@@ -380,16 +497,12 @@ pub trait Agent {
     /// the GUI after it saves a config change.
     async fn reload_config() -> Result<(), ConfigReloadError>;
     /// Apply a DPI value to `route` now (slider preview / commit).
-    async fn set_dpi(route: DeviceRoute, dpi: u32) -> Result<(), WriteError>;
+    async fn set_dpi(route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError>;
     /// Apply a lighting config to `route` now.
     async fn set_lighting(route: DeviceRoute, lighting: Lighting) -> Result<(), WriteError>;
     /// Apply a full SmartShift config to `route` now.
-    async fn set_smartshift(
-        route: DeviceRoute,
-        mode: SmartShiftMode,
-        auto_disengage: u8,
-        tunable_torque: u8,
-    ) -> Result<(), WriteError>;
+    async fn set_smartshift(route: DeviceRoute, status: SmartShiftStatus)
+    -> Result<(), WriteError>;
     /// Read the current DPI + supported values from `route`. A permanent error
     /// (`FeatureUnsupported` / `EmptyDpiList`) reaches the GUI intact so it can
     /// stop re-probing a device that genuinely lacks the feature.
@@ -482,4 +595,67 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
+    /// Declare what kind of client this connection is. Informational for an
+    /// armed agent, load-bearing for a dormant one: the macOS dormancy gate
+    /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
+    /// it speaks only [`Agent::protocol_version`] — and so never arms.
+    async fn declare_client(kind: ClientKind);
+    /// Read the current HiResWheel reporting mode from `route`.
+    async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
+    /// Read the current keyboard-backlight state from `route`.
+    async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
+    /// Read the current keyboard Fn-lock state from `route`.
+    async fn read_fn_lock(route: DeviceRoute) -> Result<FnLockState, WriteError>;
+    /// Write keyboard Fn-lock on `route` now and answer with the state the
+    /// keyboard echoes back, so the GUI shows what the keyboard took rather
+    /// than what it asked for.
+    async fn set_fn_lock(route: DeviceRoute, fn_lock: bool) -> Result<FnLockState, WriteError>;
+    /// Remove the device `route` names from the receiver it is paired to, so a
+    /// forgotten device stops coming back with the next inventory. The device
+    /// must pair again to reach this host through that receiver. Refused with
+    /// [`PairingFailure::ReceiverBusy`] while a pairing session holds the
+    /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
+    /// that names no receiver slot or a receiver that is not connected.
+    async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+    /// Read the report rate of the mouse on `route` and every rate it lists
+    /// for its current connection.
+    async fn read_report_rate(route: DeviceRoute) -> Result<ReportRateInfo, WriteError>;
+    /// Write the report rate of the mouse on `route` now and answer with what
+    /// it reads back. A rate the mouse does not list is refused with
+    /// [`WriteError::ReportRateUnsupported`] before anything is written; one
+    /// it acknowledges but does not keep — an onboard profile owns the rate —
+    /// with [`WriteError::ReportRateNotApplied`].
+    async fn set_report_rate(
+        route: DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError>;
+    /// Apply one backlight change to the keyboard on `route` and answer with
+    /// the backlight it reads back. A change the keyboard does not offer is
+    /// refused with [`WriteError::BacklightChangeUnsupported`] before anything
+    /// is written; one it acknowledges but does not keep with
+    /// [`WriteError::BacklightNotApplied`]. The keyboard stores the result
+    /// itself, so nothing is persisted or replayed.
+    async fn set_backlight(
+        route: DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError>;
+
+    /// Read the Easy-Switch host slots of the device on `route`: which are
+    /// paired, how each reaches its computer, and the name and OS that
+    /// computer recorded (`0x1815 HostsInfo`).
+    async fn read_easy_switch_hosts(route: DeviceRoute) -> Result<EasySwitchHosts, WriteError>;
+
+    /// Name the computer on Easy-Switch `slot` (zero-based) of the device on
+    /// `route` and answer with the slots it reads back. A device that cannot
+    /// rename, an empty slot and a name that does not fit are refused with
+    /// [`WriteError::HostRenameUnsupported`], [`WriteError::HostSlotEmpty`]
+    /// and [`WriteError::HostNameRejected`] before anything is written; a
+    /// name the device acknowledges but does not keep with
+    /// [`WriteError::HostNameNotApplied`]. The device stores the name itself,
+    /// so nothing is persisted or replayed.
+    async fn rename_easy_switch_host(
+        route: DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError>;
 }

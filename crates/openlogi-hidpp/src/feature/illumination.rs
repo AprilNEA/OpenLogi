@@ -26,7 +26,7 @@ pub use types::{
 use self::types::{be16, illumination_state};
 use crate::{
     feature::{EventSource, FeatureEndpoint},
-    protocol::v20::{ErrorType, Hidpp20Error},
+    protocol::v20::{self, ErrorType, Hidpp20Error},
 };
 
 // Function ids. Color-temperature functions mirror the brightness ones offset by
@@ -155,8 +155,15 @@ impl IlluminationFeature {
     }
 
     /// Shared `get<Control>Info` reader.
+    ///
+    /// The fields fill eight bytes, more than a short reply holds, so the
+    /// reply must be long: a short one would zero-fill the range and the
+    /// level count. Logi Options+ also refuses fewer than eight bytes
+    /// (reverse-engineered from its `getControlInfo`).
     async fn read_info(&self, function: u8) -> Result<ControlInfo, Hidpp20Error> {
-        let payload = self.endpoint.call(function, [0; 3]).await?.extend_payload();
+        let v20::Message::Long(_, payload) = self.endpoint.call(function, [0; 3]).await? else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
         Ok(ControlInfo::from_payload(&payload))
     }
 
@@ -174,6 +181,11 @@ impl IlluminationFeature {
     }
 
     /// Shared `get<Control>Levels` reader.
+    ///
+    /// A level page is the whole long payload, so a short reply is refused
+    /// rather than read as an empty or linear table. Logi Options+ refuses
+    /// fewer than sixteen bytes (reverse-engineered from its
+    /// `getControlLevels`).
     async fn read_levels(
         &self,
         function: u8,
@@ -183,19 +195,24 @@ impl IlluminationFeature {
             return Err(Hidpp20Error::Feature(ErrorType::InvalidArgument));
         }
         // The request carries the start index in the high nibble of byte 0.
-        let payload = self
+        let v20::Message::Long(_, payload) = self
             .endpoint
             .call(function, [start_index << 4, 0, 0])
             .await?
-            .extend_payload();
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
         Ok(LevelConfig::from_payload(&payload))
     }
 
     /// Shared `set<Control>Levels` writer.
+    ///
+    /// A non-linear table longer than one request goes out page by page. The
+    /// first rejected page stops the write, leaving the earlier pages applied.
     async fn write_levels(&self, function: u8, levels: &SetLevels) -> Result<(), Hidpp20Error> {
-        self.endpoint
-            .call_long(function, levels.to_payload()?)
-            .await?;
+        for payload in levels.to_payloads()? {
+            self.endpoint.call_long(function, payload).await?;
+        }
         Ok(())
     }
 }

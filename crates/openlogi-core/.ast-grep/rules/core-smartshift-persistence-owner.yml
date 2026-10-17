@@ -1,0 +1,13 @@
+# Owner: config::SmartShift::accepts_auto_disengage — one persistence floor.
+id: core-smartshift-persistence-owner
+language: rust
+severity: error
+message: Use SmartShift::accepts_auto_disengage for persistence validation; do not rederive the configuration floor.
+note: The config parser and automation saves must accept the same firmware values.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/settings.rs
+rule:
+  kind: binary_expression
+  regex: '\bSMARTSHIFT_MIN_AUTO_DISENGAGE\b'

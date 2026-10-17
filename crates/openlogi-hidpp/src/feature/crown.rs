@@ -8,6 +8,8 @@ pub mod event;
 #[cfg(test)]
 mod tests;
 
+use std::num::NonZeroU8;
+
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use openlogi_hidpp_derive::Feature;
 
@@ -55,27 +57,29 @@ bitflags::bitflags! {
 }
 
 /// How crown events are reported.
+///
+/// The wire's `0` is the write-side "leave unchanged" sentinel, kept out of
+/// this enum: [`SetCrownMode`] says "unchanged" with `None`, and a response
+/// answering `0` for the current mode is [`Hidpp20Error::UnsupportedResponse`]
+/// like any other value no mode can be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ReportingMode {
-    /// Leave the setting unchanged (write-only sentinel).
-    NoChange = 0,
     /// Events go to the native HID channel.
     Hid = 1,
     /// Events are diverted to HID++ (required for [`CrownEvent`]).
     Diverted = 2,
 }
 
-/// The crown's ratchet mode.
+/// The crown's ratchet mode. The wire's `0` sentinel is kept out of the enum
+/// for the same reason as [`ReportingMode`]'s.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum RatchetMode {
-    /// Leave the setting unchanged (write-only sentinel).
-    NoChange = 0,
     /// Free-spinning mode.
     Free = 1,
     /// Ratchet (detented) mode.
@@ -97,8 +101,7 @@ pub struct CrownInfo {
     pub ratchets: u16,
 }
 
-/// The crown's mode, from [`get_mode`](CrownFeature::get_mode) and echoed by
-/// [`set_mode`](CrownFeature::set_mode).
+/// The crown's current mode, from [`get_mode`](CrownFeature::get_mode).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -131,21 +134,22 @@ impl CrownMode {
 
 /// Mode settings to write with [`set_mode`](CrownFeature::set_mode).
 ///
-/// Every field uses `0` / [`ReportingMode::NoChange`] / [`RatchetMode::NoChange`]
-/// as a "leave unchanged" sentinel. The rotation timeout is clipped to `0x40`.
+/// `None` leaves a setting unchanged — encoded as the wire's `0` sentinel, so
+/// "set it to 0" is unrepresentable rather than a silent no-op. The rotation
+/// timeout is clipped to `0x40` by the device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SetCrownMode {
-    /// How events are reported, or [`ReportingMode::NoChange`].
-    pub diverting: ReportingMode,
-    /// Ratchet mode, or [`RatchetMode::NoChange`].
-    pub ratchet_mode: RatchetMode,
-    /// Rotation timeout in 10 ms steps, or `0` to leave unchanged.
-    pub rotation_timeout: u8,
-    /// Short-long timeout in 10 ms steps, or `0` to leave unchanged.
-    pub short_long_timeout: u8,
-    /// Double-tap speed in 10 ms steps, or `0` to leave unchanged.
-    pub double_tap_speed: u8,
+    /// How events are reported, or `None` to leave unchanged.
+    pub diverting: Option<ReportingMode>,
+    /// Ratchet mode, or `None` to leave unchanged.
+    pub ratchet_mode: Option<RatchetMode>,
+    /// Rotation timeout in 10 ms steps, or `None` to leave unchanged.
+    pub rotation_timeout: Option<NonZeroU8>,
+    /// Short-long timeout in 10 ms steps, or `None` to leave unchanged.
+    pub short_long_timeout: Option<NonZeroU8>,
+    /// Double-tap speed in 10 ms steps, or `None` to leave unchanged.
+    pub double_tap_speed: Option<NonZeroU8>,
 }
 
 /// Implements the `Crown` / `0x4600` feature.
@@ -177,20 +181,26 @@ impl CrownFeature {
         CrownMode::from_payload(&payload)
     }
 
-    /// Sets the crown's mode and returns the resulting mode echoed by the device.
+    /// Sets the crown's mode.
     ///
     /// Divert the crown ([`ReportingMode::Diverted`]) for [`CrownEvent`]s to be
     /// emitted.
-    pub async fn set_mode(&self, mode: SetCrownMode) -> Result<CrownMode, Hidpp20Error> {
+    ///
+    /// The spec's `SetMode` response merely echoes the request bytes — `None`
+    /// sentinels included — so it carries no statement about the device's
+    /// resulting mode and is deliberately not decoded (a `None` field's echo
+    /// would even trip the strict [`CrownMode`] decoder). Read the mode back
+    /// with [`get_mode`](Self::get_mode) when it is needed.
+    pub async fn set_mode(&self, mode: SetCrownMode) -> Result<(), Hidpp20Error> {
         let mut args = [0; 16];
         args[..5].copy_from_slice(&[
-            mode.diverting.into(),
-            mode.ratchet_mode.into(),
-            mode.rotation_timeout,
-            mode.short_long_timeout,
-            mode.double_tap_speed,
+            mode.diverting.map_or(0, u8::from),
+            mode.ratchet_mode.map_or(0, u8::from),
+            mode.rotation_timeout.map_or(0, NonZeroU8::get),
+            mode.short_long_timeout.map_or(0, NonZeroU8::get),
+            mode.double_tap_speed.map_or(0, NonZeroU8::get),
         ]);
-        let payload = self.endpoint.call_long(2, args).await?.extend_payload();
-        CrownMode::from_payload(&payload)
+        self.endpoint.call_long(2, args).await?;
+        Ok(())
     }
 }

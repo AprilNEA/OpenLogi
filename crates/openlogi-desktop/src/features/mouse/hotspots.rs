@@ -3,11 +3,6 @@
 //! stored as plain `f32` tuples so this module stays purely data and doesn't
 //! drag in `gpui` types.
 
-#![allow(
-    dead_code,
-    reason = "scaffolding consumed by UI.md phases 3–6 (carousel, popover, hotspots)"
-)]
-
 use openlogi_core::binding::ButtonId;
 
 /// One visual target in the mouse diagram.
@@ -43,10 +38,10 @@ impl MouseControlId {
     }
 
     #[must_use]
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn translation_key(self) -> &'static str {
         match self {
-            Self::Button(button) => button.label(),
-            Self::ThumbwheelRotation => "Thumb Wheel",
+            Self::Button(button) => button.translation_key(),
+            Self::ThumbwheelRotation => "pointer.thumb_wheel",
         }
     }
 }

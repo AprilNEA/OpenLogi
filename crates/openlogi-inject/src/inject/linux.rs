@@ -13,8 +13,22 @@ use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
 };
+use openlogi_core::scroll::ScrollDelta;
+
+use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
+
+const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
+
+#[derive(Default)]
+struct ScrollOutput {
+    high_resolution: ScrollQuantizer,
+    legacy: ScrollQuantizer,
+}
+
+static SCROLL_OUTPUT: LazyLock<Mutex<ScrollOutput>> =
+    LazyLock::new(|| Mutex::new(ScrollOutput::default()));
 
 /// Linux implementation: classify `action` into an [`Effect`] and inject the
 /// resulting events via a shared `uinput` virtual device.
@@ -25,17 +39,12 @@ pub(super) fn execute(action: &Action) {
         // buttons ("back"/"forward") browsers handle natively.
         Effect::Click(button) => click(mouse_button_code(button)),
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
-        Effect::Key(combo) => press_combo(combo),
+        Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),
-        Effect::Script(script) => dispatch_script(script),
-        Effect::Text(text) => {
-            tracing::warn!(
-                chars = text.chars().count(),
-                "TypeText injection is not implemented on Linux yet"
-            );
-        }
+        Effect::Script(script) => super::dispatch_script(script),
+        Effect::Text(text) => type_text(text),
         Effect::AgentSide => {
             tracing::debug!(
                 action = action.label(),
@@ -82,17 +91,12 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
     };
-    parse_shortcut(text)
-}
-
-fn parse_shortcut(text: &str) -> KeyCombo {
-    text.parse()
-        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+    super::parse_shortcut(text)
 }
 
 /// Press an already-resolved chord: a table lookup from [`combo`] or a
 /// user-recorded [`Action::CustomShortcut`]/`WorkflowStep::PressKey`.
-fn press_combo(combo: &KeyCombo) {
+pub(super) fn press_combo(combo: &KeyCombo) {
     let Some(key) = hid_usage_to_linux(combo.key().code()) else {
         tracing::warn!(
             usage = combo.key().code(),
@@ -101,6 +105,14 @@ fn press_combo(combo: &KeyCombo) {
         return;
     };
     press_key(&modifiers_to_keycodes(combo), key);
+}
+
+/// Emit one edge for the physical keys whose ownership changed.
+pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
+    let keys: Vec<_> = keys.iter().filter_map(|key| held_keycode(*key)).collect();
+    if !keys.is_empty() {
+        emit(&held_key_events(&keys, phase));
+    }
 }
 
 /// MPRIS targets the running media player; XF86 volume keys go to the
@@ -122,92 +134,102 @@ fn dispatch_native(action: &Action, native: NativeAction) {
     let ctrl = KeyCode::KEY_LEFTCTRL;
     let alt = KeyCode::KEY_LEFTALT;
     match native {
-        // No universal Linux equivalent; the compositor shortcut varies.
-        NativeAction::MissionControl
-        | NativeAction::AppExpose
-        | NativeAction::ShowDesktop
-        | NativeAction::LaunchpadShow => {
+        // GNOME's overlay key toggles the Activities overview on a bare tap;
+        // no other tested desktop binds Super alone the same way (KDE opens
+        // KRunner), so this only fires under GNOME. Activities shows every
+        // window across every app, not just the frontmost app's — that is
+        // MissionControl's contract, not AppExpose's, so AppExpose must not
+        // share this arm without its own promised single-app scope.
+        NativeAction::MissionControl => {
+            gnome_key_or_skip(action, &[], KeyCode::KEY_LEFTMETA);
+        }
+        // No tested desktop has a stock single-app window-exposé binding
+        // (GNOME's Activities and KDE's Present Windows both show every
+        // app), so this always skips rather than substitute the wrong scope.
+        NativeAction::AppExpose => {
             tracing::debug!(
                 action = action.label(),
                 "no Linux equivalent — action skipped"
             );
+        }
+        // GNOME's default "Show desktop" keybinding.
+        NativeAction::ShowDesktop => {
+            gnome_key_or_skip(action, &[KeyCode::KEY_LEFTMETA], KeyCode::KEY_D);
+        }
+        // GNOME's default "Show Applications" keybinding.
+        NativeAction::LaunchpadShow => {
+            gnome_key_or_skip(action, &[KeyCode::KEY_LEFTMETA], KeyCode::KEY_A);
         }
         // Ctrl+Alt+←/→ is the default in GNOME and KDE.
         NativeAction::PreviousDesktop => press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
         NativeAction::NextDesktop => press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
         // logind LockSession() via the system bus; falls back to Super+L.
         NativeAction::LockScreen => lock_screen(),
-        // Region vs full-screen capture depends on the desktop environment's
-        // screenshot handler for Print Screen, so both map to the same key.
-        NativeAction::Screenshot | NativeAction::CaptureRegion => {
-            press_key(&[], KeyCode::KEY_SYSRQ);
+        NativeAction::Screenshot => press_key(&[], KeyCode::KEY_SYSRQ),
+        // Print alone only opens the region selector on GNOME >= 42; other
+        // desktops need an extra chord (see `capture_region_mods`).
+        NativeAction::CaptureRegion => {
+            press_key(
+                &capture_region_mods(current_desktop().as_deref()),
+                KeyCode::KEY_SYSRQ,
+            );
         }
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
     }
 }
 
-fn dispatch_script(script: Script<'_>) {
-    match script {
-        Script::AppleScript(_) => {
-            tracing::warn!("RunAppleScript is only supported on macOS");
-        }
-        Script::ShellCommand(cmd) => run_shell_command_async(cmd.to_string()),
-        Script::Workflow(steps) => run_workflow_async(steps.to_vec()),
+/// Press `mods`+`key` under GNOME; log the existing "no Linux equivalent"
+/// skip everywhere else, since Super-based bindings vary by desktop.
+fn gnome_key_or_skip(action: &Action, mods: &[KeyCode], key: KeyCode) {
+    if is_gnome() {
+        press_key(mods, key);
+    } else {
+        tracing::debug!(
+            action = action.label(),
+            "no Linux equivalent — action skipped"
+        );
     }
+}
+
+fn is_gnome() -> bool {
+    desktop_is_gnome(std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default())
+}
+
+/// The pure half of [`is_gnome`], taking the desktop string directly instead
+/// of reading it from the process environment — so tests can drive it
+/// without `std::env::set_var`, which cannot be scoped to just this test:
+/// the process environment is process-wide, and a private test-only mutex
+/// only serializes callers that take it, not every other reader (including
+/// `is_gnome` itself, called from unrelated code running concurrently).
+fn desktop_is_gnome(current_desktop: impl AsRef<str>) -> bool {
+    current_desktop.as_ref().to_lowercase().contains("gnome")
 }
 
 /// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
 /// (-1/0/1) scaled by the fixed relative-axis magnitude the four
 /// `Scroll*`/`HorizontalScroll*` actions have always used.
 fn dispatch_scroll(dx: i8, dy: i8) {
-    if dy != 0 {
-        scroll(RelativeAxisCode::REL_WHEEL, i32::from(dy) * 3);
-    }
-    if dx != 0 {
-        scroll(RelativeAxisCode::REL_HWHEEL, i32::from(dx) * 3);
-    }
+    post_scroll(action_scroll(dx, dy));
 }
 
-fn run_shell_command_async(cmd: String) {
-    std::thread::spawn(move || run_shell_command(&cmd));
+fn action_scroll(dx: i8, dy: i8) -> ScrollDelta {
+    ScrollDelta::wheel_ticks(f64::from(dx) * 3.0, f64::from(dy) * 3.0)
 }
 
-fn run_workflow_async(steps: Vec<WorkflowStep>) {
-    std::thread::spawn(move || run_workflow(&steps));
+/// Not implemented yet: unicode text has no uinput encoding without a keymap.
+pub(super) fn type_text(text: &str) {
+    tracing::warn!(
+        chars = text.chars().count(),
+        "TypeText injection is not implemented on Linux yet"
+    );
 }
 
-fn run_workflow(steps: &[WorkflowStep]) {
-    for step in steps {
-        match step {
-            WorkflowStep::TypeText(text) => {
-                tracing::warn!(
-                    chars = text.chars().count(),
-                    "workflow TypeText injection is not implemented on Linux yet"
-                );
-            }
-            WorkflowStep::PressKey(combo) => {
-                let Some(key) = hid_usage_to_linux(combo.key().code()) else {
-                    tracing::warn!(
-                        usage = combo.key().code(),
-                        "workflow PressKey usage has no Linux mapping; step ignored"
-                    );
-                    continue;
-                };
-                press_key(&modifiers_to_keycodes(combo), key);
-            }
-            WorkflowStep::Delay { millis } => {
-                std::thread::sleep(std::time::Duration::from_millis(*millis));
-            }
-            WorkflowStep::RunAppleScript(_) => {
-                tracing::warn!("workflow RunAppleScript is only supported on macOS");
-            }
-            WorkflowStep::RunShellCommand(cmd) => run_shell_command(cmd),
-        }
-    }
+pub(super) fn run_apple_script(_src: &str) {
+    tracing::warn!("RunAppleScript is only supported on macOS");
 }
 
-fn run_shell_command(cmd: &str) {
+pub(super) fn run_shell_command(cmd: &str) {
     let _ = std::process::Command::new("/bin/sh")
         .args(["-c", cmd])
         .output();
@@ -215,11 +237,22 @@ fn run_shell_command(cmd: &str) {
 
 const DEVICE_NAME: &str = "OpenLogi action injector";
 
+/// Settle time after creating the uinput device, before its first emit.
+///
+/// `/dev/uinput` creation is synchronous, but udev, libinput, and the display
+/// server noticing the new event node and opening it are not — and an evdev
+/// reader never sees events written before it opens the device. Emitting the
+/// very first action right after creation races that pickup and is silently
+/// dropped, with every later action working once the display server has
+/// caught up (#1800).
+const UINPUT_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
 static VIRTUAL_INPUT: LazyLock<Option<Mutex<VirtualDevice>>> = LazyLock::new(|| {
-    build()
-        .map(Mutex::new)
+    let device = build()
         .map_err(|e| tracing::warn!("failed to create uinput action device: {e}"))
-        .ok()
+        .ok()?;
+    std::thread::sleep(UINPUT_SETTLE);
+    Some(Mutex::new(device))
 });
 
 #[rustfmt::skip]
@@ -252,6 +285,8 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     KeyCode::KEY_F1,  KeyCode::KEY_F2,  KeyCode::KEY_F3,  KeyCode::KEY_F4,
     KeyCode::KEY_F5,  KeyCode::KEY_F6,  KeyCode::KEY_F7,  KeyCode::KEY_F8,
     KeyCode::KEY_F9,  KeyCode::KEY_F10, KeyCode::KEY_F11, KeyCode::KEY_F12,
+    KeyCode::KEY_F13, KeyCode::KEY_F14, KeyCode::KEY_F15, KeyCode::KEY_F16,
+    KeyCode::KEY_F17, KeyCode::KEY_F18, KeyCode::KEY_F19, KeyCode::KEY_F20,
     // System
     KeyCode::KEY_SYSRQ,
     // Multimedia
@@ -274,7 +309,12 @@ fn build() -> io::Result<VirtualDevice> {
     // which can otherwise cause injected key/wheel events to be grabbed by
     // pointer-grabbing X11 clients or routed oddly by some Wayland compositors.
     let mut axes = AttributeSet::<RelativeAxisCode>::default();
-    for a in [RelativeAxisCode::REL_WHEEL, RelativeAxisCode::REL_HWHEEL] {
+    for a in [
+        RelativeAxisCode::REL_WHEEL,
+        RelativeAxisCode::REL_HWHEEL,
+        RelativeAxisCode::REL_WHEEL_HI_RES,
+        RelativeAxisCode::REL_HWHEEL_HI_RES,
+    ] {
         axes.insert(a);
     }
 
@@ -319,23 +359,32 @@ fn rel_ev(axis: RelativeAxisCode, value: i32) -> InputEvent {
 /// release, which matches what the kernel `uinput` docs show and avoids
 /// toolkits treating a zero-duration event as invalid.
 fn press_key(mods: &[KeyCode], key: KeyCode) {
-    // Down phase.
-    let mut down: Vec<InputEvent> = Vec::with_capacity(mods.len() + 2);
-    for &m in mods {
-        down.push(key_ev(m, 1));
-    }
-    down.push(key_ev(key, 1));
-    down.push(syn());
-    emit(&down);
+    emit(&key_phase_events(mods, key, KeyPhase::Down));
+    emit(&key_phase_events(mods, key, KeyPhase::Up));
+}
 
-    // Up phase.
-    let mut up: Vec<InputEvent> = Vec::with_capacity(mods.len() + 2);
-    up.push(key_ev(key, 0));
-    for &m in mods.iter().rev() {
-        up.push(key_ev(m, 0));
+/// Build one `SYN_REPORT` frame. Down order is modifiers then key; up order
+/// is the exact reverse so the ordinary key never escapes as an unmodified
+/// release.
+fn key_phase_events(mods: &[KeyCode], key: KeyCode, phase: KeyPhase) -> Vec<InputEvent> {
+    let mut keys = Vec::with_capacity(mods.len() + 1);
+    keys.extend_from_slice(mods);
+    keys.push(key);
+    held_key_events(&keys, phase)
+}
+
+fn held_key_events(keys: &[KeyCode], phase: KeyPhase) -> Vec<InputEvent> {
+    let mut events = Vec::with_capacity(keys.len() + 1);
+    match phase {
+        KeyPhase::Down => {
+            events.extend(keys.iter().map(|key| key_ev(*key, 1)));
+        }
+        KeyPhase::Up => {
+            events.extend(keys.iter().rev().map(|key| key_ev(*key, 0)));
+        }
     }
-    up.push(syn());
-    emit(&up);
+    events.push(syn());
+    events
 }
 
 /// Inject a button-down in one SYN frame and button-up in a second.
@@ -344,9 +393,60 @@ fn click(button: KeyCode) {
     emit(&[key_ev(button, 0), syn()]);
 }
 
-/// Inject a single relative-axis delta followed by `SYN_REPORT`.
-pub(super) fn scroll(axis: RelativeAxisCode, value: i32) {
-    emit(&[rel_ev(axis, value), syn()]);
+pub(super) fn post_scroll(delta: ScrollDelta) {
+    let ScrollDelta::WheelTicks { .. } = delta else {
+        tracing::debug!("pixel scroll output is unsupported on Linux");
+        return;
+    };
+    let Ok(mut output) = SCROLL_OUTPUT.lock() else {
+        tracing::warn!("Linux scroll quantizer mutex poisoned");
+        return;
+    };
+    let events = scroll_events(&mut output, delta);
+    drop(output);
+    if !events.is_empty() {
+        emit(&events);
+    }
+}
+
+/// One `SYN_REPORT` frame carrying `delta` on the hi-res and legacy axes, or
+/// nothing while the quantizers hold less than one unit.
+fn scroll_events(output: &mut ScrollOutput, delta: ScrollDelta) -> Vec<InputEvent> {
+    let high_resolution = output
+        .high_resolution
+        .quantize(delta, HIGH_RES_UNITS_PER_TICK);
+    let legacy = output.legacy.quantize(delta, 1.0);
+    let mut events = Vec::with_capacity(5);
+    push_scroll_axes(
+        &mut events,
+        high_resolution,
+        RelativeAxisCode::REL_HWHEEL_HI_RES,
+        RelativeAxisCode::REL_WHEEL_HI_RES,
+    );
+    push_scroll_axes(
+        &mut events,
+        legacy,
+        RelativeAxisCode::REL_HWHEEL,
+        RelativeAxisCode::REL_WHEEL,
+    );
+    if !events.is_empty() {
+        events.push(syn());
+    }
+    events
+}
+
+fn push_scroll_axes(
+    events: &mut Vec<InputEvent>,
+    delta: QuantizedScroll,
+    horizontal: RelativeAxisCode,
+    vertical: RelativeAxisCode,
+) {
+    if delta.x != 0 {
+        events.push(rel_ev(horizontal, delta.x));
+    }
+    if delta.y != 0 {
+        events.push(rel_ev(vertical, delta.y));
+    }
 }
 
 /// Force the virtual device to initialise (if it hasn't already) and return
@@ -369,7 +469,7 @@ pub(super) fn device_node() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Convert a [`KeyCombo`](openlogi_core::binding::KeyCombo) modifier bitmask
+/// Convert a [`KeyCombo`] modifier bitmask
 /// to the evdev keys to hold.
 ///
 /// macOS Cmd (`MOD_CMD`) and Ctrl (`MOD_CTRL`) both map to `KEY_LEFTCTRL`;
@@ -386,7 +486,29 @@ fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCod
     if combo.has_option() {
         modifiers.push(KeyCode::KEY_LEFTALT);
     }
+    if combo.has_super() {
+        modifiers.push(KeyCode::KEY_LEFTMETA);
+    }
     modifiers
+}
+
+fn held_keycode(key: HeldKey) -> Option<KeyCode> {
+    match key {
+        HeldKey::Control => Some(KeyCode::KEY_LEFTCTRL),
+        HeldKey::Shift => Some(KeyCode::KEY_LEFTSHIFT),
+        HeldKey::Alt => Some(KeyCode::KEY_LEFTALT),
+        HeldKey::Super => Some(KeyCode::KEY_LEFTMETA),
+        HeldKey::Key(usage) => {
+            let key = hid_usage_to_linux(usage.code());
+            if key.is_none() {
+                tracing::warn!(
+                    usage = usage.code(),
+                    "held shortcut usage has no Linux mapping — edge ignored"
+                );
+            }
+            key
+        }
+    }
 }
 
 /// Map a platform-neutral USB HID keyboard usage to evdev.
@@ -529,6 +651,35 @@ fn lock_screen() {
     press_key(&[KeyCode::KEY_LEFTMETA], KeyCode::KEY_L);
 }
 
+/// `$XDG_CURRENT_DESKTOP`, lowercased, or `None` if unset.
+fn current_desktop() -> Option<String> {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .ok()
+        .map(|d| d.to_lowercase())
+}
+
+/// The extra modifiers Print needs to open the region selector instead of
+/// taking a full-screen shot, chosen from the (colon-separated)
+/// `$XDG_CURRENT_DESKTOP` value.
+///
+/// GNOME >= 42 already opens the interactive selector on a bare Print, and
+/// that is what an unset or unrecognised desktop keeps. Cinnamon, MATE and
+/// XFCE bind region capture to Shift+Print; KDE Plasma binds it to
+/// Meta+Shift+Print.
+fn capture_region_mods(desktop: Option<&str>) -> Vec<KeyCode> {
+    let Some(desktop) = desktop else {
+        return Vec::new();
+    };
+    let mut desktops = desktop.split(':');
+    if desktops.clone().any(|d| d == "kde") {
+        vec![KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT]
+    } else if desktops.any(|d| matches!(d, "x-cinnamon" | "cinnamon" | "mate" | "xfce")) {
+        vec![KeyCode::KEY_LEFTSHIFT]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Suspend the system via logind's `Suspend()` on the system bus. The
 /// `false` argument declines the "interactive" polkit prompt — if the
 /// session isn't allowed to suspend, the call fails and is logged rather
@@ -607,12 +758,64 @@ fn try_mpris_command(command: &str) -> Option<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
-    use evdev::KeyCode;
+    use evdev::{KeyCode, RelativeAxisCode};
     use openlogi_core::binding::{KeyCombo, Shortcut};
 
-    use super::{combo, hid_usage_to_linux, modifiers_to_keycodes};
+    use super::{
+        ScrollOutput, action_scroll, capture_region_mods, combo, hid_usage_to_linux, key_ev,
+        key_phase_events, modifiers_to_keycodes, rel_ev, scroll_events, syn,
+    };
+    use crate::inject::KeyPhase;
+
+    #[test]
+    fn held_chord_edges_use_inverse_key_order() {
+        let modifiers = [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT];
+        assert_eq!(
+            key_phase_events(&modifiers, KeyCode::KEY_P, KeyPhase::Down),
+            vec![
+                key_ev(KeyCode::KEY_LEFTCTRL, 1),
+                key_ev(KeyCode::KEY_LEFTSHIFT, 1),
+                key_ev(KeyCode::KEY_P, 1),
+                syn(),
+            ]
+        );
+        assert_eq!(
+            key_phase_events(&modifiers, KeyCode::KEY_P, KeyPhase::Up),
+            vec![
+                key_ev(KeyCode::KEY_P, 0),
+                key_ev(KeyCode::KEY_LEFTSHIFT, 0),
+                key_ev(KeyCode::KEY_LEFTCTRL, 0),
+                syn(),
+            ]
+        );
+    }
+
+    /// libinput reads only the hi-res axes of a device that has them, so a
+    /// scroll action without them does nothing.
+    #[test]
+    fn scroll_actions_send_hi_res_and_legacy_axes_in_one_frame() {
+        let (wheel, wheel_hi) = (
+            RelativeAxisCode::REL_WHEEL,
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+        );
+        let (hwheel, hwheel_hi) = (
+            RelativeAxisCode::REL_HWHEEL,
+            RelativeAxisCode::REL_HWHEEL_HI_RES,
+        );
+        for (dx, dy, hi_res, legacy, sign) in [
+            (0, 1, wheel_hi, wheel, 1),
+            (0, -1, wheel_hi, wheel, -1),
+            (1, 0, hwheel_hi, hwheel, 1),
+            (-1, 0, hwheel_hi, hwheel, -1),
+        ] {
+            assert_eq!(
+                scroll_events(&mut ScrollOutput::default(), action_scroll(dx, dy)),
+                vec![rel_ev(hi_res, sign * 360), rel_ev(legacy, sign * 3), syn()],
+                "scroll ({dx}, {dy})"
+            );
+        }
+    }
 
     #[test]
     fn modifiers_map_to_linux_without_duplicate_control() {
@@ -661,5 +864,48 @@ mod tests {
                 "{shortcut:?} table entry has no Linux keycode mapping"
             );
         }
+    }
+
+    #[test]
+    fn gnome_detection_matches_on_current_desktop_case_insensitively() {
+        for (value, expected) in [
+            ("GNOME", true),
+            ("ubuntu:GNOME", true),
+            ("gnome-classic", true),
+            ("KDE", false),
+            ("", false),
+        ] {
+            assert_eq!(
+                super::desktop_is_gnome(value),
+                expected,
+                "XDG_CURRENT_DESKTOP={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_region_mods_picks_the_desktops_chord() {
+        assert_eq!(capture_region_mods(None), vec![]);
+        assert_eq!(capture_region_mods(Some("gnome")), vec![]);
+        assert_eq!(capture_region_mods(Some("unity")), vec![]);
+        assert_eq!(
+            capture_region_mods(Some("x-cinnamon")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("mate")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("xfce")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("kde")),
+            vec![KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT]
+        );
+        // GNOME-on-Ubuntu reports "ubuntu:gnome" — the compound string must
+        // still resolve to the GNOME (no-op) branch, not fall through.
+        assert_eq!(capture_region_mods(Some("ubuntu:gnome")), vec![]);
     }
 }

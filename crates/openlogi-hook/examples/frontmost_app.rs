@@ -1,25 +1,28 @@
-//! Smoke-test for `frontmost_bundle_id()` on Linux.
+//! Smoke-test for `frontmost_application()`.
 //!
-//! Polls the focused application once per second and prints its identifier.
+//! Polls the focused application once per second and prints its identifier and
+//! display name — the two halves per-app profiles are keyed and labelled by.
 //! Switch between windows while it runs to verify detection.
+//!
+//! Worth pointing at every platform that has a frontmost reader: the
+//! identifier's shape differs on each (bundle id, `WM_CLASS`, xdg `app_id`,
+//! executable path). On a Wayland session it is also how you find out whether
+//! the session resolved to a usable backend at all — a `None` here is the
+//! reason per-app profiles would silently never switch there.
 //!
 //! # Usage
 //!
 //! ```text
-//! cargo build --example frontmost_app -p openlogi-hook
-//! ./target/debug/examples/frontmost_app
+//! cargo run --example frontmost_app -p openlogi-hook
 //! ```
 
-#[cfg(target_os = "linux")]
 fn main() {
-    println!("Polling focused app every second — switch windows to test.");
+    println!("Polling the focused app every second — switch windows to test.");
     loop {
-        println!("{:?}", openlogi_hook::frontmost_bundle_id());
+        match openlogi_hook::frontmost_application() {
+            Some(app) => println!("{}\t{}", app.id, app.display_name),
+            None => println!("(none — no frontmost window, or no reader on this platform)"),
+        }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("frontmost_app is a Linux-only smoke test (no-op on this platform).");
 }

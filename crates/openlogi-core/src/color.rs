@@ -87,7 +87,6 @@ impl fmt::Display for Rgb {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
     use super::Rgb;
 

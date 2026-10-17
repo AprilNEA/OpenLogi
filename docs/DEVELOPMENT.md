@@ -5,9 +5,12 @@ build instructions, see the [README](../README.md).
 
 ## Toolchain
 
-- Stable Rust (Edition 2024, MSRV 1.96)
-- macOS: Xcode 16+ with the optional **Metal Toolchain** component (required by
-  GPUI's `gpui_macos` build script to compile shaders)
+- Stable Rust (Edition 2024, MSRV 1.98 — the floor tracks current stable)
+- macOS: Xcode 26+ with the optional **Metal Toolchain** component. The Metal
+  Toolchain is what GPUI's `gpui_macos` build script compiles shaders with; the
+  version floor is `actool`, which packaging uses to compile the app icon from
+  its Icon Composer document. `OPENLOGI_DEVELOPER_DIR` overrides which Xcode is
+  used when several are installed.
 - Linux: system libraries — on Debian/Ubuntu:
   `sudo apt-get install libudev-dev gcc g++ clang libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev pkg-config`
 - `create-dmg` for packaging (`brew install create-dmg`); `cargo-bundle` is
@@ -22,7 +25,7 @@ Nix/devenv is optional. A normal Rust toolchain is enough.
 ```sh
 # rustup installs the stable toolchain pinned in rust-toolchain.toml
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-# macOS: full Xcode 16+ with the Metal Toolchain (not only Command Line Tools)
+# macOS: full Xcode 26+ with the Metal Toolchain (not only Command Line Tools)
 # Linux: see system libraries under Toolchain above
 # optional helpers: brew install cmake create-dmg sccache
 git clone https://github.com/AprilNEA/OpenLogi
@@ -43,7 +46,8 @@ nfpm on Linux, and the macOS packaging/env helpers GPUI needs
 
 ```sh
 devenv tasks run openlogi:gui      # run the desktop app
-devenv tasks run openlogi:check    # fmt + clippy + tests (run before committing)
+devenv tasks run openlogi:check    # host-OS gate: fmt + clippy + tests + rustdoc
+devenv tasks run openlogi:ci       # every GitHub Actions CI job this host can reproduce
 devenv tasks run openlogi:dmg      # build the macOS DMG
 devenv tasks run openlogi:i18n-upload    # upload English source strings to Crowdin
 devenv tasks run openlogi:i18n-download  # download translations and run i18n tests
@@ -79,14 +83,25 @@ Flake's pinned formatter.
 
 On macOS the desktop binary is launched from inside a throwaway
 `target/dev/OpenLogi.app` — a Cargo `runner` wired in `.cargo/config.toml`
-(`.cargo/run-macos.sh`). This makes the dev build show as
-**OpenLogi Dev** in the menu bar and Dock, with the real app icon; a bare
-`cargo run` binary has no bundle, so macOS would otherwise fall back to the
-`openlogi-desktop` executable name and a generic icon. The binary is hardlinked in
-(no copy) and the icon is generated on demand by
-`cargo run -p xtask -- macos icns`. The runner is a transparent passthrough for
-everything else (the CLI, tests); set
-`OPENLOGI_DEV_BUNDLE=0` to launch the raw `openlogi-desktop` binary instead.
+(`.cargo/run-macos.sh`) that hands the build to `xtask macos dev-bundle`. This
+makes the dev build show as **OpenLogi Dev** in the menu bar and Dock, with the
+real app icon; a bare `cargo run` binary has no bundle, so macOS would otherwise
+fall back to the `openlogi-desktop` executable name and a generic icon. The
+binary is hardlinked in (no copy) unless the bundle is being signed, and the
+icon is generated on demand. The runner is a transparent passthrough for
+everything else (the CLI, tests); set `OPENLOGI_DEV_BUNDLE=0` to launch the raw
+`openlogi-desktop` binary instead.
+
+Each run also stops the dev agent and overlay left behind by the previous one,
+then starts the freshly built agent and waits for its IPC socket before the
+GUI launches — so the window connects immediately instead of sitting on its
+connecting frame while the GUI's production fallback re-spawns the agent.
+The helpers are launched through LaunchServices so they get their own TCC
+identity, which also means they are not children of the GUI: closing its
+window or pressing Ctrl-C ends only the GUI, and a surviving dev agent
+relaunches itself ~20 s later once its watcher notices the rewritten binary.
+Set `OPENLOGI_DEV_AGENT=0` to run against an agent you started yourself —
+nothing is stopped, built, embedded, or started then.
 
 Packaged local dev bundles (`cargo run` and
 `cargo run -p xtask -- macos bundle`) use `-dev` bundle identifiers and the
@@ -108,6 +123,10 @@ To install the CLI binary on `PATH`:
 ```sh
 cargo install --path crates/openlogi
 ```
+
+### macOS input-hook safety
+
+The agent's input-hook watchdog gives CoreGraphics permission probes a 10-second budget. After a probe returns, tap servicing and teardown use a fresh 1.5-second budget. Teardown keeps that short budget when Accessibility is revoked or the re-arm limit is reached. The watchdog exits the agent if cleanup stalls, so macOS releases the process-owned tap.
 
 ## Developing the GUI without hardware
 
@@ -141,6 +160,23 @@ flow (discovery → passkey → paired). Its agent version carries a `-mock` suf
 so a mock session is identifiable in the UI. It is a dev tool only and is never
 bundled.
 
+The proposed architecture for recorded device profiles, raw HID++ replay, and
+deterministic hardware scenarios is documented in
+[Mock device and hardware record/replay architecture](MOCK_DEVICE_TESTING.md).
+
+### Component gallery
+
+Use the debug-only component gallery to review shared controls across light and
+dark themes and every supported interface scale without config, IPC, or hardware:
+
+```sh
+OPENLOGI_COMPONENT_GALLERY=1 cargo run -p openlogi-desktop
+```
+
+Gallery mode opens one isolated window and bypasses the normal single-instance,
+config, agent, asset-sync, and updater startup paths. The environment variable is
+ignored by release builds.
+
 ## Project layout
 
 ```
@@ -161,22 +197,131 @@ crates/
   openlogi-overlay/ the `openlogi-overlay` binary — the cursor-centred Actions Ring
 ```
 
-## Pre-commit checklist
+## Agent guidance
 
-Before committing, the following must pass:
+Shared rules have one tracked source: [`.agents/rules/`](../.agents/rules/).
+Edit and link those `.md` files, not a client-specific copy. The tracked
+`.claude/rules` symlink points to `../.agents/rules` inside the checkout.
+Existing references to `.claude/rules/<name>.md` still resolve through that alias.
+Crate-specific contracts stay in each crate's `AGENTS.md`; task workflows stay
+in `.agents/skills/`. No rule generator or install step is required.
+
+The root [AGENTS.md](../AGENTS.md) holds global instructions and the rule index.
+`CLAUDE.md` imports only that entrypoint. Claude Code discovers `.md` rules
+through `.claude/rules` and uses their `paths` metadata for conditional loading.
+Other clients must follow the index; `.agents/rules/` is not a universal
+automatic discovery path. Keep the index as ordinary Markdown links: importing
+every rule from the root would load unrelated guidance into Claude's context.
+
+### Check the checkout and client loading
+
+From the repository root, in a POSIX shell or Git Bash:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+git ls-files --stage -- .claude/rules .agents/rules
+test -L .claude/rules && test -f .claude/rules/rust.md
+readlink .claude/rules
 ```
 
-Equivalent to `devenv tasks run openlogi:check`.
+Expect regular rule files under `.agents/rules/` and one `120000` entry
+for `.claude/rules`, whose link target is `../.agents/rules`. The file checks
+must succeed too: the index mode alone does not prove a working symlink.
+
+On Windows, enable Developer Mode or obtain symlink creation permission before
+cloning with `git clone -c core.symlinks=true <repository-url> <new-directory>`.
+With `core.symlinks=false`, Git writes a text file containing the target instead
+of a directory link; Claude cannot discover the rules through it. Changing the
+config alone does not repair an existing checkout. Preserve local changes and
+use a fresh symlink-enabled checkout. Until then, read the canonical rules via
+the root index; do not replace the alias with independently maintained copies.
+
+Verify loading in the client, not only the filesystem. In a fresh Claude Code
+session, use `/context` or an `InstructionsLoaded` hook to inspect loaded files:
+
+- Read `README.md`: Rust and GUI path rules should not load solely from that read.
+- Read `crates/openlogi-core/src/lib.rs`: the Rust rule should load, but not GUI.
+- Read `crates/openlogi-desktop/src/app.rs`: the GUI rule should now load too.
+
+Follow [Claude's loading diagnostics](https://code.claude.com/docs/en/memory#troubleshoot-memory-issues)
+if those results differ. Filesystem checks and unchanged `paths` metadata are
+not evidence that a particular client version loaded the rules correctly.
+
+## Local CI
+
+The PR test pipeline is `.github/workflows/ci.yml`. To run every job this
+machine can reproduce — including typos, the ast-grep guards, MSRV, cargo-deny,
+and the Windows cross-lint the host-OS gate does not run:
+
+```sh
+cargo xtask ci
+cargo xtask ci --list                        # job → command table
+devenv tasks run openlogi:ci                 # same, from devenv
+```
+
+The runner sets `RUSTFLAGS=-D warnings` the way CI does. Jobs that need another
+OS are reported as skipped; a skip is not a pass. The full job map (and which
+diff requires which job) is [`.agents/rules/ci.md`](../.agents/rules/ci.md).
+
+For structural searches and guard changes, use the [ast-grep skill](../.agents/skills/ast-grep/SKILL.md). The [guard workflow](../.agents/rules/ci.md#ast-grep-rules) defines placement beside the owner, root discovery, and verification.
+
+### Pre-push gate
+
+Before pushing, read [the local gate and push checklist](../.agents/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
+That file owns tier selection, exact commands, and additional checks required by
+the diff. `devenv tasks run openlogi:check` runs the full host-OS tier, not the
+whole CI pipeline. A Rust-bearing rebase or conflict resolution requires the
+full tier. Non-Rust changes use the applicable non-Rust checks.
+
+## GitHub workflow
+
+Read this section before preparing, adopting, reviewing, or merging a PR.
+These procedures do not authorize remote writes: obtain approval before pushing,
+opening or merging PRs, publishing, or approving/rerunning workflows.
+
+### Preparing and merging PRs
+
+- **Always `git fetch upstream master` (or origin) immediately before a rebase.** Rebase
+  onto the refreshed tip, not a stale local `master`.
+- Merging PRs: **squash by default** with a hand-written subject
+  `type(scope): description (#N)` (release-plz parses it; merge commits are disabled).
+  Rebase-merge only when every commit on the branch is already release-quality
+  conventional. Wait for the Greptile review check and CI before merging — findings get
+  fixed, replied to, and resolved, not ignored.
+- PR bodies: `## Summary`, `## Changes` (per-crate bullets), `## Testing` listing the
+  exact commands run plus hardware-verification status (say "not runtime-tested on
+  hardware" when true — real-hardware verification is the maintainer's job, so every
+  fix PR states how to test it), and a closing `Fixes #N` line. Screenshots for UI
+  changes.
+- Issues use the bug/feature/device forms and the `type:`/`area:`/`platform:`/`needs:`/
+  `status:` label families. Deferred or out-of-scope work becomes a linked issue, not a
+  TODO comment.
+
+### Adopting contributor PRs
+
+Contributor PRs are adopted, not rejected: check `maintainerCanModify`, rebase onto
+**fresh** master in a worktree, fix review findings, run the applicable local gate
+on the rebased tip (a Rust-bearing rebase takes the full tier), **then** push to the
+fork branch; preserve authorship (`Co-authored-by` when re-homing work).
+Squash-then-rebase is fine when the PR is far behind and commit-by-commit conflicts
+thrash.
+
+### CI / Actions when adopting PRs
+
+- CI concurrency is **per branch** (`ci-${{ workflow }}-${{ ref }}` with
+  `cancel-in-progress: true`). Approving or re-running an **old SHA** on the same
+  branch cancels the current-head run. Only approve / re-run workflows whose
+  `head_sha` equals the PR's current head.
+- After a force-push, wait for the new runs; do not re-approve stale
+  `action_required` jobs from earlier commits on that branch.
+- First-time-fork PRs may sit in `action_required` until a maintainer approves the
+  workflow run — that is fine; still do not push until the local gate is green.
 
 ## Packaging the macOS DMG
 
 ```sh
 cargo run -p xtask -- macos package    # → target/release/OpenLogi.dmg
+# Cross-compile a distribution DMG (aarch64 or x86_64):
+cargo run -p xtask -- macos package --target x86_64-apple-darwin
 ```
 
 Environment overrides:
@@ -185,6 +330,11 @@ Environment overrides:
   fully offline build (default: fetched on demand at first launch).
 - `OPENLOGI_SIGN_IDENTITY=<identity>` — codesign the `.app` and `.dmg` with the
   given Developer ID.
+- `OPENLOGI_SPARKLE_PUBLIC_ED_KEY=<base64>` — embed Sparkle.framework and update
+  through it (see Release updater publishing). Without it the bundle updates
+  through the built-in engine.
+- `OPENLOGI_UPDATE_BASE_URL=<url>` — update host of the embedded Sparkle feed;
+  required with `OPENLOGI_SPARKLE_PUBLIC_ED_KEY`.
 - `OPENLOGI_DMG_BACKGROUND_URL=<url>` — override the branded DMG background
   TIFF URL (default: `https://assets.openlogi.org/dmg/dmg-background.tiff`).
 
@@ -200,21 +350,74 @@ derived from the host (override with `PKG_ARCH`):
 
 ```sh
 cargo run -p xtask -- linux package
-# → target/release/openlogi_*.deb / .rpm / .pkg.tar.zst
+# → target/release/*.deb / *.rpm / *.pkg.tar.zst
 ```
 
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
 icon) are declared in `packaging/linux/nfpm.yaml`.
 
+`packaging/linux/install.sh` is a POSIX `/bin/sh` frontend for those release
+packages, not a second package lifecycle. Its online mode maps the host and
+package manager to the release naming contract
+`openlogi-v<version>-linux-<amd64|arm64>.<format>`, authenticates that file's
+detached signature against its embedded minisign public key, verifies only that
+file's `SHA256SUMS` entry, and then delegates installation to apt, dnf, yum,
+zypper, rpm, or pacman. The embedded public key must stay in sync with
+`OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`. The nFPM post-install script remains the
+owner of udev and desktop/icon cache reloads. The explicit `--from-source` mode
+preserves the checkout installer for the four local `target/release` binaries
+and shared resources.
+
+Run the mocked online/source smoke suite directly with dash; it exercises
+latest and pinned versions, both architectures, every package-manager mapping,
+signature and checksum rejection before sudo, dry-run, and the source resource
+set without network or system writes:
+
+```sh
+dash -n packaging/linux/install.sh
+dash packaging/linux/tests/install-smoke.sh
+```
+
 The Nix package uses the same shared resources and is declared in
 `packaging/linux/package.nix`; see the Nix package section above for its build
 commands.
 
+## Installation-source detection
+
+The desktop app probes once in the background and publishes the typed
+`platform::installation::Installation` global: `Detecting`, then
+`Detected(InstallationSource)`. It also logs `detected installation source`.
+Settings → Updates displays the result as **Installation source**, separately
+from the update download source. An open window refreshes when detection
+completes or the interface language changes.
+This is an ownership snapshot, not download provenance or an update policy;
+the updater does not yet change behavior based on it.
+
+- **Homebrew:** matches the installed receipt and Caskroom app back-link to
+  the running bundle, distinguishing `openlogi` from `openlogi@latest`. It
+  checks both standard prefixes, `HOMEBREW_PREFIX`, and prefixes discoverable
+  from `PATH`, without executing brew. An undiscoverable custom prefix cannot
+  be recognized. Other macOS bundles report `MacAppBundle`, not "DMG".
+- **Linux:** recognizes a resolved `/nix/store/` executable, or queries dpkg,
+  rpm, and pacman for ownership of the exact executable by `openlogi`.
+  Package queries are read-only, with a two-second timeout per command.
+- **Windows:** the MSI writes its `InstallLocation` under
+  `HKCU\Software\OpenLogi`; only a matching executable is `WindowsMsi`.
+  The ZIP carries `openlogi-installation.json` next to `OpenLogi.exe` and is
+  `WindowsPortable`. A matching MSI registration takes precedence.
+- **Unknown:** unmarked Windows releases predating these markers, bare
+  source/manual installs, or otherwise inconclusive ownership. Missing
+  metadata never implies a portable ZIP or a DMG.
+
 ## Release updater publishing
 
-Tagged releases still attach DMGs and `SHA256SUMS` to GitHub Releases for manual
-downloads and the Homebrew cask. The release workflow also publishes the same
-DMGs to Cloudflare R2 and writes a static updater manifest at:
+Tagged releases attach artifacts and `SHA256SUMS` to GitHub Releases for manual
+downloads. When both Linux build legs succeed, the release workflow copies
+`packaging/linux/install.sh` to `dist/install.sh`; that exact file is listed in
+`SHA256SUMS`, signed as `install.sh.minisig`, and attached as a release asset.
+Partial releases without a complete Linux package set omit the installer. The
+workflow also publishes the artifacts to Cloudflare R2 and writes a static
+updater manifest at:
 
 ```text
 ${OPENLOGI_UPDATE_BASE_URL}/channels/stable/latest.json
@@ -228,6 +431,36 @@ asset carries a minisign signature that verifies against that key, plus a
 matching SHA-256. A build without the key embedded (local/dev) fails closed —
 the update check errors rather than installing an unverified artifact.
 
+### macOS: Sparkle
+
+The signed macOS release bundle embeds
+[Sparkle](https://sparkle-project.org) and updates through it instead
+(`platform::updater` in `openlogi-desktop`). Each architecture ships its own
+DMG, so each reads its own feed:
+
+```text
+${OPENLOGI_UPDATE_BASE_URL}/channels/stable/appcast-arm64.xml
+${OPENLOGI_UPDATE_BASE_URL}/channels/stable/appcast-x86_64.xml
+```
+
+Each feed carries one item: that architecture's notarized, stapled DMG with an
+EdDSA (`sparkle:edSignature`) signature over the exact file, and the release
+notes as Markdown. The bundle trusts only the key in its `SUPublicEDKey`, and
+`SUVerifyUpdateBeforeExtraction` makes Sparkle check that signature before it
+unpacks anything.
+
+Updates stay opt-in. The bundle ships `SUEnableAutomaticChecks = NO`, so
+Sparkle never schedules a check or asks to; the app runs the one launch check
+itself when **Check for updates** is on, without a window. With **Automatic
+updates** also on, a found update downloads in the background and installs on
+quit or through **Restart to Update**. "Check for Updates…" opens Sparkle's
+update window. A bundle without Sparkle (Windows, Linux, local builds) and a
+Sparkle that fails to load fall back to the engine and `latest.json`.
+
+`latest.json` and the DMG minisigs keep being published: bundles from before
+Sparkle read only that manifest, and they update into a Sparkle bundle through
+it.
+
 Configure the R2/update settings in one 1Password item referenced by the GitHub
 secret `OP_R2_SECRET_ITEM`. The item must contain:
 
@@ -237,16 +470,47 @@ secret `OP_R2_SECRET_ITEM`. The item must contain:
   the app and used to verify updater artifacts.
 - `OPENLOGI_UPDATE_MINISIGN_SECRET_KEY` — the passwordless minisign secret key
   file, **base64-encoded** (`base64 < minisign.key`), used only in the release
-  publish job to sign DMGs before `latest.json` is generated. It is stored
-  base64 (not raw) so its two lines survive 1Password's paste handling; the
-  workflow decodes it, mirroring the GitHub App key.
+  publish job to sign release artifacts before `latest.json` is generated. It
+  is stored base64 (not raw) so its two lines survive 1Password's paste
+  handling; the workflow decodes it, mirroring the GitHub App key.
+- `OPENLOGI_SPARKLE_PUBLIC_ED_KEY` — Sparkle's base64 EdDSA public key, stamped
+  into the macOS bundle as `SUPublicEDKey`.
+- `OPENLOGI_SPARKLE_PRIVATE_ED_KEY` — the matching base64 private key (the
+  32-byte seed), used only in the publish job to sign the DMGs into the
+  appcasts. `release appcast` refuses a private key that does not belong to the
+  public key above.
 - `CLOUDFLARE_R2_ACCOUNT_ID` — Cloudflare account ID used for the S3 endpoint.
 - `CLOUDFLARE_R2_BUCKET` — bucket name.
 - `CLOUDFLARE_R2_ACCESS_KEY_ID` — R2 S3 access key.
 - `CLOUDFLARE_R2_SECRET_ACCESS_KEY` — R2 S3 secret key.
 
 The workflow uploads immutable artifacts under `/releases/<tag>/` and only the
-channel manifest under `/channels/stable/latest.json` is mutable.
+channel files under `/channels/stable/` — `latest.json` and the two appcasts —
+are mutable. They are uploaded after the artifacts they point at.
+
+Generate the Sparkle key pair once, with the `generate_keys` tool from the
+[Sparkle release](https://github.com/sparkle-project/Sparkle/releases) xtask
+embeds:
+
+```sh
+./bin/generate_keys --account openlogi         # prints the public key
+./bin/generate_keys --account openlogi -x sparkle-private.key
+# store the file's contents as OPENLOGI_SPARKLE_PRIVATE_ED_KEY, then delete it
+```
+
+The key cannot be replaced casually: every installed bundle trusts only the one
+it shipped with. Rotating it means shipping a bundle with the new key that is
+still signed with the old one, or relying on Sparkle's fallback to the DMG's
+Developer ID signature.
+
+After a complete Linux release is published, the workflow dispatches
+`publish-openlogi-installer` with the tag to `openlogi-org/get`. That repository
+downloads `install.sh`, `install.sh.minisig`, and `SHA256SUMS` from the published
+GitHub Release, verifies both the exact checksum and minisign signature, and
+commits immutable versioned files plus the latest stable aliases served by
+Cloudflare Pages at `get.openlogi.org`. It mirrors no native package binaries.
+The dispatch uses the same 1Password-backed GitHub App as the Homebrew update;
+the App must be installed for the `openlogi-org/get` repository.
 
 The manifest is generated by the workspace `xtask` helper:
 
@@ -258,27 +522,46 @@ cargo run -p xtask -- release latest-json \
   --output dist/latest.json
 ```
 
+and so are the appcasts, after the DMGs are stapled (stapling rewrites them).
+The private key is read only from the environment:
+
+```sh
+OPENLOGI_SPARKLE_PRIVATE_ED_KEY=… cargo run -p xtask -- release appcast \
+  --dist dist \
+  --tag v0.2.0 \
+  --base-url https://updates.openlogi.org \
+  --public-key "$OPENLOGI_SPARKLE_PUBLIC_ED_KEY" \
+  --release-notes .release/RELEASE_NOTES.md \
+  --output-dir .release/appcast
+```
+
+The stable feed takes `MAJOR.MINOR.PATCH` releases only: Sparkle's version
+comparator stops at the first `-`, so it would read `1.2.0-rc.1` as `1.2.0`.
+
 ## Crowdin translation sync
 
 `.github/workflows/crowdin.yml` syncs GUI locales with
 [Crowdin](https://crowdin.com/project/openlogi) and opens a `crowdin/i18n` PR
 when a **real** translation value improved — nightly, and on master pushes that
-touch English sources (`en.yml`), `crowdin.yml`, the Crowdin workflow, the merge
-script under `.github/scripts/i18n/`, or the shared GitHub App token action.
+touch English sources (`en.toml`), `.config/crowdin.yml`, the Crowdin workflow,
+the merge script under `.github/scripts/i18n/`, or the shared GitHub App token
+action.
 
 **How it helps translation**
 
 | | Role |
 |--|--|
-| `en.yml` (git) | English source of truth — English text is the key |
-| All `locales/*.yml` in git | Same keys as `en.yml` (parity test); seed Crowdin per language |
+| `en.toml` (git) | English source of truth; stable semantic keys grouped by product-domain tables |
+| All `locales/*.toml` in git | Same keys as `en.toml` (parity test); seed Crowdin per language |
 | Crowdin project | Where people improve non-English **values** |
 | Merge script | Applies only values ≠ English; restores keys sparse exports omit |
 | Bot PR (`crowdin/i18n`) | Only when a non-English value actually changed |
 
-Feature PRs add new keys to **every** locale file in the same change. Crowdin
-does not invent translations; it only stores and syncs them. A raw Crowdin
-download is unsafe: untranslated strings come back as English (#549), and
+Call sites use stable keys such as `device.connected`. Feature PRs add
+new keys to **every** locale file in the same change. English wording can change
+without renaming the key or updating call sites. Crowdin does not invent
+translations; it only stores and syncs them. A raw Crowdin download is unsafe:
+untranslated strings come back as English (#549), and
 `skip_untranslated_strings` overwrites catalogs with sparse files that delete
 keys (#552). The workflow always **snapshots → download → merge** via
 `.github/scripts/i18n/merge_crowdin_download.py` so catalogs stay complete and only real
@@ -286,8 +569,8 @@ translations land in git.
 
 Each run:
 
-1. Snapshots every `locales/*.yml`.
-2. Uploads `en.yml` **sources**.
+1. Snapshots every `locales/*.toml`.
+2. Uploads `en.toml` **sources**.
 3. Uploads **per-language translations** already in git (`import_eq_suggestions`
    off so `value == English` is not stored as a finished translation).
 4. Downloads Crowdin’s export (`skip_untranslated_strings`; sparse is fine).
@@ -312,7 +595,7 @@ OpenLogi project:
 
 Missing or invalid credentials fail the workflow. Translation PRs run the
 normal CI checks, including the locale key parity test (every catalog must match
-`en.yml` key-for-key). The workflow uses the existing `OP_GITHUB_APP_ITEM` to
+`en.toml` key-for-key). The workflow uses the existing `OP_GITHUB_APP_ITEM` to
 mint a short-lived token for pushing its translation branch and opening the PR;
 the default `GITHUB_TOKEN` remains read-only. Checkout runs with
 `persist-credentials: false` and the origin remote is rewritten to the app token
@@ -321,7 +604,7 @@ so git push does not inherit the read-only Actions credential.
 Local helpers (with Crowdin credentials configured):
 
 ```sh
-devenv tasks run openlogi:i18n-upload    # en.yml sources + per-language translations
+devenv tasks run openlogi:i18n-upload    # en.toml sources + per-language translations
 devenv tasks run openlogi:i18n-download  # download + merge + i18n tests
 python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
 ```

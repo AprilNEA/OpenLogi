@@ -6,9 +6,13 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::hid::DeviceRoute;
+
 mod light;
 
-pub use light::{LightCapabilities, LightValueRange, LightValueRangeError, LightValueUnit};
+pub use light::{
+    LightCapabilities, LightState, LightValueRange, LightValueRangeError, LightValueUnit,
+};
 
 /// What a paired peripheral is. Mirrors `hidpp::receiver::bolt::BoltDeviceKind`
 /// but is owned by us so consumers don't depend on `hidpp`.
@@ -48,8 +52,7 @@ pub enum DeviceKind {
     Headset,
     /// Logitech webcam (UVC), configured through `openlogi-camera`.
     Camera,
-    /// Not classified by any source — also the "no asset opinion" value
-    /// [`DeviceKind::from_registry_type`] returns for unmodelled strings.
+    /// Not classified by any source.
     Unknown,
     /// Standalone light or other illumination device controlled outside HID++.
     ///
@@ -62,26 +65,27 @@ impl DeviceKind {
     /// Parse the OpenLogi asset registry's `type` string into a [`DeviceKind`].
     ///
     /// The registry field is free-form and case-inconsistent (both `"mouse"`
-    /// and `"MOUSE"` ship), so we case-fold before matching. Values we don't
-    /// model map to [`DeviceKind::Unknown`], which callers treat as "no asset
-    /// opinion" and fall back to the HID++ classification.
+    /// and `"MOUSE"` ship), so we case-fold before matching. `None` for values
+    /// we don't model — "no asset opinion", typed as the absence of one rather
+    /// than overloading [`DeviceKind::Unknown`], which stays a real wire value
+    /// a live device can carry.
     #[must_use]
-    pub fn from_registry_type(raw: &str) -> Self {
+    pub fn from_registry_type(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "mouse" => Self::Mouse,
-            "keyboard" => Self::Keyboard,
-            "numpad" => Self::Numpad,
-            "presenter" => Self::Presenter,
-            "remote" | "remotecontrol" => Self::Remote,
-            "trackball" => Self::Trackball,
-            "touchpad" | "trackpad" => Self::Touchpad,
-            "tablet" => Self::Tablet,
-            "gamepad" => Self::Gamepad,
-            "joystick" => Self::Joystick,
-            "headset" => Self::Headset,
-            "camera" => Self::Camera,
-            "light" | "lighting" | "illumination_light" => Self::Light,
-            _ => Self::Unknown,
+            "mouse" => Some(Self::Mouse),
+            "keyboard" => Some(Self::Keyboard),
+            "numpad" => Some(Self::Numpad),
+            "presenter" => Some(Self::Presenter),
+            "remote" | "remotecontrol" => Some(Self::Remote),
+            "trackball" => Some(Self::Trackball),
+            "touchpad" | "trackpad" => Some(Self::Touchpad),
+            "tablet" => Some(Self::Tablet),
+            "gamepad" => Some(Self::Gamepad),
+            "joystick" => Some(Self::Joystick),
+            "headset" => Some(Self::Headset),
+            "camera" => Some(Self::Camera),
+            "light" | "lighting" | "illumination_light" => Some(Self::Light),
+            _ => None,
         }
     }
 }
@@ -95,7 +99,7 @@ impl DeviceKind {
 /// actually announced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "capabilities is a serialized feature-bit DTO; independent booleans keep the IPC/config shape explicit"
 )]
@@ -104,10 +108,10 @@ pub struct Capabilities {
     pub buttons: bool,
     /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
     pub pointer: bool,
-    /// Solid-colour RGB the lighting panel can actually drive — HID++
-    /// `ColorLedEffects` (`0x8070`) or `PerKeyLighting` (`0x8080`), the features
-    /// `set_keyboard_color` writes. Backlight-only families aren't driven by the
-    /// panel, so they don't flip this and don't earn an inert Lighting tab.
+    /// Solid-colour RGB the lighting panel can drive — HID++ effect engines
+    /// (`0x8070` / `0x8071`) or per-zone lighting (`0x8080` / `0x8081`).
+    /// Backlight-only families aren't driven by the panel, so they don't earn
+    /// an inert Lighting tab.
     pub lighting: bool,
     /// Native vertical wheel inversion — HID++ `0x2121 HiResWheel` with the
     /// firmware-reported `has_invert` capability.
@@ -128,6 +132,40 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// A DPI/ModeShift control in the device's `0x1b04` control table supports
+    /// both diversion and raw-XY reporting for hold-and-swipe gestures.
+    #[serde(default)]
+    pub dpi_gestures: bool,
+    /// Keyboard Fn-lock can be read and written — HID++ `0x40a0`, `0x40a2` or
+    /// `0x40a3` fn inversion. Appended: crosses the IPC and the persisted
+    /// identity.
+    #[serde(default)]
+    pub fn_lock: bool,
+    /// The keyboard's key layout can be kept on the host OS — HID++ `0x4531
+    /// MultiPlatform`, when the probe also reads that it lets software set the
+    /// platform. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub os_layout: bool,
+    /// The device's report rate can be chosen — HID++ `0x8060
+    /// AdjustableReportRate` or `0x8061 ExtendedAdjustableReportRate`.
+    /// Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub report_rate: bool,
+    /// The keyboard's backlight can be switched and tuned — HID++ `0x1982
+    /// Backlight`. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub backlight: bool,
+    /// The device has Easy-Switch host slots whose computers' names and OS
+    /// software can read — HID++ `0x1815 HostsInfo`. Appended: crosses the
+    /// IPC and the persisted identity.
+    #[serde(default)]
+    pub easy_switch: bool,
+    /// Back or Forward in the device's `0x1b04` control table can be diverted
+    /// with raw-wheel reporting, so a wheel-hold binding can turn the main
+    /// wheel into a virtual thumb wheel. Appended: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub virtual_thumbwheel: bool,
 }
 
 impl Capabilities {
@@ -137,12 +175,10 @@ impl Capabilities {
     pub fn from_feature_ids(ids: &[u16]) -> Self {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
-        // ColorLedEffects (0x8070), PerKeyLighting2 (0x8081) and PerKeyLighting
-        // (0x8080) — all three driven by `set_keyboard_color`, which prefers
-        // 0x8070's fixed effect to override a running onboard profile and falls
-        // back through 0x8081 to 0x8080. Other families (backlight 0x198x) stay
-        // out so they don't earn a tab the panel can't drive.
-        const LIGHTING: [u16; 3] = [0x8080, 0x8070, 0x8081];
+        // Every family here is driven by `set_keyboard_color`, which tries
+        // effect engines before per-zone paths. The 0x198x backlight is not
+        // lighting: `backlight` below covers 0x1982.
+        const LIGHTING: [u16; 4] = [0x8070, 0x8071, 0x8081, 0x8080];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
             buttons: has(&BUTTONS),
@@ -153,6 +189,17 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            dpi_gestures: false,
+            fn_lock: ids.contains(&0x40a0) || ids.contains(&0x40a2) || ids.contains(&0x40a3),
+            // The probe clears it unless the keyboard lets software set the
+            // platform; the feature table alone cannot say.
+            os_layout: ids.contains(&0x4531),
+            report_rate: ids.contains(&0x8060) || ids.contains(&0x8061),
+            backlight: ids.contains(&0x1982),
+            easy_switch: ids.contains(&0x1815),
+            // Set by the `0x1b04` control walk; the feature table alone
+            // cannot say which controls report raw wheel.
+            virtual_thumbwheel: false,
         }
     }
 
@@ -167,12 +214,7 @@ impl Capabilities {
             DeviceKind::Mouse | DeviceKind::Trackball => Self {
                 buttons: true,
                 pointer: true,
-                lighting: false,
-                scroll_inversion: false,
-                hires_wheel: false,
-                thumbwheel: false,
-                haptic_feedback: false,
-                haptic_panel: false,
+                ..Self::default()
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -221,8 +263,14 @@ pub enum BatteryStatus {
 /// Battery snapshot for one paired device, as last polled over HID++.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatteryInfo {
-    /// Reported charge percentage (`0..=100`).
-    pub percentage: u8,
+    /// Reported charge percentage (`0..=100`), or `None` when the reading
+    /// carries no percentage.
+    ///
+    /// `None` is not an empty battery. Some devices only report a coarse
+    /// [`level`](Self::level), such as a `0x1004` device without the
+    /// state-of-charge capability. Others have no reading yet, such as a
+    /// device first seen while it charges. Read `level` in that case.
+    pub percentage: Option<u8>,
     /// Coarse bucket for UI that doesn't want the raw percentage.
     pub level: BatteryLevel,
     /// Charging state at poll time.
@@ -269,33 +317,81 @@ pub struct DeviceModelInfo {
     /// Which transports the firmware supports; defines the slot order of
     /// [`Self::model_ids`].
     pub transports: DeviceTransports,
-    /// Per-transport PIDs ordered to match [`Self::transports`] (USB, eQuad,
-    /// BTLE, Bluetooth); slots for disabled transports stay `0`.
+    /// Per-transport PIDs for the transports enabled in [`Self::transports`],
+    /// packed from the front in ascending HID++ transport-bit order:
+    /// Bluetooth (bit 0), BTLE (bit 1), eQuad (bit 2), USB (bit 3). Only
+    /// enabled transports take a slot — a disabled transport is skipped, not
+    /// zero-filled — so unused trailing slots stay `0` and the array holds at
+    /// most three PIDs.
+    ///
+    /// Note this is the reverse of the field order of [`DeviceTransports`],
+    /// which lists `usb` first. A device with `usb + equad` reports
+    /// `[eQuad PID, USB PID, 0]`; one with `equad + btle` reports
+    /// `[BTLE PID, eQuad PID, 0]`.
     pub model_ids: [u16; 3],
     /// Extra model byte prefixed to a PID to form the asset registry's
-    /// `modelId` — see [`Self::config_key`].
+    /// `modelId` — see [`Self::model_key`].
     pub extended_model_id: u8,
 }
 
 impl DeviceModelInfo {
-    /// Stable identifier used to key per-device configuration (button
-    /// bindings, etc.) and to look up assets in the OpenLogi asset registry.
-    ///
-    /// Format: `{extended_model_id:x}{model_ids[0]:04x}` — the same string
-    /// the depot `manifest.json` uses for its `modelId` field. Example: an
-    /// MX Master 4 with `extended_model_id = 0x02` and `model_ids[0] = 0xb042`
-    /// resolves to `"2b042"`.
+    /// The model's key in the OpenLogi asset registry: the string the depot
+    /// `manifest.json` uses for its `modelId` field, formatted
+    /// `{extended_model_id:x}{model_ids[0]:04x}`. An MX Master 4 with
+    /// `extended_model_id = 0x02` and `model_ids[0] = 0xb042` resolves to
+    /// `"2b042"`. Per-device configuration is keyed by
+    /// [`crate::device_order::DeviceIdentity::config_key`], not by this.
     #[must_use]
-    pub fn config_key(&self) -> String {
+    pub fn model_key(&self) -> String {
         format!("{:x}{:04x}", self.extended_model_id, self.model_ids[0])
     }
+
+    /// Identifies which transport `product_id` belongs to, by matching it
+    /// against the packed per-transport [`Self::model_ids`] slots.
+    ///
+    /// A `Direct` route only ever carries one vendor/product id — the HID
+    /// node this session actually enumerated — so on a multi-transport
+    /// device this pinpoints the transport that's *live right now*, as
+    /// opposed to [`Self::transports`], which is the static set the firmware
+    /// merely claims to support. Returns `None` when `product_id` matches
+    /// none of the enabled slots (unknown model info, or a PID this device
+    /// doesn't report).
+    #[must_use]
+    pub fn transport_for_product_id(&self, product_id: u16) -> Option<ModelTransport> {
+        let t = self.transports;
+        [
+            (t.bluetooth, ModelTransport::Bluetooth),
+            (t.btle, ModelTransport::Btle),
+            (t.equad, ModelTransport::Equad),
+            (t.usb, ModelTransport::Usb),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, kind)| enabled.then_some(kind))
+        .zip(self.model_ids)
+        .find(|(_, pid)| *pid == product_id)
+        .map(|(kind, _)| kind)
+    }
+}
+
+/// One of the individual transports packed into [`DeviceModelInfo::model_ids`],
+/// as resolved by [`DeviceModelInfo::transport_for_product_id`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTransport {
+    /// Classic Bluetooth.
+    Bluetooth,
+    /// Bluetooth Low Energy.
+    Btle,
+    /// Logitech eQuad (Unifying/Bolt receiver RF protocol).
+    Equad,
+    /// Wired USB.
+    Usb,
 }
 
 /// Mirror of hidpp's `DeviceTransport` bitfield — one bool per protocol the
 /// device firmware exposes. The shape is dictated by HID++ feature 0x0003;
 /// a state machine doesn't fit since a single device can announce multiple
 /// transports simultaneously.
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "bitfield mirroring HID++ DeviceInformation; transports are independent flags"
 )]
@@ -341,6 +437,17 @@ pub struct PairedDevice {
     /// table. `None` for devices we couldn't probe (offline / unreachable);
     /// the GUI then falls back to [`Capabilities::presumed_from_kind`].
     pub capabilities: Option<Capabilities>,
+    /// Moves each time the device itself reports changing a setting — the
+    /// user toggling Fn lock on the keyboard, or a DPI button changing the
+    /// sensor — so a client re-reads that device's settings rather than keep
+    /// showing what it read before. Opaque: only a difference from the
+    /// previous snapshot of the same route means anything, and it restarts
+    /// when the agent reopens the device's channel.
+    ///
+    /// Appended. `default` keeps device fixtures recorded before it loading;
+    /// the IPC encoding is positional and always carries it.
+    #[serde(default)]
+    pub settings_revision: u64,
 }
 
 /// Address of a standalone raw-HID interface.
@@ -398,8 +505,16 @@ pub struct StandaloneDevice {
     ///
     /// This is deliberately appended: `StandaloneDevice` crosses the
     /// append-only GUI↔agent bincode wire format.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub registry_model_id: Option<String>,
+}
+
+impl StandaloneDevice {
+    /// The route that reaches this device.
+    #[must_use]
+    pub fn route(&self) -> DeviceRoute {
+        DeviceRoute::from(&self.address)
+    }
 }
 
 /// One receiver and its paired devices — the unit the agent's inventory
@@ -422,15 +537,10 @@ pub struct DeviceInventory {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        reason = "range fixture construction is intentionally asserted in tests"
-    )]
-
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, PairedDevice,
-        ReceiverInfo,
+        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, ModelTransport,
+        PairedDevice, ReceiverInfo,
     };
 
     fn inventory(slot: u8, wpid: Option<u16>, battery_percentage: u8) -> DeviceInventory {
@@ -448,7 +558,7 @@ mod tests {
                 kind: DeviceKind::Mouse,
                 online: true,
                 battery: Some(BatteryInfo {
-                    percentage: battery_percentage,
+                    percentage: Some(battery_percentage),
                     level: BatteryLevel::Good,
                     status: BatteryStatus::Discharging,
                 }),
@@ -474,7 +584,15 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    dpi_gestures: false,
+                    fn_lock: false,
+                    os_layout: false,
+                    report_rate: false,
+                    backlight: false,
+                    easy_switch: false,
+                    virtual_thumbwheel: false,
                 }),
+                settings_revision: 0,
             }],
         }
     }
@@ -502,25 +620,68 @@ mod tests {
     }
 
     #[test]
+    fn transport_for_product_id_resolves_the_live_slot() {
+        // G915 X LS from issue #1218: usb + equad + btle all supported,
+        // model_ids packed BTLE/eQuad/USB per the ascending-bit-order
+        // contract documented on `DeviceModelInfo::model_ids`.
+        let model = DeviceModelInfo {
+            entity_count: 3,
+            serial_number: None,
+            unit_id: [0, 0, 0, 0],
+            transports: DeviceTransports {
+                usb: true,
+                equad: true,
+                btle: true,
+                bluetooth: false,
+            },
+            model_ids: [0xb38a, 0x40b5, 0xc356],
+            extended_model_id: 0x01,
+        };
+
+        assert_eq!(
+            model.transport_for_product_id(0xc356),
+            Some(ModelTransport::Usb),
+            "the USB-slot pid must resolve to Usb even though the device \
+             also supports BTLE"
+        );
+        assert_eq!(
+            model.transport_for_product_id(0xb38a),
+            Some(ModelTransport::Btle)
+        );
+        assert_eq!(
+            model.transport_for_product_id(0x40b5),
+            Some(ModelTransport::Equad)
+        );
+        assert_eq!(
+            model.transport_for_product_id(0xdead),
+            None,
+            "an unrecognized pid must not silently match a slot"
+        );
+    }
+
+    #[test]
     fn registry_type_is_case_folded() {
         // The registry ships both `"mouse"` and `"MOUSE"`; both must resolve so
         // the asset cross-check can't silently miss a depot.
-        assert_eq!(DeviceKind::from_registry_type("mouse"), DeviceKind::Mouse);
-        assert_eq!(DeviceKind::from_registry_type("MOUSE"), DeviceKind::Mouse);
+        assert_eq!(
+            DeviceKind::from_registry_type("mouse"),
+            Some(DeviceKind::Mouse)
+        );
+        assert_eq!(
+            DeviceKind::from_registry_type("MOUSE"),
+            Some(DeviceKind::Mouse)
+        );
         assert_eq!(
             DeviceKind::from_registry_type("  Keyboard "),
-            DeviceKind::Keyboard
+            Some(DeviceKind::Keyboard)
         );
     }
 
     #[test]
     fn unknown_registry_type_defers_to_the_caller() {
-        // Unmodelled / empty → Unknown, i.e. "no asset opinion".
-        assert_eq!(
-            DeviceKind::from_registry_type("webcam"),
-            DeviceKind::Unknown
-        );
-        assert_eq!(DeviceKind::from_registry_type(""), DeviceKind::Unknown);
+        // Unmodelled / empty → no asset opinion.
+        assert_eq!(DeviceKind::from_registry_type("webcam"), None);
+        assert_eq!(DeviceKind::from_registry_type(""), None);
     }
 
     #[test]
@@ -541,6 +702,13 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                dpi_gestures: false,
+                fn_lock: false,
+                os_layout: false,
+                report_rate: false,
+                backlight: false,
+                easy_switch: false,
+                virtual_thumbwheel: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -557,6 +725,13 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                dpi_gestures: false,
+                fn_lock: false,
+                os_layout: false,
+                report_rate: false,
+                backlight: false,
+                easy_switch: false,
+                virtual_thumbwheel: false,
             }
         );
         // No driving features → nothing offered.
@@ -564,15 +739,26 @@ mod tests {
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),
             Capabilities::default()
         );
+        // 0x4531 offers the OS layout until the probe reads it cannot be set.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x4531]).os_layout);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x40a3]).os_layout);
+        // Either report-rate feature offers the report rate.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8060]).report_rate);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8061]).report_rate);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x2202]).report_rate);
+        // Only the 0x1982 backlight is driven; the older 0x1981 is not.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1982]).backlight);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1981]).backlight);
+        // 0x1815 HostsInfo offers the Easy-Switch hosts; 0x1814 ChangeHost
+        // alone switches channels but cannot name them.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1815]).easy_switch);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1814]).easy_switch);
     }
 
     #[test]
-    fn every_driveable_lighting_family_earns_the_tab() {
-        // `set_keyboard_color` walks 0x8070 → 0x8081 → 0x8080, so a keyboard
-        // exposing any one of them can be coloured and must get the tab.
-        // 0x8081 was missing here, which left such a keyboard with no lighting
-        // UI at all.
-        for id in [0x8070, 0x8080, 0x8081] {
+    fn every_drivable_lighting_family_earns_the_tab() {
+        // `set_keyboard_color` walks 0x8070 → 0x8071 → 0x8081 → 0x8080.
+        for id in [0x8070, 0x8071, 0x8080, 0x8081] {
             assert!(
                 Capabilities::from_feature_ids(&[0x0001, id]).lighting,
                 "0x{id:04x} must offer the lighting tab"
@@ -580,6 +766,11 @@ mod tests {
         }
         // Backlight (0x198x) stays out — the panel cannot drive it.
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
+        // Any fn-inversion feature gives the keyboard an Fn-lock control.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a3]).fn_lock);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a2]).fn_lock);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a0]).fn_lock);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).fn_lock);
     }
 
     #[test]

@@ -23,13 +23,7 @@
     unsafe_code,
     reason = "raw win32: Shell_NotifyIconW + a hidden window's message pump — localized here"
 )]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap,
-    reason = "win32 message plumbing round-trips ids through WPARAM/LPARAM by design"
-)]
-
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tracing::{info, warn};
@@ -49,6 +43,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPED,
 };
 
+use crate::shutdown::{self, ShutdownRequestSender};
+
 /// Tray callback message the icon posts to the hidden window.
 const WM_TRAY: u32 = WM_APP + 1;
 /// Menu command ids returned by `TrackPopupMenu`.
@@ -60,20 +56,26 @@ const ID_QUIT: usize = 2;
 /// 0xC000).
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
+thread_local! {
+    /// Where the win32 tray callback hands process termination to the async
+    /// lifecycle. The callback and message pump share this one tray thread.
+    static SHUTDOWN_TX: RefCell<Option<ShutdownRequestSender>> = const { RefCell::new(None) };
+}
+
 /// Host the tray icon on its own thread. No-op when the user disabled the
 /// menu-bar/tray preference (same `show_in_menu_bar` setting macOS honors;
 /// takes effect on the agent's next launch, as there).
 ///
 /// Failures are logged, never fatal — the agent's real work (hook, HID++,
 /// IPC) must not die because a shell icon couldn't be installed.
-pub fn spawn(show_in_tray: bool) {
+pub fn spawn(show_in_tray: bool, shutdown_tx: ShutdownRequestSender) {
     if !show_in_tray {
         info!("tray icon disabled by preference — agent stays invisible");
         return;
     }
     if let Err(e) = std::thread::Builder::new()
         .name("openlogi-tray".into())
-        .spawn(run_tray_loop)
+        .spawn(move || run_tray_loop(shutdown_tx))
     {
         warn!(error = %e, "could not spawn the tray thread");
     }
@@ -81,7 +83,8 @@ pub fn spawn(show_in_tray: bool) {
 
 /// Create the hidden window, install the icon, and pump messages for the
 /// agent's lifetime.
-fn run_tray_loop() {
+fn run_tray_loop(shutdown_tx: ShutdownRequestSender) {
+    SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
     let class_name = wide("OpenLogiAgentTray");
     // SAFETY: plain win32 registration/creation calls with pointers that
     // outlive the calls; the class name buffer lives until thread exit.
@@ -109,7 +112,7 @@ fn run_tray_loop() {
         let hwnd = CreateWindowExW(
             0,
             class_name.as_ptr(),
-            wide("OpenLogi Agent").as_ptr(),
+            wide(openlogi_core::brand::Helper::Agent.display_name()).as_ptr(),
             WS_OVERLAPPED,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -139,6 +142,11 @@ fn run_tray_loop() {
     }
 }
 
+#[expect(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    reason = "WM_TRAY packs the mouse message id into the low bits of LPARAM"
+)]
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -176,6 +184,10 @@ unsafe extern "system" fn wnd_proc(
 
 /// Install the icon (idempotent enough for the re-add path: a duplicate
 /// `NIM_ADD` fails silently and the existing icon stays).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "NOTIFYICONDATAW is a few hundred bytes"
+)]
 unsafe fn add_tray_icon(hwnd: HWND) {
     // SAFETY: `nid` is fully initialized below; the tip buffer is bounded.
     unsafe {
@@ -199,6 +211,10 @@ unsafe fn add_tray_icon(hwnd: HWND) {
 /// macOS status-item asset; `CreateIconFromResourceEx` accepts raw PNG
 /// buffers (the same PNG-compressed form .ico files carry since Vista).
 /// Falls back to the stock application icon rather than showing nothing.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the PNG is embedded at build time and is a few kilobytes"
+)]
 unsafe fn tray_icon() -> HICON {
     const BLACK: &[u8] = include_bytes!("../assets/tray-icon@2x.png");
     const WHITE: &[u8] = include_bytes!("../assets/tray-icon-white@2x.png");
@@ -236,6 +252,10 @@ fn taskbar_is_light() -> bool {
 }
 
 /// Show the context menu at the cursor and run the chosen command.
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "TrackPopupMenu returns the command id it was given, never negative"
+)]
 unsafe fn show_menu(hwnd: HWND) {
     // SAFETY: menu handles are created and destroyed here; the
     // SetForegroundWindow/WM_NULL bracket is the documented TrackPopupMenu
@@ -246,9 +266,21 @@ unsafe fn show_menu(hwnd: HWND) {
         if menu.is_null() {
             return;
         }
-        AppendMenuW(menu, MF_STRING, ID_SHOW, wide("Show Main Window").as_ptr());
+        // Built fresh on every right-click, so `t!` follows a live language
+        // switch with no rebuild plumbing.
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            ID_SHOW,
+            wide(&rust_i18n::t!("app.show_main_window")).as_ptr(),
+        );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(menu, MF_STRING, ID_QUIT, wide("Quit OpenLogi").as_ptr());
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            ID_QUIT,
+            wide(&rust_i18n::t!("app.quit_openlogi")).as_ptr(),
+        );
 
         let mut pt = POINT { x: 0, y: 0 };
         GetCursorPos(&raw mut pt);
@@ -396,6 +428,10 @@ fn spawn_gui() {
 /// the agent we are about to exit), then the icon, then the agent. Mirrors
 /// the macOS Quit semantics; the GUI holds no unsaved state (config writes
 /// are immediate).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "NOTIFYICONDATAW is a few hundred bytes"
+)]
 fn quit(hwnd: HWND) {
     use sysinfo::{Pid, ProcessesToUpdate, System};
     let mut system = System::new();
@@ -417,12 +453,10 @@ fn quit(hwnd: HWND) {
         nid.uID = 1;
         Shell_NotifyIconW(NIM_DELETE, &raw const nid);
     }
-    info!("tray Quit — exiting agent");
-    #[expect(
-        clippy::exit,
-        reason = "reached from the window procedure on the tray thread: the status cannot travel back through an `extern \"system\"` callback, and ending the message pump would only end this thread while `main` keeps running the agent core"
-    )]
-    std::process::exit(0);
+    crate::overlay::evict_on_quit();
+    info!("tray Quit — requesting graceful agent shutdown");
+    let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
+    shutdown::request_tray_quit(requests.as_ref(), 0);
 }
 
 /// NUL-terminated UTF-16 for win32 W-APIs.

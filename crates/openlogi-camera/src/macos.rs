@@ -191,7 +191,7 @@ fn max_frame_rate(format: *mut AnyObject) -> u32 {
 }
 
 /// Round a frame rate to the nearest whole fps (so 59.94 reads as 60).
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "fps is rounded, finite, and clamped to a small non-negative range"

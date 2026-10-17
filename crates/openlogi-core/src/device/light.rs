@@ -195,10 +195,6 @@ impl<'de> Deserialize<'de> for LightValueRange {
 /// advertise a control merely because the product is classified as a light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "independent optional light controls are a serialized capability DTO"
-)]
 pub struct LightCapabilities {
     /// Whether the driver can switch the light on and off.
     pub power: bool,
@@ -212,4 +208,27 @@ pub struct LightCapabilities {
     /// Whether the driver exposes independently-addressable zones.
     #[serde(default)]
     pub zones: bool,
+}
+
+/// A standalone light's state as the light itself reports it.
+///
+/// Read back from the device rather than taken from saved settings: the
+/// light's own buttons, another program, or a brightness limit can make the
+/// two differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LightState {
+    /// The controls and ranges the light reports for itself.
+    pub capabilities: LightCapabilities,
+    /// Whether the light is on.
+    pub on: bool,
+    /// Current brightness in the unit of [`LightCapabilities::brightness`],
+    /// when the light has a brightness control.
+    pub brightness: Option<u16>,
+    /// Current colour temperature in Kelvin, when the light has a
+    /// colour-temperature control.
+    pub temperature_kelvin: Option<u16>,
+    /// The highest brightness the light allows right now, when that is below
+    /// the top of its brightness range — for instance on a USB port that
+    /// cannot supply full power. A brighter request is lowered to it.
+    pub brightness_limit: Option<u16>,
 }
