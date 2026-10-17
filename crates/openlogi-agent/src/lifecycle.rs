@@ -416,8 +416,18 @@ impl Running {
                 inventories,
                 standalone,
                 hid_open_failures,
+                reapply_volatile,
             } => {
                 let mut orchestrator = self.orchestrator.lock().await;
+                match reapply_volatile {
+                    Some(openlogi_agent_core::watchers::inventory::ReapplyReason::Volatile) => {
+                        orchestrator.reapply_volatile_on_next_refresh();
+                    }
+                    Some(openlogi_agent_core::watchers::inventory::ReapplyReason::Reconnect) => {
+                        orchestrator.reapply_reconnected_on_next_refresh();
+                    }
+                    None => {}
+                }
                 orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
                 let confirm_settings = orchestrator.needs_reapply_confirmation();
                 drop(orchestrator);
