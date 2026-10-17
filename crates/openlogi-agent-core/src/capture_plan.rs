@@ -179,7 +179,7 @@ impl CapturePublication {
 /// Read-only, lossless, coalescing view of the latest capture publication.
 pub type SharedCapturePlans = watch::Receiver<Arc<CapturePublication>>;
 
-/// Back/Forward gesture maps eligible for device-specific HID++ capture.
+/// Middle/Back/Forward gesture maps eligible for device-specific HID++ capture.
 ///
 /// macOS gives these controls exclusively to HID++ because Bluetooth-direct
 /// CGEvents may carry no sender identity. Windows requests the same raw-XY
@@ -197,7 +197,12 @@ pub(crate) fn hidpp_side_gesture_maps_for(
     }
     oshook_gestures_for(config, Some(config_key), app)
         .into_iter()
-        .filter(|(button, _)| matches!(button, ButtonId::Back | ButtonId::Forward))
+        .filter(|(button, _)| {
+            matches!(
+                button,
+                ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
+            )
+        })
         .collect()
 }
 
@@ -861,16 +866,21 @@ mod tests {
                     .keys()
                     .copied()
                     .collect::<Vec<_>>(),
-                vec![ButtonId::Back, ButtonId::Forward],
-                "only the senderless side buttons use device-owned gesture dispatch"
+                vec![ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward],
+                "the senderless middle and side buttons use device-owned gesture dispatch"
             );
             let expected: Vec<_> = DIVERTABLE_STANDARD_BUTTONS
                 .into_iter()
-                .filter(|(_, button)| matches!(button, ButtonId::Back | ButtonId::Forward))
+                .filter(|(_, button)| {
+                    matches!(
+                        button,
+                        ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
+                    )
+                })
                 .collect();
             assert_eq!(
                 plan.target.spec.divert_gesture_buttons, expected,
-                "every known Back/Forward CID must be requested as a HID++ raw-XY gesture source"
+                "every known Middle/Back/Forward CID must be requested as a HID++ raw-XY gesture source"
             );
             assert!(
                 !plan
@@ -878,16 +888,11 @@ mod tests {
                     .spec
                     .divert_buttons
                     .iter()
-                    .any(|&(_, button)| matches!(button, ButtonId::Back | ButtonId::Forward)),
-                "a side-button gesture hold must not also be a plain divert"
-            );
-            assert!(
-                !plan
-                    .target
-                    .spec
-                    .divert_gesture_buttons
-                    .iter()
-                    .any(|&(_, button)| button == ButtonId::MiddleClick)
+                    .any(|&(_, button)| matches!(
+                        button,
+                        ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
+                    )),
+                "a gesture hold must not also be a plain divert"
             );
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());

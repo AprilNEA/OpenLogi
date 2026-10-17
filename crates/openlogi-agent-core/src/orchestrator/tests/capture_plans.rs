@@ -338,10 +338,9 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
     assert_eq!(maps.thumbwheel_positive_is_forward.get("a"), Some(&true));
 }
 
-#[test]
-fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
+fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(button: ButtonId) {
     let mut config = Config::default();
-    config.set_gesture_mode("a", ButtonId::Forward, true);
+    config.set_gesture_mode("a", button, true);
     let mut orch = orchestrator(config);
     orch.devices = vec![dev("a", 1, true)];
     orch.rebuild();
@@ -354,7 +353,7 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
             .spec
             .divert_gesture_buttons
             .iter()
-            .any(|&(_, button)| button == ButtonId::Forward)
+            .any(|&(_, b)| b == button)
     };
     assert!(
         !side_gesture_is_requested(&orch),
@@ -375,18 +374,18 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
         .hook_maps
         .read()
         .expect("hook maps should not be poisoned");
-    if cfg!(target_os = "macos") {
-        assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
-        assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
+    if cfg!(target_os = "macos") && button != ButtonId::MiddleClick {
+        assert!(!hook_maps.bindings.contains_key(&button));
+        assert!(!hook_maps.gestures.contains_key(&button));
         assert!(side_gesture_is_requested(&orch));
-    } else if cfg!(target_os = "windows") {
-        assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
+    } else if cfg!(any(target_os = "macos", target_os = "windows")) {
+        assert!(hook_maps.gestures.contains_key(&button));
         assert!(
             side_gesture_is_requested(&orch),
-            "Windows must request HID++ raw XY while retaining the passive hook fallback"
+            "{button} must request HID++ raw XY while retaining the passive hook fallback"
         );
     } else {
-        assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
+        assert!(hook_maps.gestures.contains_key(&button));
         assert!(!side_gesture_is_requested(&orch));
     }
     drop(hook_maps);
@@ -402,6 +401,18 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
     assert!(
         !side_gesture_is_requested(&orch),
         "revoking the movement hook must restore native HID++ controls"
+    );
+}
+
+#[test]
+fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
+    assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(ButtonId::Forward);
+}
+
+#[test]
+fn middle_click_gesture_capture_follows_platform_ownership_and_hook_availability() {
+    assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(
+        ButtonId::MiddleClick,
     );
 }
 

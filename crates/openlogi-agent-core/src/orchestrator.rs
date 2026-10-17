@@ -554,10 +554,14 @@ impl Orchestrator {
         if cfg!(target_os = "macos")
             && let Some(key) = key
         {
-            for button in hidpp_side_gesture_maps_for(&self.config, key, app).keys() {
-                // macOS gives HID++ exclusive ownership of both edges.
-                // Windows deliberately keeps this global map as a passive
-                // fallback when the physical control cannot arm raw XY.
+            for button in hidpp_side_gesture_maps_for(&self.config, key, app)
+                .keys()
+                .filter(|&&button| button != ButtonId::MiddleClick)
+            {
+                // macOS gives HID++ exclusive ownership of both edges of
+                // Back/Forward. Windows, and macOS for the wheel button whose
+                // raw-XY support varies by device, keep this global map as a
+                // passive fallback when the physical control cannot arm raw XY.
                 bindings.remove(button);
                 gestures.remove(button);
             }
