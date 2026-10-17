@@ -36,8 +36,46 @@ jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tests: ${{ steps.changes.outputs.tests }}
     steps:
       - uses: actions/checkout@v7
+      # Reuse this runner to select test jobs without another build or runner.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: changes
+        with:
+          # PRs compare against their base; pushes compare the entire pushed range.
+          token: ""
+          base: ${{ github.event.pull_request.base.sha || github.ref }}
+          predicate-quantifier: some-with-excludes
+          filters: |
+            tests:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**'
+              - 'xtask/**'
+              - 'tests/**'
+              - 'fixtures/devices/**'
+              - 'docs/config.example.toml'
+              - 'design/icon/openlogi.png'
+              - 'design/icon/openlogi.ico'
+              - 'packaging/**'
+              - '.cargo/**'
+              - '.github/workflows/ci.yml'
+              - 'rust-toolchain.toml'
+              - 'rustfmt.toml'
+              - '.rustfmt.toml'
+              - 'clippy.toml'
+              - 'prek.toml'
+              - 'sgconfig.yml'
+              - 'release-plz.toml'
+              - 'devenv.*'
+              - '.envrc'
+              - 'flake.*'
+              - '!**/*.md'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -51,6 +89,17 @@ jobs:
       - uses: crate-ci/typos@8a48f81b6c64dcfea44b3633223084c4be58ac5f # v1.49.0
         with:
           config: .config/typos.toml
+
+  # Single-source-of-truth guards stored with their owners: each names the module
+  # that owns a decision and fails on its ingredients anywhere else.
+  ast-grep:
+    name: ast-grep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ast-grep/action@370e627637505696e4365db4a149af9f2311afe8 # v1.4
+        with:
+          version: 0.45.1
 
   publish-closure:
     name: publish closure
@@ -205,6 +254,9 @@ jobs:
   # the clippy job installs is sufficient. Test workspace there as well so the
   # config-roundtrip and binding suites run on a non-macOS host.
   test-linux:
+    needs: fmt
+    # A formatting failure must not suppress tests after successful path detection.
+    if: ${{ !cancelled() && needs.fmt.outputs.tests == 'true' }}
     name: tests (linux)
     runs-on: ubuntu-latest
     steps:
@@ -229,6 +281,9 @@ jobs:
       - run: cargo test --workspace --exclude openlogi-desktop
 
   test-macos:
+    needs: fmt
+    # A formatting failure must not suppress tests after successful path detection.
+    if: ${{ !cancelled() && needs.fmt.outputs.tests == 'true' }}
     name: tests (macos, ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -255,6 +310,29 @@ jobs:
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.arch }}"
       - run: cargo test --workspace --all-targets
+
+  # Runs the workspace's tests on Windows — including the `cfg(windows)` ones,
+  # which `clippy (windows)` only compiles and no other host can execute. The
+  # same shape as the Linux job: everything but the desktop crate.
+  test-windows:
+    needs: fmt
+    # A formatting failure must not suppress tests after successful path detection.
+    if: ${{ !cancelled() && needs.fmt.outputs.tests == 'true' }}
+    name: tests (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cargo
+          shared-key: windows-stable-debug
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+      - run: cargo test --workspace --exclude openlogi-desktop
 
   cargo-deny:
     name: cargo-deny

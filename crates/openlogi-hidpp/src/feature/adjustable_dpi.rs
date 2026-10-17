@@ -28,17 +28,28 @@ impl AdjustableDpiFeature {
     /// either an explicit DPI or a compact range marker (`0xe000 | step`) whose
     /// start is the previous value and whose end is the next value. The returned
     /// list is sorted and deduplicated.
+    ///
+    /// A reply echoing another sensor yields
+    /// [`Hidpp20Error::UnsupportedResponse`], as in Logi Options+
+    /// (`devio::Feature2201AdjustableDPI::GetSensorDPIList`): its values are
+    /// another sensor's.
     pub async fn get_sensor_dpi_list(&self, sensor_index: u8) -> Result<Vec<u16>, Hidpp20Error> {
-        // Skip the echoed sensor index in byte 0; the DPI values follow.
         let payload = self
             .endpoint
             .call(1, [sensor_index, 0x00, 0x00])
             .await?
             .extend_payload();
+        if payload[0] != sensor_index {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        }
         parse_dpi_list_payload(&payload[1..])
     }
 
     /// Retrieves the currently configured DPI for `sensor_index`.
+    ///
+    /// Unlike the list, the echo is not checked: Options+ reads this value
+    /// and accepts a write without comparing it either, so a firmware that
+    /// answers these with another byte 0 keeps working.
     pub async fn get_sensor_dpi(&self, sensor_index: u8) -> Result<u16, Hidpp20Error> {
         let payload = self
             .endpoint
@@ -114,6 +125,79 @@ mod tests {
 
     use super::parse_dpi_list_payload;
     use crate::protocol::v20::Hidpp20Error;
+
+    /// The result of `call` when the device answers its one request, to
+    /// function `function`, with the long payload `reply`.
+    fn answer<T, F>(
+        function: u8,
+        call: impl FnOnce(super::AdjustableDpiFeature) -> F,
+        reply: [u8; 16],
+    ) -> Result<T, Hidpp20Error>
+    where
+        F: Future<Output = Result<T, Hidpp20Error>>,
+    {
+        use std::sync::Arc;
+
+        use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+        use crate::feature::CreatableFeature;
+        use crate::nibble::U4;
+        use crate::protocol::v20::{Message, MessageHeader};
+
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let mut pending = Box::pin(call(super::AdjustableDpiFeature::new(channel, 3, 8)));
+            assert!(futures::poll!(pending.as_mut()).is_pending());
+            let header = MessageHeader {
+                device_index: 3,
+                feature_index: 8,
+                function_id: U4::from_lo(function),
+                software_id: U4::from_lo(1),
+            };
+            handle
+                .send_incoming(Message::Long(header, reply).into())
+                .await;
+            pending.await
+        })
+    }
+
+    /// A `getSensorDpiList` reply for `sensor` listing 800 and 1600 DPI.
+    fn dpi_list_reply(sensor: u8) -> [u8; 16] {
+        let mut reply = [0; 16];
+        reply[0] = sensor;
+        reply[1..5].copy_from_slice(&[0x03, 0x20, 0x06, 0x40]);
+        reply
+    }
+
+    #[test]
+    fn dpi_list_takes_a_reply_for_its_sensor() {
+        let list = answer(
+            1,
+            |dpi| async move { dpi.get_sensor_dpi_list(1).await },
+            dpi_list_reply(1),
+        );
+        assert_matches!(list, Ok(values) if values == [800, 1600]);
+    }
+
+    #[test]
+    fn dpi_list_refuses_a_reply_for_another_sensor() {
+        let list = answer(
+            1,
+            |dpi| async move { dpi.get_sensor_dpi_list(1).await },
+            dpi_list_reply(0),
+        );
+        assert_matches!(list, Err(Hidpp20Error::UnsupportedResponse));
+    }
+
+    #[test]
+    fn current_dpi_read_does_not_check_the_echo() {
+        // Options+ reads the current DPI without comparing byte 0; a firmware
+        // that answers it with another byte keeps a readable DPI.
+        let mut reply = [0; 16];
+        reply[1..3].copy_from_slice(&1600u16.to_be_bytes());
+        let dpi = answer(2, |dpi| async move { dpi.get_sensor_dpi(1).await }, reply);
+        assert_matches!(dpi, Ok(1600));
+    }
 
     #[test]
     fn parses_explicit_dpi_list() {

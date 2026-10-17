@@ -107,6 +107,12 @@ impl LevelConfig {
     }
 }
 
+/// Most level values one `set<Control>Levels` request carries.
+const LEVELS_PER_REQUEST: usize = 7;
+
+/// Most levels a non-linear table can hold: its total count is a 4-bit field.
+const MAX_NON_LINEAR_LEVELS: usize = 15;
+
 /// A level configuration to write with `setBrightnessLevels` /
 /// `setColorTemperatureLevels`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -125,52 +131,58 @@ pub enum SetLevels {
     },
     /// Configure an explicit list of non-linear levels.
     NonLinear {
-        /// Zero-based index at which `values` are written.
-        start_index: u8,
-        /// Total number of available levels (`0` resets the count to the factory
-        /// default).
-        level_count: u8,
-        /// The monotonically increasing values to write (`1..=7` of them).
+        /// The control's whole level table: `1..=15` monotonically increasing
+        /// values. One request carries at most seven, so a longer table is
+        /// written in several requests.
         values: Vec<u16>,
     },
 }
 
 impl SetLevels {
-    /// Encodes this configuration into a request payload.
-    pub(super) fn to_payload(&self) -> Result<[u8; 16], Hidpp20Error> {
+    /// Encodes this configuration into the request payloads to send, in order.
+    ///
+    /// A non-linear table is split into pages of up to seven values. Each page
+    /// names its start index and the table's full length as the level count,
+    /// as Logi Options+ writes it. Deriving every count from the one list means
+    /// no request can claim a total its values contradict.
+    pub(super) fn to_payloads(&self) -> Result<Vec<[u8; 16]>, Hidpp20Error> {
         let mut args = [0u8; 16];
         match self {
             SetLevels::Reset => {
                 // bit1 = reset; every other field is ignored by the device.
                 args[0] = 1 << 1;
+                Ok(vec![args])
             }
             SetLevels::Linear { min, max, step } => {
                 args[0] = 1; // bit0 = linear
                 args[2..4].copy_from_slice(&min.to_be_bytes());
                 args[4..6].copy_from_slice(&max.to_be_bytes());
                 args[6..8].copy_from_slice(&step.to_be_bytes());
+                Ok(vec![args])
             }
-            SetLevels::NonLinear {
-                start_index,
-                level_count,
-                values,
-            } => {
-                if !(1..=7).contains(&values.len()) || *start_index > 0x0f || *level_count > 0x0f {
+            SetLevels::NonLinear { values } => {
+                if !(1..=MAX_NON_LINEAR_LEVELS).contains(&values.len()) {
                     return Err(Hidpp20Error::Feature(ErrorType::InvalidArgument));
                 }
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "values.len() was just checked to be in 1..=7, so it always fits in a u8"
-                )]
-                let valid_count = (values.len() as u8) & 0x07;
-                args[0] = valid_count << 5; // linear = 0, reset = 0
-                args[1] = (start_index << 4) | (level_count & 0x0f);
-                for (i, value) in values.iter().take(7).enumerate() {
-                    args[2 + 2 * i..4 + 2 * i].copy_from_slice(&value.to_be_bytes());
+                let level_count = u8::try_from(values.len())
+                    .map_err(|_| Hidpp20Error::Feature(ErrorType::InvalidArgument))?;
+                let mut pages = Vec::new();
+                let mut start_index = 0u8;
+                for chunk in values.chunks(LEVELS_PER_REQUEST) {
+                    let valid_count = u8::try_from(chunk.len())
+                        .map_err(|_| Hidpp20Error::Feature(ErrorType::InvalidArgument))?;
+                    let mut page = [0u8; 16];
+                    page[0] = valid_count << 5; // linear = 0, reset = 0
+                    page[1] = (start_index << 4) | level_count;
+                    for (i, value) in chunk.iter().enumerate() {
+                        page[2 + 2 * i..4 + 2 * i].copy_from_slice(&value.to_be_bytes());
+                    }
+                    pages.push(page);
+                    start_index += valid_count;
                 }
+                Ok(pages)
             }
         }
-        Ok(args)
     }
 }
 

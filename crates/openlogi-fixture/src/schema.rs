@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, ScrollWheelMode,
-    SmartShiftStatus,
+    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, EasySwitchHosts,
+    FnLockState, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -139,6 +139,13 @@ pub enum ProfileSetting<T> {
 }
 
 impl<T> ProfileSetting<T> {
+    /// The absent-feature behavior; the serde default for settings appended
+    /// after schema v1 so older profiles keep loading.
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self::Unsupported
+    }
+
     /// Whether the feature is present, independently of value availability.
     #[must_use]
     pub const fn supports_feature(&self) -> bool {
@@ -178,6 +185,18 @@ pub struct ProfileDeviceSettings {
     pub wheel: ProfileSetting<ScrollWheelMode>,
     /// Keyboard-backlight read state.
     pub backlight: ProfileSetting<BacklightState>,
+    /// Keyboard Fn-lock read state. Defaults to unsupported so profiles
+    /// recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub fn_lock: ProfileSetting<FnLockState>,
+    /// Report-rate read state. Defaults to unsupported so profiles recorded
+    /// before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub report_rate: ProfileSetting<ReportRateInfo>,
+    /// Easy-Switch host-slot read state. Defaults to unsupported so profiles
+    /// recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub easy_switch: ProfileSetting<EasySwitchHosts>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -234,7 +253,7 @@ impl ProfileValidation {
         self.validate_paired_devices(inventory)?;
         self.validate_inventory_identity(inventory)?;
         for device in &inventory.paired {
-            let Some(route) = DeviceRoute::device_route_for(inventory, device.slot) else {
+            let Some(route) = DeviceRoute::for_slot(inventory, device.slot) else {
                 return Err(FixtureError::invalid(
                     "device profile",
                     format!(
@@ -358,13 +377,7 @@ impl ProfileValidation {
         let owner = format!("standalone device {}", device.display_name);
         validate_unit_id(&mut self.unit_ids, device.unit_id, &owner)?;
         self.push_route(ProfileRouteFacts {
-            route: DeviceRoute::RawHid {
-                vendor_id: device.address.vendor_id,
-                product_id: device.address.product_id,
-                usage_page: device.address.usage_page,
-                usage_id: device.address.usage_id,
-                identity: device.address.identity.clone(),
-            },
+            route: device.route(),
             capabilities: device.capabilities,
             standalone: true,
             light_capabilities: device.light_capabilities,
@@ -436,7 +449,7 @@ fn validate_battery(
     receiver: &str,
     slot: u8,
 ) -> Result<(), FixtureError> {
-    if battery.is_some_and(|battery| battery.percentage > 100) {
+    if battery.is_some_and(|battery| battery.percentage.is_some_and(|p| p > 100)) {
         Err(FixtureError::invalid(
             "device profile",
             format!("slot {slot} on {receiver} has battery percentage above 100"),
@@ -460,6 +473,12 @@ fn validate_setting_values(settings: &ProfileDeviceSettings) -> Result<(), Fixtu
     }
     if let Some(backlight) = settings.backlight.value() {
         validate_backlight(&settings.route, *backlight)?;
+    }
+    if let Some(report_rate) = settings.report_rate.value() {
+        validate_report_rate(&settings.route, report_rate)?;
+    }
+    if let Some(hosts) = settings.easy_switch.value() {
+        validate_easy_switch(&settings.route, hosts)?;
     }
     if settings.backlight.supports_feature() && settings.lighting.is_supported() {
         return Err(FixtureError::invalid(
@@ -505,6 +524,86 @@ fn validate_dpi(route: &DeviceRoute, dpi: &DpiInfo) -> Result<(), FixtureError> 
     Ok(())
 }
 
+fn validate_report_rate(route: &DeviceRoute, info: &ReportRateInfo) -> Result<(), FixtureError> {
+    if info.supported.is_empty() {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} has an empty report-rate list"),
+        ));
+    }
+    if info.supported.iter().any(|rate| u16::from(*rate) == 0) {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} has a zero report rate"),
+        ));
+    }
+    if info
+        .supported
+        .array_windows::<2>()
+        .any(|[left, right]| left >= right)
+    {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} report rates must be sorted and unique"),
+        ));
+    }
+    if !info.supports(info.current) {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!(
+                "route {route} current report rate {} is not supported",
+                info.current
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_easy_switch(route: &DeviceRoute, hosts: &EasySwitchHosts) -> Result<(), FixtureError> {
+    let invalid = |reason: String| {
+        Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} Easy-Switch {reason}"),
+        ))
+    };
+    if hosts.slots.is_empty() {
+        return invalid("has no host slots".to_owned());
+    }
+    if !hosts
+        .slots
+        .iter()
+        .zip(0u8..)
+        .all(|(slot, index)| slot.index == index)
+    {
+        return invalid("slots must be numbered 0, 1, 2, … in order".to_owned());
+    }
+    if hosts
+        .current
+        .is_some_and(|current| hosts.slot(current).is_none())
+    {
+        return invalid("current slot is not one of its slots".to_owned());
+    }
+    for slot in &hosts.slots {
+        if !slot.paired && (slot.name.is_some() || slot.os.is_some()) {
+            return invalid(format!(
+                "slot {} has a name or OS but no computer",
+                slot.index
+            ));
+        }
+        if let Some(name) = &slot.name
+            && (name.is_empty()
+                || name.contains('\0')
+                || name.len() > usize::from(slot.name_max_len))
+        {
+            return invalid(format!(
+                "slot {} name does not fit its {} bytes",
+                slot.index, slot.name_max_len
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_backlight(route: &DeviceRoute, backlight: BacklightState) -> Result<(), FixtureError> {
     if backlight.nb_levels == 0 {
         return Err(FixtureError::invalid(
@@ -540,6 +639,8 @@ fn validate_setting_support(
             || settings.smartshift.supports_feature()
             || settings.wheel.supports_feature()
             || settings.backlight.supports_feature()
+            || settings.report_rate.supports_feature()
+            || settings.easy_switch.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -589,6 +690,24 @@ fn validate_setting_support(
                 "lighting",
                 settings.lighting.is_supported(),
                 capabilities.lighting,
+            )?;
+            validate_capability_support(
+                settings,
+                "report rate",
+                settings.report_rate.supports_feature(),
+                capabilities.report_rate,
+            )?;
+            validate_capability_support(
+                settings,
+                "backlight",
+                settings.backlight.supports_feature(),
+                capabilities.backlight,
+            )?;
+            validate_capability_support(
+                settings,
+                "Easy-Switch",
+                settings.easy_switch.supports_feature(),
+                capabilities.easy_switch,
             )?;
         }
     }
@@ -850,7 +969,11 @@ fn normalize_hidpp20(request: &[u8]) -> Vec<u8> {
     normalized
 }
 
-fn format_hex(report: &[u8]) -> String {
+/// A report as a cassette spells it: lowercase hex, two digits per byte, no
+/// separators. Replay diagnostics quote reports the same way, so a mismatch
+/// message can be pasted back against the cassette.
+#[must_use]
+pub fn format_hex(report: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut formatted = String::with_capacity(report.len() * 2);
     for &byte in report {

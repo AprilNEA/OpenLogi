@@ -56,7 +56,7 @@ fn is_optional_asset(name: &str) -> bool {
 #[derive(Debug, Args)]
 pub struct SyncArgs {
     /// Override automatic mirror discovery with one uniform asset origin.
-    #[arg(long, env = "OPENLOGI_ASSETS")]
+    #[arg(long, env = openlogi_core::env::ASSETS)]
     base: Option<String>,
     /// Destination directory. Default matches the cargo-bundle
     /// resources path declared in openlogi-desktop/Cargo.toml.

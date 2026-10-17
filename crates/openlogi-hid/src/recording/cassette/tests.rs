@@ -348,6 +348,43 @@ async fn rejects_malformed_unmatched_and_unproven_fire_and_forget_evidence() {
 }
 
 #[tokio::test]
+async fn foreign_protocol_reports_from_the_same_node_add_no_rejection() {
+    // Wire-captured Logitech DJ "device paired" notification from a Unifying
+    // receiver on Linux, which shares its node with HID++. A recording that
+    // would commit without it must still commit with it — asserting the whole
+    // rejection set, not just the absence of one reason.
+    let dj_notification = vec![
+        0x20, 0x01, 0x41, 0x01, 0x6f, 0x40, 0x1e, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let request = short(0xff, 0x83, 0xfb, [0, 0, 0]);
+    let response = long(0xff, 0x83, 0xfb, BOLT_UNIQUE_ID);
+
+    let report = record_successes_with_foreign_reports(
+        vec![(request.clone(), response.clone())],
+        vec![dj_notification],
+    )
+    .await
+    .build_hid_cassette(metadata());
+
+    assert!(report.is_committable(), "{:?}", report.rejections);
+    assert_eq!(report.cassette.expect("cassette").exchanges.len(), 1);
+
+    // The same recording without the exchange is rejected as empty only —
+    // the foreign report itself contributes no rejection of its own.
+    let foreign_only = record_unassociated(vec![vec![
+        0x20, 0x01, 0x41, 0x01, 0x6f, 0x40, 0x1e, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+    ]])
+    .await
+    .build_hid_cassette(metadata());
+    let reasons: Vec<_> = foreign_only
+        .rejections
+        .iter()
+        .map(|rejection| rejection.reason.clone())
+        .collect();
+    assert_eq!(reasons, vec![CassetteRejectionReason::EmptyCassette]);
+}
+
+#[tokio::test]
 async fn rejects_every_unsuccessful_terminal_outcome() {
     let transaction = root_mapping(CAPTURE_SW_ID, 0x0003, 5);
     let mut channel = record_successes(vec![
@@ -551,6 +588,45 @@ async fn record_successes_with_support(
     wait_for_accepted(&recorder, 2 + transactions.len() * 3).await;
     drop(channel);
     wait_for_accepted(&recorder, 3 + transactions.len() * 3).await;
+    recorder.finish().unwrap().channels.remove(0)
+}
+
+async fn record_successes_with_foreign_reports(
+    transactions: Vec<(Vec<u8>, Vec<u8>)>,
+    foreign: Vec<Vec<u8>>,
+) -> RecordedChannel {
+    let foreign_count = foreign.len();
+    let recorder = NativeRecorder::new(256).unwrap();
+    let sink = recorder.sink();
+    let mut capture = sink.begin_channel(test_node()).unwrap();
+    let (raw, handle) = FakeRawHidChannel::new();
+    let channel = HidppChannel::from_raw_channel_with_observer(raw, capture.observer())
+        .await
+        .unwrap();
+    capture.complete(RecordedChannelOpenOutcome::Opened {
+        supports_short: true,
+        supports_long: true,
+    });
+    drop(capture);
+
+    for (index, (request, response)) in transactions.iter().enumerate() {
+        let request = HidppMessage::read_raw(request).expect("valid synthetic request");
+        let expected = HidppMessage::read_raw(response).expect("valid synthetic response");
+        let send = channel.send(request, move |candidate| *candidate == expected);
+        let respond = async {
+            handle.wait_for_writes(index + 1).await;
+            handle.send_raw(response.clone());
+        };
+        let (result, ()) = tokio::join!(send, respond);
+        assert_eq!(result.unwrap(), expected);
+    }
+    for report in foreign {
+        handle.send_raw(report);
+    }
+
+    wait_for_accepted(&recorder, 2 + transactions.len() * 3 + foreign_count).await;
+    drop(channel);
+    wait_for_closed(&recorder).await;
     recorder.finish().unwrap().channels.remove(0)
 }
 
