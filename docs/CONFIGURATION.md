@@ -102,9 +102,10 @@ Common device fields are:
   `false` leaves the wheel native
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
-  `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
-  stays inert unless bound here, because the wheel reports taps from incidental
-  thumb contact as well as from deliberate ones.
+  `Thumbwheel` is the thumb wheel's capacitive tap, bindable from the wheel's
+  entry in the Buttons panel alongside its rotation preset; it stays inert
+  (`None`) by default, because the wheel reports taps from incidental thumb
+  contact as well as from deliberate ones.
   Keyboard keys are named by their HID++ `0x1b04` control: a catalog name such
   as `KeyScreenCapture`, `KeyCalculator` or `KeyLock`, or `control:0x<cid>` for
   any control `openlogi diag controls` reports as divertable. A bound key is

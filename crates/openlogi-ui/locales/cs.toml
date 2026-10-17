@@ -237,6 +237,7 @@ couldnt_read_smartshift_click_to_retry = "Nastavení SmartShift se nepodařilo n
 this_device_does_not_support_smartshift = "Toto zařízení nepodporuje SmartShift."
 dpi_preset = "Předvolba DPI %{index}"
 thumb_wheel = "Palcové kolečko"
+thumb_wheel_tap = "Klepnutí na palcové kolečko"
 back_forward = "Zpět / vpřed"
 undo_redo = "Zpět / znovu"
 browser_back_forward = "V prohlížeči zpět / vpřed"
