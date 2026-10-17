@@ -18,7 +18,7 @@ use super::features::ProbedFeatures;
 use super::ledger;
 use super::probe::{
     NodeProbe, PassContext, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
-    parse_codename, preferred_direct_codename, probe_one, probe_unifying_slot,
+    direct_cache_key, parse_codename, preferred_direct_codename, probe_one, probe_unifying_slot,
     retry_arrival_trigger, unifying_probe_budget,
 };
 use super::{
