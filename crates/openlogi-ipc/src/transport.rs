@@ -22,7 +22,7 @@ use tarpc::tokio_serde::formats::Bincode;
 ///
 /// On Unix this is the filesystem Unix-domain socket at
 /// [`agent_socket_path`](openlogi_core::paths::agent_socket_path). Production
-/// builds keep `~/.config/openlogi/agent.sock`; local macOS `.dev` bundles use
+/// builds keep `~/.config/openlogi/agent.sock`; local macOS `-dev` bundles use
 /// the sibling `openlogi-dev` profile so development agents cannot occupy the
 /// installed app's endpoint. On Windows it is a named pipe in the OS namespace
 /// (`\\.\pipe\openlogi-agent.sock`).

@@ -228,11 +228,6 @@ fn event_source_arg(ty: &Type) -> Option<Type> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "unwrap/expect are idiomatic in tests"
-)]
 mod tests {
     use quote::quote;
 

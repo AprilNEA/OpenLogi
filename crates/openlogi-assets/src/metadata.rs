@@ -1,8 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "full schema parsed; label direction codes + extra coords land in later phases"
-)]
-
 //! Parses the per-depot hotspot metadata shipped by the Logi Options+
 //! installer (and re-hosted by assets.openlogi.org) — `core_metadata.json`
 //! on newer depots, `metadata.json` on older ones. The caller picks the
@@ -50,12 +45,12 @@ use serde::Deserialize;
 use crate::error::AssetError;
 use crate::http;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Metadata {
     pub images: Vec<ImageEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ImageEntry {
     pub key: String,
     pub origin: Origin,
@@ -63,14 +58,20 @@ pub struct ImageEntry {
     pub assignments: Vec<Assignment>,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub struct Origin {
     pub width: u32,
     pub height: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Assignment {
+    /// Logi's per-depot slot identifier, e.g. `mx-keys-mini-2b369_c266`. On
+    /// keyboard depots the `_c<decimal>` suffix is the key's HID++ `0x1b04`
+    /// control ID — see [`Assignment::control_id`]. Empty on depots that
+    /// predate the field.
+    #[serde(rename = "slotId", default)]
+    pub slot_id: String,
     /// Empty on older keyboard depots whose assignments carry only `slotId`;
     /// `map_slot_name`-style consumers treat unknown names as "no hotspot".
     #[serde(rename = "slotName", default)]
@@ -84,13 +85,25 @@ pub struct Assignment {
     pub label: Direction,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, Default)]
+impl Assignment {
+    /// The HID++ `0x1b04` control ID Logi's slot identifier encodes: the
+    /// decimal after the trailing `_c`, as in `ergo-k860-6b359_c111` for the
+    /// Lock key (`0x006f`). `None` for settings slots
+    /// (`…_touchpad_settings`) and any depot that names slots differently.
+    #[must_use]
+    pub fn control_id(&self) -> Option<u16> {
+        let (_, cid) = self.slot_id.rsplit_once("_c")?;
+        cid.parse().ok()
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, Default)]
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Direction {
     pub x: i32,
     pub y: i32,
@@ -122,7 +135,6 @@ impl Metadata {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::Metadata;
 
@@ -130,6 +142,32 @@ mod tests {
     /// no `slotName` — and add fields like `assignmentOffset`. Parsing must
     /// not fail wholesale: the renderer still needs `origin`, and unknown
     /// slot names already degrade to "no hotspot" in the consumer.
+    #[test]
+    fn slot_ids_decode_their_control_id() {
+        let json = r#"{
+          "images": [
+            {
+              "key": "device_keys_image",
+              "origin": { "width": 1872, "height": 728 },
+              "assignments": [
+                { "slotId": "mx-keys-mini-2b369_c266", "slotName": "SLOT_NAME_SCREEN_CAPTURE",
+                  "marker": { "x": 53.5, "y": 13.8 } },
+                { "slotId": "k400-4404d_touchpad_settings", "slotName": "SLOT_NAME_ZOOM_GESTURE",
+                  "marker": { "x": 79, "y": 48 } },
+                { "slotId": "g513_g1_m1", "marker": { "x": 370, "y": 300 } }
+              ]
+            }
+          ]
+        }"#;
+        let meta: Metadata = serde_json::from_str(json).expect("parses");
+        let cids: Vec<Option<u16>> = meta.images[0]
+            .assignments
+            .iter()
+            .map(super::Assignment::control_id)
+            .collect();
+        assert_eq!(cids, vec![Some(0x010a), None, None]);
+    }
+
     #[test]
     fn old_slot_id_only_metadata_parses() {
         let json = r#"{

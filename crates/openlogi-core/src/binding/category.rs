@@ -2,8 +2,8 @@
 
 /// Grouping for popover section headers.
 ///
-/// Used by [`Action::category`] and rendered as a small muted label above
-/// each group in the action picker.
+/// Used by [`Action::category`](crate::binding::Action::category) and rendered
+/// as a small muted label above each group in the action picker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Category {
     /// Cut, copy, paste, undo, redo, select-all, find, save.
@@ -25,19 +25,33 @@ pub enum Category {
 }
 
 impl Category {
-    /// Short label for popover section headers (already uppercase so callers
-    /// don't have to transform it).
+    /// Human-readable English label for logs and non-localized contexts.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Category::Editing => "EDITING",
-            Category::Browser => "BROWSER",
-            Category::Media => "MEDIA",
-            Category::Mouse => "MOUSE",
+            Category::Editing => "Editing",
+            Category::Browser => "Browser",
+            Category::Media => "Media",
+            Category::Mouse => "Mouse",
             Category::Dpi => "DPI",
-            Category::Scroll => "SCROLL",
-            Category::Navigation => "NAVIGATION",
-            Category::System => "SYSTEM",
+            Category::Scroll => "Scroll",
+            Category::Navigation => "Navigation",
+            Category::System => "System",
+        }
+    }
+
+    /// Stable catalog key for the localized popover section header.
+    #[must_use]
+    pub fn translation_key(self) -> &'static str {
+        match self {
+            Category::Editing => "actions.editing",
+            Category::Browser => "actions.browser",
+            Category::Media => "actions.media",
+            Category::Mouse => "device.mouse",
+            Category::Dpi => "pointer.dpi",
+            Category::Scroll => "pointer.scroll",
+            Category::Navigation => "actions.navigation",
+            Category::System => "actions.system",
         }
     }
 }

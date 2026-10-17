@@ -20,7 +20,8 @@ mod source;
 pub use error::AssetError;
 pub use http::{AssetClient, FetchOutcome, cached_matches, read_bytes, sha256_hex, sha256_of_file};
 pub use index::{
-    BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, FileEntry, Index, METADATA_FILES,
+    BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, FileEntry, INDEX_NAME, Index,
+    METADATA_FILES,
 };
 pub use manifest::{DepotManifest, ManifestDevice, ManifestResource, variant_model_id};
 pub use metadata::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};

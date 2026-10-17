@@ -1,7 +1,8 @@
 //! Windows helpers for synthesising OS-level input events via `SendInput`.
-#![allow(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
+#![expect(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
 
 use std::mem::size_of;
+use std::sync::{LazyLock, Mutex};
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
@@ -11,10 +12,17 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
 };
+use openlogi_core::scroll::ScrollDelta;
+
+use super::{HeldKey, KeyPhase, ScrollQuantizer};
 
 const WHEEL_DELTA: i32 = 120;
+const WHEEL_DELTA_F64: f64 = 120.0;
+
+static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
 const VK_D: u16 = 0x44;
 const VK_L: u16 = 0x4C;
@@ -26,6 +34,7 @@ const VK_SHIFT: u16 = 0x10;
 const VK_CONTROL: u16 = 0x11;
 const VK_MENU: u16 = 0x12;
 const VK_LWIN: u16 = 0x5B;
+const VK_SNAPSHOT: u16 = 0x2C;
 const VK_BROWSER_BACK: u16 = 0xA6;
 const VK_BROWSER_FORWARD: u16 = 0xA7;
 const VK_VOLUME_MUTE: u16 = 0xAD;
@@ -50,17 +59,12 @@ pub(super) fn execute(action: &Action) {
         Effect::None => {}
         Effect::Click(button) => post_click(button),
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
-        Effect::Key(combo) => post_custom_shortcut(combo),
+        Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(native),
-        Effect::Script(script) => dispatch_script(script),
-        Effect::Text(text) => {
-            tracing::warn!(
-                chars = text.chars().count(),
-                "TypeText injection is not implemented on Windows yet"
-            );
-        }
+        Effect::Script(script) => super::dispatch_script(script),
+        Effect::Text(text) => type_text(text),
         Effect::AgentSide => {
             tracing::debug!(
                 action = action.label(),
@@ -79,7 +83,7 @@ pub(super) fn execute(action: &Action) {
 /// which isn't a USB HID keyboard usage and so has no [`KeyCombo`]
 /// representation — unlike on macOS/Linux, where the same shortcuts are
 /// ordinary modifier+key chords. [`press_shortcut`] posts the `Err` case
-/// directly instead of routing it through [`post_custom_shortcut`].
+/// directly instead of routing it through [`press_combo`].
 fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
     let text = match shortcut {
         Shortcut::BrowserBack => return Err(VK_BROWSER_BACK),
@@ -101,17 +105,12 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
     };
-    Ok(parse_shortcut(text))
-}
-
-fn parse_shortcut(text: &str) -> KeyCombo {
-    text.parse()
-        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+    Ok(super::parse_shortcut(text))
 }
 
 fn press_shortcut(shortcut: Shortcut) {
     match combo(shortcut) {
-        Ok(combo) => post_custom_shortcut(&combo),
+        Ok(combo) => press_combo(&combo),
         Err(vk) => post_key(vk, &[]),
     }
 }
@@ -127,11 +126,13 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::ShowDesktop => post_key(VK_D, &[VK_LWIN]),
         NativeAction::LaunchpadShow => post_key(VK_LWIN, &[]),
         NativeAction::LockScreen => post_key(VK_L, &[VK_LWIN]),
-        // Win+Shift+S opens the snip overlay, which serves both full-screen
-        // and region capture on Windows.
-        NativeAction::Screenshot | NativeAction::CaptureRegion => {
-            post_key(VK_S, &[VK_LWIN, VK_SHIFT]);
-        }
+        // Win+PrtScn saves a full-screen capture straight to
+        // `Pictures\Screenshots` with no further click, like ⌘⇧3 on macOS.
+        NativeAction::Screenshot => post_key(VK_SNAPSHOT, &[VK_LWIN]),
+        // Win+Shift+S opens the snip overlay, which waits for a region. It
+        // used to serve `Screenshot` too, so the two actions behaved the
+        // same (#1864).
+        NativeAction::CaptureRegion => post_key(VK_S, &[VK_LWIN, VK_SHIFT]),
         // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
         // hibernates instead when hibernation is enabled — no clean win from
         // a background agent, so the action is skipped on Windows for now.
@@ -152,46 +153,19 @@ fn dispatch_media(key: MediaKey) {
     }
 }
 
-fn dispatch_script(script: Script<'_>) {
-    match script {
-        Script::AppleScript(_) => {
-            tracing::warn!("RunAppleScript is only supported on macOS");
-        }
-        Script::ShellCommand(cmd) => run_shell_command_async(cmd.to_string()),
-        Script::Workflow(steps) => run_workflow_async(steps.to_vec()),
-    }
+/// Not implemented yet: SendInput's KEYEVENTF_UNICODE path is unwired.
+pub(super) fn type_text(text: &str) {
+    tracing::warn!(
+        chars = text.chars().count(),
+        "TypeText injection is not implemented on Windows yet"
+    );
 }
 
-fn run_shell_command_async(cmd: String) {
-    std::thread::spawn(move || run_shell_command(&cmd));
+pub(super) fn run_apple_script(_src: &str) {
+    tracing::warn!("RunAppleScript is only supported on macOS");
 }
 
-fn run_workflow_async(steps: Vec<WorkflowStep>) {
-    std::thread::spawn(move || run_workflow(&steps));
-}
-
-fn run_workflow(steps: &[WorkflowStep]) {
-    for step in steps {
-        match step {
-            WorkflowStep::TypeText(text) => {
-                tracing::warn!(
-                    chars = text.chars().count(),
-                    "workflow TypeText injection is not implemented on Windows yet"
-                );
-            }
-            WorkflowStep::PressKey(combo) => post_custom_shortcut(combo),
-            WorkflowStep::Delay { millis } => {
-                std::thread::sleep(std::time::Duration::from_millis(*millis));
-            }
-            WorkflowStep::RunAppleScript(_) => {
-                tracing::warn!("workflow RunAppleScript is only supported on macOS");
-            }
-            WorkflowStep::RunShellCommand(cmd) => run_shell_command(cmd),
-        }
-    }
-}
-
-fn run_shell_command(cmd: &str) {
+pub(super) fn run_shell_command(cmd: &str) {
     let _ = std::process::Command::new("cmd").args(["/C", cmd]).output();
 }
 
@@ -236,17 +210,31 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     }
 }
 
-pub(super) fn post_horizontal_scroll(delta: i32) {
-    if delta == 0 {
+pub(super) fn post_scroll(delta: ScrollDelta) {
+    let ScrollDelta::WheelTicks { .. } = delta else {
+        tracing::debug!("pixel scroll output is unsupported on Windows");
         return;
+    };
+    let Ok(mut quantizer) = SCROLL_QUANTIZER.lock() else {
+        tracing::warn!("Windows scroll quantizer mutex poisoned");
+        return;
+    };
+    let delta = quantizer.quantize(delta, WHEEL_DELTA_F64);
+    drop(quantizer);
+
+    let mut inputs = Vec::with_capacity(2);
+    if delta.y != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_WHEEL, delta.y));
     }
-    send_inputs(&[mouse_input(
-        MOUSEEVENTF_HWHEEL,
-        delta.saturating_mul(WHEEL_DELTA),
-    )]);
+    if delta.x != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_HWHEEL, delta.x));
+    }
+    if !inputs.is_empty() {
+        send_inputs(&inputs);
+    }
 }
 
-fn post_custom_shortcut(combo: &KeyCombo) {
+pub(super) fn press_combo(combo: &KeyCombo) {
     let Some(vk) = super::hid_usage_to_windows(combo.key().code()) else {
         tracing::warn!(
             usage = combo.key().code(),
@@ -256,6 +244,10 @@ fn post_custom_shortcut(combo: &KeyCombo) {
         return;
     };
 
+    post_key(vk, &combo_modifiers(combo));
+}
+
+fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     let mut modifiers = Vec::new();
     if combo.has_command() {
         modifiers.push(VK_CONTROL);
@@ -269,7 +261,43 @@ fn post_custom_shortcut(combo: &KeyCombo) {
     if combo.has_option() {
         modifiers.push(VK_MENU);
     }
-    post_key(vk, &modifiers);
+    if combo.has_super() {
+        modifiers.push(VK_LWIN);
+    }
+    modifiers
+}
+
+/// Emit one edge for the physical keys whose ownership changed.
+pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
+    let keys: Vec<_> = keys
+        .iter()
+        .filter_map(|key| held_virtual_key(*key))
+        .collect();
+    let key_up = phase == KeyPhase::Up;
+    let mut inputs: Vec<_> = keys.iter().map(|key| key_input(*key, key_up)).collect();
+    if key_up {
+        inputs.reverse();
+    }
+    send_inputs(&inputs);
+}
+
+fn held_virtual_key(key: HeldKey) -> Option<u16> {
+    match key {
+        HeldKey::Control => Some(VK_CONTROL),
+        HeldKey::Shift => Some(VK_SHIFT),
+        HeldKey::Alt => Some(VK_MENU),
+        HeldKey::Super => Some(VK_LWIN),
+        HeldKey::Key(usage) => {
+            let key = super::hid_usage_to_windows(usage.code());
+            if key.is_none() {
+                tracing::warn!(
+                    usage = usage.code(),
+                    "held shortcut usage has no Windows mapping — edge ignored"
+                );
+            }
+            key
+        }
+    }
 }
 
 fn send_inputs(inputs: &[INPUT]) {
@@ -365,7 +393,7 @@ mod tests {
         assert_eq!(combo(Shortcut::BrowserForward), Err(VK_BROWSER_FORWARD));
         // Every chord-shaped row must actually resolve through
         // hid_usage_to_windows, or a `Shortcut` silently no-ops instead of
-        // pressing anything (see `post_custom_shortcut`'s warn-and-drop
+        // pressing anything (see `press_combo`'s warn-and-drop
         // path). Iterates `Shortcut::ALL` rather than a hand-copied list,
         // so a newly added `Shortcut` variant is checked here
         // automatically instead of depending on someone remembering to

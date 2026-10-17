@@ -1,8 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "full schema parsed; only a subset is consumed by today's callers"
-)]
-
 //! Parses the `index.json` shared by OpenLogi's asset mirrors.
 //!
 //! Schema mirrors the file the assets repo's `stage_assets.py` emits:
@@ -37,6 +32,10 @@ use serde::Deserialize;
 
 use crate::error::AssetError;
 use crate::http;
+
+/// Filename of the registry at the asset host's root, and of its cached
+/// copy in every asset root on disk.
+pub const INDEX_NAME: &str = "index.json";
 
 #[derive(Debug, Deserialize)]
 pub struct Index {
@@ -187,7 +186,6 @@ impl Index {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
     use std::collections::HashMap;

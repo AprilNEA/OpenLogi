@@ -1,0 +1,34 @@
+# Owner: openlogi-desktop's runtime — the one AssetResolver the device list is
+# resolved against, and the only place that replaces it when the files on disk
+# change. services/diagnostics.rs builds its own on purpose: a report states
+# what is on disk at the moment it is copied. Tests build theirs freely.
+id: gui-asset-resolver-owner
+language: rust
+severity: error
+message: The runtime owns the AssetResolver (runtime.rs builds it once and replaces it when assets change); take a &AssetResolver from there instead of building another here.
+note: |
+  A resolver parses index.json when it is built and remembers every asset it
+  has read, so a second one costs the parse again and is never told when a
+  download lands. Startup once built three. See "Single source of truth" in
+  AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/runtime.rs
+  - crates/openlogi-desktop/src/services/assets.rs
+  - crates/openlogi-desktop/src/services/diagnostics.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - any:
+        - pattern: AssetResolver::new()
+        - pattern: $PATH::AssetResolver::new()
+        - pattern: AssetResolver::default()
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'

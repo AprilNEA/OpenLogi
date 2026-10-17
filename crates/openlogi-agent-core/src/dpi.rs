@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use openlogi_hid::{DeviceRoute, DpiCapabilities};
+use openlogi_hid::{DeviceRoute, Dpi, DpiCapabilities};
 
 /// Per-device DPI-cycle states plus the GUI's current selection.
 ///
@@ -42,7 +42,7 @@ impl DpiCycles {
 /// device), not the next-to-fire. `cycle` advances and returns the new value.
 #[derive(Debug, Clone, Default)]
 pub struct DpiCycleState {
-    pub presets: Vec<u32>,
+    pub presets: Vec<Dpi>,
     pub index: usize,
     pub target: Option<DeviceRoute>,
     pub capabilities: Option<DpiCapabilities>,
@@ -52,7 +52,7 @@ impl DpiCycleState {
     /// Advance to the next preset (wrapping last → first) and return the new
     /// DPI + the device target to write to. Returns `None` if `presets` is
     /// empty.
-    pub fn cycle(&mut self) -> Option<(u32, Option<DeviceRoute>)> {
+    pub fn cycle(&mut self) -> Option<(Dpi, Option<DeviceRoute>)> {
         if self.presets.is_empty() {
             return None;
         }
@@ -65,7 +65,7 @@ impl DpiCycleState {
 
     /// Jump to preset `i`, clamping to the list length. Returns the DPI +
     /// target, or `None` if `presets` is empty.
-    pub fn set(&mut self, i: usize) -> Option<(u32, Option<DeviceRoute>)> {
+    pub fn set(&mut self, i: usize) -> Option<(Dpi, Option<DeviceRoute>)> {
         if self.presets.is_empty() {
             return None;
         }
@@ -74,10 +74,10 @@ impl DpiCycleState {
         Some((self.normalize(self.presets[clamped]), self.target.clone()))
     }
 
-    fn normalize(&self, dpi: u32) -> u32 {
+    fn normalize(&self, dpi: Dpi) -> Dpi {
         self.capabilities
             .as_ref()
-            .map_or(dpi, |caps| caps.snap(dpi))
+            .map_or(dpi, |caps| caps.nearest(dpi))
     }
 }
 
@@ -90,7 +90,7 @@ mod tests {
         cycles.by_key.insert(
             key.to_string(),
             DpiCycleState {
-                presets: vec![800, 1600],
+                presets: vec![Dpi::new(800), Dpi::new(1600)],
                 index: 0,
                 target: Some(DeviceRoute::Bolt {
                     receiver_uid: "AA00".to_string(),

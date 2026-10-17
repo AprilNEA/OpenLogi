@@ -1,0 +1,17 @@
+# Owner: openlogi_core — `DeviceRoute::from(&RawDeviceAddress)` and
+# `StandaloneDevice::route()`: the route that reaches a standalone raw-HID
+# interface is its address, field for field.
+id: core-raw-route-owner
+language: rust
+severity: error
+message: A standalone device's route is StandaloneDevice::route() (DeviceRoute::from(&address)); do not copy the address fields into DeviceRoute::RawHid by hand here.
+note: |
+  Six sites in five crates once copied the five fields, two of them through a
+  local helper of the same name. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/**
+rule:
+  pattern: 'DeviceRoute::RawHid { vendor_id: $ADDRESS.vendor_id, $$$REST }'

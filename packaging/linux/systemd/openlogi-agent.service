@@ -2,9 +2,10 @@
 #
 # Packages use /usr/bin directly. install.sh rewrites ExecStart when installing
 # under a custom PREFIX (default: /usr/local).
-# The agent's launch_at_login setting writes its own copy to
-# $XDG_CONFIG_HOME/systemd/user/ using the current binary path — both coexist,
-# enabling either works.
+# The agent's launch_at_login setting enables this unit as-is when it launches
+# the same binary. It only generates its own copy — under $XDG_DATA_HOME, never
+# the user's $XDG_CONFIG_HOME — when this unit names a different executable, as
+# for a build from source.
 #
 # Enable for the current user:
 #   systemctl --user enable --now openlogi-agent.service

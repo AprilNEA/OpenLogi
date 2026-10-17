@@ -1,0 +1,11 @@
+# Owner: macos::watchdog::WatchdogSignals::mark_armed — progress before the short budget.
+id: hook-armed-progress-owner
+language: rust
+severity: error
+message: Use WatchdogSignals::mark_armed so fresh progress is visible before the short watchdog budget applies.
+files:
+  - crates/openlogi-hook/src/**/*.rs
+ignores:
+  - crates/openlogi-hook/src/macos/watchdog.rs
+rule:
+  pattern: $SIGNALS.set_phase(TapPhase::Armed)

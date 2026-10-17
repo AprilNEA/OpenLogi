@@ -5,6 +5,9 @@ use openlogi_core::config::Appearance;
 
 /// The OS product version (e.g. `"15.5"` on macOS), or `None` when unavailable.
 #[must_use]
+// Not `expect`: only the macOS arm returns `Some`, so off macOS the lint never
+// fires and the expectation would go unfulfilled.
+#[expect(clippy::allow_attributes, reason = "see above")]
 #[allow(
     clippy::unnecessary_wraps,
     reason = "Option is the cross-platform contract; non-macOS arms return None"

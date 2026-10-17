@@ -1,9 +1,4 @@
 //! Unit tests for `Crown` mode parsing and event decoding.
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 
 use std::assert_matches;
 
@@ -33,6 +28,18 @@ fn parses_mode() {
 fn rejects_unknown_mode_value() {
     let mut payload = [0; 16];
     payload[0] = 9;
+
+    assert_matches!(
+        CrownMode::from_payload(&payload),
+        Err(crate::protocol::v20::Hidpp20Error::UnsupportedResponse)
+    );
+}
+
+#[test]
+fn rejects_the_write_only_sentinel_in_a_response() {
+    // `0` is the request-side "leave unchanged" sentinel; a device answering
+    // it as the current mode is as unsupported as any unknown value.
+    let payload = [0; 16];
 
     assert_matches!(
         CrownMode::from_payload(&payload),

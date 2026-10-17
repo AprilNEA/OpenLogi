@@ -1,5 +1,4 @@
 //! Unit tests for `TouchpadRawXy` info parsing and raw-event decoding.
-#![allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 
 use std::assert_matches;
 

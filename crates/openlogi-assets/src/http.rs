@@ -24,6 +24,7 @@ use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig};
 
 use crate::error::AssetError;
+use crate::index::INDEX_NAME;
 use crate::index::{FileEntry, Index};
 
 const USER_AGENT: &str = concat!(
@@ -31,9 +32,6 @@ const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (+https://github.com/AprilNEA/OpenLogi)"
 );
-
-/// Filename of the registry at the asset host's root.
-const INDEX_NAME: &str = "index.json";
 
 /// Bound on DNS + TCP + TLS connect. Deliberately does *not* cap body-read
 /// time, so a slow-but-progressing download of a large asset isn't killed.
@@ -383,7 +381,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
     fn write_replace_overwrites_in_place() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let dst = dir.path().join("a.png");
@@ -396,7 +393,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
     fn write_replace_replaces_a_planted_symlink_instead_of_following_it() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let victim = dir.path().join("victim.txt");

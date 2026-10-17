@@ -16,17 +16,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::ValueEnum;
+use openlogi_core::brand;
 use strum::{Display, VariantArray};
 
-use super::{read_plist_string, stamp_plist_strings};
-
-/// The app's production bundle identifier, also advertised by the update
-/// manifest so the running app and the manifest cannot disagree.
-pub(crate) const APP_BUNDLE_ID: &str = "org.openlogi.openlogi";
-
-/// The icon every component shares, as `CFBundleIconFile` spells it (the `.icns`
-/// extension is optional there, so it is trimmed before comparing).
-const ICON_STEM: &str = "AppIcon";
+use crate::icon::macos::ICON_NAME;
+use crate::support::info_plist::{read_plist_string, stamp_plist_strings};
 
 /// Which identity family a bundle carries.
 ///
@@ -41,6 +35,18 @@ pub(crate) enum Channel {
     /// bundle can never claim a shipped grant and System Settings shows which
     /// of the two installed copies a row belongs to.
     Dev,
+}
+
+/// The profile a bundle of this channel runs under: packaging stamps the
+/// identifiers, and the running process derives its config directory, socket
+/// and service label from them.
+impl From<Channel> for openlogi_core::paths::Profile {
+    fn from(channel: Channel) -> Self {
+        match channel {
+            Channel::Production => Self::Production,
+            Channel::Dev => Self::Dev,
+        }
+    }
 }
 
 /// A bundle whose identity xtask owns: the app plus each nested login-item
@@ -63,38 +69,48 @@ pub(crate) enum Component {
 }
 
 impl Component {
-    /// Where this component lives inside the app bundle; `None` is the app itself.
-    pub(super) fn nested_bundle(self) -> Option<&'static str> {
+    /// The `brand` helper this component embeds; `None` is the app itself.
+    fn helper(self) -> Option<brand::Helper> {
         match self {
             Self::App => None,
-            Self::Agent => Some("Contents/Library/LoginItems/OpenLogiAgent.app"),
-            Self::Overlay => Some("Contents/Library/LoginItems/OpenLogiOverlay.app"),
+            Self::Agent => Some(brand::Helper::Agent),
+            Self::Overlay => Some(brand::Helper::Overlay),
         }
     }
 
+    /// Where this component lives inside the app bundle; `None` is the app
+    /// itself. The spellings are [`brand::Helper`]'s: the GUI and the agent
+    /// look the helpers up by the same names at runtime.
+    pub(crate) fn nested_bundle_dir(self, channel: Channel) -> Option<String> {
+        let helper = self.helper()?;
+        Some(match channel {
+            Channel::Production => helper.bundle_dir(),
+            Channel::Dev => helper.dev_bundle_dir(),
+        })
+    }
+
     /// This component's bundle root inside `app`.
-    pub(super) fn root(self, app: &Path) -> PathBuf {
-        self.nested_bundle()
+    pub(crate) fn root(self, app: &Path, channel: Channel) -> PathBuf {
+        self.nested_bundle_dir(channel)
             .map_or_else(|| app.to_path_buf(), |nested| app.join(nested))
     }
 
     /// This component's `Info.plist`.
-    pub(super) fn info_plist(self, app: &Path) -> PathBuf {
-        self.root(app).join("Contents/Info.plist")
+    pub(crate) fn info_plist(self, app: &Path, channel: Channel) -> PathBuf {
+        self.root(app, channel).join("Contents/Info.plist")
     }
 
     /// This component's copy of the shared app icon.
-    pub(super) fn icon(self, app: &Path) -> PathBuf {
-        self.root(app)
-            .join(format!("Contents/Resources/{ICON_STEM}.icns"))
+    pub(crate) fn icon(self, app: &Path, channel: Channel) -> PathBuf {
+        self.root(app, channel)
+            .join(format!("Contents/Resources/{ICON_NAME}.icns"))
     }
 
     /// The shipped identity — the one macOS ties existing grants to.
     fn production(self) -> Identity {
-        let (bundle_id, name) = match self {
-            Self::App => (APP_BUNDLE_ID, "OpenLogi"),
-            Self::Agent => ("org.openlogi.agent", "OpenLogi Agent"),
-            Self::Overlay => ("org.openlogi.overlay", "OpenLogi Overlay"),
+        let (bundle_id, name) = match self.helper() {
+            None => (brand::APP_ID, brand::APP_NAME),
+            Some(helper) => (helper.bundle_id(), helper.display_name()),
         };
         Identity {
             bundle_id: bundle_id.to_owned(),
@@ -119,15 +135,15 @@ impl Channel {
         match self {
             Self::Production => production,
             Self::Dev => Identity {
-                bundle_id: format!("{}.dev", production.bundle_id),
-                name: format!("{} Dev", production.name),
+                bundle_id: brand::dev_id(&production.bundle_id),
+                name: brand::dev_name(&production.name),
             },
         }
     }
 }
 
 /// The `Info.plist` keys that carry the identity.
-fn identity_entries(identity: &Identity) -> [(&str, &str); 3] {
+pub(crate) fn identity_entries(identity: &Identity) -> [(&str, &str); 3] {
     [
         ("CFBundleIdentifier", identity.bundle_id.as_str()),
         ("CFBundleName", identity.name.as_str()),
@@ -135,14 +151,20 @@ fn identity_entries(identity: &Identity) -> [(&str, &str); 3] {
     ]
 }
 
-/// Write `channel`'s identity over every component of the bundle at `app`.
+/// Write `channel`'s identity over each of `components` in the bundle at `app`.
 ///
-/// Runs before codesigning, which seals the `Info.plist` it stamps.
-pub(crate) fn stamp(app: &Path, channel: Channel) -> Result<()> {
+/// Runs before codesigning, which seals the `Info.plist` it stamps. Callers
+/// pass [`Component::VARIANTS`] unless they deliberately assembled a partial
+/// bundle — `xtask macos dev-bundle` does when the developer asked it not to
+/// embed the helpers.
+pub(crate) fn stamp(app: &Path, channel: Channel, components: &[Component]) -> Result<()> {
     println!("==> bundle identity ({channel})");
-    for &component in Component::VARIANTS {
+    for &component in components {
         let identity = channel.identity(component);
-        stamp_plist_strings(&component.info_plist(app), &identity_entries(&identity))?;
+        stamp_plist_strings(
+            &component.info_plist(app, channel),
+            &identity_entries(&identity),
+        )?;
         println!(
             "    {component}: {} ({})",
             identity.bundle_id, identity.name
@@ -151,14 +173,14 @@ pub(crate) fn stamp(app: &Path, channel: Channel) -> Result<()> {
     Ok(())
 }
 
-/// Read every component's identity back, failing unless it is `channel`'s.
+/// Read each of `components`' identity back, failing unless it is `channel`'s.
 ///
 /// This is the gate a distribution artifact passes before it is signed or
 /// packaged, so a bundle built for local use can never be shipped by mistake.
-pub(crate) fn verify(app: &Path, channel: Channel) -> Result<()> {
-    for &component in Component::VARIANTS {
+pub(crate) fn verify(app: &Path, channel: Channel, components: &[Component]) -> Result<()> {
+    for &component in components {
         let expected = channel.identity(component);
-        let plist = component.info_plist(app);
+        let plist = component.info_plist(app, channel);
         for (key, want) in identity_entries(&expected) {
             let found = read_plist_string(&plist, key)?;
             if found.as_deref() != Some(want) {
@@ -175,24 +197,28 @@ pub(crate) fn verify(app: &Path, channel: Channel) -> Result<()> {
 /// Fail unless every component ships the shared app icon *and* declares it, so
 /// no surface that lists OpenLogi's processes — System Settings' privacy panes,
 /// Login Items — shows a blank icon for one of them.
-pub(crate) fn verify_icons(app: &Path) -> Result<()> {
-    for &component in Component::VARIANTS {
-        let icon = component.icon(app);
+///
+/// What the app carries beyond that `.icns` — the asset catalog, the alternates
+/// — belongs to the icon pipeline, and
+/// [`IconPipeline::verify`](crate::icon::IconPipeline::verify) checks it.
+pub(crate) fn verify_icons(app: &Path, channel: Channel, components: &[Component]) -> Result<()> {
+    for &component in components {
+        let icon = component.icon(app, channel);
         if !icon.is_file() {
             bail!(
                 "{component}: missing the shared app icon at {}",
                 icon.display()
             );
         }
-        let plist = component.info_plist(app);
+        let plist = component.info_plist(app, channel);
         let declared = read_plist_string(&plist, "CFBundleIconFile")?;
         if declared
             .as_deref()
             .map(|file| file.trim_end_matches(".icns"))
-            != Some(ICON_STEM)
+            != Some(ICON_NAME)
         {
             bail!(
-                "{component}: CFBundleIconFile is {declared:?}, expected {ICON_STEM:?} ({})",
+                "{component}: CFBundleIconFile is {declared:?}, expected {ICON_NAME:?} ({})",
                 plist.display()
             );
         }
@@ -201,126 +227,4 @@ pub(crate) fn verify_icons(app: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
-mod tests {
-    use super::*;
-
-    /// A bundle skeleton with an empty `Info.plist` per component.
-    fn bundle() -> tempfile::TempDir {
-        let app = tempfile::tempdir().unwrap();
-        for &component in Component::VARIANTS {
-            let plist = component.info_plist(app.path());
-            fs_err::create_dir_all(plist.parent().unwrap()).unwrap();
-            plist::Value::Dictionary(plist::Dictionary::new())
-                .to_file_xml(plist)
-                .unwrap();
-        }
-        app
-    }
-
-    /// `--channel`'s default is rendered through `Display` and then parsed back
-    /// by clap's value parser, so a name only one of the two knows would break
-    /// `macos bundle` the moment the flag is omitted.
-    #[test]
-    fn each_channel_renders_as_the_flag_value_it_parses_from() {
-        for channel in [Channel::Production, Channel::Dev] {
-            assert_eq!(
-                Channel::from_str(&channel.to_string(), false).ok(),
-                Some(channel),
-                "{channel} does not round-trip through the value parser"
-            );
-        }
-    }
-
-    #[test]
-    fn a_dev_bundle_can_never_collide_with_a_shipped_one() {
-        let shipped: Vec<Identity> = Component::VARIANTS
-            .iter()
-            .map(|&component| Channel::Production.identity(component))
-            .collect();
-
-        for &component in Component::VARIANTS {
-            let dev = Channel::Dev.identity(component);
-            assert!(
-                shipped.iter().all(|other| other.bundle_id != dev.bundle_id),
-                "dev {component} id {} collides with a shipped identity",
-                dev.bundle_id
-            );
-            assert!(
-                shipped.iter().all(|other| other.name != dev.name),
-                "dev {component} name {} collides with a shipped identity",
-                dev.name
-            );
-        }
-    }
-
-    #[test]
-    fn shipped_identities_are_distinct_per_component() {
-        let ids: Vec<String> = Component::VARIANTS
-            .iter()
-            .map(|&component| Channel::Production.identity(component).bundle_id)
-            .collect();
-        for (index, id) in ids.iter().enumerate() {
-            assert!(
-                !ids[index + 1..].contains(id),
-                "{id} is claimed by two components"
-            );
-        }
-    }
-
-    #[test]
-    fn stamping_a_channel_makes_it_verify() {
-        for channel in [Channel::Production, Channel::Dev] {
-            let app = bundle();
-
-            stamp(app.path(), channel).unwrap();
-
-            verify(app.path(), channel).unwrap();
-        }
-    }
-
-    #[test]
-    fn a_dev_bundle_fails_production_verification() {
-        let app = bundle();
-        stamp(app.path(), Channel::Dev).unwrap();
-
-        let error = verify(app.path(), Channel::Production)
-            .unwrap_err()
-            .to_string();
-
-        assert!(
-            error.contains("org.openlogi.openlogi.dev") && error.contains("production"),
-            "the error must name the dev identity it found and the channel it wanted, got: {error}"
-        );
-    }
-
-    #[test]
-    fn a_shipped_bundle_fails_dev_verification() {
-        let app = bundle();
-        stamp(app.path(), Channel::Production).unwrap();
-
-        let error = verify(app.path(), Channel::Dev).unwrap_err().to_string();
-
-        assert!(error.contains("dev"), "got: {error}");
-    }
-
-    #[test]
-    fn verify_rejects_a_bundle_with_no_identity_at_all() {
-        let app = bundle();
-
-        assert!(verify(app.path(), Channel::Production).is_err());
-    }
-
-    #[test]
-    fn missing_icons_are_reported_per_component() {
-        let app = bundle();
-        stamp(app.path(), Channel::Production).unwrap();
-
-        let error = verify_icons(app.path()).unwrap_err().to_string();
-
-        assert!(
-            error.contains("missing the shared app icon"),
-            "got: {error}"
-        );
-    }
-}
+mod tests;
