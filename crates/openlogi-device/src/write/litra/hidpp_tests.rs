@@ -1158,6 +1158,92 @@ async fn a_brightness_lowered_to_a_new_limit_is_not_a_change_on_the_light() {
 }
 
 #[tokio::test]
+async fn a_limit_read_behind_another_notification_is_not_a_change_on_the_light() {
+    let mut light = Light::glow();
+    light.brightness_flags = DYNAMIC;
+    let backend = LitraBackend::new("limit-behind", Opens::Hidpp, light);
+    let mut watch = watching(&backend).await;
+
+    // The temperature button is pressed, and the light lowers its limit
+    // before the temperature notification is read.
+    backend.press(2, |light| {
+        light.kelvin = 5000;
+        5000u16.to_be_bytes().to_vec()
+    });
+    backend.press(3, |light| {
+        light.effective_max = 80;
+        light.lumens = 80;
+        80u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the temperature press is reported");
+    assert_eq!(
+        change.on_light,
+        LightControls {
+            temperature: true,
+            ..LightControls::default()
+        }
+    );
+    assert_eq!(change.state.brightness, Some(80));
+    assert_eq!(change.state.brightness_limit, Some(80));
+    assert!(
+        stays_quiet(&mut watch).await,
+        "the limit notification read later finds nothing new"
+    );
+}
+
+#[tokio::test]
+async fn a_read_after_a_notification_replaces_an_older_write_reading() {
+    let light = Light {
+        quirk: Quirk::Unannounced,
+        ..Light::glow()
+    };
+    let backend = LitraBackend::new("superseded", Opens::Hidpp, light);
+    let route = backend.route();
+    let mut watch = watching(&backend).await;
+
+    // OpenLogi writes 200 lm, then the brightness button lowers it to 150 lm
+    // before the watcher takes the write's reading.
+    apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::BrightnessNative(200),
+    )
+    .await
+    .expect("the brightness is written")
+    .expect("the light reads back");
+    backend.press(1, |light| {
+        light.lumens = 150;
+        150u16.to_be_bytes().to_vec()
+    });
+
+    // Let the press notification reach the watcher before it next looks, so
+    // the notification is taken before the write's reading.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut reported = Vec::new();
+    while let Ok(change) = tokio::time::timeout(Duration::from_millis(200), watch.next()).await {
+        reported.push(change.expect("the link stays"));
+    }
+    let Some(last) = reported.last() else {
+        panic!("the button press is reported");
+    };
+    assert_eq!(
+        *last,
+        LightChange {
+            state: watch.state(),
+            on_light: LightControls {
+                brightness: true,
+                ..LightControls::default()
+            },
+        },
+        "the press is reported last, not the write's older reading: {reported:?}"
+    );
+    assert_eq!(watch.state().brightness, Some(150));
+}
+
+#[tokio::test]
 async fn a_raw_only_light_cannot_be_watched_and_a_refused_open_can_be_retried() {
     let raw_only = LitraBackend::new("watch-raw", Opens::NotHidpp, Light::glow());
     assert!(matches!(

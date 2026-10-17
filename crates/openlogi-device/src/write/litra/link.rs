@@ -185,11 +185,12 @@ impl LightWatch {
     ///
     /// After a notification the light is read again rather than trusted from
     /// the notification, and only a value that differs from the last one read
-    /// or written counts as changed on the light. A brightness the light
-    /// lowered to a new limit is a change of state, not one made on the light.
-    /// A write OpenLogi made is reported with the state it read back and no
-    /// control changed on the light, once, whether the light announces it or
-    /// not.
+    /// or written counts as changed on the light. A brightness that moved
+    /// with the light's limit is a change of state, not one made on the light,
+    /// whichever notification is read first. A write OpenLogi made is reported
+    /// with the state it read back and no control changed on the light, once,
+    /// whether the light announces it or not — unless a read after a
+    /// notification already took its place.
     ///
     /// Returns `None` once the link is gone — the light stopped answering, or
     /// came back as another node — and the caller should watch it again.
@@ -215,6 +216,9 @@ impl LightWatch {
                 }
             };
             let _guard = device_lock(&self.route).await;
+            // Each write read the light back and noted it under this lock, so
+            // the read below is newer than every state a write noted so far.
+            self.written.mark_unchanged();
             let state = match tokio::time::timeout(RESOLVE_TIMEOUT, self.link.light.read_state())
                 .await
             {
@@ -229,11 +233,14 @@ impl LightWatch {
                 }
             };
             let before = std::mem::replace(&mut *self.link.last(), state);
-            let limited = matches!(
-                event,
-                IlluminationEvent::BrightnessEffectiveMaxChanged(_)
-                    | IlluminationEvent::BrightnessClamped { .. }
-            );
+            // The limit shows in the state read even when another
+            // notification is read before the light's own limit notification.
+            let limited = before.brightness_limit != state.brightness_limit
+                || matches!(
+                    event,
+                    IlluminationEvent::BrightnessEffectiveMaxChanged(_)
+                        | IlluminationEvent::BrightnessClamped { .. }
+                );
             let on_light = LightControls {
                 power: before.on != state.on,
                 brightness: !limited && before.brightness != state.brightness,
