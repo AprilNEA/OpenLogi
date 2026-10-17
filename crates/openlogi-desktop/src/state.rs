@@ -292,7 +292,7 @@ impl AppState {
         // Plain `persist_config`, not `persist_and_reload` as
         // `refresh_inventories` uses for the same fold: there is no agent
         // connection to reload yet this early in startup, and the
-        // unconditional `ReloadConfig` send at the end of this constructor
+        // unconditional `LoadConfig` send at the end of this constructor
         // (below) already covers both branches once `state` is fully built —
         // sending it here too would just queue a second, redundant reload.
         if adopted {
@@ -301,7 +301,7 @@ impl AppState {
             state.persist_config("device identity");
         }
         if state.config.should_reload_agent() {
-            state.send_ipc(crate::services::ipc::ReloadConfig);
+            state.send_ipc(crate::services::ipc::LoadConfig);
         }
         state
     }
@@ -323,8 +323,23 @@ impl AppState {
     /// next reconnect or wake. A failed write restores the last persisted
     /// config and surfaces the persistence error in the GUI.
     fn persist_and_reload(&mut self, what: &str) -> bool {
+        self.persist_and_reload_choosing(what, Vec::new())
+    }
+
+    /// [`Self::persist_and_reload`] for a save in which the user set controls
+    /// of lights without a write to the light. `chosen` names them, so the
+    /// agent drops the changes made on the lights for those controls
+    /// ([`openlogi_ipc::Agent::reload_saved_config`]). The reload carries the
+    /// revision of the file this save wrote, so the agent can tell an edit
+    /// made after the save.
+    fn persist_and_reload_choosing(
+        &mut self,
+        what: &str,
+        chosen: Vec<openlogi_ipc::ChosenLight>,
+    ) -> bool {
         if self.persist_config(what) {
-            self.send_ipc(crate::services::ipc::ReloadConfig);
+            let revision = self.config.revision();
+            self.send_ipc(crate::services::ipc::ReloadConfig { chosen, revision });
             true
         } else {
             false

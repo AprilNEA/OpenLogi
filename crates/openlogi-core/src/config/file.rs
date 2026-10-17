@@ -13,7 +13,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use toml_edit::{DocumentMut, Item, Table};
 
-use super::{Config, SCHEMA_VERSION};
+use super::{Config, ConfigRevision, SCHEMA_VERSION};
 use crate::paths::{self, PathsError};
 
 const CONFIG_BACKUP_GENERATIONS: usize = 5;
@@ -243,6 +243,13 @@ impl ConfigFile {
         self.migrated_from = None;
         self.source = Some(body);
         Ok(())
+    }
+
+    /// The revision of the file as this handle loaded it or last saved it.
+    /// A missing file has the revision of an empty one.
+    #[must_use]
+    pub fn revision(&self) -> ConfigRevision {
+        ConfigRevision::of(self.source.as_deref().unwrap_or_default())
     }
 }
 

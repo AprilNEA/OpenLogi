@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::binding::ButtonId;
 use crate::color::Rgb;
+use crate::device::ChangedOnLight;
 use crate::hid::{SmartShiftAutoDisengage, SmartShiftThreshold, TunableTorque};
 
 /// Light/dark appearance preference. `System` follows the OS appearance (the
@@ -580,6 +581,19 @@ impl LightSettings {
             brightness_percent: brightness_percent.min(100),
             temperature_kelvin,
             color: None,
+        }
+    }
+
+    /// Take the values changed on the light itself in place of these.
+    pub fn apply_changes_on_light(&mut self, changed: ChangedOnLight) {
+        if let Some(enabled) = changed.enabled {
+            self.enabled = enabled;
+        }
+        if let Some(percent) = changed.brightness_percent {
+            self.brightness_percent = percent;
+        }
+        if let Some(kelvin) = changed.temperature_kelvin {
+            self.temperature_kelvin = Some(kelvin);
         }
     }
 }

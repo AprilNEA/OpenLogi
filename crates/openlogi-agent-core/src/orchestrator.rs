@@ -17,7 +17,9 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, MouseProfileTarget, canonical_device_key};
+use openlogi_core::config::{
+    Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
+};
 use openlogi_core::device::{
     Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities, LightState,
     StandaloneDevice,
@@ -28,7 +30,9 @@ use openlogi_hid::{
     DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, ReportRate,
     ReportRateInfo, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
 };
-use openlogi_ipc::InventoryHealth;
+#[cfg(test)]
+use openlogi_ipc::ChosenLight;
+use openlogi_ipc::{InventoryHealth, SavedConfig};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -51,6 +55,8 @@ use crate::{DpiCycleState, DpiCycles};
 
 mod devices;
 mod lights;
+
+pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 
 #[cfg(test)]
 use devices::reapply_targets;
@@ -363,6 +369,14 @@ pub struct Orchestrator {
     /// yet, by config key. They stand in for the saved values until a save
     /// or a GUI write of that control replaces them.
     lights_changed_on_light: BTreeMap<String, ChangedOnLight>,
+    /// The changes made on lights that GUI writes in flight took, by claim
+    /// ([`LightWriteClaim`]). A reload replaces them as it replaces the
+    /// changes above, and a failed write puts back what is left. A write
+    /// whose RPC is cancelled before it settles leaves its claim here; it is
+    /// never put back.
+    light_writes: BTreeMap<u64, TakenLightChange>,
+    /// The number of the next [`LightWriteClaim`].
+    next_light_write: u64,
     /// The keyboards whose "keep OS layout" is in effect, shared with the
     /// layout writes queued for them so a write withdraws itself once a
     /// reload turns the setting off or disables the device.
@@ -469,6 +483,8 @@ impl Orchestrator {
             manual_light_overrides: BTreeMap::new(),
             light_states: BTreeMap::new(),
             lights_changed_on_light: BTreeMap::new(),
+            light_writes: BTreeMap::new(),
+            next_light_write: 0,
             kept_os_layouts: Arc::default(),
             os_mouse_hook_available: false,
             capture_plans_tx,
@@ -1052,7 +1068,7 @@ impl Orchestrator {
     fn effective_light_settings(&self, key: &str) -> Option<LightSettings> {
         let mut light = self.config.light(key)?;
         if let Some(changed) = self.lights_changed_on_light.get(key) {
-            lights::apply_changes_on_light(&mut light, *changed);
+            light.apply_changes_on_light(*changed);
         }
         if light.auto_camera {
             if let Some(override_enabled) = self.manual_light_overrides.get(key) {
@@ -1266,8 +1282,33 @@ impl Orchestrator {
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
+    /// The file is one the agent did not see saved, as at startup or after a
+    /// hand edit (see [`ConfigSource::Loaded`]).
     pub fn reload_config(&mut self, config: Config) {
-        for write in self.replace_config(config) {
+        self.reload_from(config, ConfigSource::Loaded);
+    }
+
+    /// [`Self::reload_config`] after the GUI saved `saved`, with `config`
+    /// read from a file at revision `read`. A file still at the revision the
+    /// GUI wrote is its save; another was edited since, and loads as
+    /// [`Self::reload_config`] loads it (see [`ConfigSource::of_saved`]).
+    pub fn reload_saved_config(
+        &mut self,
+        config: Config,
+        read: ConfigRevision,
+        saved: &SavedConfig,
+    ) {
+        self.reload_from(config, ConfigSource::of_saved(read, saved));
+    }
+
+    /// Replace the config from `source` and write each light it changed.
+    fn reload_from(&mut self, config: Config, source: ConfigSource<'_>) {
+        let writes = self.replace_config_from(config, source);
+        self.write_lights(writes);
+    }
+
+    fn write_lights(&self, writes: Vec<LightWrite>) {
+        for write in writes {
             self.shared.hardware.set_light_in_background(
                 Some(write.route),
                 &write.light,
@@ -1278,10 +1319,21 @@ impl Orchestrator {
 
     /// Everything [`Self::reload_config`] does except the light writes, which
     /// it returns instead: one per online light whose settings changed.
+    #[cfg(test)]
     fn replace_config(&mut self, config: Config) -> Vec<LightWrite> {
+        self.replace_config_from(config, ConfigSource::Loaded)
+    }
+
+    /// [`Self::replace_config`] for [`Self::reload_saved_config`].
+    #[cfg(test)]
+    fn replace_saved_config(&mut self, config: Config, chosen: &[ChosenLight]) -> Vec<LightWrite> {
+        self.replace_config_from(config, ConfigSource::Saved { chosen })
+    }
+
+    fn replace_config_from(&mut self, config: Config, source: ConfigSource<'_>) -> Vec<LightWrite> {
         let previous_lights = self.effective_online_lights();
         let previous = std::mem::replace(&mut self.config, config);
-        self.forget_saved_light_changes(&previous);
+        self.forget_saved_light_changes(&previous, source);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
         self.shared.scroll_preferences.publish(
