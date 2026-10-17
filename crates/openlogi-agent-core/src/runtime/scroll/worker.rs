@@ -273,6 +273,10 @@ struct ScrollInput {
     source: ScrollSource,
     impulse: WheelDelta,
     output: ScrollOutputMode,
+    /// `ISOLATED_TICK_BOOST` (or neutral `1.0`) applied to `impulse` only if
+    /// the worker eases it, so a tick reclassified as direct output by a
+    /// smoothing toggle keeps its true distance.
+    isolated_boost: f64,
 }
 
 impl ScrollInput {
@@ -416,13 +420,15 @@ impl ScrollInputHandle {
         } else {
             1.0
         };
-        let mut scale = resolution_scale * preferences.vertical_sensitivity.scroll_multiplier();
-        if preferences.smooth_scroll
+        let scale = resolution_scale * preferences.vertical_sensitivity.scroll_multiplier();
+        let isolated_boost = if preferences.smooth_scroll
             && is_isolated_tick
             && impulse.y.abs() < RESOLUTION_SCALE_MAGNITUDE_THRESHOLD
         {
-            scale *= ISOLATED_TICK_BOOST;
-        }
+            ISOLATED_TICK_BOOST
+        } else {
+            1.0
+        };
         let Some(scaled) = impulse.with_vertical_scale(scale) else {
             return false;
         };
@@ -433,7 +439,7 @@ impl ScrollInputHandle {
         } else {
             return false;
         };
-        self.try_enqueue(ScrollSource::current_hook(), scaled, output)
+        self.try_enqueue(ScrollSource::current_hook(), scaled, output, isolated_boost)
     }
 
     /// Queue one diverted thumb-wheel impulse from an active HID++ session.
@@ -459,7 +465,7 @@ impl ScrollInputHandle {
         ) else {
             return false;
         };
-        self.try_enqueue(ScrollSource::Hidpp(session.clone()), impulse, output)
+        self.try_enqueue(ScrollSource::Hidpp(session.clone()), impulse, output, 1.0)
     }
 
     /// Queue one diverted main-wheel impulse from an active HID++ session.
@@ -493,6 +499,7 @@ impl ScrollInputHandle {
                 ScrollSource::Hidpp(session.clone()),
                 scaled,
                 ScrollOutputMode::Eased { at: Instant::now() },
+                1.0,
             );
         if queued { Ok(()) } else { Err(scaled.into()) }
     }
@@ -502,12 +509,14 @@ impl ScrollInputHandle {
         source: ScrollSource,
         impulse: WheelDelta,
         output: ScrollOutputMode,
+        isolated_boost: f64,
     ) -> bool {
         let input = ScrollInput {
             generation: self.generation.load(Ordering::Acquire),
             source,
             impulse,
             output,
+            isolated_boost,
         };
         match self.commands.try_send(ScrollCommand::Input(input)) {
             Ok(()) => true,
@@ -736,7 +745,11 @@ fn run_worker(
             Ok(ScrollCommand::Input(input)) if cancellations.accepts(&input) => {
                 match input.output_under(smoothing) {
                     ScrollOutputMode::Smooth { at } | ScrollOutputMode::Eased { at } => {
-                        engine.impulse(input.source, input.impulse, at, emit_smooth);
+                        let impulse = input
+                            .impulse
+                            .with_vertical_scale(input.isolated_boost)
+                            .unwrap_or(input.impulse);
+                        engine.impulse(input.source, impulse, at, emit_smooth);
                     }
                     ScrollOutputMode::Phased { at } => {
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
@@ -978,8 +991,9 @@ mod tests {
         // (no prior tick to compare against).
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 2.0)));
         let queued = queued_input(&receiver);
-        // Base scale (sensitivity 7 -> 0.5) times ISOLATED_TICK_BOOST (8.0).
-        assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 8.0 });
+        // Base scale (sensitivity 7 -> 0.5), eased with ISOLATED_TICK_BOOST.
+        assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 1.0 });
+        assert_eq!(queued.isolated_boost, ISOLATED_TICK_BOOST);
     }
 
     #[test]
@@ -1407,6 +1421,7 @@ mod tests {
             source: source.clone(),
             impulse: WheelDelta { x, y },
             output,
+            isolated_boost: 1.0,
         };
 
         // Queued with smoothing on, dequeued with it off.
@@ -1591,6 +1606,7 @@ mod tests {
             source: ScrollSource::Hidpp(session.clone()),
             impulse: WheelDelta { x: 0.0, y: 1.0 },
             output: ScrollOutputMode::Direct,
+            isolated_boost: 1.0,
         };
         let mut cancellations = OverflowCancellations::new(0);
         cancellations.cancel(&cancelled, 0);
@@ -1646,6 +1662,7 @@ mod tests {
                 source: ScrollSource::Hidpp(session.clone()),
                 impulse: WheelDelta { x: 0.0, y: 1.0 },
                 output: ScrollOutputMode::Smooth { at: Instant::now() },
+                isolated_boost: 1.0,
             }))
             .expect("worker command channel remains open");
         assert_eq!(
@@ -1700,6 +1717,7 @@ mod tests {
                 source: ScrollSource::Hidpp(session.clone()),
                 impulse: WheelDelta { x: 0.0, y },
                 output: ScrollOutputMode::Direct,
+                isolated_boost: 1.0,
             }))
         };
         let mut script = [
