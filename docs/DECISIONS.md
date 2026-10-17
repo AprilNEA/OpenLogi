@@ -46,7 +46,10 @@ state, and writes a value only when it differs from the one it read.
   flight. The agent takes the controls a write sets before it writes and gives
   them back only if the write fails, so a state published during the write
   never offers the old change, and the app cannot save it over the value the
-  user just chose. The app reloads its own saves with `reload_saved_config`.
+  user just chose. The agent holds what a write took until the write settles,
+  so a reload during the write replaces it as it replaces any change, and a
+  failed write gives back only what is left. The app reloads its own saves
+  with `reload_saved_config`.
   It writes each control it changes before it saves it, and the write takes
   the change, so a saved value that differs from the one before is the app's
   copy of an earlier report. That save leaves a newer change on the light in

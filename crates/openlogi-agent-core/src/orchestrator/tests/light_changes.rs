@@ -261,6 +261,17 @@ fn taken(changed: ChangedOnLight) -> TakenLightChange {
     }
 }
 
+/// What a GUI write of `command` to the light on `route` takes, held as for
+/// a write in flight.
+fn writing(
+    orch: &mut Orchestrator,
+    route: &DeviceRoute,
+    command: LightCommand,
+) -> Option<TakenLightChange> {
+    let claim = orch.light_writing(route, command)?;
+    orch.claimed(&claim).cloned()
+}
+
 #[test]
 fn a_gui_write_of_a_control_not_changed_on_the_light_takes_nothing() {
     let mut orch = with_glow(config_with(settings(true, 80, 4000)));
@@ -268,7 +279,7 @@ fn a_gui_write_of_a_control_not_changed_on_the_light_takes_nothing() {
     let changed = changed_on_light(&orch);
     assert_eq!(changed.temperature_kelvin, Some(5000));
     assert_eq!(
-        orch.light_writing(&route(), LightCommand::BrightnessPercent(70)),
+        writing(&mut orch, &route(), LightCommand::BrightnessPercent(70)),
         None
     );
     assert_eq!(changed_on_light(&orch), changed);
@@ -280,13 +291,17 @@ fn a_gui_write_takes_only_the_control_it_sets() {
     orch.light_changed(&route(), pressed_everything());
     let pressed = changed_on_light(&orch);
     assert_eq!(
-        orch.light_writing(&glow_route("serial:other"), LightCommand::Power(true)),
+        writing(
+            &mut orch,
+            &glow_route("serial:other"),
+            LightCommand::Power(true)
+        ),
         None,
         "a write to another light takes nothing from this one"
     );
     assert_eq!(changed_on_light(&orch), pressed);
     assert_eq!(
-        orch.light_writing(&route(), LightCommand::BrightnessNative(200)),
+        writing(&mut orch, &route(), LightCommand::BrightnessNative(200)),
         Some(taken(ChangedOnLight {
             brightness_percent: Some(50),
             ..ChangedOnLight::default()
@@ -300,7 +315,7 @@ fn a_gui_write_takes_only_the_control_it_sets() {
         }
     );
     assert_eq!(
-        orch.light_writing(&route(), LightCommand::Power(true)),
+        writing(&mut orch, &route(), LightCommand::Power(true)),
         Some(taken(ChangedOnLight {
             enabled: Some(false),
             ..ChangedOnLight::default()
@@ -314,7 +329,7 @@ fn a_gui_write_takes_only_the_control_it_sets() {
         }
     );
     assert_eq!(
-        orch.light_writing(&route(), LightCommand::TemperatureKelvin(4000)),
+        writing(&mut orch, &route(), LightCommand::TemperatureKelvin(4000)),
         Some(taken(ChangedOnLight {
             temperature_kelvin: Some(5000),
             ..ChangedOnLight::default()
@@ -323,13 +338,10 @@ fn a_gui_write_takes_only_the_control_it_sets() {
     assert!(orch.lights_changed_on_light.is_empty());
     assert_eq!(changed_on_light(&orch), ChangedOnLight::default());
     orch.light_changed(&route(), change(state(true, 135, 4000), false, true, false));
-    assert!(
-        orch.light_writing(&route(), LightCommand::BrightnessPercent(70))
-            .is_some()
-    );
+    assert!(writing(&mut orch, &route(), LightCommand::BrightnessPercent(70)).is_some());
     assert!(orch.lights_changed_on_light.is_empty());
     assert_eq!(
-        orch.light_writing(&route(), LightCommand::Power(true)),
+        writing(&mut orch, &route(), LightCommand::Power(true)),
         None,
         "nothing changed on the light, nothing taken"
     );
@@ -394,12 +406,6 @@ fn a_failed_gui_write_puts_back_only_what_no_newer_change_replaced() {
         orch.light_write_failed(taken);
     }
     assert_eq!(changed_on_light(&orch), newer);
-
-    orch.light_write_failed(TakenLightChange {
-        key: KEY.to_string(),
-        changed: ChangedOnLight::default(),
-    });
-    assert_eq!(changed_on_light(&orch), newer);
 }
 
 #[test]
@@ -421,6 +427,63 @@ fn a_failed_gui_write_puts_the_change_back_after_the_light_went_offline() {
         orch.effective_light_settings(KEY)
             .map(|light| light.brightness_percent),
         Some(50)
+    );
+}
+
+#[test]
+fn a_reload_during_a_gui_write_replaces_what_the_write_took() {
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    orch.light_changed(&route(), pressed_everything());
+    let pressed = changed_on_light(&orch);
+    let Some(brightness) = orch.light_writing(&route(), LightCommand::BrightnessNative(200)) else {
+        panic!("the pressed brightness is taken");
+    };
+    // A CLI edit sets 70 % while the write is in flight.
+    let _ = orch.replace_config(config_with(settings(true, 70, 4000)));
+    assert_eq!(
+        orch.claimed(&brightness),
+        None,
+        "the edit replaced all that the write took"
+    );
+    orch.light_write_failed(brightness);
+    assert_eq!(
+        changed_on_light(&orch),
+        ChangedOnLight {
+            brightness_percent: None,
+            ..pressed
+        },
+        "the failed write does not put the replaced press back"
+    );
+    assert_eq!(
+        orch.effective_light_settings(KEY)
+            .map(|light| light.brightness_percent),
+        Some(70),
+        "the reconnect writes the edit"
+    );
+}
+
+#[test]
+fn a_reload_during_a_gui_write_keeps_what_it_did_not_replace() {
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    orch.light_changed(&route(), pressed_everything());
+    let pressed = changed_on_light(&orch);
+    let Some(brightness) = orch.light_writing(&route(), LightCommand::BrightnessNative(200)) else {
+        panic!("the pressed brightness is taken");
+    };
+    // A CLI edit of the temperature only, while the write is in flight.
+    let _ = orch.replace_config(config_with(settings(true, 80, 4500)));
+    orch.light_write_failed(brightness);
+    assert_eq!(
+        changed_on_light(&orch),
+        ChangedOnLight {
+            temperature_kelvin: None,
+            ..pressed
+        },
+        "the failed write puts the press the edit left alone back"
+    );
+    assert!(
+        orch.light_writes.is_empty(),
+        "the settled write holds nothing"
     );
 }
 
@@ -446,6 +509,10 @@ async fn a_successful_gui_write_keeps_the_old_change_out() {
             ..pressed
         },
         "the light now holds the user's choice"
+    );
+    assert!(
+        orch.lock().await.light_writes.is_empty(),
+        "the settled write holds nothing"
     );
 }
 
@@ -495,6 +562,10 @@ async fn a_failed_gui_write_offers_the_old_change_again() {
         .await;
     assert_eq!(written, Err(WriteError::DeviceNotFound));
     assert_eq!(changed_on_light(&*orch.lock().await), pressed);
+    assert!(
+        orch.lock().await.light_writes.is_empty(),
+        "the settled write holds nothing"
+    );
 }
 
 #[test]

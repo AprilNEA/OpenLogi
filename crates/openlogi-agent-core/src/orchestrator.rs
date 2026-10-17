@@ -56,7 +56,7 @@ use crate::{DpiCycleState, DpiCycles};
 mod devices;
 mod lights;
 
-pub use lights::{ConfigSource, TakenLightChange, write_light};
+pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 
 #[cfg(test)]
 use devices::reapply_targets;
@@ -369,6 +369,14 @@ pub struct Orchestrator {
     /// yet, by config key. They stand in for the saved values until a save
     /// or a GUI write of that control replaces them.
     lights_changed_on_light: BTreeMap<String, ChangedOnLight>,
+    /// The changes made on lights that GUI writes in flight took, by claim
+    /// ([`LightWriteClaim`]). A reload replaces them as it replaces the
+    /// changes above, and a failed write puts back what is left. A write
+    /// whose RPC is cancelled before it settles leaves its claim here; it is
+    /// never put back.
+    light_writes: BTreeMap<u64, TakenLightChange>,
+    /// The number of the next [`LightWriteClaim`].
+    next_light_write: u64,
     /// The keyboards whose "keep OS layout" is in effect, shared with the
     /// layout writes queued for them so a write withdraws itself once a
     /// reload turns the setting off or disables the device.
@@ -475,6 +483,8 @@ impl Orchestrator {
             manual_light_overrides: BTreeMap::new(),
             light_states: BTreeMap::new(),
             lights_changed_on_light: BTreeMap::new(),
+            light_writes: BTreeMap::new(),
+            next_light_write: 0,
             kept_os_layouts: Arc::default(),
             os_mouse_hook_available: false,
             capture_plans_tx,

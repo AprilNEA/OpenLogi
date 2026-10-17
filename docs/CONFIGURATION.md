@@ -131,8 +131,9 @@ Common device fields are:
   its buttons or by another program also replaces the saved value while the
   agent runs, so a reconnect writes the new value back, as in Logi Options+.
   The agent publishes the change to clients and keeps it until a save or a
-  write from OpenLogi sets that control; a write that fails leaves it. The
-  desktop app saves the change as the light's setting. While one of its own
+  write from OpenLogi sets that control; a write that fails leaves it, unless
+  a reload during the write replaced it. The desktop app saves the change
+  as the light's setting. While one of its own
   writes to that light is in flight, it waits for the write to settle and
   saves only what the agent still reports. It writes each control it changes
   before it saves it, so its save of a value the light reported earlier leaves
