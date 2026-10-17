@@ -423,6 +423,11 @@ async fn accept_pending(state: Arc<GenerationState>, peer: PublicKey, transfer_i
             // on an armed edge that sends the devices straight back.
             if let Some(entry) = state.handoffs.pointer_entry(peer, transfer_id).await {
                 super::runtime::warp_entry(&entry);
+                state.pointer_hold.arrived();
+                info!(
+                    transfer_id,
+                    "Flow incoming handoff accepted, pointer placed"
+                );
             }
             let keys = state.handoffs.pending_keys(peer, transfer_id).await;
             state.note_presence(keys.iter().map(String::as_str), Presence::Arrived);

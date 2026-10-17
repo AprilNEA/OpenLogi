@@ -725,8 +725,16 @@ fn platform() -> proto::Platform {
 /// runs in the background under an ordinary I/O lease; a device that cannot be
 /// prepared now is retried on the next inventory change.
 pub(super) fn prepare_switch_targets(state: &Arc<GenerationState>) {
-    let wanted: Vec<(DeviceRoute, Vec<u8>)> = state
-        .effective_devices()
+    let devices = state.effective_devices();
+    // A prepared target survives the device leaving: it comes back to the
+    // same receiver slot, where the handle is still valid, and a round trip
+    // is exactly when there is no time to prepare it again. A failed write
+    // clears the cache instead.
+    let known: Vec<DeviceRoute> = devices
+        .iter()
+        .filter_map(|device| device.snapshot.route.clone())
+        .collect();
+    let wanted: Vec<(DeviceRoute, Vec<u8>)> = devices
         .into_iter()
         .filter(|device| device.snapshot.online)
         .filter_map(|device| {
@@ -739,7 +747,7 @@ pub(super) fn prepare_switch_targets(state: &Arc<GenerationState>) {
         let Ok(mut cache) = state.switch_targets.lock() else {
             return;
         };
-        cache.retain(|(route, _)| wanted.iter().any(|(online, _)| online == route));
+        cache.retain(|(route, _)| known.contains(route));
         let missing: Vec<_> = wanted
             .into_iter()
             .filter(|(route, _)| !cache.iter().any(|(cached, _)| cached == route))

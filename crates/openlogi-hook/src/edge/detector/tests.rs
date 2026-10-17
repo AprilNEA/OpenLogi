@@ -315,3 +315,39 @@ fn geometry_replacement_preserves_crossing_latch_until_rearm() {
             .is_some()
     );
 }
+
+#[test]
+fn a_latched_arrival_waits_until_the_cursor_leaves_the_edge() {
+    let edges = ExposedEdges::from_displays(&[rect(0.0, 0.0, 100.0, 100.0)]);
+    let mut detector = EdgeDetector::new(
+        edges,
+        ArmedSides::from_sides([EdgeSide::Left]),
+        dwell_params(),
+    );
+    detector.latch();
+
+    // Placed one pixel inside the armed edge and left there: no dwell crossing.
+    assert!(detector.update(point(1.0, 50.0), Duration::ZERO).is_none());
+    assert!(
+        detector
+            .update(point(1.0, 50.0), Duration::from_millis(400))
+            .is_none()
+    );
+
+    // Away past the rearm distance, then back: an ordinary crossing again.
+    assert!(
+        detector
+            .update(point(30.0, 50.0), Duration::from_millis(600))
+            .is_none()
+    );
+    assert!(
+        detector
+            .update(point(0.0, 50.0), Duration::from_millis(1_200))
+            .is_none()
+    );
+    assert!(
+        detector
+            .update(point(0.0, 50.0), Duration::from_millis(1_400))
+            .is_some()
+    );
+}

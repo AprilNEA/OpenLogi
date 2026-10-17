@@ -9,7 +9,7 @@ use openlogi_hook::edge::{
 };
 use openlogi_ipc::{FlowLinkState, FlowPeerStatus, FlowStatus};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::FlowGeneration;
 use crate::flow::FlowDeviceSnapshot;
@@ -60,6 +60,9 @@ pub(crate) struct PointerHold {
     epoch: Instant,
     /// Milliseconds after `epoch` until which movement is swallowed; 0 = none.
     until_ms: AtomicU64,
+    /// Set when a handoff placed the pointer on an armed edge from outside;
+    /// the edge detector latches so that placement cannot read as a crossing.
+    arrived: AtomicBool,
 }
 
 /// Long enough to cover the exclusive receiver lease and the switch writes.
@@ -70,6 +73,7 @@ impl PointerHold {
         Self {
             epoch: Instant::now(),
             until_ms: AtomicU64::new(0),
+            arrived: AtomicBool::new(false),
         }
     }
 
@@ -87,6 +91,15 @@ impl PointerHold {
     /// Let the pointer move again: the handoff did not move the devices.
     pub(crate) fn release(&self) {
         self.until_ms.store(0, Ordering::Release);
+    }
+
+    /// The pointer was just placed on the edge a handoff arrived through.
+    pub(crate) fn arrived(&self) {
+        self.arrived.store(true, Ordering::Release);
+    }
+
+    fn take_arrival(&self) -> bool {
+        self.arrived.swap(false, Ordering::AcqRel)
     }
 
     fn held(&self) -> bool {
@@ -365,7 +378,8 @@ async fn run_edge_input(
     hold: Arc<PointerHold>,
 ) {
     let epoch = Instant::now();
-    let mut detector = None;
+    let mut detector: Option<EdgeDetector> = None;
+    let mut latch_pending = false;
     let mut active_revision = u64::MAX;
     let mut refreshed_at = Instant::now()
         .checked_sub(GEOMETRY_REFRESH)
@@ -383,15 +397,27 @@ async fn run_edge_input(
             || Instant::now().duration_since(refreshed_at) >= GEOMETRY_REFRESH;
         if refresh {
             let displays = openlogi_hook::display_rects();
-            detector = (!displays.is_empty()).then(|| {
-                EdgeDetector::new(
-                    ExposedEdges::from_displays(&displays),
-                    current.sides,
-                    EdgeDetectorParams::default(),
-                )
-            });
+            let edges = ExposedEdges::from_displays(&displays);
+            detector = match detector.take() {
+                // Same configuration: refresh the geometry only, so a latch
+                // (after a crossing or an arrival) survives the periodic poll.
+                Some(mut existing)
+                    if current.revision == active_revision && !displays.is_empty() =>
+                {
+                    existing.set_edges(edges);
+                    Some(existing)
+                }
+                _ => (!displays.is_empty()).then(|| {
+                    EdgeDetector::new(edges, current.sides, EdgeDetectorParams::default())
+                }),
+            };
             active_revision = current.revision;
             refreshed_at = Instant::now();
+        }
+        latch_pending |= hold.take_arrival();
+        if latch_pending && let Some(detector) = detector.as_mut() {
+            detector.latch();
+            latch_pending = false;
         }
         let (Some(detector), Some(position)) =
             (detector.as_mut(), openlogi_hook::cursor_position())
@@ -399,6 +425,7 @@ async fn run_edge_input(
             continue;
         };
         if let Some(crossing) = detector.update(position, epoch.elapsed()) {
+            info!(side = ?crossing.side, "Flow edge crossed");
             hold.hold();
             if control.send(Control::Crossing(crossing)).is_err() {
                 hold.release();

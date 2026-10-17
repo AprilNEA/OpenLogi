@@ -147,6 +147,16 @@ impl EdgeDetector {
         self.contact = None;
     }
 
+    /// Treat the cursor as having just crossed: nothing triggers until it moves
+    /// at least `rearm_distance` from every armed edge.
+    ///
+    /// For a cursor placed on an armed edge from outside — a handoff arriving
+    /// from the machine beyond it — which must not read as an approach back.
+    pub fn latch(&mut self) {
+        self.contact = None;
+        self.latched = true;
+    }
+
     /// Consume one cursor sample and return at most one crossing.
     ///
     /// At a corner, an existing contact remains selected. A new contact chooses

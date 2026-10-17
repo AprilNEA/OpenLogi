@@ -33,41 +33,58 @@ pub(in crate::flow) fn start_outgoing(state: Arc<GenerationState>, crossing: Edg
         if let Some(completed) = state.handoffs.complete_on_departure().await {
             super::finish_incoming(Arc::clone(&state), completed).await;
         }
+        let acknowledgment = run_outgoing(&state, crossing).await;
         // Once the switch is issued the devices are leaving: the hold expires
         // on its own. Anything short of that gives the pointer back now.
-        if !run_outgoing(&state, crossing).await {
+        if acknowledgment.is_none() {
             state.pointer_hold.release();
         }
+        // The devices are gone, so nothing here can cross again until they
+        // come back — and when they do, that crossing must not queue behind
+        // this transfer's acknowledgment.
         state
             .handoffs
             .sender_busy
             .store(false, std::sync::atomic::Ordering::Release);
+        if let Some(acknowledgment) = acknowledgment {
+            await_acknowledgment(&state, acknowledgment).await;
+        }
     });
 }
 
-/// Run one outgoing handoff; returns whether the host switch was issued.
-async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) -> bool {
-    // A config reload deactivates a generation at this lock boundary. Once a
-    // peer accepts, keep the bounded handoff transaction on one generation
-    // through its arrival acknowledgment so stale config cannot switch hosts.
+/// A switched transfer still waiting for the receiver's arrival result.
+struct Acknowledgment {
+    peer: String,
+    transfer_id: u64,
+    started: std::time::Instant,
+    deadline: Duration,
+    result: tokio::sync::oneshot::Receiver<OutgoingSignal>,
+}
+
+/// Run one outgoing handoff up to the host switch; returns the pending
+/// acknowledgment when the switch was issued.
+async fn run_outgoing(
+    state: &Arc<GenerationState>,
+    crossing: EdgeCrossing,
+) -> Option<Acknowledgment> {
+    // A config reload deactivates a generation at this lock boundary, so
+    // stale config cannot switch hosts. The lock ends with the switch: the
+    // acknowledgment only reports, and holding the lock through it blocked
+    // the next incoming handoff for up to its whole deadline.
     let _lifecycle = state.lifecycle.lock().await;
     if !state.is_active() {
-        return false;
+        return None;
     }
-    let Some(&peer_index) = state.config.layout.get(&crossing.side) else {
-        return false;
-    };
-    let Some(peer) = state.config.peers.get(peer_index) else {
-        return false;
-    };
+    let &peer_index = state.config.layout.get(&crossing.side)?;
+    let peer = state.config.peers.get(peer_index)?;
     let Some(connection) = state.connection(peer.public_key) else {
         debug!(peer = %peer.name, "Flow edge ignored while peer is disconnected");
-        return false;
+        return None;
     };
     let targets = state.outgoing_devices(&peer.name);
     if targets.is_empty() {
         warn!(peer = %peer.name, "Flow edge has no online configured devices to hand off");
-        return false;
+        return None;
     }
 
     let transfer_id = random_transfer_id();
@@ -82,7 +99,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) -> b
     };
     *request.entry.get_or_insert_default() = entry_from_crossing(crossing);
     let Ok(envelope) = message_envelope(FrameKind::HandoffRequest, &request) else {
-        return false;
+        return None;
     };
     // Register before opening the RPC stream: QUIC does not order the response
     // stream against the receiver's HandoffResult notification stream.
@@ -94,7 +111,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) -> b
     let Some(deadline) = request_acceptance(&connection, &peer.name, transfer_id, envelope).await
     else {
         state.handoffs.remove_outgoing(transfer_id).await;
-        return false;
+        return None;
     };
     info!(
         peer = %peer.name,
@@ -113,7 +130,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) -> b
                     proto::HandoffCancelReason::Shutdown,
                 )
                 .await;
-            return false;
+            return None;
         }
         Err(error) => {
             state.handoffs.remove_outgoing(transfer_id).await;
@@ -125,14 +142,32 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) -> b
                     proto::HandoffCancelReason::SwitchFailed,
                 )
                 .await;
-            return false;
+            return None;
         }
     }
 
+    Some(Acknowledgment {
+        peer: peer.name.clone(),
+        transfer_id,
+        started,
+        deadline,
+        result,
+    })
+}
+
+/// Log how the receiver reported the transfer's arrival.
+async fn await_acknowledgment(state: &GenerationState, acknowledgment: Acknowledgment) {
+    let Acknowledgment {
+        peer,
+        transfer_id,
+        started,
+        deadline,
+        result,
+    } = acknowledgment;
     match tokio::time::timeout(deadline, result).await {
         Ok(Ok(OutgoingSignal::Result(result))) => {
             info!(
-                peer = %peer.name,
+                peer,
                 transfer_id,
                 outcome = result.outcome.to_i32(),
                 total_ms = started.elapsed().as_millis(),
@@ -140,14 +175,13 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) -> b
             );
         }
         Ok(Ok(OutgoingSignal::Cancelled)) => {
-            debug!(peer = %peer.name, transfer_id, "Flow handoff cancelled by peer");
+            debug!(peer, transfer_id, "Flow handoff cancelled by peer");
         }
         Ok(Err(_)) | Err(_) => {
             state.handoffs.remove_outgoing(transfer_id).await;
-            warn!(peer = %peer.name, transfer_id, "Flow arrival acknowledgment timed out");
+            warn!(peer, transfer_id, "Flow arrival acknowledgment timed out");
         }
     }
-    true
 }
 
 async fn request_acceptance(
