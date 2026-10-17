@@ -21,10 +21,12 @@ fn lit() -> BacklightState {
         current_level: 2,
         nb_levels: 5,
         power_save: true,
+        duration_secs: 30,
         controls: BacklightControls {
             automatic: true,
             level: true,
             power_save: true,
+            duration: true,
         },
     }
 }
@@ -183,6 +185,14 @@ fn a_change_targets_a_reading_that_accepts_it_and_is_altered_by_it() {
     );
     // A level the keyboard does not have.
     assert_eq!(change_target(&reading, BacklightChange::Level(5)), None);
+    // Already on the 30 second step: nothing to write. A shorter step is.
+    assert_eq!(change_target(&reading, BacklightChange::Duration(30)), None);
+    assert_eq!(
+        change_target(&reading, BacklightChange::Duration(15)),
+        Some(lit().changed(BacklightChange::Duration(15)))
+    );
+    // Not one of the 5–30 second steps.
+    assert_eq!(change_target(&reading, BacklightChange::Duration(7)), None);
     // A control this keyboard does not offer.
     let no_level = Load::Ready(Arc::new(BacklightState {
         controls: BacklightControls {

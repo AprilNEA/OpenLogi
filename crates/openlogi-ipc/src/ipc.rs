@@ -110,7 +110,9 @@ pub use succession::Identity;
 ///      the settings app, with the revision of the file it wrote. It keeps a
 ///      change made on a light unless the save holds its value, removes the
 ///      control's value, or the user chose that control. A file at another
-///      revision loads as a plain reload.
+///      revision loads as a plain reload; `BacklightControls::duration`,
+///      `BacklightState::duration_secs` and `BacklightChange::Duration`
+///      appended — the `0x1982` backlight timer, 5 to 30 seconds.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the

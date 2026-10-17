@@ -32,6 +32,13 @@ use super::{
 /// not apply.
 const LEVEL_VERSION: u8 = 3;
 
+/// The first `0x1982` version whose fade-out durations software may write.
+///
+/// Solaar's `Backlight2Duration` requires it. The durations are in the config
+/// this write already round-trips, but an older keyboard is refused a timer
+/// rather than sent one it may not apply.
+const DURATION_VERSION: u8 = 3;
+
 /// Map the fork's `0x1982` mode onto OpenLogi's [`BacklightMode`]. The source
 /// enum is `#[non_exhaustive]`; an unmodelled future variant maps to
 /// [`BacklightMode::None`], which callers treat as "firmware picks".
@@ -81,6 +88,7 @@ fn controls_from(options: BacklightOptions, version: u8, nb_levels: u8) -> Backl
         automatic: manual && options.contains(BacklightOptions::AUTO_MODE_SUPPORTED),
         level: manual && version >= LEVEL_VERSION && nb_levels > 1,
         power_save: options.contains(BacklightOptions::PWR_SAVE_SUPPORTED),
+        duration: version >= DURATION_VERSION,
     }
 }
 
@@ -107,6 +115,14 @@ fn state_from(config: &BacklightConfig, info: &BacklightInfo, version: u8) -> Ba
         nb_levels: info.nb_levels,
         power_save: config.options.contains(BacklightOptions::PWR_SAVE),
         controls: controls_from(config.options, version, info.nb_levels),
+        // The timer Logi Options+ shows is the hands-out fade-out. Below the
+        // duration version the bytes are preserved on other writes but not
+        // reported as a timer software set.
+        duration_secs: if version >= DURATION_VERSION {
+            BacklightChange::seconds_from_units(config.duration_hands_out)
+        } else {
+            0
+        },
     }
 }
 
@@ -134,7 +150,10 @@ fn held_level(
 ///
 /// Everything `change` does not touch is written back as read: the effect
 /// (sent as "do not change"), the level, the fade-out durations and the
-/// other options. The mode survives too, except from
+/// other options. A [`BacklightChange::Duration`] is the exception for the
+/// two inactivity fades: both become that timer, in 5-second units. The
+/// plugged-in timeout and the fourth duration are still written back as
+/// read. The mode survives too, except from
 /// [`BacklightMode::TemporaryManual`], which `setBacklightConfig` cannot
 /// write; see [`update_backlight`].
 fn request_for(
@@ -165,6 +184,15 @@ fn request_for(
             }
         }
         BacklightChange::PowerSave(on) => request.options.set(BacklightOptions::PWR_SAVE, on),
+        // One Options+ timer covers both inactivity fades. MX Keys keeps them
+        // equal and leaves the plugged-in timeout (`duration_powered`) and the
+        // unverified fourth duration alone.
+        BacklightChange::Duration(seconds) => {
+            if let Some(units) = BacklightChange::duration_units(seconds) {
+                request.duration_hands_out = units;
+                request.duration_hands_in = units;
+            }
+        }
     }
     request
 }
@@ -186,6 +214,11 @@ fn carries(config: &BacklightConfig, change: BacklightChange, held: Option<u8>) 
                 && held.is_none_or(|level| config.current_level == level)
         }
         BacklightChange::PowerSave(on) => config.options.contains(BacklightOptions::PWR_SAVE) == on,
+        BacklightChange::Duration(seconds) => {
+            BacklightChange::duration_units(seconds).is_some_and(|units| {
+                config.duration_hands_out == units && config.duration_hands_in == units
+            })
+        }
     }
 }
 
@@ -229,7 +262,9 @@ async fn get_backlight_on_channel(
 /// switches and power cycles, so nothing needs to re-apply it. Whatever
 /// `change` does not touch is written back as read — the effect, the level,
 /// the fade-out durations and the other options — so turning the backlight
-/// off and on again returns it as it was. Disabling sets the firmware's own
+/// off and on again returns it as it was. A duration is the exception for the
+/// two inactivity fades: both become that timer, while the plugged-in timeout
+/// stays as read. Disabling sets the firmware's own
 /// master switch: the LEDs stay dark whatever the sensors see, and the
 /// keyboard reports [`BacklightStatus::DisabledBySoftware`].
 ///
@@ -568,6 +603,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_duration_sets_both_inactivity_fades_and_keeps_the_rest() -> Result<(), WriteError> {
+        let (state, writes) = update(Keyboard::v3(), BacklightChange::Duration(15)).await;
+        let state = state?;
+        assert_eq!(state.duration_secs, 15);
+        assert_eq!(state.mode, BacklightMode::Automatic);
+        assert!(state.controls.duration);
+        // 15 seconds is 3 units. Powered stays 3; the fourth duration stays
+        // 0x0405. Both inactivity fades become 3.
+        assert_eq!(
+            writes,
+            vec![vec![
+                1, AUTOMATIC, 0xff, 4, 0x03, 0, 0x03, 0, 0x03, 0, 0x05, 0x04
+            ]]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_change_the_keyboard_does_not_offer_writes_nothing() {
         let before_v3 = Keyboard {
             version: 2,
@@ -579,7 +632,9 @@ mod tests {
         let no_sensor = Keyboard::v3().capabilities(BacklightOptions::PERM_MANUAL_SUPPORTED);
         for (keyboard, change) in [
             (before_v3, BacklightChange::Level(2)),
+            (before_v3, BacklightChange::Duration(15)),
             (Keyboard::v3(), BacklightChange::Level(NB_LEVELS)),
+            (Keyboard::v3(), BacklightChange::Duration(7)),
             (no_saving, BacklightChange::PowerSave(true)),
             (no_sensor, BacklightChange::Automatic(true)),
         ] {
@@ -628,13 +683,24 @@ mod tests {
                 automatic: true,
                 level: true,
                 power_save: true,
+                duration: true,
             }
         );
+        assert!(controls_from(BacklightOptions::empty(), 3, 1).duration);
         // The automatic switch needs both the sensor and a held level.
         assert!(!controls_from(BacklightOptions::AUTO_MODE_SUPPORTED, 3, 8).automatic);
         assert!(!controls_from(manual, 3, 8).automatic);
+        // A version-3 keyboard offers the timer even with no other options.
+        // Before that version it offers nothing.
         assert_eq!(
             controls_from(BacklightOptions::empty(), 3, 8),
+            BacklightControls {
+                duration: true,
+                ..BacklightControls::default()
+            }
+        );
+        assert_eq!(
+            controls_from(BacklightOptions::empty(), 2, 8),
             BacklightControls::default()
         );
     }

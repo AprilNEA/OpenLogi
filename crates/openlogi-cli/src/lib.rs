@@ -103,6 +103,37 @@ mod tests {
     }
 
     #[test]
+    fn backlight_duration_accepts_an_options_plus_step_and_rejects_the_rest() {
+        let cli = Cli::try_parse_from(["openlogi", "backlight", "duration", "15"])
+            .expect("a 15 second duration parses");
+        match cli.cmd.expect("subcommand present") {
+            Command::Backlight(args) => {
+                assert!(matches!(
+                    args.action,
+                    Some(BacklightAction::Duration { seconds: 15 })
+                ));
+            }
+            other => panic!("expected Backlight, got {other:?}"),
+        }
+
+        let result = Cli::try_parse_from(["openlogi", "backlight", "duration", "7"]);
+        result.expect_err("7 seconds is not a 5-second step");
+        let two_hours = Cli::try_parse_from(["openlogi", "backlight", "duration", "7200"])
+            .expect("two hours is the protocol maximum");
+        match two_hours.cmd.expect("subcommand present") {
+            Command::Backlight(args) => {
+                assert!(matches!(
+                    args.action,
+                    Some(BacklightAction::Duration { seconds: 7_200 })
+                ));
+            }
+            other => panic!("expected Backlight, got {other:?}"),
+        }
+        let result = Cli::try_parse_from(["openlogi", "backlight", "duration", "7205"]);
+        result.expect_err("7205 seconds is past the protocol maximum");
+    }
+
+    #[test]
     fn smartshift_leave_flipped_conflicts_with_sensitivity() {
         let result = Cli::try_parse_from([
             "openlogi",

@@ -58,6 +58,34 @@ pub enum BacklightAction {
         #[arg(value_enum)]
         set: Switch,
     },
+    /// How long the keys stay lit after you stop typing, in seconds. A
+    /// multiple of 5, from 5 through 7200 (two hours, the longest `0x1982`
+    /// stores). Longer than 30 seconds can drain the battery within minutes.
+    Duration {
+        /// Seconds, a multiple of 5 from 5 through 7200.
+        #[arg(value_name = "SECONDS", value_parser = duration_seconds)]
+        seconds: u16,
+    },
+}
+
+/// Reject a duration that is not one of the Options+ steps, so a typo never
+/// reaches the keyboard as an unsupported change.
+fn duration_seconds(raw: &str) -> Result<u16, String> {
+    let seconds = raw.parse::<u16>().map_err(|_| duration_rejected())?;
+    if BacklightChange::duration_offered(seconds) {
+        Ok(seconds)
+    } else {
+        Err(duration_rejected())
+    }
+}
+
+fn duration_rejected() -> String {
+    format!(
+        "duration must be a multiple of {} seconds, from {} through {} (two hours)",
+        BacklightChange::DURATION_STEP_SECONDS,
+        BacklightChange::DURATION_STEP_SECONDS,
+        BacklightChange::MAX_DURATION_SECONDS,
+    )
 }
 
 impl BacklightAction {
@@ -70,6 +98,7 @@ impl BacklightAction {
             Self::Auto { set } => Some(BacklightChange::Automatic(set.is_on())),
             Self::Level { level } => Some(BacklightChange::Level(level)),
             Self::BatterySaving { set } => Some(BacklightChange::PowerSave(set.is_on())),
+            Self::Duration { seconds } => Some(BacklightChange::Duration(seconds)),
         }
     }
 }
@@ -106,7 +135,7 @@ pub async fn run(args: BacklightArgs) -> Result<()> {
 fn keeps_the_mode(change: BacklightChange) -> bool {
     matches!(
         change,
-        BacklightChange::Enabled(_) | BacklightChange::PowerSave(_)
+        BacklightChange::Enabled(_) | BacklightChange::PowerSave(_) | BacklightChange::Duration(_)
     )
 }
 
@@ -118,14 +147,24 @@ async fn read_state(route: &DeviceRoute) -> Result<BacklightState> {
 
 fn print_state(label: &str, state: BacklightState) {
     println!(
-        "  {label}: enabled={} mode={} status={} level={}/{} battery-saving={}",
+        "  {label}: enabled={} mode={} status={} level={}/{} battery-saving={} duration={}",
         state.enabled,
         mode_label(state.mode),
         status_label(state.status),
         state.current_level,
         state.nb_levels,
         state.power_save,
+        duration_label(state),
     );
+}
+
+/// The timer this keyboard reports, or that it does not offer one.
+fn duration_label(state: BacklightState) -> String {
+    if state.controls.duration {
+        format!("{}s", state.duration_secs)
+    } else {
+        "unsupported".to_string()
+    }
 }
 
 /// The subcommands beyond `on` / `off` this keyboard accepts.
@@ -134,6 +173,7 @@ fn offers(controls: BacklightControls) -> String {
         (controls.automatic, "auto"),
         (controls.level, "level"),
         (controls.power_save, "battery-saving"),
+        (controls.duration, "duration"),
     ]
     .into_iter()
     .filter_map(|(offered, name)| offered.then_some(name))
@@ -188,6 +228,10 @@ mod tests {
             BacklightAction::BatterySaving { set: Switch::On }.change(),
             Some(BacklightChange::PowerSave(true))
         );
+        assert_eq!(
+            BacklightAction::Duration { seconds: 15 }.change(),
+            Some(BacklightChange::Duration(15))
+        );
     }
 
     #[test]
@@ -202,14 +246,16 @@ mod tests {
             automatic: true,
             level: true,
             power_save: true,
+            duration: true,
         };
-        assert_eq!(offers(all), "on/off, auto, level, battery-saving");
+        assert_eq!(offers(all), "on/off, auto, level, battery-saving, duration");
     }
 
     #[test]
     fn only_a_change_that_keeps_the_mode_warns_about_the_backlight_keys() {
         assert!(keeps_the_mode(BacklightChange::Enabled(true)));
         assert!(keeps_the_mode(BacklightChange::PowerSave(false)));
+        assert!(keeps_the_mode(BacklightChange::Duration(10)));
         assert!(!keeps_the_mode(BacklightChange::Automatic(false)));
         assert!(!keeps_the_mode(BacklightChange::Level(2)));
     }

@@ -119,6 +119,18 @@ impl AppState {
         StateEvent::BacklightChanged(key.clone()).into()
     }
 
+    /// Whether the backlight card is showing timers past 30 seconds.
+    #[must_use]
+    pub fn extended_backlight_durations(&self) -> bool {
+        self.extended_backlight_durations
+    }
+
+    /// Show or hide timers past 30 seconds. Writes nothing to the keyboard.
+    pub fn set_extended_backlight_durations(&mut self, enabled: bool) -> StateEvents {
+        self.extended_backlight_durations = enabled;
+        self.for_current_device(StateEvent::BacklightChanged)
+    }
+
     /// Re-run `key`'s exhausted backlight read — the "click to retry"
     /// affordance on a [`BacklightLoad::Failed`] keyboard.
     pub(crate) fn retry_backlight_read(&mut self, key: &DeviceKey) -> StateEvents {
