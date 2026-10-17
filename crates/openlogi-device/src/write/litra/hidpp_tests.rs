@@ -1229,6 +1229,115 @@ async fn a_press_read_with_a_limit_it_stays_under_is_still_a_change_on_the_light
     );
 }
 
+/// A light at 100 lm under a steady 120 lm limit.
+fn under_a_steady_limit() -> Light {
+    let mut light = Light::glow();
+    light.brightness_flags = DYNAMIC;
+    light.effective_max = 120;
+    light
+}
+
+/// The clamp notification `0x1990` sends, from `source`, at `lumens`.
+fn clamp(source: u8, lumens: u16) -> Vec<u8> {
+    let mut payload = vec![source];
+    payload.extend_from_slice(&lumens.to_be_bytes());
+    payload
+}
+
+#[tokio::test]
+async fn a_brightness_a_request_was_clamped_to_is_not_a_change_on_the_light() {
+    for clamp_first in [true, false] {
+        let backend = LitraBackend::new(
+            &format!("request-clamped-{clamp_first}"),
+            Opens::Hidpp,
+            under_a_steady_limit(),
+        );
+        let mut watch = watching(&backend).await;
+        // Another program asks for 200 lm: the light holds its 120 lm limit
+        // and says the request was clamped, before or after its brightness.
+        let brightness = |light: &mut Light| {
+            light.lumens = 120;
+            120u16.to_be_bytes().to_vec()
+        };
+        if clamp_first {
+            backend.press(4, |_| clamp(1, 120));
+            backend.press(1, brightness);
+        } else {
+            backend.press(1, brightness);
+            backend.press(4, |_| clamp(1, 120));
+        }
+        let change = next_change(&mut watch)
+            .await
+            .expect("the new brightness is reported");
+        assert_eq!(
+            change.on_light,
+            LightControls::default(),
+            "clamp first: {clamp_first}"
+        );
+        assert_eq!(change.state.brightness, Some(120));
+        assert_eq!(change.state.brightness_limit, Some(120));
+        assert!(stays_quiet(&mut watch).await, "clamp first: {clamp_first}");
+    }
+}
+
+#[tokio::test]
+async fn a_clamp_the_button_made_still_follows_a_press_on_the_light() {
+    let backend = LitraBackend::new("button-clamped", Opens::Hidpp, under_a_steady_limit());
+    let mut watch = watching(&backend).await;
+    backend.press(1, |light| {
+        light.lumens = 120;
+        120u16.to_be_bytes().to_vec()
+    });
+    backend.press(4, |_| clamp(2, 120));
+    let change = next_change(&mut watch)
+        .await
+        .expect("the brightness press is reported");
+    assert_eq!(
+        change.on_light,
+        LightControls {
+            brightness: true,
+            ..LightControls::default()
+        }
+    );
+    assert_eq!(change.state.brightness, Some(120));
+}
+
+#[tokio::test]
+async fn a_press_after_a_clamp_is_still_a_change_on_the_light() {
+    let backend = LitraBackend::new("pressed-after-clamp", Opens::Hidpp, under_a_steady_limit());
+    let mut watch = watching(&backend).await;
+    backend.press(4, |light| {
+        light.lumens = 120;
+        clamp(1, 120)
+    });
+    backend.press(1, |light| {
+        light.lumens = 110;
+        110u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the brightness press is reported");
+    assert_eq!(
+        change.on_light,
+        LightControls {
+            brightness: true,
+            ..LightControls::default()
+        }
+    );
+    assert_eq!(change.state.brightness, Some(110));
+
+    // The clamp explained only the read that followed it.
+    backend.press(1, |light| {
+        light.lumens = 120;
+        120u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the press back to the limit is reported");
+    assert!(change.on_light.brightness);
+    assert_eq!(change.state.brightness, Some(120));
+}
+
 #[tokio::test]
 async fn a_brightness_raised_back_from_its_limit_is_not_a_change_on_the_light() {
     let mut light = Light::glow();

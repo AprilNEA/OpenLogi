@@ -17,8 +17,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use futures_lite::StreamExt;
+use futures_lite::future::poll_once;
 use futures_lite::stream::Boxed;
-use hidpp::feature::illumination::IlluminationEvent;
+use hidpp::feature::illumination::{BrightnessClampedSource, IlluminationEvent};
 use openlogi_core::device::LightState;
 use tokio::sync::watch;
 use tracing::debug;
@@ -158,8 +159,8 @@ fn limit_explains(before: &LightState, after: &LightState) -> bool {
 
 /// What woke a [`LightWatch`].
 enum Woke {
-    /// The light sent a notification.
-    Notified,
+    /// The light sent this notification.
+    Notified(IlluminationEvent),
     /// OpenLogi wrote to the light.
     Written,
 }
@@ -173,6 +174,9 @@ pub struct LightWatch {
     retired: watch::Receiver<bool>,
     /// The state last reported.
     state: LightState,
+    /// The brightness a clamp reported since the last read, when a request
+    /// rather than the light's button made it.
+    clamped: Option<u16>,
 }
 
 impl LightWatch {
@@ -180,7 +184,7 @@ impl LightWatch {
     /// route's device lock.
     pub(super) fn new(route: DeviceRoute, link: Arc<LiveLink>, state: LightState) -> Self {
         *link.last() = state;
-        let events = link.light.listen().boxed();
+        let events = link.light.listen().fuse().boxed();
         let written = link.written.subscribe();
         let retired = link.retired.subscribe();
         Self {
@@ -190,6 +194,7 @@ impl LightWatch {
             written,
             retired,
             state,
+            clamped: None,
         }
     }
 
@@ -206,7 +211,10 @@ impl LightWatch {
     /// or written counts as changed on the light. A brightness the light's
     /// limit explains — lowered to a lower limit, or back up once the limit
     /// it sat at rose — is a change of state, not one made on the light,
-    /// whichever notification is read first. A write OpenLogi made is reported
+    /// whichever notification is read first. So is a brightness a clamp
+    /// reports: a request above the limit leaves the light at its limit, which
+    /// nobody chose; a clamp the light's button made still follows a press on
+    /// it. A write OpenLogi made is reported
     /// with the state it read back and no control changed on the light, once,
     /// whether the light announces it or not — unless a read after a
     /// notification already took its place.
@@ -222,16 +230,19 @@ impl LightWatch {
                 biased;
                 _ = self.retired.wait_for(|retired| *retired) => return None,
                 event = self.events.next() => match event {
-                    Some(_) => Woke::Notified,
+                    Some(event) => Woke::Notified(event),
                     None => return None,
                 },
                 Ok(()) = self.written.changed() => Woke::Written,
             };
-            if matches!(woke, Woke::Written) {
-                let state = *self.written.borrow_and_update();
-                match self.report(state, LightControls::default()) {
-                    Some(change) => return Some(change),
-                    None => continue,
+            match woke {
+                Woke::Notified(event) => self.note(event),
+                Woke::Written => {
+                    let state = *self.written.borrow_and_update();
+                    match self.report(state, LightControls::default()) {
+                        Some(change) => return Some(change),
+                        None => continue,
+                    }
                 }
             }
             let _guard = device_lock(&self.route).await;
@@ -251,18 +262,34 @@ impl LightWatch {
                     return None;
                 }
             };
+            // The light sent these before it answered the read, so the read
+            // already shows them.
+            while let Some(Some(event)) = poll_once(self.events.next()).await {
+                self.note(event);
+            }
+            let clamped = self.clamped.take();
             let before = std::mem::replace(&mut *self.link.last(), state);
             // The limit shows in the state read even when another
             // notification is read before the light's own limit notification.
             let on_light = LightControls {
                 power: before.on != state.on,
                 brightness: before.brightness != state.brightness
-                    && !limit_explains(&before, &state),
+                    && !limit_explains(&before, &state)
+                    && clamped.is_none_or(|lumens| state.brightness != Some(lumens)),
                 temperature: before.temperature_kelvin != state.temperature_kelvin,
             };
             if let Some(change) = self.report(state, on_light) {
                 return Some(change);
             }
+        }
+    }
+
+    /// Keep the evidence of a clamp a request made.
+    fn note(&mut self, event: IlluminationEvent) {
+        if let IlluminationEvent::BrightnessClamped { source, brightness } = event
+            && !matches!(source, BrightnessClampedSource::Button)
+        {
+            self.clamped = Some(brightness);
         }
     }
 

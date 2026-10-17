@@ -48,7 +48,10 @@ state, and writes a value only when it differs from the one it read.
   explains is the light's limit, not the user's choice, even when another
   notification is read first: lowered to a limit below the old brightness or
   the old limit, or raised from the limit it sat at once that limit rose. A
-  press read together with a limit it stays under is still the user's. The
+  press read together with a limit it stays under is still the user's. Nor is
+  a brightness a request was clamped to: the light sends the clamp when a
+  request asks for more than the limit, and holds the limit, which nobody
+  chose. A clamp the light's button made still follows a press on it. The
   published state still follows the write: the watcher reports the state a
   write read back once, whether or not the light echoes it, unless a later
   read replaced it.
