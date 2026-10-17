@@ -4,6 +4,8 @@
 use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
 
+use windows_sys::Win32::Foundation::GetLastError;
+use windows_sys::Win32::System::Shutdown::LockWorkStation;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
@@ -25,7 +27,6 @@ static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
 const VK_D: u16 = 0x44;
-const VK_L: u16 = 0x4C;
 const VK_S: u16 = 0x53;
 const VK_TAB: u16 = 0x09;
 const VK_LEFT: u16 = 0x25;
@@ -124,7 +125,10 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::NextDesktop => post_key(VK_RIGHT, &[VK_LWIN, VK_CONTROL]),
         NativeAction::ShowDesktop => post_key(VK_D, &[VK_LWIN]),
         NativeAction::LaunchpadShow => post_key(VK_LWIN, &[]),
-        NativeAction::LockScreen => post_key(VK_L, &[VK_LWIN]),
+        // Windows ignores a synthesized Win+L — a session lock cannot be
+        // triggered by injected input (Vista+ hardening) — so this calls the
+        // actual Win32 API instead (#1727).
+        NativeAction::LockScreen => lock_screen(),
         // Win+Shift+S opens the snip overlay, which serves both full-screen
         // and region capture on Windows.
         NativeAction::Screenshot | NativeAction::CaptureRegion => {
@@ -176,6 +180,19 @@ fn post_click(button: MouseButton) {
         MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON2),
     };
     send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
+}
+
+/// Lock the current session via the actual Win32 API. `SendInput` cannot do
+/// this: Windows ignores a synthetic Win+L for a session lock (Vista+
+/// hardening against injected input triggering it), so there is no
+/// `post_key` equivalent here.
+fn lock_screen() {
+    // SAFETY: LockWorkStation and GetLastError take no arguments and have no
+    // preconditions.
+    let (succeeded, error) = unsafe { (LockWorkStation() != 0, GetLastError()) };
+    if !succeeded {
+        tracing::warn!(error, "LockWorkStation failed");
+    }
 }
 
 fn post_key(vk: u16, modifiers: &[u16]) {
