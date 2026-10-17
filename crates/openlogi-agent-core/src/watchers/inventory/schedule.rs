@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
+use openlogi_hid::inventory::PROBE_CACHE_FRESHNESS;
 use openlogi_hid::inventory::events::HidppEventSource;
 
 /// A bounded repair/confirmation retry delay. This keeps the old two-second
@@ -17,14 +18,23 @@ pub(super) const HID_EVENT_SETTLE: Duration = Duration::from_millis(200);
 /// Pause after resume before probing devices that may still be reconnecting.
 pub(super) const SYSTEM_RESUME_SETTLE: Duration = Duration::from_millis(400);
 
+/// Spare time inside [`PROBE_CACHE_FRESHNESS`] for a late timer wake.
+///
+/// The cache stays fresh through that window and is stale after it. A recovery
+/// scan that waits the whole window, or wakes a moment later, re-walks the
+/// feature table (#1774).
+const RECOVERY_WAKE_MARGIN: Duration = Duration::from_secs(1);
+
 /// Authoritative recovery cadence when no trustworthy event arrives.
 ///
 /// Receiver notifications and OS hotplug can be disabled, unsupported, or
 /// missed across firmware/host transitions. Unified battery has an event, but
-/// legacy `0x1000` and voltage `0x1001` batteries do not. Thirty seconds
-/// preserves the probe cache's prior freshness bound, keeps those readings
-/// useful, and bounds recovery without returning to constant full HID scans.
-pub(super) const RECOVERY_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+/// legacy `0x1000` and voltage `0x1001` batteries do not. The period sits
+/// [`RECOVERY_WAKE_MARGIN`] inside the probe-cache window so a slightly late
+/// wake still reuses the feature table, keeps those readings on the same
+/// cadence, and does not return to constant full HID scans.
+pub(super) const RECOVERY_SCAN_PERIOD: Duration =
+    PROBE_CACHE_FRESHNESS.saturating_sub(RECOVERY_WAKE_MARGIN);
 
 /// Wall-clock lead over monotonic time that means the monotonic clock paused
 /// during system sleep. NTP false positives only cause harmless re-apply.
@@ -62,6 +72,13 @@ pub(super) enum DeadlinePurpose {
     RecoveryScan,
 }
 
+/// Scan-start and scan-end clocks for one reconciliation.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ScanClock {
+    pub(super) started: Instant,
+    pub(super) finished: Instant,
+}
+
 /// Scheduling state only; all I/O stays in the watcher loop.
 pub(super) struct Schedule {
     retry_due: Option<Instant>,
@@ -75,47 +92,48 @@ impl Schedule {
         Self {
             retry_due: None,
             settings_due: None,
-            recovery_due: now + RECOVERY_SCAN_INTERVAL,
+            recovery_due: now + RECOVERY_SCAN_PERIOD,
             retry_count: 0,
         }
     }
 
-    /// Earliest deadline and its single purpose.
+    /// Next deadline and its purpose.
+    ///
+    /// A pending repair retry outranks recovery. The retry is anchored at scan
+    /// completion, so a pass that outlasts the recovery period must not look
+    /// due first and skip the pause.
     pub(super) fn next_deadline(&self) -> (Instant, DeadlinePurpose) {
         let mut next = (self.recovery_due, DeadlinePurpose::RecoveryScan);
-        for candidate in [
-            self.retry_due.map(|at| (at, DeadlinePurpose::RepairRetry)),
-            self.settings_due
-                .map(|at| (at, DeadlinePurpose::SettingsConfirmation)),
-        ]
-        .into_iter()
-        .flatten()
+        if let Some(at) = self.retry_due {
+            next = (at, DeadlinePurpose::RepairRetry);
+        }
+        if let Some(at) = self.settings_due
+            && at < next.0
         {
-            if candidate.0 < next.0 {
-                next = candidate;
-            }
+            next = (at, DeadlinePurpose::SettingsConfirmation);
         }
         next
     }
 
     /// Any completed full pass satisfies pending repair and settings deadlines.
-    /// An unhealthy result then starts (or advances) one bounded repair run.
+    /// Recovery is rescheduled from `clock.started`. An unhealthy result then
+    /// starts (or advances) one bounded repair from `clock.finished`.
     pub(super) fn scan_finished(
         &mut self,
         trigger: ReconcileTrigger,
         needs_repair: bool,
-        now: Instant,
+        clock: ScanClock,
     ) {
         self.retry_due = None;
         self.settings_due = None;
-        self.recovery_due = now + RECOVERY_SCAN_INTERVAL;
+        self.recovery_due = clock.started + RECOVERY_SCAN_PERIOD;
 
         if !matches!(trigger, ReconcileTrigger::RepairRetry) {
             self.retry_count = 0;
         }
         if needs_repair && self.retry_count < FAST_RETRY_LIMIT {
             self.retry_count += 1;
-            self.retry_due = Some(now + FAST_RETRY_DELAY);
+            self.retry_due = Some(clock.finished + FAST_RETRY_DELAY);
         } else if !needs_repair {
             self.retry_count = 0;
         }
@@ -154,16 +172,23 @@ impl WakeDetector {
 mod tests {
     use super::*;
 
+    fn closed(at: Instant) -> ScanClock {
+        ScanClock {
+            started: at,
+            finished: at,
+        }
+    }
+
     #[test]
     fn repair_retries_are_fast_but_bounded() {
         let start = Instant::now();
         let mut schedule = Schedule::new(start);
 
-        schedule.scan_finished(ReconcileTrigger::Initial, true, start);
+        schedule.scan_finished(ReconcileTrigger::Initial, true, closed(start));
         for _ in 0..FAST_RETRY_LIMIT {
             let (due, purpose) = schedule.next_deadline();
             assert_eq!(purpose, DeadlinePurpose::RepairRetry);
-            schedule.scan_finished(ReconcileTrigger::RepairRetry, true, due);
+            schedule.scan_finished(ReconcileTrigger::RepairRetry, true, closed(due));
         }
 
         assert!(schedule.retry_due.is_none());
@@ -174,9 +199,9 @@ mod tests {
     fn healthy_pass_resets_the_repair_budget() {
         let start = Instant::now();
         let mut schedule = Schedule::new(start);
-        schedule.scan_finished(ReconcileTrigger::Initial, true, start);
+        schedule.scan_finished(ReconcileTrigger::Initial, true, closed(start));
         let retry = schedule.next_deadline().0;
-        schedule.scan_finished(ReconcileTrigger::RepairRetry, false, retry);
+        schedule.scan_finished(ReconcileTrigger::RepairRetry, false, closed(retry));
 
         assert!(schedule.retry_due.is_none());
         assert_eq!(schedule.retry_count, 0);
@@ -199,7 +224,7 @@ mod tests {
         schedule.scan_finished(
             ReconcileTrigger::SettingsConfirmation,
             false,
-            start + FAST_RETRY_DELAY,
+            closed(start + FAST_RETRY_DELAY),
         );
         assert!(schedule.settings_due.is_none());
     }
@@ -212,10 +237,87 @@ mod tests {
         schedule.scan_finished(
             ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery),
             false,
-            event_time,
+            closed(event_time),
         );
 
-        assert_eq!(schedule.recovery_due, event_time + RECOVERY_SCAN_INTERVAL);
+        assert_eq!(schedule.recovery_due, event_time + RECOVERY_SCAN_PERIOD);
+    }
+
+    #[test]
+    fn late_recovery_wake_is_still_inside_the_probe_cache_window() {
+        let started = Instant::now();
+        let finished = started + Duration::from_secs(4);
+        let mut schedule = Schedule::new(started);
+        schedule.scan_finished(
+            ReconcileTrigger::Initial,
+            false,
+            ScanClock { started, finished },
+        );
+
+        let (due, purpose) = schedule.next_deadline();
+        assert_eq!(purpose, DeadlinePurpose::RecoveryScan);
+        assert_eq!(due, started + RECOVERY_SCAN_PERIOD);
+        assert_eq!(
+            RECOVERY_SCAN_PERIOD + RECOVERY_WAKE_MARGIN,
+            PROBE_CACHE_FRESHNESS
+        );
+        let on_time = due;
+        let late_by_margin = due + RECOVERY_WAKE_MARGIN;
+        assert_eq!(late_by_margin, started + PROBE_CACHE_FRESHNESS);
+        assert!(
+            !openlogi_hid::inventory::probe_cache_is_stale(started, on_time),
+            "an on-time recovery wake must hit the probe cache"
+        );
+        assert!(
+            !openlogi_hid::inventory::probe_cache_is_stale(started, late_by_margin),
+            "a wake late by the whole margin must still hit the probe cache"
+        );
+        assert!(
+            openlogi_hid::inventory::probe_cache_is_stale(
+                started,
+                late_by_margin + Duration::from_nanos(1),
+            ),
+            "the cache is stale only after the freshness window"
+        );
+    }
+
+    #[test]
+    fn repair_pause_survives_a_scan_longer_than_the_retry_delay() {
+        let started = Instant::now();
+        let finished = started + Duration::from_secs(3);
+        let mut schedule = Schedule::new(started);
+        schedule.scan_finished(
+            ReconcileTrigger::Initial,
+            true,
+            ScanClock { started, finished },
+        );
+
+        assert_eq!(
+            schedule.next_deadline(),
+            (finished + FAST_RETRY_DELAY, DeadlinePurpose::RepairRetry)
+        );
+        assert_eq!(schedule.recovery_due, started + RECOVERY_SCAN_PERIOD);
+    }
+
+    #[test]
+    fn repair_pause_outranks_an_overdue_recovery_scan() {
+        let started = Instant::now();
+        let finished = started + RECOVERY_SCAN_PERIOD + FAST_RETRY_DELAY;
+        let mut schedule = Schedule::new(started);
+        schedule.scan_finished(
+            ReconcileTrigger::Initial,
+            true,
+            ScanClock { started, finished },
+        );
+
+        assert!(
+            schedule.recovery_due <= finished,
+            "a scan longer than the recovery period leaves that deadline overdue"
+        );
+        assert_eq!(
+            schedule.next_deadline(),
+            (finished + FAST_RETRY_DELAY, DeadlinePurpose::RepairRetry)
+        );
     }
 
     #[test]

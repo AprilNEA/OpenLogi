@@ -1,7 +1,10 @@
 //! Implements the `DeviceInformation` feature (ID `0x0003`) that provides some
 //! general information about the device.
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+#[cfg(test)]
+mod tests;
+
+use num_enum::{FromPrimitive, IntoPrimitive};
 use openlogi_hidpp_derive::Feature;
 
 use crate::{feature::FeatureEndpoint, nibble::U4, protocol::v20::Hidpp20Error};
@@ -21,6 +24,22 @@ fn packed_bcd_u16(bcd: u16) -> Option<u16> {
     let high = u16::from(packed_bcd_u8((bcd >> 8) as u8)?);
     let low = u16::from(packed_bcd_u8((bcd & 0xff) as u8)?);
     Some(high * 100 + low)
+}
+
+/// The largest value four decimal digits hold.
+const FOUR_DIGIT_MAX: u16 = 9999;
+
+/// Decodes a four-digit version field, `getFwInfo`'s version (bytes 4 and 5)
+/// or build (bytes 6 and 7).
+///
+/// The spec sends packed BCD, but some firmware sends the number in binary: a
+/// G502 LIGHTSPEED's Softdevice reports build `0x00a9`. Logi Options+ accepts
+/// both. Its `Feature0003FirmwareInfo::convertToBCDIfNeeded` keeps a field
+/// whose four nibbles are all decimal digits, and otherwise reads the field as
+/// a binary number capped at 9999. This does the same, so a binary build of
+/// `0x00a9` decodes as 169 instead of failing the whole entity.
+fn four_digit_field(field: u16) -> u16 {
+    packed_bcd_u16(field).unwrap_or_else(|| field.min(FOUR_DIGIT_MAX))
 }
 
 /// Implements the `DeviceInformation` / `0x0003` feature.
@@ -62,26 +81,7 @@ impl DeviceInformationFeature {
             .call(1, [entity_index, 0x00, 0x00])
             .await?
             .extend_payload();
-
-        Ok(DeviceEntityFirmwareInfo {
-            entity_type: DeviceEntityType::try_from(payload[0])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            firmware_prefix: String::from_utf8(payload[1..=3].to_vec())
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            firmware_number: packed_bcd_u8(payload[4]).ok_or(Hidpp20Error::UnsupportedResponse)?,
-            revision: packed_bcd_u8(payload[5]).ok_or(Hidpp20Error::UnsupportedResponse)?,
-            build: packed_bcd_u16(u16::from_be_bytes([payload[6], payload[7]]))
-                .ok_or(Hidpp20Error::UnsupportedResponse)?,
-            active: payload[8] & 1 != 0,
-            transport_pid: u16::from_be_bytes([payload[9], payload[10]]),
-            extra_version: [
-                payload[11],
-                payload[12],
-                payload[13],
-                payload[14],
-                payload[15],
-            ],
-        })
+        DeviceEntityFirmwareInfo::from_payload(&payload)
     }
 
     /// Retrieves the serial number of the device.
@@ -209,20 +209,23 @@ pub struct DeviceEntityFirmwareInfo {
 
     /// The firmware number.
     ///
-    /// This is represented in packed BCD format in the protocol itself, but
-    /// decoding is handled by this implementation automatically.
+    /// The protocol sends packed BCD, which this implementation decodes. A
+    /// field that is not BCD is read as binary instead, capped at 9999, as
+    /// Logi Options+ does.
     pub firmware_number: u8,
 
     /// The firmware revision.
     ///
-    /// This is represented in packed BCD format in the protocol itself, but
-    /// decoding is handled by this implementation automatically.
+    /// The protocol sends packed BCD, which this implementation decodes. A
+    /// field that is not BCD is read as binary instead, capped at 9999, as
+    /// Logi Options+ does.
     pub revision: u8,
 
     /// The firmware build.
     ///
-    /// This is represented in packed BCD format in the protocol itself, but
-    /// decoding is handled by this implementation automatically.
+    /// The protocol sends packed BCD, which this implementation decodes. A
+    /// field that is not BCD is read as binary instead, capped at 9999, as
+    /// Logi Options+ does.
     pub build: u16,
 
     /// Whether the entity is the responding and active one.
@@ -240,8 +243,42 @@ pub struct DeviceEntityFirmwareInfo {
     pub extra_version: [u8; 5],
 }
 
+impl DeviceEntityFirmwareInfo {
+    fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
+        // The version is one four-digit field, as Options+ reads it: number
+        // and revision are its high and low two digits. A binary version is
+        // split the same way, so `0x010a` (266) reads as 02.66.
+        let version = four_digit_field(u16::from_be_bytes([payload[4], payload[5]]));
+        let firmware_number =
+            u8::try_from(version / 100).map_err(|_| Hidpp20Error::UnsupportedResponse)?;
+        let revision =
+            u8::try_from(version % 100).map_err(|_| Hidpp20Error::UnsupportedResponse)?;
+        Ok(Self {
+            entity_type: DeviceEntityType::from(payload[0]),
+            firmware_prefix: String::from_utf8(payload[1..=3].to_vec())
+                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            firmware_number,
+            revision,
+            build: four_digit_field(u16::from_be_bytes([payload[6], payload[7]])),
+            active: payload[8] & 1 != 0,
+            transport_pid: u16::from_be_bytes([payload[9], payload[10]]),
+            extra_version: [
+                payload[11],
+                payload[12],
+                payload[13],
+                payload[14],
+                payload[15],
+            ],
+        })
+    }
+}
+
 /// Represents the type of a device entity.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, TryFromPrimitive)]
+///
+/// Logitech's 2012 HID++ 2.0 draft defines 0 to 2 and groups 3 to 15 as
+/// "other". This crate names the types it knows; any other value decodes as
+/// [`Self::Other`] instead of failing the whole entity.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -266,4 +303,7 @@ pub enum DeviceEntityType {
     RgbCustomEffect = 8,
     /// Motor drive entity.
     MotorDrive = 9,
+    /// An entity type without a name here, holding the type byte as reported.
+    #[num_enum(catch_all)]
+    Other(u8),
 }

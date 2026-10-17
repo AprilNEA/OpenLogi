@@ -112,8 +112,16 @@ pub enum ChannelObservation {
         /// The exact bytes returned by the raw transport.
         report: ObservedReport,
     },
-    /// Raw incoming bytes rejected by HID++ report parsing.
+    /// Raw incoming bytes carrying a HID++ report ID that failed HID++ report
+    /// parsing.
     MalformedIncomingReport {
+        /// The exact bytes returned by the raw transport.
+        report: ObservedReport,
+    },
+    /// An incoming report belonging to another protocol sharing this node —
+    /// Logitech DJ (`0x20`/`0x21`) on a Unifying receiver, for instance. It
+    /// says nothing about the HID++ exchange and the channel drops it.
+    ForeignIncomingReport {
         /// The exact bytes returned by the raw transport.
         report: ObservedReport,
     },

@@ -56,6 +56,10 @@ pub(crate) fn request_channel() -> (ShutdownRequestSender, ShutdownRequests) {
 /// process ends. There is deliberately no elapsed-time fallback: a timer
 /// cannot distinguish a dead core from legitimate firmware restoration and
 /// can preempt the exact cleanup this handoff exists to protect.
+///
+/// The fallback exit still does the one thing of the lifecycle's final exit
+/// that outlives the process: it forgets the armed login session, so a start
+/// after a Quit whose core had already died is a dormant one, not a re-arm.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) fn request_tray_quit(
     requests: Option<&ShutdownRequestSender>,
@@ -75,6 +79,8 @@ pub(crate) fn request_tray_quit(
     } else {
         tracing::warn!("no live agent core to accept tray Quit — exiting directly");
     }
+    #[cfg(target_os = "macos")]
+    crate::lifecycle::armed_session::clear();
     #[expect(
         clippy::exit,
         reason = "fallback only: a missing or unwound core cannot return a status through an AppKit or win32 tray callback"

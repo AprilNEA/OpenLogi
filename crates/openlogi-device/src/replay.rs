@@ -7,6 +7,7 @@
 mod backend;
 mod barrier;
 mod channel;
+mod fixture;
 mod slots;
 
 use openlogi_fixture::FixtureError;

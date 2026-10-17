@@ -1,11 +1,16 @@
-//! Brand constants shared across the workspace: the project's public URLs and
-//! the `openlogi://` deep-link command vocabulary.
+//! Brand constants shared across the workspace: the project's public URLs,
+//! the `openlogi://` deep-link command vocabulary, the three processes' bundle
+//! identifiers, and the app bundle's layout — where the helpers live and what
+//! they are called on disk.
 //!
-//! Both live here, in the platform-free core crate, so the agent (which *emits*
-//! tray deep links and renders help links) and the GUI (which *parses* the deep
-//! links and renders the same help links) share a single source of truth — the
-//! command names can't drift across the process boundary, and a repo move
-//! touches one file instead of three.
+//! All of it lives here, in the platform-free core crate, so the agent (which
+//! *emits* tray deep links and finds the overlay), the GUI (which *parses* the
+//! deep links and finds the agent), and the packaging tooling share a single
+//! source of truth: the command names can't drift across the process boundary,
+//! a helper is looked up at runtime by the name packaging gave it, and a rename
+//! touches one file.
+
+use std::path::Path;
 
 /// The OpenLogi GitHub repository.
 pub const REPO_URL: &str = "https://github.com/AprilNEA/OpenLogi";
@@ -61,6 +66,133 @@ pub fn dev_id(id: &str) -> String {
     format!("{id}{DEV_SUFFIX}")
 }
 
+/// The app's display name: the outer bundle's `CFBundleName` and
+/// `CFBundleDisplayName`, and the root the helpers' names are formed from.
+pub const APP_NAME: &str = "OpenLogi";
+
+/// The GUI's executable, as cargo builds it and as the macOS bundle and the
+/// Linux packages ship it. The helpers' executables are [`Helper::executable`].
+pub const GUI_EXECUTABLE: &str = "openlogi-desktop";
+
+/// The CLI's executable — the command users type, so it never changes. The
+/// Windows installer ships the GUI under the same name in another case
+/// (`OpenLogi.exe`), which the case-insensitive match below covers.
+pub const CLI_EXECUTABLE: &str = "openlogi";
+
+/// `name`'s dev-channel counterpart, the way [`dev_id`] is for identifiers:
+/// what System Settings shows for a local build's bundle, and the directory a
+/// dev helper lives in.
+#[must_use]
+pub fn dev_name(name: &str) -> String {
+    format!("{name} Dev")
+}
+
+/// Where the app bundle nests its login-item helpers, relative to its root.
+pub const LOGIN_ITEMS_DIR: &str = "Contents/Library/LoginItems";
+
+/// Where the app bundle carries the agent's launchd service plist, relative
+/// to its root.
+pub const LAUNCH_AGENTS_DIR: &str = "Contents/Library/LaunchAgents";
+
+/// The nested login-item helpers the app bundle embeds.
+///
+/// Each helper's directory is named exactly like its display name, because
+/// macOS privacy panes fall back to a bundle's filename whenever its metadata
+/// is stale — a spelling that differs from the display name, or a dev helper
+/// named like the shipped one, renders as a row nobody can trust. Packaging
+/// writes these names and both the app and the agent look the helpers up by
+/// them at runtime, so they are defined once here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Helper {
+    /// The always-on agent: the process that owns the hook and holds the
+    /// Accessibility grant.
+    Agent,
+    /// The Actions Ring renderer.
+    Overlay,
+}
+
+impl Helper {
+    /// The helper's bundle identifier.
+    #[must_use]
+    pub const fn bundle_id(self) -> &'static str {
+        match self {
+            Self::Agent => AGENT_ID,
+            Self::Overlay => OVERLAY_ID,
+        }
+    }
+
+    /// The shipped display name — and so the shipped bundle directory's name.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Agent => "OpenLogi Agent",
+            Self::Overlay => "OpenLogi Overlay",
+        }
+    }
+
+    /// The helper's executable: how cargo names the binary, and how the
+    /// process shows up in a process list.
+    #[must_use]
+    pub const fn executable(self) -> &'static str {
+        match self {
+            Self::Agent => "openlogi-agent",
+            Self::Overlay => "openlogi-overlay",
+        }
+    }
+
+    /// The shipped helper's bundle, relative to the app bundle's root.
+    #[must_use]
+    pub fn bundle_dir(self) -> String {
+        format!("{LOGIN_ITEMS_DIR}/{}.app", self.display_name())
+    }
+
+    /// A dev build's helper bundle, relative to the app bundle's root.
+    #[must_use]
+    pub fn dev_bundle_dir(self) -> String {
+        format!("{LOGIN_ITEMS_DIR}/{}.app", dev_name(self.display_name()))
+    }
+
+    /// The helper's executable inside `bundle_dir`, one of [`Self::bundle_dir`]
+    /// or [`Self::dev_bundle_dir`].
+    #[must_use]
+    pub fn executable_in(self, bundle_dir: &str) -> String {
+        format!("{bundle_dir}/Contents/MacOS/{}", self.executable())
+    }
+
+    /// The bundle name this helper shipped under before it took its display
+    /// name. History, so spelled out rather than derived: a future rename must
+    /// not quietly stop old installs from being found.
+    const fn legacy_bundle_name(self) -> &'static str {
+        match self {
+            Self::Agent => "OpenLogiAgent",
+            Self::Overlay => "OpenLogiOverlay",
+        }
+    }
+
+    /// Every path, relative to the app bundle's root, at which this helper's
+    /// executable has ever shipped, newest layout first: the dev-suffixed
+    /// name, the shipped name, and the pre-rename name for bundles built
+    /// before the helpers took their display names.
+    #[must_use]
+    pub fn executable_candidates(self) -> [String; 3] {
+        let legacy = format!("{LOGIN_ITEMS_DIR}/{}.app", self.legacy_bundle_name());
+        [
+            self.executable_in(&self.dev_bundle_dir()),
+            self.executable_in(&self.bundle_dir()),
+            self.executable_in(&legacy),
+        ]
+    }
+}
+
+/// The `.app` root of a packaged helper binary — `…/Foo.app/Contents/MacOS/foo`
+/// gives `…/Foo.app` — and `None` for a bare binary such as a cargo build
+/// output.
+#[must_use]
+pub fn helper_bundle_root(executable: &Path) -> Option<&Path> {
+    let bundle = executable.ancestors().nth(3)?;
+    (bundle.extension()? == "app").then_some(bundle)
+}
+
 /// Whether `id` names a dev build — the inverse of [`dev_id`].
 ///
 /// The profile split keys off this: a dev bundle gets its own config directory
@@ -81,18 +213,18 @@ pub fn is_dev_id(id: &str) -> bool {
 /// without this OpenLogi would offer itself as a target for a per-app profile.
 /// Both identifier shapes are recognised: the bundle-id family above (macOS
 /// bundle ids, and the `WM_CLASS` / `app_id` the GUI advertises on Linux), dev
-/// builds included; and the Windows executable path, matched on its file name.
-/// `packaging/windows/OpenLogi.wxs` carries its own literal copy of those names
-/// (it can't reference Rust) — keep the two in sync.
+/// builds included; and the Windows executable path, matched on its file name
+/// — the installed names from `packaging/windows/OpenLogi.wxs` (which carries
+/// its own literal copy, since it can't reference Rust — keep the two in sync)
+/// plus the cargo artifact name a dev build's GUI runs under.
 #[must_use]
 pub fn is_openlogi_foreground_id(id: &str) -> bool {
-    /// Installed names from `OpenLogi.wxs`, plus the cargo artifact name a dev
-    /// build runs under.
-    const EXECUTABLES: [&str; 4] = [
-        "openlogi.exe",
-        "openlogi-agent.exe",
-        "openlogi-overlay.exe",
-        "openlogi-desktop.exe",
+    const WINDOWS_SUFFIX: &str = ".exe";
+    let executables = [
+        CLI_EXECUTABLE,
+        GUI_EXECUTABLE,
+        Helper::Agent.executable(),
+        Helper::Overlay.executable(),
     ];
 
     let base = strip_dev_suffix(id);
@@ -102,7 +234,9 @@ pub fn is_openlogi_foreground_id(id: &str) -> bool {
         || id
             .rsplit(['\\', '/'])
             .next()
-            .is_some_and(|file| EXECUTABLES.iter().any(|exe| file.eq_ignore_ascii_case(exe)))
+            .filter(|file| ends_with_ignore_ascii_case(file, WINDOWS_SUFFIX))
+            .and_then(|file| file.get(..file.len() - WINDOWS_SUFFIX.len()))
+            .is_some_and(|stem| executables.iter().any(|exe| stem.eq_ignore_ascii_case(exe)))
 }
 
 /// The dev suffix before it was hyphenated. Recognised, never produced.
@@ -201,8 +335,11 @@ impl DeeplinkCommand {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
-        AGENT_ID, APP_ID, DeeplinkCommand, OVERLAY_ID, dev_id, is_dev_id, is_openlogi_foreground_id,
+        AGENT_ID, APP_ID, DeeplinkCommand, Helper, OVERLAY_ID, dev_id, helper_bundle_root,
+        is_dev_id, is_openlogi_foreground_id,
     };
 
     const ALL: [DeeplinkCommand; 5] = [
@@ -245,6 +382,50 @@ mod tests {
             assert!(is_dev_id(&dev_id(id)), "{id} suffixed must read as dev");
             assert!(!is_dev_id(id), "{id} is production");
         }
+    }
+
+    #[test]
+    fn helper_bundles_are_named_after_their_display_names() {
+        assert_eq!(
+            Helper::Agent.bundle_dir(),
+            "Contents/Library/LoginItems/OpenLogi Agent.app"
+        );
+        assert_eq!(
+            Helper::Overlay.dev_bundle_dir(),
+            "Contents/Library/LoginItems/OpenLogi Overlay Dev.app"
+        );
+        // Bundles built before the helpers took their display names are
+        // still found, after the current layouts.
+        assert_eq!(
+            Helper::Agent.executable_candidates()[2],
+            "Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent"
+        );
+    }
+
+    #[test]
+    fn a_helper_bundle_root_is_three_levels_above_its_executable() {
+        let packaged = Path::new(
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
+        );
+        assert_eq!(
+            helper_bundle_root(packaged),
+            Some(Path::new(
+                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
+            ))
+        );
+        let dev = Path::new(
+            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app/Contents/MacOS/openlogi-agent",
+        );
+        assert_eq!(
+            helper_bundle_root(dev),
+            Some(Path::new(
+                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app"
+            ))
+        );
+        assert_eq!(
+            helper_bundle_root(Path::new("target/debug/openlogi-agent")),
+            None
+        );
     }
 
     #[test]

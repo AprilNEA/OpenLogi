@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Presentation code shared by the OpenLogi settings app and its Actions Ring overlay helper."
-# Not publishable to crates.io: depends on git-only gpui.
+# Internal presentation crate, distributed with the desktop and overlay.
 publish = false
 
 [dependencies]

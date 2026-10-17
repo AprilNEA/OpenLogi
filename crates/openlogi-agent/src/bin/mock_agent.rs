@@ -51,11 +51,12 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
     PairedDevice, StandaloneDevice,
 };
-use openlogi_core::single_instance::{self, InstanceError};
+use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    LightCommand, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -70,7 +71,6 @@ use tarpc::server::{BaseChannel, Channel as _};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 #[path = "mock_agent/profile.rs"]
 mod profile;
@@ -113,21 +113,16 @@ const PAIRING_HOLD: Duration = Duration::from_secs(2);
 /// How often that hold checks for an event. Short enough that a scripted step
 /// reaches the GUI promptly; see [`MockAgent::next_pairing`] for why the hold
 /// polls instead of awaiting the receiver.
-const PAIRING_POLL_TICK: Duration = Duration::from_millis(100);
+const PAIRING_POLL_PERIOD: Duration = Duration::from_millis(100);
 
 /// How often a held `observe` re-renders the scripted state looking for a
 /// change. The real agent is told by its watchers and needs no tick at all; a
 /// mock has nothing to be told by, so it compares instead.
-const OBSERVE_TICK: Duration = Duration::from_millis(250);
+const OBSERVE_POLL_PERIOD: Duration = Duration::from_millis(250);
 
 fn main() -> ExitCode {
     default_to_dev_profile();
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    openlogi_core::logging::init_stderr();
 
     let state = match state_from_args(std::env::args_os().skip(1)) {
         Ok(state) => state,
@@ -141,7 +136,7 @@ fn main() -> ExitCode {
     // agent spawned meanwhile (GUI auto-spawn, launchd KeepAlive) exit as a
     // duplicate — its takeover handshake sees us answer the current
     // PROTOCOL_VERSION and stands down.
-    let _guard = match single_instance::acquire("agent.lock") {
+    let _guard = match single_instance::acquire(Role::Agent) {
         Ok(guard) => guard,
         Err(InstanceError::AlreadyRunning { path }) => {
             warn!(
@@ -218,7 +213,7 @@ fn load_fixture_profile(path: &Path) -> Result<DeviceProfile, String> {
 /// socket — the two would never meet, and the mock would sit on the installed
 /// app's paths instead.
 fn default_to_dev_profile() {
-    if std::env::var_os("OPENLOGI_PROFILE").is_some() {
+    if std::env::var_os(openlogi_core::env::PROFILE).is_some() {
         return;
     }
     #[expect(
@@ -229,16 +224,25 @@ fn default_to_dev_profile() {
     // the first statement of `main`: no runtime, no tracing subscriber, no
     // other thread exists yet, and nothing has read the environment.
     unsafe {
-        std::env::set_var("OPENLOGI_PROFILE", "dev");
+        std::env::set_var(
+            openlogi_core::env::PROFILE,
+            openlogi_core::paths::Profile::Dev.env_value(),
+        );
     }
 }
 
 /// Accept loop — the mock's copy of `server::run` (kept verbatim rather than
 /// making the production loop generic over its service impl for a dev tool).
 async fn serve(server: MockAgent) -> std::io::Result<()> {
-    let listener = transport::bind()?;
+    serve_on(transport::bind()?, server).await
+}
+
+async fn serve_on(
+    listener: interprocess::local_socket::tokio::Listener,
+    server: MockAgent,
+) -> std::io::Result<()> {
     info!(
-        profile = std::env::var("OPENLOGI_PROFILE").unwrap_or_default(),
+        profile = std::env::var(openlogi_core::env::PROFILE).unwrap_or_default(),
         "mock agent listening"
     );
     loop {
@@ -523,7 +527,7 @@ impl State {
             .iter()
             .find_map(|inventory| {
                 inventory.paired.iter().find_map(|device| {
-                    (DeviceRoute::device_route_for(inventory, device.slot).as_ref() == Some(route))
+                    (DeviceRoute::for_slot(inventory, device.slot).as_ref() == Some(route))
                         .then_some(device.online)
                 })
             })
@@ -538,15 +542,38 @@ impl State {
                 })
             })
             .or_else(|| {
-                self.profile.standalone.iter().find_map(|device| {
-                    (standalone_route(device) == *route).then_some(device.online)
-                })
+                self.profile
+                    .standalone
+                    .iter()
+                    .find_map(|device| (device.route() == *route).then_some(device.online))
             })
     }
 
     #[cfg(test)]
     fn advance_test_time(&mut self, duration: Duration) {
         self.clock.advance(duration);
+    }
+
+    /// Drop the paired device `route` names, as its receiver does on unpair.
+    fn unpair(&mut self, route: &DeviceRoute) -> Result<(), PairingFailure> {
+        let (DeviceRoute::Bolt { receiver_uid, slot }
+        | DeviceRoute::Unifying { receiver_uid, slot }) = route
+        else {
+            return Err(PairingFailure::ReceiverNotFound);
+        };
+        let names =
+            |uid: Option<&str>| uid.is_some_and(|uid| uid.eq_ignore_ascii_case(receiver_uid));
+        let inventory = self
+            .profile
+            .inventories
+            .iter_mut()
+            .find(|inventory| names(inventory.receiver.unique_id.as_deref()))
+            .ok_or(PairingFailure::ReceiverNotFound)?;
+        inventory.paired.retain(|device| device.slot != *slot);
+        if names(Some(RECEIVER_UID)) {
+            self.paired_extra.retain(|device| device.slot != *slot);
+        }
+        Ok(())
     }
 
     /// Append the scripted pairing candidate to the Bolt receiver's inventory
@@ -561,12 +588,13 @@ impl State {
             kind: DeviceKind::Keyboard,
             online: true,
             battery: Some(BatteryInfo {
-                percentage: 90,
+                percentage: Some(90),
                 level: BatteryLevel::Full,
                 status: BatteryStatus::Discharging,
             }),
             model_info: None,
             capabilities: Some(Capabilities::default()),
+            settings_revision: 0,
         });
         self.profile
             .settings
@@ -606,23 +634,13 @@ fn profile_value_mut<'a, T>(
     }
 }
 
-fn standalone_route(device: &StandaloneDevice) -> DeviceRoute {
-    DeviceRoute::RawHid {
-        vendor_id: device.address.vendor_id,
-        product_id: device.address.product_id,
-        usage_page: device.address.usage_page,
-        usage_id: device.address.usage_id,
-        identity: device.address.identity.clone(),
-    }
-}
-
 /// Sawtooth battery for the online mouse: 80% draining ~1%/minute down to
 /// 20%, then back to 80%, with the coarse level tracking the percentage.
 fn draining_battery(elapsed: Duration) -> BatteryInfo {
     let drained = u8::try_from(elapsed.as_secs() / 60 % 61).unwrap_or(0);
     let percentage = 80 - drained;
     BatteryInfo {
-        percentage,
+        percentage: Some(percentage),
         level: match percentage {
             0..=10 => BatteryLevel::Critical,
             11..=25 => BatteryLevel::Low,
@@ -695,6 +713,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         camera_active: state.camera_active(),
         pairing: state.phase.clone(),
         foreground: state.foreground(),
+        lights: Vec::new(),
     }
 }
 
@@ -841,6 +860,98 @@ impl Agent for MockAgent {
         profile_value(&state.settings_for(&route)?.backlight, &route, 0x1982).copied()
     }
 
+    async fn read_fn_lock(self, _: Context, route: DeviceRoute) -> Result<FnLockState, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.fn_lock, &route, 0x40a3).copied()
+    }
+
+    async fn set_fn_lock(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.fn_lock, &route, 0x40a3)?;
+        stored.fn_lock = fn_lock;
+        info!(%route, fn_lock, "set_fn_lock");
+        Ok(*stored)
+    }
+
+    async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {
+        let result = self.state.lock().await.unpair(&route);
+        info!(%route, ok = result.is_ok(), "unpair_device");
+        result
+    }
+    async fn read_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ReportRateInfo, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.report_rate, &route, 0x8061).cloned()
+    }
+    async fn set_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.report_rate, &route, 0x8061)?;
+        if !stored.supports(rate) {
+            return Err(WriteError::ReportRateUnsupported { requested: rate });
+        }
+        stored.current = rate;
+        info!(%route, %rate, "set_report_rate");
+        Ok(stored.clone())
+    }
+    async fn set_backlight(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.backlight, &route, 0x1982)?;
+        if !stored.accepts(change) {
+            return Err(WriteError::BacklightChangeUnsupported { change });
+        }
+        *stored = stored.changed(change);
+        info!(%route, %change, "set_backlight");
+        Ok(*stored)
+    }
+
+    async fn read_easy_switch_hosts(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.easy_switch, &route, 0x1815).cloned()
+    }
+
+    async fn rename_easy_switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.easy_switch, &route, 0x1815)?;
+        let name = stored.name_for(slot, &name)?.to_owned();
+        if let Some(host) = stored.slots.iter_mut().find(|host| host.index == slot) {
+            host.name = Some(name);
+        }
+        info!(%route, slot, "rename_easy_switch_host");
+        Ok(stored.clone())
+    }
+
     async fn request_accessibility_prompt(self, _: Context) {
         info!("request_accessibility_prompt (no-op in the mock)");
     }
@@ -931,7 +1042,7 @@ impl Agent for MockAgent {
             if let Some(update) = self.state.lock().await.next_pairing_update() {
                 return Some(update);
             }
-            tokio::time::sleep(PAIRING_POLL_TICK).await;
+            tokio::time::sleep(PAIRING_POLL_PERIOD).await;
         }
         None
     }
@@ -947,7 +1058,7 @@ impl Agent for MockAgent {
             if current.generation != since || Instant::now() >= deadline {
                 return current;
             }
-            tokio::time::sleep(OBSERVE_TICK).await;
+            tokio::time::sleep(OBSERVE_POLL_PERIOD).await;
         }
     }
 
