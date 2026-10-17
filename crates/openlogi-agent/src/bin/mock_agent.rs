@@ -63,7 +63,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
     MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingPhase, PairingUpdate, RingObservation,
+    PairingPhase, PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -950,6 +950,15 @@ impl Agent for MockAgent {
         }
         info!(%route, slot, "rename_easy_switch_host");
         Ok(stored.clone())
+    }
+    /// The mock reports no changes on its lights, so it has none to keep.
+    async fn reload_saved_config(
+        self,
+        _: Context,
+        _saved: SavedConfig,
+    ) -> Result<(), ConfigReloadError> {
+        info!("reload_saved_config (no-op in the mock)");
+        Ok(())
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

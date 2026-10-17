@@ -34,6 +34,7 @@ const VK_SHIFT: u16 = 0x10;
 const VK_CONTROL: u16 = 0x11;
 const VK_MENU: u16 = 0x12;
 const VK_LWIN: u16 = 0x5B;
+const VK_SNAPSHOT: u16 = 0x2C;
 const VK_BROWSER_BACK: u16 = 0xA6;
 const VK_BROWSER_FORWARD: u16 = 0xA7;
 const VK_VOLUME_MUTE: u16 = 0xAD;
@@ -125,11 +126,13 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::ShowDesktop => post_key(VK_D, &[VK_LWIN]),
         NativeAction::LaunchpadShow => post_key(VK_LWIN, &[]),
         NativeAction::LockScreen => post_key(VK_L, &[VK_LWIN]),
-        // Win+Shift+S opens the snip overlay, which serves both full-screen
-        // and region capture on Windows.
-        NativeAction::Screenshot | NativeAction::CaptureRegion => {
-            post_key(VK_S, &[VK_LWIN, VK_SHIFT]);
-        }
+        // Win+PrtScn saves a full-screen capture straight to
+        // `Pictures\Screenshots` with no further click, like ⌘⇧3 on macOS.
+        NativeAction::Screenshot => post_key(VK_SNAPSHOT, &[VK_LWIN]),
+        // Win+Shift+S opens the snip overlay, which waits for a region. It
+        // used to serve `Screenshot` too, so the two actions behaved the
+        // same (#1864).
+        NativeAction::CaptureRegion => post_key(VK_S, &[VK_LWIN, VK_SHIFT]),
         // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
         // hibernates instead when hibernation is enabled — no clean win from
         // a background agent, so the action is skipped on Windows for now.

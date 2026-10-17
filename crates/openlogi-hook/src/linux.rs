@@ -12,6 +12,10 @@
 //! multitouch `EV_ABS` stream (and the input properties libinput keys
 //! behavior on) with no way to re-inject it — killing the built-in pointer.
 //!
+//! A supervisor thread owns the per-mouse threads and grabs a mouse again
+//! when its event node is re-created by a power cycle, a Bluetooth
+//! reconnect, or a resume (see [`supervisor`]).
+//!
 //! # Permissions
 //!
 //! The process needs read access to `/dev/input/eventN` (typically the `input`
@@ -20,11 +24,12 @@
 //! [`crate::HookError::Linux`].
 #![expect(
     unsafe_code,
-    reason = "the wake pipe and the Wayland toplevel listener call libc directly"
+    reason = "the wake pipes, the /dev/input watch, and the Wayland toplevel listener call libc directly"
 )]
 
 mod foreground;
 pub(crate) mod pointer;
+mod supervisor;
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -32,13 +37,13 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::thread;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
     AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, EventType, InputEvent, KeyCode,
     PropType, RelativeAxisCode,
 };
+use openlogi_inject::uinput;
 use tracing::{debug, error, warn};
 use x11rb::protocol::xproto::ConnectionExt as _;
 
@@ -51,26 +56,11 @@ pub(crate) use foreground::{
     ForegroundApplicationObserver, watch_frontmost_application_activations,
 };
 
-/// Prefix carried by every uinput device OpenLogi creates — the hook's
-/// pass-through mice ([`VIRTUAL_DEVICE_NAME`]) and openlogi-inject's
-/// "OpenLogi action injector" (which also advertises mouse buttons).
-/// Enumeration refuses anything with this prefix so the hook can never grab
-/// one of our own virtual devices.
-const OPENLOGI_DEVICE_PREFIX: &str = "OpenLogi ";
-
-/// Name stamped on every uinput pass-through device.
-const VIRTUAL_DEVICE_NAME: &str = "OpenLogi virtual mouse";
-
 /// Hi-res scroll resolution: 120 units per standard wheel tick, matching the
 /// Linux kernel's `REL_WHEEL_HI_RES` convention and Windows HID semantics.
 const HIRES_UNITS_PER_TICK: f32 = 120.0;
 
-pub(crate) struct HookInner {
-    stop: Arc<AtomicBool>,
-    /// One pipe write-end per device thread; writing wakes the blocking poll.
-    stop_pipes: Vec<OwnedFd>,
-    threads: Vec<thread::JoinHandle<()>>,
-}
+pub(crate) struct HookInner(supervisor::Running);
 
 /// The Linux backend: one `evdev` reader thread per mouse, re-injecting
 /// pass-through events through a `uinput` device.
@@ -82,47 +72,20 @@ impl HookBackend for Backend {
     fn start(
         cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
     ) -> Result<HookInner, HookError> {
-        let devices = find_mouse_devices();
-        if devices.is_empty() {
-            return Err(HookError::NoDeviceFound);
-        }
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
-        let mut threads: Vec<thread::JoinHandle<()>> = Vec::with_capacity(devices.len());
-        let mut stop_pipes: Vec<OwnedFd> = Vec::with_capacity(devices.len());
-
-        let result = (|| -> io::Result<()> {
-            for (path, device) in devices {
-                let virtual_device = build_virtual_device(&device)?;
-                let (rx, tx) = create_pipe()?;
-                let stop_clone = Arc::clone(&stop);
-                let cb_clone = Arc::clone(&cb);
-                let handle = thread::Builder::new()
-                    .name(format!("openlogi-hook:{}", path.display()))
-                    .spawn(move || {
-                        device_thread(path, device, virtual_device, cb_clone, stop_clone, rx);
-                    })?;
-                threads.push(handle);
-                stop_pipes.push(tx);
-            }
-            Ok(())
-        })();
-
-        if let Err(e) = result {
-            shutdown(&stop, &stop_pipes, threads);
-            return Err(HookError::Linux(e));
-        }
-
-        Ok(HookInner {
-            stop,
-            stop_pipes,
-            threads,
-        })
+        supervisor::start(Arc::new(cb)).map(HookInner)
     }
 
     fn stop(inner: HookInner) {
-        shutdown(&inner.stop, &inner.stop_pipes, inner.threads);
+        inner.0.stop();
+    }
+
+    /// Whether the supervisor still runs. A device thread ending with its
+    /// mouse does not stop the hook: the supervisor grabs the mouse again
+    /// when it comes back. Only a supervisor that exited — which then also
+    /// stopped every device thread — lets the agent retire and reinstall
+    /// the hook.
+    fn is_running(inner: &HookInner) -> bool {
+        inner.0.is_running()
     }
 
     /// Return the currently frontmost application, or `None` when unavailable.
@@ -149,19 +112,11 @@ impl HookBackend for Backend {
     }
 }
 
-fn shutdown(stop: &AtomicBool, pipes: &[OwnedFd], threads: Vec<thread::JoinHandle<()>>) {
-    stop.store(true, Ordering::Relaxed);
-    for fd in pipes {
-        signal_pipe(fd);
-    }
-    for handle in threads {
-        if let Err(e) = handle.join() {
-            error!("hook thread panicked on shutdown: {e:?}");
-        }
-    }
-}
-
 /// Write one wake-up byte to a pipe, retrying on EINTR.
+///
+/// `EPIPE` means the reading thread has already exited and closed its end,
+/// so there is nothing left to wake: a device thread whose mouse went away
+/// still gets a stop signal at shutdown.
 fn signal_pipe(fd: &OwnedFd) {
     loop {
         // SAFETY: fd is a valid open pipe write end; writing one byte is safe.
@@ -170,8 +125,10 @@ fn signal_pipe(fd: &OwnedFd) {
             return;
         }
         let err = io::Error::last_os_error();
-        if err.kind() == io::ErrorKind::Interrupted {
-            continue;
+        match err.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::BrokenPipe => return,
+            _ => {}
         }
         error!("failed to signal hook thread pipe ({err}): hook thread may not wake");
         return;
@@ -258,9 +215,10 @@ fn is_hookable_mouse(
     props: &AttributeSetRef<PropType>,
     vendor_id: u32,
 ) -> bool {
-    // Never hook one of our own uinput devices (an unnamed device is fine —
-    // ours are always named).
-    if name.is_some_and(|n| n.starts_with(OPENLOGI_DEVICE_PREFIX)) {
+    // Never hook one of our own uinput devices: the pass-through mice and
+    // the action injector, which also advertises mouse buttons. An unnamed
+    // device is fine — ours are always named.
+    if name.is_some_and(uinput::is_own_device) {
         return false;
     }
     // OpenLogi only remaps Logitech hardware — never grab foreign vendors.
@@ -297,9 +255,7 @@ fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDev
     // look identical and unrecognized, so those settings silently fell back
     // to their defaults instead of the ones configured for this hardware
     // (issue #1075).
-    let builder = VirtualDevice::builder()?
-        .name(VIRTUAL_DEVICE_NAME)
-        .input_id(device.input_id());
+    let builder = uinput::builder(uinput::Device::PassThroughMouse)?.input_id(device.input_id());
 
     let builder = if let Some(keys) = device.supported_keys() {
         builder.with_keys(keys)?
@@ -1092,22 +1048,16 @@ mod tests {
 
     #[test]
     fn own_virtual_devices_are_not_hookable() {
-        // Both uinput devices OpenLogi creates carry the prefix; even with
-        // fully mouse-like capabilities they must never be grabbed.
-        for name in ["OpenLogi virtual mouse", "OpenLogi action injector"] {
+        // Even with fully mouse-like capabilities, a uinput device OpenLogi
+        // created must never be grabbed.
+        for device in [
+            uinput::Device::PassThroughMouse,
+            uinput::Device::ActionInjector,
+        ] {
             let mut caps = Caps::mouse();
-            caps.name = Some(name);
-            assert!(!caps.is_hookable(), "{name:?} must be excluded by prefix");
+            caps.name = Some(device.name());
+            assert!(!caps.is_hookable(), "{device:?} must be excluded");
         }
-    }
-
-    #[test]
-    fn virtual_device_name_carries_exclusion_prefix() {
-        assert!(
-            VIRTUAL_DEVICE_NAME.starts_with(OPENLOGI_DEVICE_PREFIX),
-            "renaming the virtual device away from the prefix would let the \
-             hook grab its own pass-through mice"
-        );
     }
 
     #[test]

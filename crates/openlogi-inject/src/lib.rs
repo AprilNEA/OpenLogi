@@ -1,6 +1,8 @@
 //! OS input-event synthesis split out of openlogi-core so the core stays platform- and IO-free.
 
 mod inject;
+#[cfg(target_os = "linux")]
+pub mod uinput;
 
 pub use inject::{
     HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, ax_navigate_browser, execute,
