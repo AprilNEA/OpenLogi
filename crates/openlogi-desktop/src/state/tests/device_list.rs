@@ -947,6 +947,28 @@ fn a_refused_leftover_unpair_keeps_the_forgotten_device() {
     assert_eq!(state.devices().len(), 1);
 }
 
+/// With every slot asleep and the settings saved under a legacy slot key, the
+/// card stays on that slot, so its panels read the saved settings rather than
+/// defaults.
+#[test]
+fn an_asleep_device_stays_on_the_slot_holding_legacy_settings() {
+    let slot_key = "receiver:ol-bolt-uid-0002:slot:4";
+    let mut config = Config::ephemeral();
+    config.set_dpi(slot_key, Dpi::new(1600));
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories: &[keyboard_pairings(&[2, 3, 4], None)],
+        ..Sources::in_memory(config, &AssetResolver::new(), commands)
+    });
+
+    let [card] = state.devices() else {
+        panic!("one keyboard must be one card: {:?}", state.devices());
+    };
+    assert_eq!(card.route, Some(bolt_slot(4)));
+    assert_eq!(card.config_key, slot_key);
+    assert_eq!(card.stale_pairings, [bolt_slot(2), bolt_slot(3)]);
+}
+
 /// A leftover slot whose identity was saved under its own slot key is still
 /// folded: the saved entry does not come back as a separate offline card.
 #[test]

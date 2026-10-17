@@ -4,7 +4,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 
 use openlogi_camera::Camera;
-use openlogi_core::config::{Config, DeviceIdentity, canonical_device_key};
+use openlogi_core::config::{Config, DeviceConfig, DeviceIdentity, canonical_device_key};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
     LightCapabilities, StandaloneDevice,
@@ -285,7 +285,7 @@ pub(super) fn build_device_list(
             });
         }
     }
-    let folded_keys = collapse_duplicate_pairings(&mut list);
+    let folded_keys = collapse_duplicate_pairings(&mut list, config);
     append_standalone(&mut list, standalone, resolver, config);
     #[cfg(debug_assertions)]
     if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
@@ -321,14 +321,15 @@ pub(super) fn build_device_list(
 /// unit id, and with the same serial from the probe cache. Shown as is, one
 /// keyboard becomes three cards. The card that stays is the online slot, else
 /// the slot whose key is the device's own identity (the one that owns its
-/// settings), else the lowest slot; the other offline slots become its
+/// settings), else a slot whose key holds saved settings, else the lowest
+/// slot; the other offline slots become its
 /// [`DeviceRecord::stale_pairings`]. An online duplicate is never folded: a
 /// live link is not a leftover. Slots on different receivers stay separate
 /// cards, since a second receiver can be a deliberate Easy-Switch host.
 ///
 /// Returns the config keys of the folded slots, so a saved identity under one
 /// of them does not come back as an offline placeholder.
-fn collapse_duplicate_pairings(list: &mut Vec<DeviceRecord>) -> HashSet<String> {
+fn collapse_duplicate_pairings(list: &mut Vec<DeviceRecord>, config: &Config) -> HashSet<String> {
     let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, record) in list.iter().enumerate() {
         let Some(
@@ -354,6 +355,10 @@ fn collapse_duplicate_pairings(list: &mut Vec<DeviceRecord>) -> HashSet<String> 
             (
                 record.online,
                 record.config_key == identity,
+                config
+                    .devices
+                    .get(&record.config_key)
+                    .is_some_and(DeviceConfig::holds_settings),
                 std::cmp::Reverse(record.slot),
             )
         }) else {
