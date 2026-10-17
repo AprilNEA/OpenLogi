@@ -1,6 +1,7 @@
 //! DPI-cycle state shared with background action dispatch.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use openlogi_hid::{DeviceRoute, Dpi, DpiCapabilities};
 
@@ -25,6 +26,21 @@ impl DpiCycles {
         self.by_key.get_mut(key)
     }
 
+    /// The config key, DPI and write target of a held DPI shift on `key`
+    /// (same fallback as [`Self::state_for`]).
+    #[must_use]
+    pub fn target_for_shift(&self, key: Option<&str>) -> Option<(&str, Dpi, DeviceRoute)> {
+        let key = key.or(self.selected.as_deref())?;
+        let (key, state) = self.by_key.get_key_value(key)?;
+        Some((key, state.lowest()?, state.target.clone()?))
+    }
+
+    /// The DPI config or an action last set on `key`'s sensor, when known.
+    #[must_use]
+    pub fn current(&self, key: &str) -> Option<Dpi> {
+        self.by_key.get(key)?.current
+    }
+
     /// The write target for `key` (same fallback as [`Self::state_for`])
     /// without a mutable borrow — for dispatch that only needs the route, like
     /// the SmartShift toggle.
@@ -32,6 +48,28 @@ impl DpiCycles {
     pub fn target_for(&self, key: Option<&str>) -> Option<DeviceRoute> {
         let key = key.or(self.selected.as_deref())?;
         self.by_key.get(key).and_then(|state| state.target.clone())
+    }
+}
+
+/// The DPI a mouse had before a held DPI shift, read from its sensor when
+/// config or an action never set one.
+///
+/// It is kept until a restore is written. A hold that supersedes a pending
+/// restore then reuses it, where a fresh reading would be the shifted DPI.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DpiBeforeShift(Arc<Mutex<Option<Dpi>>>);
+
+impl DpiBeforeShift {
+    pub(crate) fn get(&self) -> Option<Dpi> {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn set(&self, dpi: Dpi) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(dpi);
+    }
+
+    pub(crate) fn clear(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 }
 
@@ -46,6 +84,10 @@ pub struct DpiCycleState {
     pub index: usize,
     pub target: Option<DeviceRoute>,
     pub capabilities: Option<DpiCapabilities>,
+    /// The sensor DPI last set through config or an action, when known.
+    pub current: Option<Dpi>,
+    /// The configured DPI this state was built from.
+    pub committed: Option<Dpi>,
 }
 
 impl DpiCycleState {
@@ -57,10 +99,7 @@ impl DpiCycleState {
             return None;
         }
         self.index = (self.index + 1) % self.presets.len();
-        Some((
-            self.normalize(self.presets[self.index]),
-            self.target.clone(),
-        ))
+        Some(self.select())
     }
 
     /// Jump to preset `i`, clamping to the list length. Returns the DPI +
@@ -69,9 +108,32 @@ impl DpiCycleState {
         if self.presets.is_empty() {
             return None;
         }
-        let clamped = i.min(self.presets.len() - 1);
-        self.index = clamped;
-        Some((self.normalize(self.presets[clamped]), self.target.clone()))
+        self.index = i.min(self.presets.len() - 1);
+        Some(self.select())
+    }
+
+    /// Steps one preset without wrapping.
+    pub fn step(&mut self, up: bool) -> Option<(Dpi, Option<DeviceRoute>)> {
+        let last = self.presets.len().checked_sub(1)?;
+        self.index = if up {
+            (self.index + 1).min(last)
+        } else {
+            self.index.saturating_sub(1)
+        };
+        Some(self.select())
+    }
+
+    /// The lowest preset, which a held DPI shift drops to.
+    #[must_use]
+    pub fn lowest(&self) -> Option<Dpi> {
+        let low = self.presets.iter().copied().min()?;
+        Some(self.normalize(low))
+    }
+
+    fn select(&mut self) -> (Dpi, Option<DeviceRoute>) {
+        let dpi = self.normalize(self.presets[self.index]);
+        self.current = Some(dpi);
+        (dpi, self.target.clone())
     }
 
     fn normalize(&self, dpi: Dpi) -> Dpi {
@@ -97,9 +159,33 @@ mod tests {
                     slot,
                 }),
                 capabilities: None,
+                current: None,
+                committed: None,
             },
         );
         cycles
+    }
+
+    #[test]
+    fn step_stops_at_both_ends_and_shift_drops_to_the_lowest_preset() {
+        let mut cycles = cycles_with("a", 1);
+        let state = cycles.state_for(Some("a")).unwrap();
+        assert_eq!(state.step(false).unwrap().0, Dpi::new(800));
+        assert_eq!(state.step(true).unwrap().0, Dpi::new(1600));
+        assert_eq!(state.step(true).unwrap().0, Dpi::new(1600));
+        assert_eq!(state.lowest(), Some(Dpi::new(800)));
+    }
+
+    /// A preset is not a reading: until config or an action sets the DPI, a
+    /// shift has to ask the mouse what to return to.
+    #[test]
+    fn current_dpi_is_unknown_until_config_or_an_action_sets_it() {
+        let mut cycles = cycles_with("a", 1);
+        assert_eq!(cycles.current("a"), None);
+        let (key, low, _) = cycles.target_for_shift(Some("a")).unwrap();
+        assert_eq!((key, low), ("a", Dpi::new(800)));
+        cycles.state_for(Some("a")).unwrap().step(true);
+        assert_eq!(cycles.current("a"), Some(Dpi::new(1600)));
     }
 
     #[test]

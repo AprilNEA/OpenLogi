@@ -44,6 +44,14 @@ fn catalog_excludes_custom_shortcut() {
     }
 }
 
+/// One-shot sources (Actions Ring slots, swipes) pick from the catalog and
+/// cannot deliver a release.
+#[test]
+fn catalog_excludes_actions_that_last_as_long_as_their_press() {
+    assert!(Action::catalog().iter().all(|action| !action.is_held()));
+    assert!(Action::DpiShift.is_held() && Action::GShift.is_held());
+}
+
 #[test]
 fn hold_shortcut_has_distinct_lifecycle_semantics() {
     let combo: KeyCombo = "Alt+Space".parse().expect("valid shortcut failed");
@@ -381,11 +389,25 @@ fn all_catalog_variants_roundtrip_toml() {
     }
 }
 
+/// The variant name `action` is stored under in `config.toml`.
+fn persisted_name(action: Action) -> String {
+    match toml::Value::try_from(action).expect("serialize action") {
+        toml::Value::String(name) => name,
+        toml::Value::Table(table) if table.len() == 1 => table
+            .into_iter()
+            .next()
+            .map(|(key, _)| key)
+            .expect("one variant key"),
+        value => panic!("unexpected action shape: {value:?}"),
+    }
+}
+
 #[test]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
     actions.extend([
         Action::SetDpiPreset(0),
+        Action::DpiShift,
         Action::CustomShortcut(
             "F1".parse()
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
@@ -408,20 +430,7 @@ fn persisted_action_variant_names_are_stable() {
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
     ]);
-    let mut actual: Vec<String> = actions
-        .into_iter()
-        .map(
-            |action| match toml::Value::try_from(action).expect("serialize action") {
-                toml::Value::String(name) => name,
-                toml::Value::Table(table) if table.len() == 1 => table
-                    .into_iter()
-                    .next()
-                    .map(|(key, _)| key)
-                    .expect("one variant key"),
-                value => panic!("unexpected action shape: {value:?}"),
-            },
-        )
-        .collect();
+    let mut actual: Vec<String> = actions.into_iter().map(persisted_name).collect();
     actual.sort();
     let mut expected = [
         "AppExpose",
@@ -433,6 +442,7 @@ fn persisted_action_variant_names_are_stable() {
         "CustomShortcut",
         "Cut",
         "CycleDpiPresets",
+        "DpiShift",
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
@@ -447,6 +457,7 @@ fn persisted_action_variant_names_are_stable() {
         "MuteVolume",
         "NewTab",
         "NextDesktop",
+        "NextDpiPreset",
         "NextTab",
         "NextTrack",
         "None",
@@ -456,6 +467,7 @@ fn persisted_action_variant_names_are_stable() {
         "PrevTab",
         "PrevTrack",
         "PreviousDesktop",
+        "PreviousDpiPreset",
         "Redo",
         "ReloadPage",
         "ReopenTab",

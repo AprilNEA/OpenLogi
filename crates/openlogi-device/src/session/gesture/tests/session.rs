@@ -176,6 +176,7 @@ async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
         ),
         None,
         None,
+        None,
     )
     .expect("one diverted control should require restoration");
 
@@ -223,6 +224,7 @@ fn diverted_gesture(
                 PointerDivert::RawXy,
             )],
         ),
+        None,
         None,
         None,
     )
@@ -420,6 +422,7 @@ async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
         ),
         None,
         None,
+        None,
     )
     .expect("one diverted control should require restoration");
 
@@ -482,6 +485,7 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
                 PointerDivert::RawXy,
             )],
         ),
+        None,
         None,
         None,
     );
@@ -657,4 +661,58 @@ async fn thumbwheel_left_diverted_is_restored_native_without_its_diverted_sign()
         arm_then_restore_thumbwheel([0x01, 0x01]).await,
         vec![[0x01, 0x00], [0x00, 0x00]]
     );
+}
+
+/// A wake that mutes the captured buttons but cannot start the spy leaves
+/// them dead, so the session has to end and restore the mouse.
+#[tokio::test]
+async fn host_rearm_reports_a_spy_that_did_not_start() {
+    const ONBOARD: u8 = 9;
+    const SPY: u8 = 10;
+    const START_SPY: u8 = 1;
+    let spy_fails = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder({
+        let spy_fails = Arc::clone(&spy_fails);
+        move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => {
+                    response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                        0x8100 => ONBOARD,
+                        0x8110 => SPY,
+                        _ => 0,
+                    };
+                }
+                (SPY, START_SPY) if spy_fails.load(std::sync::atomic::Ordering::Relaxed) => {
+                    response[2] = 0xff;
+                    response[3] = SPY;
+                    response[4] = request[3];
+                    response[5] = 2;
+                }
+                (ONBOARD | SPY, _) => {}
+                _ => panic!("unexpected capture request: {request:02x?}"),
+            }
+            Some(response)
+        }
+    });
+    let channel = scripted_channel(raw).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let spec = CaptureSpec {
+        onboard: Some(OnboardTarget::Host(HostMode {
+            slots: vec![(ButtonId::G9, true)],
+            report_rate: None,
+        })),
+        ..CaptureSpec::default()
+    };
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+        .await
+        .unwrap();
+
+    assert!(armed.rearm().await);
+    spy_fails.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(!armed.rearm().await);
 }

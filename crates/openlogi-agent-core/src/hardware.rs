@@ -33,6 +33,7 @@ use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
 
 use crate::capture_plan::SharedCapturePlans;
+use crate::dpi::DpiBeforeShift;
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
@@ -1004,16 +1005,115 @@ fn log_wheel_result(
     });
 }
 
-/// Spawn an OS thread that writes `dpi` to `op`'s device via its current
-/// shared channel. Returns immediately; failures are logged.
-pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
+/// Spawn an OS thread that writes `dpi` to `op`'s device once its earlier
+/// DPI writes have finished, unless a newer one was requested by then.
+/// Failures are logged.
+pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dpi) {
     let index = op.route.device_index();
-    op.spawn_write(
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
         "DPI write",
-        move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_dpi_on(&shared, dpi).await.map(|()| true)
+                },
+                || async { Ok(false) },
+            )
+            .await
+        },
         move |result| {
-            log_outcome(index, "DPI write", result, |()| {
-                debug!(index, %dpi, "DPI written to device");
+            log_outcome(index, "DPI write", result, |written| {
+                if written {
+                    debug!(index, %dpi, "DPI written to device");
+                } else {
+                    debug!(index, %dpi, "DPI write superseded by a newer one");
+                }
+            });
+        },
+    );
+}
+
+/// [`write_dpi_in_background`] for a held DPI shift. With `before`, the sensor
+/// DPI is read into it first unless an earlier hold's reading is still owed a
+/// restore. If that read fails nothing is written: the release would have
+/// nothing to return to.
+pub(crate) fn hold_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    dpi: Dpi,
+    before: Option<DpiBeforeShift>,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "DPI shift",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async move {
+                    let shared = op.resolve()?;
+                    if let Some(before) = before
+                        && before.get().is_none()
+                    {
+                        before.set(openlogi_hid::get_dpi_info_on(&shared).await?.current);
+                    }
+                    openlogi_hid::set_dpi_on(&shared, dpi).await.map(|()| true)
+                },
+                || async { Ok(false) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "DPI shift", result, |written| {
+                if written {
+                    debug!(index, %dpi, "DPI shift written to device");
+                } else {
+                    debug!(index, %dpi, "DPI shift superseded by a newer write");
+                }
+            });
+        },
+    );
+}
+
+/// Write the DPI `restore` yields once this write's turn comes, if any, and
+/// forget `before` once it is written.
+pub(crate) fn restore_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    before: DpiBeforeShift,
+    restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "DPI restore",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async move {
+                    let Some(dpi) = restore() else {
+                        return Ok(Some(None));
+                    };
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_dpi_on(&shared, dpi).await?;
+                    before.clear();
+                    Ok(Some(Some(dpi)))
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "DPI restore", result, |restored| match restored {
+                Some(Some(dpi)) => debug!(index, %dpi, "DPI restored"),
+                Some(None) => debug!(index, "no DPI to restore"),
+                None => debug!(index, "DPI restore superseded by a newer write"),
             });
         },
     );

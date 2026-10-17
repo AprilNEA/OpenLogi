@@ -18,8 +18,8 @@ use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::device::{ChangedOnLight, DeviceInventory, LightState, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PairingError, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    LightCommand, OnboardState, PairingError, PasskeyMethod, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -110,7 +110,11 @@ pub use succession::Identity;
 ///      the settings app, with the revision of the file it wrote. It keeps a
 ///      change made on a light unless the save holds its value, removes the
 ///      control's value, or the user chose that control. A file at another
-///      revision loads as a plain reload.
+///      revision loads as a plain reload; `Capabilities::{onboard_profiles,
+///      button_spy}`, the `NextDpiPreset`, `PreviousDpiPreset`, `DpiShift`
+///      and `GShift` actions, `Agent::read_onboard`,
+///      `HidppOperation::ReadOnboard` and `PairingFailure::ReceiverFull`
+///      appended — G-series onboard memory, host mode and G-Shift.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -365,6 +369,8 @@ pub enum PairingFailure {
     UnknownDevice,
     /// There is no pairing session to receive this command.
     NoActiveSession,
+    /// The receiver has no free slot.
+    ReceiverFull,
 }
 
 /// Immediate command-acceptance failure for pairing RPCs.
@@ -420,6 +426,7 @@ impl From<PairingError> for PairingFailure {
             PairingError::MalformedNotification(what) => Self::Hid {
                 message: format!("malformed pairing notification ({what})"),
             },
+            PairingError::ReceiverFull => Self::ReceiverFull,
         }
     }
 }
@@ -721,4 +728,6 @@ pub trait Agent {
     /// revision than `saved.revision` was edited since, and loads as
     /// [`Agent::reload_config`] loads it.
     async fn reload_saved_config(saved: SavedConfig) -> Result<(), ConfigReloadError>;
+    /// Read a G-series mouse's onboard memory.
+    async fn read_onboard(route: DeviceRoute) -> Result<OnboardState, WriteError>;
 }
