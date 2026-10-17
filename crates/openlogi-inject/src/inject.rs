@@ -525,6 +525,7 @@ impl ScrollQuantizer {
     /// input) needs a proportionally larger floor to guarantee a comparably
     /// visible result for one isolated, deliberate tick — see
     /// `openspec/changes/normalize-scroll-sensitivity-by-resolution` design.md.
+    #[cfg(any(target_os = "macos", test))]
     fn quantize_with_floor(
         &mut self,
         delta: ScrollDelta,
