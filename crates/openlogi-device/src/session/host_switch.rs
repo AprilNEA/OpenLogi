@@ -385,6 +385,17 @@ impl HostSwitchTarget {
     pub async fn switch_to(&self, host: u8) -> Result<(), HostSwitchError> {
         timed_hidpp("writing current host", self.feature.set_current_host(host)).await
     }
+
+    /// Whether the device still answers on this connection.
+    ///
+    /// The switch write is never acknowledged, so after one an answer is the
+    /// only sign it did not take: the device never left. A device that left,
+    /// or is asleep, does not answer within `limit`.
+    pub async fn answers(&self, limit: Duration) -> bool {
+        timeout(limit, self.feature.get_host_info())
+            .await
+            .is_ok_and(|reply| reply.is_ok())
+    }
 }
 
 /// Prepare `route` for one-write moves to any of the zero-based `hosts`.
