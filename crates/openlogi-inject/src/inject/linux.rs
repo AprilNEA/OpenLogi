@@ -19,7 +19,7 @@ use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
+    Action, Effect, Host, KeyCombo, LinuxDesktop, MediaKey, MouseButton, NativeAction, Shortcut,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -134,10 +134,19 @@ fn dispatch_media(key: MediaKey) {
     }
 }
 
-/// Dispatch a window-manager or power [`NativeAction`]. `action` is only
-/// used for its label in the "no Linux equivalent" debug log.
+/// Dispatch a window-manager or power [`NativeAction`].
+///
+/// Whether this desktop can perform `action` at all is decided by
+/// [`Action::is_available_on`], the same table the pickers read to stop
+/// offering it, and the desktop comes from the same [`LinuxDesktop`]
+/// classification; what is left here is how each desktop performs it.
 fn dispatch_native(action: &Action, native: NativeAction) {
-    if hyprland_session() {
+    let desktop = LinuxDesktop::current();
+    if !action.is_available_on(Host::Linux(desktop)) {
+        skip_unsupported_native(action);
+        return;
+    }
+    if desktop == LinuxDesktop::Hyprland {
         tracing::debug!(
             desktop = std::env::var("XDG_CURRENT_DESKTOP")
                 .ok()
@@ -252,16 +261,6 @@ fn skip_unsupported_native(action: &Action) {
         action = action.label(),
         "no Linux equivalent — action skipped"
     );
-}
-
-/// Hyprland compositor session. Gate is the instance signature only —
-/// `XDG_CURRENT_DESKTOP` is logged for diagnostics and must not select the table.
-fn hyprland_session() -> bool {
-    hyprland_session_from_signature(std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok().as_deref())
-}
-
-fn hyprland_session_from_signature(signature: Option<&str>) -> bool {
-    signature.is_some_and(|value| !value.is_empty())
 }
 
 const HELPER_PREFIXES: [&str; 2] = ["/usr/bin", "/usr/local/bin"];
@@ -472,17 +471,7 @@ fn gnome_key_or_skip(action: &Action, mods: &[KeyCode], key: KeyCode) {
 }
 
 fn is_gnome() -> bool {
-    desktop_is_gnome(std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default())
-}
-
-/// The pure half of [`is_gnome`], taking the desktop string directly instead
-/// of reading it from the process environment — so tests can drive it
-/// without `std::env::set_var`, which cannot be scoped to just this test:
-/// the process environment is process-wide, and a private test-only mutex
-/// only serializes callers that take it, not every other reader (including
-/// `is_gnome` itself, called from unrelated code running concurrently).
-fn desktop_is_gnome(current_desktop: impl AsRef<str>) -> bool {
-    current_desktop.as_ref().to_lowercase().contains("gnome")
+    LinuxDesktop::current() == LinuxDesktop::Gnome
 }
 
 /// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
@@ -1074,7 +1063,7 @@ fn sleep_system() {
 }
 
 fn is_kde() -> bool {
-    current_desktop().is_some_and(|d| d.contains("kde"))
+    LinuxDesktop::current() == LinuxDesktop::Kde
 }
 
 /// The KWin session bus, but only on KDE. KDE is identified by the XDG_CURRENT_DESKTOP
@@ -1257,9 +1246,9 @@ mod tests {
     use super::{
         HELPER_PREFIXES, KEY_CAPABILITIES, ScrollOutput, action_scroll, capture_region_mods, combo,
         desktop_switch_mods, generic_linux_lock_fallback_chord, hid_usage_to_linux,
-        hyprland_helper, hyprland_lock_fallback_chord, hyprland_lock_helper,
-        hyprland_session_from_signature, key_ev, key_phase_events, modifiers_to_keycodes, rel_ev,
-        resolve_allowlisted_under, scroll_events, syn, unheld_modifiers, wait_with_retry,
+        hyprland_helper, hyprland_lock_fallback_chord, hyprland_lock_helper, key_ev,
+        key_phase_events, modifiers_to_keycodes, rel_ev, resolve_allowlisted_under, scroll_events,
+        syn, unheld_modifiers, wait_with_retry,
     };
     use crate::inject::{HeldChordKind, HeldOutput, KeyPhase};
 
@@ -1414,15 +1403,6 @@ mod tests {
     }
 
     #[test]
-    fn hyprland_gate_is_signature_only() {
-        assert!(!hyprland_session_from_signature(None));
-        assert!(!hyprland_session_from_signature(Some("")));
-        assert!(hyprland_session_from_signature(Some(
-            "wayland-1_1234567890_1111111111"
-        )));
-    }
-
-    #[test]
     fn hyprland_launchpad_maps_to_absolute_omarchy_menu_toggle() {
         let (helper, fallback) = hyprland_helper(NativeAction::LaunchpadShow)
             .expect("LaunchpadShow must have a Hyprland helper");
@@ -1539,23 +1519,6 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn gnome_detection_matches_on_current_desktop_case_insensitively() {
-        for (value, expected) in [
-            ("GNOME", true),
-            ("ubuntu:GNOME", true),
-            ("gnome-classic", true),
-            ("KDE", false),
-            ("", false),
-        ] {
-            assert_eq!(
-                super::desktop_is_gnome(value),
-                expected,
-                "XDG_CURRENT_DESKTOP={value:?}"
-            );
-        }
     }
 
     #[test]
