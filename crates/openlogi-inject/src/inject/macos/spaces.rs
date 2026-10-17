@@ -1,6 +1,9 @@
-//! DockSwipe injection with read-only, per-display Space confirmation.
+//! Adjacent-Space switches with read-only, per-display Space confirmation.
 //!
-//! Private event format follows yabai's SIP-enabled implementation:
+//! The switch types the user's own "Move left/right a space" shortcut when it
+//! is enabled, so the Dock plays its normal slide, and otherwise posts a
+//! DockSwipe. The DockSwipe event format follows yabai's SIP-enabled
+//! implementation:
 //! <https://github.com/asmvik/yabai/blob/dd845723416f5fe92af49fad5ebab00369e07edd/src/space_manager.c#L927-L981>
 //! No Dock injection, cursor warp, focus click, or symbolic-hotkey mutation.
 
@@ -165,15 +168,11 @@ impl Backend for Native {
     }
 
     fn post(&mut self, direction: Direction, gate: PostGate) -> Result<(), Failure> {
-        let events = swipe_events(direction).ok_or(Failure::PostFailed)?;
+        let output = Output::prepare(direction).ok_or(Failure::PostFailed)?;
         if cursor_display() != Some(self.display) {
             return Err(Failure::ContextChanged);
         }
-        gate.commit(|| {
-            for event in &events {
-                CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
-            }
-        })
+        gate.commit(|| output.post())
     }
 
     fn elapsed(&self) -> Duration {
@@ -183,6 +182,50 @@ impl Backend for Native {
     fn wait_for_change(&mut self, remaining: Duration) {
         // Deadline wakeup is cleanup/reconciliation, never evidence of success.
         let _ = self.changed.recv_timeout(remaining);
+    }
+}
+
+/// What one adjacent-Space switch posts, chosen before the gate. The
+/// DockSwipe is built in full before the gate; the shortcut builds every
+/// edge before posting any, against the held modifiers at that moment.
+enum Output {
+    /// The user's enabled Space shortcut, typed as a physical keyboard would.
+    /// The Dock animates it exactly like the keyboard does. Falls back to a
+    /// DockSwipe in `direction` if a held chord owns the shortcut's key.
+    Shortcut(super::symbolic_hotkey::SpaceShortcut, Direction),
+    /// A DockSwipe, for when that shortcut is disabled. The Dock switches
+    /// without the slide animation (#1722).
+    Swipe([CFRetained<CGEvent>; 2]),
+}
+
+impl Output {
+    fn prepare(direction: Direction) -> Option<Self> {
+        if let Some(shortcut) = super::symbolic_hotkey::space_shortcut(direction) {
+            return Some(Self::Shortcut(shortcut, direction));
+        }
+        tracing::debug!(?direction, "no usable Space shortcut — posting a DockSwipe");
+        swipe_events(direction).map(Self::Swipe)
+    }
+
+    fn post(&self) {
+        match self {
+            Self::Shortcut(shortcut, direction) => {
+                if !shortcut.post() {
+                    tracing::debug!("Space shortcut not typed — posting a DockSwipe");
+                    match swipe_events(*direction) {
+                        Some(events) => post_swipe(&events),
+                        None => tracing::warn!("could not build the fallback DockSwipe"),
+                    }
+                }
+            }
+            Self::Swipe(events) => post_swipe(events),
+        }
+    }
+}
+
+fn post_swipe(events: &[CFRetained<CGEvent>; 2]) {
+    for event in events {
+        CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
     }
 }
 
