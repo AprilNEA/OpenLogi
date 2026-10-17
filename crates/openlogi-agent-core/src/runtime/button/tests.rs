@@ -1130,6 +1130,164 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
 }
 
 #[test]
+fn next_deadline_is_the_earliest_pending_long_press() {
+    let binding = long_press(Action::Copy, Action::Paste);
+    let now = Instant::now();
+    let mut state = ButtonState::default();
+    assert_eq!(state.next_deadline(), None);
+
+    state.press(hook_press(1, ButtonId::MiddleClick));
+    assert_eq!(
+        state.next_deadline(),
+        None,
+        "an immediate press has nothing to wait for"
+    );
+    state.press(ActivePress {
+        token: PressToken::hook_for_test(2, ButtonId::Back),
+        behavior: PressBehavior::new(Some(&binding), now + Duration::from_millis(40)),
+        target: ActionDispatchTarget::Keyboard,
+    });
+    state.press(ActivePress {
+        token: PressToken::hook_for_test(3, ButtonId::Forward),
+        behavior: PressBehavior::new(Some(&binding), now),
+        target: ActionDispatchTarget::Keyboard,
+    });
+    assert_eq!(state.next_deadline(), Some(now + LONG_PRESS_THRESHOLD));
+
+    let mut fired = Vec::new();
+    emit_due_long_presses(&mut state, now + LONG_PRESS_THRESHOLD, &mut |event| {
+        fired.push(event);
+    });
+    assert_eq!(fired.len(), 1);
+    assert_eq!(
+        state.next_deadline(),
+        Some(now + Duration::from_millis(40) + LONG_PRESS_THRESHOLD),
+        "a fired long press no longer bounds the wait"
+    );
+}
+
+#[test]
+fn idle_worker_blocks_until_shutdown_wakes_it() {
+    let (commands, queued) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let (sent, received) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        run_worker(&queued, &shutdown_rx, &AtomicU64::new(0), &mut |event| {
+            sent.send(event)
+                .expect("test receiver should stay connected");
+        });
+    });
+    // A press with no long-press threshold leaves the worker nothing to time.
+    commands
+        .send(ButtonCommand::Input {
+            generation: 0,
+            input: ButtonInput::Down(hook_press(1, ButtonId::Back)),
+        })
+        .expect("test queue should accept the press");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    // Let the worker settle back into its wait for the next command.
+    thread::sleep(Duration::from_millis(50));
+
+    let (done, wait) = mpsc::sync_channel(0);
+    shutdown_tx
+        .send(ShutdownRequest { done })
+        .expect("worker should accept shutdown");
+    // A polling worker answers within one period; a blocked one needs the
+    // wake every real shutdown sends after its request.
+    assert!(
+        wait.recv_timeout(Duration::from_millis(100)).is_err(),
+        "an idle worker must not wake on a timer"
+    );
+    commands
+        .send(ButtonCommand::Wake)
+        .expect("worker should accept the wake");
+    wait.recv_timeout(Duration::from_secs(1))
+        .expect("the wake should let the worker observe shutdown");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::Shutdown),
+            ..
+        }
+    ));
+    worker.join().expect("worker should stop");
+}
+
+#[test]
+fn a_quiet_queue_still_fires_the_long_action_at_its_threshold() {
+    let (commands, queued) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
+    let binding = long_press(Action::Copy, Action::Paste);
+    let pressed_at = Instant::now();
+    commands
+        .send(ButtonCommand::Input {
+            generation: 0,
+            input: ButtonInput::Down(ActivePress {
+                token: PressToken::hook_for_test(1, ButtonId::Back),
+                behavior: PressBehavior::new(Some(&binding), pressed_at),
+                target: ActionDispatchTarget::Keyboard,
+            }),
+        })
+        .expect("test queue should accept the press");
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let (sent, received) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        run_worker(&queued, &shutdown_rx, &AtomicU64::new(0), &mut |event| {
+            sent.send((event, Instant::now()))
+                .expect("test receiver should stay connected");
+        });
+    });
+
+    let (started, _) = received
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the press should start");
+    assert!(matches!(started, ButtonRuntimeEvent::Started(_)));
+    // Nothing else is queued, so only the worker's own deadline can fire it.
+    let (triggered, triggered_at) = received
+        .recv_timeout(LONG_PRESS_THRESHOLD + Duration::from_secs(1))
+        .expect("the long action should fire without further input");
+    assert!(matches!(
+        triggered,
+        ButtonRuntimeEvent::Triggered {
+            action: Action::Paste,
+            ..
+        }
+    ));
+    let fired_after = triggered_at.duration_since(pressed_at);
+    assert!(
+        fired_after >= LONG_PRESS_THRESHOLD,
+        "fired early: {fired_after:?}"
+    );
+    assert!(
+        fired_after <= LONG_PRESS_THRESHOLD + Duration::from_millis(250),
+        "fired late: {fired_after:?}"
+    );
+
+    let (done, wait) = mpsc::sync_channel(0);
+    shutdown_tx
+        .send(ShutdownRequest { done })
+        .expect("worker should accept shutdown");
+    commands
+        .send(ButtonCommand::Wake)
+        .expect("worker should accept the shutdown wake");
+    wait.recv_timeout(Duration::from_secs(1))
+        .expect("worker should finish shutdown");
+    assert!(matches!(
+        received.recv_timeout(Duration::from_secs(1)),
+        Ok((
+            ButtonRuntimeEvent::Ended {
+                reason: EndReason::Canceled(CancelReason::Shutdown),
+                ..
+            },
+            _
+        ))
+    ));
+    worker.join().expect("worker should stop");
+}
+
+#[test]
 fn invalidation_during_a_blocked_handler_wins_over_an_overdue_long_action() {
     let (sent, received) = mpsc::channel();
     let (resume, blocked) = mpsc::sync_channel(0);

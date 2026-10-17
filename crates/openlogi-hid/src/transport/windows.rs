@@ -164,7 +164,7 @@ impl WindowsHidppChannel {
     /// Honour the permanent-failure half of the [`RawHidChannel::read_report`]
     /// contract: an `Err` is retried by the `hidpp` read loop, so a condition
     /// that will never clear has to park instead of surfacing — otherwise the
-    /// loop busy-spins a core until something evicts the channel. Sound because
+    /// loop keeps retrying it until something evicts the channel. Sound because
     /// the read loop always races this future against the channel's close
     /// signal in a `select!`.
     async fn park_disconnected<T>(&self) -> T {

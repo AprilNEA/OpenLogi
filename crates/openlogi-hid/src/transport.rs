@@ -730,8 +730,9 @@ impl RawHidChannel for AsyncHidChannel {
             // The device disconnected — there will never be another input
             // report, so this is the permanent-failure case of the
             // `RawHidChannel::read_report` contract: errors are retried by the
-            // `hidpp` read loop (surfacing this one would busy-spin a core
-            // until the inventory watcher evicts the channel), so park instead.
+            // `hidpp` read loop (surfacing this one would keep it retrying a
+            // dead handle until the inventory watcher evicts the channel), so
+            // park instead.
             // The contract guarantees every caller races this future against
             // the channel's close signal, which tears the read down on drop.
             Err(async_hid::HidError::Disconnected) => {

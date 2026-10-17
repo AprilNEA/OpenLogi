@@ -11,7 +11,7 @@ use std::{
     io,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -34,6 +34,8 @@ pub(crate) struct MockRawHidHandle {
     responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
     park_writes: Arc<AtomicBool>,
     fail_writes: Arc<AtomicBool>,
+    fail_reads: Arc<AtomicBool>,
+    read_attempts: Arc<AtomicUsize>,
 }
 
 impl MockRawHidHandle {
@@ -67,6 +69,20 @@ impl MockRawHidHandle {
     pub(crate) fn fail_writes(&self) {
         self.fail_writes.store(true, Ordering::SeqCst);
     }
+
+    /// Make every read fail at once until [`Self::recover_reads`].
+    pub(crate) fn fail_reads(&self) {
+        self.fail_reads.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn recover_reads(&self) {
+        self.fail_reads.store(false, Ordering::SeqCst);
+    }
+
+    /// How many times the channel has called `read_report`.
+    pub(crate) fn read_attempts(&self) -> usize {
+        self.read_attempts.load(Ordering::SeqCst)
+    }
 }
 
 pub(crate) struct MockRawHidChannel {
@@ -76,6 +92,8 @@ pub(crate) struct MockRawHidChannel {
     responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
     park_writes: Arc<AtomicBool>,
     fail_writes: Arc<AtomicBool>,
+    fail_reads: Arc<AtomicBool>,
+    read_attempts: Arc<AtomicUsize>,
     report_support: (bool, bool),
     drop_flag: Option<&'static AtomicBool>,
 }
@@ -104,6 +122,8 @@ impl MockRawHidChannel {
         let responses_on_write = Arc::new(Mutex::new(VecDeque::new()));
         let park_writes = Arc::new(AtomicBool::new(false));
         let fail_writes = Arc::new(AtomicBool::new(false));
+        let fail_reads = Arc::new(AtomicBool::new(false));
+        let read_attempts = Arc::new(AtomicUsize::new(0));
 
         let handle = MockRawHidHandle {
             incoming_tx: incoming_tx.clone(),
@@ -111,6 +131,8 @@ impl MockRawHidChannel {
             responses_on_write: Arc::clone(&responses_on_write),
             park_writes: Arc::clone(&park_writes),
             fail_writes: Arc::clone(&fail_writes),
+            fail_reads: Arc::clone(&fail_reads),
+            read_attempts: Arc::clone(&read_attempts),
         };
 
         (
@@ -121,6 +143,8 @@ impl MockRawHidChannel {
                 responses_on_write,
                 park_writes,
                 fail_writes,
+                fail_reads,
+                read_attempts,
                 report_support,
                 drop_flag,
             },
@@ -164,6 +188,10 @@ impl RawHidChannel for MockRawHidChannel {
     }
 
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
+        self.read_attempts.fetch_add(1, Ordering::SeqCst);
+        if self.fail_reads.load(Ordering::SeqCst) {
+            return Err(mock_error());
+        }
         let report = self.incoming_rx.recv().await.map_err(|_| mock_error())?;
         let len = report.len().min(buf.len());
         buf[..len].copy_from_slice(&report[..len]);
