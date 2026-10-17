@@ -112,7 +112,7 @@ fn run_tray_loop(shutdown_tx: ShutdownRequestSender) {
         let hwnd = CreateWindowExW(
             0,
             class_name.as_ptr(),
-            wide("OpenLogi Agent").as_ptr(),
+            wide(openlogi_core::brand::Helper::Agent.display_name()).as_ptr(),
             WS_OVERLAPPED,
             CW_USEDEFAULT,
             CW_USEDEFAULT,

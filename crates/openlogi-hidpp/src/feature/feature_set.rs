@@ -4,6 +4,7 @@
 use openlogi_hidpp_derive::Feature;
 
 use crate::{
+    channel::AbandonedReply,
     feature::{FeatureEndpoint, FeatureType},
     protocol::v20::Hidpp20Error,
 };
@@ -15,6 +16,12 @@ use crate::{
 /// supported features (excluding the root feature). Then call
 /// [`Self::get_feature`] for every `i in 1..=count` (1-based, as accessing the
 /// root feature is not allowed).
+///
+/// The table is fixed for the life of the connection: no write changes what
+/// either function answers. Both therefore adopt a reply still owed to an
+/// abandoned identical ask ([`AbandonedReply::AdoptIdentical`]), so a walk
+/// that re-asks for an entry the link dropped is not held for the channel's
+/// stale-reply grace on every retry — the one place that trade is sound.
 #[derive(Clone, Feature)]
 #[creatable(id = 0x0001, version = 0)]
 pub struct FeatureSetFeature {
@@ -26,7 +33,11 @@ impl FeatureSetFeature {
     /// Retrieves the amount of features supported by the device, not including
     /// the root feature.
     pub async fn count(&self) -> Result<u8, Hidpp20Error> {
-        Ok(self.endpoint.call(0, [0; 3]).await?.extend_payload()[0])
+        Ok(self
+            .endpoint
+            .call_with(0, [0; 3], AbandonedReply::AdoptIdentical)
+            .await?
+            .extend_payload()[0])
     }
 
     /// Retrieves the information about a specific feature based on its index in
@@ -36,7 +47,7 @@ impl FeatureSetFeature {
     pub async fn get_feature(&self, index: u8) -> Result<FeatureInformation, Hidpp20Error> {
         let payload = self
             .endpoint
-            .call(1, [index, 0x00, 0x00])
+            .call_with(1, [index, 0x00, 0x00], AbandonedReply::AdoptIdentical)
             .await?
             .extend_payload();
 

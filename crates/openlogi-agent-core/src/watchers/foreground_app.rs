@@ -15,13 +15,13 @@ use super::poll;
 /// This is deliberately not a foreground polling cadence: every delivered
 /// native event defers it. It remains armed because native observers and event
 /// transports can miss a change without disconnecting their callback.
-const IDLE_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
+const IDLE_RECOVERY_PERIOD: Duration = Duration::from_secs(30);
 
 /// Retry cadence only while native observer setup or health is failing.
-const OBSERVER_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const OBSERVER_RETRY_PERIOD: Duration = Duration::from_secs(2);
 
 fn next_idle_recovery_deadline(now: Instant) -> Instant {
-    now + IDLE_RECOVERY_INTERVAL
+    now + IDLE_RECOVERY_PERIOD
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,7 +128,7 @@ fn spawn_native() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
                             }
                             recovery_deadline = next_idle_recovery_deadline(now);
                         }
-                        thread::sleep(OBSERVER_RETRY_INTERVAL);
+                        thread::sleep(OBSERVER_RETRY_PERIOD);
                         if tx.is_closed() {
                             debug!("foreground-app watcher receiver dropped — exiting");
                             return;
@@ -186,7 +186,7 @@ fn spawn_native() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
                             return;
                         }
                     }
-                    ObserverExit::RetryAfterFailure => thread::sleep(OBSERVER_RETRY_INTERVAL),
+                    ObserverExit::RetryAfterFailure => thread::sleep(OBSERVER_RETRY_PERIOD),
                 }
             }
         });
@@ -249,11 +249,11 @@ mod tests {
 
         assert_eq!(
             original.saturating_duration_since(started),
-            IDLE_RECOVERY_INTERVAL
+            IDLE_RECOVERY_PERIOD
         );
         assert_eq!(
             deferred.saturating_duration_since(activation),
-            IDLE_RECOVERY_INTERVAL
+            IDLE_RECOVERY_PERIOD
         );
         assert!(deferred > original);
     }

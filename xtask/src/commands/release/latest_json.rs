@@ -11,8 +11,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 // both come from one constant.
 use openlogi_core::brand::APP_ID;
 
-const CHANNEL: &str = "stable";
-const MACOS_MINIMUM_OS_VERSION: &str = "13.0";
+use crate::support::update_feed::{BASE_URL_ENV, CHANNEL, MACOS_MINIMUM_OS_VERSION};
+
 /// Windows 10+. Informational — the client updater doesn't gate on it today,
 /// and everything that can run OpenLogi reports at least 10.0.
 const WINDOWS_MINIMUM_OS_VERSION: &str = "10.0";
@@ -29,7 +29,7 @@ pub(crate) struct Args {
     #[arg(long, env = "GITHUB_REF_NAME")]
     tag: String,
     /// Public update base URL, for example `https://updates.openlogi.org`.
-    #[arg(long, env = "OPENLOGI_UPDATE_BASE_URL")]
+    #[arg(long, env = BASE_URL_ENV)]
     base_url: String,
     /// Also emit the per-arch Windows `.msi`/`.zip` entries. Off by default so
     /// the manifest can never reference objects the release workflow's R2

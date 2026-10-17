@@ -2,7 +2,8 @@
 
 use gpui::{
     App, AppContext as _, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Render,
-    Role, SharedString, Size, Styled, Window, WindowBounds, WindowOptions, div, px, rems,
+    Role, SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowBounds,
+    WindowOptions, div, px, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -11,6 +12,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     scroll::ScrollableElement as _,
+    slider::Slider,
     v_flex,
 };
 use openlogi_core::brand::APP_ID;
@@ -20,7 +22,8 @@ use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
-use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle};
+use super::commit_slider::{CommitSlider, SliderRange};
+use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle, toggle_row};
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
 
 const TITLE: &str = "OpenLogi Component Gallery";
@@ -94,10 +97,19 @@ struct ComponentGallery {
     profile_selected: usize,
     preset_selected: bool,
     carousel_selected: usize,
+    slider: CommitSlider<u8>,
+    slider_committed: u8,
 }
 
 impl ComponentGallery {
-    fn new(_: &mut Context<Self>) -> Self {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let slider_committed = 40;
+        let slider = CommitSlider::new(
+            SliderRange::new(0, 100),
+            slider_committed,
+            cx,
+            |this: &mut Self, value, _| this.slider_committed = value,
+        );
         Self {
             mode: ThemeMode::Light,
             scale: UiScale::Normal,
@@ -107,6 +119,8 @@ impl ComponentGallery {
             profile_selected: 1,
             preset_selected: true,
             carousel_selected: 1,
+            slider,
+            slider_committed,
         }
     }
 
@@ -186,6 +200,7 @@ impl ComponentGallery {
             .child(self.menu_panel(pal, cx))
             .child(self.profile_panel(pal, cx))
             .child(self.preset_panel(pal, cx))
+            .child(self.slider_panel(pal))
             .child(Self::battery_panel(pal))
     }
 
@@ -252,7 +267,22 @@ impl ComponentGallery {
                         .selected(true)
                         .label(Some(SharedString::from("Unavailable")))
                         .disabled(true),
-                ),
+                )
+                .child(toggle_row(
+                    "gallery-toggle-row",
+                    pal,
+                    SharedString::from("Setting"),
+                    SharedString::from(
+                        "The caption under the title says what the setting changes and wraps \
+                         instead of pushing the toggle out.",
+                    ),
+                    Toggle::new("gallery-toggle-row-control")
+                        .selected(self.toggle_selected)
+                        .on_change(cx.listener(|this, selected: &bool, _, cx| {
+                            this.toggle_selected = *selected;
+                            cx.notify();
+                        })),
+                )),
             pal,
         )
     }
@@ -266,6 +296,7 @@ impl ComponentGallery {
                 .child(
                     MenuRow::new("gallery-menu-primary")
                         .role(Role::MenuItem)
+                        .aria_label("Primary action")
                         .selected(self.menu_selected == 0)
                         .child("Primary action")
                         .child(Icon::new(IconName::ChevronRight).size_3())
@@ -277,6 +308,7 @@ impl ComponentGallery {
                 .child(
                     MenuRow::new("gallery-menu-secondary")
                         .role(Role::MenuItem)
+                        .aria_label("Secondary action")
                         .selected(self.menu_selected == 1)
                         .child("Secondary action")
                         .child(Icon::new(IconName::ChevronRight).size_3())
@@ -344,6 +376,27 @@ impl ComponentGallery {
         )
     }
 
+    fn slider_panel(&self, pal: Palette) -> gpui::Div {
+        gallery_panel(
+            "CommitSlider",
+            IconName::Sun,
+            v_flex()
+                .gap_2()
+                .child(Slider::new(self.slider.slider()).horizontal())
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(format!(
+                            "Showing {} · committed {}",
+                            self.slider.shown(self.slider_committed),
+                            self.slider_committed
+                        )),
+                ),
+            pal,
+        )
+    }
+
     fn battery_panel(pal: Palette) -> gpui::Div {
         let battery = |percentage, level, status| BatteryInfo {
             percentage,
@@ -356,28 +409,32 @@ impl ComponentGallery {
             v_flex()
                 .gap_3()
                 .child(BatteryIndicator::summary(&battery(
-                    78,
+                    Some(78),
                     BatteryLevel::Good,
                     BatteryStatus::Discharging,
                 )))
                 .child(BatteryIndicator::status(
-                    &battery(100, BatteryLevel::Full, BatteryStatus::Full),
+                    &battery(Some(100), BatteryLevel::Full, BatteryStatus::Full),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(42, BatteryLevel::Good, BatteryStatus::Charging),
+                    &battery(Some(42), BatteryLevel::Good, BatteryStatus::Charging),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(0, BatteryLevel::Unknown, BatteryStatus::Charging),
+                    &battery(Some(0), BatteryLevel::Unknown, BatteryStatus::Charging),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(14, BatteryLevel::Low, BatteryStatus::Discharging),
+                    &battery(Some(14), BatteryLevel::Low, BatteryStatus::Discharging),
                     false,
                 ))
+                .child(BatteryIndicator::status(
+                    &battery(None, BatteryLevel::Good, BatteryStatus::Discharging),
+                    true,
+                ))
                 .child(BatteryIndicator::summary(&battery(
-                    35,
+                    Some(35),
                     BatteryLevel::Unknown,
                     BatteryStatus::Error,
                 ))),
@@ -495,6 +552,10 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
         .bg(pal.control)
         .hover(move |style| style.bg(pal.control_hover))
         .focus_visible(move |style| style.border_color(theme::accent()))
+        .gap_1()
+        // A preview strip above the label: the stacked shape the settings
+        // pickers rely on.
+        .child(div().h(px(6.)).rounded_full().bg(pal.border))
         .child(div().text_body().child(label))
 }
 

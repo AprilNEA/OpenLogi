@@ -85,12 +85,29 @@ bitflags::bitflags! {
     }
 }
 
+bitflags::bitflags! {
+    /// The status byte of a [`PersistentAction`] (response byte 7).
+    ///
+    /// Only bit 0 has a known meaning. Unknown bits are kept as reported so
+    /// they reach callers instead of being dropped.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+    pub struct PersistentActionStatus: u8 {
+        /// The control is remapped away from its default behaviour. Solaar
+        /// sets this status after it writes a persistent action.
+        const REMAPPED = 1 << 0;
+    }
+}
+
 /// The action a control performs when triggered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ActionId {
+    /// No output: the control sends nothing. A device reports its value and
+    /// modifiers as zero.
+    Empty = 0x00,
     /// Send a keyboard/keypad report (HID usage page 7).
     SendKeyboard = 0x01,
     /// Send a mouse-button report (usage page 9).
@@ -139,11 +156,17 @@ pub struct PersistentAction {
     pub value: u16,
     /// Keyboard modifiers applied (keyboard actions only).
     pub modifier_mask: ModifierMask,
-    /// Whether the control is remapped away from its default behaviour.
-    pub remapped: bool,
+    /// The status byte, with any unknown bits kept.
+    pub status: PersistentActionStatus,
 }
 
 impl PersistentAction {
+    /// Whether the control is remapped away from its default behaviour.
+    #[must_use]
+    pub const fn is_remapped(&self) -> bool {
+        self.status.contains(PersistentActionStatus::REMAPPED)
+    }
+
     fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
         Ok(Self {
             cid: ControlId::from(u16::from_be_bytes([payload[0], payload[1]])),
@@ -152,7 +175,7 @@ impl PersistentAction {
                 .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
             value: u16::from_be_bytes([payload[4], payload[5]]),
             modifier_mask: ModifierMask::from_bits_retain(payload[6]),
-            remapped: payload[7] & 1 != 0,
+            status: PersistentActionStatus::from_bits_retain(payload[7]),
         })
     }
 }

@@ -29,10 +29,27 @@ pub enum CaptureError {
     /// The session ran but produced no frame within the timeout.
     #[error("camera produced no frame in time")]
     Timeout,
+    /// Hardware resources needed to start capture are unavailable. Another
+    /// application using the camera is one possible cause, not a certainty.
+    #[error("camera resources are unavailable; another application may be using the camera")]
+    ResourcesUnavailable,
     /// A platform capture object failed to construct.
     #[error("capture setup failed: {0}")]
     Setup(String),
     /// Capture has no backend on this platform.
     #[error("camera capture is not implemented on this platform")]
     Unsupported,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CaptureError;
+
+    #[test]
+    fn resources_unavailable_does_not_assert_another_application_owns_the_camera() {
+        assert_eq!(
+            CaptureError::ResourcesUnavailable.to_string(),
+            "camera resources are unavailable; another application may be using the camera"
+        );
+    }
 }

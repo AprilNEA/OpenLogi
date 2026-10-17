@@ -3,12 +3,15 @@
 use std::{any::Any, sync::Arc};
 
 use crate::{
-    channel::{HidppChannel, HidppMessage, LONG_REPORT_LENGTH, MessageListenerGuard},
+    channel::{
+        AbandonedReply, HidppChannel, HidppMessage, LONG_REPORT_LENGTH, MessageListenerGuard,
+    },
     emitter::EventEmitter,
     nibble::U4,
     protocol::v20::{self, Hidpp20Error},
 };
 
+pub mod adc_measurement;
 pub mod adjustable_dpi;
 pub mod backlight;
 pub mod battery_status;
@@ -38,6 +41,7 @@ pub mod mouse_pointer;
 pub mod multi_platform;
 pub mod per_key_lighting;
 pub mod persistent_remappable_action;
+pub mod pointer_motion_scaling;
 pub mod registry;
 pub mod report_rate;
 pub mod reprog_controls;
@@ -197,8 +201,22 @@ impl FeatureEndpoint {
         function: u8,
         args: [u8; 3],
     ) -> Result<v20::Message, Hidpp20Error> {
+        self.call_with(function, args, AbandonedReply::Quarantine)
+            .await
+    }
+
+    /// [`Self::call`], choosing what to do about a reply still owed to an
+    /// abandoned call with the same header. Only a function that reads
+    /// state no write can change should pass
+    /// [`AbandonedReply::AdoptIdentical`].
+    pub(crate) async fn call_with(
+        &self,
+        function: u8,
+        args: [u8; 3],
+        abandoned: AbandonedReply,
+    ) -> Result<v20::Message, Hidpp20Error> {
         self.chan
-            .send_v20(v20::Message::Short(self.header(function), args))
+            .send_v20_with(v20::Message::Short(self.header(function), args), abandoned)
             .await
     }
 
@@ -211,6 +229,40 @@ impl FeatureEndpoint {
     ) -> Result<v20::Message, Hidpp20Error> {
         self.chan
             .send_v20(v20::Message::Long(self.header(function), args))
+            .await
+    }
+
+    /// Calls a function that echoes all three request bytes, waiting through
+    /// the native write before applying the response deadline. Differing
+    /// payloads (e.g. a late ownership claim during rollback) do not match.
+    ///
+    /// The owner must drive this future to completion; see
+    /// [`HidppChannel::send_v20_write_through`].
+    pub(crate) async fn call_echoed_write_through(
+        &self,
+        function: u8,
+        args: [u8; 3],
+    ) -> Result<v20::Message, Hidpp20Error> {
+        self.chan
+            .send_v20_write_through(
+                v20::Message::Short(self.header(function), args),
+                move |response| response.extend_payload()[..3] == args,
+            )
+            .await
+    }
+
+    /// Calls `function` with a 16-byte long-report payload, waiting through the
+    /// native write before applying the response deadline.
+    ///
+    /// The owner must drive this future to completion; see
+    /// [`HidppChannel::send_v20_write_through`].
+    pub(crate) async fn call_long_write_through(
+        &self,
+        function: u8,
+        args: [u8; 16],
+    ) -> Result<v20::Message, Hidpp20Error> {
+        self.chan
+            .send_v20_write_through(v20::Message::Long(self.header(function), args), |_| true)
             .await
     }
 
