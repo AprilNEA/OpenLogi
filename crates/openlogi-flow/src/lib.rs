@@ -8,6 +8,7 @@
 //! [`FLOW-PROTOCOL.md`]: ../../../docs/FLOW-PROTOCOL.md
 //! [`proto/flow.v1.proto`]: ../proto/flow.v1.proto
 
+pub mod clipboard;
 pub mod discovery;
 pub mod frame;
 pub mod identity;

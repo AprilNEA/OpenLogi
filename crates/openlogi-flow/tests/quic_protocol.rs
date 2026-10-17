@@ -11,13 +11,17 @@ use std::{
 };
 
 use openlogi_flow::{
+    clipboard::{
+        Announced, FetchError, Served, TEXT_MIME, TextOffer, fetch_text, serve_fetch,
+        text_sync_enabled,
+    },
     frame::{Envelope, FrameKind, MAX_PAYLOAD_LEN},
     generated as proto,
     pairing::{PairingSession, PeerKeyStore, PersistPeerKeyError},
     sas::{PublicKey, SessionNonce},
     transport::{
-        BulkRpcResponse, FlowConnection, FlowEndpoint, MachineIdentity, PeerTrust, RpcEvent,
-        SessionTrust, TransportError, message_envelope,
+        BulkRpcResponse, FlowConnection, FlowEndpoint, MachineIdentity, NotificationEvent,
+        PeerTrust, RpcEvent, SessionTrust, TransportError, message_envelope,
     },
 };
 
@@ -32,22 +36,34 @@ struct ConnectedPair {
 
 impl ConnectedPair {
     async fn trusted(first_range: (u32, u32), second_range: (u32, u32)) -> TestResult<Self> {
-        Self::connect(first_range, second_range, false, &[]).await
+        Self::connect(first_range, second_range, false, (&[], &[])).await
     }
 
     async fn pairing() -> TestResult<Self> {
-        Self::connect((1, 1), (1, 1), true, &[]).await
+        Self::connect((1, 1), (1, 1), true, (&[], &[])).await
     }
 
     async fn trusted_clipboard() -> TestResult<Self> {
-        Self::connect((1, 1), (1, 1), false, &[proto::Capability::ClipboardText]).await
+        let text = &[proto::Capability::ClipboardText];
+        Self::connect((1, 1), (1, 1), false, (text, text)).await
+    }
+
+    /// Only `first` lists clipboard text, as against a peer that predates it.
+    async fn clipboard_on_first_only() -> TestResult<Self> {
+        Self::connect(
+            (1, 1),
+            (1, 1),
+            false,
+            (&[proto::Capability::ClipboardText], &[]),
+        )
+        .await
     }
 
     async fn connect(
         first_range: (u32, u32),
         second_range: (u32, u32),
         pairing: bool,
-        capabilities: &[proto::Capability],
+        (first_capabilities, second_capabilities): (&[proto::Capability], &[proto::Capability]),
     ) -> TestResult<Self> {
         let first_identity = MachineIdentity::generate()?;
         let second_identity = MachineIdentity::generate()?;
@@ -65,13 +81,13 @@ impl ConnectedPair {
             localhost(),
             first_identity.clone(),
             first_trust,
-            hello_with_capabilities(&first_identity, [1; 16], first_range, capabilities),
+            hello_with_capabilities(&first_identity, [1; 16], first_range, first_capabilities),
         )?);
         let second = Arc::new(FlowEndpoint::bind(
             localhost(),
             second_identity.clone(),
             second_trust,
-            hello_with_capabilities(&second_identity, [2; 16], second_range, capabilities),
+            hello_with_capabilities(&second_identity, [2; 16], second_range, second_capabilities),
         )?);
         let second_acceptor = Arc::clone(&second);
         let accept = tokio::spawn(async move { second_acceptor.accept().await });
@@ -393,6 +409,145 @@ async fn bulk_rpc_streams_head_chunks_and_terminal_frame() -> TestResult {
     let (server_result, client_result) = tokio::join!(server_side, client_side);
     server_result?;
     client_result?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn clipboard_text_round_trips_through_announce_fetch_and_serve() -> TestResult {
+    let pair = ConnectedPair::trusted_clipboard().await?;
+    assert!(text_sync_enabled(&pair.first));
+    assert!(text_sync_enabled(&pair.second));
+    // Several chunks, with multi-byte characters straddling their boundaries.
+    let text = "Flow \u{2713} clipboard \u{2014} ".repeat(9_000);
+    let offer = TextOffer::new(1, text.clone())?;
+    pair.first
+        .notify(message_envelope(
+            FrameKind::ClipboardAnnounce,
+            &offer.announce(),
+        )?)
+        .await?;
+    let NotificationEvent::Notification(announce) = pair.second.accept_notification().await? else {
+        return Err("ClipboardAnnounce was dropped".into());
+    };
+    let Announced::Text(announced) =
+        Announced::from_announce(&decode::<proto::ClipboardAnnounce>(&announce)?)
+    else {
+        return Err("the announce carried no fetchable text".into());
+    };
+    assert_eq!(announced.size_bytes(), text.len());
+
+    let serve = async {
+        let RpcEvent::Request(rpc) = pair.first.accept_rpc().await? else {
+            return Err("ClipboardFetch was rejected".into());
+        };
+        TestResult::Ok(serve_fetch(rpc, Some(&offer)).await?)
+    };
+    let (served, fetched) = tokio::join!(serve, fetch_text(&pair.second, &announced));
+    assert_eq!(served?, Served::Sent { sequence: 1 });
+    assert_eq!(fetched?, text);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_fetch_for_a_superseded_clipboard_generation_is_refused() -> TestResult {
+    let pair = ConnectedPair::trusted_clipboard().await?;
+    let stale = TextOffer::new(1, "older".to_owned())?;
+    let current = TextOffer::new(2, "newer".to_owned())?;
+    let Announced::Text(announced) = Announced::from_announce(&stale.announce()) else {
+        return Err("the announce carried no fetchable text".into());
+    };
+
+    let serve = async {
+        let RpcEvent::Request(rpc) = pair.first.accept_rpc().await? else {
+            return Err("ClipboardFetch was rejected".into());
+        };
+        TestResult::Ok(serve_fetch(rpc, Some(&current)).await?)
+    };
+    let (served, fetched) = tokio::join!(serve, fetch_text(&pair.second, &announced));
+    assert_eq!(served?, Served::Refused);
+    assert!(
+        matches!(
+            fetched,
+            Err(FetchError::Refused(code)) if code.as_known() == Some(proto::ErrorCode::Invalid)
+        ),
+        "a superseded generation must be refused INVALID, got {fetched:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn clipboard_frames_need_both_peers_to_list_the_capability() -> TestResult {
+    let pair = ConnectedPair::clipboard_on_first_only().await?;
+    assert!(!text_sync_enabled(&pair.first));
+    assert!(!text_sync_enabled(&pair.second));
+
+    let offer = TextOffer::new(1, "not for a peer without clipboard sync".to_owned())?;
+    let announce = message_envelope(FrameKind::ClipboardAnnounce, &offer.announce())?;
+    assert!(matches!(
+        pair.first.notify(announce).await,
+        Err(TransportError::SendGated(FrameKind::ClipboardAnnounce))
+    ));
+    let Announced::Text(announced) = Announced::from_announce(&offer.announce()) else {
+        return Err("the announce carried no fetchable text".into());
+    };
+    assert!(matches!(
+        fetch_text(&pair.second, &announced).await,
+        Err(FetchError::Transport(TransportError::SendGated(
+            FrameKind::ClipboardFetch
+        )))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_transfer_longer_than_its_announce_is_rejected() -> TestResult {
+    let pair = ConnectedPair::trusted_clipboard().await?;
+    let announce = proto::ClipboardAnnounce {
+        sequence: 4,
+        formats: vec![proto::ClipboardFormat {
+            mime: TEXT_MIME.to_owned(),
+            size_bytes: 3,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let Announced::Text(announced) = Announced::from_announce(&announce) else {
+        return Err("the announce carried no fetchable text".into());
+    };
+
+    let serve = async {
+        let RpcEvent::Request(rpc) = pair.first.accept_rpc().await? else {
+            return Err("ClipboardFetch was rejected".into());
+        };
+        rpc.respond_bulk(
+            message_envelope(
+                FrameKind::ClipboardData,
+                &proto::ClipboardData {
+                    sequence: 4,
+                    mime: TEXT_MIME.to_owned(),
+                    total_size: 3,
+                    ..Default::default()
+                },
+            )?,
+            [message_envelope(
+                FrameKind::Chunk,
+                &proto::Chunk {
+                    data: b"abcdef".to_vec(),
+                    ..Default::default()
+                },
+            )?],
+            message_envelope(FrameKind::ChunkEnd, &proto::ChunkEnd::default())?,
+        )
+        .await?;
+        TestResult::Ok(())
+    };
+    // The fetcher stops reading at the first excess byte, so the serving side
+    // may see its stream stopped; only the fetcher's verdict matters here.
+    let (_served, fetched) = tokio::join!(serve, fetch_text(&pair.second, &announced));
+    assert!(
+        matches!(fetched, Err(FetchError::Invalid(_))),
+        "excess text must fail the fetch, got {fetched:?}"
+    );
     Ok(())
 }
 
