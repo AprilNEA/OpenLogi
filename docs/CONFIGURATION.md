@@ -127,7 +127,13 @@ Common device fields are:
 - standalone `light`: the agent writes it when the light connects, when a save
   changes it, and, with `auto_camera` on, when camera use starts or stops.
   Saving another setting leaves a change made with the light's own buttons in
-  place
+  place. On a light the agent reaches over HID++ `0x1990`, a change made with
+  its buttons or by another program also replaces the saved value while the
+  agent runs, so a reconnect writes the new value back, as in Logi Options+.
+  The agent publishes the change to clients and keeps it until a save or a
+  write from OpenLogi sets that control. With `auto_camera` on, a power change
+  on the light is a manual choice until the next camera transition, like the
+  power switch in the settings app
 - `host_switch_targets` and `fn_lock` for compatible keyboards
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+

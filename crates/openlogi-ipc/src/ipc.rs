@@ -15,7 +15,7 @@ use std::time::Duration;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::device::{ChangedOnLight, DeviceInventory, LightState, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     LightCommand, PairingError, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
@@ -103,7 +103,9 @@ pub use succession::Identity;
 ///      HostNameNotApplied}` appended — the `0x1815` Easy-Switch host names
 ///      and OS, and renaming a slot's computer.
 /// v37: `Capabilities::virtual_thumbwheel` appended — Back/Forward can hold
-///      the main wheel as a virtual thumb wheel.
+///      the main wheel as a virtual thumb wheel; `AgentSnapshot::lights`
+///      appended — what each standalone light reached over HID++ `0x1990`
+///      reads back, and the settings changed on the light itself.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -181,6 +183,22 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// The online standalone lights the agent reads over HID++ `0x1990`. A
+    /// light reached only through its raw report reads nothing back and is
+    /// not listed.
+    pub lights: Vec<ObservedLight>,
+}
+
+/// A standalone light as it reported itself to the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedLight {
+    /// The route the light is reached on, as in [`AgentSnapshot::standalone`].
+    pub route: DeviceRoute,
+    /// What the light last read back.
+    pub state: LightState,
+    /// Settings changed on the light itself that the saved settings do not
+    /// hold yet. The agent already uses them; the GUI saves them.
+    pub changed_on_light: ChangedOnLight,
 }
 
 /// The application the agent currently resolves per-app profiles against, and

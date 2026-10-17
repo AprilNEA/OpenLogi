@@ -456,6 +456,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             }),
             recent: Vec::new(),
         },
+        lights: Vec::new(),
     };
     TestAgent::from_profile(profile, snapshot)
 }

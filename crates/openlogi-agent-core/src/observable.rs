@@ -20,7 +20,7 @@ use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
-    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
+    OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
 };
 use tokio::sync::watch;
 
@@ -60,6 +60,7 @@ impl ObservableState {
                 camera_active: false,
                 pairing: None,
                 foreground: ForegroundApps::default(),
+                lights: Vec::new(),
             },
         });
         Self { tx }
@@ -150,6 +151,18 @@ impl ObservableState {
                 return false;
             }
             snapshot.camera_active = active;
+            true
+        });
+    }
+
+    /// Publish what the online standalone lights read back, and what was
+    /// changed on them. The same lights read the same way notify nobody.
+    pub fn set_lights(&self, lights: Vec<ObservedLight>) {
+        self.update(|snapshot| {
+            if snapshot.lights == lights {
+                return false;
+            }
+            snapshot.lights = lights;
             true
         });
     }

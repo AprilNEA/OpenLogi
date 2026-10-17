@@ -33,6 +33,7 @@ use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
+use openlogi_agent_core::watchers::light::LightEvent;
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
@@ -386,6 +387,12 @@ impl Running {
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
                 self.observable.set_input_monitoring_granted(granted);
+            }
+            WatcherEvent::Light(LightEvent::Read { route, state }) => {
+                self.orchestrator.lock().await.light_read(&route, state);
+            }
+            WatcherEvent::Light(LightEvent::Changed { route, change }) => {
+                self.orchestrator.lock().await.light_changed(&route, change);
             }
             // Watcher thread death — without a snapshot the GUI would scan
             // forever.

@@ -346,7 +346,13 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         command: LightCommand,
     ) -> Result<(), WriteError> {
-        self.shared.hardware().apply_light(&route, command).await
+        self.shared.hardware().apply_light(&route, command).await?;
+        // The light now holds the user's choice, not one made on the light.
+        self.orchestrator
+            .lock()
+            .await
+            .light_written(&route, command);
+        Ok(())
     }
 
     async fn set_light_manual_power(

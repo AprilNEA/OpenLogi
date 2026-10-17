@@ -392,7 +392,7 @@ impl ReplayRawHidChannel {
         }
     }
 
-    pub(super) fn incoming_sender(&self) -> mpsc::UnboundedSender<Vec<u8>> {
+    pub(crate) fn incoming_sender(&self) -> mpsc::UnboundedSender<Vec<u8>> {
         self.incoming_tx.clone()
     }
 

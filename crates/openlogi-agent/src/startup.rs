@@ -234,6 +234,8 @@ pub(crate) enum WatcherEvent {
     Accessibility(bool),
     /// The Input Monitoring grant flipped.
     InputMonitoring(bool),
+    /// A standalone light was read, or announced a change.
+    Light(watchers::light::LightEvent),
     /// A watcher's channel closed (its thread died). Emitted once; the
     /// source then leaves the merge, so a dead watcher cannot busy-wake the
     /// loop.
@@ -249,6 +251,7 @@ pub(crate) enum Watcher {
     Pointer,
     Accessibility,
     InputMonitoring,
+    Light,
 }
 
 /// Spawn the per-source state watchers at arming, merged into one tagged
@@ -280,6 +283,12 @@ pub(crate) fn spawn_state_watchers(
         shared.channel_registry.clone(),
     );
     shared.publish_inventory_refresh(inventory.refresh.clone());
+    let (light_events, lights) = tokio::sync::mpsc::unbounded_channel();
+    // The stream owns the light watcher's handle: dropping the stream drops
+    // the handle, which stops the watcher. It only listens, so nothing on a
+    // light needs restoring when it stops.
+    let light_watcher =
+        watchers::light::spawn(shared.hardware(), &shared.watched_lights, light_events);
     let mut pointer = watchers::pointer::spawn();
     // Publish capability even when an unsupported source has no worker and
     // closes immediately. The orchestrator starts unknown, never guessing.
@@ -317,6 +326,12 @@ pub(crate) fn spawn_state_watchers(
             Watcher::InputMonitoring,
             WatcherEvent::InputMonitoring,
         ),
+        stream::unfold((lights, light_watcher), |(mut rx, watcher)| async move {
+            let event = rx.recv().await?;
+            Some((WatcherEvent::Light(event), (rx, watcher)))
+        })
+        .chain(stream::iter([WatcherEvent::Lost(Watcher::Light)]))
+        .boxed(),
     ]);
     (streams, inventory.refresh)
 }

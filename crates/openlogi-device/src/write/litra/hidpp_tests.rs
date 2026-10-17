@@ -7,11 +7,15 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use hidpp::channel::HidppChannel;
 
 use super::illumination::{RESOLVE_TIMEOUT, control_range};
-use super::{LightCommand, LitraModel, apply, encode_command, read_state};
+use super::{
+    LightChange, LightCommand, LightControls, LightWatch, LitraModel, apply, encode_command,
+    read_state, watch,
+};
 use crate::backend::{BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter};
 use crate::channel::route::DeviceRoute;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
@@ -38,6 +42,8 @@ enum Quirk {
     IgnoresWrites,
     /// Setters answer with a HID++ error.
     RejectsWrites,
+    /// Nothing is answered any more, as after the light was unplugged.
+    Gone,
 }
 
 /// A scripted Litra's feature table and state.
@@ -56,6 +62,8 @@ struct Light {
     effective_max: u16,
     /// Every `0x1990` request, as `(function, first parameter bytes)`.
     requests: Vec<(u8, [u8; 2])>,
+    /// Where the light's notifications go once a HID++ channel is open.
+    notify: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 impl Light {
@@ -72,7 +80,23 @@ impl Light {
             kelvin: 4000,
             effective_max: 0,
             requests: Vec::new(),
+            notify: None,
         }
+    }
+
+    /// Send the `0x1990` notification `sub_id` with `payload`, as the light
+    /// does after any change, including one OpenLogi asked for.
+    fn announce(&self, sub_id: u8, payload: &[u8]) {
+        let Some(notify) = &self.notify else {
+            return;
+        };
+        let mut report = vec![0u8; 20];
+        report[0] = 0x11;
+        report[1] = 0xff;
+        report[2] = INDEX;
+        report[3] = sub_id << 4;
+        report[4..4 + payload.len()].copy_from_slice(payload);
+        let _ = notify.send(report);
     }
 
     fn functions(&self) -> Vec<u8> {
@@ -83,6 +107,9 @@ impl Light {
     }
 
     fn respond(&mut self, request: &[u8]) -> Option<Vec<u8>> {
+        if self.quirk == Quirk::Gone {
+            return None;
+        }
         // A directly attached device answers at `0xff` only.
         if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) || request[1] != 0xff {
             return None;
@@ -113,7 +140,10 @@ impl Light {
                 match function {
                     _ if setter && self.quirk == Quirk::IgnoresWrites => {}
                     0 => payload[0] = u8::from(self.on),
-                    1 => self.on = request[4] & 1 != 0,
+                    1 => {
+                        self.on = request[4] & 1 != 0;
+                        self.announce(0, &[u8::from(self.on)]);
+                    }
                     2 => info(&mut payload, self.brightness_flags, self.brightness),
                     3 => payload[..2].copy_from_slice(&self.lumens.to_be_bytes()),
                     4 => {
@@ -121,10 +151,14 @@ impl Light {
                             0 => argument,
                             limit => argument.min(limit),
                         };
+                        self.announce(1, &self.lumens.to_be_bytes());
                     }
                     7 => info(&mut payload, LINEAR, self.temperature),
                     8 => payload[..2].copy_from_slice(&self.kelvin.to_be_bytes()),
-                    9 => self.kelvin = argument,
+                    9 => {
+                        self.kelvin = argument;
+                        self.announce(2, &self.kelvin.to_be_bytes());
+                    }
                     12 => payload[..2].copy_from_slice(&self.effective_max.to_be_bytes()),
                     _ => return None,
                 }
@@ -209,6 +243,19 @@ impl LitraBackend {
     fn hidpp_opens(&self) -> usize {
         self.hidpp_opens.load(Ordering::SeqCst)
     }
+
+    /// Change the light as its own buttons do, and announce notification
+    /// `sub_id` with the payload `change` returns.
+    fn press(&self, sub_id: u8, change: impl FnOnce(&mut Light) -> Vec<u8>) {
+        let mut light = self.light.lock().unwrap_or_else(PoisonError::into_inner);
+        let payload = change(&mut light);
+        light.announce(sub_id, &payload);
+    }
+
+    /// Change the light the way `change` does without announcing it yet.
+    fn change_silently(&self, change: impl FnOnce(&mut Light)) {
+        change(&mut self.light.lock().unwrap_or_else(PoisonError::into_inner));
+    }
 }
 
 /// A Litra Glow node whose OS id and serial are unique to `tag`, so tests
@@ -263,6 +310,10 @@ impl HidBackend for LitraBackend {
                         .unwrap_or_else(PoisonError::into_inner)
                         .respond(request)
                 });
+                self.light
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .notify = Some(raw.incoming_sender());
                 Ok(Some(scripted_channel(raw).await))
             }
             Opens::Silent => {
@@ -773,4 +824,283 @@ fn a_control_range_keeps_its_top_on_the_resolution_grid() {
     );
     assert_eq!(control_range(250, 250, 1, lumens), None, "a single setting");
     assert_eq!(control_range(300, 250, 1, lumens), None, "a reversed range");
+}
+
+/// The watcher's next change, failing the test rather than hanging.
+async fn next_change(watch: &mut LightWatch) -> Option<LightChange> {
+    tokio::time::timeout(Duration::from_secs(5), watch.next())
+        .await
+        .expect("the watcher answers in time")
+}
+
+async fn watching(backend: &LitraBackend) -> LightWatch {
+    watch(backend, &backend.route(), LitraModel::Glow)
+        .await
+        .expect("the light answers")
+        .expect("a HID++ light can be watched")
+}
+
+#[tokio::test]
+async fn later_commands_reuse_the_open_link_but_still_read_the_light() {
+    // Every command reads the light before it acts, over the one link.
+    const READ: [u8; 5] = [2, 7, 0, 3, 8];
+    let backend = LitraBackend::new("reuse", Opens::Hidpp, Light::glow());
+    let route = backend.route();
+
+    apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::BrightnessNative(120),
+    )
+    .await
+    .expect("the brightness is written");
+    apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::TemperatureKelvin(5000),
+    )
+    .await
+    .expect("the temperature is written");
+    read_state(&backend, &route, LitraModel::Glow)
+        .await
+        .expect("the light reads back");
+
+    assert_eq!(backend.hidpp_opens(), 1, "the light is opened once");
+    assert_eq!(
+        backend.light().functions(),
+        [&READ[..], &[4, 3], &READ, &[9, 8], &READ].concat()
+    );
+    let light = backend.light();
+    assert_eq!((light.lumens, light.kelvin), (120, 5000));
+}
+
+#[tokio::test]
+async fn a_link_that_stops_answering_is_opened_again() {
+    let backend = LitraBackend::new("gone", Opens::Hidpp, Light::glow());
+    let route = backend.route();
+    apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::BrightnessNative(120),
+    )
+    .await
+    .expect("the brightness is written");
+
+    // From here on nothing answers, so the deadlines pass at once.
+    tokio::time::pause();
+    backend.change_silently(|light| light.quirk = Quirk::Gone);
+    let applied = apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::BrightnessNative(150),
+    )
+    .await
+    .expect("the raw report is sent");
+
+    assert_eq!(
+        applied, None,
+        "a light that does not answer gets the raw report"
+    );
+    assert_eq!(backend.hidpp_opens(), 2, "the light is opened again");
+    assert_eq!(backend.raw_reports().len(), 1);
+}
+
+#[tokio::test]
+async fn a_change_made_on_the_light_is_reported() {
+    let backend = LitraBackend::new("button", Opens::Hidpp, Light::glow());
+    let mut watch = watching(&backend).await;
+    assert_eq!(watch.state().brightness, Some(100));
+
+    backend.press(1, |light| {
+        light.lumens = 150;
+        light.lumens.to_be_bytes().to_vec()
+    });
+
+    let change = next_change(&mut watch)
+        .await
+        .expect("the change is reported");
+    assert_eq!(change.state.brightness, Some(150));
+    assert_eq!(
+        change.on_light,
+        LightControls {
+            brightness: true,
+            ..LightControls::default()
+        }
+    );
+    assert_eq!(watch.state(), change.state);
+}
+
+/// Whether the watcher reports nothing for a while. Real time: the scripted
+/// light answers from the runtime, and a paused clock could run a deadline out
+/// before it does.
+async fn stays_quiet(watch: &mut LightWatch) -> bool {
+    tokio::time::timeout(Duration::from_millis(200), watch.next())
+        .await
+        .is_err()
+}
+
+#[tokio::test]
+async fn openlogis_own_writes_are_not_reported_as_changes_on_the_light() {
+    let backend = LitraBackend::new("echo", Opens::Hidpp, Light::glow());
+    let route = backend.route();
+    let mut watch = watching(&backend).await;
+
+    // The light announces each write it was asked for.
+    for command in [
+        LightCommand::Power(false),
+        LightCommand::BrightnessNative(200),
+        LightCommand::TemperatureKelvin(5000),
+    ] {
+        apply(&backend, &route, LitraModel::Glow, command)
+            .await
+            .expect("the command is written");
+        assert!(
+            stays_quiet(&mut watch).await,
+            "the echo of {command:?} is not a change on the light"
+        );
+    }
+    // Then its power button is pressed.
+    backend.press(0, |light| {
+        light.on = true;
+        vec![1]
+    });
+
+    let change = next_change(&mut watch)
+        .await
+        .expect("the button press is reported");
+    assert_eq!(
+        change.on_light,
+        LightControls {
+            power: true,
+            ..LightControls::default()
+        }
+    );
+    assert_eq!(change.state.brightness, Some(200));
+    assert_eq!(change.state.temperature_kelvin, Some(5000));
+}
+
+#[tokio::test]
+async fn a_write_does_not_hide_a_change_made_on_the_light_meanwhile() {
+    let backend = LitraBackend::new("meanwhile", Opens::Hidpp, Light::glow());
+    let route = backend.route();
+    let mut watch = watching(&backend).await;
+
+    // The brightness button is pressed, a temperature write runs before the
+    // light's notification arrives, and then the notification arrives.
+    backend.change_silently(|light| light.lumens = 150);
+    apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::TemperatureKelvin(5000),
+    )
+    .await
+    .expect("the temperature is written");
+    backend.press(1, |light| light.lumens.to_be_bytes().to_vec());
+
+    let change = next_change(&mut watch)
+        .await
+        .expect("the button press is reported");
+    assert_eq!(
+        change.on_light,
+        LightControls {
+            brightness: true,
+            ..LightControls::default()
+        }
+    );
+    assert_eq!(change.state.brightness, Some(150));
+    assert_eq!(change.state.temperature_kelvin, Some(5000));
+}
+
+#[tokio::test]
+async fn a_brightness_lowered_to_a_new_limit_is_not_a_change_on_the_light() {
+    let mut light = Light::glow();
+    light.brightness_flags = DYNAMIC;
+    let backend = LitraBackend::new("limit", Opens::Hidpp, light);
+    let mut watch = watching(&backend).await;
+
+    backend.press(3, |light| {
+        light.effective_max = 80;
+        light.lumens = 80;
+        80u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the new limit is reported");
+    assert_eq!(change.on_light, LightControls::default());
+    assert_eq!(change.state.brightness, Some(80));
+    assert_eq!(change.state.brightness_limit, Some(80));
+
+    backend.press(4, |light| {
+        light.effective_max = 60;
+        light.lumens = 60;
+        vec![0, 0, 60]
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the clamp is reported");
+    assert_eq!(change.on_light, LightControls::default());
+    assert_eq!(change.state.brightness, Some(60));
+}
+
+#[tokio::test]
+async fn a_raw_only_light_cannot_be_watched_and_a_refused_open_can_be_retried() {
+    let raw_only = LitraBackend::new("watch-raw", Opens::NotHidpp, Light::glow());
+    assert!(matches!(
+        watch(&raw_only, &raw_only.route(), LitraModel::Glow).await,
+        Ok(None)
+    ));
+
+    let refused = LitraBackend::new("watch-refused", Opens::Fails, Light::glow());
+    assert!(
+        watch(&refused, &refused.route(), LitraModel::Glow)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_watcher_ends_when_its_link_is_retired() {
+    let backend = LitraBackend::new("watch-gone", Opens::Hidpp, Light::glow());
+    let route = backend.route();
+    let mut watch = watching(&backend).await;
+
+    // From here on nothing answers, so the deadlines pass at once.
+    tokio::time::pause();
+    backend.change_silently(|light| light.quirk = Quirk::Gone);
+    apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::BrightnessNative(150),
+    )
+    .await
+    .expect("the raw report is sent");
+
+    assert_eq!(next_change(&mut watch).await, None);
+}
+
+#[tokio::test]
+async fn a_watcher_ends_when_its_light_comes_back_as_another_node() {
+    let before = LitraBackend::new("moved", Opens::Hidpp, Light::glow());
+    let mut watch = watching(&before).await;
+
+    // The same light, by serial, under a new OS node.
+    let mut after = LitraBackend::new("moved", Opens::Hidpp, Light::glow());
+    after.nodes[0].id = NodeId::from("litra-hidpp-test-moved-again".to_string());
+    assert_eq!(after.route(), before.route());
+    apply(
+        &after,
+        &after.route(),
+        LitraModel::Glow,
+        LightCommand::BrightnessNative(150),
+    )
+    .await
+    .expect("the brightness is written over the new node");
+
+    assert_eq!(next_change(&mut watch).await, None);
 }

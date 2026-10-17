@@ -31,6 +31,21 @@ state, and writes a value only when it differs from the one it read.
   light, so it falls back for that command only.
 - **No raw retry after a HID++ write.** Once the command has gone out over
   HID++, a failure is returned rather than repeated as a raw report.
+- **One link per light.** The agent keeps the light's HID++ channel open and
+  listens on it, so commands and notifications share one channel and the
+  feature lookup runs once. A channel that stops answering is replaced on the
+  next command, and the listener follows the new one.
+- **A change on the light is the new setting.** Options+ broadcasts the state
+  a `0x1990` notification reports and stores it as the light's settings. The
+  agent keeps a value changed with the light's buttons or by another program
+  in place of the saved one, so a reconnect writes it back instead of undoing
+  it, and publishes it so the settings app can save it. A save of that control
+  or a write from OpenLogi replaces it; the power of a camera-linked light is
+  a manual choice until the next camera transition instead.
+- **OpenLogi's own writes are not changes on the light.** The light echoes
+  every setter as a notification. A notification that matches the value the
+  agent just wrote is the echo; a lowered effective maximum is the light's
+  limit, not the user's choice.
 
 Verified against scripted lights only; the repository has no Litra capture yet.
 

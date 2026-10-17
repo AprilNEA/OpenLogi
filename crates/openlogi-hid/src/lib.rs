@@ -37,7 +37,7 @@ pub use host::{
     read_battery_raw, read_litra_state, set_dpi, set_fn_lock, set_keyboard_color,
     set_keyboard_color_with, set_pointer_scaling, set_scroll_inversion, set_scroll_resolution,
     set_scroll_wheel_mode, set_smartshift, set_smartshift_sensitivity, toggle_smartshift,
-    update_backlight, watch_hotplug,
+    update_backlight, watch_hotplug, watch_litra,
 };
 pub use lighting::{set_keyboard_color_on, set_keyboard_color_with_on};
 pub use probe_cache::FileProbeCacheStore;

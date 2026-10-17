@@ -574,6 +574,7 @@ mod tests {
             camera_active,
             pairing: None,
             foreground: ForegroundApps::default(),
+            lights: Vec::new(),
         }
     }
 
