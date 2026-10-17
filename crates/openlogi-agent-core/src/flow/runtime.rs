@@ -29,6 +29,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use super::clipboard::ClipboardSync;
 use super::config::CompiledFlowConfig;
 use super::handoff::{HandoffBook, handle_notification, handle_rpc, inventory_changed};
 use super::{FlowDeviceSnapshot, RuntimeDevice, is_pointing_device};
@@ -68,6 +69,7 @@ impl FlowGeneration {
         let identity = tokio::task::spawn_blocking(load_machine_identity)
             .await
             .map_err(|error| FlowRuntimeError::IdentityTask(error.to_string()))??;
+        let clipboard = ClipboardSync::system(config.clipboard);
         let hello = proto::Hello {
             proto_min: PROTOCOL_MIN,
             proto_max: PROTOCOL_MAX,
@@ -76,6 +78,11 @@ impl FlowGeneration {
             machine_name: machine_name(),
             platform: platform().into(),
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            capabilities: clipboard
+                .capabilities()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             ..Default::default()
         };
         let endpoint = Arc::new(FlowEndpoint::bind(
@@ -120,6 +127,7 @@ impl FlowGeneration {
             channel_pool,
             receiver_access,
             input,
+            clipboard,
         ));
         prepare_switch_targets(&state);
         let provider: Arc<dyn TrustedStateProvider> = state.clone();
@@ -187,6 +195,7 @@ pub(super) struct GenerationState {
     pub(super) lifecycle: Mutex<()>,
     pub(super) handoffs: HandoffBook,
     pub(super) input: Arc<FlowInput>,
+    pub(super) clipboard: ClipboardSync,
     /// Online devices already prepared for a one-write switch; `None` while
     /// a preparation is in flight.
     switch_targets: std::sync::Mutex<Vec<(DeviceRoute, Option<Arc<HostSwitchTarget>>)>>,
@@ -250,6 +259,7 @@ impl GenerationState {
         channel_pool: ChannelPool,
         receiver_access: ReceiverAccess,
         input: Arc<FlowInput>,
+        clipboard: ClipboardSync,
     ) -> Self {
         let devices = runtime_devices(&config, snapshots);
         Self {
@@ -266,6 +276,7 @@ impl GenerationState {
             lifecycle: Mutex::new(()),
             handoffs: HandoffBook::default(),
             input,
+            clipboard,
             switch_targets: std::sync::Mutex::new(Vec::new()),
             presence: std::sync::Mutex::new(HashMap::new()),
             handed_off_to: std::sync::Mutex::new(None),
@@ -707,15 +718,24 @@ async fn run_application_connection(
     peer: PublicKey,
     connection: Arc<FlowConnection>,
 ) {
+    let mut clipboard = state.clipboard.connection(peer, Arc::clone(&connection));
     loop {
         tokio::select! {
             rpc = connection.accept_rpc() => match rpc {
+                Ok(RpcEvent::Request(rpc)) if rpc.request().kind == FrameKind::ClipboardFetch => {
+                    clipboard.serve(rpc);
+                }
                 Ok(event @ (RpcEvent::Request(_) | RpcEvent::Rejected(_))) => {
                     handle_rpc(Arc::clone(&state), peer, event).await;
                 }
                 Err(_) => return,
             },
             notification = connection.accept_notification() => match notification {
+                Ok(NotificationEvent::Notification(announce))
+                    if announce.kind == FrameKind::ClipboardAnnounce =>
+                {
+                    clipboard.announced(&announce);
+                }
                 Ok(event @ (NotificationEvent::Notification(_) | NotificationEvent::Dropped(_))) => {
                     handle_notification(Arc::clone(&state), peer, event).await;
                 }

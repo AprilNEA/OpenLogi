@@ -1,0 +1,345 @@
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use openlogi_flow::transport::{
+    FlowEndpoint, MachineIdentity, NotificationEvent, PeerTrust, RpcEvent,
+};
+
+use super::*;
+
+/// How long an expected frame may take to arrive.
+const ARRIVAL: Duration = Duration::from_secs(5);
+/// How long to wait for a frame that must not come.
+const QUIET: Duration = Duration::from_millis(300);
+
+/// An in-memory clipboard that counts writes.
+#[derive(Default)]
+struct FakeClipboard {
+    text: Mutex<Option<String>>,
+    writes: AtomicUsize,
+}
+
+impl FakeClipboard {
+    fn holding(text: &str) -> Arc<Self> {
+        let clipboard = Self::default();
+        *clipboard.text.lock().unwrap() = Some(text.to_owned());
+        Arc::new(clipboard)
+    }
+
+    fn text(&self) -> Option<String> {
+        self.text.lock().unwrap().clone()
+    }
+
+    fn writes(&self) -> usize {
+        self.writes.load(Ordering::SeqCst)
+    }
+}
+
+impl ClipboardBackend for FakeClipboard {
+    fn read_text(&self, max_bytes: usize) -> Result<ClipboardText, ClipboardError> {
+        Ok(match self.text() {
+            None => ClipboardText::Absent,
+            Some(text) if text.is_empty() => ClipboardText::Absent,
+            Some(text) if text.len() > max_bytes => ClipboardText::TooLarge,
+            Some(text) => ClipboardText::Text(text),
+        })
+    }
+
+    fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
+        *self.text.lock().unwrap() = Some(text.to_owned());
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn peer(byte: u8) -> PublicKey {
+    PublicKey::new([byte; 32])
+}
+
+#[test]
+fn every_offer_is_a_new_generation() {
+    let mut ledger = Ledger::default();
+    let first = ledger.offer(peer(1), "one".to_owned()).unwrap();
+    let second = ledger.offer(peer(1), "two".to_owned()).unwrap();
+
+    assert_eq!(first.sequence(), 1);
+    assert_eq!(second.sequence(), 2);
+    assert_eq!(ledger.current_offer().unwrap().sequence(), 2);
+}
+
+#[test]
+fn text_a_peer_already_holds_is_not_offered_again() {
+    let mut ledger = Ledger::default();
+    let offer = ledger.offer(peer(1), "copied".to_owned()).unwrap();
+    ledger.served(peer(1), offer.sequence());
+
+    assert!(ledger.offer(peer(1), "copied".to_owned()).is_none());
+    // A third machine has not seen it: the text goes on with the pointer.
+    assert!(ledger.offer(peer(2), "copied".to_owned()).is_some());
+}
+
+#[test]
+fn text_taken_from_a_peer_is_not_sent_back() {
+    let mut ledger = Ledger::default();
+    ledger.adopted(peer(1), TextDigest::of("from the peer"));
+
+    assert!(ledger.offer(peer(1), "from the peer".to_owned()).is_none());
+}
+
+#[test]
+fn text_copied_here_after_a_sync_is_offered_even_to_a_peer_that_held_it() {
+    let mut ledger = Ledger::default();
+    let offer = ledger.offer(peer(1), "first".to_owned()).unwrap();
+    ledger.served(peer(1), offer.sequence());
+    // Another peer's text arrived, then the user copied "first" again.
+    ledger.adopted(peer(2), TextDigest::of("from elsewhere"));
+
+    assert!(ledger.offer(peer(1), "first".to_owned()).is_some());
+}
+
+#[test]
+fn only_a_complete_fetch_of_the_current_offer_counts_as_shared() {
+    let mut ledger = Ledger::default();
+    let stale = ledger.offer(peer(1), "older".to_owned()).unwrap();
+    ledger.offer(peer(1), "newer".to_owned()).unwrap();
+    ledger.served(peer(1), stale.sequence());
+
+    assert!(ledger.offer(peer(1), "older".to_owned()).is_some());
+}
+
+#[test]
+fn empty_text_is_never_offered() {
+    let mut ledger = Ledger::default();
+    assert!(ledger.offer(peer(1), String::new()).is_none());
+    assert!(ledger.current_offer().is_none());
+}
+
+#[test]
+fn a_newer_announce_supersedes_every_older_fetch() {
+    let mut ledger = Ledger::default();
+    let first = ledger.announced();
+    let second = ledger.announced();
+
+    assert!(!ledger.is_newest(first));
+    assert!(ledger.is_newest(second));
+}
+
+#[tokio::test]
+async fn clipboard_sync_is_advertised_only_when_it_runs() {
+    assert!(ClipboardSync::system(false).capabilities().is_empty());
+    assert_eq!(
+        ClipboardSync::system(true).capabilities().is_empty(),
+        !openlogi_clipboard::available()
+    );
+    assert_eq!(
+        ClipboardSync::with_backend(Arc::new(FakeClipboard::default())).capabilities(),
+        [proto::Capability::ClipboardText]
+    );
+}
+
+/// Two machines on one loopback QUIC link, each with its own clipboard.
+struct Machines {
+    _endpoints: [Arc<FlowEndpoint>; 2],
+    sender_key: PublicKey,
+    receiver_key: PublicKey,
+    sender_connection: Arc<FlowConnection>,
+    receiver_connection: Arc<FlowConnection>,
+    sender: ClipboardSync,
+    receiver: ClipboardSync,
+}
+
+impl Machines {
+    /// Connects a sender and a receiver whose `Hello`s list what their
+    /// clipboard syncs advertise.
+    async fn connect(sender: ClipboardSync, receiver: ClipboardSync) -> Self {
+        let receiver_capabilities = receiver.capabilities();
+        Self::connect_listing(sender, receiver, receiver_capabilities).await
+    }
+
+    /// Connects them with the receiver's `Hello` listing
+    /// `receiver_capabilities`, as a peer predating clipboard sync lists none.
+    async fn connect_listing(
+        sender: ClipboardSync,
+        receiver: ClipboardSync,
+        receiver_capabilities: Vec<proto::Capability>,
+    ) -> Self {
+        let sender_identity = MachineIdentity::generate().unwrap();
+        let receiver_identity = MachineIdentity::generate().unwrap();
+        let sender_key = sender_identity.public_key();
+        let receiver_key = receiver_identity.public_key();
+        let sender_endpoint = Arc::new(
+            FlowEndpoint::bind(
+                localhost(),
+                sender_identity.clone(),
+                PeerTrust::pinned([receiver_key]),
+                hello(&sender_identity, sender.capabilities()),
+            )
+            .unwrap(),
+        );
+        let receiver_endpoint = Arc::new(
+            FlowEndpoint::bind(
+                localhost(),
+                receiver_identity.clone(),
+                PeerTrust::pinned([sender_key]),
+                hello(&receiver_identity, receiver_capabilities),
+            )
+            .unwrap(),
+        );
+        let acceptor = Arc::clone(&receiver_endpoint);
+        let accepted = tokio::spawn(async move { acceptor.accept().await });
+        let sender_connection = sender_endpoint
+            .connect(receiver_endpoint.local_addr().unwrap())
+            .await
+            .unwrap();
+        let receiver_connection = accepted.await.unwrap().unwrap();
+        Self {
+            _endpoints: [sender_endpoint, receiver_endpoint],
+            sender_key,
+            receiver_key,
+            sender_connection: Arc::new(sender_connection),
+            receiver_connection: Arc::new(receiver_connection),
+            sender,
+            receiver,
+        }
+    }
+
+    /// The sender offers its clipboard, as after an accepted handoff, and the
+    /// receiver's connection loop takes the announce, as the runtime's does.
+    /// Returns whether an announce arrived within `wait`.
+    async fn offer(&self, wait: Duration) -> bool {
+        self.sender
+            .offer(self.receiver_key, &self.sender_connection);
+        let Ok(announce) =
+            tokio::time::timeout(wait, self.receiver_connection.accept_notification()).await
+        else {
+            return false;
+        };
+        let NotificationEvent::Notification(announce) = announce.unwrap() else {
+            panic!("the announce was dropped");
+        };
+        self.receiver
+            .connection(self.sender_key, Arc::clone(&self.receiver_connection))
+            .announced(&announce);
+        true
+    }
+
+    /// The sender's connection loop answers one fetch. Returns whether the
+    /// receiver fetched within `wait`.
+    async fn serve_fetch(&self, wait: Duration) -> bool {
+        let Ok(fetch) = tokio::time::timeout(wait, self.sender_connection.accept_rpc()).await
+        else {
+            return false;
+        };
+        let RpcEvent::Request(fetch) = fetch.unwrap() else {
+            panic!("the fetch was rejected");
+        };
+        self.sender
+            .connection(self.receiver_key, Arc::clone(&self.sender_connection))
+            .serve(fetch);
+        true
+    }
+}
+
+fn localhost() -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
+}
+
+fn hello(identity: &MachineIdentity, capabilities: Vec<proto::Capability>) -> proto::Hello {
+    proto::Hello {
+        proto_min: 1,
+        proto_max: 1,
+        public_key: identity.public_key().as_bytes().to_vec(),
+        session_nonce: vec![7; 16],
+        capabilities: capabilities.into_iter().map(Into::into).collect(),
+        ..Default::default()
+    }
+}
+
+/// Waits for `clipboard` to hold `expected`.
+async fn wait_for_text(clipboard: &FakeClipboard, expected: &str) {
+    tokio::time::timeout(ARRIVAL, async {
+        while clipboard.text().as_deref() != Some(expected) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the receiver's clipboard takes the sender's text");
+}
+
+#[tokio::test]
+async fn text_copied_on_the_sender_lands_on_the_receivers_clipboard() {
+    let sender_clipboard = FakeClipboard::holding("copied on machine A");
+    let receiver_clipboard = FakeClipboard::holding("older text on machine B");
+    let machines = Machines::connect(
+        ClipboardSync::with_backend(sender_clipboard.clone()),
+        ClipboardSync::with_backend(receiver_clipboard.clone()),
+    )
+    .await;
+
+    assert!(
+        machines.offer(ARRIVAL).await,
+        "the sender announces its text"
+    );
+    assert!(
+        machines.serve_fetch(ARRIVAL).await,
+        "the receiver fetches it"
+    );
+
+    wait_for_text(&receiver_clipboard, "copied on machine A").await;
+    assert_eq!(receiver_clipboard.writes(), 1);
+    assert_eq!(sender_clipboard.writes(), 0);
+}
+
+#[tokio::test]
+async fn text_the_receiver_already_holds_is_neither_fetched_nor_written() {
+    let receiver_clipboard = FakeClipboard::holding("same on both");
+    let machines = Machines::connect(
+        ClipboardSync::with_backend(FakeClipboard::holding("same on both")),
+        ClipboardSync::with_backend(receiver_clipboard.clone()),
+    )
+    .await;
+
+    assert!(
+        machines.offer(ARRIVAL).await,
+        "the sender announces its text"
+    );
+    assert!(
+        !machines.serve_fetch(QUIET).await,
+        "a receiver holding the announced text does not fetch it"
+    );
+    assert_eq!(receiver_clipboard.writes(), 0);
+}
+
+#[tokio::test]
+async fn nothing_crosses_to_a_peer_that_does_not_list_clipboard_sync() {
+    let receiver_clipboard = FakeClipboard::holding("kept");
+    let machines = Machines::connect_listing(
+        ClipboardSync::with_backend(FakeClipboard::holding("copied")),
+        ClipboardSync::with_backend(receiver_clipboard.clone()),
+        Vec::new(),
+    )
+    .await;
+
+    assert!(
+        !machines.offer(QUIET).await,
+        "no announce may reach a peer that did not list clipboard sync"
+    );
+    assert_eq!(receiver_clipboard.text().as_deref(), Some("kept"));
+    assert_eq!(receiver_clipboard.writes(), 0);
+}
+
+#[tokio::test]
+async fn text_over_the_limit_is_skipped_without_an_announce() {
+    let receiver_clipboard = FakeClipboard::holding("kept");
+    let machines = Machines::connect(
+        ClipboardSync::with_backend(FakeClipboard::holding(&"x".repeat(MAX_TEXT_BYTES + 1))),
+        ClipboardSync::with_backend(receiver_clipboard.clone()),
+    )
+    .await;
+
+    assert!(
+        !machines.offer(QUIET).await,
+        "text over the limit is not announced"
+    );
+    assert_eq!(receiver_clipboard.writes(), 0);
+}

@@ -119,6 +119,8 @@ async fn run_outgoing(
         accept_ms = started.elapsed().as_millis(),
         "Flow handoff accepted"
     );
+    // Queued, not awaited: the text reaches the peer while the devices move.
+    state.clipboard.offer(peer.public_key, &connection);
     match state.switch_devices(&targets).await {
         Ok(true) => state.set_handed_off_to(&peer.name),
         Ok(false) => {

@@ -5680,6 +5680,7 @@ version = "0.8.15"
 dependencies = [
  "axwatch",
  "futures-lite",
+ "openlogi-clipboard",
  "openlogi-core",
  "openlogi-fixture",
  "openlogi-flow",

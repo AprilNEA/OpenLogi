@@ -18,6 +18,7 @@ openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-flow = { path = "../openlogi-flow" }
+openlogi-clipboard = { path = "../openlogi-clipboard" }
 futures-lite = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }

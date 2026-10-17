@@ -1,5 +1,6 @@
 //! Agent-side bridge between Flow networking, input edges, and HID++.
 
+mod clipboard;
 mod config;
 mod handoff;
 mod runtime;
