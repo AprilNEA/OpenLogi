@@ -70,11 +70,12 @@ pub(super) fn space_shortcut(direction: Direction) -> Option<SpaceShortcut> {
 }
 
 impl SpaceShortcut {
-    /// Type the shortcut on top of whatever modifiers held chords keep down.
+    /// Type the shortcut around whatever modifiers held chords keep down.
     ///
-    /// The events are built and posted under the held-chord lock, so none
-    /// releases a modifier another binding still holds, and every one is
-    /// built before the first is posted.
+    /// The events are built and posted under the held-chord lock, so a
+    /// modifier another binding holds is lifted only for the keystroke and
+    /// restored before the lock is released, and every event is built before
+    /// the first is posted.
     pub(super) fn post(&self) {
         super::super::with_held_modifiers(|held| {
             let Some(events) = keystroke(self.virtual_key, self.flags, held) else {
@@ -89,9 +90,10 @@ impl SpaceShortcut {
 }
 
 /// The edges a physical keyboard sends for `virtual_key` under `flags` while
-/// `held` modifiers are already down: each missing modifier key down, the
-/// key down and up, then those modifiers up in reverse. A modifier already
-/// held stays down throughout, as it would on a physical keyboard.
+/// `held` modifiers are already down: each held modifier the shortcut does
+/// not use up, each missing one down, the key down and up, then both sets
+/// restored in reverse. A held modifier the shortcut uses stays down
+/// throughout; one it does not use would turn it into a different shortcut.
 ///
 /// WindowServer matches a synthesized symbolic hotkey only in this shape: a
 /// key event that merely carries the modifier flags is ignored, as is an
@@ -103,6 +105,11 @@ fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Opti
         .filter(|&&(flag, key)| flags.contains(flag) && !held.contains(key))
         .map(|&(_, key)| key)
         .collect();
+    let released: Vec<HeldKey> = MODIFIER_KEYS
+        .iter()
+        .filter(|&&(flag, key)| !flags.contains(flag) && held.contains(key))
+        .map(|&(_, key)| key)
+        .collect();
     let mut key_flags = MODIFIER_KEYS
         .iter()
         .fold(flags, |rest, &(flag, _)| rest.difference(flag));
@@ -111,7 +118,11 @@ fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Opti
     }
 
     let mut modifiers = held;
-    let mut events = Vec::with_capacity(pressed.len() * 2 + 2);
+    let mut events = Vec::with_capacity((pressed.len() + released.len()) * 2 + 2);
+    for &key in &released {
+        let (vk, edge_flags) = super::held_key_event(key, KeyPhase::Up, &mut modifiers)?;
+        events.push(super::key_event(vk, edge_flags, KeyPhase::Up)?);
+    }
     for &key in &pressed {
         let (vk, edge_flags) = super::held_key_event(key, KeyPhase::Down, &mut modifiers)?;
         events.push(super::key_event(vk, edge_flags, KeyPhase::Down)?);
@@ -122,6 +133,10 @@ fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Opti
     for &key in pressed.iter().rev() {
         let (vk, edge_flags) = super::held_key_event(key, KeyPhase::Up, &mut modifiers)?;
         events.push(super::key_event(vk, edge_flags, KeyPhase::Up)?);
+    }
+    for &key in released.iter().rev() {
+        let (vk, edge_flags) = super::held_key_event(key, KeyPhase::Down, &mut modifiers)?;
+        events.push(super::key_event(vk, edge_flags, KeyPhase::Down)?);
     }
     debug_assert_eq!(
         modifiers, held,
@@ -342,11 +357,26 @@ mod tests {
         );
     }
 
-    /// A modifier a held chord already owns is neither pressed again nor
-    /// released: releasing it would end that chord's hold early. Other held
-    /// modifiers ride on the key, as they would on a physical keyboard.
+    /// A modifier a held chord already owns that the shortcut uses is neither
+    /// pressed again nor released.
     #[test]
-    fn keystroke_leaves_modifiers_held_by_other_chords_down() {
+    fn keystroke_leaves_shared_held_modifiers_down() {
+        let mut held = HeldModifiers::default();
+        held.set(HeldKey::Control, true);
+        let events = keystroke(0x7c, CONTROL | FN, held).expect("keyboard events");
+        assert_eq!(
+            edges(&events),
+            [
+                (0x7c, Down, CONTROL | FN | PAD),
+                (0x7c, Up, CONTROL | FN | PAD),
+            ]
+        );
+    }
+
+    /// A held modifier the shortcut does not use would make it a different
+    /// shortcut, so it is lifted around the keystroke and pressed again after.
+    #[test]
+    fn keystroke_lifts_held_modifiers_the_shortcut_does_not_use() {
         let mut held = HeldModifiers::default();
         held.set(HeldKey::Control, true);
         held.set(HeldKey::Shift, true);
@@ -354,8 +384,10 @@ mod tests {
         assert_eq!(
             edges(&events),
             [
-                (0x7c, Down, CONTROL | SHIFT | FN | PAD),
-                (0x7c, Up, CONTROL | SHIFT | FN | PAD),
+                (0x38, Flags, CONTROL),
+                (0x7c, Down, CONTROL | FN | PAD),
+                (0x7c, Up, CONTROL | FN | PAD),
+                (0x38, Flags, CONTROL | SHIFT),
             ]
         );
 
@@ -365,10 +397,12 @@ mod tests {
         assert_eq!(
             edges(&events),
             [
-                (0x3b, Flags, CONTROL | SHIFT),
-                (0x7c, Down, CONTROL | SHIFT | FN | PAD),
-                (0x7c, Up, CONTROL | SHIFT | FN | PAD),
-                (0x3b, Flags, SHIFT),
+                (0x38, Flags, NONE),
+                (0x3b, Flags, CONTROL),
+                (0x7c, Down, CONTROL | FN | PAD),
+                (0x7c, Up, CONTROL | FN | PAD),
+                (0x3b, Flags, NONE),
+                (0x38, Flags, SHIFT),
             ]
         );
     }

@@ -443,8 +443,9 @@ fn hold_transition(
 /// Run `post` with the synthetic modifiers held chords keep down, under the
 /// lock that orders held-chord edges.
 ///
-/// A one-shot keystroke posted through this neither releases a modifier a
-/// held chord still owns nor interleaves with a held transition.
+/// A one-shot keystroke posted through this sees exactly which modifiers held
+/// chords own, restores any it lifts before returning, and never interleaves
+/// with a held transition.
 #[cfg(target_os = "macos")]
 fn with_held_modifiers<R>(post: impl FnOnce(HeldModifiers) -> R) -> R {
     let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
