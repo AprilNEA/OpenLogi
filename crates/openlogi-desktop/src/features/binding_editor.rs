@@ -9,7 +9,7 @@ use gpui::{
 use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
 use openlogi_core::binding::{Action, Category, GestureDirection};
 
-use crate::ui::action::localized_action_label;
+use crate::ui::action::{is_available, localized_action_label};
 use crate::ui::components::MenuRow;
 use crate::ui::section::section_label;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
@@ -21,10 +21,11 @@ pub(crate) const EDITOR_LIST_MAX_H: f32 = 360.;
 pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 
 /// The action catalog grouped by [`Category`], preserving catalog order within
-/// each group and first-seen order across groups.
+/// each group and first-seen order across groups. Actions this host cannot
+/// perform are left out (see [`is_available`]).
 pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
     let mut sections: Vec<(Category, Vec<Action>)> = Vec::new();
-    for action in Action::catalog() {
+    for action in Action::catalog().into_iter().filter(is_available) {
         let category = action.category();
         if let Some(section) = sections
             .iter_mut()
@@ -241,6 +242,18 @@ pub(crate) fn editor_scroll_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picker_offers_only_actions_this_host_can_perform() {
+        for (_, actions) in grouped_catalog() {
+            for action in actions {
+                assert!(
+                    is_available(&action),
+                    "{action:?} is offered but never fires"
+                );
+            }
+        }
+    }
 
     #[test]
     fn gesture_action_catalog_includes_actions_ring() {

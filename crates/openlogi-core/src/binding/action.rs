@@ -378,15 +378,17 @@ macro_rules! derive_action_core {
                 }
             }
 
-            /// Resolve the stable key for a payload-free English action label.
+            /// Resolve the payload-free action an English action label names.
             ///
             /// The Actions Ring wire contract carries this English label for
             /// compatibility with older helpers. The overlay converts it at
-            /// the localization boundary rather than changing the wire value.
+            /// the localization boundary rather than changing the wire value,
+            /// going through the action so the label can follow the host
+            /// (see [`Action::translation_key_on`]).
             #[must_use]
-            pub fn translation_key_for_label(label: &str) -> Option<&'static str> {
+            pub fn for_label(label: &str) -> Option<Action> {
                 match label {
-                    $( $label => Some($translation_key), )*
+                    $( $label => Some(Action::$variant), )*
                     _ => None,
                 }
             }

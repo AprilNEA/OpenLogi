@@ -13,7 +13,7 @@ use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
+    Action, Effect, Host, KeyCombo, LinuxDesktop, MediaKey, MouseButton, NativeAction, Shortcut,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -128,38 +128,38 @@ fn dispatch_media(key: MediaKey) {
     }
 }
 
-/// Dispatch a window-manager or power [`NativeAction`]. `action` is only
-/// used for its label in the "no Linux equivalent" debug log.
+/// Dispatch a window-manager or power [`NativeAction`].
+///
+/// Whether this desktop can perform `action` at all is decided by
+/// [`Action::is_available_on`], the same table the pickers read to stop
+/// offering it; what is left here is how to perform it.
 fn dispatch_native(action: &Action, native: NativeAction) {
+    if !action.is_available_on(Host::Linux(LinuxDesktop::current())) {
+        tracing::debug!(
+            action = action.label(),
+            "no Linux equivalent on this desktop — action skipped"
+        );
+        return;
+    }
     let ctrl = KeyCode::KEY_LEFTCTRL;
     let alt = KeyCode::KEY_LEFTALT;
+    let meta = KeyCode::KEY_LEFTMETA;
     match native {
-        // GNOME's overlay key toggles the Activities overview on a bare tap;
-        // no other tested desktop binds Super alone the same way (KDE opens
-        // KRunner), so this only fires under GNOME. Activities shows every
-        // window across every app, not just the frontmost app's — that is
-        // MissionControl's contract, not AppExpose's, so AppExpose must not
-        // share this arm without its own promised single-app scope.
-        NativeAction::MissionControl => {
-            gnome_key_or_skip(action, &[], KeyCode::KEY_LEFTMETA);
-        }
+        // GNOME's overlay key toggles the Activities overview on a bare tap.
+        // Activities shows every window across every app, not just the
+        // frontmost app's — that is MissionControl's contract, not
+        // AppExpose's, so AppExpose must not share this arm without its own
+        // promised single-app scope.
+        NativeAction::MissionControl => press_key(&[], meta),
         // No tested desktop has a stock single-app window-exposé binding
-        // (GNOME's Activities and KDE's Present Windows both show every
-        // app), so this always skips rather than substitute the wrong scope.
-        NativeAction::AppExpose => {
-            tracing::debug!(
-                action = action.label(),
-                "no Linux equivalent — action skipped"
-            );
-        }
+        // (GNOME's Activities and KDE's Present Windows both show every app),
+        // so the table above already skipped it rather than substitute the
+        // wrong scope.
+        NativeAction::AppExpose => {}
         // GNOME's default "Show desktop" keybinding.
-        NativeAction::ShowDesktop => {
-            gnome_key_or_skip(action, &[KeyCode::KEY_LEFTMETA], KeyCode::KEY_D);
-        }
+        NativeAction::ShowDesktop => press_key(&[meta], KeyCode::KEY_D),
         // GNOME's default "Show Applications" keybinding.
-        NativeAction::LaunchpadShow => {
-            gnome_key_or_skip(action, &[KeyCode::KEY_LEFTMETA], KeyCode::KEY_A);
-        }
+        NativeAction::LaunchpadShow => press_key(&[meta], KeyCode::KEY_A),
         // Ctrl+Alt+←/→ is the default in GNOME and KDE.
         NativeAction::PreviousDesktop => press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
         NativeAction::NextDesktop => press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
@@ -177,33 +177,6 @@ fn dispatch_native(action: &Action, native: NativeAction) {
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
     }
-}
-
-/// Press `mods`+`key` under GNOME; log the existing "no Linux equivalent"
-/// skip everywhere else, since Super-based bindings vary by desktop.
-fn gnome_key_or_skip(action: &Action, mods: &[KeyCode], key: KeyCode) {
-    if is_gnome() {
-        press_key(mods, key);
-    } else {
-        tracing::debug!(
-            action = action.label(),
-            "no Linux equivalent — action skipped"
-        );
-    }
-}
-
-fn is_gnome() -> bool {
-    desktop_is_gnome(std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default())
-}
-
-/// The pure half of [`is_gnome`], taking the desktop string directly instead
-/// of reading it from the process environment — so tests can drive it
-/// without `std::env::set_var`, which cannot be scoped to just this test:
-/// the process environment is process-wide, and a private test-only mutex
-/// only serializes callers that take it, not every other reader (including
-/// `is_gnome` itself, called from unrelated code running concurrently).
-fn desktop_is_gnome(current_desktop: impl AsRef<str>) -> bool {
-    current_desktop.as_ref().to_lowercase().contains("gnome")
 }
 
 /// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
@@ -859,23 +832,6 @@ mod tests {
             assert!(
                 hid_usage_to_linux(key).is_some(),
                 "{shortcut:?} table entry has no Linux keycode mapping"
-            );
-        }
-    }
-
-    #[test]
-    fn gnome_detection_matches_on_current_desktop_case_insensitively() {
-        for (value, expected) in [
-            ("GNOME", true),
-            ("ubuntu:GNOME", true),
-            ("gnome-classic", true),
-            ("KDE", false),
-            ("", false),
-        ] {
-            assert_eq!(
-                super::desktop_is_gnome(value),
-                expected,
-                "XDG_CURRENT_DESKTOP={value:?}"
             );
         }
     }

@@ -88,6 +88,9 @@ pub fn default_gesture_binding(direction: GestureDirection) -> Action {
         GestureDirection::Down => Action::ShowDesktop,
         GestureDirection::Left => Action::PrevTab,
         GestureDirection::Right => Action::NextTab,
+        // App Exposé has no Linux backend (see `Action::is_available_on`), so
+        // a Linux click opens the Actions Ring, which every desktop can show.
+        GestureDirection::Click if cfg!(target_os = "linux") => Action::ShowActionsRing,
         GestureDirection::Click => Action::AppExpose,
     }
 }

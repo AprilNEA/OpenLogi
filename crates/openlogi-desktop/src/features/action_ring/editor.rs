@@ -17,7 +17,7 @@ use super::action_icons::action_icon_path;
 use crate::features::binding_editor::editor_section;
 use crate::features::keyboard::editors::PowerUserKind;
 use crate::state::AppState;
-use crate::ui::action::localized_action_label;
+use crate::ui::action::{is_available, localized_action_label};
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -97,17 +97,19 @@ pub(super) fn action_library(
                 })
                 .child(shortcut_editor(slot, shortcut_input, pal))
                 .child(path_editor(slot, application_input, pal))
-                .child(text_action_editor(
-                    slot,
-                    PowerUserKind::TypeText,
-                    &power_user.type_text,
-                    pal,
-                ))
-                // RunAppleScript has no execution path outside macOS
-                // (`openlogi-inject`'s Linux/Windows backends only log a
-                // warning and do nothing) — hide the editor there instead of
-                // letting a binding be saved that silently never fires.
-                .when(cfg!(target_os = "macos"), |library| {
+                // TypeText and RunAppleScript have no backend on some hosts
+                // (`openlogi-inject` only logs a warning there) — hide their
+                // editors instead of letting a binding be saved that silently
+                // never fires.
+                .when(PowerUserKind::TypeText.is_available(), |library| {
+                    library.child(text_action_editor(
+                        slot,
+                        PowerUserKind::TypeText,
+                        &power_user.type_text,
+                        pal,
+                    ))
+                })
+                .when(PowerUserKind::RunAppleScript.is_available(), |library| {
                     library.child(text_action_editor(
                         slot,
                         PowerUserKind::RunAppleScript,
@@ -361,7 +363,7 @@ fn action_sections(
 
 fn ring_catalog() -> Vec<(Category, Vec<Action>)> {
     let mut sections: Vec<(Category, Vec<Action>)> = Vec::new();
-    for action in Action::catalog() {
+    for action in Action::catalog().into_iter().filter(is_available) {
         if RingAction::new(action.clone()).is_err() {
             continue;
         }

@@ -1,14 +1,41 @@
 //! Display helpers for the shared action vocabulary.
 
-use gpui::SharedString;
-use openlogi_core::binding::Action;
+use std::sync::LazyLock;
 
-/// Localized label for an action, including its dynamic payload.
+use gpui::SharedString;
+use openlogi_core::binding::{Action, Host};
+
+/// The host the agent dispatches on, read once: the GUI runs in the same
+/// session, so it sees the same OS and `$XDG_CURRENT_DESKTOP`.
+pub(crate) fn host() -> Host {
+    static HOST: LazyLock<Host> = LazyLock::new(Host::current);
+    *HOST
+}
+
+/// Whether binding `action` does anything on this host. The pickers offer
+/// only these; an existing binding to anything else keeps its row, marked by
+/// [`localized_action_label`].
+pub(crate) fn is_available(action: &Action) -> bool {
+    action.is_available_on(host())
+}
+
+/// Localized label for an action, including its dynamic payload, under the
+/// name this host uses for it. A binding this host cannot perform says so,
+/// rather than looking like it works.
+pub(crate) fn localized_action_label(action: &Action) -> SharedString {
+    let label = action_label(action);
+    if is_available(action) {
+        label
+    } else {
+        tr!("actions.unavailable_here", action => label)
+    }
+}
+
 #[expect(
     clippy::expect_used,
     reason = "the preceding match arms handle every action without a static key"
 )]
-pub(crate) fn localized_action_label(action: &Action) -> SharedString {
+fn action_label(action: &Action) -> SharedString {
     match action {
         Action::SetDpiPreset(index) => {
             tr!("pointer.dpi_preset", index => (index + 1).to_string())
@@ -38,7 +65,7 @@ pub(crate) fn localized_action_label(action: &Action) -> SharedString {
             tr!("actions.open_named_target", name => target.display_name())
         }
         _ => tr!(action
-            .translation_key()
+            .translation_key_on(host())
             .expect("every payload-free action has a translation key")),
     }
 }

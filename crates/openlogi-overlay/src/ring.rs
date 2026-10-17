@@ -11,7 +11,7 @@ use gpui::{
     WindowBackgroundAppearance, WindowKind, WindowOptions, div, point, prelude::FluentBuilder as _,
     px, svg,
 };
-use openlogi_core::binding::{Action, ActionRingSlot};
+use openlogi_core::binding::{Action, ActionRingSlot, Host};
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
@@ -173,7 +173,9 @@ impl RingView {
             // collide with a known key ("Copy" → "Copier" under fr).
             let label = if presentation.literal {
                 presentation.label.clone()
-            } else if let Some(key) = Action::translation_key_for_label(&presentation.label) {
+            } else if let Some(key) = Action::for_label(&presentation.label)
+                .and_then(|action| action.translation_key_on(Host::current()))
+            {
                 rust_i18n::t!(key).into_owned()
             } else {
                 presentation.label.clone()

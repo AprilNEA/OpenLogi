@@ -931,52 +931,56 @@ fn panel_action_rows(
     children.push(
         v_flex()
             .child(editor_section(tr!("actions.power_user").to_string(), *pal))
-            .children(power_user_actions.iter().enumerate().map(
-                |(idx, (kind, label, icon_path))| {
-                    let kind = *kind;
-                    let view = view.clone();
-                    let selected = matches!(
-                        (current, kind),
-                        (Some(Action::TypeText(_)), PowerUserKind::TypeText)
-                            | (
-                                Some(Action::RunAppleScript(_)),
-                                PowerUserKind::RunAppleScript
-                            )
-                            | (
-                                Some(Action::RunShellCommand(_)),
-                                PowerUserKind::RunShellCommand
-                            )
-                            | (Some(Action::Workflow(_)), PowerUserKind::Workflow)
-                    );
-                    MenuRow::new(format!("panel-power-{idx}"))
-                        .selected(selected)
-                        .role(Role::MenuItem)
-                        .aria_label(*label)
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    svg()
-                                        .path(*icon_path)
-                                        .size_4()
-                                        .flex_none()
-                                        .text_color(pal.text_muted),
+            .children(
+                power_user_actions
+                    .iter()
+                    .filter(|(kind, _, _)| kind.is_available())
+                    .enumerate()
+                    .map(|(idx, (kind, label, icon_path))| {
+                        let kind = *kind;
+                        let view = view.clone();
+                        let selected = matches!(
+                            (current, kind),
+                            (Some(Action::TypeText(_)), PowerUserKind::TypeText)
+                                | (
+                                    Some(Action::RunAppleScript(_)),
+                                    PowerUserKind::RunAppleScript
                                 )
-                                .child(div().child((*label).to_string())),
-                        )
-                        .when(selected, |s| {
-                            s.child(
-                                gpui_component::Icon::new(gpui_component::IconName::Check)
-                                    .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
+                                | (
+                                    Some(Action::RunShellCommand(_)),
+                                    PowerUserKind::RunShellCommand
+                                )
+                                | (Some(Action::Workflow(_)), PowerUserKind::Workflow)
+                        );
+                        MenuRow::new(format!("panel-power-{idx}"))
+                            .selected(selected)
+                            .role(Role::MenuItem)
+                            .aria_label(*label)
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        svg()
+                                            .path(*icon_path)
+                                            .size_4()
+                                            .flex_none()
+                                            .text_color(pal.text_muted),
+                                    )
+                                    .child(div().child((*label).to_string())),
                             )
-                        })
-                        .on_click(move |_ev, _window, cx| {
-                            view.update(cx, |v, vcx| v.open_editor(kind, vcx));
-                        })
-                },
-            )),
+                            .when(selected, |s| {
+                                s.child(
+                                    gpui_component::Icon::new(gpui_component::IconName::Check)
+                                        .size_3()
+                                        .text_color(rgb(ACCENT_BLUE)),
+                                )
+                            })
+                            .on_click(move |_ev, _window, cx| {
+                                view.update(cx, |v, vcx| v.open_editor(kind, vcx));
+                            })
+                    }),
+            ),
     );
     children
 }
