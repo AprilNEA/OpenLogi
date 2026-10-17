@@ -6,6 +6,7 @@
 )]
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
@@ -81,6 +82,54 @@ thread_local! {
     /// construction and needs no synchronization on the freeze-sensitive
     /// callback path.
     static LAST_POINT: Cell<Option<POINT>> = const { Cell::new(None) };
+}
+
+/// A baseline handed in from outside the hook thread after a programmatic
+/// cursor warp, consumed by the next mouse message in place of
+/// [`LAST_POINT`]. The hook never sees `SetCursorPos`, so without it the first
+/// real move after a warp is differenced against where the cursor was before
+/// the warp — a phantom jump the size of the warp.
+static RESEED: Reseed = Reseed::new();
+
+/// One pending baseline: a packed `POINT` plus whether it awaits consumption.
+struct Reseed {
+    packed: AtomicU64,
+    pending: AtomicBool,
+}
+
+impl Reseed {
+    const fn new() -> Self {
+        Self {
+            packed: AtomicU64::new(0),
+            pending: AtomicBool::new(false),
+        }
+    }
+
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "the coordinates are stored bit-for-bit and unpacked with the reverse casts"
+    )]
+    fn set(&self, point: POINT) {
+        let packed = (u64::from(point.x as u32) << 32) | u64::from(point.y as u32);
+        self.packed.store(packed, Ordering::Relaxed);
+        self.pending.store(true, Ordering::Release);
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "reverses the bit-for-bit packing in `set`"
+    )]
+    fn take(&self) -> Option<POINT> {
+        if !self.pending.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        let packed = self.packed.load(Ordering::Relaxed);
+        Some(POINT {
+            x: (packed >> 32) as u32 as i32,
+            y: packed as u32 as i32,
+        })
+    }
 }
 
 type HookCallback = Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync + 'static>;
@@ -208,6 +257,33 @@ impl HookBackend for Backend {
             y: point.y,
         };
         Some(physical.into_logical(dpi))
+    }
+
+    /// Physical pixels, like [`Self::display_rects`] and `SetCursorPos` in this
+    /// per-monitor-DPI-aware process — unlike [`Self::cursor_position`],
+    /// which reports DIPs for the overlay. On a scaled monitor, mixing the two
+    /// put the right and bottom edges out of the cursor's reach.
+    fn edge_cursor_position() -> Option<CursorPosition> {
+        let mut point = POINT { x: 0, y: 0 };
+        // SAFETY: `point` is a valid writable POINT for the duration of the call.
+        if unsafe { GetCursorPos(&raw mut point) } == 0 {
+            return None;
+        }
+        Some(CursorPosition {
+            x: f64::from(point.x),
+            y: f64::from(point.y),
+        })
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "rounded screen coordinates fit i32 by construction"
+    )]
+    fn reseed_motion_baseline(position: CursorPosition) {
+        RESEED.set(POINT {
+            x: position.x.round() as i32,
+            y: position.y.round() as i32,
+        });
     }
 
     fn display_rects() -> Vec<DisplayRect> {
@@ -469,6 +545,7 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
     // all of them: injected motion is dropped below but still moves the cursor,
     // and a gesture's button-down seeds the baseline for its own first move.
     let previous = LAST_POINT.replace(Some(data.pt));
+    let previous = RESEED.take().or(previous);
 
     if data.flags & LLMHF_INJECTED != 0 {
         return None;

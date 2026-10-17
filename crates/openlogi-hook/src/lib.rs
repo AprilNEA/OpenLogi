@@ -500,6 +500,14 @@ trait HookBackend {
     fn display_rects() -> Vec<edge::DisplayRect> {
         Vec::new()
     }
+
+    /// See [`crate::edge_cursor_position`].
+    fn edge_cursor_position() -> Option<CursorPosition> {
+        Self::cursor_position()
+    }
+
+    /// See [`crate::reseed_motion_baseline`].
+    fn reseed_motion_baseline(_position: CursorPosition) {}
 }
 
 /// The backend for a platform with no hook: every default, and a
@@ -796,7 +804,7 @@ pub fn cursor_position() -> Option<CursorPosition> {
 }
 
 /// Return active display bounds in the same global coordinate space as
-/// [`cursor_position`].
+/// [`edge_cursor_position`] and `openlogi_inject::warp_cursor`.
 ///
 /// Returns an empty vector when enumeration is unavailable. Native Wayland
 /// deliberately has no global display coordinate space, so it is unsupported
@@ -804,6 +812,28 @@ pub fn cursor_position() -> Option<CursorPosition> {
 #[must_use]
 pub fn display_rects() -> Vec<edge::DisplayRect> {
     Backend::display_rects()
+}
+
+/// The cursor position in the coordinate space of [`display_rects`] and of
+/// `openlogi_inject::warp_cursor`, for edge geometry.
+///
+/// On Windows that is physical pixels, where [`cursor_position`] reports DIPs
+/// for the overlay; on a scaled monitor the two differ by the scale factor.
+/// Elsewhere it is [`cursor_position`].
+#[must_use]
+pub fn edge_cursor_position() -> Option<CursorPosition> {
+    Backend::edge_cursor_position()
+}
+
+/// Tell the hook the cursor was just moved programmatically to `position`, in
+/// [`edge_cursor_position`]'s space, so the next real movement is measured
+/// from there.
+///
+/// Windows derives motion from consecutive hook positions and never sees a
+/// `SetCursorPos`, so without this the first move after a warp carries the
+/// warp itself. Elsewhere motion is reported directly and this does nothing.
+pub fn reseed_motion_baseline(position: CursorPosition) {
+    Backend::reseed_motion_baseline(position);
 }
 
 #[cfg(target_os = "macos")]
