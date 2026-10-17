@@ -21,6 +21,7 @@ use tracing::{debug, error};
 use crate::ForegroundApp;
 
 mod gnome_shell;
+mod kwin_script;
 mod stop;
 mod wlr_foreign_toplevel;
 pub(super) mod x11;
@@ -138,7 +139,19 @@ fn x11_candidate() -> Option<Box<dyn FrontmostSource>> {
 /// support none of these fall through to the X11/XWayland path (which resolves
 /// XWayland windows, `None` for native Wayland apps).
 fn wayland_candidates() -> Vec<Candidate> {
-    vec![wlr_foreign_toplevel::candidate, gnome_shell::candidate]
+    // Order is "most specific first". The two shell-assisted backends only
+    // start where their companion is installed, and wlroots' protocol only
+    // binds where the compositor offers it, so whichever matches this session
+    // wins and the rest fall through to X11/XWayland.
+    //
+    // KWin comes last only because it is the most expensive probe: unlike the
+    // other two it loads its companion script as part of starting, so letting
+    // the cheap checks decline first avoids that work on non-KDE sessions.
+    vec![
+        wlr_foreign_toplevel::candidate,
+        gnome_shell::candidate,
+        kwin_script::candidate,
+    ]
 }
 
 /// Pick the frontmost backend for this session, trying each candidate in order
