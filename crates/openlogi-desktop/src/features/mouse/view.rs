@@ -22,10 +22,11 @@ use super::geometry::{
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::inspector::{
-    ActionPickerContext, BindingInspectorData, InvalidDrafts, ShortcutError, ShortcutMode,
-    binding_inspector,
+    ActionPickerContext, BindingInspectorData, InspectorList, InvalidDrafts, ShortcutError,
+    ShortcutMode, binding_inspector,
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
+use super::thumbwheel::ScrollMethodChoice;
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::binding_editor::{Recording, RecordsShortcut, ShortcutRecorder};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
@@ -92,6 +93,7 @@ struct MouseWorkspaceData<'a> {
     extra_actions: &'static [Action],
     /// Catalog actions the picker leaves out.
     hidden_actions: &'static [Action],
+    scroll_method: Option<ScrollMethodChoice>,
 }
 
 impl<'a> MouseWorkspaceData<'a> {
@@ -140,6 +142,7 @@ impl<'a> MouseWorkspaceData<'a> {
             } else {
                 NO_ACTIONS_RING
             },
+            scroll_method: state.editing_scroll_method(),
         })
     }
 
@@ -163,6 +166,7 @@ impl<'a> MouseWorkspaceData<'a> {
             overridden: None,
             extra_actions: &[],
             hidden_actions: &[],
+            scroll_method: None,
         }
     }
 }
@@ -175,7 +179,7 @@ pub struct MouseModelView {
     selected: Option<MouseControlId>,
     /// The gesture direction whose action is open in the fixed inspector.
     gesture_active_dir: Option<GestureDirection>,
-    action_picker_open: bool,
+    open_list: InspectorList,
     action_search: Entity<InputState>,
     pub(super) custom_shortcut_input: Entity<InputState>,
     pub(super) custom_application_input: Entity<InputState>,
@@ -255,7 +259,7 @@ impl MouseModelView {
             hovered: None,
             selected: None,
             gesture_active_dir: None,
-            action_picker_open: false,
+            open_list: InspectorList::Closed,
             action_search,
             custom_shortcut_input,
             custom_application_input,
@@ -292,18 +296,27 @@ impl MouseModelView {
     /// `cx.notify()` to re-render.
     pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
         self.gesture_active_dir = dir;
-        self.action_picker_open = false;
+        self.open_list = InspectorList::Closed;
         self.shortcut_recorder = None;
     }
 
     pub(super) fn toggle_action_picker(&mut self) {
-        self.action_picker_open = !self.action_picker_open;
+        self.open_list = self.open_list.toggled(InspectorList::Actions);
         self.shortcut_recorder = None;
     }
 
     pub(super) fn close_action_picker(&mut self) {
-        self.action_picker_open = false;
+        self.open_list = self.open_list.closing(InspectorList::Actions);
         self.shortcut_recorder = None;
+    }
+
+    pub(super) fn toggle_scroll_method_picker(&mut self) {
+        self.open_list = self.open_list.toggled(InspectorList::ScrollMethods);
+        self.shortcut_recorder = None;
+    }
+
+    pub(super) fn close_scroll_method_picker(&mut self) {
+        self.open_list = self.open_list.closing(InspectorList::ScrollMethods);
     }
 
     /// Start recording the custom shortcut, or stop the recording in
@@ -323,7 +336,7 @@ impl MouseModelView {
     /// The action picker's state, as the inspector reads it.
     fn action_picker_context<'a>(&'a self, view: &'a Entity<Self>) -> ActionPickerContext<'a> {
         ActionPickerContext {
-            open: self.action_picker_open,
+            list: self.open_list,
             search: &self.action_search,
             shortcut_input: &self.custom_shortcut_input,
             application_input: &self.custom_application_input,
@@ -344,7 +357,7 @@ impl MouseModelView {
         self.hovered = None;
         self.selected = None;
         self.gesture_active_dir = None;
-        self.action_picker_open = false;
+        self.open_list = InspectorList::Closed;
         self.shortcut_recorder = None;
     }
 
@@ -352,7 +365,7 @@ impl MouseModelView {
         if self.selected != Some(control) {
             self.selected = Some(control);
             self.gesture_active_dir = None;
-            self.action_picker_open = false;
+            self.open_list = InspectorList::Closed;
             self.shortcut_recorder = None;
         }
     }
@@ -472,6 +485,7 @@ impl Render for MouseModelView {
             overridden,
             extra_actions,
             hidden_actions,
+            scroll_method,
         } = MouseWorkspaceData::read(cx).unwrap_or_else(MouseWorkspaceData::empty);
 
         let gesture_buttons: Vec<ButtonId> = gesture_maps
@@ -551,6 +565,7 @@ impl Render for MouseModelView {
                 press_force: PressForce::of(force_sensing.as_ref(), self.force_sensing.as_ref()),
                 extra_actions,
                 hidden_actions,
+                scroll_method,
             },
             self.action_picker_context(&view),
             cx,

@@ -61,6 +61,7 @@ pub(crate) use disable_keys::{DisableKeysError, DisableKeysPersistenceStatus};
 use light::LightSession;
 use pointer::PointerState;
 
+use crate::features::mouse::thumbwheel::{SCROLL_METHODS_SUPPORTED, scroll_rule_applies};
 use crate::services::assets::AssetResolver;
 use crate::services::device_reads::DeviceReads;
 pub(crate) use crate::services::disable_keys_reads::ConfigReconciliation;
@@ -507,19 +508,54 @@ impl AppState {
 
     /// Every application profile the active device has, as
     /// `(identifier, override count)` in identifier order.
+    ///
+    /// An application whose only setting is its horizontal scroll method, a
+    /// rule every mouse shares, has a profile with no overrides, listed under
+    /// the identifier being edited or recently seen for it when there is one.
     pub fn app_profiles(&self) -> impl Iterator<Item = (&str, usize)> {
-        self.current_record()
+        let Some(key) = self
+            .current_record()
             .and_then(DeviceRecord::persistent_config_key)
-            .into_iter()
-            .flat_map(move |key| {
-                self.config.app_profiles(key).map(move |app| {
-                    let count = self
-                        .config
-                        .per_app_overrides(key, app)
-                        .map_or(0, BTreeMap::len);
-                    (app, count)
-                })
+        else {
+            return Vec::new().into_iter();
+        };
+        let mut profiles: Vec<(&str, usize)> = self
+            .config
+            .app_profiles(key)
+            .map(|app| {
+                let count = self
+                    .config
+                    .per_app_overrides(key, app)
+                    .map_or(0, BTreeMap::len);
+                (app, count)
             })
+            .collect();
+        if SCROLL_METHODS_SUPPORTED {
+            let rules =
+                self.config.thumbwheel_apps.iter().filter(|(_, rule)| {
+                    rule.delivery.is_some_and(|delivery| !delivery.is_native())
+                });
+            for (rule, _) in rules {
+                if profiles
+                    .iter()
+                    .any(|(app, _)| scroll_rule_applies(app, rule, &self.config))
+                {
+                    continue;
+                }
+                let app = self
+                    .editing_app()
+                    .into_iter()
+                    .chain(self.recent_apps().map(|(app, _)| app))
+                    .find(|app| scroll_rule_applies(app, rule, &self.config))
+                    .unwrap_or(rule.as_str());
+                if !self.app_has_scroll_method(app) {
+                    continue;
+                }
+                profiles.push((app, 0));
+            }
+            profiles.sort_unstable_by_key(|&(app, _)| app);
+        }
+        profiles.into_iter()
     }
 
     /// Applications the agent recently saw in front, newest first, as
