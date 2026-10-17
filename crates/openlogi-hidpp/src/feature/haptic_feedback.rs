@@ -121,6 +121,37 @@ pub struct HapticCapabilities {
     pub waveforms: SupportedWaveforms,
 }
 
+/// The haptic status the device reports through `getHapticInfo`
+/// (function 3).
+///
+/// Logi Options+ plays a waveform only while this status is zero, and names
+/// no other value, so neither does this type: the raw byte is kept so a
+/// refusal can say what the device reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct HapticStatus(u8);
+
+impl HapticStatus {
+    /// Wrap a raw status byte.
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Self {
+        Self(raw)
+    }
+
+    /// The raw status byte.
+    #[must_use]
+    pub const fn raw(self) -> u8 {
+        self.0
+    }
+
+    /// Whether the device can play a waveform: Logi Options+ refuses every
+    /// play while the status is non-zero.
+    #[must_use]
+    pub const fn is_ready(self) -> bool {
+        self.0 == 0
+    }
+}
+
 /// Implements `HapticFeedback` / `0x19b0`.
 #[derive(Clone, Feature)]
 #[creatable(id = 0x19b0, version = 0)]
@@ -176,6 +207,18 @@ impl HapticFeedbackFeature {
             .await?
             .extend_payload();
         HapticConfiguration::from_payload(&payload)
+    }
+
+    /// Read the haptic status (`getHapticInfo`, function 3).
+    ///
+    /// Reverse-engineered from Logi Options+ 2.8: its `getHapticInfo` sends
+    /// function 3 with an empty request and decodes the status from reply
+    /// byte 0, zero-padding an empty reply; its play path refuses while that
+    /// status is non-zero. The unsolicited haptic-info report it stores into
+    /// the same field carries the status in byte 0 too.
+    pub async fn get_haptic_status(&self) -> Result<HapticStatus, Hidpp20Error> {
+        let payload = self.endpoint.call(3, [0; 3]).await?.extend_payload();
+        Ok(HapticStatus(payload[0]))
     }
 
     /// Play one typed haptic waveform immediately.
@@ -294,5 +337,50 @@ mod tests {
             HapticConfiguration::from_payload(&[0x01, 101, 0]),
             Err(Hidpp20Error::UnsupportedResponse)
         ));
+    }
+
+    /// What `get_haptic_status` returns when the device answers with `reply`.
+    fn status_with_reply(reply: [u8; 3]) -> HapticStatus {
+        use std::sync::Arc;
+
+        use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+        use crate::feature::CreatableFeature;
+        use crate::nibble::U4;
+        use crate::protocol::v20::{Message, MessageHeader};
+
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let feature = HapticFeedbackFeature::new(channel, 3, 0x0b);
+            let mut read = Box::pin(feature.get_haptic_status());
+            assert!(futures::poll!(read.as_mut()).is_pending());
+            let header = MessageHeader {
+                device_index: 3,
+                feature_index: 0x0b,
+                function_id: U4::from_lo(3),
+                software_id: U4::from_lo(1),
+            };
+            handle
+                .send_incoming(Message::Short(header, reply).into())
+                .await;
+            let status = read.await.expect("the device answered getHapticInfo");
+            let written = handle.written_reports();
+            let request = written.last().expect("getHapticInfo was sent");
+            assert_eq!(request[3] >> 4, 3, "getHapticInfo is function 3");
+            assert_eq!(&request[4..7], &[0, 0, 0], "with an empty request");
+            status
+        })
+    }
+
+    #[test]
+    fn haptic_status_is_reply_byte_zero_and_only_zero_is_ready() {
+        let ready = status_with_reply([0, 0xff, 0xff]);
+        assert!(ready.is_ready(), "later bytes do not decide readiness");
+        assert_eq!(ready.raw(), 0);
+        for raw in [1, 2, 0x80, 0xff] {
+            let status = status_with_reply([raw, 0, 0]);
+            assert!(!status.is_ready(), "status {raw} refuses play");
+            assert_eq!(status.raw(), raw, "the raw byte is kept");
+        }
     }
 }

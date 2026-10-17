@@ -39,7 +39,10 @@ fn live_session(epoch: u64) -> RunningKeyboardSession {
 
 fn draining_session(epoch: u64) -> RunningKeyboardSession {
     let mut session = live_session(epoch);
-    assert_eq!(session.reconcile(None), ReconcileAction::Retiring);
+    assert_eq!(
+        session.reconcile_with(None, |_, _| CaptureSessionStop::Shutdown),
+        ReconcileAction::Retiring
+    );
     session
 }
 
@@ -107,7 +110,9 @@ fn binding_changes_refresh_without_rearming_hardware() {
     let new_dispatch = dispatch(Action::ShowDesktop);
 
     assert_eq!(
-        session.reconcile(Some((&current_target, &new_dispatch))),
+        session.reconcile_with(Some((&current_target, &new_dispatch)), |_, _| {
+            CaptureSessionStop::Shutdown
+        }),
         ReconcileAction::DispatchChanged
     );
     assert!(session.is_active());
@@ -127,7 +132,9 @@ fn target_changes_freeze_dispatch_until_teardown_finishes() {
         "the test must require different firmware capture"
     );
     assert_eq!(
-        session.reconcile(Some((&replacement, &new_dispatch))),
+        session.reconcile_with(Some((&replacement, &new_dispatch)), |_, _| {
+            CaptureSessionStop::Shutdown
+        }),
         ReconcileAction::Retiring
     );
     assert!(!session.is_active());
@@ -192,6 +199,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             registry,
             receiver_access: access.clone(),
             device_io,
+            transport_turns: crate::hardware::TransportTurns::default(),
         };
         let mut actions =
             crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring)

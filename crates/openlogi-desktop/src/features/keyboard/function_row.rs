@@ -825,46 +825,44 @@ impl FunctionRowView {
         });
 
         let mut rows = Vec::new();
-        if let KeyTarget::Control(_) = target {
-            // A control's resting state is its firmware function, which is
-            // not an action in the catalog: give it a row of its own so the
-            // key can be returned to native (#1172).
-            let view_for_native = view.clone();
-            let target_for_native = target.clone();
-            rows.push(
-                v_flex().child(
-                    MenuRow::new("panel-native")
-                        .selected(current.is_none())
-                        .role(Role::MenuItem)
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    svg()
-                                        .path("action-icons/keyboard.svg")
-                                        .size_4()
-                                        .flex_none()
-                                        .text_color(pal.text_muted),
-                                )
-                                .child(div().child(tr!("keyboard.native_function"))),
-                        )
-                        .when(current.is_none(), |row| {
-                            row.child(
-                                gpui_component::Icon::new(gpui_component::IconName::Check)
-                                    .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
+        // Unbound is not a catalog action. A control rests on its firmware
+        // function (#1172); a function key rests on the key itself. The row
+        // clears the override so either key returns to that native behavior.
+        let view_for_native = view.clone();
+        let target_for_native = target.clone();
+        rows.push(
+            v_flex().child(
+                MenuRow::new("panel-native")
+                    .selected(current.is_none())
+                    .role(Role::MenuItem)
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                svg()
+                                    .path("action-icons/keyboard.svg")
+                                    .size_4()
+                                    .flex_none()
+                                    .text_color(pal.text_muted),
                             )
-                        })
-                        .on_click(move |_ev, _window, cx| {
-                            AppState::apply(cx, |state| {
-                                commit_key_action(state, &target_for_native, None)
-                            });
-                            view_for_native.update(cx, |_, vcx| vcx.notify());
-                        }),
-                ),
-            );
-        }
+                            .child(div().child(tr!("keyboard.native_function"))),
+                    )
+                    .when(current.is_none(), |row| {
+                        row.child(
+                            gpui_component::Icon::new(gpui_component::IconName::Check)
+                                .size_3()
+                                .text_color(rgb(ACCENT_BLUE)),
+                        )
+                    })
+                    .on_click(move |_ev, _window, cx| {
+                        AppState::apply(cx, |state| {
+                            commit_key_action(state, &target_for_native, None)
+                        });
+                        view_for_native.update(cx, |_, vcx| vcx.notify());
+                    }),
+            ),
+        );
         rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
 
         compact_panel(pal)

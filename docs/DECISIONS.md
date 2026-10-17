@@ -4,6 +4,64 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: Litra is reached over HID++ `0x1990`, with the raw report as fallback
+
+The "raw" Litra report `[0x11, 0xff, 0x04, …]` was always a HID++ 2.0 long
+report: device `0xff`, feature index 4, the `0x1990 Illumination` setters.
+Hard-coding the index sent writes to the wrong feature on any firmware that
+lists `0x1990` elsewhere, and nothing was ever read back. Logi Options+ 2.8
+resolves the index through the root feature, reads the light's ranges and
+state, and writes a value only when it differs from the one it read.
+
+- **HID++ first.** A command opens the light's own node as HID++, pings it,
+  looks `0x1990` up through the root feature and reads the light's ranges and
+  state. It writes only a changed value, reads the written control back, and
+  checks values against the ranges the light reports rather than the static
+  per-model ones.
+- **The effective maximum is gated.** `getBrightnessEffectiveMax` is read only
+  for feature version 1 with the dynamic-maximum flag set, as the
+  specification and Options+ gate it.
+- **The raw report stays as the fallback.** It is the path every earlier
+  release shipped and the only one proven on hardware. A light that opens but
+  does not answer the ping, list `0x1990` or have its state read within one
+  second gets it instead; without the deadline it would hold the command for
+  the channel's five-second request timeout. That answer is remembered per
+  route and OS node for the life of the process, so a light that comes back as
+  a different OS node is asked again. A refused open says nothing about the
+  light, so it falls back for that command only.
+- **No raw retry after a HID++ write.** Once the command has gone out over
+  HID++, a failure is returned rather than repeated as a raw report.
+- **One link per light.** The agent keeps the light's HID++ channel open and
+  listens on it, so commands and notifications share one channel and the
+  feature lookup runs once. A channel that stops answering is replaced on the
+  next command, and the listener follows the new one.
+- **A change on the light is the new setting.** Options+ broadcasts the state
+  a `0x1990` notification reports and stores it as the light's settings. The
+  agent keeps a value changed with the light's buttons or by another program
+  in place of the saved one, so a reconnect writes it back instead of undoing
+  it, and publishes it so the settings app can save it. A save of that control
+  or a write from OpenLogi replaces it; the power of a camera-linked light is
+  a manual choice until the next camera transition instead.
+- **OpenLogi's own writes are not changes on the light.** The light echoes
+  every setter as a notification. A notification that matches the value the
+  agent just wrote is the echo. A brightness the light's effective maximum
+  explains is the light's limit, not the user's choice, even when another
+  notification is read first: lowered to a limit below the old brightness or
+  the old limit, or raised from the limit it sat at once that limit rose. A
+  press read together with a limit it stays under is still the user's. Nor is
+  a brightness a request was clamped to: the light sends the clamp when a
+  request asks for more than the limit, and holds the limit, which nobody
+  chose. A clamp the light's button made still follows a press on it. A clamp
+  stops explaining the brightness once the button makes a clamp, or once a
+  later brightness differs from the clamped one. A notification that arrives
+  while the light is read makes the watcher read it again, at most three times
+  per notification; a light that keeps notifying is read again on the next
+  call without waiting. The published state still follows the write: the
+  watcher reports the state a write read back once, whether or not the light
+  echoes it, unless a later read replaced it.
+
+Verified against scripted lights only; the repository has no Litra capture yet.
+
 ## 2026-10: RGB software control is held per session and handed back on exit
 
 A volatile `0x8071` effect shows only while the host holds software control,

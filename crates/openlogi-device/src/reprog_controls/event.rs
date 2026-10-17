@@ -1,6 +1,6 @@
 use hidpp::protocol::v20;
 
-use super::{ControlId, ReprogControlsEvent, decode_full_event};
+use super::{ControlId, RawWheelResolution, ReprogControlsEvent, decode_full_event};
 
 /// An unsolicited `0x1b04` event decoded for OpenLogi's gesture pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +59,40 @@ pub fn decode_event(
         .ok()
 }
 
+/// `divertedRawWheel`: the main wheel's movement while a control diverted
+/// with raw-wheel reporting is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawWheelEvent {
+    /// Whether `delta` counts notches or high-resolution units.
+    pub resolution: RawWheelResolution,
+    /// Wheel movement; positive is away from the user, as in a HID wheel
+    /// report.
+    pub delta: i16,
+}
+
+/// Decode a channel message into a [`RawWheelEvent`] when it is an
+/// unsolicited `divertedRawWheel` event for `(device_index, feature_index)`.
+#[must_use]
+pub fn decode_raw_wheel_event(
+    msg: &v20::Message,
+    device_index: u8,
+    feature_index: u8,
+) -> Option<RawWheelEvent> {
+    match decode_full_event(msg, device_index, feature_index)? {
+        ReprogControlsEvent::DivertedRawWheel {
+            resolution,
+            delta_vertical,
+            ..
+        } => Some(RawWheelEvent {
+            resolution,
+            delta: delta_vertical,
+        }),
+        ReprogControlsEvent::DivertedButtons(_)
+        | ReprogControlsEvent::DivertedRawMouseXy { .. }
+        | ReprogControlsEvent::AnalyticsKeyEvents(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use hidpp::{nibble::U4, protocol::v20};
@@ -115,5 +149,41 @@ mod tests {
         assert_eq!(decode_event(&event(2, 0, p), 2, 7), None);
         // Wrong feature index.
         assert_eq!(decode_event(&event(0, 0, p), 2, 9), None);
+    }
+
+    #[test]
+    fn decodes_signed_raw_wheel_in_both_resolutions() {
+        let mut low = [0u8; 16];
+        low[0] = 0x01;
+        low[1..3].copy_from_slice(&(-3i16).to_be_bytes());
+        assert_eq!(
+            decode_raw_wheel_event(&event(4, 0, low), 2, 7),
+            Some(RawWheelEvent {
+                resolution: RawWheelResolution::Low,
+                delta: -3,
+            })
+        );
+        let mut high = [0u8; 16];
+        high[0] = 0x11;
+        high[1..3].copy_from_slice(&24i16.to_be_bytes());
+        assert_eq!(
+            decode_raw_wheel_event(&event(4, 0, high), 2, 7),
+            Some(RawWheelEvent {
+                resolution: RawWheelResolution::High,
+                delta: 24,
+            })
+        );
+        // ...and the gesture-pipeline decoder leaves it alone.
+        assert_eq!(decode_event(&event(4, 0, high), 2, 7), None);
+    }
+
+    #[test]
+    fn raw_wheel_decoding_ignores_other_events_and_responses() {
+        let mut p = [0u8; 16];
+        p[0..2].copy_from_slice(&GESTURE_BUTTON_CID.to_be_bytes());
+        assert_eq!(decode_raw_wheel_event(&event(0, 0, p), 2, 7), None);
+        assert_eq!(decode_raw_wheel_event(&event(1, 0, p), 2, 7), None);
+        assert_eq!(decode_raw_wheel_event(&event(4, 5, p), 2, 7), None);
+        assert_eq!(decode_raw_wheel_event(&event(4, 0, p), 2, 9), None);
     }
 }

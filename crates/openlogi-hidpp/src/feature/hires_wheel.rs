@@ -9,7 +9,7 @@ use openlogi_hidpp_derive::Feature;
 use crate::{
     feature::{DecodeEvent, EventSource, FeatureEndpoint},
     nibble::U4,
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{self, Hidpp20Error},
 };
 
 /// Implements the `HiResWheel` / `0x2121` feature.
@@ -48,6 +48,26 @@ impl DecodeEvent for HiResWheelEvent {
             _ => None,
         }
     }
+}
+
+/// Decode an unsolicited `0x2121` HID++ message from `feature_index` on
+/// `device_index`, for a listener that reads the channel's reports itself.
+/// `None` for another device or feature, and for a function reply (non-zero
+/// software id) rather than an event.
+#[must_use]
+pub fn decode_event(
+    msg: &v20::Message,
+    device_index: u8,
+    feature_index: u8,
+) -> Option<HiResWheelEvent> {
+    let header = msg.header();
+    if header.device_index != device_index
+        || header.feature_index != feature_index
+        || header.software_id.to_lo() != 0
+    {
+        return None;
+    }
+    HiResWheelEvent::decode(header.function_id.to_lo(), &msg.extend_payload())
 }
 
 impl HiResWheelFeature {
@@ -295,8 +315,9 @@ pub struct WheelMovementData {
 mod tests {
     use super::{
         HiResWheelEvent, WheelCapabilities, WheelEventTarget, WheelMode, WheelMovementData,
-        WheelResolution,
+        WheelRatchetState, WheelResolution, decode_event,
     };
+    use crate::protocol::v20::{Message, MessageHeader};
     use crate::{feature::DecodeEvent, nibble::U4};
 
     fn payload(mode: [u8; 3]) -> [u8; 16] {
@@ -363,6 +384,60 @@ mod tests {
         assert_eq!(
             (movement.delta_vertical, movement.delta_horizontal),
             (120, 300)
+        );
+    }
+
+    /// A long message from `device_index` / `feature_index` carrying
+    /// `function` with `software_id` and `payload`.
+    fn message(
+        device_index: u8,
+        feature_index: u8,
+        function: u8,
+        software_id: u8,
+        payload: &[u8],
+    ) -> Message {
+        let mut body = [0; 16];
+        body[..payload.len()].copy_from_slice(payload);
+        Message::Long(
+            MessageHeader {
+                device_index,
+                feature_index,
+                function_id: U4::from_lo(function),
+                software_id: U4::from_lo(software_id),
+            },
+            body,
+        )
+    }
+
+    #[test]
+    fn decode_event_reads_only_events_from_its_device_and_feature() {
+        // Low resolution, 1 period, deltaV = -1.
+        let movement = [1, 0xff, 0xff];
+        assert_eq!(
+            decode_event(&message(2, 0x0e, 0, 0, &movement), 2, 0x0e),
+            Some(HiResWheelEvent::WheelMovement(WheelMovementData {
+                resolution: WheelResolution::Low,
+                periods: U4::from_lo(1),
+                delta_vertical: -1,
+                delta_horizontal: 0,
+            }))
+        );
+        assert_eq!(
+            decode_event(&message(2, 0x0e, 1, 0, &[1]), 2, 0x0e),
+            Some(HiResWheelEvent::RatchetSwitch(WheelRatchetState::Ratchet))
+        );
+        // Another device, another feature, or a reply to a request.
+        assert_eq!(
+            decode_event(&message(3, 0x0e, 0, 0, &movement), 2, 0x0e),
+            None
+        );
+        assert_eq!(
+            decode_event(&message(2, 0x0f, 0, 0, &movement), 2, 0x0e),
+            None
+        );
+        assert_eq!(
+            decode_event(&message(2, 0x0e, 0, 1, &movement), 2, 0x0e),
+            None
         );
     }
 

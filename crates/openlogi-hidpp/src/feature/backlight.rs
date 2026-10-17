@@ -270,6 +270,21 @@ impl DecodeEvent for BacklightEvent {
 }
 
 impl BacklightFeature {
+    /// Whether an unsolicited report with `function_id` is the keyboard's
+    /// `backlightInfoEvent`, sent when its backlight changes on the device —
+    /// the backlight keys, the ambient-light sensor, or the battery.
+    ///
+    /// Logi Options+ 2.8 (`Feature1982Backlight::onFeatureReport`) accepts
+    /// event `0` only, as `BacklightEvent::decode` does. Deliberately
+    /// independent of the payload, like
+    /// `ExtendedDpiFeature::is_parameters_broadcast`: a listener re-reads the
+    /// state with [`Self::get_backlight_config`] and
+    /// [`Self::get_backlight_info`].
+    #[must_use]
+    pub const fn is_info_broadcast(function_id: u8) -> bool {
+        function_id == 0
+    }
+
     /// Retrieves the current backlight configuration.
     ///
     /// The reply must be long: a short one would zero-fill the level and the
@@ -377,8 +392,20 @@ impl BacklightInfoUpdate {
 #[cfg(test)]
 mod tests {
     use super::{
-        BacklightEffect, BacklightInfoUpdate, BacklightMode, BacklightOptions, BacklightStatus,
+        BacklightEffect, BacklightFeature, BacklightInfoUpdate, BacklightMode, BacklightOptions,
+        BacklightStatus,
     };
+
+    #[test]
+    fn only_function_zero_is_the_info_broadcast() {
+        assert!(BacklightFeature::is_info_broadcast(0));
+        for function_id in 1..=0x0f {
+            assert!(
+                !BacklightFeature::is_info_broadcast(function_id),
+                "{function_id}"
+            );
+        }
+    }
 
     #[test]
     fn decodes_options_and_mode_split() {

@@ -4,10 +4,11 @@
 
 use std::collections::HashMap;
 
-use openlogi_core::config::Config;
+use openlogi_core::config::{Config, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use openlogi_hid::session::gesture::MainWheelDivert;
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, ReportRate};
 
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
@@ -16,8 +17,57 @@ use crate::watchers::host_switch::HostSwitchLink;
 /// Resolve the two independently-gated HiResWheel settings for one device
 /// into the change that applies them. A setting the device cannot take, or
 /// that is not configured, is left out of the change and keeps the device's
-/// current value; `None` when that leaves nothing to write.
-pub(super) fn configured_wheel_mode(config: &Config, dev: &AgentDevice) -> Option<WheelModeChange> {
+/// current value; `None` when that leaves nothing to write, and while the
+/// device's capture session owns the wheel ([`main_wheel_divert`]): that
+/// session writes the same settings along with its divert, and a write from
+/// here would hand the wheel back to native reporting under it.
+pub(super) fn configured_wheel_mode(
+    config: &Config,
+    dev: &AgentDevice,
+    os_mouse_hook_available: bool,
+) -> Option<WheelModeChange> {
+    if main_wheel_divert(config, dev, os_mouse_hook_available).is_some() {
+        return None;
+    }
+    let (resolution, inverted) = wheel_settings(config, dev)?;
+    WheelModeChange::new(resolution, inverted)
+}
+
+/// The main-wheel divert `dev`'s capture session arms for smooth scrolling,
+/// carrying the wheel settings [`configured_wheel_mode`] would otherwise
+/// write; `None` leaves the wheel native.
+///
+/// Diverting needs the device's opt-in, its `0x2121` wheel, and an agent that
+/// may post the scrolling in the wheel's place: the mouse hook running (on
+/// macOS, Accessibility granted) and mouse capture not switched off. Logi
+/// Options+ keeps the wheel native without Accessibility the same way.
+pub(super) fn main_wheel_divert(
+    config: &Config,
+    dev: &AgentDevice,
+    os_mouse_hook_available: bool,
+) -> Option<MainWheelDivert> {
+    let wanted = os_mouse_hook_available
+        && config.app_settings.capture_mouse_events
+        && config.device_enabled(&dev.config_key)
+        && config.smooth_wheel(&dev.config_key)
+        && dev.capabilities.is_some_and(|caps| caps.hires_wheel);
+    if !wanted {
+        return None;
+    }
+    let (resolution, inverted) = wheel_settings(config, dev)?;
+    Some(MainWheelDivert {
+        resolution,
+        inverted,
+    })
+}
+
+/// The configured wheel resolution and native inversion for `dev`, each
+/// `None` where the device cannot take it or nothing is configured; `None`
+/// overall while the device's capabilities are unknown.
+fn wheel_settings(
+    config: &Config,
+    dev: &AgentDevice,
+) -> Option<(Option<ScrollResolution>, Option<bool>)> {
     let capabilities = dev.capabilities?;
     let route_key = stable_id(dev).route_key();
     let device = config.devices.get(dev.config_key.as_str());
@@ -28,7 +78,35 @@ pub(super) fn configured_wheel_mode(config: &Config, dev: &AgentDevice) -> Optio
     let inverted = capabilities
         .scroll_inversion
         .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
-    WheelModeChange::new(resolution, inverted)
+    Some((resolution, inverted))
+}
+
+/// Whether the scrolling the agent posts for `dev`'s main wheel is reversed —
+/// a wheel-hold button's horizontal scroll and the diverted smooth wheel: the
+/// inversion its native wheel gets. A wheel with the native `0x2121`
+/// invert bit is written the value effective on the link `dev` is reached
+/// by ([`configured_wheel_mode`]); one without it is reversed by the hook
+/// from the device-level setting (`Orchestrator::publish_scroll_inversion`).
+/// Unknown capabilities write and reverse nothing, so nothing is inverted.
+pub(super) fn wheel_inverted(config: &Config, dev: &AgentDevice) -> bool {
+    match dev.capabilities {
+        Some(capabilities) if capabilities.scroll_inversion => config
+            .devices
+            .get(dev.config_key.as_str())
+            .is_some_and(|d| d.effective_invert_scroll(&stable_id(dev).route_key())),
+        Some(_) => config.invert_scroll(&dev.config_key),
+        None => false,
+    }
+}
+
+/// The saved report rate to push to `dev`: only to a device with a
+/// report-rate feature, so a rate saved for a mouse is never written to
+/// whatever later answers under the same key without one.
+pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Option<ReportRate> {
+    dev.capabilities
+        .is_some_and(|caps| caps.report_rate)
+        .then(|| config.report_rate(&dev.config_key))
+        .flatten()
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's
@@ -81,6 +159,7 @@ pub(super) fn build_devices(
                 kind: paired.kind,
                 light_capabilities: None,
                 online: paired.online,
+                settings_revision: paired.settings_revision,
             });
         }
     }
@@ -109,6 +188,8 @@ pub(super) fn build_devices(
             kind: device.kind,
             light_capabilities: device.light_capabilities,
             online: device.online,
+            // A standalone device reports no device-side setting changes.
+            settings_revision: 0,
         });
     }
     // Order by the same canonical key the GUI carousel uses, so the
@@ -190,6 +271,68 @@ pub(super) fn reapply_targets(
         })
         .map(|(idx, _)| idx)
         .collect()
+}
+
+/// Indices into `next` of online devices whose settings revision moved since
+/// `prev`: the device reported a setting changed on it. A device is matched by
+/// [`stable_id`] and must keep its route, as the revision restarts when the
+/// device's channel is reopened.
+pub(super) fn settings_moved(prev: &[AgentDevice], next: &[AgentDevice]) -> Vec<usize> {
+    next.iter()
+        .enumerate()
+        .filter(|(_, dev)| dev.online && dev.route.is_some())
+        .filter(|(_, dev)| {
+            let id = stable_id(dev);
+            prev.iter().find(|p| stable_id(p) == id).is_some_and(|p| {
+                p.online && p.route == dev.route && p.settings_revision != dev.settings_revision
+            })
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Indices into `next` of online devices that report the `os_layout`
+/// capability on a route that was already online without it, such as a Bolt
+/// keyboard whose feature walk failed until after its reconnect reapply. A
+/// device that just came online or changed route is reapplied instead.
+pub(super) fn os_layout_appeared(prev: &[AgentDevice], next: &[AgentDevice]) -> Vec<usize> {
+    let has_os_layout = |dev: &AgentDevice| dev.capabilities.is_some_and(|caps| caps.os_layout);
+    next.iter()
+        .enumerate()
+        .filter(|(_, dev)| dev.online && dev.route.is_some() && has_os_layout(dev))
+        .filter(|(_, dev)| {
+            let id = stable_id(dev);
+            prev.iter()
+                .find(|p| stable_id(p) == id)
+                .is_some_and(|p| p.online && p.route == dev.route && !has_os_layout(p))
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Whether `config` keeps the key layout of the device under `key` on the
+/// host OS, whatever the device supports: enabled, with the setting on.
+pub(super) fn config_keeps_os_layout(config: &Config, key: &str) -> bool {
+    config.device_enabled(key) && config.keep_os_layout(key)
+}
+
+/// Whether `config` keeps `dev`'s key layout on the host OS: a keyboard whose
+/// platform software can set, enabled, with the setting on.
+pub(super) fn keeps_os_layout(config: &Config, dev: &AgentDevice) -> bool {
+    dev.capabilities.is_some_and(|caps| caps.os_layout)
+        && config_keeps_os_layout(config, &dev.config_key)
+}
+
+/// The devices whose "keep OS layout" takes effect going from `previous` to
+/// `config`: the setting turned on, or its device re-enabled.
+pub(super) fn newly_kept_os_layouts<'a>(
+    previous: &'a Config,
+    config: &'a Config,
+    devices: &'a [AgentDevice],
+) -> impl Iterator<Item = &'a AgentDevice> {
+    devices
+        .iter()
+        .filter(|dev| keeps_os_layout(config, dev) && !keeps_os_layout(previous, dev))
 }
 
 /// Whether this refresh invalidated any online device's volatile control
