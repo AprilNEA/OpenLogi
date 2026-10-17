@@ -100,6 +100,9 @@ impl DeviceCapturePlan {
         let gestures = config.stored_bindings(key);
         let keeps_gestures =
             |button: ButtonId| matches!(gestures.get(&button), Some(Binding::Gesture(_)));
+        let may_capture = |button: ButtonId| {
+            config.app_settings.capture_mouse_events || !button.is_os_hook_button()
+        };
         self.target.spec.onboard = match config.effective_onboard_memory(key, layout) {
             None => None,
             Some(OnboardMemory::Profile(index)) => Some(OnboardTarget::Profile(index)),
@@ -112,6 +115,7 @@ impl DeviceCapturePlan {
                         .map(|&button| {
                             let captured = layout.needs_host_mode(button)
                                 || (shift
+                                    && may_capture(button)
                                     && !keeps_gestures(button)
                                     && layout.remappable().any(|b| b == button))
                                 || diverted.iter().any(|&(_, b)| b == button);
@@ -512,6 +516,20 @@ mod tests {
                 .contains(&(ButtonId::Back, false)),
             "a gesture button keeps its native report for the OS hook"
         );
+    }
+
+    #[test]
+    fn mouse_capture_opt_out_keeps_standard_buttons_native_under_gshift() {
+        let layout = Some(&openlogi_core::binding::G502_LIGHTSPEED);
+        let mut cfg = Config::default();
+        cfg.app_settings.capture_mouse_events = false;
+        cfg.set_binding("g502", ButtonId::G7, Binding::Single(Action::GShift));
+        let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
+        let slots = host_slots(&plan).expect("host mode");
+        for button in [ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward] {
+            assert!(slots.contains(&(button, false)), "{button:?} stays native");
+        }
+        assert!(slots.contains(&(ButtonId::G9, true)));
     }
 
     #[test]
