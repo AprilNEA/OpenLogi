@@ -15,7 +15,7 @@
 
 use std::fs;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd as _, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -123,22 +123,53 @@ fn node_inode(path: &Path) -> Option<u64> {
     fs::metadata(path).ok().map(|metadata| metadata.ino())
 }
 
+/// The inode of the node `device` was opened from.
+///
+/// Read from the open descriptor, not the path: the node at the path can
+/// already be a re-created one, and recording its inode would make the claim
+/// outlive the node it was taken for.
+fn opened_inode(device: &Device) -> io::Result<u64> {
+    let fd = device.as_fd().try_clone_to_owned()?;
+    Ok(fs::File::from(fd).metadata()?.ino())
+}
+
 /// One device thread and the event node it was started for.
 struct Worker {
     path: PathBuf,
-    /// [`node_inode`] of `path` when the worker started.
+    /// The inode of the node the worker's device was opened from.
     node: u64,
+    /// Set by the worker's [`ExitNotice`] before it wakes the supervisor.
+    exited: Arc<AtomicBool>,
     stop_tx: OwnedFd,
     thread: thread::JoinHandle<()>,
 }
 
 impl Worker {
+    /// `exited` is the signal: the wake that follows it can arrive before
+    /// the thread finishes, so `is_finished` alone could read as still
+    /// running for that one rescan. `is_finished` stays as the fallback.
     fn state(&self) -> WorkerState {
-        if self.thread.is_finished() {
+        if self.exited.load(Ordering::Acquire) || self.thread.is_finished() {
             WorkerState::Exited
         } else {
             WorkerState::Running
         }
+    }
+}
+
+/// Marks a device thread exited and wakes the supervisor when the thread's
+/// work ends, also when it unwinds from a panic.
+struct ExitNotice {
+    exited: Arc<AtomicBool>,
+    wake: Arc<OwnedFd>,
+}
+
+impl Drop for ExitNotice {
+    fn drop(&mut self) {
+        self.exited.store(true, Ordering::Release);
+        // A node re-created at this path waits behind this worker's claim, so
+        // let the supervisor reap it now rather than at the next heartbeat.
+        super::signal_pipe(&self.wake);
     }
 }
 
@@ -257,25 +288,29 @@ impl Supervisor {
 
     /// Start a device thread for `device` and record its claim on `path`.
     fn spawn(&mut self, path: PathBuf, device: Device) -> io::Result<()> {
-        let node = fs::metadata(&path)?.ino();
+        let node = opened_inode(&device)?;
         let virtual_device = super::build_virtual_device(&device)?;
         let (stop_rx, stop_tx) = super::create_pipe()?;
         let cb = Arc::clone(&self.cb);
         let stop = Arc::clone(&self.stop);
-        let wake = Arc::clone(&self.wake_tx);
+        let exited = Arc::new(AtomicBool::new(false));
+        let notice = ExitNotice {
+            exited: Arc::clone(&exited),
+            wake: Arc::clone(&self.wake_tx),
+        };
         let thread_path = path.clone();
         let thread = thread::Builder::new()
             .name(format!("openlogi-hook:{}", path.display()))
             .spawn(move || {
+                // Dropped after `device_thread` returns, so after the device
+                // and its grab are released.
+                let _notice = notice;
                 super::device_thread(thread_path, device, virtual_device, cb, stop, stop_rx);
-                // A node re-created at this path waits behind this worker's
-                // claim, so let the supervisor reap it now rather than at the
-                // next heartbeat.
-                super::signal_pipe(&wake);
             })?;
         self.workers.push(Worker {
             path,
             node,
+            exited,
             stop_tx,
             thread,
         });
@@ -353,10 +388,38 @@ impl InputDirWatch {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read as _;
+
     use super::*;
 
     const NODE: u64 = 41;
     const RECREATED: u64 = 42;
+
+    /// The notice marks the worker exited before it wakes the supervisor, on
+    /// a normal return and on a panic, so the rescan the wake triggers never
+    /// sees the worker as still running.
+    #[test]
+    fn exit_notice_marks_exited_before_waking() {
+        for panics in [false, true] {
+            let (wake_rx, wake_tx) = super::super::create_pipe().expect("wake pipe");
+            let exited = Arc::new(AtomicBool::new(false));
+            let notice = ExitNotice {
+                exited: Arc::clone(&exited),
+                wake: Arc::new(wake_tx),
+            };
+            let result = std::panic::catch_unwind(move || {
+                let _notice = notice;
+                assert!(!panics, "device thread panicked");
+            });
+            assert_eq!(result.is_err(), panics);
+            assert!(exited.load(Ordering::Acquire), "panics={panics}");
+            let mut buf = [0u8; 8];
+            let woken = fs::File::from(wake_rx)
+                .read(&mut buf)
+                .expect("read wake pipe");
+            assert!(woken > 0, "no wake with panics={panics}");
+        }
+    }
 
     /// Every combination of worker state and what is at the path now.
     #[test]
