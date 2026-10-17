@@ -167,6 +167,13 @@ pub const PROTOCOL_VERSION: u32 = 43;
 /// adopts whichever run answers first.
 pub const RUN_ENV: &str = "OPENLOGI_RUN";
 
+/// The status a supervised overlay helper exits with after a stretch with
+/// nothing to show. The agent's supervisor reads it as "not needed" rather than
+/// as a crash, so it starts the next helper on demand instead of restarting
+/// this one. It differs from a stand-down's 0, `main`'s error 1, and a panic's
+/// 101.
+pub const OVERLAY_IDLE_EXIT_CODE: i32 = 75;
+
 /// Why the agent refused to adopt the config currently on disk.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigReloadError {

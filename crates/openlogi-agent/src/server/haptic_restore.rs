@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use openlogi_agent_core::action_ring::SESSION_LIFETIME;
+use openlogi_agent_core::action_ring::{ActionRingManager, SESSION_LIFETIME};
 use openlogi_hid::{DeviceRoute, HidppFeatureErrorKind, WriteError};
 
 /// How long a restore that could not reach its device waits for its next
@@ -55,7 +55,8 @@ impl<R> RestoreLedger<R> {
     /// it already owes one, moves to the new session instead: the session
     /// plays on the engine that enable left on, and handing it back first
     /// would only turn it off and on again. A session that never reports its
-    /// close is over [`SESSION_LIFETIME`] after `now`.
+    /// close waits at least [`SESSION_LIFETIME`] after `now`; [`Self::take_due`]
+    /// also checks for a late observer extending it.
     pub(super) fn opened(
         &mut self,
         session: u64,
@@ -110,9 +111,24 @@ impl<R> RestoreLedger<R> {
         self.owed.iter().map(|owed| owed.due).min()
     }
 
-    /// Take one restore that is due at `now`. It is no longer owed unless
-    /// the caller hands it back through [`Self::retry`].
-    pub(super) fn take_due(&mut self, now: Instant) -> Option<Owed<R>> {
+    /// Take one restore that is due at `now`, after moving a live session's
+    /// due time with its delivery deadline. `action_ring` supplies the current
+    /// deadline, or is `None` when the agent is leaving and every session must
+    /// end. No extra polling or parallel lifetime clock is needed.
+    /// The restore is no longer owed unless handed back through [`Self::retry`].
+    pub(super) fn take_due(
+        &mut self,
+        now: Instant,
+        action_ring: Option<&ActionRingManager>,
+    ) -> Option<Owed<R>> {
+        for owed in &mut self.owed {
+            if owed.due <= now
+                && let Some(deadline) =
+                    action_ring.and_then(|ring| ring.session_deadline(owed.session))
+            {
+                owed.due = owed.due.max(deadline);
+            }
+        }
         let index = self.owed.iter().position(|owed| owed.due <= now)?;
         Some(self.owed.swap_remove(index))
     }
@@ -158,6 +174,8 @@ pub(super) fn is_unreached(error: &WriteError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use openlogi_agent_core::action_ring::ActionRingSessionSpec;
+    use openlogi_core::binding::ActionRingConfig;
     use openlogi_hid::HidppOperation;
 
     use super::*;
@@ -178,9 +196,131 @@ mod tests {
 
     /// Every restore due at `now`, as (route, proof) pairs.
     fn due(ledger: &mut RestoreLedger<u8>, now: Instant) -> Vec<(DeviceRoute, u8)> {
-        std::iter::from_fn(|| ledger.take_due(now))
+        std::iter::from_fn(|| ledger.take_due(now, None))
             .map(|owed| (owed.route, owed.restore))
             .collect()
+    }
+
+    fn ring_spec() -> ActionRingSessionSpec {
+        ActionRingSessionSpec {
+            device_key: "mouse".into(),
+            haptic_route: Some(mouse()),
+            layout: ActionRingConfig::default().default,
+            language: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rebased_lifetime_contract() {
+        let manager = ActionRingManager::default();
+        let opened = manager.begin(ring_spec());
+        let mut ledger = RestoreLedger::default();
+        ledger.opened(
+            opened.session_id,
+            mouse(),
+            Some(7u8),
+            tokio::time::Instant::now().into_std(),
+        );
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(manager.observe(0).await.invocation, Some(opened.clone()));
+        tokio::time::advance(Duration::from_secs(14)).await;
+        assert!(
+            manager.is_showing(),
+            "late delivery keeps the ring live at 19 s"
+        );
+        assert!(
+            ledger
+                .take_due(tokio::time::Instant::now().into_std(), Some(&manager))
+                .is_none(),
+            "a live ring must not have its engine restored early"
+        );
+        assert_eq!(
+            ledger.next_due(),
+            manager.session_deadline(opened.session_id)
+        );
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(
+            !manager.is_showing(),
+            "the delivered session eventually expires"
+        );
+        assert_eq!(
+            due(&mut ledger, tokio::time::Instant::now().into_std()),
+            vec![(mouse(), 7)]
+        );
+        assert_eq!(ledger.next_due(), None, "the enable is handed back once");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delivery_at_the_original_deadline_defers_restore_but_a_repeated_poll_does_not() {
+        let manager = ActionRingManager::default();
+        let opened = manager.begin(ring_spec());
+        let mut ledger = RestoreLedger::default();
+        ledger.opened(
+            opened.session_id,
+            mouse(),
+            Some(7u8),
+            tokio::time::Instant::now().into_std(),
+        );
+        tokio::time::advance(SESSION_LIFETIME).await;
+        let seen = manager.observe(0).await.generation;
+        assert!(
+            ledger
+                .take_due(tokio::time::Instant::now().into_std(), Some(&manager))
+                .is_none()
+        );
+        assert!(
+            manager.is_showing(),
+            "delivery can win the original expiry boundary"
+        );
+        assert_eq!(manager.observe(seen).await.generation, seen);
+        assert!(
+            !manager.is_showing(),
+            "a repeated poll cannot extend the session"
+        );
+        let owed = ledger
+            .take_due(tokio::time::Instant::now().into_std(), Some(&manager))
+            .unwrap();
+        assert_eq!((owed.route, owed.restore), (mouse(), 7));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_delivery_does_not_delay_cancel_replacement_or_exit() {
+        for ending in ["cancel", "replacement", "exit"] {
+            let manager = ActionRingManager::default();
+            let opened = manager.begin(ring_spec());
+            let mut ledger = RestoreLedger::default();
+            ledger.opened(
+                opened.session_id,
+                mouse(),
+                Some(7u8),
+                tokio::time::Instant::now().into_std(),
+            );
+            tokio::time::advance(Duration::from_secs(5)).await;
+            manager.observe(0).await;
+            tokio::time::advance(Duration::from_secs(14)).await;
+            let now = tokio::time::Instant::now().into_std();
+            assert!(ledger.take_due(now, Some(&manager)).is_none());
+            let owed = match ending {
+                "cancel" => {
+                    manager.cancel(opened.session_id);
+                    ledger.closed(opened.session_id, now);
+                    ledger.take_due(now, Some(&manager))
+                }
+                "replacement" => {
+                    let replacement = manager.begin(ring_spec());
+                    ledger.opened(replacement.session_id, other_mouse(), None, now);
+                    ledger.take_due(now, Some(&manager))
+                }
+                "exit" => {
+                    ledger.leaving(now);
+                    ledger.take_due(now, None)
+                }
+                _ => unreachable!(),
+            }
+            .expect("ending the session hands the engine back immediately");
+            assert_eq!((owed.route, owed.restore), (mouse(), 7), "{ending}");
+            assert_eq!(ledger.next_due(), None);
+        }
     }
 
     #[test]
@@ -270,7 +410,7 @@ mod tests {
         // A restore waiting for its next attempt.
         ledger.opened(2, mouse(), Some(8), start);
         ledger.closed(2, start);
-        let owed = ledger.take_due(start).expect("due at the close");
+        let owed = ledger.take_due(start, None).expect("due at the close");
         ledger.retry(owed, start);
         assert_eq!(due(&mut ledger, start), vec![]);
         ledger.leaving(start);
@@ -283,7 +423,7 @@ mod tests {
         let mut ledger = RestoreLedger::default();
         ledger.opened(1, mouse(), Some(7), start);
         ledger.closed(1, start);
-        let owed = ledger.take_due(start).expect("due at the close");
+        let owed = ledger.take_due(start, None).expect("due at the close");
         ledger.retry(owed, start);
         assert_eq!(ledger.next_due(), Some(start + RESTORE_RETRY));
         assert_eq!(
@@ -306,7 +446,7 @@ mod tests {
         let mut ledger = RestoreLedger::default();
         ledger.opened(1, mouse(), Some(7), start);
         ledger.closed(1, start);
-        let owed = ledger.take_due(start).expect("due at the close");
+        let owed = ledger.take_due(start, None).expect("due at the close");
         ledger.retry(owed, start);
         // The mouse is back and opens a ring: the engine stays on for it.
         let back = start + Duration::from_secs(30);
@@ -322,7 +462,7 @@ mod tests {
         let mut ledger = RestoreLedger::default();
         ledger.opened(1, mouse(), Some(7), start);
         ledger.closed(1, start);
-        let stale = ledger.take_due(start).expect("due at the close");
+        let stale = ledger.take_due(start, None).expect("due at the close");
         ledger.opened(2, mouse(), Some(8), start);
         ledger.retry(stale, start);
         ledger.closed(2, start);

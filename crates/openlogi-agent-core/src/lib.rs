@@ -16,6 +16,7 @@ pub mod capture_plan;
 mod dpi;
 pub mod event_monitor;
 pub mod hardware;
+mod indicator;
 pub mod lock_keys;
 pub mod notices;
 pub mod observable;

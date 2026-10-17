@@ -19,11 +19,11 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_ipc::client::{self, ConnectError, Observer, Stamped};
 use openlogi_ipc::{
     ActionRingInvocation, AgentClient, BacklightObservation, ClientKind, LockKeyObservation,
-    NoticeObservation, RingObservation,
+    NoticeObservation, OVERLAY_IDLE_EXIT_CODE, RingObservation,
 };
 use succession::Standing;
 use tarpc::context;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::session::allegiance;
@@ -77,20 +77,25 @@ pub(crate) fn spawn() -> Handle {
     let (commands, mut command_rx) = mpsc::unbounded_channel();
     let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
         runtime.block_on(async {
+            let (idle, activity) = watch::channel(IdleClock::new(Instant::now()));
             tokio::join!(
-                observe(connect, RING, |ring| invocation_tx
+                observe(connect, RING, &idle, |ring| invocation_tx
                     .send(ring.invocation)
                     .is_ok()),
-                observe(connect, BACKLIGHT, |observed| backlight_tx
+                observe(connect, BACKLIGHT, &idle, |observed| backlight_tx
                     .send(observed)
                     .is_ok()),
-                observe(connect, NOTICES, |observed| notice_tx
+                observe(connect, NOTICES, &idle, |observed| notice_tx
                     .send(observed)
                     .is_ok()),
-                observe(connect, LOCK_KEYS, |observed| lock_key_tx
+                observe(connect, LOCK_KEYS, &idle, |observed| lock_key_tx
                     .send(observed)
                     .is_ok()),
-                send_commands(&mut command_rx)
+                send_commands(&mut command_rx),
+                async {
+                    wait_for_idle(activity).await;
+                    leave_idle();
+                }
             );
         });
     });
@@ -216,16 +221,71 @@ pub(crate) fn stand_down(because: &str) -> ! {
 
 /// How long to keep reaching for an agent before giving up and exiting.
 ///
-/// Nothing else bounds this process's life. The agent starts it detached and
+/// [`IDLE_EXIT_AFTER`] only runs while an agent answers, so nothing else bounds
+/// the life of a helper whose agent is gone. The agent starts it detached and
 /// never kills it — the menu-bar Quit is a `process::exit`, which runs no
 /// destructors — and every other exit path here needs a *replacement* agent to
 /// answer. So an agent that stops for good leaves its helper reconnecting
 /// forever; one was found still at it three days on. Giving up costs almost
-/// nothing: the helper only exists to keep process-start latency off the first
-/// ring press, which is worth exactly zero while no agent is running, and the
-/// supervisor starts a fresh one within its restart backoff once an agent is
-/// back.
+/// nothing: a helper is worth exactly zero while no agent is running, and an
+/// agent that is back starts a fresh one when it next has a ring to draw.
 const GIVE_UP_AFTER: Duration = Duration::from_mins(1);
+
+/// How long a connected helper stays up with nothing to show before leaving.
+///
+/// Staying costs a resident GPUI process, renderer and vsync wakeups included,
+/// for a ring that may not come. Leaving costs one process start on the next
+/// ring: the agent starts a fresh helper, which joins late and reads the ring
+/// already published. Ten minutes keeps a burst of use on one warm process.
+const IDLE_EXIT_AFTER: Duration = Duration::from_mins(10);
+
+/// When this helper was last given something to show, and so when it may
+/// leave for want of anything else.
+#[derive(Clone, Copy, Debug)]
+struct IdleClock {
+    since: Instant,
+}
+
+impl IdleClock {
+    const fn new(now: Instant) -> Self {
+        Self { since: now }
+    }
+
+    /// The agent changed a ring, notice, backlight or lock-key indicator.
+    const fn touch(&mut self, now: Instant) {
+        self.since = now;
+    }
+
+    /// When the helper leaves unless touched again first. No ring can still be
+    /// showing then: each closes within `DISPLAY_LIFETIME` of the change that
+    /// opened it, far inside the idle period.
+    fn deadline(self) -> Instant {
+        self.since + IDLE_EXIT_AFTER
+    }
+}
+
+/// One deadline for the whole helper: activity on any observed cell keeps
+/// the other, quiet cells from shutting down a process that is still in use.
+async fn wait_for_idle(mut activity: watch::Receiver<IdleClock>) {
+    loop {
+        let deadline = activity.borrow_and_update().deadline();
+        match tokio::time::timeout_at(deadline.into(), activity.changed()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) | Err(_) => return,
+        }
+    }
+}
+
+/// Exit for want of anything to show, releasing the role with
+/// [`OVERLAY_IDLE_EXIT_CODE`] so the agent starts the next helper on demand.
+#[expect(
+    clippy::exit,
+    reason = "the IPC tasks run off the GPUI main thread and cannot return a status to `main`, which is parked in the application run loop; the exit status is how the agent tells idleness from a crash"
+)]
+fn leave_idle() -> ! {
+    info!("no overlay activity for {IDLE_EXIT_AFTER:?} — exiting until it is needed");
+    std::process::exit(OVERLAY_IDLE_EXIT_CODE)
+}
 
 /// How long to wait between attempts to reach an agent.
 const RETRY_PERIOD: Duration = Duration::from_secs(1);
@@ -281,6 +341,7 @@ impl<T: Stamped> ObservationLink<T> {
 async fn observe<T: Stamped, C: Future<Output = Option<AgentClient>>>(
     mut connect: impl FnMut() -> C,
     cell: Cell<T>,
+    idle: &watch::Sender<IdleClock>,
     mut deliver: impl FnMut(T) -> bool,
 ) {
     let mut link = ObservationLink::<T>::default();
@@ -308,6 +369,7 @@ async fn observe<T: Stamped, C: Future<Output = Option<AgentClient>>>(
             // alive, nothing to show.
             Ok(None) => {}
             Ok(Some(latest)) => {
+                idle.send_modify(|clock| clock.touch(tokio::time::Instant::now().into_std()));
                 if !deliver(latest) {
                     return;
                 }

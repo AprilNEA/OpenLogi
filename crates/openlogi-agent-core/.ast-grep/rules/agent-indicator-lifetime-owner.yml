@@ -1,0 +1,26 @@
+# Owner: openlogi_agent_core::indicator::Indicator owns first delivery and
+# expiration for backlight and lock-key indicators, including generation checks.
+id: agent-indicator-lifetime-owner
+language: rust
+severity: error
+message: Use indicator::Indicator for keyboard-indicator delivery and expiry; passive agent consumers subscribe instead of consuming observe.
+note: |
+  Backlight and lock-key hints used to expire before a cold overlay connected.
+  Their lifecycle and deadlines belong to indicator::Indicator, not wrappers
+  or the agent control loop.
+files:
+  - crates/openlogi-agent-core/src/backlight_overlay.rs
+  - crates/openlogi-agent-core/src/lock_keys.rs
+  - crates/openlogi-agent/src/lifecycle.rs
+rule:
+  any:
+    - all:
+        - kind: call_expression
+        - regex: '(sleep|sleep_until|timeout|timeout_at)\('
+        - inside:
+            any:
+              - pattern: 'impl BacklightOverlayManager { $$$BODY }'
+              - pattern: 'impl LockKeyIndicator { $$$BODY }'
+            stopBy: end
+    - pattern: $RUNNING.backlight_overlay.observe($$$ARGS)
+    - pattern: $RUNNING.observable.lock_keys().observe($$$ARGS)
