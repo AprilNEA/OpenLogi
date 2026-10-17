@@ -33,7 +33,7 @@ use super::config::CompiledFlowConfig;
 use super::handoff::{HandoffBook, handle_notification, handle_rpc, inventory_changed};
 use super::{FlowDeviceSnapshot, RuntimeDevice, is_pointing_device};
 use crate::observable::ObservableState;
-use crate::receiver_access::{ExclusiveAccessReason, ReceiverAccess};
+use crate::receiver_access::ReceiverAccess;
 
 const FLOW_IDENTITY_FILE: &str = "flow-identity.pk8";
 const PROTOCOL_MIN: u32 = 1;
@@ -199,8 +199,9 @@ pub(super) enum Presence {
     Departed,
 }
 
-/// How long a switch waits for exclusive receiver access before going ahead.
-const LEASE_PATIENCE: std::time::Duration = std::time::Duration::from_millis(100);
+/// How long a switch waits for its receiver I/O lease before going ahead.
+/// The shared lease is free unless a pairing session holds the receiver.
+const LEASE_PATIENCE: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// How long Flow's own record outranks the inventory.
 const PRESENCE_TTL: std::time::Duration = std::time::Duration::from_secs(20);
@@ -386,18 +387,16 @@ impl GenerationState {
         devices: &[OutgoingDevice],
     ) -> Result<bool, openlogi_hid::HostSwitchError> {
         let started = std::time::Instant::now();
-        // The exclusive lease waits for every in-flight receiver operation,
-        // and right after a quick round trip those include settings writes to
-        // devices that already left, each running into its own timeout: the
-        // wait grew to seconds. The switch is one write per device and the
-        // devices are leaving anyway, so it waits briefly and then goes ahead.
-        let lease = tokio::time::timeout(
-            LEASE_PATIENCE,
-            self.receiver_access
-                .acquire_exclusive(ExclusiveAccessReason::HostTransition),
-        )
-        .await
-        .ok();
+        // A shared I/O lease, not the exclusive one: exclusive access waits for
+        // every in-flight receiver operation and asks the button capture to
+        // stand down, which it never did in time — every switch made while
+        // capture was active waited out the full patience (~105 ms) for
+        // nothing. The switch is one write per device and the devices are
+        // leaving, so their capture ends on its own. The shared lease still
+        // queues behind a pairing session; past a short patience it goes ahead.
+        let lease = tokio::time::timeout(LEASE_PATIENCE, self.receiver_access.acquire_for_io())
+            .await
+            .ok();
         let leased = started.elapsed();
         if !self.is_active() {
             return Ok(false);
@@ -436,7 +435,7 @@ impl GenerationState {
             switch_ms = started.elapsed().saturating_sub(leased).as_millis(),
             devices = devices.len(),
             prepared = fast,
-            exclusive = lease.is_some(),
+            leased = lease.is_some(),
             "Flow host switch issued"
         );
         Ok(true)
