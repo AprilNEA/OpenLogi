@@ -649,20 +649,32 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     let Some(data) = (unsafe { key_hook_data(lparam) }) else {
         return call_next(code, wparam, lparam);
     };
-    let Some(event) = translate_key(wparam, data, current_modifiers()) else {
-        return call_next(code, wparam, lparam);
+    let event = match translate_key(wparam, data, current_modifiers()) {
+        Some(event) => HookEvent::Key(event),
+        // Every other physical press still counts as keyboard activity; which
+        // key it was is never passed on.
+        None if is_physical_key_down(wparam, data) => HookEvent::KeyPressed,
+        None => return call_next(code, wparam, lparam),
     };
 
     let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
     let disposition = callback
         .as_ref()
-        .map_or(EventDisposition::PassThrough, |cb| {
-            cb(HookEvent::Key(event))
-        });
+        .map_or(EventDisposition::PassThrough, |cb| cb(event));
     match disposition {
         EventDisposition::PassThrough => call_next(code, wparam, lparam),
         EventDisposition::Suppress => 1,
     }
+}
+
+/// Whether a `WH_KEYBOARD_LL` message is a key going down on a real keyboard,
+/// not one OpenLogi or another program synthesized.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "WPARAM carries a 32-bit window message by ABI"
+)]
+fn is_physical_key_down(wparam: WPARAM, data: KBDLLHOOKSTRUCT) -> bool {
+    data.flags & LLKHF_INJECTED == 0 && matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN)
 }
 
 /// Copy the `KBDLLHOOKSTRUCT` the OS passed in `lparam`, or `None` if `lparam`
