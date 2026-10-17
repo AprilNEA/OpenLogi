@@ -199,6 +199,9 @@ pub(super) enum Presence {
     Departed,
 }
 
+/// How long a switch waits for exclusive receiver access before going ahead.
+const LEASE_PATIENCE: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// How long Flow's own record outranks the inventory.
 const PRESENCE_TTL: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -383,10 +386,18 @@ impl GenerationState {
         devices: &[OutgoingDevice],
     ) -> Result<bool, openlogi_hid::HostSwitchError> {
         let started = std::time::Instant::now();
-        let _lease = self
-            .receiver_access
-            .acquire_exclusive(ExclusiveAccessReason::HostTransition)
-            .await;
+        // The exclusive lease waits for every in-flight receiver operation,
+        // and right after a quick round trip those include settings writes to
+        // devices that already left, each running into its own timeout: the
+        // wait grew to seconds. The switch is one write per device and the
+        // devices are leaving anyway, so it waits briefly and then goes ahead.
+        let lease = tokio::time::timeout(
+            LEASE_PATIENCE,
+            self.receiver_access
+                .acquire_exclusive(ExclusiveAccessReason::HostTransition),
+        )
+        .await
+        .ok();
         let leased = started.elapsed();
         if !self.is_active() {
             return Ok(false);
@@ -425,6 +436,7 @@ impl GenerationState {
             switch_ms = started.elapsed().saturating_sub(leased).as_millis(),
             devices = devices.len(),
             prepared = fast,
+            exclusive = lease.is_some(),
             "Flow host switch issued"
         );
         Ok(true)
