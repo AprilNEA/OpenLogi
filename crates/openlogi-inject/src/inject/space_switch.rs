@@ -31,7 +31,7 @@ pub(super) struct SpaceState {
 }
 
 impl SpaceState {
-    fn target(&self, direction: Direction) -> Result<Option<u64>, Failure> {
+    pub(super) fn target(&self, direction: Direction) -> Result<Option<u64>, Failure> {
         if self.display.is_empty()
             || self.current == 0
             || self

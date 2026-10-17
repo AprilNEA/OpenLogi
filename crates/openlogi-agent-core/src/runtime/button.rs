@@ -419,6 +419,17 @@ impl ButtonState {
     }
 
     fn cancel_pointer_except(&mut self, current: openlogi_hook::PointerTarget) -> Vec<ActivePress> {
+        // A lifecycle-only press (a gesture hold) holds no output, and its own
+        // swipe may be what changed the hovered window (Next Desktop). Follow
+        // the pointer instead of canceling, so one hold can chain swipes; the
+        // press-time focus fallback stays with it.
+        for press in self.active.values_mut() {
+            if press.behavior == PressBehavior::LifecycleOnly
+                && let ActionDispatchTarget::Pointer { target, .. } = &mut press.target
+            {
+                *target = current;
+            }
+        }
         self.active.extract_if(|_, press| matches!(press.target, ActionDispatchTarget::Pointer { target, .. } if target != current))
             .map(|(_, press)| press)
             .collect()
@@ -581,6 +592,12 @@ impl ButtonInputHandle {
             target,
         );
         self.try_input(generation, ButtonInput::Pulse(press))
+    }
+
+    /// Whether `token`'s press has outlived every all-press invalidation so
+    /// far (a binding or profile change ends every press at once).
+    pub(crate) fn is_current(&self, token: &PressToken) -> bool {
+        token.generation == self.generation.load(Ordering::Acquire)
     }
 
     pub(crate) fn try_trigger_while_pressed(&self, token: &PressToken, action: &Action) -> bool {
