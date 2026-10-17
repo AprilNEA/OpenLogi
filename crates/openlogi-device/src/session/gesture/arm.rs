@@ -17,7 +17,7 @@ use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::open_device;
 use crate::session::capture_restore::{
     ArmedReporting, CaptureError, CaptureSessionFailure, HiResWheelRestore, PendingCaptureRestore,
-    PointerDivert, ReprogRestore, ThumbwheelRestore,
+    PointerDivert, ReprogRestore, ThumbwheelRestore, restore_now,
 };
 use crate::session::restore::rollback_start;
 use crate::thumbwheel::{
@@ -57,6 +57,18 @@ pub(super) struct ArmedControls {
     pub(super) thumb: Option<ArmedThumbwheel>,
     /// `0x2121` main wheel, present when its movement reports are diverted.
     pub(super) main_wheel: Option<ArmedMainWheel>,
+    /// What the session owned before a live reconfiguration and the new spec
+    /// has neither re-claimed nor handed back yet.
+    superseded: Superseded,
+}
+
+/// Firmware ownership carried across a live reconfiguration. Arming re-claims
+/// what the new spec still diverts; the rest is handed back afterwards.
+#[derive(Default)]
+struct Superseded {
+    reporting: Vec<ArmedReporting>,
+    thumb: Option<ArmedThumbwheel>,
+    main_wheel: Option<ArmedMainWheel>,
 }
 
 pub(super) struct ArmedThumbwheel {
@@ -99,21 +111,74 @@ impl ArmedControls {
     pub(super) fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
         let Self {
             reprog,
-            reporting,
+            mut reporting,
             thumb,
             main_wheel,
+            superseded,
             ..
         } = self;
+        reporting.extend(superseded.reporting);
         let reprog =
             reprog.and_then(|controls| ReprogRestore::new(controls.feature_index(), reporting));
         PendingCaptureRestore::new(
             retired,
             reprog,
-            thumb.as_ref().map(|thumb| thumb.restore),
+            thumb
+                .or(superseded.thumb)
+                .as_ref()
+                .map(|thumb| thumb.restore),
             main_wheel
+                .or(superseded.main_wheel)
                 .as_ref()
                 .map(|wheel| HiResWheelRestore::new(wheel.feature_index)),
         )
+    }
+
+    /// Move a live session to `spec` on its own channel. A control `spec`
+    /// still diverts the same way is not written again, one it diverts
+    /// differently is switched in place with the reporting read before the
+    /// session first diverted it, and one it drops is handed back. Returns
+    /// whether firmware now matches `spec`; either way every control the
+    /// session may still have diverted stays owned for teardown.
+    pub(super) async fn reconfigure(&mut self, shared: &SharedChannel, spec: &CaptureSpec) -> bool {
+        let device = match open_device(shared).await {
+            Ok(device) => device,
+            Err(error) => {
+                warn!(%error, "control capture reload could not reach the device");
+                return false;
+            }
+        };
+        let previous = std::mem::take(self);
+        let mut superseded = previous.superseded;
+        superseded.reporting.extend(previous.reporting);
+        superseded.thumb = previous.thumb.or(superseded.thumb);
+        superseded.main_wheel = previous.main_wheel.or(superseded.main_wheel);
+        self.reprog = previous.reprog;
+        self.superseded = superseded;
+        if let Err(error) =
+            arm_controls_into(&device, shared.channel(), shared.device_index(), spec, self).await
+        {
+            warn!(%error, "control capture reload failed");
+            return false;
+        }
+        let superseded = &self.superseded;
+        let reprog = self.reprog.as_ref().and_then(|controls| {
+            ReprogRestore::new(controls.feature_index(), superseded.reporting.clone())
+        });
+        let released = restore_now(
+            shared,
+            reprog,
+            superseded.thumb.as_ref().map(|thumb| thumb.restore),
+            superseded
+                .main_wheel
+                .as_ref()
+                .map(|wheel| HiResWheelRestore::new(wheel.feature_index)),
+        )
+        .await;
+        if released {
+            self.superseded = Superseded::default();
+        }
+        released
     }
 
     /// Reapply volatile diversion after a wireless reconnect broadcast.
@@ -208,7 +273,7 @@ pub(super) async fn arm_controls_into(
                 .iter()
                 .any(|c| c.cid == cid && c.is_divertable() && c.supports_raw_xy())
             {
-                arm_reprog_control(&rc, cid, PointerDivert::RawXy, &mut armed.reporting).await?;
+                arm_reprog_control(&rc, cid, PointerDivert::RawXy, armed).await?;
                 armed.gesture_cids.push(cid);
             }
         }
@@ -217,7 +282,7 @@ pub(super) async fn arm_controls_into(
                 && control.is_divertable()
                 && control.supports_raw_xy()
             {
-                arm_reprog_control(&rc, cid, PointerDivert::RawXy, &mut armed.reporting).await?;
+                arm_reprog_control(&rc, cid, PointerDivert::RawXy, armed).await?;
                 armed.gesture_button_cids.push((cid, button));
             }
         }
@@ -234,7 +299,7 @@ pub(super) async fn arm_controls_into(
                 continue;
             }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                arm_reprog_control(&rc, cid, PointerDivert::Plain, &mut armed.reporting).await?;
+                arm_reprog_control(&rc, cid, PointerDivert::Plain, armed).await?;
                 armed.dpi_cids.push(cid);
             }
         }
@@ -251,7 +316,7 @@ pub(super) async fn arm_controls_into(
                 continue;
             }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                arm_reprog_control(&rc, cid, PointerDivert::Plain, &mut armed.reporting).await?;
+                arm_reprog_control(&rc, cid, PointerDivert::Plain, armed).await?;
                 armed.button_cids.push((cid, button));
             }
         }
@@ -259,6 +324,10 @@ pub(super) async fn arm_controls_into(
     }
 
     if spec.capture_thumbwheel
+        && let Some(thumb) = armed.superseded.thumb.take()
+    {
+        armed.thumb = Some(thumb);
+    } else if spec.capture_thumbwheel
         && let Some(info) = device.root().get_feature(thumbwheel::FEATURE_ID).await?
     {
         let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
@@ -333,6 +402,9 @@ async fn arm_main_wheel(
     // Same ownership rule as the thumb wheel: recorded before the write,
     // which a transport error leaves uncertain.
     let wheel = armed.main_wheel.insert(wheel);
+    // This divert rewrites any mode a live session armed before, so that
+    // earlier ownership passes to it instead of being handed back.
+    armed.superseded.main_wheel = None;
     match wheel.divert().await {
         Ok(()) => Ok(()),
         Err(error @ Hidpp20Error::Channel(_)) => Err(error.into()),
@@ -351,8 +423,26 @@ async fn arm_reprog_control(
     rc: &ReprogControlsV4,
     cid: u16,
     divert: PointerDivert,
-    reporting: &mut Vec<ArmedReporting>,
+    armed: &mut ArmedControls,
 ) -> Result<(), CaptureError> {
+    if let Some(index) = armed
+        .superseded
+        .reporting
+        .iter()
+        .position(|previous| previous.cid == cid)
+    {
+        // Re-reading would record this session's own diversion as the
+        // original, so keep the one read before the session first armed it.
+        let previous = armed.superseded.reporting.swap_remove(index);
+        let next = ArmedReporting::pointer(cid, previous.original, divert);
+        armed.reporting.push(next);
+        if next != previous {
+            rc.set_cid_reporting_full(cid, next.rediverted_from(previous))
+                .await?;
+        }
+        return Ok(());
+    }
+    let reporting = &mut armed.reporting;
     let original = rc.get_cid_reporting(cid).await?;
     if original.diverted {
         // Left over from a session that never tore down (agent killed, or
@@ -392,7 +482,7 @@ async fn arm_wheel_hold_controls(
             continue;
         };
         if control.supports_raw_wheel() {
-            arm_reprog_control(rc, cid, PointerDivert::RawWheel, &mut armed.reporting).await?;
+            arm_reprog_control(rc, cid, PointerDivert::RawWheel, armed).await?;
             armed.wheel_button_cids.push((cid, button));
         } else {
             // Without raw-wheel reporting the button cannot scroll, but its
@@ -401,7 +491,7 @@ async fn arm_wheel_hold_controls(
                 cid,
                 "control lacks raw-wheel reporting — wheel-hold armed as a click"
             );
-            arm_reprog_control(rc, cid, PointerDivert::Plain, &mut armed.reporting).await?;
+            arm_reprog_control(rc, cid, PointerDivert::Plain, armed).await?;
             armed.button_cids.push((cid, button));
         }
     }

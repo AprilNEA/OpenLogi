@@ -40,6 +40,10 @@ enum SessionPhase<Stop> {
     Draining,
 }
 
+/// Hands a running task a new target. `true` means the task adopted it in
+/// place, so its hardware epoch continues.
+type Retarget<Target> = Box<dyn Fn(&Target, &Target) -> bool + Send>;
+
 /// One capture epoch, including its hardware identity, dispatch state and
 /// acknowledged teardown phase.
 pub(super) struct CaptureSession<Target, Dispatch, Stop = ()> {
@@ -47,6 +51,7 @@ pub(super) struct CaptureSession<Target, Dispatch, Stop = ()> {
     target: Target,
     dispatch: Dispatch,
     phase: SessionPhase<Stop>,
+    retarget: Option<Retarget<Target>>,
 }
 
 /// Firmware restoration and restart pacing retained after a capture task has
@@ -171,7 +176,18 @@ impl<Target, Dispatch, Stop> CaptureSession<Target, Dispatch, Stop> {
             target,
             dispatch,
             phase: SessionPhase::Active(stop),
+            retarget: None,
         }
+    }
+
+    /// Let target changes `retarget` accepts reach the running task instead
+    /// of retiring it.
+    pub(super) fn with_retarget(
+        mut self,
+        retarget: impl Fn(&Target, &Target) -> bool + Send + 'static,
+    ) -> Self {
+        self.retarget = Some(Box::new(retarget));
+        self
     }
 
     /// Exact device + epoch identity carried by captured events.
@@ -220,10 +236,14 @@ impl<Target, Dispatch, Stop> CaptureSession<Target, Dispatch, Stop> {
     }
 }
 
-impl<Target: PartialEq, Dispatch: Clone + PartialEq, Stop> CaptureSession<Target, Dispatch, Stop> {
+impl<Target: Clone + PartialEq, Dispatch: Clone + PartialEq, Stop>
+    CaptureSession<Target, Dispatch, Stop>
+{
     /// Reconcile against the latest wanted target and dispatch state. A target
-    /// change begins teardown exactly once; dispatch-only changes hot-refresh
-    /// the plan while preserving the hardware epoch.
+    /// change the task cannot adopt in place begins teardown exactly once;
+    /// dispatch-only changes hot-refresh the plan while preserving the
+    /// hardware epoch. An adopted target change also counts as a dispatch
+    /// change: the task forgets input it was tracking under the old target.
     pub(super) fn reconcile_with(
         &mut self,
         wanted: Option<(&Target, &Dispatch)>,
@@ -232,14 +252,22 @@ impl<Target: PartialEq, Dispatch: Clone + PartialEq, Stop> CaptureSession<Target
         if !self.is_active() {
             return ReconcileAction::None;
         }
-        if let Some((target, dispatch)) = wanted
-            && self.target == *target
-        {
-            if self.dispatch == *dispatch {
-                return ReconcileAction::None;
+        if let Some((target, dispatch)) = wanted {
+            let retargeted = self.target != *target
+                && self
+                    .retarget
+                    .as_ref()
+                    .is_some_and(|retarget| retarget(&self.target, target));
+            if retargeted {
+                self.target.clone_from(target);
             }
-            self.dispatch.clone_from(dispatch);
-            return ReconcileAction::DispatchChanged;
+            if self.target == *target {
+                if self.dispatch == *dispatch && !retargeted {
+                    return ReconcileAction::None;
+                }
+                self.dispatch.clone_from(dispatch);
+                return ReconcileAction::DispatchChanged;
+            }
         }
         let stop_command = stop_for_change(&self.target, wanted.map(|(target, _)| target));
         let SessionPhase::Active(stop) = std::mem::replace(&mut self.phase, SessionPhase::Draining)
