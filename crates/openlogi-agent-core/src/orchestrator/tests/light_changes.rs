@@ -572,3 +572,121 @@ fn a_change_on_a_route_no_online_light_has_is_ignored() {
         Some(settings(true, 80, 4000))
     );
 }
+
+/// The light's own buttons set it to 135 lm (50 %) and then to 158 lm (60 %).
+fn pressed_to_50_then_60(orch: &mut Orchestrator) {
+    orch.light_changed(&route(), change(state(true, 135, 4000), false, true, false));
+    orch.light_changed(&route(), change(state(true, 158, 4000), false, true, false));
+}
+
+fn brightness_changed_on_light(orch: &Orchestrator) -> Option<u8> {
+    orch.lights_changed_on_light
+        .get(KEY)
+        .and_then(|changed| changed.brightness_percent)
+}
+
+fn writes_brightness(percent: u8) -> Vec<LightWrite> {
+    vec![LightWrite {
+        route: route(),
+        light: settings(true, percent, 4000),
+        capabilities: capabilities(),
+    }]
+}
+
+#[test]
+fn a_save_of_an_earlier_report_keeps_the_newer_change_on_the_light() {
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    pressed_to_50_then_60(&mut orch);
+    // The GUI saves the 50 % it was told before the press to 60 % reached it.
+    assert_eq!(
+        orch.replace_config(config_with(settings(true, 50, 4000))),
+        Vec::new()
+    );
+    assert_eq!(brightness_changed_on_light(&orch), Some(60));
+    assert_eq!(
+        orch.effective_light_settings(KEY),
+        Some(settings(true, 60, 4000))
+    );
+    // Its save of 60 % then acknowledges the newer press.
+    assert_eq!(
+        orch.replace_config(config_with(settings(true, 60, 4000))),
+        Vec::new()
+    );
+    assert!(orch.lights_changed_on_light.is_empty());
+    assert!(orch.lights_reported_on_light.is_empty());
+}
+
+#[test]
+fn a_save_of_a_value_the_light_did_not_report_replaces_the_change() {
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    pressed_to_50_then_60(&mut orch);
+    assert_eq!(
+        orch.replace_config(config_with(settings(true, 70, 4000))),
+        writes_brightness(70)
+    );
+    assert_eq!(brightness_changed_on_light(&orch), None);
+}
+
+#[test]
+fn the_reports_of_a_control_end_with_its_change() {
+    // A save that replaced the change ends its reports, even while the
+    // power changed on the light stays.
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    orch.light_changed(&route(), change(state(false, 135, 4000), true, true, false));
+    let switched_off = |percent| {
+        vec![LightWrite {
+            route: route(),
+            light: settings(false, percent, 4000),
+            capabilities: capabilities(),
+        }]
+    };
+    assert_eq!(
+        orch.replace_config(config_with(settings(true, 70, 4000))),
+        switched_off(70)
+    );
+    orch.light_changed(
+        &route(),
+        change(state(false, 158, 4000), false, true, false),
+    );
+    assert_eq!(
+        orch.replace_config(config_with(settings(true, 50, 4000))),
+        switched_off(50)
+    );
+    assert_eq!(brightness_changed_on_light(&orch), None);
+    assert_eq!(
+        orch.lights_changed_on_light
+            .get(KEY)
+            .and_then(|changed| changed.enabled),
+        Some(false)
+    );
+
+    // So does a GUI write that took it.
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    orch.light_changed(&route(), change(state(true, 135, 4000), false, true, false));
+    assert!(
+        orch.light_writing(&route(), LightCommand::BrightnessPercent(70))
+            .is_some()
+    );
+    orch.light_changed(&route(), change(state(true, 158, 4000), false, true, false));
+    assert_eq!(
+        orch.replace_config(config_with(settings(true, 50, 4000))),
+        writes_brightness(50)
+    );
+    assert_eq!(brightness_changed_on_light(&orch), None);
+}
+
+#[test]
+fn a_change_put_back_after_a_failed_write_is_a_report() {
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    orch.light_changed(&route(), change(state(true, 135, 4000), false, true, false));
+    let Some(taken) = orch.light_writing(&route(), LightCommand::BrightnessPercent(70)) else {
+        panic!("the write takes the change on the light");
+    };
+    orch.light_write_failed(taken);
+    orch.light_changed(&route(), change(state(true, 158, 4000), false, true, false));
+    assert_eq!(
+        orch.replace_config(config_with(settings(true, 50, 4000))),
+        Vec::new()
+    );
+    assert_eq!(brightness_changed_on_light(&orch), Some(60));
+}
