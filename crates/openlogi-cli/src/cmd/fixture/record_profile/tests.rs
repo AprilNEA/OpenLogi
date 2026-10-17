@@ -21,7 +21,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
     Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation,
+    PairingUpdate, RingObservation, SavedConfig,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -371,6 +371,13 @@ impl Agent for TestAgent {
         _name: String,
     ) -> Result<EasySwitchHosts, WriteError> {
         unreachable!("profile capture must never rename a host")
+    }
+    async fn reload_saved_config(
+        self,
+        _: TarpcContext,
+        _saved: SavedConfig,
+    ) -> Result<(), ConfigReloadError> {
+        unreachable!("profile capture is read-only")
     }
 }
 

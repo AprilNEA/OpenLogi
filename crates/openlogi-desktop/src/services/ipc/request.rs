@@ -16,12 +16,14 @@
 
 use std::future::Future;
 
-use openlogi_core::config::Lighting;
+use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
-use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
+use openlogi_ipc::{
+    AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
+};
 use tarpc::client::RpcError;
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
@@ -471,14 +473,45 @@ impl Request for ReadFnLock {
     }
 }
 
-/// Have the agent re-read `config.toml`.
+/// Have the agent re-read the `config.toml` the GUI just saved
+/// ([`openlogi_ipc::Agent::reload_saved_config`]).
 ///
 /// The loop holds this one until a connection exists and never answers it
 /// locally (module doc), so `deliver` only ever reports the agent's own
 /// verdict: a reload that did not happen is not one the agent refused.
-pub struct ReloadConfig;
+#[derive(Debug, Default)]
+pub struct ReloadConfig {
+    /// The controls of lights the user set in the save without a write to
+    /// the light. A change made on the light to one of them gives way.
+    pub chosen: Vec<ChosenLight>,
+    /// The revision of `config.toml` that the save wrote. The agent takes a
+    /// file at another revision as edited after the save.
+    pub revision: ConfigRevision,
+}
 
 impl Request for ReloadConfig {
+    type Answer = Result<(), ConfigReloadError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        let saved = SavedConfig {
+            revision: self.revision,
+            chosen: self.chosen.clone(),
+        };
+        client.reload_saved_config(context::current(), saved).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_reload(outcome, updates);
+    }
+}
+
+/// Have the agent re-read a `config.toml` it did not see the GUI save, as at
+/// startup, so edits made while the GUI was closed apply
+/// ([`openlogi_ipc::Agent::reload_config`]). Held and answered like
+/// [`ReloadConfig`].
+pub struct LoadConfig;
+
+impl Request for LoadConfig {
     type Answer = Result<(), ConfigReloadError>;
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
@@ -486,9 +519,18 @@ impl Request for ReloadConfig {
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
-        if let Ok(verdict) = outcome {
-            let _ = updates.send(GuiUpdate::ConfigReloadResult(verdict));
-        }
+        report_reload(outcome, updates);
+    }
+}
+
+/// Report the agent's verdict on a held reload. A reload that did not happen
+/// is not one the agent refused, so it reports nothing.
+fn report_reload(
+    outcome: Result<Result<(), ConfigReloadError>, Unavailable>,
+    updates: &UpdateSender,
+) {
+    if let Ok(verdict) = outcome {
+        let _ = updates.send(GuiUpdate::ConfigReloadResult(verdict));
     }
 }
 
@@ -691,6 +733,7 @@ commands! {
     ReadReportRate,
     ReadBacklight,
     ReadEasySwitchHosts,
+    LoadConfig,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,
@@ -746,7 +789,8 @@ mod tests {
     fn a_reload_that_never_reached_the_agent_is_not_a_verdict() {
         let (updates, mut received) = mpsc::unbounded_channel();
 
-        ReloadConfig.deliver(Err(Unavailable), &updates);
+        ReloadConfig::default().deliver(Err(Unavailable), &updates);
+        LoadConfig.deliver(Err(Unavailable), &updates);
 
         assert!(received.try_recv().is_err());
     }

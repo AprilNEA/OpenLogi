@@ -1,7 +1,7 @@
 //! Persisting a change: the rollback on a read-only config and the agent reload that follows.
 
 use super::*;
-use openlogi_core::config::{ConfigFile, MouseProfileTarget};
+use openlogi_core::config::{ConfigFile, ConfigRevision, MouseProfileTarget};
 
 #[test]
 fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
@@ -45,10 +45,11 @@ fn mouse_profile_target_persists_and_reloads_only_when_changed() {
         persistence: ConfigPersistence::UserFile(file),
         ..Sources::in_memory(config, &resolver, commands)
     });
-    // A file-backed AppState reloads once at startup, independently of edits.
+    // A file-backed AppState loads the file into the agent once at startup,
+    // independently of edits.
     assert!(matches!(
         receiver.try_recv(),
-        Ok(crate::services::ipc::Command::ReloadConfig(_))
+        Ok(crate::services::ipc::Command::LoadConfig(_))
     ));
     assert!(receiver.try_recv().is_err());
 
@@ -65,10 +66,14 @@ fn mouse_profile_target_persists_and_reloads_only_when_changed() {
                 .mouse_profile_target,
             target
         );
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(crate::services::ipc::Command::ReloadConfig(_))
-        ));
+        let Ok(crate::services::ipc::Command::ReloadConfig(reload)) = receiver.try_recv() else {
+            panic!("a save reloads the agent");
+        };
+        assert_eq!(
+            reload.revision,
+            ConfigRevision::of(&std::fs::read_to_string(&path).unwrap()),
+            "the reload names the revision of the file the save wrote"
+        );
         assert!(receiver.try_recv().is_err());
 
         let _ = state.commit_mouse_profile_target(target);

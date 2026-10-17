@@ -12,10 +12,10 @@ use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
+use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_core::config::{Config, Lighting};
+use openlogi_core::config::{ConfigFile, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
@@ -26,7 +26,7 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingUpdate, RingObservation,
+    PairingCommandError, PairingFailure, PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::Compat;
 
@@ -87,6 +87,51 @@ impl AgentServer {
             declarations,
         )
     }
+
+    /// Re-read `config.toml` for [`Agent::reload_config`], or for
+    /// [`Agent::reload_saved_config`] when the GUI's save is given. The
+    /// revision is that of the text the config is parsed from, so an edit
+    /// that lands after the read cannot pass for the save.
+    async fn reload(self, saved: Option<SavedConfig>) -> Result<(), ConfigReloadError> {
+        match ConfigFile::load_or_default() {
+            Ok((config, file)) => {
+                let launch_at_login = config.app_settings.launch_at_login;
+                #[cfg(target_os = "macos")]
+                let app_icon = config.app_settings.app_icon;
+                let language = config.app_settings.language.clone();
+                match saved {
+                    None => self.orchestrator.lock().await.reload_config(config),
+                    Some(saved) => self.orchestrator.lock().await.reload_saved_config(
+                        config,
+                        file.revision(),
+                        &saved,
+                    ),
+                }
+                self.dispatcher.cancel_all_buttons();
+                // The GUI's launch-at-login toggle reaches us through this
+                // reload, so re-reconcile the autostart from the new config.
+                crate::autostart::reconcile(launch_at_login);
+                // So does the app icon, and the menu-bar item is ours to
+                // restyle — the GUI can only reach the Dock and the bundle.
+                #[cfg(target_os = "macos")]
+                crate::tray::set_icon(app_icon);
+                // And the interface language: re-resolve the process locale
+                // (the Windows popup rebuilds per show and picks it up alone)
+                // and rebuild the macOS menu, whose titles were stamped at
+                // install.
+                openlogi_core::locale::activate(language.as_deref());
+                #[cfg(target_os = "macos")]
+                crate::tray::relocalize();
+                Ok(())
+            }
+            Err(error) => {
+                warn!(error = %error, "reload_config: parse failed; keeping current config");
+                Err(ConfigReloadError {
+                    message: error.to_string(),
+                })
+            }
+        }
+    }
 }
 
 #[expect(
@@ -116,37 +161,7 @@ impl Agent for AgentServer {
     }
 
     async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
-        match Config::load_or_default() {
-            Ok(config) => {
-                let launch_at_login = config.app_settings.launch_at_login;
-                #[cfg(target_os = "macos")]
-                let app_icon = config.app_settings.app_icon;
-                let language = config.app_settings.language.clone();
-                self.orchestrator.lock().await.reload_config(config);
-                self.dispatcher.cancel_all_buttons();
-                // The GUI's launch-at-login toggle reaches us through this
-                // reload, so re-reconcile the autostart from the new config.
-                crate::autostart::reconcile(launch_at_login);
-                // So does the app icon, and the menu-bar item is ours to
-                // restyle — the GUI can only reach the Dock and the bundle.
-                #[cfg(target_os = "macos")]
-                crate::tray::set_icon(app_icon);
-                // And the interface language: re-resolve the process locale
-                // (the Windows popup rebuilds per show and picks it up alone)
-                // and rebuild the macOS menu, whose titles were stamped at
-                // install.
-                openlogi_core::locale::activate(language.as_deref());
-                #[cfg(target_os = "macos")]
-                crate::tray::relocalize();
-                Ok(())
-            }
-            Err(error) => {
-                warn!(error = %error, "reload_config: parse failed; keeping current config");
-                Err(ConfigReloadError {
-                    message: error.to_string(),
-                })
-            }
-        }
+        self.reload(None).await
     }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
@@ -323,6 +338,13 @@ impl Agent for AgentServer {
             .rename_easy_switch_host(&route, slot, name)
             .await
     }
+    async fn reload_saved_config(
+        self,
+        _: Context,
+        saved: SavedConfig,
+    ) -> Result<(), ConfigReloadError> {
+        self.reload(Some(saved)).await
+    }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {
         self.pairing.next_update().await
@@ -346,13 +368,14 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         command: LightCommand,
     ) -> Result<(), WriteError> {
-        self.shared.hardware().apply_light(&route, command).await?;
-        // The light now holds the user's choice, not one made on the light.
-        self.orchestrator
-            .lock()
-            .await
-            .light_written(&route, command);
-        Ok(())
+        let hardware = self.shared.hardware();
+        orchestrator::write_light(
+            &self.orchestrator,
+            &route,
+            command,
+            hardware.apply_light(&route, command),
+        )
+        .await
     }
 
     async fn set_light_manual_power(
