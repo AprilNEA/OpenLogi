@@ -127,6 +127,23 @@ fn a_serial_keyed_direct_entry_is_kept_however_long_the_device_is_away() {
 }
 
 #[test]
+fn a_serial_keyed_direct_entry_is_fresh_when_its_device_returns_from_a_long_absence() {
+    let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
+    let direct = CacheKey::DirectSerial("d9:d2:69:b2:4b:96".to_string());
+    let mut entry = cache_entry();
+    entry.probed_at = Instant::now()
+        .checked_sub(REFRESH_INTERVAL * 10)
+        .expect("the monotonic clock reaches back past the refresh interval");
+    e.cache.insert(direct.clone(), entry);
+
+    e.evict_unseen(&HashSet::new(), &HashSet::new());
+
+    // Served from cache on return; the regular refresh re-walks it later.
+    let kept = e.cache.get(&direct).expect("serial-keyed entry kept");
+    assert!(!is_stale(kept, Instant::now()));
+}
+
+#[test]
 fn being_seen_resets_the_miss_counter() {
     let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
     let key = CacheKey::Bolt { unit_id: [9; 4] };

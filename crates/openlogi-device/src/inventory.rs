@@ -774,12 +774,19 @@ impl Enumerator {
             .filter(|k| !seen_keys.contains(*k) && !frozen.contains(*k))
             .cloned()
             .collect();
+        let now = Instant::now();
         for key in missing {
             // Such a key memoizes data that stays true while the device is
             // away, and dropping it is what makes a device that steps out and
             // back re-answer questions it has already answered. What it costs
-            // to keep is a few hundred bytes per device ever seen.
+            // to keep is a few hundred bytes per device ever seen. Its refresh
+            // window restarts while it is away, like a warm-start entry's, so a
+            // return is served from cache instead of stalling on a re-walk; the
+            // regular refresh re-walks it on schedule after.
             if key.outlives_absence() {
+                if let Some(entry) = self.cache.get_mut(&key) {
+                    entry.probed_at = now;
+                }
                 continue;
             }
             let misses = self.misses.entry(key.clone()).or_insert(0);
