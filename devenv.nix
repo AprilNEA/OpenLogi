@@ -47,6 +47,9 @@ in
       cmake
       sccache
       prek
+      typos
+      # The `ast-grep` CI job and the prek hook of the same name.
+      ast-grep
       # The `shell` CI job and the prek hooks of the same name.
       shellcheck
       shfmt
@@ -141,11 +144,11 @@ in
       '';
     };
     "openlogi:i18n-upload" = {
-      description = "Upload en.yml sources and per-language translations to Crowdin.";
+      description = "Upload en.toml sources and per-language translations to Crowdin.";
       exec = ''
         set -e
-        ${pkgs.crowdin-cli}/bin/crowdin upload sources
-        ${pkgs.crowdin-cli}/bin/crowdin upload translations
+        ${pkgs.crowdin-cli}/bin/crowdin upload sources --config .config/crowdin.yml
+        ${pkgs.crowdin-cli}/bin/crowdin upload translations --config .config/crowdin.yml
       '';
     };
     "openlogi:i18n-download" = {
@@ -156,12 +159,13 @@ in
         ${pkgs.python3}/bin/python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
         before="$(mktemp -d)"
         trap 'rm -rf "$before"' EXIT
-        cp crates/openlogi-ui/locales/*.yml "$before/"
-        ${pkgs.crowdin-cli}/bin/crowdin download --skip-untranslated-strings
+        cp crates/openlogi-ui/locales/*.toml "$before/"
+        ${pkgs.crowdin-cli}/bin/crowdin download --config .config/crowdin.yml \
+          --skip-untranslated-strings
         ${pkgs.python3}/bin/python3 .github/scripts/i18n/merge_crowdin_download.py \
           --before "$before" \
           --locales crates/openlogi-ui/locales \
-          --en crates/openlogi-ui/locales/en.yml
+          --en crates/openlogi-ui/locales/en.toml
         cargo test -p openlogi-desktop i18n
       '';
     };

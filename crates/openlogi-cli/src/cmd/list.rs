@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_camera::Camera;
 use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice};
+use openlogi_ipc::client::ConnectError;
+use openlogi_ipc::{AgentSnapshot, AgentStatus};
 
 #[derive(Debug, Args)]
 pub struct ListArgs {}
@@ -17,28 +19,36 @@ const NOTHING_FOUND: u8 = 2;
 
 /// Print every connected receiver, paired device and Logitech webcam.
 ///
+/// Reads the running agent's inventory when one is reachable — the agent is
+/// the process that actually holds device permissions, so its answer is the
+/// GUI's answer and no second identity opens the same HID nodes. Falls back
+/// to direct enumeration (this process's own permission identity) when no
+/// agent responds; the provenance goes to stderr so scripts keep parsing
+/// stdout.
+///
 /// Returns the `NOTHING_FOUND` status when neither a HID++ device nor a webcam
 /// is present, so scripts can tell "no hardware" apart from a failed
 /// enumeration.
 pub async fn run(_args: ListArgs) -> Result<ExitCode> {
-    let inventories = openlogi_hid::enumerate()
-        .await
-        .context("failed to enumerate HID++ devices")?;
+    let (inventories, agent_status) = if let Some(snapshot) = agent_snapshot().await {
+        eprintln!("(inventory read from the running agent)");
+        (snapshot.inventory, Some(snapshot.status))
+    } else {
+        eprintln!(
+            "(no agent reachable — reading hardware directly; macOS judges this \
+             process's Input Monitoring grant, not the agent's)"
+        );
+        let inventories = openlogi_hid::enumerate()
+            .await
+            .context("failed to enumerate HID++ devices")?;
+        (inventories, None)
+    };
     let cameras = openlogi_camera::enumerate_cameras();
 
     if inventories.is_empty() && cameras.is_empty() {
         println!("No Logitech HID++ devices or webcams found.");
         println!();
-        println!("Notes:");
-        println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
-        println!(
-            "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
-             permission: System Settings → Privacy & Security → Input Monitoring."
-        );
-        println!(
-            "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
-             receivers (Unifying) aren't surfaced yet."
-        );
+        print_empty_notes(agent_status.as_ref());
         return Ok(ExitCode::from(NOTHING_FOUND));
     }
 
@@ -57,6 +67,66 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// One agent snapshot, or `None` when the CLI should read hardware itself:
+/// no agent listening, a hung handshake, a protocol mismatch, or a stalled
+/// snapshot call.
+async fn agent_snapshot() -> Option<AgentSnapshot> {
+    let client = match crate::agent::connect().await {
+        Ok(client) => client,
+        Err(ConnectError::Skew(skew)) => {
+            eprintln!("note: {skew} — reading hardware directly");
+            return None;
+        }
+        Err(_) => return None,
+    };
+    crate::agent::snapshot(&client).await.ok()
+}
+
+/// Why the list is empty. With an agent status in hand the reason is known;
+/// without one, fall back to the generic checklist.
+fn print_empty_notes(status: Option<&AgentStatus>) {
+    match status {
+        Some(status) if !status.input_monitoring_granted => {
+            println!("Notes:");
+            println!(
+                "  - The agent does not hold Input Monitoring. Grant it to OpenLogi Agent: \
+                 System Settings → Privacy & Security → Input Monitoring (the + picker \
+                 cannot browse into the app bundle — use Go to Folder)."
+            );
+        }
+        // Off macOS there is no Input Monitoring gate, so a failed open on
+        // Linux is almost always missing hidraw access, not a stale session.
+        Some(status) if status.hid_open_failures && cfg!(target_os = "linux") => {
+            println!("Notes:");
+            println!(
+                "  - The agent's device opens keep failing. On Linux, HID++ access needs \
+                 OpenLogi's udev rules (shipped by the packages; for a source build see \
+                 docs/INSTALL-linux.md)."
+            );
+        }
+        Some(status) if status.hid_open_failures => {
+            println!("Notes:");
+            println!(
+                "  - Input Monitoring is granted, but the agent's device opens keep \
+                 failing — another app may hold the devices (quit Logi Options+), or \
+                 macOS is serving a stale permission session: log out and back in."
+            );
+        }
+        _ => {
+            println!("Notes:");
+            println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
+            println!(
+                "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
+                 permission: System Settings → Privacy & Security → Input Monitoring."
+            );
+            println!(
+                "  - On Linux, HID++ access needs OpenLogi's udev rules (shipped by the \
+                 packages; for a source build see docs/INSTALL-linux.md)."
+            );
+        }
+    }
 }
 
 fn print_cameras(cameras: &[Camera]) {
@@ -148,10 +218,14 @@ struct BatteryDisplay<'a>(&'a BatteryInfo);
 impl fmt::Display for BatteryDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let battery = self.0;
+        write!(f, "battery=")?;
+        // A device without a state-of-charge gauge reports only its level.
+        if let Some(percentage) = battery.percentage {
+            write!(f, "{percentage}% ")?;
+        }
         write!(
             f,
-            "battery={}% {} ({})",
-            battery.percentage,
+            "{} ({})",
             LowercaseDebug(battery.level),
             LowercaseDebug(battery.status)
         )
@@ -241,6 +315,7 @@ mod format_tests {
             battery: None,
             model_info: None,
             capabilities: None,
+            settings_revision: 0,
         }
     }
 
@@ -272,7 +347,7 @@ mod format_tests {
     fn battery_info_is_embedded_when_present() {
         let mut d = base_device();
         d.battery = Some(BatteryInfo {
-            percentage: 42,
+            percentage: Some(42),
             level: BatteryLevel::Low,
             status: BatteryStatus::Discharging,
         });
@@ -281,11 +356,21 @@ mod format_tests {
     }
 
     #[test]
+    fn a_level_only_battery_prints_no_percentage() {
+        let b = BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        assert_eq!(BatteryDisplay(&b).to_string(), "battery=good (discharging)");
+    }
+
+    #[test]
     fn battery_status_debug_names_are_lowercased_verbatim() {
         // `ChargingSlow`'s Debug form has no separator; lowercasing alone
         // yields "chargingslow", not "charging_slow" or "charging slow".
         let b = BatteryInfo {
-            percentage: 10,
+            percentage: Some(10),
             level: BatteryLevel::Critical,
             status: BatteryStatus::ChargingSlow,
         };

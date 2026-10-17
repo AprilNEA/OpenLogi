@@ -67,7 +67,9 @@ sudo rm -f /usr/lib/systemd/user/openlogi-agent.service
 
 echo "Removing desktop entry and icon …"
 sudo rm -f /usr/share/applications/openlogi.desktop
-sudo rm -f /usr/share/icons/hicolor/1024x1024/apps/openlogi.png
+for size in 1024 512 256 128 64 48 32 16; do
+  sudo rm -f "/usr/share/icons/hicolor/${size}x${size}/apps/openlogi.png"
+done
 
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   sudo gtk-update-icon-cache -qtf /usr/share/icons/hicolor || true

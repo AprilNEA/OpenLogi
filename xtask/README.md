@@ -13,18 +13,26 @@ devenv shell -- cargo run -p xtask -- <command>
 
 - `ci [--list] [--dry-run] [JOB…]` — reproduce the `ci.yml` jobs this host can
   run; a job it cannot is skipped with a reason, never passed.
-- `macos icns` — generate `crates/openlogi-desktop/icon/AppIcon.icns` from the master PNG.
+- `macos icon` — compile `design/icon/openlogi.icon` into the `AppIcon.icns` and
+  `Assets.car` under `crates/openlogi-desktop/icon/`.
 - `macos bundle [--channel dev|production]` — build `OpenLogi.app` and embed the
   agent and overlay helpers.
 - `macos dev-bundle --binary <path>` — wrap a freshly built desktop binary in
   `target/dev/OpenLogi.app`. Driven by the Cargo runner, not run by hand.
 - `macos dmg` — package an existing app bundle into the branded DMG.
-- `macos package` — build the app bundle, optionally sign it, then create the branded DMG.
+- `macos package` — build the app bundle, embed Sparkle when given its public key,
+  optionally sign it, then create the branded DMG.
 - `linux package` — build release binaries and package `.deb`, `.rpm`, and
   `.pkg.tar.zst` artifacts with nfpm.
 - `release changelog` — write the next workspace version's section into
   `CHANGELOG.md` with git-cliff.
+- `release check-publish` — verify that every crates.io package has a publishable,
+  versioned workspace dependency closure.
+- `release checkout-version-bump` — pin a release job to the commit that
+  introduced the current workspace version.
 - `release latest-json` — generate the static updater manifest for the stable channel.
+- `release appcast` — sign the macOS DMGs with Sparkle's EdDSA key and write one
+  appcast per architecture.
 
 ### Bundle identity
 
@@ -47,9 +55,25 @@ package anything but a production bundle once it is given a signing identity, so
 a dev build cannot reach users. That check is what releases 0.6.24–0.6.26 lacked
 when the release workflow shipped `.dev` identifiers.
 
-The raw DMG emitted by `cargo-bundle` is deleted during `macos bundle` because it
-is created before xtask embeds and signs the helpers; use `macos package` when
-you need a DMG.
+`macos bundle` asks `cargo-bundle` for the base `.app` only, then embeds and signs
+the helpers. Use `macos package` when you need the final DMG. The package command
+also accepts `--target aarch64-apple-darwin` or `--target x86_64-apple-darwin` so
+CI can cross-compile either distribution architecture.
+
+### Sparkle
+
+Given `OPENLOGI_SPARKLE_PUBLIC_ED_KEY` (or `--sparkle-public-key`), `macos package`
+embeds the pinned Sparkle release (`bundle/sparkle.rs`: version and archive
+SHA-256, cached under `target/sparkle/`) as `Contents/Frameworks/Sparkle.framework`,
+drops its XPC services (OpenLogi is not sandboxed), and stamps the `SU*` keys
+into `Info.plist`. The feed URL comes from `support/update_feed.rs`: one appcast
+per architecture under `OPENLOGI_UPDATE_BASE_URL`, because each architecture
+ships its own DMG. `release appcast` writes those feeds from the same module,
+so the URL a bundle reads and the file a release uploads cannot drift apart.
+Signing re-signs Sparkle's `Autoupdate`, `Updater.app` and the framework, inside
+out, before the app seals them. Without the key the bundle has no Sparkle and
+the app updates through its built-in engine, which is what every non-release
+build does.
 
 ### The dev bundle
 
@@ -96,12 +120,12 @@ xtask/
         bundle/
           embed.rs             # login-item helpers, the CLI, required binaries
           embed/tests.rs
-          icns.rs              # the app icon
           identity.rs          # bundle ids, names, icons per channel
           identity/tests.rs
-          info_plist.rs        # reading and stamping plist keys
           signing.rs           # codesign, inside out
           signing/tests.rs
+          sparkle.rs           # Sparkle.framework: fetch, embed, Info.plist keys
+          sparkle/tests.rs
         dev_bundle.rs
         dev_bundle/
           processes.rs
@@ -114,14 +138,25 @@ xtask/
         package/tests.rs
       release.rs             # release metadata entry
       release/
+        appcast.rs           # per-architecture Sparkle feeds, EdDSA-signed
+        appcast/tests.rs
         changelog.rs
         changelog/tests.rs
+        checkout_version_bump.rs
+        checkout_version_bump/tests.rs
         latest_json.rs
         latest_json/tests.rs
+    icon.rs                  # the icon set, and the pipeline a platform implements
+    icon/
+      macos.rs               # Icon Composer documents -> icns + asset catalog
+      macos/tests.rs
     support/
       mod.rs
       fs.rs                  # shared filesystem/process guards only
+      info_plist.rs          # reading and stamping plist keys
       manifest.rs            # the root Cargo.toml's [workspace.package]
+      update_feed.rs         # channel, update host and feed URLs packaging and release share
+      update_feed/tests.rs
 ```
 
 Unit tests are a sibling file throughout this crate: `foo.rs` declares

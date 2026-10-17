@@ -1,7 +1,7 @@
 > [!WARNING]
 > **OpenLogi is under active development** and not yet stable — features and config may still change. Give the repo a **Star** ⭐ and **Watch** 👀 it to get notified when a new release lands.
 
-<h4 align="right"><strong>English</strong> | <a href="docs/README.zh-CN.md">简体中文</a> | <a href="docs/README.ja.md">日本語</a> | <a href="docs/README.de.md">Deutsch</a> | <a href="docs/README.fr.md">Français</a> | <a href="docs/README.ko.md">한국어</a></h4>
+<h4 align="right"><strong>English</strong> | <a href="docs/README.zh-CN.md">简体中文</a> | <a href="docs/README.ja.md">日本語</a> | <a href="docs/README.de.md">Deutsch</a> | <a href="docs/README.fr.md">Français</a> | <a href="docs/README.ko.md">한국어</a> | <a href="docs/README.ru.md">Русский</a> | <a href="docs/README.es.md">Español</a> | <a href="docs/README.pt-BR.md">Português</a> | <a href="docs/README.tr.md">Türkçe</a></h4>
 
 <p align="center">
     <img src="https://assets.openlogi.org/brand/openlogi-icon.png" width="138" alt="OpenLogi"/>
@@ -9,7 +9,6 @@
 
 <h1 align="center">OpenLogi</h1>
 <p align="center"><strong>⚡️ A native, local-first alternative to Logitech Options+, written in Rust 🦀<br/>Unlock the full capabilities of Logitech mice, keyboards, and webcams over HID++ and UVC</strong></p>
-
 
 <div align="center">
     <a href="https://twitter.com/AprilNEA" target="_blank">
@@ -26,6 +25,12 @@
 <p align="center">
     <a href="https://trendshift.io/repositories/42303" target="_blank">
     <img src="https://trendshift.io/api/badge/repositories/42303" alt="AprilNEA%2FOpenLogi | Trendshift" width="250" height="55"/></a>
+    <a href="https://www.producthunt.com/products/openlogi?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-openlogi" target="_blank" rel="noopener noreferrer">
+    <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=openlogi&amp;theme=dark&amp;period=daily">
+        <source media="(prefers-color-scheme: light)" srcset="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=openlogi&amp;theme=light&amp;period=daily">
+        <img alt="OpenLogi - A local-first alternative to Logitech Options+ | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=openlogi&amp;theme=light&amp;period=daily">
+    </picture></a>
 </p>
 
 > **Fed up with Options+? Try OpenLogi.**
@@ -40,21 +45,24 @@ Things OpenLogi does that Options+ won't:
 
 - **Stay light.** Native Rust + GPUI.
 - **Run on Linux.** Linux is a first-class platform in OpenLogi.
-- **Gestures on any button.** Give the gesture role to any physical button — or turn gestures off entirely.
+- **Gestures on supported buttons.** Assign gesture actions to supported controls — or turn gestures off entirely.
 - **Plain-text config.** Everything is one TOML file you can sync between machines however you like.
-- **Script it.** A real CLI alongside the GUI.
+- **Script it.** A real CLI alongside the GUI, with [hardware diagnostics](docs/USAGE.md) for DPI, pointer scaling, and SmartShift.
 
 ## Features
 
 - Devices connected over Logi Bolt receivers, Unifying receivers, Bluetooth, or a wired connection, with battery percentage and charge state
-- Button remapping via the OS input hook: a built-in action catalog plus custom keyboard shortcuts authored in the TOML config¹
+- Easy-Switch channels: the name, OS, and connection of the computer paired on each channel, with a rename on devices that allow it (`0x1815`, supported devices)
+- Button remapping via the OS input hook: a built-in action catalog plus custom keyboard shortcuts authored in the TOML config, including independent short/long-press actions and hold-until-release chords for push-to-talk¹
 - Per-application profile overlays that auto-switch on app focus (macOS + Windows; Linux on X11 / XWayland only)
 - Litra lights: power, brightness, and color temperature, with optional auto power that follows camera activity
 
 **Mouse**
 
 - Capture and remap the middle, mode-shift, and thumbwheel buttons (middle everywhere, the rest where the device exposes them)
-- Per-direction gesture bindings with live capture, on any capable button
+- Per-direction gesture bindings with live capture on supported buttons: Back/Forward, DPI/ModeShift, the dedicated gesture button, and the haptic panel
+  - DPI/ModeShift gestures require device-reported diversion and raw-XY support.
+  - Primary clicks and wheel controls cannot be newly assigned gestures; existing Middle Click gesture bindings are preserved.
 - Actions Ring: a cursor-centred, eight-slot overlay of actions (`ShowActionsRing`), with per-application layouts
 - DPI control with presets and Cycle / Set-preset actions (`0x2201`)
 - SmartShift wheel: mode toggle, sensitivity, and a permanent-ratchet panel (`0x2111`)
@@ -69,7 +77,7 @@ Things OpenLogi does that Options+ won't:
 
 - Any Logitech UVC webcam (Brio, StreamCam, the C920 series, …), plug and play
 - Live preview that opens the camera only while you watch — leaving it releases the camera entirely and the LED goes off
-- Image controls written straight to the UVC hardware — zoom, focus, exposure, brightness, contrast, saturation, sharpness, white balance, tint, anti-flicker, and low-light compensation, with auto-mode toggles for focus / exposure / white balance — so changes apply in Meet / Zoom / OBS and every other app using the camera
+- Image controls written straight to the UVC hardware — zoom, pan, tilt, focus, exposure, brightness, contrast, saturation, sharpness, gain, backlight compensation, white balance, tint, anti-flicker, and low-light compensation, with auto-mode toggles for focus / exposure / white balance — so changes apply in Meet / Zoom / OBS and every other app using the camera
 - One-click profiles: built-in Default / Streaming / Video call plus custom snapshots; settings persist per camera and are written back to the hardware on the next view
 
 ¹ Media key actions use D-Bus MPRIS on Linux; a handful of macOS-specific actions have no universal Linux equivalent and are no-ops. Windows maps platform actions to native equivalents where available.
@@ -105,21 +113,30 @@ before the official cask autobump lands. Install either `openlogi` or
 
 ### Linux
 
-Download the package for your distribution from the
-[latest release](https://github.com/AprilNEA/OpenLogi/releases/latest):
+Download the installer over HTTPS, inspect it, then run it. Do not pipe it into
+a shell:
 
 ```sh
-# Debian / Ubuntu
-sudo dpkg -i openlogi_*.deb
-
-# Fedora / RHEL
-sudo rpm -i openlogi-*.rpm
-
-# Arch Linux
-sudo pacman -U openlogi-*.pkg.tar.zst
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  --fail --location --silent --show-error \
+  --retry 3 --retry-connrefused \
+  --output openlogi-install.sh \
+  https://raw.githubusercontent.com/AprilNEA/OpenLogi/master/packaging/linux/install.sh
+less openlogi-install.sh
+sh openlogi-install.sh
+rm openlogi-install.sh
 ```
 
+The script detects apt, dnf, yum, zypper, rpm, or pacman; selects the exact
+`.deb`, `.rpm`, or `.pkg.tar.zst` for the machine; authenticates its detached
+signature with OpenLogi's embedded minisign public key; and verifies its entry
+in the release `SHA256SUMS` before invoking the package manager with `sudo`.
+Install `minisign` through your distribution first. Run the script as your
+normal user, not with `sudo`. It installs the latest release by default. Use
+`--version`, `--package-manager`, `--no-start`, or `--dry-run` when needed.
+
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
+Pre-built packages require GLIBC 2.35 or newer (Ubuntu 22.04 baseline).
 
 NixOS users can instead import the repository's module, which installs the
 package and udev rules and starts the agent with the graphical session:
@@ -146,15 +163,15 @@ package and udev rules and starts the agent with the graphical session:
 
 All Linux packages install udev rules that grant your user access to
 `/dev/hidraw*`, `/dev/uinput` and your Logitech mouse's `/dev/input/event*`
-node without `sudo`. The NixOS module starts the agent automatically; after a
-`.deb`, `.rpm`, or `.pkg.tar.zst` installation, enable it for your user:
+node without `sudo`. The installer and NixOS module start the agent
+automatically; after a manual package installation, enable it for your user:
 
 ```sh
 systemctl --user enable --now openlogi-agent.service
 ```
 
-See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for complete NixOS options,
-manual / source installs, and distros without systemd.
+See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for fixed-version installs,
+complete NixOS options, source installs, and distros without systemd.
 
 ### Windows
 
@@ -183,11 +200,12 @@ See [USAGE.md](docs/USAGE.md)
 
 ## Configuration
 
-See [CONFIGURATION.md](docs/CONFIGURATION.md)
+Settings use plain TOML; saves preserve symlinked config files. See
+[CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Developing
 
-See [DEVELOPMENT.md](docs/DEVELOPMENT.md)
+See [DEVELOPMENT.md](docs/DEVELOPMENT.md), including [macOS input-hook safety](docs/DEVELOPMENT.md#macos-input-hook-safety).
 
 ## Acknowledgments
 
@@ -225,4 +243,4 @@ your own projects, forks, or distributions without prior written permission.
 
 ## Repo activity
 
-![Repobeats analytics image](https://repobeats.axiom.co/api/embed/4a0b576a03e9d528ad31ccf4797a1286c045d021.svg "Repobeats analytics image")
+![Repobeats analytics image](https://repobeats.com/AprilNEA/OpenLogi "Repobeats analytics image")

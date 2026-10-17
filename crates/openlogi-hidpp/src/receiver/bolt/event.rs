@@ -32,9 +32,6 @@ enum Notification {
 
     /// Device discovery was enabled or disabled.
     DeviceDiscoveryStatus = 0x53,
-
-    /// A pairing attempt progressed, succeeded, or failed.
-    PairingStatus = 0x54,
 }
 
 /// The two payload kinds a [`Notification::DeviceDiscovery`] report carries,
@@ -56,8 +53,10 @@ enum DiscoveryPart {
 /// drops.
 ///
 /// Kept separate from the message listener in [`super::Receiver::new`] so the
-/// wire layout is reachable from tests without a HID channel behind it.
-pub(super) fn decode(msg: &v10::Message) -> Option<Event> {
+/// wire layout is reachable from consumers and tests without a HID channel
+/// behind it.
+#[must_use]
+pub fn decode(msg: &v10::Message) -> Option<Event> {
     let header = msg.header();
     let payload = msg.extend_payload();
 
@@ -79,7 +78,7 @@ pub(super) fn decode(msg: &v10::Message) -> Option<Event> {
             // instead of dropping the event, which would hide the device
             // entirely.
             kind: DeviceKind::from(payload[1] & 0x0f),
-            encrypted: payload[1] & (1 << 5) != 0,
+            encrypted: crate::receiver::connection_encrypted(payload[0], payload[1]),
             online: payload[1] & (1 << 6) == 0,
             wpid: u16::from_le_bytes([payload[2], payload[3]]),
         })),
@@ -103,16 +102,6 @@ pub(super) fn decode(msg: &v10::Message) -> Option<Event> {
 
         Notification::DeviceDiscoveryStatus => Some(Event::DeviceDiscoveryStatus {
             discovery_enabled: payload[0] == 0x00,
-        }),
-
-        Notification::PairingStatus => Some(Event::PairingStatus {
-            device_address: address6(&payload, 2),
-            // `payload[0]` carries some further status this crate does not
-            // model. An unrecognised error code still means "pairing failed" —
-            // dropping it would turn the failure into a session timeout, so
-            // carry the raw code instead.
-            pairing_error: (payload[1] != 0x00).then(|| PairingError::from(payload[1])),
-            slot: (payload[8] != 0x00).then_some(payload[8]),
         }),
 
         Notification::PairingPasskeyRequest => Some(Event::PairingPasskeyRequest {
@@ -174,14 +163,14 @@ fn passkey(payload: &[u8; 17]) -> Option<&str> {
 ///
 /// You can listen to these events using [`super::Receiver::listen`]. Only
 /// enabled notifications as indicated by
-/// [`super::Receiver::get_notification_state`] are emitted.
+/// [`super::Receiver::get_notification_flags`] are emitted.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub enum Event {
     /// Is emitted whenever a device connects to or disconnects from the
     /// receiver, but only if
-    /// [`NotificationState::wireless_notifications`](super::NotificationState::wireless_notifications)
+    /// [`NotificationFlags::WIRELESS`](crate::receiver::NotificationFlags::WIRELESS)
     /// is enabled.
     ///
     /// Can be triggered for all paired devices using
@@ -242,19 +231,6 @@ pub enum Event {
 
         /// Discovered device name.
         name: String,
-    },
-
-    /// Is emitted whenever the status of a pairing process changes.
-    PairingStatus {
-        /// BTLE address of the device being paired.
-        device_address: [u8; 6],
-
-        /// Optional pairing error reported by the receiver.
-        pairing_error: Option<PairingError>,
-
-        /// The receiver slot the newly paired device was paired to. This can be
-        /// used as the device index for subsequent operations.
-        slot: Option<u8>,
     },
 
     /// Is emitted once the receiver requests a passkey to be entered on a
@@ -356,23 +332,6 @@ pub enum DeviceKind {
     Headset = 0x0d,
 }
 
-/// Represents an error during device pairing.
-///
-/// This is reported by the [`Event::PairingStatus`] event.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, FromPrimitive, IntoPrimitive)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
-#[repr(u8)]
-pub enum PairingError {
-    /// Device timed out during pairing.
-    DeviceTimeout = 0x01,
-    /// Pairing failed.
-    Failed = 0x02,
-    /// An error code this crate does not model; carries the raw byte.
-    #[num_enum(catch_all)]
-    Other(u8),
-}
-
 /// Represents the type of a single passkey press.
 ///
 /// This is reported by the [`Event::PairingPasskeyPressed`] event, which also
@@ -396,8 +355,7 @@ pub enum PairingPasskeyPressType {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeviceConnection, DeviceKind, Event, PairingError, PairingPasskeyPressType, decode,
-        discovery_name,
+        DeviceConnection, DeviceKind, Event, PairingPasskeyPressType, decode, discovery_name,
     };
     use crate::{
         protocol::v10::{Message, MessageHeader},
@@ -448,8 +406,8 @@ mod tests {
     #[test]
     fn device_connection_decodes_its_status_bits() {
         // Bit 5 is the link encryption flag and bit 6 is *inverted*: it is set
-        // when the device is offline. Bolt puts encryption on a different bit
-        // than Unifying does (bit 4), so this is not a shared layout.
+        // when the device is offline. Unifying uses the same layout — bit 4 is
+        // the software-present flag on both receivers.
         let connection = |status: u8| {
             let mut payload = [0u8; 17];
             payload[1] = status;
@@ -466,6 +424,29 @@ mod tests {
         let plain_offline = connection(1 << 6);
         assert!(!plain_offline.encrypted);
         assert!(!plain_offline.online);
+    }
+
+    #[test]
+    fn a_bolt_protocol_byte_means_an_encrypted_link() {
+        // Byte 3 of the notification is the link protocol; 0x10 is Bolt, which
+        // is encrypted even with bit 5 clear (Solaar: `address == 0x10`).
+        let connection = |protocol: u8, status: u8| {
+            let mut payload = [0u8; 17];
+            payload[0] = protocol;
+            payload[1] = status;
+            match decode(&notification(1, 0x41, payload)) {
+                Some(Event::DeviceConnection(connection)) => connection,
+                other => panic!("expected a device connection, got {other:?}"),
+            }
+        };
+        assert!(connection(0x10, 0x02).encrypted);
+        assert!(connection(0x10, 0x02).online);
+        let offline = connection(0x10, (1 << 6) | 0x02);
+        assert!(offline.encrypted);
+        assert!(!offline.online);
+        // Another protocol byte leaves bit 5 as the only source.
+        assert!(!connection(0x04, 0x02).encrypted);
+        assert!(connection(0x04, (1 << 5) | 0x02).encrypted);
     }
 
     #[test]
@@ -550,39 +531,6 @@ mod tests {
             enabled(0x01),
             Event::DeviceDiscoveryStatus {
                 discovery_enabled: false
-            }
-        );
-    }
-
-    #[test]
-    fn pairing_status_carries_an_unmodelled_error_code_rather_than_dropping_it() {
-        // Dropping an unrecognised code would turn a reported failure into a
-        // silent session timeout.
-        let mut payload = [0u8; 17];
-        payload[1] = 0x7f;
-        payload[2..8].copy_from_slice(&[9, 8, 7, 6, 5, 4]);
-        payload[8] = 2;
-
-        assert_eq!(
-            decode(&from_receiver(0x54, payload)).unwrap(),
-            Event::PairingStatus {
-                device_address: [9, 8, 7, 6, 5, 4],
-                pairing_error: Some(PairingError::Other(0x7f)),
-                slot: Some(2),
-            }
-        );
-    }
-
-    #[test]
-    fn pairing_status_reports_success_as_no_error_and_slot_zero_as_none() {
-        let payload = [0u8; 17];
-
-        assert_eq!(
-            decode(&from_receiver(0x54, payload)).unwrap(),
-            Event::PairingStatus {
-                device_address: [0; 6],
-                pairing_error: None,
-                slot: None,
             }
         );
     }

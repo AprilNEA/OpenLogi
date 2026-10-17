@@ -18,8 +18,8 @@ use crate::channel::route::DeviceRoute;
 use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
 
 // DpiCapabilities and DpiInfo are pure IPC wire data with no HID++ I/O, so
-// they live in `openlogi_core::hid::dpi`; re-exported here unchanged so this
-// module's own API surface doesn't churn.
+// they live in `openlogi_core::hid::dpi`; the DPI writes name them through
+// here.
 pub use openlogi_core::hid::dpi::{Dpi, DpiCapabilities, DpiInfo};
 
 /// Sensor 0 is the only sensor OpenLogi drives: the UI exposes one DPI value
@@ -116,24 +116,18 @@ impl DpiFeature {
             Self::Adjustable(feature) => feature.set_sensor_dpi(SENSOR, dpi).await,
             Self::Extended(feature) => {
                 // `setSensorDpiParameters` writes DPI X, DPI Y and lift-off
-                // distance in one packet with no "leave unchanged" encoding, so
-                // read the current parameters first and put back what we are
-                // not asked to change. Writing a bare `lod` would silently
-                // retune the sensor's lift-off height.
+                // distance in one packet with no "leave unchanged" encoding.
+                // Which of Y and LOD the packet may carry is the sensor's
+                // capability bits, not a guess from the values a parameters
+                // read returns. The current LOD is put back so the write does
+                // not retune the lift-off height, and an independent Y axis is
+                // kept locked to X — the UI exposes a single DPI.
+                let capabilities = feature.get_sensor_capabilities(SENSOR).await?.capabilities;
                 let current = feature.get_sensor_dpi_parameters(SENSOR).await?;
                 feature
                     .set_sensor_dpi_parameters(
                         SENSOR,
-                        SetDpiParameters {
-                            dpi_x: dpi,
-                            // The spec has the host send 0 for dpiY when the
-                            // sensor has no independent Y axis, and reports 0
-                            // on read in exactly that case. When it does have
-                            // one, keep the axes locked together — the UI
-                            // exposes a single DPI.
-                            dpi_y: if current.dpi_y == 0 { 0 } else { dpi },
-                            lod: current.lod,
-                        },
+                        SetDpiParameters::for_sensor(capabilities, dpi, dpi, current.lod),
                     )
                     .await
             }
@@ -284,6 +278,11 @@ pub async fn set_dpi(
 /// The DPI write itself, on an already-open channel at HID++ `index`. Shared by
 /// [`set_dpi`] (which opens a fresh channel) and [`set_dpi_on`]
 /// (which reuses one).
+///
+/// Fails with [`WriteError::DpiUnsupported`], without writing, when `dpi` is
+/// not in the device-reported supported list, and with
+/// [`WriteError::DpiNotApplied`] when the device still reads back a different
+/// value after one re-write.
 pub(super) async fn set_dpi_on_channel(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,
@@ -293,31 +292,54 @@ pub(super) async fn set_dpi_on_channel(
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let feature = DpiFeature::open(&mut device).await?;
-    feature
-        .set_dpi(dpi)
-        .await
-        .map_err(|e| classify_hidpp_error(e, HidppOperation::WriteDpi, feature.id()))?;
-    // Read back to confirm the firmware accepted the value. A mismatch is a
-    // silent failure mode that's otherwise invisible — devices in low-power
-    // states or with unsupported DPI ranges can ACK the write yet keep the old
-    // value. We log a warning but still return Ok because the request reached
-    // the device.
-    if let Ok(actual) = feature.current_dpi().await {
-        if actual == dpi {
-            debug!(index, %dpi, "wrote DPI (verified)");
-        } else {
-            tracing::warn!(
-                index,
-                requested = %dpi,
-                %actual,
-                "DPI write accepted but device reports a different value — \
-                 likely out of the device's supported range"
-            );
-        }
-    } else {
-        debug!(index, %dpi, "wrote DPI (read-back skipped)");
+    let feature_hex = feature.id();
+    let write_error = |e| classify_hidpp_error(e, HidppOperation::WriteDpi, feature_hex);
+    // Only a value the device itself reports is ever written. Every caller
+    // reaches this with a value from somewhere else — a config file, another
+    // device's settings, an IPC client — and firmware handed an unsupported
+    // DPI may clamp it, ignore it or reject it, none of which the caller asked
+    // for.
+    let supported = DpiCapabilities::new(feature.supported_dpi().await.map_err(write_error)?)?;
+    if !supported.contains(dpi) {
+        return Err(WriteError::DpiUnsupported { requested: dpi });
     }
-    Ok(())
+    feature.set_dpi(dpi).await.map_err(write_error)?;
+    // Read back to confirm the firmware accepted the value. A mismatch is a
+    // silent failure mode that's otherwise invisible — a device in a low-power
+    // state can ACK the write yet keep the old value. A single re-write
+    // disambiguates: firmware still drowsy from a link re-establishment
+    // usually takes the second write, and a device that keeps a different
+    // value after that has not applied the request, which the caller is told.
+    // A failed read-back leaves the acknowledged write standing.
+    let Ok(actual) = feature.current_dpi().await else {
+        debug!(index, %dpi, "wrote DPI (read-back skipped)");
+        return Ok(());
+    };
+    if actual == dpi {
+        debug!(index, %dpi, "wrote DPI (verified)");
+        return Ok(());
+    }
+    feature.set_dpi(dpi).await.map_err(write_error)?;
+    match feature.current_dpi().await {
+        Ok(retried) if retried == dpi => {
+            tracing::info!(
+                index,
+                %dpi,
+                first_readback = %actual,
+                "DPI write landed on retry — first write was ACKed but dropped \
+                 (device likely mid link re-establishment)"
+            );
+            Ok(())
+        }
+        Ok(retried) => Err(WriteError::DpiNotApplied {
+            requested: dpi,
+            actual: retried,
+        }),
+        Err(_) => {
+            debug!(index, %dpi, "re-wrote DPI (read-back skipped)");
+            Ok(())
+        }
+    }
 }
 
 /// Write DPI on an already-open [`SharedChannel`] — the fast path that skips
@@ -330,3 +352,6 @@ pub async fn set_dpi_on(shared: &SharedChannel, dpi: Dpi) -> Result<(), WriteErr
 pub async fn get_dpi_info_on(shared: &SharedChannel) -> Result<DpiInfo, WriteError> {
     get_dpi_info_on_channel(shared.channel(), shared.device_index()).await
 }
+
+#[cfg(test)]
+mod tests;

@@ -15,7 +15,7 @@ name = "openlogi-overlay"
 path = "src/main.rs"
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core" }
+openlogi-core = { path = "../openlogi-core", features = ["logging", "worker"] }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-ui = { path = "../openlogi-ui" }
@@ -23,20 +23,14 @@ anyhow = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 rust-i18n = "4"
-succession = "0.1"
+succession = "0.2"
 tarpc = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
-# Windows exe resources (app icon + VERSIONINFO) — see build.rs. Pinned to the
-# version already in Cargo.lock as gpui's own build-dependency, so the resolve
-# adds an edge, not a crate, and the pinned gpui rev cannot move.
 [build-dependencies]
 embed-resource = "3.0.9"
 
-# Native window policy for the ring panel — see src/platform.rs, and
-# crates/openlogi-desktop/src/platform/AGENTS.md for the rules this code follows.
 [target.'cfg(target_os = "macos")'.dependencies]
 # CGGetActiveDisplayList/CGDisplayBounds: placing the ring on the cursor's
 # display needs global display bounds, which GPUI's display API doesn't expose
@@ -46,6 +40,10 @@ objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSEvent", "block2"] }
 # NSEvent global-monitor handlers are ObjC blocks (click-away dismissal).
 block2 = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6"
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 
 [lints]
 workspace = true

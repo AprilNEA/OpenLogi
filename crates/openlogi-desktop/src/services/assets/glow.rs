@@ -50,7 +50,7 @@ struct MetaGlow {
 
 /// One horizontal run of inter-key holes, normalized to the mask's `[0, 1]`
 /// extent so it scales to whatever size the device image renders at.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GlowSeg {
     pub x: f32,
     pub y: f32,
@@ -62,7 +62,7 @@ pub(crate) struct GlowSeg {
 /// ratio, ready to paint over the device image at any size. Decoded once per
 /// asset resolve; the segment list is the entire runtime footprint — there is
 /// no recoloured texture, so a session that cycles colours costs nothing extra.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct GlowGeometry {
     pub aspect: f32,
     pub segments: Vec<GlowSeg>,

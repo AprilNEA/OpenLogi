@@ -1,41 +1,28 @@
-//! Accessibility permission polling watcher.
+//! Accessibility permission watcher.
 
-use std::thread;
 use std::time::Duration;
 
 use openlogi_hook::Hook;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+
+use super::poll::{self, Poll};
 
 /// Watch macOS Accessibility permission changes.
-pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<bool> {
-    let (tx, rx) = mpsc::unbounded_channel();
-
+///
+/// Read for as long as a hook is installed: an active event tap that outlives
+/// its grant wedges system input until reboot, so the agent has to learn about
+/// a revocation on its own (see `crates/openlogi-hook/AGENTS.md`). The hook's
+/// own probe cue is the safety path; this feeds the status clients see.
+pub fn spawn(heartbeat: Duration) -> mpsc::UnboundedReceiver<bool> {
     if !cfg!(target_os = "macos") {
-        let _ = tx.send(true);
-        let _ = period;
-        return rx;
+        // Linux and Windows gate the hook below the privacy layer, so there is
+        // nothing here that can change.
+        return poll::constant(true);
     }
-
-    let spawn_result = thread::Builder::new()
-        .name("openlogi-accessibility-watcher".into())
-        .spawn(move || {
-            let mut last: Option<bool> = None;
-            loop {
-                let granted = Hook::has_accessibility();
-                if last != Some(granted) {
-                    debug!(granted, "accessibility trust changed");
-                    if tx.send(granted).is_err() {
-                        debug!("accessibility watcher receiver dropped — exiting");
-                        return;
-                    }
-                    last = Some(granted);
-                }
-                thread::sleep(period);
-            }
-        });
-    if let Err(e) = spawn_result {
-        warn!(error = %e, "could not spawn accessibility watcher — gate won't auto-dismiss");
+    Poll {
+        name: "openlogi-accessibility-watcher",
+        heartbeat,
+        degrades: "the permission gate won't auto-dismiss",
     }
-    rx
+    .on_change(Hook::has_accessibility)
 }

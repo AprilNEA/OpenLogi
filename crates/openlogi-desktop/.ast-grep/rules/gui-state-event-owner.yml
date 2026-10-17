@@ -1,0 +1,43 @@
+# Owner: openlogi-desktop's state module — which StateEvent a change to
+# AppState causes. A mutator returns it as StateEvents and AppState::apply is
+# the one place that emits. services/device_reads.rs is in scope of the owner:
+# it holds the state entity's own query observers, not a view.
+id: gui-state-event-owner
+language: rust
+severity: error
+message: Which StateEvent a change causes is its mutator's call. Return StateEvents from the mutator and run it through AppState::apply; do not pick or emit a StateEvent here.
+note: |
+  Views once wrapped every mutator in read-key, mutate, emit, each picking the
+  event itself, and five panels grew their own wrapper for it. See "Single
+  source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/state.rs
+  - crates/openlogi-desktop/src/state/**
+  - crates/openlogi-desktop/src/services/device_reads.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    # Emitting an event picked at the call site.
+    - kind: call_expression
+      all:
+        - has:
+            field: function
+            kind: field_expression
+            has:
+              field: field
+              regex: '^emit$'
+        - has:
+            field: arguments
+            regex: 'StateEvent::'
+    # Building the events a mutator should have returned.
+    - pattern: StateEvents::from($$$)
+    - kind: call_expression
+      pattern: $EVENT.into()
+      has:
+        field: function
+        has:
+          field: value
+          regex: 'StateEvent::'

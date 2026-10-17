@@ -2,14 +2,18 @@
 //! and raw-XY reporting, the mechanism behind MX-line reprogrammable controls.
 //!
 //! The full protocol wrapper lives in `openlogi-hidpp`; this module keeps the
-//! OpenLogi-facing compatibility API used by gesture/button orchestration:
-//! `getCount` / `getCtrlIdInfo` (locate a control and confirm it can divert raw
-//! XY) and `setCidReporting` (turn diversion on or off). While a control is
-//! diverted with raw-XY reporting, the device emits two unsolicited events,
-//! decoded by [`decode_event`]:
+//! raw-CID accessor the capture and host-switch sessions drive: `getCount` /
+//! `getCtrlIdInfo` (walk the control table and confirm a control can divert or
+//! report raw XY), `getCidReporting` (snapshot a control before arming it) and
+//! `setCidReporting` (turn diversion on or off, and hand the control back).
+//! While a control is diverted, the device emits these unsolicited events,
+//! the first two decoded by [`decode_event`] and the third by
+//! [`decode_raw_wheel_event`]:
 //!
 //! - function `0` `divertedButtonsEvent` — up to four currently-pressed CIDs.
 //! - function `1` `rawXYEvent` — signed `dx`/`dy` while a raw-XY control is held.
+//! - function `4` `divertedRawWheel` — the main wheel's movement while a
+//!   control diverted with raw-wheel reporting is held, in place of scrolling.
 //!
 //! Wire formats cross-checked against Solaar's `hidpp20.py` and
 //! `notifications.py`.
@@ -24,7 +28,7 @@ use hidpp::{
 
 mod event;
 
-pub use event::{RawControlEvent, decode_event};
+pub use event::{RawControlEvent, RawWheelEvent, decode_event, decode_raw_wheel_event};
 pub use hidpp_reprog::{
     AnalyticsKeyEvent, CidFlags, CidInfo, CidReporting, CidReportingChange, CidReportingChangeEcho,
     ControlId, GroupMask, RawWheelResolution, ReprogControlsCapabilities, ReprogControlsEvent,
@@ -48,9 +52,10 @@ pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 /// Reverse-engineered on real hardware (MX Master 4, Bolt receiver); not in
 /// the published `0x1b04` control-ID lists. Press/release arrive as
 /// `divertedButtonsEvent` with this CID, and while touched the panel streams
-/// relative raw-XY at ~125 Hz exactly like the dedicated gesture button —
-/// except that the first raw-XY sample after contact is a large position jump
-/// that must be discarded before feeding a swipe accumulator.
+/// relative raw-XY at ~125 Hz exactly like the dedicated gesture button. Its
+/// first raw-XY sample after contact is a large position jump; like every
+/// gesture source's first sample, it is discarded before feeding a swipe
+/// accumulator.
 ///
 /// The typed source of truth is [`control_ids::HAPTIC_PANEL`].
 pub const HAPTIC_PANEL_CID: u16 = control_ids::HAPTIC_PANEL.0;
@@ -117,22 +122,17 @@ impl CtrlIdInfo {
         self.typed_flags().supports_raw_xy()
     }
 
-    /// Whether the control can report force raw-XY data while held.
+    /// Whether the control can report the main wheel's movement while held,
+    /// in place of scrolling — required for a wheel-hold button.
     #[must_use]
-    pub fn supports_force_raw_xy(self) -> bool {
-        self.typed_flags().supports_force_raw_xy()
+    pub fn supports_raw_wheel(self) -> bool {
+        self.typed_flags().supports_raw_wheel()
     }
 
     /// Whether the control can report analytics key events.
     #[must_use]
     pub fn supports_analytics_events(self) -> bool {
         self.typed_flags().supports_analytics_key_events()
-    }
-
-    /// Whether the control can report raw wheel data.
-    #[must_use]
-    pub fn supports_raw_wheel(self) -> bool {
-        self.typed_flags().supports_raw_wheel()
     }
 }
 
@@ -150,11 +150,10 @@ impl From<CidInfo> for CtrlIdInfo {
 ///
 /// Construct with the feature index obtained from the device's root feature
 /// (`get_feature(`[`FEATURE_ID`]`)`), then call the functions below. Cheap to
-/// clone (an `Arc` plus two indices).
+/// clone (an `Arc` plus the feature index).
 #[derive(Clone)]
 pub struct ReprogControlsV4 {
     inner: Arc<hidpp_reprog::ReprogControlsFeature>,
-    device_index: u8,
     feature_index: u8,
 }
 
@@ -168,7 +167,6 @@ impl ReprogControlsV4 {
                 device_index,
                 feature_index,
             )),
-            device_index,
             feature_index,
         }
     }
@@ -178,12 +176,6 @@ impl ReprogControlsV4 {
     #[must_use]
     pub fn feature_index(&self) -> u8 {
         self.feature_index
-    }
-
-    /// The device index this accessor talks to.
-    #[must_use]
-    pub fn device_index(&self) -> u8 {
-        self.device_index
     }
 
     /// Number of reprogrammable controls the device exposes.
@@ -201,24 +193,6 @@ impl ReprogControlsV4 {
         Ok(self.get_cid_info(index).await?.into())
     }
 
-    /// Scan the control table for the control with `cid`. `None` if the device
-    /// doesn't expose it.
-    pub async fn find_cid_info(&self, cid: ControlId) -> Result<Option<CidInfo>, Hidpp20Error> {
-        let count = self.get_count().await?;
-        for index in 0..count {
-            let info = self.get_cid_info(index).await?;
-            if info.cid == cid {
-                return Ok(Some(info));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Compatibility projection of [`Self::find_cid_info`].
-    pub async fn find_control(&self, cid: u16) -> Result<Option<CtrlIdInfo>, Hidpp20Error> {
-        Ok(self.find_cid_info(ControlId(cid)).await?.map(Into::into))
-    }
-
     /// Current reporting/remapping state for `cid`.
     pub async fn get_cid_reporting(&self, cid: u16) -> Result<CidReporting, Hidpp20Error> {
         self.inner.get_cid_reporting(ControlId(cid)).await
@@ -233,31 +207,17 @@ impl ReprogControlsV4 {
         self.inner.set_cid_reporting(ControlId(cid), change).await
     }
 
-    /// Feature-level v6 capabilities.
-    pub async fn get_capabilities(&self) -> Result<ReprogControlsCapabilities, Hidpp20Error> {
-        self.inner.get_capabilities().await
-    }
-
-    /// Reset all diverted/remapped control report settings on v6 devices that
-    /// advertise this capability.
-    pub async fn reset_all_cid_report_settings(&self) -> Result<(), Hidpp20Error> {
-        self.inner.reset_all_cid_report_settings().await
-    }
-
-    /// Set (or clear) temporary diversion and raw-XY reporting for `cid`.
-    ///
-    /// `remap` is left at `0` (no persistent remapping). After enabling, the
-    /// device emits [`RawControlEvent`]s on this feature index; clear both flags
-    /// on teardown to hand the control back to the firmware.
-    pub async fn set_cid_reporting(
-        &self,
-        cid: u16,
-        diverted: bool,
-        raw_xy: bool,
-    ) -> Result<(), Hidpp20Error> {
+    /// Divert `cid`'s reports to software. Raw XY stays off and remapping is
+    /// left untouched; the device then emits [`RawControlEvent`]s on this
+    /// feature index.
+    pub async fn divert_cid(&self, cid: u16) -> Result<(), Hidpp20Error> {
         self.set_cid_reporting_full(
             cid,
-            hidpp_reprog::CidReportingChange::temporary_diversion(diverted, raw_xy),
+            hidpp_reprog::CidReportingChange {
+                diverted: Some(true),
+                raw_xy: Some(false),
+                ..Default::default()
+            },
         )
         .await?;
         Ok(())

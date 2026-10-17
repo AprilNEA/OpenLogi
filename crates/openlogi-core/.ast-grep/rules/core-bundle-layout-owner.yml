@@ -1,0 +1,31 @@
+# Owner: openlogi_core::brand — the app bundle's layout: the LoginItems and
+# LaunchAgents directories, the helpers' bundle directories (named after
+# their display names), and the pre-rename names still found on old bundles.
+# Prose that merely names a helper is not layout. Tests may pin the literal
+# layout as an oracle; production code asks brand.
+id: core-bundle-layout-owner
+language: rust
+severity: error
+message: The app bundle's layout is openlogi_core::brand's (Helper, LOGIN_ITEMS_DIR, LAUNCH_AGENTS_DIR, helper_bundle_root); ask it instead of spelling a helper path or name here.
+note: |
+  Packaging, the app, and the agent each spelled the helper directories, and
+  two crates each resolved a helper's bundle root from its executable. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/**
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - kind: string_literal
+    - regex: 'Library/(LoginItems|LaunchAgents)|OpenLogi (Agent|Overlay)( Dev)?\.app|OpenLogi(Agent|Overlay)\.app'
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'

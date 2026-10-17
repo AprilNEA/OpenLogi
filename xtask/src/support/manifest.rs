@@ -32,7 +32,11 @@ struct Workspace {
 pub(crate) fn workspace_package(root: &Path) -> Result<WorkspacePackage> {
     let path = root.join("Cargo.toml");
     let text = fs_err::read_to_string(&path)?;
-    let manifest: Manifest =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    parse_workspace_package(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Parse `[workspace.package]` from a root manifest.
+pub(crate) fn parse_workspace_package(text: &str) -> Result<WorkspacePackage> {
+    let manifest: Manifest = toml::from_str(text).context("parsing workspace manifest")?;
     Ok(manifest.workspace.package)
 }
