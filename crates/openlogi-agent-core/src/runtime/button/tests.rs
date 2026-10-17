@@ -304,7 +304,7 @@ fn hook_actions_retain_the_press_time_target_across_focus_changes() {
     let input = owner.input();
     let target = ActionDispatchTarget::SafariProcess(417);
     let token = input
-        .try_hook_down_with_target(ButtonId::Back, None, target)
+        .try_hook_down_with_target(None, ButtonId::Back, None, target)
         .expect("Safari down should be queued");
     let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
         panic!("down should start the press lifecycle");
@@ -312,7 +312,12 @@ fn hook_actions_retain_the_press_time_target_across_focus_changes() {
     assert_eq!(started.target(), target);
 
     input
-        .try_hook_down_with_target(ButtonId::Forward, None, ActionDispatchTarget::Keyboard)
+        .try_hook_down_with_target(
+            None,
+            ButtonId::Forward,
+            None,
+            ActionDispatchTarget::Keyboard,
+        )
         .expect("post-focus-change down should be queued");
     assert!(matches!(
         recv_event(&received),
@@ -388,6 +393,7 @@ fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
         let current = PointerTarget::Desktop;
         let old_press = input
             .try_hook_down_with_target(
+                None,
                 ButtonId::Back,
                 None,
                 ActionDispatchTarget::for_pointer(Some(old), || Some(417)),
@@ -395,6 +401,7 @@ fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
             .expect("old down");
         let new_press = input
             .try_hook_down_with_target(
+                None,
                 ButtonId::Forward,
                 None,
                 ActionDispatchTarget::for_pointer(Some(current), || {
@@ -417,7 +424,7 @@ fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
         };
         assert_eq!(press.token(), &old_press);
         assert_eq!(reason, EndReason::Canceled(CancelReason::Invalidated));
-        assert!(input.try_hook_up(ButtonId::Forward));
+        assert!(input.try_hook_up(None, ButtonId::Forward));
         let ButtonRuntimeEvent::Ended { press, .. } = recv_event(&received) else {
             panic!("new target must survive");
         };
@@ -777,7 +784,7 @@ fn worker_schedules_the_long_action_without_a_capture_thread_timer() {
             ..
         }
     ));
-    assert!(input.try_hook_up(ButtonId::Back));
+    assert!(input.try_hook_up(None, ButtonId::Back));
     assert!(matches!(
         recv_event(&received),
         ButtonRuntimeEvent::Ended {
@@ -985,7 +992,7 @@ fn a_release_observed_before_the_threshold_wins_despite_worker_backlog() {
         recv_event(&received),
         ButtonRuntimeEvent::Started(_)
     ));
-    assert!(input.try_hook_up(ButtonId::Back));
+    assert!(input.try_hook_up(None, ButtonId::Back));
     thread::sleep(LONG_PRESS_THRESHOLD + Duration::from_millis(20));
     resume.send(()).expect("worker should still be blocked");
 

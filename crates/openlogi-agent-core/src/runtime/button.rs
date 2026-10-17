@@ -15,6 +15,7 @@ use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId, LONG_PRESS_THRESHOLD};
+use openlogi_hook::EventDevice;
 use tracing::warn;
 
 use super::ActionDispatchTarget;
@@ -95,19 +96,24 @@ impl HidppSessionId {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ButtonSource {
     /// Linux has one callback thread per grabbed device; macOS and Windows
-    /// expose one global callback thread.
-    OsHook(ThreadId),
+    /// expose one global callback thread, so the event's attributed device
+    /// keeps two mice pressing the same button from replacing each other.
+    OsHook(ThreadId, Option<EventDevice>),
     Hidpp(HidppSessionId),
 }
 
 impl ButtonSource {
     fn current_hook() -> Self {
-        Self::OsHook(thread::current().id())
+        Self::hook_device(None)
+    }
+
+    fn hook_device(device: Option<&EventDevice>) -> Self {
+        Self::OsHook(thread::current().id(), device.cloned())
     }
 
     fn device_key(&self) -> Option<&str> {
         match self {
-            Self::OsHook(_) => None,
+            Self::OsHook(..) => None,
             Self::Hidpp(session) => Some(session.device_key()),
         }
     }
@@ -362,6 +368,7 @@ enum ButtonCommand {
     Input { generation: u64, input: ButtonInput },
     CancelStalePress(PressToken),
     CancelSource(ButtonSource),
+    CancelHookThread(ThreadId),
     CancelHooks,
     CancelPointerExcept(openlogi_hook::PointerTarget),
     Wake,
@@ -410,8 +417,14 @@ impl ButtonState {
         self.cancel_where(|key| key.source == *source)
     }
 
+    fn cancel_hook_thread(&mut self, thread: ThreadId) -> Vec<ActivePress> {
+        self.cancel_where(
+            |key| matches!(key.source, ButtonSource::OsHook(owner, _) if owner == thread),
+        )
+    }
+
     fn cancel_hooks(&mut self) -> Vec<ActivePress> {
-        self.cancel_where(|key| matches!(key.source, ButtonSource::OsHook(_)))
+        self.cancel_where(|key| matches!(key.source, ButtonSource::OsHook(..)))
     }
 
     fn cancel_all(&mut self) -> Vec<ActivePress> {
@@ -490,20 +503,21 @@ impl ButtonInputHandle {
         button: ButtonId,
         binding: Option<&Binding>,
     ) -> Option<PressToken> {
-        self.try_hook_down_with_target(button, binding, ActionDispatchTarget::capture())
+        self.try_hook_down_with_target(None, button, binding, ActionDispatchTarget::capture())
     }
 
     pub(crate) fn try_hook_down_with_target(
         &self,
+        device: Option<&EventDevice>,
         button: ButtonId,
         binding: Option<&Binding>,
         target: ActionDispatchTarget,
     ) -> Option<PressToken> {
-        self.try_down(ButtonSource::current_hook(), button, binding, target)
+        self.try_down(ButtonSource::hook_device(device), button, binding, target)
     }
 
-    pub(crate) fn try_hook_up(&self, button: ButtonId) -> bool {
-        self.try_up(ButtonSource::current_hook(), button)
+    pub(crate) fn try_hook_up(&self, device: Option<&EventDevice>, button: ButtonId) -> bool {
+        self.try_up(ButtonSource::hook_device(device), button)
     }
 
     pub(crate) fn try_hook_key_down(
@@ -536,7 +550,7 @@ impl ButtonInputHandle {
     }
 
     pub(crate) fn cancel_hook_thread(&self) {
-        self.try_command(ButtonCommand::CancelSource(ButtonSource::current_hook()));
+        self.try_command(ButtonCommand::CancelHookThread(thread::current().id()));
     }
 
     pub(crate) fn cancel_hooks(&self) {

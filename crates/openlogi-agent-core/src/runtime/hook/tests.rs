@@ -4,6 +4,8 @@ use super::*;
 use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
 use openlogi_core::config::KeyModifiers;
 
+use super::super::button::{ButtonRuntimeEvent, CancelReason, EndReason};
+
 fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
 }
@@ -66,7 +68,7 @@ fn test_dispatcher() -> (
 fn accumulate_tags_a_committed_swipe_with_the_held_press() {
     let mut hold = HoldState::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, press.clone());
+    hold.begin(ButtonId::Back, None, press.clone());
     hold.swipe.backdate_hold_for_test();
 
     assert_eq!(
@@ -78,7 +80,7 @@ fn accumulate_tags_a_committed_swipe_with_the_held_press() {
         None,
         "commits at most once per hold"
     );
-    assert_eq!(hold.end(ButtonId::Back), Some((press, false)));
+    assert_eq!(hold.end(ButtonId::Back, None), Some((press, false)));
 }
 
 #[test]
@@ -86,17 +88,20 @@ fn a_same_button_repress_restarts_the_stale_hold() {
     let mut hold = HoldState::default();
     let old = token(1, ButtonId::Back);
     assert!(matches!(
-        hold.prepare_begin(ButtonId::Back),
+        hold.prepare_begin(ButtonId::Back, None),
         HoldAdmission::Begin
     ));
-    hold.begin(ButtonId::Back, old);
+    hold.begin(ButtonId::Back, None, old);
 
     let replacement = token(2, ButtonId::Back);
     assert!(
-        matches!(hold.prepare_begin(ButtonId::Back), HoldAdmission::Begin),
+        matches!(
+            hold.prepare_begin(ButtonId::Back, None),
+            HoldAdmission::Begin
+        ),
         "a same-button re-press is proof of a lost release"
     );
-    hold.begin(ButtonId::Back, replacement.clone());
+    hold.begin(ButtonId::Back, None, replacement.clone());
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
         hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -107,15 +112,15 @@ fn a_same_button_repress_restarts_the_stale_hold() {
 #[test]
 fn an_aged_hold_yields_to_a_new_buttons_press() {
     let mut hold = HoldState::default();
-    hold.begin(ButtonId::Back, token(1, ButtonId::Back));
+    hold.begin(ButtonId::Back, None, token(1, ButtonId::Back));
     hold.backdate_for_test();
 
     let replacement = token(2, ButtonId::Forward);
-    let HoldAdmission::Replace(stale) = hold.prepare_begin(ButtonId::Forward) else {
+    let HoldAdmission::Replace(stale) = hold.prepare_begin(ButtonId::Forward, None) else {
         panic!("an aged hold must yield to a new press");
     };
     assert_eq!(stale, token(1, ButtonId::Back));
-    hold.begin(ButtonId::Forward, replacement.clone());
+    hold.begin(ButtonId::Forward, None, replacement.clone());
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
         hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -127,10 +132,13 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
 fn begin_is_first_wins_while_a_hold_is_active() {
     let mut hold = HoldState::default();
     let first = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, first.clone());
+    hold.begin(ButtonId::Back, None, first.clone());
     hold.swipe.backdate_hold_for_test();
     assert!(
-        matches!(hold.prepare_begin(ButtonId::Forward), HoldAdmission::Refuse),
+        matches!(
+            hold.prepare_begin(ButtonId::Forward, None),
+            HoldAdmission::Refuse
+        ),
         "a second press must not hijack the active hold"
     );
 
@@ -138,17 +146,17 @@ fn begin_is_first_wins_while_a_hold_is_active() {
         hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
         Some((first.clone(), ButtonId::Back, GestureDirection::Right))
     );
-    assert_eq!(hold.end(ButtonId::Forward), None);
-    assert_eq!(hold.end(ButtonId::Back), Some((first, false)));
+    assert_eq!(hold.end(ButtonId::Forward, None), None);
+    assert_eq!(hold.end(ButtonId::Back, None), Some((first, false)));
 }
 
 #[test]
 fn end_matches_the_held_button_and_returns_its_token() {
     let mut hold = HoldState::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, press.clone());
-    assert_eq!(hold.end(ButtonId::Forward), None);
-    assert_eq!(hold.end(ButtonId::Back), Some((press, true)));
+    hold.begin(ButtonId::Back, None, press.clone());
+    assert_eq!(hold.end(ButtonId::Forward, None), None);
+    assert_eq!(hold.end(ButtonId::Back, None), Some((press, true)));
 }
 
 #[test]
@@ -171,25 +179,29 @@ fn resolve_gesture_click_prefers_explicit_then_falls_back_to_default() {
 
 #[test]
 fn fail_open_press_pairs_release() {
-    let mut fail_open = HashSet::new();
+    let mut fail_open = HashMap::new();
     assert_eq!(
-        remapped_press_disposition(ButtonId::Back, true, &mut fail_open),
+        remapped_press_disposition(
+            (ButtonId::Back, None),
+            Some(token(1, ButtonId::Back)),
+            &mut fail_open
+        ),
         EventDisposition::Suppress
     );
     assert_eq!(
-        remapped_release_disposition(ButtonId::Back, &mut fail_open),
+        remapped_release_disposition(&(ButtonId::Back, None), &mut fail_open),
         EventDisposition::Suppress
     );
     assert_eq!(
-        remapped_press_disposition(ButtonId::Forward, false, &mut fail_open),
+        remapped_press_disposition((ButtonId::Forward, None), None, &mut fail_open),
         EventDisposition::PassThrough
     );
     assert_eq!(
-        remapped_release_disposition(ButtonId::Forward, &mut fail_open),
+        remapped_release_disposition(&(ButtonId::Forward, None), &mut fail_open),
         EventDisposition::PassThrough
     );
     assert_eq!(
-        remapped_release_disposition(ButtonId::Forward, &mut fail_open),
+        remapped_release_disposition(&(ButtonId::Forward, None), &mut fail_open),
         EventDisposition::PassThrough
     );
 }
@@ -257,6 +269,7 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
             ButtonId::Back,
             true,
             Some(&mouse),
+            &[],
             &hooks,
             &dispatcher,
             || { panic!("pointer-scoped binding must not capture foreground Safari") }
@@ -288,6 +301,7 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
             ButtonId::Back,
             false,
             Some(&mouse),
+            &[],
             &hooks,
             &dispatcher,
             || { panic!("release does not retarget") }
@@ -307,6 +321,7 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
             ButtonId::Back,
             true,
             Some(&mouse),
+            &[],
             &hooks,
             &dispatcher,
             || None
@@ -323,6 +338,7 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
             ButtonId::Back,
             false,
             Some(&mouse),
+            &[],
             &hooks,
             &dispatcher,
             || { panic!("release does not retarget") }
@@ -362,6 +378,7 @@ fn queued_unidentified_pointer_action_retains_its_press_time_target() {
                 ButtonId::Back,
                 true,
                 Some(&mouse),
+                &[],
                 &hooks,
                 &dispatcher,
                 || focused_safari.get(),
@@ -401,6 +418,7 @@ fn queued_unidentified_pointer_action_retains_its_press_time_target() {
                 ButtonId::Back,
                 false,
                 Some(&mouse),
+                &[],
                 &hooks,
                 &dispatcher,
                 || panic!("release does not retarget"),
@@ -450,9 +468,15 @@ fn safari_target_never_relaxes_device_isolation() {
         for id in [ButtonId::Back, ButtonId::Forward] {
             for pressed in [true, false] {
                 assert_eq!(
-                    handle_button(id, pressed, source.as_ref(), &hooks, &dispatcher, || {
-                        Some(417)
-                    }),
+                    handle_button(
+                        id,
+                        pressed,
+                        source.as_ref(),
+                        &[],
+                        &hooks,
+                        &dispatcher,
+                        || Some(417)
+                    ),
                     EventDisposition::PassThrough
                 );
             }
@@ -586,4 +610,518 @@ fn resolve_gesture_click_falls_back_when_click_is_absent() {
         resolve_gesture_click(&empty, ButtonId::Forward),
         default_binding(ButtonId::Forward)
     );
+}
+
+/// Reproduces the sender-less-attribution hazard: a hold begins under a known
+/// source, a later release of the same button arrives with its attribution
+/// invalidated (the resolver's unreadable- or lost-holder case), and the hold must be
+/// cancelled there and then — not left for a stray pointer move to turn into
+/// a phantom swipe (the downstream state `HoldState::cancel_for` guards, not
+/// just the resolver's own cache checked by `senderless_button`'s tests).
+#[test]
+fn an_invalidated_attribution_cancels_the_hold_it_began_under() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(ButtonId::Back, BTreeMap::new())]),
+        ..HookMaps::default()
+    }));
+    let logitech = EventDevice {
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+    // `invalidated_sources` is only ever set on macOS, usually
+    // alongside `device: None` (see `MouseEvent::Button`'s doc), but
+    // `handle_button`'s policy split is platform-neutral: any source
+    // `button_source_may_remap` rejects takes the same branch. A
+    // non-remappable *known* device (a trackpad, rejected on every platform)
+    // drives that branch without relying on macOS's `None`-fails-closed
+    // rule, so this test is not vacuous on the Linux/Windows CI hosts that
+    // run it.
+    let trackpad = EventDevice {
+        product_name: Some("Apple Internal Keyboard / Trackpad".into()),
+        ..EventDevice::default()
+    };
+    let target = || Some(417);
+
+    // A hold begins under a known, remappable source.
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&logitech),
+            &[],
+            &hooks,
+            &dispatcher,
+            target
+        ),
+        EventDisposition::Suppress
+    );
+    assert!(
+        HOLD.with_borrow(|h| h.current.is_some()),
+        "hold must be active"
+    );
+    assert!(
+        matches!(
+            events.recv_timeout(Duration::from_secs(1)),
+            Ok(ButtonRuntimeEvent::Started(_))
+        ),
+        "the dispatcher must have accepted the lifecycle"
+    );
+
+    // The hold's attribution is lost. The event itself still can't be
+    // remapped, but it must cancel the hold it silently invalidated rather
+    // than leave it dangling.
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&trackpad),
+            std::slice::from_ref(&logitech),
+            &hooks,
+            &dispatcher,
+            target
+        ),
+        EventDisposition::PassThrough
+    );
+    assert!(
+        HOLD.with_borrow(|h| h.current.is_none()),
+        "the stale hold must not survive the invalidation"
+    );
+    assert!(
+        matches!(
+            events.recv_timeout(Duration::from_secs(1)),
+            Ok(ButtonRuntimeEvent::Ended {
+                reason: EndReason::Canceled(CancelReason::StaleHold),
+                ..
+            })
+        ),
+        "the dispatcher-owned lifecycle must be released, not just the thread-local pointer"
+    );
+
+    // The exact reported symptom: stray pointer motion after both physical
+    // releases must not resurrect a swipe from the cancelled hold.
+    assert_eq!(
+        HOLD.with_borrow_mut(|h| h.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0)),
+        None
+    );
+
+    assert!(owner.shutdown());
+}
+
+/// The held-binding half of the same hazard: a long-press accepted under a
+/// known source must not keep timing after a lost holder invalidates
+/// its attribution, because its own release will arrive unattributed and pass
+/// through without ever reaching the dispatcher.
+#[test]
+fn an_invalidated_attribution_cancels_the_held_binding_it_began_under() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        bindings: BTreeMap::from([(
+            ButtonId::Back,
+            Binding::LongPress(LongPressBinding::new(Action::Copy, Action::MissionControl)),
+        )]),
+        ..HookMaps::default()
+    }));
+    let logitech = EventDevice {
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+    // A non-remappable known source drives the rejected-source branch on
+    // every platform, as in the gesture-hold test above.
+    let trackpad = EventDevice {
+        product_name: Some("Apple Internal Keyboard / Trackpad".into()),
+        ..EventDevice::default()
+    };
+
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&logitech),
+            &[],
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)),
+        Ok(ButtonRuntimeEvent::Started(_))
+    ));
+
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&trackpad),
+            std::slice::from_ref(&logitech),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::PassThrough
+    );
+    assert!(
+        matches!(
+            events.recv_timeout(Duration::from_secs(1)),
+            Ok(ButtonRuntimeEvent::Ended {
+                reason: EndReason::Canceled(CancelReason::StaleHold),
+                ..
+            })
+        ),
+        "the held binding's lifecycle must be released"
+    );
+    assert!(
+        SUPPRESSED_PRESSES.with_borrow(HashMap::is_empty),
+        "a later attributed release must not be suppressed for the cancelled press"
+    );
+
+    assert!(owner.shutdown());
+}
+
+/// A press attributed in the same event that drops a lost holder's
+/// attribution cancels the stale hold even when the button is no longer a
+/// gesture, so nothing else would replace it.
+#[test]
+fn an_attributed_press_that_invalidates_a_lost_hold_cancels_it() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(ButtonId::Back, BTreeMap::new())]),
+        ..HookMaps::default()
+    }));
+    let logitech = EventDevice {
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+    let press = |invalidated: &[EventDevice]| {
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&logitech),
+            invalidated,
+            &hooks,
+            &dispatcher,
+            || None,
+        )
+    };
+
+    assert_eq!(press(&[]), EventDisposition::Suppress);
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)),
+        Ok(ButtonRuntimeEvent::Started(_))
+    ));
+
+    *hooks.write().unwrap() = HookMaps::default();
+    assert_eq!(
+        press(std::slice::from_ref(&logitech)),
+        EventDisposition::PassThrough
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)),
+        Ok(ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::StaleHold),
+            ..
+        })
+    ));
+    assert!(
+        HOLD.with_borrow(|h| h.current.is_none()),
+        "the stale hold must not survive the invalidation"
+    );
+
+    assert!(owner.shutdown());
+}
+
+fn two_logitech_mice() -> (EventDevice, EventDevice) {
+    let first = EventDevice {
+        product_id: Some(1),
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+    let second = EventDevice {
+        product_id: Some(2),
+        ..first.clone()
+    };
+    (first, second)
+}
+
+/// One mouse's lost attribution cancels only the hold that mouse began.
+#[test]
+fn an_invalidation_cancels_only_its_own_sources_hold() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(ButtonId::Back, BTreeMap::new())]),
+        ..HookMaps::default()
+    }));
+    let (holder, other) = two_logitech_mice();
+    let event = |pressed, device: Option<&EventDevice>, invalidated: &[EventDevice]| {
+        handle_button(
+            ButtonId::Back,
+            pressed,
+            device,
+            invalidated,
+            &hooks,
+            &dispatcher,
+            || None,
+        )
+    };
+
+    assert_eq!(event(true, Some(&holder), &[]), EventDisposition::Suppress);
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)),
+        Ok(ButtonRuntimeEvent::Started(_))
+    ));
+    assert_eq!(
+        event(false, Some(&other), std::slice::from_ref(&other)),
+        EventDisposition::PassThrough,
+        "another mouse's release must not end or suppress the hold"
+    );
+    assert!(HOLD.with_borrow(|h| h.current.is_some()));
+    assert!(
+        events.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the hold's lifecycle must not be cancelled"
+    );
+    assert_eq!(event(false, Some(&holder), &[]), EventDisposition::Suppress);
+    assert!(HOLD.with_borrow(|h| h.current.is_none()));
+
+    assert!(owner.shutdown());
+}
+
+/// A release is suppressed only when that same mouse's press was: another
+/// mouse's raw press would otherwise stay down at the OS.
+#[test]
+fn a_release_is_suppressed_only_for_the_source_whose_press_was() {
+    let (dispatcher, mut owner, _events) = test_dispatcher();
+    let (first, second) = two_logitech_mice();
+    for hooks in [
+        HookMaps {
+            bindings: BTreeMap::from([(ButtonId::Back, Action::Copy.into())]),
+            ..HookMaps::default()
+        },
+        HookMaps {
+            gestures: BTreeMap::from([(ButtonId::Back, BTreeMap::new())]),
+            ..HookMaps::default()
+        },
+    ] {
+        let hooks = Arc::new(RwLock::new(hooks));
+        let event = |pressed, device: &EventDevice| {
+            handle_button(
+                ButtonId::Back,
+                pressed,
+                Some(device),
+                &[],
+                &hooks,
+                &dispatcher,
+                || None,
+            )
+        };
+
+        assert_eq!(event(true, &first), EventDisposition::Suppress);
+        // The gesture hold refuses the second press and no binding remaps it.
+        if hooks.read().unwrap().bindings.is_empty() {
+            assert_eq!(event(true, &second), EventDisposition::PassThrough);
+            assert_eq!(event(false, &second), EventDisposition::PassThrough);
+        } else {
+            assert_eq!(
+                event(false, &second),
+                EventDisposition::PassThrough,
+                "a release whose press was never seen passes through"
+            );
+        }
+        assert_eq!(event(false, &first), EventDisposition::Suppress);
+        assert_eq!(event(false, &first), EventDisposition::PassThrough);
+    }
+
+    assert!(owner.shutdown());
+}
+
+/// The worker's events until `started` presses have all ended. Shutdown
+/// rides its own channel, so it would otherwise overtake queued edges.
+fn events_until_ended(
+    events: &mpsc::Receiver<ButtonRuntimeEvent>,
+    started: usize,
+) -> Vec<ButtonRuntimeEvent> {
+    let mut received = Vec::new();
+    let mut open = 0_usize;
+    let mut seen = 0;
+    while seen < started || open > 0 {
+        let event = events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("every accepted press must end");
+        match &event {
+            ButtonRuntimeEvent::Started(_) => {
+                seen += 1;
+                open += 1;
+            }
+            ButtonRuntimeEvent::Ended { .. } => open -= 1,
+            ButtonRuntimeEvent::Triggered { .. } => {}
+        }
+        received.push(event);
+    }
+    received
+}
+
+/// Back is a gesture button with a fallback binding, Forward a plain binding.
+fn gesture_and_bindings() -> SharedHookMaps {
+    Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(
+            ButtonId::Back,
+            BTreeMap::from([(GestureDirection::Right, Action::Paste)]),
+        )]),
+        bindings: BTreeMap::from([
+            (ButtonId::Back, Action::Copy.into()),
+            (ButtonId::Forward, Action::Cut.into()),
+        ]),
+        ..HookMaps::default()
+    }))
+}
+
+/// A second mouse's press of the held gesture button runs its own binding
+/// without cancelling the first mouse's hold, whose swipe still fires.
+#[test]
+fn another_mouses_press_leaves_the_gesture_hold_alone() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = gesture_and_bindings();
+    let (first, second) = two_logitech_mice();
+    let event = |pressed, device: &EventDevice| {
+        handle_button(
+            ButtonId::Back,
+            pressed,
+            Some(device),
+            &[],
+            &hooks,
+            &dispatcher,
+            || None,
+        )
+    };
+
+    assert_eq!(event(true, &first), EventDisposition::Suppress);
+    let Ok(ButtonRuntimeEvent::Started(held)) = events.recv_timeout(Duration::from_secs(1)) else {
+        panic!("the gesture hold must start");
+    };
+    assert_eq!(event(true, &second), EventDisposition::Suppress);
+    HOLD.with_borrow_mut(|h| h.swipe.backdate_hold_for_test());
+    handle_moved(GESTURE_SWIPE_THRESHOLD + 10, 0, &hooks, &dispatcher);
+    assert_eq!(event(false, &second), EventDisposition::Suppress);
+    assert_eq!(event(false, &first), EventDisposition::Suppress);
+
+    let mut events = events_until_ended(&events, 1);
+    events.insert(0, ButtonRuntimeEvent::Started(held.clone()));
+    assert!(owner.shutdown());
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ButtonRuntimeEvent::Triggered { press, action: Action::Paste }
+                if press.token() == held.token()
+        )),
+        "the first mouse's swipe must still fire"
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            ButtonRuntimeEvent::Ended {
+                reason: EndReason::Canceled(_),
+                ..
+            }
+        )),
+        "no press may be cancelled by another mouse's"
+    );
+}
+
+/// Every order of three actors each pressing then releasing, plus one swipe
+/// (`None`).
+fn interleave(
+    order: &mut Vec<Option<(usize, bool)>>,
+    progress: &mut [u8; 3],
+    swiped: bool,
+    out: &mut Vec<Vec<Option<(usize, bool)>>>,
+) {
+    if swiped && progress.iter().all(|&done| done == 2) {
+        out.push(order.clone());
+        return;
+    }
+    if !swiped {
+        order.push(None);
+        interleave(order, progress, true, out);
+        order.pop();
+    }
+    for actor in 0..3 {
+        if progress[actor] < 2 {
+            order.push(Some((actor, progress[actor] == 0)));
+            progress[actor] += 1;
+            interleave(order, progress, swiped, out);
+            progress[actor] -= 1;
+            order.pop();
+        }
+    }
+}
+
+/// Every ordering of two identified mice pressing Back, the second also
+/// Forward, and one swipe, through the real lifecycle worker: no press
+/// cancels another, every accepted press ends on its own release, and each
+/// release is suppressed exactly when its press was.
+#[test]
+fn every_two_mouse_interleaving_keeps_each_press_its_own() {
+    let (first, second) = two_logitech_mice();
+    let actors = [
+        (ButtonId::Back, first),
+        (ButtonId::Back, second.clone()),
+        (ButtonId::Forward, second),
+    ];
+    let mut orders = Vec::new();
+    let mut order = Vec::new();
+    interleave(&mut order, &mut [0; 3], false, &mut orders);
+    assert_eq!(orders.len(), 630);
+
+    let hooks = gesture_and_bindings();
+    for order in orders {
+        HOLD.with_borrow_mut(HoldState::cancel);
+        SUPPRESSED_PRESSES.with_borrow_mut(HashMap::clear);
+        let (dispatcher, mut owner, events) = test_dispatcher();
+        let mut pressed_as = [None; 3];
+        for step in &order {
+            let Some((actor, pressed)) = *step else {
+                HOLD.with_borrow_mut(|h| h.swipe.backdate_hold_for_test());
+                handle_moved(GESTURE_SWIPE_THRESHOLD + 10, 0, &hooks, &dispatcher);
+                continue;
+            };
+            let (id, device) = &actors[actor];
+            let disposition =
+                handle_button(*id, pressed, Some(device), &[], &hooks, &dispatcher, || {
+                    None
+                });
+            if pressed {
+                pressed_as[actor] = Some(disposition);
+            } else {
+                assert_eq!(
+                    Some(disposition),
+                    pressed_as[actor],
+                    "a release must share its press's disposition: {order:?}"
+                );
+            }
+        }
+        let started = pressed_as
+            .iter()
+            .filter(|&&disposition| disposition == Some(EventDisposition::Suppress))
+            .count();
+        let received = events_until_ended(&events, started);
+        assert!(owner.shutdown());
+        let mut open = Vec::new();
+        for event in received {
+            match event {
+                ButtonRuntimeEvent::Started(press) => open.push(press.token().clone()),
+                ButtonRuntimeEvent::Ended { press, reason } => {
+                    assert_eq!(
+                        reason,
+                        EndReason::Released,
+                        "a press ended other than by its release: {order:?}"
+                    );
+                    open.retain(|token| token != press.token());
+                }
+                ButtonRuntimeEvent::Triggered { .. } => {}
+            }
+        }
+        assert!(open.is_empty(), "a press never ended: {order:?}");
+    }
+    HOLD.with_borrow_mut(HoldState::cancel);
 }

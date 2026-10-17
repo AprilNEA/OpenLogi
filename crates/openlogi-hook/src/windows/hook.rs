@@ -454,6 +454,7 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
             id,
             pressed,
             device: None,
+            invalidated_sources: Vec::new(),
         });
     }
 

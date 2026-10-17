@@ -68,7 +68,7 @@ pub struct CursorPosition {
 /// Platform hooks fill the stable fields they can read cheaply from the native
 /// event. Consumers use this to apply host-side settings per device rather than
 /// through the currently selected UI device.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct EventDevice {
     /// USB/Bluetooth vendor id when the platform exposes it.
     pub vendor_id: Option<u32>,
@@ -271,6 +271,16 @@ pub enum MouseEvent {
         /// Best-effort physical source. `None` when the platform cannot
         /// attribute the event (Windows today) or it was synthetic.
         device: Option<EventDevice>,
+        /// The devices whose press of `id` this event left without a
+        /// recognizable release (macOS's sender-less-event resolver only): an
+        /// attribution evicted because its holder became unreadable, lost its
+        /// release (e.g. by being unplugged), or its release could not be
+        /// told apart from another press's; or an identified press this
+        /// sender-less release may have ended. Such a release never reaches
+        /// the code that would end the hold the device began, so the runtime
+        /// must cancel that hold here instead. Always empty on Linux/Windows
+        /// and for every other macOS button event.
+        invalidated_sources: Vec<EventDevice>,
     },
     /// A scroll-wheel tick or pixel-precise continuous scroll.
     Scroll {

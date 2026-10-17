@@ -181,6 +181,7 @@ mod tests {
             id: ButtonId::Back,
             pressed: true,
             device: None,
+            invalidated_sources: Vec::new(),
         });
         assert!(!m.enabled());
 
@@ -197,6 +198,7 @@ mod tests {
             id: ButtonId::Forward,
             pressed: false,
             device: None,
+            invalidated_sources: Vec::new(),
         });
         assert_eq!(
             m.poll(),

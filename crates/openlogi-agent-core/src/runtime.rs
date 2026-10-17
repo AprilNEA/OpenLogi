@@ -330,21 +330,26 @@ impl ActionDispatcher {
         );
     }
 
-    /// Queue one OS-hook down edge without blocking the callback. The returned
-    /// token uniquely identifies this accepted press.
+    /// Queue one OS-hook down edge from `device` without blocking the
+    /// callback. The returned token uniquely identifies this accepted press.
     pub(crate) fn try_hook_button_down(
         &self,
+        device: Option<&openlogi_hook::EventDevice>,
         button: ButtonId,
         binding: Option<&Binding>,
         target: ActionDispatchTarget,
     ) -> Option<PressToken> {
         self.buttons
-            .try_hook_down_with_target(button, binding, target)
+            .try_hook_down_with_target(device, button, binding, target)
     }
 
-    /// Queue one OS-hook up edge without blocking the callback.
-    pub(crate) fn try_hook_button_up(&self, button: ButtonId) -> bool {
-        self.buttons.try_hook_up(button)
+    /// Queue one OS-hook up edge from `device` without blocking the callback.
+    pub(crate) fn try_hook_button_up(
+        &self,
+        device: Option<&openlogi_hook::EventDevice>,
+        button: ButtonId,
+    ) -> bool {
+        self.buttons.try_hook_up(device, button)
     }
 
     /// Queue one function-key down edge without blocking the hook callback.

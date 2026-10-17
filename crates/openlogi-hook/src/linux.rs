@@ -385,6 +385,7 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
                 id,
                 pressed: value != 0,
                 device: None,
+                invalidated_sources: Vec::new(),
             })
         }
         EventSummary::RelativeAxis(_, axis, value) => match axis {
@@ -703,7 +704,8 @@ mod tests {
                 id: ButtonId::LeftClick,
                 pressed: true,
                 device: None,
-            })
+                invalidated_sources,
+            }) if invalidated_sources.is_empty()
         );
     }
 
@@ -716,7 +718,8 @@ mod tests {
                 id: ButtonId::LeftClick,
                 pressed: false,
                 device: None,
-            })
+                invalidated_sources,
+            }) if invalidated_sources.is_empty()
         );
     }
 
@@ -729,7 +732,8 @@ mod tests {
                 id: ButtonId::Back,
                 pressed: true,
                 device: None,
-            })
+                invalidated_sources,
+            }) if invalidated_sources.is_empty()
         );
     }
 
@@ -742,7 +746,8 @@ mod tests {
                 id: ButtonId::Back,
                 pressed: true,
                 device: None,
-            })
+                invalidated_sources,
+            }) if invalidated_sources.is_empty()
         );
     }
 
@@ -755,7 +760,8 @@ mod tests {
                 id: ButtonId::Forward,
                 pressed: true,
                 device: None,
-            })
+                invalidated_sources,
+            }) if invalidated_sources.is_empty()
         );
     }
 

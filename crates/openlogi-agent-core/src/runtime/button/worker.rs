@@ -100,6 +100,13 @@ fn process_command(
                 emit,
             );
         }
+        ButtonCommand::CancelHookThread(thread) => {
+            emit_canceled(
+                state.cancel_hook_thread(thread),
+                CancelReason::SourceEnded,
+                emit,
+            );
+        }
         ButtonCommand::CancelHooks => {
             emit_canceled(state.cancel_hooks(), CancelReason::SourceEnded, emit);
         }
