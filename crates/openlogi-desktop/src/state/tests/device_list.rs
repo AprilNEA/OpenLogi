@@ -586,6 +586,7 @@ fn forgetting_a_receiver_device_unpairs_it_before_dropping_the_card() {
             UnpairIntent::Forget {
                 record_key: sent_key,
                 config_key: sent_config,
+                pending,
             },
     })) = commands.try_recv()
     else {
@@ -594,6 +595,7 @@ fn forgetting_a_receiver_device_unpairs_it_before_dropping_the_card() {
     assert_eq!(Some(&sent_route), route.as_ref());
     assert_eq!(sent_key, record_key);
     assert_eq!(sent_config.as_deref(), Some(config_key.as_str()));
+    assert!(pending.is_empty());
 
     assert_eq!(
         state.apply_device_unpaired(&record_key, &sent_route, Some(&config_key), Ok(())),
@@ -871,4 +873,108 @@ fn a_refused_leftover_removal_says_why() {
         [StateEvent::StalePairingRemovalFailed { name, failure }]
     );
     assert_eq!(state.devices().len(), 1);
+}
+
+/// Forgetting a folded card unpairs its leftover slots too, one at a time,
+/// and the settings go only once the last slot is gone — otherwise the next
+/// inventory would bring a leftover back as a card without them.
+#[test]
+fn forgetting_a_folded_card_unpairs_every_slot_before_dropping_settings() {
+    use crate::services::ipc::{Command, UnpairDevice, UnpairIntent};
+
+    let (mut state, mut commands) = state_with(&[keyboard_pairings(&[2, 3, 4], None)]);
+    let record_key = state.devices()[0].record_key();
+    let config_key = state.devices()[0].config_key.clone();
+    let own_route = state.devices()[0].route.clone().expect("a Bolt route");
+    let mut expected = state.devices()[0].stale_pairings.clone();
+    assert_eq!(expected.len(), 2, "two leftover slots fold into the card");
+    expected.push(own_route.clone());
+    state
+        .config
+        .edit(|config| config.set_dpi(&config_key, Dpi::new(1600)));
+    while commands.try_recv().is_ok() {}
+
+    assert!(state.forget_device(&record_key).is_empty());
+
+    for step in 0..expected.len() - 1 {
+        let Ok(Command::UnpairDevice(UnpairDevice { route, intent })) = commands.try_recv() else {
+            panic!("leftover {step} must be unpaired next");
+        };
+        assert_eq!(route, expected[step]);
+        let UnpairIntent::Forget { pending, .. } = &intent else {
+            panic!("a forget carries its intent: {intent:?}");
+        };
+        assert_eq!(*pending, expected[step + 1..]);
+        assert!(state.apply_unpaired(&route, intent, Ok(())).is_empty());
+        assert!(state.config.devices.contains_key(&config_key));
+        assert_eq!(state.devices().len(), 1);
+    }
+
+    let Ok(Command::UnpairDevice(UnpairDevice { route, intent })) = commands.try_recv() else {
+        panic!("the card's own slot is unpaired last");
+    };
+    assert_eq!(route, own_route);
+    assert_eq!(
+        state.apply_unpaired(&route, intent, Ok(())),
+        [StateEvent::InventoryChanged]
+    );
+    assert!(state.devices().is_empty());
+    assert!(!state.config.devices.contains_key(&config_key));
+}
+
+/// A leftover slot that fails to unpair stops the forget: the device and its
+/// settings stay, and the user hears why.
+#[test]
+fn a_refused_leftover_unpair_keeps_the_forgotten_device() {
+    use crate::services::ipc::{Command, UnpairDevice, UnpairFailure};
+    use openlogi_ipc::PairingFailure;
+
+    let (mut state, mut commands) = state_with(&[keyboard_pairings(&[2, 4], None)]);
+    let record_key = state.devices()[0].record_key();
+    let name = state.devices()[0].display_name.clone();
+    while commands.try_recv().is_ok() {}
+    assert!(state.forget_device(&record_key).is_empty());
+    let Ok(Command::UnpairDevice(UnpairDevice { route, intent })) = commands.try_recv() else {
+        panic!("the leftover slot is unpaired first");
+    };
+    let failure = UnpairFailure::Refused(PairingFailure::ReceiverBusy);
+
+    assert_eq!(
+        state.apply_unpaired(&route, intent, Err(failure.clone())),
+        [StateEvent::DeviceRemovalFailed { name, failure }]
+    );
+    assert!(commands.try_recv().is_err());
+    assert_eq!(state.devices().len(), 1);
+}
+
+/// A leftover slot whose identity was saved under its own slot key is still
+/// folded: the saved entry does not come back as a separate offline card.
+#[test]
+fn a_saved_leftover_slot_does_not_return_as_a_placeholder() {
+    let identity = DeviceIdentity {
+        display_name: "MX Mechanical".to_string(),
+        kind: DeviceKind::Keyboard,
+        capabilities: Capabilities::presumed_from_kind(DeviceKind::Keyboard),
+        light_capabilities: None,
+        model_info: keyboard_pairings(&[2], None).paired[0].model_info.clone(),
+        codename: Some("MX MCHNCL".to_string()),
+        driver_id: None,
+        registry_model_id: None,
+    };
+    let mut config = Config::ephemeral();
+    config.set_device_identity("receiver:ol-bolt-uid-0002:slot:2", identity);
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories: &[keyboard_pairings(&[2, 4], Some(4))],
+        ..Sources::in_memory(config, &AssetResolver::new(), commands)
+    });
+
+    let [card] = state.devices() else {
+        panic!(
+            "a saved leftover slot must not add a card: {:?}",
+            state.devices()
+        );
+    };
+    assert_eq!(card.route, Some(bolt_slot(4)));
+    assert_eq!(card.stale_pairings, [bolt_slot(2)]);
 }

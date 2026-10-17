@@ -285,7 +285,7 @@ pub(super) fn build_device_list(
             });
         }
     }
-    collapse_duplicate_pairings(&mut list);
+    let folded_keys = collapse_duplicate_pairings(&mut list);
     append_standalone(&mut list, standalone, resolver, config);
     #[cfg(debug_assertions)]
     if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
@@ -296,13 +296,10 @@ pub(super) fn build_device_list(
         .filter_map(|inv| inv.receiver.unique_id.as_deref())
         .map(str::to_ascii_lowercase)
         .collect();
-    append_offline_known(
-        &mut list,
-        config.known_identities(),
-        resolver,
-        &present_receivers,
-        config,
-    );
+    let known = config
+        .known_identities()
+        .filter(|(key, _)| !folded_keys.contains(*key));
+    append_offline_known(&mut list, known, resolver, &present_receivers, config);
     // Cameras are UVC, not HID++, so they come from a parallel discovery path
     // (AVFoundation on macOS) rather than the receiver inventory. The caller
     // enumerates them off the UI thread — discovery is too slow for the render
@@ -328,7 +325,10 @@ pub(super) fn build_device_list(
 /// [`DeviceRecord::stale_pairings`]. An online duplicate is never folded: a
 /// live link is not a leftover. Slots on different receivers stay separate
 /// cards, since a second receiver can be a deliberate Easy-Switch host.
-fn collapse_duplicate_pairings(list: &mut Vec<DeviceRecord>) {
+///
+/// Returns the config keys of the folded slots, so a saved identity under one
+/// of them does not come back as an offline placeholder.
+fn collapse_duplicate_pairings(list: &mut Vec<DeviceRecord>) -> HashSet<String> {
     let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, record) in list.iter().enumerate() {
         let Some(
@@ -373,12 +373,17 @@ fn collapse_duplicate_pairings(list: &mut Vec<DeviceRecord>) {
             .collect();
         folded.extend(stale);
     }
+    let folded_keys = folded
+        .iter()
+        .map(|&index| list[index].config_key.clone())
+        .collect();
     let mut index = 0;
     list.retain(|_| {
         let keep = !folded.contains(&index);
         index += 1;
         keep
     });
+    folded_keys
 }
 
 fn apply_custom_names(list: &mut [DeviceRecord], config: &Config) {
@@ -810,8 +815,16 @@ pub(super) fn fold_by_inventory_key(
                 slot.insert(record);
             }
             Entry::Occupied(mut slot) => {
+                let mut record = record;
                 if record.online || !slot.get().online {
+                    let mut stale = std::mem::take(&mut slot.get_mut().stale_pairings);
+                    stale.append(&mut record.stale_pairings);
+                    record.stale_pairings = stale;
                     slot.insert(record);
+                } else {
+                    slot.get_mut()
+                        .stale_pairings
+                        .append(&mut record.stale_pairings);
                 }
             }
         }

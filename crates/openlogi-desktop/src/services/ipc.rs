@@ -174,6 +174,9 @@ pub enum UnpairIntent {
         record_key: String,
         /// Where its settings live.
         config_key: Option<String>,
+        /// Pairings still to drop after this one. The settings go only once
+        /// the last of them is gone.
+        pending: Vec<DeviceRoute>,
     },
     /// A leftover slot of a device that stays: nothing local changes, the
     /// next inventory simply no longer lists the slot.
