@@ -27,7 +27,7 @@ pub fn status_line(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {
 
 /// A clickable accent line that re-arms a failed read on click. `on_retry` runs
 /// the panel's query retry — the only recovery
-/// path when the carousel holds a single device, where re-selecting is a no-op.
+/// path when the gallery holds a single device, where re-selecting is a no-op.
 pub fn retry_line(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,

@@ -51,7 +51,7 @@ if [[ -f "$HOME/.cargo/env" ]]; then
 fi
 if ! command -v rustup >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
-    sh -s -- -y --profile minimal --no-modify-path
+    sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
   # shellcheck disable=SC1091
   source "$HOME/.cargo/env"
 fi
@@ -75,13 +75,14 @@ rustup toolchain install stable \
 echo "    completed in $((SECONDS - step_started))s"
 
 step_started=$SECONDS
-echo "==> Fetching locked Cargo dependencies"
-cargo fetch --locked
+echo "==> Fetching locked Cargo dependencies for this host"
+host_target="$(rustc -vV | sed -n 's/^host: //p')"
+cargo fetch --locked --target "$host_target"
 echo "    completed in $((SECONDS - step_started))s"
 
 step_started=$SECONDS
 echo "==> Installing locked release-notes dependencies"
-corepack pnpm@10.11.0 --dir scripts/release-notes install --frozen-lockfile
+corepack pnpm@10.11.0 --dir .github/scripts/release-notes install --frozen-lockfile
 echo "    completed in $((SECONDS - step_started))s"
 
 echo "==> OpenLogi orb setup complete"

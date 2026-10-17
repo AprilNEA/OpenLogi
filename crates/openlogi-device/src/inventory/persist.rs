@@ -5,34 +5,50 @@
 //! but the in-memory cache dies with the process, forcing every agent restart
 //! to re-interview every device. Persisting the cache means a device that was
 //! fully probed once keeps its identity across restarts, even on transports
-//! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE`).
+//! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE_TIMEOUT`).
 //!
 //! Only Bolt identities are persisted, because only they are keyed on the
 //! device's *own* identity (the pairing-register unit id), which no re-pairing
 //! can silently reassign. A `CacheKey::UnifyingSlot` is `receiver + slot`: a
 //! different device paired into that slot while the agent is down would
 //! inherit the previous occupant's probe on warm start. A `CacheKey::Direct`
-//! is an OS-runtime node id with no cross-boot stability. Loaded entries get
-//! `probed_tick = 0`, so the regular `cache::REFRESH_TICKS`
-//! self-healing pass re-walks them on schedule; until (and unless) that walk
-//! succeeds, the persisted data serves exactly like an in-memory cache hit.
+//! is an OS-runtime node id with no cross-boot stability. Loaded entries
+//! restart the elapsed refresh window, so the regular self-healing pass
+//! re-walks them on schedule; until (and unless) that walk succeeds, the
+//! persisted data serves exactly like an in-memory cache hit.
 //!
 //! *Where* a snapshot is kept is the host's business, not this module's: the
 //! enumerator writes through a [`ProbeCacheStore`]; `openlogi-hid` supplies
 //! the file-backed one every native build uses.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::cache::{CacheKey, Cached};
+use super::events::EventFeatureIndices;
 use super::features::{BatteryProbe, ProbedFeatures};
 
 /// Bumped when the persisted shape changes; a mismatched snapshot is discarded
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
-const SCHEMA_VERSION: u32 = 2;
+/// v3 adds event-capable feature indexes discovered by the immutable walk.
+/// v4 adds the `0x1F20` ADC-measurement event index.
+/// v5 adds the legacy `0x1000` and voltage `0x1001` battery event indexes.
+/// v6 records whether a `0x1004` battery reports a percentage.
+/// v7 adds the Fn-inversion `0x40a2`/`0x40a3` and extended-DPI `0x2202`
+/// event indexes.
+/// v8 adds the `0x4531` multi-platform event index and records whether the
+/// keyboard lets software set its platform (`Capabilities::os_layout`).
+/// v9 adds the extended report-rate `0x8061` event index and the
+/// `Capabilities::report_rate` flag.
+/// v10 adds the `0x1982` backlight event index.
+/// v11 adds the `Capabilities::easy_switch` flag (`0x1815` host slots).
+/// v12 adds the `Capabilities::virtual_thumbwheel` flag (Back/Forward
+/// raw-wheel reporting).
+const SCHEMA_VERSION: u32 = 12;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -67,7 +83,7 @@ pub trait ProbeCacheStore: Send + Sync {
     /// Persist `snapshot`.
     ///
     /// An `Err` is logged by the caller and the snapshot retried on the next
-    /// tick that dirties the cache, so a store may fail freely.
+    /// pass that dirties the cache, so a store may fail freely.
     fn save(&self, snapshot: &ProbeCacheSnapshot) -> Result<(), ProbeCacheError>;
 }
 
@@ -83,6 +99,7 @@ struct PersistedEntry {
     key: PersistedKey,
     probe: ProbedFeatures,
     battery: Option<BatteryProbe>,
+    events: EventFeatureIndices,
 }
 
 /// The persistable subset of [`CacheKey`] — Bolt only (see the module docs).
@@ -144,6 +161,7 @@ impl ProbeCacheSnapshot {
                         key,
                         probe,
                         battery: cached.battery,
+                        events: cached.events,
                     }
                 })
             })
@@ -175,11 +193,12 @@ impl ProbeCacheSnapshot {
                     Cached {
                         probe: entry.probe,
                         battery: entry.battery,
+                        events: entry.events,
                         // Restart the refresh clock: the entry serves
                         // immediately as a cache hit, and the periodic
                         // self-healing re-walk decides when it is due for a
                         // fresh read.
-                        probed_tick: 0,
+                        probed_at: Instant::now(),
                     },
                 )
             })
@@ -190,12 +209,14 @@ impl ProbeCacheSnapshot {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Instant;
 
     use openlogi_core::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports,
     };
 
     use super::super::cache::{CacheKey, Cached};
+    use super::super::events::EventFeatureIndices;
     use super::super::features::{BatteryProbe, ProbedFeatures};
     use super::{ProbeCacheSnapshot, SCHEMA_VERSION};
 
@@ -212,6 +233,19 @@ mod tests {
             model_ids: [0xb042, 0, 0],
             extended_model_id: 0,
         };
+        let events = EventFeatureIndices {
+            wireless_status: Some(7),
+            unified_battery: Some(9),
+            battery_status: Some(12),
+            battery_voltage: Some(13),
+            adc_measurement: Some(11),
+            fn_inversion: None,
+            fn_inversion_multi_host: None,
+            extended_dpi: None,
+            multi_platform: Some(14),
+            extended_report_rate: Some(15),
+            backlight: Some(16),
+        };
         let mut cache = HashMap::new();
         cache.insert(
             CacheKey::Bolt {
@@ -222,14 +256,18 @@ mod tests {
                     model_info: Some(model.clone()),
                     // A live reading at snapshot time.
                     battery: Some(BatteryInfo {
-                        percentage: 55,
+                        percentage: Some(55),
                         level: BatteryLevel::Good,
                         status: BatteryStatus::Discharging,
                     }),
                     ..Default::default()
                 },
-                battery: Some(BatteryProbe::Unified(9)),
-                probed_tick: 7,
+                battery: Some(BatteryProbe::Unified {
+                    index: 9,
+                    state_of_charge: true,
+                }),
+                events,
+                probed_at: Instant::now(),
             },
         );
         cache.insert(
@@ -240,11 +278,14 @@ mod tests {
             Cached {
                 probe: ProbedFeatures::default(),
                 battery: None,
-                probed_tick: 3,
+                events: EventFeatureIndices::default(),
+                probed_at: Instant::now(),
             },
         );
 
-        let restored = ProbeCacheSnapshot::of(&cache).into_entries();
+        let snapshot = ProbeCacheSnapshot::of(&cache);
+        let restored_after = Instant::now();
+        let restored = snapshot.into_entries();
 
         let bolt = restored
             .get(&CacheKey::Bolt {
@@ -254,15 +295,22 @@ mod tests {
         assert_eq!(bolt.probe.model_info.as_ref(), Some(&model));
         assert_eq!(
             bolt.battery,
-            Some(BatteryProbe::Unified(9)),
+            Some(BatteryProbe::Unified {
+                index: 9,
+                state_of_charge: true,
+            }),
             "the battery *feature index* is immutable and kept"
+        );
+        assert_eq!(
+            bolt.events, events,
+            "event feature indexes are immutable and kept"
         );
         assert!(
             bolt.probe.battery.is_none(),
             "the battery *reading* is volatile — restoring it would resurrect a stale value"
         );
-        assert_eq!(
-            bolt.probed_tick, 0,
+        assert!(
+            bolt.probed_at >= restored_after,
             "a restored entry restarts the refresh clock"
         );
         assert!(

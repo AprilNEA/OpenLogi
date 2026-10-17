@@ -20,6 +20,8 @@ use openlogi_core::config::{Appearance, UiScale};
 
 use crate::state::AppState;
 
+use super::spacing::DynamicSpacing;
+
 // The brand accent lives in `openlogi-ui` so the overlay paints the same blue
 // this app does — it cannot depend on this crate, and a local copy is how the
 // ring ended up with a blue of its own. Re-exported so screens keep reading it
@@ -38,12 +40,20 @@ pub const STATUS_DISABLED: u32 = 0x00ef_4444;
 pub const HEADER_H: f32 = 64.;
 pub const FOOTER_H: f32 = 40.;
 pub const DETAIL_RAIL_W: f32 = 168.;
+/// Height of standalone form controls: buttons, text inputs, tabs.
+/// gpui-component's `.small()` maps to a 24 px `h_6`, which reads undersized
+/// against this 30 px control rhythm — small controls pin the height
+/// explicitly (single-line `Input`s via `min_h`; their inherent `h` is
+/// multi-line-only and would be ignored).
+pub const CONTROL_H: f32 = 30.;
 
 const BASE_REM_SIZE: f32 = 16.;
 
 /// Maximum-width scale for detail-tab content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentWidth {
+    /// Compact explanatory copy and empty-state text (440 px at 100%).
+    Narrow,
     /// A single compact settings card (560 px at 100%).
     Small,
     /// A wider single panel (680 px at 100%).
@@ -61,6 +71,7 @@ impl ContentWidth {
     #[must_use]
     pub const fn rems(self) -> Rems {
         match self {
+            Self::Narrow => rems(27.5),
             Self::Small => rems(35.),
             Self::Medium => rems(42.5),
             Self::Large => rems(57.5),
@@ -78,19 +89,21 @@ impl ContentWidth {
 ///   two-column grid is sized against this exact value; see its card min-width).
 /// - `CARD_PAD` / `CARD_GAP` — a card's inner padding and its title-to-content
 ///   gap, so every [`panel_card`](crate::app) reads the same.
-pub const SCREEN_PAD: Rems = rems(1.25);
-pub const CARD_PAD: Rems = rems(1.);
-pub const CARD_GAP: Rems = rems(0.75);
+pub const SCREEN_PAD: DynamicSpacing = DynamicSpacing::Base20;
+pub const CARD_PAD: DynamicSpacing = DynamicSpacing::Base16;
+pub const CARD_GAP: DynamicSpacing = DynamicSpacing::Base12;
 
 /// Apple HIG / WCAG minimum contrast for normal text up to 17pt.
 const MIN_TEXT_CONTRAST: f32 = 4.5;
 
-/// Fixed footprint of a device card in the Home gallery. Equal-width cards lay
-/// out in a horizontally scrollable row (centred when they fit, scrollable when
-/// they don't); `GALLERY_PHOTO_H` is the height of the device photo above the
-/// name/battery row.
-pub const GALLERY_CARD_W: f32 = 240.;
-pub const GALLERY_PHOTO_H: f32 = 230.;
+/// Responsive bounds for a device card in the Home grid. At standard scale,
+/// two cards fit the 720 px minimum window after the screen inset and gap; at
+/// the normal wide window, three grow to [`GALLERY_CARD_MAX_W`].
+/// `GALLERY_PHOTO_H` is the fixed product-image stage above the scalable
+/// identity and status rows.
+pub const GALLERY_CARD_MIN_W: Rems = rems(19.375);
+pub const GALLERY_CARD_MAX_W: Rems = rems(25.3125);
+pub const GALLERY_PHOTO_H: f32 = 196.;
 
 /// Appearance-dependent surface + text colours for the bespoke (non
 /// gpui-component) surfaces. Resolved once per render via [`palette`] and
@@ -252,6 +265,11 @@ fn rem_size(scale: UiScale) -> Pixels {
     px(BASE_REM_SIZE * f32::from(scale.percent()) / 100.)
 }
 
+/// Apply one semantic interface scale to a window.
+pub(crate) fn apply_scale(window: &mut Window, scale: UiScale) {
+    window.set_rem_size(rem_size(scale));
+}
+
 /// Apply the stored interface scale to one desktop window.
 ///
 /// Root views call this before building their elements so text and every
@@ -260,7 +278,7 @@ fn rem_size(scale: UiScale) -> Pixels {
 pub fn apply_ui_scale(window: &mut Window, cx: &App) {
     let scale =
         AppState::try_read(cx).map_or_else(UiScale::default, |state| state.app_settings().ui_scale);
-    window.set_rem_size(rem_size(scale));
+    apply_scale(window, scale);
 }
 
 /// Resolve the user's stored appearance preference and apply it to the global
@@ -348,7 +366,7 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
 /// Faint accent fill marking a *selected* row / chip — tinted, not painted, so
 /// it reads on both palettes while the label stays in `text_primary` (a blue
 /// label fails AA contrast on the light surface). Hand-matched to [`accent`]
-/// (hue 0.6 / sat 0.9 / light 0.6); [`tests::accent_tint_matches_accent`] pins
+/// (hue 0.6 / sat 0.9 / light 0.6); the `accent_tint_matches_accent` test pins
 /// that it stays derived from the brand colour.
 #[must_use]
 pub fn accent_tint() -> Hsla {
@@ -446,10 +464,28 @@ impl<E: Styled> Typography for E {}
 mod tests {
     use super::*;
 
+    #[gpui::test]
+    fn bundled_theme_picker_keeps_upstream_and_openlogi_themes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            register_builtin_themes(cx);
+            let themes = ThemeRegistry::global(cx).themes();
+            for name in [
+                OPENLOGI_LIGHT,
+                OPENLOGI_DARK,
+                "Catppuccin Latte",
+                "Catppuccin Mocha",
+            ] {
+                assert!(themes.contains_key(name), "missing bundled theme: {name}");
+            }
+        });
+    }
+
     #[test]
     fn content_width_scale_preserves_the_standard_layout() {
         assert_eq!(
             [
+                ContentWidth::Narrow,
                 ContentWidth::Small,
                 ContentWidth::Medium,
                 ContentWidth::Large,
@@ -457,7 +493,7 @@ mod tests {
                 ContentWidth::DoubleExtraLarge,
             ]
             .map(|width| width.rems().to_pixels(px(BASE_REM_SIZE))),
-            [px(560.), px(680.), px(920.), px(980.), px(1040.)]
+            [px(440.), px(560.), px(680.), px(920.), px(980.), px(1040.),]
         );
     }
 

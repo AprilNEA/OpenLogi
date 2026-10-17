@@ -1,113 +1,69 @@
-//! Application icon integration.
+//! The icon this app wears.
 //!
-//! The bundle ships every alternate under `Contents/Resources/Icons`, compiled
-//! by `cargo xtask macos icon`; applying one hands its `.icns` to macOS through
-//! [`appicon`], which sets both the Dock tile of this process and the icon
-//! Finder and Launchpad read. Nothing here is fatal: an icon that cannot be
-//! applied — a bundle owned by another user, a build without the alternates —
-//! leaves the app wearing what it was signed with, which is a cosmetic loss
-//! rather than a reason to fail a launch.
-//!
-//! The profile switcher also resolves other installed applications through
-//! Launch Services so their real Finder icons can identify per-app profiles.
+//! The bundle ships every alternate under `Contents/Resources/Icons` (built by
+//! `cargo xtask macos icon`); [`appicon`] hands the chosen `.icns` to macOS,
+//! which updates the Dock tile and what Finder and Launchpad show. Failure is
+//! cosmetic — the app keeps the icon it was signed with — never fatal.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use openlogi_core::config::AppIcon;
 use tracing::{debug, warn};
 
-/// Re-apply the persisted choice at startup.
-///
-/// The default is applied by touching *nothing*. The bundle already wears it,
-/// and a user who pasted their own icon onto the app in Finder gets to keep it
-/// — an app that resets its icon on every launch quietly overwrites that, which
-/// is the complaint Arc's icon picker collects.
-///
-/// A non-default choice is re-applied every launch on purpose: replacing the
-/// bundle drops the icon, and an update does exactly that.
-pub fn restore(icon: AppIcon) {
-    if icon.is_default() {
-        return;
-    }
-    apply(icon);
+/// Bundle-side behaviour of an [`AppIcon`]. `openlogi-core` owns the enum and
+/// stays platform-free, so the effects live here as an extension trait.
+pub trait AppIconExt {
+    /// Re-apply the persisted choice at startup. The default touches nothing,
+    /// so an icon the user pasted on in Finder survives; any other choice is
+    /// re-applied every launch because an update replaces the bundle.
+    fn restore(self);
+
+    /// Apply a choice the user just made. Picking the default clears whatever
+    /// the bundle is wearing.
+    fn apply(self);
+
+    /// The PNG Settings previews for this icon, `None` outside a bundle that
+    /// ships it.
+    #[must_use]
+    fn preview(self) -> Option<PathBuf>;
 }
 
-/// Apply a choice the user just made, the default included — picking it back is
-/// an explicit request to drop whatever icon the bundle is wearing.
-pub fn apply(icon: AppIcon) {
-    let outcome = if icon.is_default() {
-        appicon::reset()
-    } else {
-        let Some(icns) = alternate(icon) else {
-            warn!(%icon, "the bundle ships no icon by that name; leaving the icon alone");
+impl AppIconExt for AppIcon {
+    fn restore(self) {
+        if self.is_default() {
             return;
+        }
+        self.apply();
+    }
+
+    fn apply(self) {
+        let outcome = if self.is_default() {
+            appicon::reset()
+        } else {
+            let Some(icns) = bundled_icon(self, "icns") else {
+                warn!(icon = %self, "the bundle ships no icon by that name; leaving the icon alone");
+                return;
+            };
+            appicon::set(appicon::Icon::File(&icns))
         };
-        appicon::set(appicon::Icon::File(&icns))
-    };
-    match outcome {
-        Ok(()) => debug!(%icon, "app icon applied"),
-        Err(error) => warn!(%icon, %error, "could not apply the app icon"),
+        match outcome {
+            Ok(()) => debug!(icon = %self, "app icon applied"),
+            Err(error) => warn!(icon = %self, %error, "could not apply the app icon"),
+        }
+    }
+
+    fn preview(self) -> Option<PathBuf> {
+        bundled_icon(self, "png")
     }
 }
 
-/// The alternate's `.icns` inside this app bundle, `None` when the running
-/// binary is not in one that ships it.
-fn alternate(icon: AppIcon) -> Option<PathBuf> {
-    icons_dir(format!("{icon}.icns"))
-}
-
-/// The render Settings draws for `icon`, `None` outside a bundle that ships it.
-/// Every icon has one, the default included — the picker offers them all.
-#[must_use]
-pub fn preview(icon: AppIcon) -> Option<PathBuf> {
-    icons_dir(format!("{icon}.png"))
-}
-
-/// Resolve the installed application's icon for a per-app profile identifier.
-///
-/// macOS profile identifiers are bundle identifiers, so Launch Services can
-/// find the installed bundle and AppKit can return the same icon Finder uses.
-/// Other identifier namespaces have no equivalent portable lookup yet.
-#[must_use]
-#[cfg_attr(
-    target_os = "macos",
-    expect(
-        unsafe_code,
-        reason = "AppKit marks PNG encoding unsafe only because its properties dictionary is untyped"
-    )
-)]
-pub fn application_icon(identifier: &str) -> Option<Arc<gpui::Image>> {
-    #[cfg(target_os = "macos")]
-    {
-        use gpui::{Image, ImageFormat};
-        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
-        use objc2_foundation::{NSDictionary, NSString};
-
-        let workspace = NSWorkspace::sharedWorkspace();
-        let identifier = NSString::from_str(identifier);
-        let application = workspace.URLForApplicationWithBundleIdentifier(&identifier)?;
-        let path = application.path()?;
-        let icon = workspace.iconForFile(&path);
-        let tiff = icon.TIFFRepresentation()?;
-        let bitmap = NSBitmapImageRep::imageRepWithData(&tiff)?;
-        let properties = NSDictionary::new();
-        // SAFETY: PNG encoding accepts an empty image-property dictionary.
-        let png = unsafe {
-            bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)?
-        };
-        (!png.is_empty()).then(|| Arc::new(Image::from_bytes(ImageFormat::Png, png.to_vec())))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = identifier;
-        None
-    }
-}
-
-/// Resolve `file` inside the bundle's icon directory, if it is there.
-fn icons_dir(file: String) -> Option<PathBuf> {
+/// `icon`'s `ext` file under the bundle's `Resources/Icons`, if it ships one.
+fn bundled_icon(icon: AppIcon, ext: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let path = exe.parent()?.parent()?.join("Resources/Icons").join(file);
+    let path = exe
+        .parent()?
+        .parent()?
+        .join("Resources/Icons")
+        .join(format!("{icon}.{ext}"));
     path.is_file().then_some(path)
 }

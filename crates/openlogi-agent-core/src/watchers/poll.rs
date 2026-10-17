@@ -1,33 +1,38 @@
-//! The shape shared by the agent's polling watchers.
+//! The shape shared by the agent's grant watchers.
 //!
-//! Some of what the agent tracks has no notification worth using — a macOS
-//! privacy grant, the frontmost application — so it is read on a thread at a
-//! fixed cadence and reported when it changes. Writing that loop once means the
-//! three rules it has to get right are stated in one place, and tested:
+//! A macOS privacy grant has no public change API. It has two undocumented
+//! notifications, which `axwatch` observes, and a missed one costs only a stale
+//! status here — so each grant is read on a thread when a notification arrives
+//! and at least every heartbeat, and reported when it changes. Writing that
+//! loop once means the rules it has to get right are stated in one place, and
+//! tested:
 //!
 //! - the first sample is always reported (the consumer has nothing until it
 //!   arrives), and after that only changes are,
+//! - a burst of wakes — one System Settings edit posts several — is one sample,
 //! - the thread ends when the consumer stops listening,
 //! - a thread that cannot start degrades the feature with a warning rather than
-//!   taking the agent down.
+//!   taking the agent down, and a watch that cannot start leaves the heartbeat
+//!   cadence alone, with the same warning.
 //!
 //! Watchers with more to say than "the value changed" — the HID inventory, the
 //! gesture and pairing sessions — keep their own loops.
 
 use std::fmt::Debug;
+use std::sync::mpsc as sync_mpsc;
 use std::thread;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-/// One polling watcher, described where it is started.
+/// One grant watcher, described where it is started.
 #[derive(Clone, Copy, Debug)]
 pub struct Poll {
     /// Thread name, and the tag this watcher's log lines carry.
     pub name: &'static str,
-    /// How long to wait between samples.
-    pub period: Duration,
+    /// The longest the grant goes unread when no notification arrives.
+    pub heartbeat: Duration,
     /// What stops working if the thread cannot start, for the warning that
     /// says so — phrased to complete "could not spawn watcher — …".
     pub degrades: &'static str,
@@ -36,8 +41,8 @@ pub struct Poll {
 impl Poll {
     /// Report what `read` returns whenever it differs from the last value sent.
     ///
-    /// `read` runs on the watcher's own thread and must not block for long: the
-    /// cadence is the sum of `period` and however long it takes.
+    /// `read` runs on the watcher's own thread, once per wake, and must not
+    /// block for long.
     pub fn on_change<T, F>(self, read: F) -> mpsc::UnboundedReceiver<T>
     where
         T: Clone + PartialEq + Debug + Send + 'static,
@@ -47,6 +52,7 @@ impl Poll {
         let spawned = thread::Builder::new()
             .name(self.name.into())
             .spawn(move || {
+                let mut wakes = Wakes::start(self);
                 let mut last: Option<T> = None;
                 loop {
                     let current = read();
@@ -61,7 +67,11 @@ impl Poll {
                         }
                         last = Some(current);
                     }
-                    thread::sleep(self.period);
+                    wakes.wait();
+                    if tx.is_closed() {
+                        debug!(watcher = self.name, "receiver dropped — exiting");
+                        return;
+                    }
                 }
             });
         if let Err(error) = spawned {
@@ -73,6 +83,56 @@ impl Poll {
             );
         }
         rx
+    }
+}
+
+/// What the watcher thread blocks on between samples.
+enum Wakes {
+    /// A privacy notification or the watch's heartbeat. The watch is owned
+    /// here so it lives exactly as long as the thread and unregisters when the
+    /// thread exits.
+    Watch {
+        _watch: axwatch::Watch,
+        wakes: sync_mpsc::Receiver<()>,
+    },
+    /// The watch could not start: the heartbeat cadence alone.
+    Sleep(Duration),
+}
+
+impl Wakes {
+    fn start(poll: Poll) -> Self {
+        let (tx, wakes) = sync_mpsc::channel();
+        match axwatch::Watch::start(Some(poll.heartbeat), move |_| {
+            // The receiver outlives every sender: the thread that owns it
+            // drops the watch, and with it this handler, before exiting.
+            let _ = tx.send(());
+        }) {
+            Ok(watch) => Self::Watch {
+                _watch: watch,
+                wakes,
+            },
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    watcher = poll.name,
+                    heartbeat = ?poll.heartbeat,
+                    "could not watch privacy notifications — sampling on the heartbeat alone"
+                );
+                Self::Sleep(poll.heartbeat)
+            }
+        }
+    }
+
+    fn wait(&mut self) {
+        match self {
+            Self::Watch { wakes, .. } => {
+                // The watch, and so a sender, lives as long as `self`.
+                let _ = wakes.recv();
+                // One edit posts several notifications; answer them once.
+                while wakes.try_recv().is_ok() {}
+            }
+            Self::Sleep(period) => thread::sleep(*period),
+        }
     }
 }
 
@@ -93,7 +153,8 @@ pub fn never<T>() -> mpsc::UnboundedReceiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
     /// Drain what the watcher reports until it goes quiet, bounded so a broken
@@ -115,7 +176,7 @@ mod tests {
         let samples = Mutex::new(vec![false, true, true, true, false].into_iter());
         let mut rx = Poll {
             name: "openlogi-test-watcher",
-            period: Duration::from_millis(1),
+            heartbeat: Duration::from_millis(1),
             degrades: "the test learns nothing",
         }
         .on_change(move || {
@@ -131,6 +192,30 @@ mod tests {
         // `false` opens the stream even though it equals `T::default()`, then
         // only the two transitions follow.
         assert_eq!(drain(&mut rx, 3), vec![false, true, false]);
+    }
+
+    #[test]
+    fn the_thread_stops_sampling_once_the_receiver_is_gone() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&reads);
+        let rx = Poll {
+            name: "openlogi-test-watcher",
+            heartbeat: Duration::from_millis(1),
+            degrades: "the test learns nothing",
+        }
+        .on_change(move || counter.fetch_add(1, Ordering::AcqRel));
+        thread::sleep(Duration::from_millis(20));
+        drop(rx);
+
+        // The thread notices within one wake; allow a few for scheduling.
+        thread::sleep(Duration::from_millis(50));
+        let after_drop = reads.load(Ordering::Acquire);
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            reads.load(Ordering::Acquire),
+            after_drop,
+            "a watcher nobody listens to keeps sampling"
+        );
     }
 
     #[test]
