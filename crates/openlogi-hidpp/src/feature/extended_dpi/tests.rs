@@ -4,10 +4,41 @@ use std::assert_matches;
 
 use super::event::{ExtendedDpiEvent, decode_event};
 use super::types::{
-    DpiCalibrationCorrection, DpiDirection, DpiRange, Lod, parse_dpi_list, parse_dpi_ranges,
-    parse_lod_list, terminated_word_len,
+    DpiCalibrationCorrection, DpiDirection, DpiRange, Lod, SensorCapabilities, SetDpiParameters,
+    parse_dpi_list, parse_dpi_ranges, parse_lod_list, terminated_word_len,
 };
 use crate::protocol::v20::{ErrorType, Hidpp20Error};
+
+#[test]
+fn set_parameters_carry_y_and_lod_only_for_advertised_capabilities() {
+    let cases = [
+        (SensorCapabilities::empty(), 0, Lod::NotSupported),
+        (SensorCapabilities::DPI_Y, 1600, Lod::NotSupported),
+        (SensorCapabilities::LOD, 0, Lod::High),
+        (
+            SensorCapabilities::DPI_Y | SensorCapabilities::LOD,
+            1600,
+            Lod::High,
+        ),
+        // Calibration and profile support say nothing about Y or LOD.
+        (
+            SensorCapabilities::CALIBRATION | SensorCapabilities::PROFILE,
+            0,
+            Lod::NotSupported,
+        ),
+    ];
+    for (capabilities, dpi_y, lod) in cases {
+        assert_eq!(
+            SetDpiParameters::for_sensor(capabilities, 1200, 1600, Lod::High),
+            SetDpiParameters {
+                dpi_x: 1200,
+                dpi_y,
+                lod,
+            },
+            "{capabilities:?}"
+        );
+    }
+}
 
 #[test]
 fn parses_fixed_dpi_ranges_pws_example() {
@@ -325,6 +356,217 @@ fn rejects_out_of_range_calibration_corrections() {
         assert_matches!(
             correction.to_wire(),
             Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
+        );
+    }
+}
+
+/// The sensor the per-sensor call tests ask about. Not `0`, so a reply
+/// that zero-fills its echo does not pass for one that names it.
+const SENSOR: u8 = 1;
+
+/// The result of `call` when the device answers its one request, to
+/// function `function`, with `reply`.
+fn answer<T, F>(
+    function: u8,
+    call: impl FnOnce(super::ExtendedDpiFeature) -> F,
+    reply: impl FnOnce(crate::protocol::v20::MessageHeader) -> crate::protocol::v20::Message,
+) -> Result<T, Hidpp20Error>
+where
+    F: Future<Output = Result<T, Hidpp20Error>>,
+{
+    use std::sync::Arc;
+
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::nibble::U4;
+    use crate::protocol::v20::MessageHeader;
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let mut pending = Box::pin(call(super::ExtendedDpiFeature::new(channel, 3, 8)));
+        assert!(futures::poll!(pending.as_mut()).is_pending());
+        let header = MessageHeader {
+            device_index: 3,
+            feature_index: 8,
+            function_id: U4::from_lo(function),
+            software_id: U4::from_lo(1),
+        };
+        handle.send_incoming(reply(header).into()).await;
+        pending.await
+    })
+}
+
+/// Functions that take a sensor index and echo it in byte 0 of the reply.
+/// `getSensorDpiRanges` (function 2) checks its page echo separately.
+const PER_SENSOR_FUNCTIONS: [u8; 9] = [1, 3, 4, 5, 6, 7, 8, 9, 10];
+
+/// Issues the call for `function` about [`SENSOR`] and answers it with
+/// `reply`, dropping any decoded value.
+fn per_sensor_call(
+    function: u8,
+    reply: impl FnOnce(crate::protocol::v20::MessageHeader) -> crate::protocol::v20::Message,
+) -> Result<(), Hidpp20Error> {
+    use super::types::{CalibrationType, LedHoldType, ShowDpiStatus, StartDpiCalibration};
+
+    answer(
+        function,
+        |dpi| async move {
+            match function {
+                1 => dpi.get_sensor_capabilities(SENSOR).await.map(|_| ()),
+                3 => dpi
+                    .get_sensor_dpi_list(SENSOR, DpiDirection::X)
+                    .await
+                    .map(|_| ()),
+                4 => dpi.get_sensor_lod_list(SENSOR, 1).await.map(|_| ()),
+                5 => dpi.get_sensor_dpi_parameters(SENSOR).await.map(|_| ()),
+                6 => {
+                    let params = SetDpiParameters {
+                        dpi_x: 800,
+                        dpi_y: 0,
+                        lod: Lod::NotSupported,
+                    };
+                    dpi.set_sensor_dpi_parameters(SENSOR, params).await
+                }
+                7 => {
+                    let params = ShowDpiStatus {
+                        dpi_level: 1,
+                        led_hold_type: LedHoldType::TimerBased,
+                        button_num: 0,
+                    };
+                    dpi.show_sensor_dpi_status(SENSOR, params).await
+                }
+                8 => dpi.get_dpi_calibration_info(SENSOR).await.map(|_| ()),
+                9 => {
+                    let params = StartDpiCalibration {
+                        direction: DpiDirection::X,
+                        expected_count: 100,
+                        calib_type: CalibrationType::Hardware,
+                        start_timeout: 1,
+                        hw_process_timeout: 1,
+                        sw_process_timeout: 1,
+                    };
+                    dpi.start_dpi_calibration(SENSOR, params).await
+                }
+                10 => {
+                    let correction = DpiCalibrationCorrection::Adjust(5);
+                    dpi.set_dpi_calibration(SENSOR, DpiDirection::X, correction)
+                        .await
+                }
+                _ => unreachable!("function {function} takes no sensor"),
+            }
+        },
+        reply,
+    )
+}
+
+/// A well-formed long reply to `function` for `sensor`: an 800 DPI list
+/// entry for function 3, a `Low` lift-off for function 4, 800 DPI for
+/// function 5, and zeros elsewhere.
+fn valid_reply(function: u8, sensor: u8) -> [u8; 16] {
+    let mut payload = [0; 16];
+    payload[0] = sensor;
+    match function {
+        3 => payload[2..4].copy_from_slice(&800u16.to_be_bytes()),
+        4 => payload[1] = Lod::Low.into(),
+        5 => {
+            payload[1..3].copy_from_slice(&800u16.to_be_bytes());
+            payload[3..5].copy_from_slice(&1000u16.to_be_bytes());
+        }
+        _ => {}
+    }
+    payload
+}
+
+#[test]
+fn per_sensor_calls_take_a_reply_for_their_sensor() {
+    use crate::protocol::v20::Message;
+
+    for function in PER_SENSOR_FUNCTIONS {
+        let reply = valid_reply(function, SENSOR);
+        let result = per_sensor_call(function, |header| Message::Long(header, reply));
+        assert!(result.is_ok(), "function {function}: {result:?}");
+    }
+}
+
+#[test]
+fn per_sensor_calls_refuse_a_reply_for_another_sensor() {
+    use crate::protocol::v20::Message;
+
+    for function in PER_SENSOR_FUNCTIONS {
+        let reply = valid_reply(function, SENSOR + 1);
+        let result = per_sensor_call(function, |header| Message::Long(header, reply));
+        assert_matches!(
+            result,
+            Err(Hidpp20Error::UnsupportedResponse),
+            "function {function}"
+        );
+    }
+}
+
+#[test]
+fn dpi_list_refuses_a_reply_for_another_direction() {
+    use crate::protocol::v20::Message;
+
+    let mut reply = valid_reply(3, SENSOR);
+    reply[1] = DpiDirection::Y.into();
+    let result = per_sensor_call(3, |header| Message::Long(header, reply));
+    assert_matches!(result, Err(Hidpp20Error::UnsupportedResponse));
+}
+
+#[test]
+fn parameter_and_calibration_reads_refuse_a_short_reply() {
+    use crate::protocol::v20::Message;
+
+    // Zero-filled, these would decode as a sensor at 800 DPI with no
+    // default and as an all-zero calibration reference.
+    for function in [5, 8] {
+        let result = per_sensor_call(function, |header| {
+            Message::Short(header, [SENSOR, 0x03, 0x20])
+        });
+        assert_matches!(
+            result,
+            Err(Hidpp20Error::UnsupportedResponse),
+            "function {function}"
+        );
+    }
+}
+
+#[test]
+fn parameters_decode_from_a_reply_for_their_sensor() {
+    use crate::protocol::v20::Message;
+
+    let reply = valid_reply(5, SENSOR);
+    let params = answer(
+        5,
+        |dpi| async move { dpi.get_sensor_dpi_parameters(SENSOR).await },
+        |header| Message::Long(header, reply),
+    )
+    .expect("a long reply for the sensor decodes");
+    assert_eq!(
+        (
+            params.sensor_index,
+            params.dpi_x,
+            params.default_dpi_x,
+            params.lod
+        ),
+        (SENSOR, 800, 1000, Lod::NotSupported)
+    );
+}
+
+#[test]
+fn parameters_broadcast_is_exactly_the_parameters_changed_event() {
+    use super::ExtendedDpiFeature;
+
+    for function in 0..=0x0f {
+        let changed = matches!(
+            decode_event(function, &[0; 16]),
+            Some(ExtendedDpiEvent::ParametersChanged(_))
+        );
+        assert_eq!(
+            ExtendedDpiFeature::is_parameters_broadcast(function),
+            changed,
+            "function {function}"
         );
     }
 }

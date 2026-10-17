@@ -35,7 +35,7 @@ pub use types::{
 use self::types::{ALL_CLUSTERS, ALL_EFFECTS, GetOrSet, be16};
 use crate::{
     feature::{EventSource, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{self, Hidpp20Error},
 };
 
 /// `typeOfInfo` value selecting general info in `getInfo`.
@@ -71,16 +71,26 @@ impl RgbEffectsFeature {
 
     /// Retrieves cluster-level information for `cluster_index` (`getInfo` cluster
     /// mode).
+    ///
+    /// The reply must be long and must echo `cluster_index` in byte 0; a short
+    /// reply (which would zero-fill the fields) or the info of another cluster
+    /// is refused with [`Hidpp20Error::UnsupportedResponse`].
     pub async fn get_cluster_info(
         &self,
         cluster_index: u8,
     ) -> Result<RgbClusterInfo, Hidpp20Error> {
-        let payload = self
+        let v20::Message::Long(_, payload) = self
             .endpoint
             .call(0, [cluster_index, ALL_EFFECTS, TYPE_GENERAL_INFO])
             .await?
-            .extend_payload();
-        Ok(RgbClusterInfo::from_payload(&payload))
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
+        let info = RgbClusterInfo::from_payload(&payload);
+        if info.cluster_index != cluster_index {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        }
+        Ok(info)
     }
 
     /// Retrieves effect-level information for an effect of a cluster (`getInfo`
@@ -130,6 +140,10 @@ impl RgbEffectsFeature {
     /// `persistence` controls volatile/non-volatile storage and `power_mode`
     /// selects which power mode the effect applies to. Requires software control
     /// (see [`Self::set_sw_control`]).
+    ///
+    /// Drive this future to completion even if its requester cancels: it waits
+    /// for native write completion before bounding the response wait. See
+    /// [`crate::channel::HidppChannel::send_write_through`].
     pub async fn set_rgb_cluster_effect(
         &self,
         cluster_index: u8,
@@ -143,7 +157,7 @@ impl RgbEffectsFeature {
         args[1] = cluster_effect_index;
         args[2..2 + CLUSTER_EFFECT_PARAM_COUNT].copy_from_slice(&params);
         args[12] = persistence.bits() | (u8::from(power_mode) << POWER_TARGET_SHIFT);
-        self.endpoint.call_long(1, args).await?;
+        self.endpoint.call_long_write_through(1, args).await?;
         Ok(())
     }
 
@@ -158,35 +172,40 @@ impl RgbEffectsFeature {
     }
 
     /// Reads one non-volatile configuration `capability`.
+    ///
+    /// The reply must be long: its six parameters are what
+    /// [`Self::set_nv_config`] writes back.
     pub async fn get_nv_config(
         &self,
         capability: RgbNvCapabilities,
     ) -> Result<RgbNvConfig, Hidpp20Error> {
         let [cap_hi, cap_lo] = capability.bits().to_be_bytes();
-        let payload = self
+        let v20::Message::Long(_, payload) = self
             .endpoint
             .call(3, [GetOrSet::Get.into(), cap_hi, cap_lo])
             .await?
-            .extend_payload();
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
+        let mut params = [0; 6];
+        params.copy_from_slice(&payload[4..10]);
         Ok(RgbNvConfig {
             capability: RgbNvCapabilities::from_bits_retain(be16(&payload, 1)),
             state: payload[3],
-            param1: payload[4],
-            param2: payload[5],
+            params,
         })
     }
 
     /// Writes one non-volatile configuration entry (to EEPROM).
-    pub async fn set_nv_config(
-        &self,
-        capability: RgbNvCapabilities,
-        state: u8,
-        param1: u8,
-        param2: u8,
-    ) -> Result<(), Hidpp20Error> {
-        let [cap_hi, cap_lo] = capability.bits().to_be_bytes();
+    ///
+    /// Outside this crate `config` can only come from [`Self::get_nv_config`]:
+    /// edit the fields to change, and every other parameter is written back
+    /// as read.
+    pub async fn set_nv_config(&self, config: &RgbNvConfig) -> Result<(), Hidpp20Error> {
+        let [cap_hi, cap_lo] = config.capability.bits().to_be_bytes();
         let mut args = [0; 16];
-        args[..6].copy_from_slice(&[GetOrSet::Set.into(), cap_hi, cap_lo, state, param1, param2]);
+        args[..4].copy_from_slice(&[GetOrSet::Set.into(), cap_hi, cap_lo, config.state]);
+        args[4..10].copy_from_slice(&config.params);
         self.endpoint.call_long(3, args).await?;
         Ok(())
     }
@@ -245,13 +264,18 @@ impl RgbEffectsFeature {
     }
 
     /// Sets the software-control and event-notification flags.
+    ///
+    /// Drive to completion, as for [`Self::set_rgb_cluster_effect`]. The
+    /// [v4 spec, pp. 26–28](https://drive.google.com/file/d/1lecrJQgAC7wnXlo8PEnwVSb3L0GioALG/view)
+    /// returns all three request fields; matching them keeps a late claim ACK
+    /// with different flags from satisfying a restore request.
     pub async fn set_sw_control(
         &self,
         control: SwControlFlags,
         events: EventsNotificationFlags,
     ) -> Result<(), Hidpp20Error> {
         self.endpoint
-            .call(5, [GetOrSet::Set.into(), control.bits(), events.bits()])
+            .call_echoed_write_through(5, [GetOrSet::Set.into(), control.bits(), events.bits()])
             .await?;
         Ok(())
     }

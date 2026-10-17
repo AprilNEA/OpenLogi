@@ -7,14 +7,19 @@
 //! at all. Unlike its siblings the feature reports no percentage — callers
 //! estimate one from the voltage (see `openlogi-hid`'s mappings).
 //!
-//! Only `getBatteryInfo` (function `0`) is implemented; the broadcast event
-//! isn't needed to display a charge reading — the same scope `BatteryStatus`
-//! (`0x1000`) keeps.
+//! Only `getBatteryInfo` (function `0`) is implemented. The device also
+//! broadcasts event `0` when its voltage or charging state changes;
+//! [`BatteryVoltageFeature::is_status_broadcast`] recognises it so a listener
+//! can re-read the battery instead of waiting for a poll — the same scope
+//! `BatteryStatus` (`0x1000`) keeps.
 //!
 //! The wire layout is not in a public Logitech spec: the voltage as a
 //! big-endian millivolt `u16` followed by one flags byte was
 //! reverse-engineered, and the decoding here follows Solaar
 //! (`decipher_battery_voltage`) and libratbag's consensus on the flag bits.
+//! The charge status values follow the Linux HID++ driver
+//! (`hidpp20_battery_map_status_voltage`), which reads three status bits and
+//! leaves values above `2` unknown.
 
 use openlogi_hidpp_derive::Feature;
 
@@ -29,6 +34,19 @@ pub struct BatteryVoltageFeature {
 }
 
 impl BatteryVoltageFeature {
+    /// Whether an unsolicited report on this feature's index is its
+    /// battery-voltage broadcast (event `0`; the Linux driver's
+    /// `EVENT_BATTERY_VOLTAGE_STATUS_BROADCAST`).
+    ///
+    /// Deliberately independent of the payload, like
+    /// `BatteryStatusFeature::is_status_broadcast`: a listener that only needs
+    /// to know *that* the reading changed re-reads it with
+    /// [`Self::get_battery_info`].
+    #[must_use]
+    pub const fn is_status_broadcast(function_id: u8) -> bool {
+        function_id == 0
+    }
+
     /// Reads the measured battery voltage and charging state (function `0`,
     /// `getBatteryInfo`).
     pub async fn get_battery_info(&self) -> Result<VoltageBatteryInfo, Hidpp20Error> {
@@ -69,9 +87,9 @@ impl VoltageBatteryInfo {
 
 /// Charging state decoded from the `0x1001` flags byte.
 ///
-/// Bit `7` set means external power is present; bits `0`–`1` then carry the
-/// charge status (`0b01` charge complete, `0b10` charge fault) and bits `3` /
-/// `4` mark fast / slow charging. Bit assignments follow Solaar and libratbag.
+/// Bit `7` set means external power is present; bits `0`–`2` then carry the
+/// charge status (`0` charging, `1` charge complete, `2` charge fault, any
+/// other value undefined) and bits `3` / `4` mark fast / slow charging.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -89,20 +107,22 @@ pub enum VoltageChargingStatus {
     /// On external power but not charging — a charge fault (status bits
     /// `0b10`).
     NotCharging,
+    /// On external power with a status value the protocol leaves undefined
+    /// (bits `0`–`2` equal to `3` through `7`).
+    Unknown,
 }
 
 impl VoltageChargingStatus {
-    /// Decodes the flags byte. Total on purpose: a contradictory or future
-    /// flag combination falls into the nearest charging bucket rather than
-    /// failing, so a battery reading never vanishes over an unknown bit.
+    /// Decodes the flags byte. Total on purpose, so a battery reading never
+    /// vanishes over an unknown bit: an undefined status value decodes to
+    /// [`Self::Unknown`] and the voltage still reads. It does not borrow a
+    /// neighbouring bucket — that would show `0b011` as a full battery.
     fn from_flags(flags: u8) -> Self {
         if flags & (1 << 7) == 0 {
             return Self::Discharging;
         }
-        match flags & 0x03 {
-            0x01 | 0x03 => Self::Full,
-            0x02 => Self::NotCharging,
-            _ => {
+        match flags & 0x07 {
+            0x00 => {
                 if flags & (1 << 3) != 0 {
                     Self::ChargingFast
                 } else if flags & (1 << 4) != 0 {
@@ -111,6 +131,9 @@ impl VoltageChargingStatus {
                     Self::Charging
                 }
             }
+            0x01 => Self::Full,
+            0x02 => Self::NotCharging,
+            _ => Self::Unknown,
         }
     }
 }
@@ -170,5 +193,31 @@ mod tests {
         // Bit 7 clear: whatever the low bits claim, the device runs on battery.
         let info = VoltageBatteryInfo::from_wire(&payload(3700, 0x1b));
         assert_eq!(info.status, VoltageChargingStatus::Discharging);
+    }
+
+    #[test]
+    fn on_external_power_only_status_values_0_to_2_are_defined() {
+        let cases = [
+            (0x80, VoltageChargingStatus::Charging),
+            (0x81, VoltageChargingStatus::Full),
+            (0x82, VoltageChargingStatus::NotCharging),
+            (0x83, VoltageChargingStatus::Unknown),
+            (0x84, VoltageChargingStatus::Unknown),
+            (0x85, VoltageChargingStatus::Unknown),
+            (0x86, VoltageChargingStatus::Unknown),
+            (0x87, VoltageChargingStatus::Unknown),
+        ];
+        for (flags, expected) in cases {
+            let info = VoltageBatteryInfo::from_wire(&payload(4000, flags));
+            assert_eq!(info.status, expected, "flags {flags:#04x}");
+            assert_eq!(info.voltage_mv, 4000, "flags {flags:#04x}");
+        }
+    }
+
+    #[test]
+    fn rate_bits_do_not_turn_an_undefined_status_into_charging() {
+        // Status 4 with the fast-charge bit set is still an undefined status.
+        let info = VoltageBatteryInfo::from_wire(&payload(3900, 0x80 | 0x08 | 0x04));
+        assert_eq!(info.status, VoltageChargingStatus::Unknown);
     }
 }

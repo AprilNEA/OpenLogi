@@ -2,11 +2,11 @@
 //!
 //! On macOS production is supervised-only: `launchctl kickstart` the
 //! registered service, register it on demand when absent (registration *is*
-//! the supervised start), and stop there — a login item the user switched
-//! off stays off, and a bundle whose registration fails needs its install
-//! fixed, not an unmanaged shadow agent. Only dev profiles (which never
-//! register) fall through to the direct launch (`open -g -n` / `disclaim`),
-//! which elsewhere is the only path.
+//! the supervised start), rebuild a registration launchd has no job for, and
+//! stop there — a login item the user switched off stays off, and a bundle
+//! whose registration fails needs its install fixed, not an unmanaged shadow
+//! agent. Only dev profiles (which never register) fall through to the direct
+//! launch (`open -g -n` / `disclaim`), which elsewhere is the only path.
 
 use std::path::PathBuf;
 
@@ -27,7 +27,7 @@ pub fn mark_suite_quitting() {
 /// Launch the agent once when the socket is unreachable. Detached so it
 /// outlives the GUI (the agent is the always-on process); logs and moves on if
 /// the binary can't be found / started — the user may start it via launchd or by
-/// hand, and the poll loop keeps retrying the connection regardless.
+/// hand, and the observe loop keeps retrying the connection regardless.
 pub(super) fn spawn_agent() {
     if SUITE_QUITTING.load(std::sync::atomic::Ordering::Relaxed) {
         info!("suite is quitting — leaving the agent down");
@@ -38,7 +38,8 @@ pub(super) fn spawn_agent() {
     // supervised rungs below; direct launch is reserved for dev profiles.
     #[cfg(target_os = "macos")]
     {
-        if kickstart_registered_agent() {
+        let kickstart = kickstart_registered_agent();
+        if kickstart == Kickstart::Started {
             return;
         }
         // Second rung: on a fresh install this reflex outruns the
@@ -47,9 +48,19 @@ pub(super) fn spawn_agent() {
         // profiles never register implicitly (a login item into `target/`
         // goes stale).
         if !openlogi_core::paths::is_dev_profile() {
-            match crate::platform::registration::ensure_registered() {
+            // A record whose job launchd no longer has still reports
+            // `Enabled`, so plain convergence would leave it alone and every
+            // kickstart from here on answers "Could not find service" — the
+            // agent would stay down for the rest of the session. Say what
+            // launchctl saw so the registration can rebuild the job.
+            let registered = if kickstart == Kickstart::NoSuchJob {
+                crate::platform::registration::reregister_missing_job()
+            } else {
+                crate::platform::registration::ensure_registered()
+            };
+            match registered {
                 Ok(()) => {
-                    if kickstart_registered_agent() {
+                    if kickstart_registered_agent() == Kickstart::Started {
                         return;
                     }
                 }
@@ -90,7 +101,7 @@ fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
     // TCC responsible process; a direct exec attributes its Accessibility
     // check to the parent GUI and the grant flips with the launch path (#192).
     #[cfg(target_os = "macos")]
-    if let Some(bundle) = helper_bundle(path) {
+    if let Some(bundle) = openlogi_core::brand::helper_bundle_root(path) {
         let mut child = std::process::Command::new("/usr/bin/open")
             .arg("-g")
             .arg("-n")
@@ -112,19 +123,38 @@ fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
     disclaim::Command::new(path).spawn().map(|_| ())
 }
 
-/// `launchctl kickstart` the agent's registered launchd service. Returns
-/// whether the start was handed to launchd — `false` (not registered, user
-/// switched it off in Login Items, or launchctl itself failed) lets the caller
-/// try registration before deciding whether its profile permits direct launch.
+/// What `launchctl kickstart` made of the agent's registered launchd service.
 #[cfg(target_os = "macos")]
-fn kickstart_registered_agent() -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kickstart {
+    /// launchd took the start request.
+    Started,
+    /// launchd has no job under that label — the registration record
+    /// `SMAppService` reads outlived the job itself, so only re-registering
+    /// can produce something startable again.
+    NoSuchJob,
+    /// Nothing to kickstart (not registered, or the user switched it off in
+    /// Login Items), or launchctl itself failed.
+    Unavailable,
+}
+
+/// `launchctl`'s exit status for "Could not find service": the label is not in
+/// the domain at all, as opposed to a job that exists and refused to start.
+#[cfg(target_os = "macos")]
+const LAUNCHCTL_SERVICE_NOT_FOUND: i32 = 113;
+
+/// `launchctl kickstart` the agent's registered launchd service. Anything but
+/// [`Kickstart::Started`] lets the caller converge the registration before
+/// deciding whether its profile permits direct launch.
+#[cfg(target_os = "macos")]
+fn kickstart_registered_agent() -> Kickstart {
     use crate::platform::registration;
 
     if registration::status() != registration::ServiceStatus::Enabled {
-        return false;
+        return Kickstart::Unavailable;
     }
     let Some(uid) = current_uid() else {
-        return false;
+        return Kickstart::Unavailable;
     };
     let target = format!("gui/{uid}/{}", registration::agent_service_label());
     match std::process::Command::new("/bin/launchctl")
@@ -134,7 +164,7 @@ fn kickstart_registered_agent() -> bool {
     {
         Ok(out) if out.status.success() => {
             info!(%target, "agent not running — kickstarted the registered service");
-            true
+            Kickstart::Started
         }
         Ok(out) => {
             warn!(
@@ -143,12 +173,24 @@ fn kickstart_registered_agent() -> bool {
                 stderr = %String::from_utf8_lossy(&out.stderr).trim(),
                 "launchctl kickstart failed"
             );
-            false
+            failed_kickstart(out.status.code())
         }
         Err(e) => {
             warn!(error = %e, "could not run launchctl");
-            false
+            Kickstart::Unavailable
         }
+    }
+}
+
+/// Read a failed `launchctl kickstart` exit code: only "could not find
+/// service" says the job is gone rather than unstartable, and only that
+/// warrants rebuilding the registration.
+#[cfg(target_os = "macos")]
+fn failed_kickstart(code: Option<i32>) -> Kickstart {
+    if code == Some(LAUNCHCTL_SERVICE_NOT_FOUND) {
+        Kickstart::NoSuchJob
+    } else {
+        Kickstart::Unavailable
     }
 }
 
@@ -163,13 +205,6 @@ fn current_uid() -> Option<u32> {
     std::fs::metadata(home).ok().map(|meta| meta.uid())
 }
 
-/// The `.app` root of a packaged helper binary, `None` for a bare dev binary.
-#[cfg(target_os = "macos")]
-fn helper_bundle(path: &std::path::Path) -> Option<&std::path::Path> {
-    let bundle = path.ancestors().nth(3)?;
-    (bundle.extension()? == "app").then_some(bundle)
-}
-
 /// Resolve the agent executable relative to the running GUI: a sibling in the
 /// cargo target dir (dev, and the flat Windows install layout), else the
 /// embedded `OpenLogi Agent.app` login-item helper (packaged macOS build).
@@ -178,22 +213,21 @@ fn agent_binary_path() -> Option<PathBuf> {
     let dir = exe.parent()?;
     // EXE_SUFFIX, or the Windows lookup misses `openlogi-agent.exe` and the
     // spawn retry — the only agent restart path there — silently never works.
-    let sibling = dir.join(format!("openlogi-agent{}", std::env::consts::EXE_SUFFIX));
+    let sibling = dir.join(format!(
+        "{}{}",
+        openlogi_core::brand::Helper::Agent.executable(),
+        std::env::consts::EXE_SUFFIX
+    ));
     if sibling.exists() {
         return Some(sibling);
     }
-    // Packaged: the login-item helper inside the outer bundle. Directories
-    // carry the display name (the privacy panes' filename fallback shows it);
-    // the last entry still finds pre-rename bundles.
+    // Packaged: the login-item helper inside the outer bundle, at every
+    // layout it has shipped under (`brand::Helper`).
     #[cfg(target_os = "macos")]
     {
-        let contents = dir.parent()?;
-        for relative in [
-            "Library/LoginItems/OpenLogi Agent Dev.app/Contents/MacOS/openlogi-agent",
-            "Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
-            "Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
-        ] {
-            let helper = contents.join(relative);
+        let app = dir.parent()?.parent()?;
+        for relative in openlogi_core::brand::Helper::Agent.executable_candidates() {
+            let helper = app.join(relative);
             if helper.exists() {
                 return Some(helper);
             }
@@ -207,33 +241,20 @@ fn agent_binary_path() -> Option<PathBuf> {
 #[cfg(test)]
 #[cfg(target_os = "macos")]
 mod tests {
-    use std::path::Path;
-
     use super::*;
 
     #[test]
-    fn helper_bundle_resolves_only_the_packaged_layout() {
-        let packaged = Path::new(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
-        );
+    fn only_a_missing_service_asks_for_a_new_registration() {
+        // 113 is launchctl's "Could not find service": the label is not in the
+        // domain, which the registration can repair. Every other failure is a
+        // job that exists and did not start — re-registering would restart a
+        // working service for nothing.
         assert_eq!(
-            helper_bundle(packaged),
-            Some(Path::new(
-                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
-            ))
+            failed_kickstart(Some(LAUNCHCTL_SERVICE_NOT_FOUND)),
+            Kickstart::NoSuchJob
         );
-        let dev = Path::new(
-            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app/Contents/MacOS/openlogi-agent",
-        );
-        assert_eq!(
-            helper_bundle(dev),
-            Some(Path::new(
-                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app"
-            ))
-        );
-        assert_eq!(
-            helper_bundle(Path::new("target/debug/openlogi-agent")),
-            None
-        );
+        assert_eq!(failed_kickstart(Some(1)), Kickstart::Unavailable);
+        // Killed by a signal: no exit code at all.
+        assert_eq!(failed_kickstart(None), Kickstart::Unavailable);
     }
 }

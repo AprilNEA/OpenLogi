@@ -21,8 +21,8 @@ use super::{
     AppView, connection_summary, connection_view, custom_model_subtitle, device_card, device_image,
     device_menu, device_menu_button, device_ring, keyboard_glow, kind_badge,
 };
-use crate::state::{AppState, DeviceRecord, StateEvent};
-use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading};
+use crate::state::{AppState, DeviceRecord};
+use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading, value_label};
 use crate::ui::carousel::Carousel;
 use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
 
@@ -43,10 +43,7 @@ pub(super) fn device_view_switcher(
                     if !checked {
                         return;
                     }
-                    AppState::update(cx, |state, cx| {
-                        state.set_device_view_mode(mode);
-                        cx.emit(StateEvent::SettingsChanged);
-                    });
+                    AppState::apply(cx, |state| state.commit_device_view_mode(mode));
                     view.update(cx, |_, cx| cx.notify());
                 })
         };
@@ -55,19 +52,19 @@ pub(super) fn device_view_switcher(
         toggle(
             "device-view-grid",
             IconName::LayoutDashboard,
-            tr!("Grid"),
+            tr!("common.grid"),
             DeviceViewMode::Grid,
         ),
         toggle(
             "device-view-list",
             IconName::Menu,
-            tr!("List"),
+            tr!("common.list"),
             DeviceViewMode::List,
         ),
         toggle(
             "device-view-carousel",
             IconName::GalleryVerticalEnd,
-            tr!("Carousel"),
+            tr!("common.carousel"),
             DeviceViewMode::Carousel,
         ),
     ])
@@ -202,11 +199,7 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
                 let Some(&idx) = select_order.get(*position) else {
                     return;
                 };
-                AppState::global(cx).update(cx, |state, cx| {
-                    if let Some(key) = state.set_current_device(idx) {
-                        cx.emit(StateEvent::DeviceSelected(key));
-                    }
-                });
+                AppState::apply(cx, |state| state.select_device(idx));
                 AppState::load_current_device_reads(cx);
             })),
     )
@@ -228,19 +221,27 @@ fn device_card_element(
     let light_settings = state.light_for(&record.device_key());
     let glow = keyboard_glow(state, record);
 
-    device_card(record, enabled, glow, light_enabled, light_settings, pal)
-        .active(gpui::Styled::shadow_2xs)
-        .accessibility_label(record.display_name.clone())
-        .aria_description(device_accessibility_description(record))
-        .aria_selected(active)
-        .cursor_pointer()
-        .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-        .focus_visible(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-        .on_click(move |_, _, cx| {
-            view.update(cx, |this, cx| {
-                this.open_device(record_key.clone(), cx);
-            });
-        })
+    device_card(
+        record,
+        state.offline_connection(record),
+        enabled,
+        glow,
+        light_enabled,
+        light_settings,
+        pal,
+    )
+    .active(gpui::Styled::shadow_2xs)
+    .accessibility_label(record.display_name.clone())
+    .aria_description(device_accessibility_description(record))
+    .aria_selected(active)
+    .cursor_pointer()
+    .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+    .focus_visible(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+    .on_click(move |_, _, cx| {
+        view.update(cx, |this, cx| {
+            this.open_device(record_key.clone(), cx);
+        });
+    })
 }
 
 fn device_list_row(
@@ -315,7 +316,11 @@ fn device_list_row(
                             .child(model),
                     )
                 })
-                .child(connection_view(record, pal)),
+                .child(connection_view(
+                    record,
+                    pal,
+                    state.offline_connection(record),
+                )),
         )
         .child(
             v_flex()
@@ -346,9 +351,9 @@ fn device_list_row(
 
 fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
     let status = if record.online {
-        tr!("Connected")
+        tr!("device.connected")
     } else {
-        tr!("Offline")
+        tr!("device.offline")
     };
     let identity = if record.display_name == record.model_name {
         super::kind_label(record.kind)
@@ -358,11 +363,15 @@ fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
     let metadata = format!("{status}. {identity}. {}.", connection_summary(record));
     if let Some(battery) = record.battery.as_ref() {
         let battery = if battery_charging_no_reading(battery) {
-            tr!("Charging").to_string()
+            tr!("device.charging").to_string()
         } else if record.online {
-            format!("{} {}%", tr!("Battery"), battery.percentage)
+            format!("{} {}", tr!("device.battery"), value_label(battery))
         } else {
-            format!("{} {}%", tr!("Last known battery"), battery.percentage)
+            format!(
+                "{} {}",
+                tr!("device.last_known_battery"),
+                value_label(battery)
+            )
         };
         format!("{metadata} {battery}.").into()
     } else {

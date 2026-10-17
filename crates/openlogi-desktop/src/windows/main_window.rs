@@ -9,7 +9,6 @@
 use gpui::{App, AppContext as _, Bounds, Size, Styled as _, WindowBounds, WindowOptions, px};
 use gpui_component::{ActiveTheme as _, Root};
 use openlogi_core::brand::APP_ID;
-use openlogi_core::device::DeviceInventory;
 use tracing::warn;
 
 use crate::app::AppView;
@@ -40,7 +39,7 @@ fn window_options(cx: &mut App) -> WindowOptions {
 }
 
 /// Open the main window — or focus the one already open.
-pub fn open(inventories: &[DeviceInventory], cx: &mut App) {
+pub fn open(cx: &mut App) {
     let existing = cx.default_global::<WindowRegistry>().main;
     if let Some(handle) = existing
         && handle
@@ -55,7 +54,7 @@ pub fn open(inventories: &[DeviceInventory], cx: &mut App) {
     let opened = cx.open_window(options, |window, cx| {
         theme::apply_from_settings(Some(window), cx);
 
-        let view = cx.new(|cx| AppView::new(inventories, window, cx));
+        let view = cx.new(|cx| AppView::new(window, cx));
 
         let appearance_obs = window.observe_window_appearance(|window, cx| {
             theme::apply_from_settings(Some(window), cx);
@@ -81,6 +80,6 @@ pub fn open(inventories: &[DeviceInventory], cx: &mut App) {
 /// would leave the app quitting the moment that window closes.
 pub fn ensure(cx: &mut App) {
     if cx.windows().is_empty() {
-        open(&[], cx);
+        open(cx);
     }
 }

@@ -8,6 +8,123 @@ use super::types::{
 };
 
 #[test]
+fn restoring_control_rejects_late_claim_and_different_notification_flags() {
+    use std::sync::Arc;
+
+    use super::{EventsNotificationFlags, RgbEffectsFeature, SwControlFlags};
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::nibble::U4;
+    use crate::protocol::v20::{Message, MessageHeader};
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let (seen, incoming) = async_channel::unbounded();
+        let _listener = channel.add_msg_listener_guarded(move |_, matched| {
+            seen.try_send(matched).unwrap();
+        });
+        let feature = RgbEffectsFeature::new(channel, 3, 8);
+        let mut restore = Box::pin(feature.set_sw_control(
+            SwControlFlags::from_bits_retain(0x82),
+            EventsNotificationFlags::from_bits_retain(0x45),
+        ));
+        assert!(futures::poll!(restore.as_mut()).is_pending());
+        let header = MessageHeader {
+            device_index: 3,
+            feature_index: 8,
+            function_id: U4::from_lo(5),
+            software_id: U4::from_lo(1),
+        };
+        for payload in [[1, 0x83, 0x45], [1, 0x82, 0x44], [0, 0x82, 0x45]] {
+            handle
+                .send_incoming(Message::Short(header, payload).into())
+                .await;
+            assert!(!incoming.recv().await.unwrap());
+            assert!(futures::poll!(restore.as_mut()).is_pending());
+        }
+        handle
+            .send_incoming(Message::Short(header, [1, 0x82, 0x45]).into())
+            .await;
+        restore.await.unwrap();
+        assert!(incoming.recv().await.unwrap());
+    });
+}
+
+fn nv_config_header() -> crate::protocol::v20::MessageHeader {
+    crate::protocol::v20::MessageHeader {
+        device_index: 3,
+        feature_index: 8,
+        function_id: crate::nibble::U4::from_lo(3),
+        software_id: crate::nibble::U4::from_lo(1),
+    }
+}
+
+#[test]
+fn nv_config_write_hands_back_every_parameter_it_read() {
+    use std::sync::Arc;
+
+    use super::RgbEffectsFeature;
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::protocol::v20::Message;
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let feature = RgbEffectsFeature::new(channel, 3, 8);
+
+        let mut read = Box::pin(feature.get_nv_config(RgbNvCapabilities::BOOT_UP_EFFECT));
+        assert!(futures::poll!(read.as_mut()).is_pending());
+        let mut reply = [0u8; 16];
+        reply[..10].copy_from_slice(&[0, 0x00, 0x01, 1, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        handle
+            .send_incoming(Message::Long(nv_config_header(), reply).into())
+            .await;
+        let mut config = read.await.unwrap();
+        assert_eq!(config.params, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+
+        config.state = 2;
+        let mut write = Box::pin(feature.set_nv_config(&config));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        handle
+            .send_incoming(Message::Long(nv_config_header(), reply).into())
+            .await;
+        write.await.unwrap();
+
+        let written = handle.written_reports();
+        let request = written.last().expect("setNvConfig was sent");
+        assert_eq!(
+            &request[4..14],
+            &[1, 0x00, 0x01, 2, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            "only the state changes; parameters 3..=6 are not zeroed"
+        );
+    });
+}
+
+#[test]
+fn nv_config_rejects_a_short_reply() {
+    use std::sync::Arc;
+
+    use super::RgbEffectsFeature;
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::protocol::v20::{Hidpp20Error, Message};
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let feature = RgbEffectsFeature::new(channel, 3, 8);
+        let mut read = Box::pin(feature.get_nv_config(RgbNvCapabilities::BOOT_UP_EFFECT));
+        assert!(futures::poll!(read.as_mut()).is_pending());
+        handle
+            .send_incoming(Message::Short(nv_config_header(), [0, 0x00, 0x01]).into())
+            .await;
+        assert!(matches!(read.await, Err(Hidpp20Error::UnsupportedResponse)));
+    });
+}
+
+#[test]
 fn parses_device_info() {
     let mut payload = [0; 16];
     payload[0] = 0xff;
@@ -187,4 +304,78 @@ fn keeps_cluster_changed_event_with_unknown_power_mode() {
         };
         assert_eq!(cluster_index, 1);
     }
+}
+
+/// Answers one `getInfo` cluster-mode request for `cluster_index` with
+/// `reply` and returns the wrapper's result.
+fn cluster_info_reply(
+    cluster_index: u8,
+    reply: crate::protocol::v20::Message,
+) -> Result<RgbClusterInfo, crate::protocol::v20::Hidpp20Error> {
+    use std::sync::Arc;
+
+    use super::RgbEffectsFeature;
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let feature = RgbEffectsFeature::new(channel, 3, 8);
+        handle.queue_response(reply.into());
+        feature.get_cluster_info(cluster_index).await
+    })
+}
+
+fn cluster_info_header() -> crate::protocol::v20::MessageHeader {
+    crate::protocol::v20::MessageHeader {
+        device_index: 3,
+        feature_index: 8,
+        function_id: crate::nibble::U4::from_lo(0),
+        software_id: crate::nibble::U4::from_lo(1),
+    }
+}
+
+/// A long cluster-info payload for `cluster_index` with five effects.
+fn cluster_info_payload(cluster_index: u8) -> [u8; 16] {
+    let mut payload = [0; 16];
+    payload[0] = cluster_index;
+    payload[2..4].copy_from_slice(&0x0001u16.to_be_bytes());
+    payload[4] = 5;
+    payload
+}
+
+#[test]
+fn cluster_info_reads_the_requested_cluster() {
+    use crate::protocol::v20::Message;
+
+    let info = cluster_info_reply(
+        1,
+        Message::Long(cluster_info_header(), cluster_info_payload(1)),
+    )
+    .expect("matching long reply");
+    assert_eq!(info.cluster_index, 1);
+    assert_eq!(info.effects_number, 5);
+}
+
+#[test]
+fn cluster_info_refuses_the_info_of_another_cluster() {
+    // Options+ GetRgbClusterInfo compares byte 0 with the requested index and
+    // fails with a protocol error otherwise.
+    use crate::protocol::v20::{Hidpp20Error, Message};
+
+    let reply = cluster_info_reply(
+        1,
+        Message::Long(cluster_info_header(), cluster_info_payload(0)),
+    );
+    assert!(matches!(reply, Err(Hidpp20Error::UnsupportedResponse)));
+}
+
+#[test]
+fn cluster_info_refuses_a_short_reply() {
+    // A short reply would zero-fill the effect count and persistency.
+    use crate::protocol::v20::{Hidpp20Error, Message};
+
+    let reply = cluster_info_reply(1, Message::Short(cluster_info_header(), [1, 0x00, 0x00]));
+    assert!(matches!(reply, Err(Hidpp20Error::UnsupportedResponse)));
 }
