@@ -5630,6 +5630,7 @@ dependencies = [
  "plist",
  "rust-i18n",
  "serde",
+ "sha2 0.10.9",
  "strum 0.27.2",
  "sys-locale",
  "tempfile",
