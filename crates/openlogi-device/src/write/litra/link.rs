@@ -138,10 +138,28 @@ pub struct LightChange {
     pub on_light: LightControls,
 }
 
+/// Whether the light's brightness limit explains its brightness moving from
+/// `before` to `after`: the light lowered it to a limit below the old
+/// brightness or below the old limit, or raised it from the limit it sat at
+/// once that limit rose or went away. A limit change the brightness does not
+/// follow explains nothing, so a press read with it is still the user's.
+fn limit_explains(before: &LightState, after: &LightState) -> bool {
+    let (Some(was), Some(now)) = (before.brightness, after.brightness) else {
+        return false;
+    };
+    let lowered = after.brightness_limit.is_some_and(|limit| {
+        now == limit && (was > limit || before.brightness_limit.is_none_or(|old| limit < old))
+    });
+    let released = before.brightness_limit.is_some_and(|old| {
+        was == old && now > was && after.brightness_limit.is_none_or(|limit| limit > old)
+    });
+    lowered || released
+}
+
 /// What woke a [`LightWatch`].
 enum Woke {
     /// The light sent a notification.
-    Notified(IlluminationEvent),
+    Notified,
     /// OpenLogi wrote to the light.
     Written,
 }
@@ -185,8 +203,9 @@ impl LightWatch {
     ///
     /// After a notification the light is read again rather than trusted from
     /// the notification, and only a value that differs from the last one read
-    /// or written counts as changed on the light. A brightness that moved
-    /// with the light's limit is a change of state, not one made on the light,
+    /// or written counts as changed on the light. A brightness the light's
+    /// limit explains — lowered to a lower limit, or back up once the limit
+    /// it sat at rose — is a change of state, not one made on the light,
     /// whichever notification is read first. A write OpenLogi made is reported
     /// with the state it read back and no control changed on the light, once,
     /// whether the light announces it or not — unless a read after a
@@ -202,19 +221,19 @@ impl LightWatch {
             let woke = tokio::select! {
                 biased;
                 _ = self.retired.wait_for(|retired| *retired) => return None,
-                event = self.events.next() => Woke::Notified(event?),
+                event = self.events.next() => match event {
+                    Some(_) => Woke::Notified,
+                    None => return None,
+                },
                 Ok(()) = self.written.changed() => Woke::Written,
             };
-            let event = match woke {
-                Woke::Notified(event) => event,
-                Woke::Written => {
-                    let state = *self.written.borrow_and_update();
-                    match self.report(state, LightControls::default()) {
-                        Some(change) => return Some(change),
-                        None => continue,
-                    }
+            if matches!(woke, Woke::Written) {
+                let state = *self.written.borrow_and_update();
+                match self.report(state, LightControls::default()) {
+                    Some(change) => return Some(change),
+                    None => continue,
                 }
-            };
+            }
             let _guard = device_lock(&self.route).await;
             // Each write read the light back and noted it under this lock, so
             // the read below is newer than every state a write noted so far.
@@ -235,15 +254,10 @@ impl LightWatch {
             let before = std::mem::replace(&mut *self.link.last(), state);
             // The limit shows in the state read even when another
             // notification is read before the light's own limit notification.
-            let limited = before.brightness_limit != state.brightness_limit
-                || matches!(
-                    event,
-                    IlluminationEvent::BrightnessEffectiveMaxChanged(_)
-                        | IlluminationEvent::BrightnessClamped { .. }
-                );
             let on_light = LightControls {
                 power: before.on != state.on,
-                brightness: !limited && before.brightness != state.brightness,
+                brightness: before.brightness != state.brightness
+                    && !limit_explains(&before, &state),
                 temperature: before.temperature_kelvin != state.temperature_kelvin,
             };
             if let Some(change) = self.report(state, on_light) {

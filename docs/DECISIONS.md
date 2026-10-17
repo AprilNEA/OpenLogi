@@ -44,11 +44,14 @@ state, and writes a value only when it differs from the one it read.
   a manual choice until the next camera transition instead.
 - **OpenLogi's own writes are not changes on the light.** The light echoes
   every setter as a notification. A notification that matches the value the
-  agent just wrote is the echo. A brightness that moved with the effective
-  maximum the light reads back is the light's limit, not the user's choice,
-  even when another notification is read first. The published state still
-  follows the write: the watcher reports the state a write read back once,
-  whether or not the light echoes it, unless a later read replaced it.
+  agent just wrote is the echo. A brightness the light's effective maximum
+  explains is the light's limit, not the user's choice, even when another
+  notification is read first: lowered to a limit below the old brightness or
+  the old limit, or raised from the limit it sat at once that limit rose. A
+  press read together with a limit it stays under is still the user's. The
+  published state still follows the write: the watcher reports the state a
+  write read back once, whether or not the light echoes it, unless a later
+  read replaced it.
 
 Verified against scripted lights only; the repository has no Litra capture yet.
 

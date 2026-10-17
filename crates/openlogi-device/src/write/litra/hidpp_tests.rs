@@ -1194,6 +1194,141 @@ async fn a_limit_read_behind_another_notification_is_not_a_change_on_the_light()
 }
 
 #[tokio::test]
+async fn a_press_read_with_a_limit_it_stays_under_is_still_a_change_on_the_light() {
+    let mut light = Light::glow();
+    light.brightness_flags = DYNAMIC;
+    let backend = LitraBackend::new("press-under-limit", Opens::Hidpp, light);
+    let mut watch = watching(&backend).await;
+
+    // The brightness button takes the light from 100 to 150 lm, and the
+    // limit drops to 200 lm before the brightness notification is read:
+    // 150 lm is under the new limit, so the limit explains nothing.
+    backend.press(1, |light| {
+        light.lumens = 150;
+        150u16.to_be_bytes().to_vec()
+    });
+    backend.press(3, |light| {
+        light.effective_max = 200;
+        200u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the brightness press is reported");
+    assert_eq!(
+        change.on_light,
+        LightControls {
+            brightness: true,
+            ..LightControls::default()
+        }
+    );
+    assert_eq!(change.state.brightness, Some(150));
+    assert_eq!(change.state.brightness_limit, Some(200));
+    assert!(
+        stays_quiet(&mut watch).await,
+        "the limit notification read later finds nothing new"
+    );
+}
+
+#[tokio::test]
+async fn a_brightness_raised_back_from_its_limit_is_not_a_change_on_the_light() {
+    let mut light = Light::glow();
+    light.brightness_flags = DYNAMIC;
+    let backend = LitraBackend::new("limit-released", Opens::Hidpp, light);
+    let mut watch = watching(&backend).await;
+
+    backend.press(3, |light| {
+        light.effective_max = 80;
+        light.lumens = 80;
+        80u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the new limit is reported");
+    assert_eq!(change.on_light, LightControls::default());
+
+    // Full power is back, and the light raises its brightness from the
+    // limit it was held at.
+    backend.press(3, |light| {
+        light.effective_max = 250;
+        light.lumens = 120;
+        250u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the lifted limit is reported");
+    assert_eq!(change.on_light, LightControls::default());
+    assert_eq!(change.state.brightness, Some(120));
+    assert_eq!(change.state.brightness_limit, None);
+}
+
+#[tokio::test]
+async fn a_press_read_with_a_lifted_limit_is_still_a_change_on_the_light() {
+    let mut light = Light::glow();
+    light.brightness_flags = DYNAMIC;
+    let backend = LitraBackend::new("press-limit-lifted", Opens::Hidpp, light);
+    let mut watch = watching(&backend).await;
+
+    backend.press(3, |light| {
+        light.effective_max = 200;
+        200u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the new limit is reported");
+    assert_eq!(change.on_light, LightControls::default());
+    assert_eq!(change.state.brightness, Some(100));
+
+    // The light sat below its 200 lm limit, so a rise read together with the
+    // lifted limit is the brightness button, not the light coming back up.
+    backend.press(1, |light| {
+        light.lumens = 150;
+        150u16.to_be_bytes().to_vec()
+    });
+    backend.press(3, |light| {
+        light.effective_max = 250;
+        250u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the brightness press is reported");
+    assert_eq!(
+        change.on_light,
+        LightControls {
+            brightness: true,
+            ..LightControls::default()
+        }
+    );
+    assert_eq!(change.state.brightness, Some(150));
+    assert_eq!(change.state.brightness_limit, None);
+    assert!(
+        stays_quiet(&mut watch).await,
+        "the limit notification read later finds nothing new"
+    );
+}
+
+#[tokio::test]
+async fn a_press_a_new_limit_cuts_short_is_not_kept_as_the_brightness() {
+    let mut light = Light::glow();
+    light.brightness_flags = DYNAMIC;
+    let backend = LitraBackend::new("press-cut-short", Opens::Hidpp, light);
+    let mut watch = watching(&backend).await;
+
+    // The brightness button raises the light from 100 lm while a new 120 lm
+    // limit stops it there: the light sits at a limit lower than before.
+    backend.press(1, |light| {
+        light.effective_max = 120;
+        light.lumens = 120;
+        120u16.to_be_bytes().to_vec()
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the new state is reported");
+    assert_eq!(change.on_light, LightControls::default());
+    assert_eq!(change.state.brightness, Some(120));
+    assert_eq!(change.state.brightness_limit, Some(120));
+}
+
+#[tokio::test]
 async fn a_read_after_a_notification_replaces_an_older_write_reading() {
     let light = Light {
         quirk: Quirk::Unannounced,
