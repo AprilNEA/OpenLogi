@@ -103,7 +103,8 @@ pub use succession::Identity;
 ///      HostNameNotApplied}` appended — the `0x1815` Easy-Switch host names
 ///      and OS, and renaming a slot's computer.
 /// v37: `Capabilities::virtual_thumbwheel` appended — Back/Forward can hold
-///      the main wheel as a virtual thumb wheel.
+///      the main wheel as a virtual thumb wheel;
+///      `ReceiverSelector::ReceiverUid` appended for explicit pairing targets.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the

@@ -132,6 +132,14 @@ impl Link {
         matches!(self, Self::Down(_))
     }
 
+    /// Discard an observation begun before a pairing command. Its buffered
+    /// phase must not overwrite the command's completion or newly started flow.
+    pub(super) fn refresh_state(&mut self) {
+        if let Self::Up(observer) = self {
+            *observer = Observer::state(observer.client().clone());
+        }
+    }
+
     pub(super) fn down_mut(&mut self) -> Option<&mut Down> {
         match self {
             Self::Down(down) => Some(down),
