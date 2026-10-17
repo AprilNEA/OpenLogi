@@ -5772,6 +5772,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "openlogi-clipboard"
+version = "0.8.14"
+dependencies = [
+ "thiserror 2.0.18",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "openlogi-core"
 version = "0.8.15"
 dependencies = [

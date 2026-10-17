@@ -142,6 +142,11 @@ release = false
 publish = false
 
 [[package]]
+name = "openlogi-clipboard"
+release = false
+publish = false
+
+[[package]]
 name = "openlogi-agent"
 release = false
 publish = false

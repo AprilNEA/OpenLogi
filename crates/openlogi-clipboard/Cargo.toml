@@ -1,0 +1,35 @@
+[package]
+name = "openlogi-clipboard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Plain-text access to the OS clipboard for OpenLogi Flow's clipboard sync."
+# Agent-internal; no published crate depends on it.
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+] }
+
+# The round-trip test runs against a private window station's clipboard.
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_System_DataExchange",
+  "Win32_System_StationsAndDesktops",
+] }
+
+[lints]
+workspace = true
