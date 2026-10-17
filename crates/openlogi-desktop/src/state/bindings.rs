@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, WheelHoldBinding};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, GestureDirection, LongPressBinding, WheelHoldBinding,
+};
 use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, KeyTrigger};
 use tracing::debug;
@@ -211,8 +213,9 @@ impl AppState {
     /// map for the currently selected device — in whichever profile
     /// [`AppState::editing_app`] has open.
     ///
-    /// In the global profile a wheel-hold button keeps holding the wheel:
-    /// the picked action replaces only what its press runs.
+    /// In the global profile a long-press button keeps its long action and a
+    /// wheel-hold button keeps holding the wheel: the picked action replaces
+    /// only the short or click action.
     ///
     /// Disk failures restore the persisted projection and surface a config
     /// error instead of crashing the UI thread.
@@ -238,11 +241,17 @@ impl AppState {
             // action means, and why gesture mode is not offered in this scope.
             if let Some(app) = app {
                 config.set_per_app_binding(&key, &app, button, Some(action));
-            } else if config.is_wheel_hold(&key, button) {
-                let binding = WheelHoldBinding::horizontal_scroll(action);
-                config.set_binding(&key, button, Binding::WheelHold(binding));
             } else {
-                config.set_binding(&key, button, Binding::Single(action));
+                let binding = match config.stored_bindings(&key).get(&button) {
+                    Some(Binding::LongPress(binding)) => {
+                        Binding::LongPress(LongPressBinding::new(action, binding.long().clone()))
+                    }
+                    Some(Binding::WheelHold(_)) => {
+                        Binding::WheelHold(WheelHoldBinding::horizontal_scroll(action))
+                    }
+                    _ => Binding::Single(action),
+                };
+                config.set_binding(&key, button, binding);
             }
         });
         // The agent owns the hook; have it rebuild its live map from config.
