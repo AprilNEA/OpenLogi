@@ -210,9 +210,9 @@ pub struct CaptureSpec {
 /// [`CaptureSessionOutcome::RestorePending`] for the caller to retry on the
 /// current inventory channel.
 ///
-/// `spec` is followed live: a new value is applied on the open channel (see
-/// [`ArmedControls::reconfigure`]) instead of restarting the session, so a
-/// control both specs divert the same way keeps its diversion throughout.
+/// `spec` is followed live: a new value is applied on the open channel
+/// instead of restarting the session, so a control both specs divert the same
+/// way keeps its diversion throughout.
 pub async fn run_capture_session(
     route: DeviceRoute,
     mut spec: watch::Receiver<CaptureSpec>,
