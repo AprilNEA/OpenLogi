@@ -154,6 +154,33 @@ fn only_the_controls_changed_on_the_light_are_kept() {
 }
 
 #[test]
+fn a_state_an_openlogi_write_read_back_is_published_and_keeps_the_change() {
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    // The brightness was pressed, then OpenLogi wrote the temperature.
+    orch.light_changed(&route(), change(state(true, 135, 4000), false, true, false));
+    orch.light_changed(
+        &route(),
+        change(state(true, 135, 5000), false, false, false),
+    );
+
+    assert_eq!(
+        published(&orch),
+        vec![ObservedLight {
+            route: route(),
+            state: state(true, 135, 5000),
+            changed_on_light: ChangedOnLight {
+                brightness_percent: Some(50),
+                ..ChangedOnLight::default()
+            },
+        }]
+    );
+    assert_eq!(
+        orch.effective_light_settings(KEY),
+        Some(settings(true, 50, 4000))
+    );
+}
+
+#[test]
 fn a_brightness_outside_the_range_is_not_kept() {
     let mut orch = with_glow(config_with(settings(true, 80, 4000)));
     orch.light_changed(&route(), change(state(true, 300, 4000), false, true, false));

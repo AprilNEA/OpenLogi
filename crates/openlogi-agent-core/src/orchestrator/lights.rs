@@ -9,9 +9,9 @@
 
 use openlogi_core::config::{Config, LightSettings};
 use openlogi_core::device::{ChangedOnLight, LightState};
-use openlogi_hid::{DeviceRoute, LightChange, LightCommand, litra_model_for_route};
+use openlogi_hid::{DeviceRoute, LightChange, LightCommand, LightControls, litra_model_for_route};
 use openlogi_ipc::ObservedLight;
-use tracing::info;
+use tracing::{debug, info};
 
 use super::Orchestrator;
 use crate::watchers::light::WatchedLight;
@@ -39,8 +39,9 @@ impl Orchestrator {
         self.publish_lights();
     }
 
-    /// Record a change a watched light announced. A control changed on the
-    /// light itself stands in for its saved value. The power of a
+    /// Record a watched light's new state: one it announced, or one an
+    /// OpenLogi write read back. A control changed on the light itself stands
+    /// in for its saved value. The power of a
     /// camera-linked light is kept as a manual choice instead, as the GUI's
     /// power switch keeps it, so the next camera transition still applies.
     pub fn light_changed(&mut self, route: &DeviceRoute, change: LightChange) {
@@ -78,7 +79,11 @@ impl Orchestrator {
         if changed.is_empty() {
             self.lights_changed_on_light.remove(&key);
         }
-        info!(device = %key, ?on_light, ?changed, "a light was changed on the light itself");
+        if on_light == LightControls::default() {
+            debug!(device = %key, ?state, "a light reads back a new state");
+        } else {
+            info!(device = %key, ?on_light, ?changed, "a light was changed on the light itself");
+        }
         self.publish_lights();
     }
 

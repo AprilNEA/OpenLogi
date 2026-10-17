@@ -194,7 +194,8 @@ pub struct AgentSnapshot {
 pub struct ObservedLight {
     /// The route the light is reached on, as in [`AgentSnapshot::standalone`].
     pub route: DeviceRoute,
-    /// What the light last read back.
+    /// What the light last read back: when its watch began, after each of
+    /// its notifications, and after each write OpenLogi made.
     pub state: LightState,
     /// Settings changed on the light itself that the saved settings do not
     /// hold yet. The agent already uses them; the GUI saves them.

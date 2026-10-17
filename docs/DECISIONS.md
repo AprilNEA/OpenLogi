@@ -45,7 +45,9 @@ state, and writes a value only when it differs from the one it read.
 - **OpenLogi's own writes are not changes on the light.** The light echoes
   every setter as a notification. A notification that matches the value the
   agent just wrote is the echo; a lowered effective maximum is the light's
-  limit, not the user's choice.
+  limit, not the user's choice. The published state still follows the write:
+  the watcher reports the state a write read back once, whether or not the
+  light echoes it.
 
 Verified against scripted lights only; the repository has no Litra capture yet.
 

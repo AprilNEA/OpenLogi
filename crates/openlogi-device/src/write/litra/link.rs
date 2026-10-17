@@ -9,7 +9,9 @@
 //! A watcher must tell OpenLogi's own writes from a change made on the light,
 //! because the light announces both. A command records the value it wrote
 //! before it releases the route's device lock, and the watcher reads the light
-//! under that lock, so the echo of a write compares equal and is not reported.
+//! under that lock, so the echo of a write is not a change on the light. The
+//! watcher still reports the state the write read back, whether or not the
+//! light announces the write.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
@@ -34,9 +36,12 @@ pub(super) type LinkKey = (String, NodeId);
 /// A light reached over HID++ `0x1990`, kept open.
 pub(super) struct LiveLink {
     pub(super) light: Illumination,
-    /// What the light last read as, for the watcher to compare against.
+    /// What the light last read as, with the controls OpenLogi wrote since,
+    /// for the watcher to tell a change made on the light from its own write.
     /// Written under the route's device lock.
     last: Mutex<LightState>,
+    /// What the light read back after OpenLogi's latest write.
+    written: watch::Sender<LightState>,
     /// Set once a newer link replaces this one or it stops answering, so a
     /// watcher on it reconnects.
     retired: watch::Sender<bool>,
@@ -59,6 +64,7 @@ pub(super) fn keep(key: LinkKey, light: Illumination, state: LightState) -> Arc<
     let link = Arc::new(LiveLink {
         light,
         last: Mutex::new(state),
+        written: watch::Sender::new(state),
         retired: watch::Sender::new(false),
     });
     let mut links = links();
@@ -91,18 +97,22 @@ impl LiveLink {
     /// Record the control `command` wrote at the value the light read back,
     /// so the watcher takes the light's echo for OpenLogi's own write. The
     /// other controls keep their last value: a change made on the light
-    /// meanwhile is still the watcher's to report.
+    /// meanwhile is still the watcher's to report. The whole state read back
+    /// goes to the watcher too.
     pub(super) fn note_written(&self, command: LightCommand, state: &LightState) {
-        let mut last = self.last();
-        match command {
-            LightCommand::Power(_) => last.on = state.on,
-            LightCommand::BrightnessPercent(_) | LightCommand::BrightnessNative(_) => {
-                last.brightness = state.brightness;
-            }
-            LightCommand::TemperatureKelvin(_) => {
-                last.temperature_kelvin = state.temperature_kelvin;
+        {
+            let mut last = self.last();
+            match command {
+                LightCommand::Power(_) => last.on = state.on,
+                LightCommand::BrightnessPercent(_) | LightCommand::BrightnessNative(_) => {
+                    last.brightness = state.brightness;
+                }
+                LightCommand::TemperatureKelvin(_) => {
+                    last.temperature_kelvin = state.temperature_kelvin;
+                }
             }
         }
+        self.written.send_replace(*state);
     }
 }
 
@@ -117,14 +127,23 @@ pub struct LightControls {
     pub temperature: bool,
 }
 
-/// A light's state after it announced a change.
+/// A light's state after it changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LightChange {
     /// What the light reads back now.
     pub state: LightState,
     /// The controls changed on the light itself — its buttons or another
-    /// program — rather than by OpenLogi or by a brightness limit.
+    /// program — rather than by OpenLogi or by a brightness limit. None for a
+    /// write OpenLogi made or a new brightness limit.
     pub on_light: LightControls,
+}
+
+/// What woke a [`LightWatch`].
+enum Woke {
+    /// The light sent a notification.
+    Notified(IlluminationEvent),
+    /// OpenLogi wrote to the light.
+    Written,
 }
 
 /// The notifications of one light reached over HID++ `0x1990`.
@@ -132,7 +151,9 @@ pub struct LightWatch {
     route: DeviceRoute,
     link: Arc<LiveLink>,
     events: Boxed<IlluminationEvent>,
+    written: watch::Receiver<LightState>,
     retired: watch::Receiver<bool>,
+    /// The state last reported.
     state: LightState,
 }
 
@@ -142,11 +163,13 @@ impl LightWatch {
     pub(super) fn new(route: DeviceRoute, link: Arc<LiveLink>, state: LightState) -> Self {
         *link.last() = state;
         let events = link.light.listen().boxed();
+        let written = link.written.subscribe();
         let retired = link.retired.subscribe();
         Self {
             route,
             link,
             events,
+            written,
             retired,
             state,
         }
@@ -160,18 +183,36 @@ impl LightWatch {
 
     /// Wait for the light to change, and read it.
     ///
-    /// The light is read again rather than trusted from the notification, and
-    /// only a value that differs from the last one read or written counts. A
-    /// brightness the light lowered to a new limit is a change of state, not
-    /// one made on the light.
+    /// After a notification the light is read again rather than trusted from
+    /// the notification, and only a value that differs from the last one read
+    /// or written counts as changed on the light. A brightness the light
+    /// lowered to a new limit is a change of state, not one made on the light.
+    /// A write OpenLogi made is reported with the state it read back and no
+    /// control changed on the light, once, whether the light announces it or
+    /// not.
     ///
     /// Returns `None` once the link is gone — the light stopped answering, or
     /// came back as another node — and the caller should watch it again.
     pub async fn next(&mut self) -> Option<LightChange> {
         loop {
-            let event = tokio::select! {
-                event = self.events.next() => event?,
+            // In this order: a notification the light sent before a write
+            // finished — its echo among them — is matched against the value
+            // noted for the write before the write's own state is taken.
+            let woke = tokio::select! {
+                biased;
                 _ = self.retired.wait_for(|retired| *retired) => return None,
+                event = self.events.next() => Woke::Notified(event?),
+                Ok(()) = self.written.changed() => Woke::Written,
+            };
+            let event = match woke {
+                Woke::Notified(event) => event,
+                Woke::Written => {
+                    let state = *self.written.borrow_and_update();
+                    match self.report(state, LightControls::default()) {
+                        Some(change) => return Some(change),
+                        None => continue,
+                    }
+                }
             };
             let _guard = device_lock(&self.route).await;
             let state = match tokio::time::timeout(RESOLVE_TIMEOUT, self.link.light.read_state())
@@ -188,23 +229,28 @@ impl LightWatch {
                 }
             };
             let before = std::mem::replace(&mut *self.link.last(), state);
-            self.state = state;
-            if before == state {
-                continue;
-            }
             let limited = matches!(
                 event,
                 IlluminationEvent::BrightnessEffectiveMaxChanged(_)
                     | IlluminationEvent::BrightnessClamped { .. }
             );
-            return Some(LightChange {
-                state,
-                on_light: LightControls {
-                    power: before.on != state.on,
-                    brightness: !limited && before.brightness != state.brightness,
-                    temperature: before.temperature_kelvin != state.temperature_kelvin,
-                },
-            });
+            let on_light = LightControls {
+                power: before.on != state.on,
+                brightness: !limited && before.brightness != state.brightness,
+                temperature: before.temperature_kelvin != state.temperature_kelvin,
+            };
+            if let Some(change) = self.report(state, on_light) {
+                return Some(change);
+            }
         }
+    }
+
+    /// Take `state` as the one reported, and the change to report: one when
+    /// it differs from the state last reported or a control was changed on
+    /// the light.
+    fn report(&mut self, state: LightState, on_light: LightControls) -> Option<LightChange> {
+        let reported = std::mem::replace(&mut self.state, state);
+        (reported != state || on_light != LightControls::default())
+            .then_some(LightChange { state, on_light })
     }
 }

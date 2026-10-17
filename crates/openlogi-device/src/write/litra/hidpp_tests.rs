@@ -44,6 +44,8 @@ enum Quirk {
     RejectsWrites,
     /// Nothing is answered any more, as after the light was unplugged.
     Gone,
+    /// Setters change the light without announcing it.
+    Unannounced,
 }
 
 /// A scripted Litra's feature table and state.
@@ -99,6 +101,13 @@ impl Light {
         let _ = notify.send(report);
     }
 
+    /// Announce a write OpenLogi asked for, unless this light does not.
+    fn echo(&self, sub_id: u8, payload: &[u8]) {
+        if self.quirk != Quirk::Unannounced {
+            self.announce(sub_id, payload);
+        }
+    }
+
     fn functions(&self) -> Vec<u8> {
         self.requests
             .iter()
@@ -142,7 +151,7 @@ impl Light {
                     0 => payload[0] = u8::from(self.on),
                     1 => {
                         self.on = request[4] & 1 != 0;
-                        self.announce(0, &[u8::from(self.on)]);
+                        self.echo(0, &[u8::from(self.on)]);
                     }
                     2 => info(&mut payload, self.brightness_flags, self.brightness),
                     3 => payload[..2].copy_from_slice(&self.lumens.to_be_bytes()),
@@ -151,13 +160,13 @@ impl Light {
                             0 => argument,
                             limit => argument.min(limit),
                         };
-                        self.announce(1, &self.lumens.to_be_bytes());
+                        self.echo(1, &self.lumens.to_be_bytes());
                     }
                     7 => info(&mut payload, LINEAR, self.temperature),
                     8 => payload[..2].copy_from_slice(&self.kelvin.to_be_bytes()),
                     9 => {
                         self.kelvin = argument;
-                        self.announce(2, &self.kelvin.to_be_bytes());
+                        self.echo(2, &self.kelvin.to_be_bytes());
                     }
                     12 => payload[..2].copy_from_slice(&self.effective_max.to_be_bytes()),
                     _ => return None,
@@ -943,8 +952,19 @@ async fn stays_quiet(watch: &mut LightWatch) -> bool {
         .is_err()
 }
 
+/// The watcher's next change made on the light, past the states it reports
+/// for OpenLogi's own writes.
+async fn next_change_on_light(watch: &mut LightWatch) -> LightChange {
+    loop {
+        let change = next_change(watch).await.expect("the watcher keeps running");
+        if change.on_light != LightControls::default() {
+            return change;
+        }
+    }
+}
+
 #[tokio::test]
-async fn openlogis_own_writes_are_not_reported_as_changes_on_the_light() {
+async fn openlogis_own_write_is_reported_once_and_not_as_a_change_on_the_light() {
     let backend = LitraBackend::new("echo", Opens::Hidpp, Light::glow());
     let route = backend.route();
     let mut watch = watching(&backend).await;
@@ -955,12 +975,24 @@ async fn openlogis_own_writes_are_not_reported_as_changes_on_the_light() {
         LightCommand::BrightnessNative(200),
         LightCommand::TemperatureKelvin(5000),
     ] {
-        apply(&backend, &route, LitraModel::Glow, command)
+        let applied = apply(&backend, &route, LitraModel::Glow, command)
             .await
-            .expect("the command is written");
+            .expect("the command is written")
+            .expect("the light reads back");
+        let change = next_change(&mut watch)
+            .await
+            .expect("the write is reported");
+        assert_eq!(
+            change,
+            LightChange {
+                state: applied,
+                on_light: LightControls::default(),
+            },
+            "{command:?} is reported with the state it read back"
+        );
         assert!(
             stays_quiet(&mut watch).await,
-            "the echo of {command:?} is not a change on the light"
+            "the echo of {command:?} is not reported again"
         );
     }
     // Then its power button is pressed.
@@ -984,6 +1016,40 @@ async fn openlogis_own_writes_are_not_reported_as_changes_on_the_light() {
 }
 
 #[tokio::test]
+async fn a_write_the_light_does_not_announce_is_reported_too() {
+    let light = Light {
+        quirk: Quirk::Unannounced,
+        ..Light::glow()
+    };
+    let backend = LitraBackend::new("unannounced", Opens::Hidpp, light);
+    let route = backend.route();
+    let mut watch = watching(&backend).await;
+
+    let applied = apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::BrightnessNative(200),
+    )
+    .await
+    .expect("the brightness is written")
+    .expect("the light reads back");
+
+    let change = next_change(&mut watch)
+        .await
+        .expect("the write is reported");
+    assert_eq!(change.state.brightness, Some(200));
+    assert_eq!(
+        change,
+        LightChange {
+            state: applied,
+            on_light: LightControls::default(),
+        }
+    );
+    assert!(stays_quiet(&mut watch).await, "the write is reported once");
+}
+
+#[tokio::test]
 async fn a_write_does_not_hide_a_change_made_on_the_light_meanwhile() {
     let backend = LitraBackend::new("meanwhile", Opens::Hidpp, Light::glow());
     let route = backend.route();
@@ -1002,9 +1068,8 @@ async fn a_write_does_not_hide_a_change_made_on_the_light_meanwhile() {
     .expect("the temperature is written");
     backend.press(1, |light| light.lumens.to_be_bytes().to_vec());
 
-    let change = next_change(&mut watch)
-        .await
-        .expect("the button press is reported");
+    // The write's own state may be reported first; the press still is.
+    let change = next_change_on_light(&mut watch).await;
     assert_eq!(
         change.on_light,
         LightControls {
@@ -1014,6 +1079,51 @@ async fn a_write_does_not_hide_a_change_made_on_the_light_meanwhile() {
     );
     assert_eq!(change.state.brightness, Some(150));
     assert_eq!(change.state.temperature_kelvin, Some(5000));
+    assert!(stays_quiet(&mut watch).await, "the press is reported once");
+}
+
+#[tokio::test]
+async fn a_change_on_the_light_is_reported_even_when_a_write_already_read_it() {
+    let light = Light {
+        quirk: Quirk::Unannounced,
+        ..Light::glow()
+    };
+    let backend = LitraBackend::new("read-first", Opens::Hidpp, light);
+    let route = backend.route();
+    let mut watch = watching(&backend).await;
+
+    // The brightness button is pressed, and a temperature write reads the
+    // new brightness back before the light's notification arrives.
+    backend.change_silently(|light| light.lumens = 150);
+    apply(
+        &backend,
+        &route,
+        LitraModel::Glow,
+        LightCommand::TemperatureKelvin(5000),
+    )
+    .await
+    .expect("the temperature is written");
+    let written = next_change(&mut watch)
+        .await
+        .expect("the write is reported");
+    assert_eq!(written.on_light, LightControls::default());
+    assert_eq!(written.state.brightness, Some(150));
+
+    // The light's state is already reported; the press still is.
+    backend.press(1, |light| light.lumens.to_be_bytes().to_vec());
+    let change = next_change(&mut watch)
+        .await
+        .expect("the button press is reported");
+    assert_eq!(
+        change,
+        LightChange {
+            state: written.state,
+            on_light: LightControls {
+                brightness: true,
+                ..LightControls::default()
+            },
+        }
+    );
 }
 
 #[tokio::test]
