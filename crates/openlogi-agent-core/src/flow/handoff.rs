@@ -21,6 +21,8 @@ const ARM_TIMEOUT: Duration = Duration::from_secs(8);
 const COMPLETED_LIMIT: usize = 64;
 /// Time for a switched device to reconnect to this receiver.
 const RECONNECT_SETTLE: Duration = Duration::from_millis(1500);
+/// When the input that followed an arrival is logged.
+const ARRIVAL_REPORT_AFTER: Duration = Duration::from_secs(3);
 
 mod sender;
 
@@ -422,12 +424,13 @@ async fn accept_pending(state: Arc<GenerationState>, peer: PublicKey, transfer_i
             // mouse from wherever this screen's pointer last was, which can be
             // on an armed edge that sends the devices straight back.
             if let Some(entry) = state.handoffs.pointer_entry(peer, transfer_id).await {
+                state.input.arrived();
                 super::runtime::warp_entry(&entry);
-                state.pointer_hold.arrived();
                 info!(
                     transfer_id,
                     "Flow incoming handoff accepted, pointer placed"
                 );
+                spawn_arrival_report(Arc::clone(&state), transfer_id);
             }
             let keys = state.handoffs.pending_keys(peer, transfer_id).await;
             state.note_presence(keys.iter().map(String::as_str), Presence::Arrived);
@@ -441,6 +444,24 @@ async fn accept_pending(state: Arc<GenerationState>, peer: PublicKey, transfer_i
     if let Some(completed) = completed {
         finish_incoming(state, completed).await;
     }
+}
+
+/// Log when the first movement and the first key press came in after an
+/// arrival, and whether the mouse released a burst — the part of a crossing
+/// the receiver can measure. Never the key itself.
+fn spawn_arrival_report(state: Arc<GenerationState>, transfer_id: u64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(ARRIVAL_REPORT_AFTER).await;
+        let report = state.input.arrival_report();
+        info!(
+            transfer_id,
+            first_move_ms = ?report.first_move_ms,
+            first_key_ms = ?report.first_key_ms,
+            burst_events = report.burst_events,
+            burst_px = report.burst_px,
+            "Flow arrival input"
+        );
+    });
 }
 
 /// Prepare one-write switches for the devices that are arriving, once they have

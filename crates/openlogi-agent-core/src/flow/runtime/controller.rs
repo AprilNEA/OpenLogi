@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::FlowGeneration;
+use super::input::FlowInput;
 use crate::flow::FlowDeviceSnapshot;
 use crate::flow::config::{CompiledFlowConfig, format_public_key};
 use crate::flow::handoff::start_outgoing;
@@ -39,72 +40,14 @@ struct ControllerInner {
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
     armed: AtomicBool,
-    pointer_hold: Arc<PointerHold>,
+    input: Arc<FlowInput>,
 }
 
-/// Bounded, callback-safe input seam for pointer movement.
+/// Bounded, callback-safe input seam for the OS hook.
 #[derive(Clone)]
 pub struct FlowInputHandle {
     movement: mpsc::Sender<Movement>,
-    hold: Arc<PointerHold>,
-}
-
-/// Keeps the pointer on the edge it crossed while the devices are moved away.
-///
-/// Between the crossing and the moment the receiver drops the devices, the
-/// pointer would otherwise keep moving here — sliding along the edge or back
-/// into the screen — for as long as the switch takes. The hook swallows
-/// movement while held. A hold always expires, so a lost release cannot
-/// freeze the pointer.
-pub(crate) struct PointerHold {
-    epoch: Instant,
-    /// Milliseconds after `epoch` until which movement is swallowed; 0 = none.
-    until_ms: AtomicU64,
-    /// Set when a handoff placed the pointer on an armed edge from outside;
-    /// the edge detector latches so that placement cannot read as a crossing.
-    arrived: AtomicBool,
-}
-
-/// Long enough to cover the exclusive receiver lease and the switch writes.
-const POINTER_HOLD: Duration = Duration::from_millis(1500);
-
-impl PointerHold {
-    fn new() -> Self {
-        Self {
-            epoch: Instant::now(),
-            until_ms: AtomicU64::new(0),
-            arrived: AtomicBool::new(false),
-        }
-    }
-
-    fn now_ms(&self) -> u64 {
-        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
-    }
-
-    fn hold(&self) {
-        let until = self
-            .now_ms()
-            .saturating_add(u64::try_from(POINTER_HOLD.as_millis()).unwrap_or(u64::MAX));
-        self.until_ms.store(until, Ordering::Release);
-    }
-
-    /// Let the pointer move again: the handoff did not move the devices.
-    pub(crate) fn release(&self) {
-        self.until_ms.store(0, Ordering::Release);
-    }
-
-    /// The pointer was just placed on the edge a handoff arrived through.
-    pub(crate) fn arrived(&self) {
-        self.arrived.store(true, Ordering::Release);
-    }
-
-    fn take_arrival(&self) -> bool {
-        self.arrived.swap(false, Ordering::AcqRel)
-    }
-
-    fn held(&self) -> bool {
-        self.now_ms() < self.until_ms.load(Ordering::Acquire)
-    }
+    input: Arc<FlowInput>,
 }
 
 #[derive(Clone, Copy)]
@@ -151,7 +94,7 @@ impl FlowController {
                 channel_pool,
                 receiver_access,
                 armed: AtomicBool::new(false),
-                pointer_hold: Arc::new(PointerHold::new()),
+                input: Arc::new(FlowInput::new()),
             }),
         }
     }
@@ -197,8 +140,11 @@ impl FlowController {
             movement,
             Arc::clone(&self.inner.edge_settings),
             self.inner.control_tx.clone(),
-            Arc::clone(&self.inner.pointer_hold),
+            Arc::clone(&self.inner.input),
         ));
+        tokio::spawn(super::input::run_arrival_glide(Arc::clone(
+            &self.inner.input,
+        )));
         // Published whether or not Flow is enabled: a peer needs this key in
         // its config before either side can connect.
         tokio::spawn(publish_identity(Arc::clone(&self.inner.observable)));
@@ -244,7 +190,7 @@ impl FlowController {
     pub fn input(&self) -> FlowInputHandle {
         FlowInputHandle {
             movement: self.inner.movement_tx.clone(),
-            hold: Arc::clone(&self.inner.pointer_hold),
+            input: Arc::clone(&self.inner.input),
         }
     }
 }
@@ -252,11 +198,20 @@ impl FlowController {
 impl FlowInputHandle {
     /// Queue one pointer movement without blocking the OS hook callback.
     /// Returns whether the hook should swallow it: a handoff holds the
-    /// pointer on the edge it crossed.
+    /// pointer on the edge it crossed, and the burst a reconnecting mouse
+    /// releases on arrival glides in instead of jumping.
     #[must_use]
-    pub fn try_moved(&self, control_held: bool) -> bool {
+    pub fn try_moved(&self, control_held: bool, delta_x: i32, delta_y: i32) -> bool {
         let _ = self.movement.try_send(Movement { control_held });
-        self.hold.held()
+        self.input.pointer_moved(delta_x, delta_y)
+    }
+
+    /// Note one key press without blocking the OS hook callback. Returns
+    /// whether the hook should swallow it: a press here after the devices were
+    /// sent away means the keyboard stayed behind, and it is sent on.
+    #[must_use]
+    pub fn key_pressed(&self) -> bool {
+        self.input.key_pressed()
     }
 }
 
@@ -326,7 +281,7 @@ async fn run_controller(
                 if let Some(active) = &generation {
                     start_outgoing(Arc::clone(&active.state), crossing);
                 } else {
-                    inner.pointer_hold.release();
+                    inner.input.release();
                 }
             }
         }
@@ -359,7 +314,7 @@ async fn start_generation(
         Arc::clone(&inner.observable),
         inner.channel_pool.clone(),
         inner.receiver_access.clone(),
-        Arc::clone(&inner.pointer_hold),
+        Arc::clone(&inner.input),
     )
     .await
     {
@@ -375,7 +330,7 @@ async fn run_edge_input(
     mut movement: mpsc::Receiver<Movement>,
     settings: Arc<RwLock<EdgeSettings>>,
     control: mpsc::UnboundedSender<Control>,
-    hold: Arc<PointerHold>,
+    input: Arc<FlowInput>,
 ) {
     let epoch = Instant::now();
     let mut detector: Option<EdgeDetector> = None;
@@ -414,39 +369,22 @@ async fn run_edge_input(
             active_revision = current.revision;
             refreshed_at = Instant::now();
         }
-        latch_pending |= hold.take_arrival();
+        latch_pending |= input.take_latch();
         if latch_pending && let Some(detector) = detector.as_mut() {
             detector.latch();
             latch_pending = false;
         }
         let (Some(detector), Some(position)) =
-            (detector.as_mut(), openlogi_hook::cursor_position())
+            (detector.as_mut(), openlogi_hook::edge_cursor_position())
         else {
             continue;
         };
         if let Some(crossing) = detector.update(position, epoch.elapsed()) {
             info!(side = ?crossing.side, "Flow edge crossed");
-            hold.hold();
+            input.hold();
             if control.send(Control::Crossing(crossing)).is_err() {
-                hold.release();
+                input.release();
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PointerHold;
-
-    #[test]
-    fn a_pointer_hold_swallows_movement_until_released() {
-        let hold = PointerHold::new();
-        assert!(!hold.held(), "nothing is held before a crossing");
-
-        hold.hold();
-        assert!(hold.held());
-
-        hold.release();
-        assert!(!hold.held(), "a failed handoff gives the pointer back");
     }
 }

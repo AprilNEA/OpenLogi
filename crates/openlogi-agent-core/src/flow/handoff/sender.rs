@@ -16,7 +16,7 @@ const MAX_PEER_ARM_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(in crate::flow) fn start_outgoing(state: Arc<GenerationState>, crossing: EdgeCrossing) {
     if !state.is_active() {
-        state.pointer_hold.release();
+        state.input.release();
         return;
     }
     // A handoff already in flight owns the pointer hold.
@@ -37,7 +37,7 @@ pub(in crate::flow) fn start_outgoing(state: Arc<GenerationState>, crossing: Edg
         // Once the switch is issued the devices are leaving: the hold expires
         // on its own. Anything short of that gives the pointer back now.
         if acknowledgment.is_none() {
-            state.pointer_hold.release();
+            state.input.release();
         }
         // The devices are gone, so nothing here can cross again until they
         // come back — and when they do, that crossing must not queue behind
@@ -120,7 +120,7 @@ async fn run_outgoing(
         "Flow handoff accepted"
     );
     match state.switch_devices(&targets).await {
-        Ok(true) => {}
+        Ok(true) => state.set_handed_off_to(&peer.name),
         Ok(false) => {
             state.handoffs.remove_outgoing(transfer_id).await;
             state

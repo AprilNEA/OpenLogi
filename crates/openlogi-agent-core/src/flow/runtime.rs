@@ -40,14 +40,18 @@ const PROTOCOL_MIN: u32 = 1;
 const PROTOCOL_MAX: u32 = 1;
 
 mod controller;
+mod input;
 
-pub(crate) use controller::PointerHold;
 pub use controller::{FlowController, FlowInputHandle};
+pub(crate) use input::FlowInput;
 
 struct FlowGeneration {
     state: Arc<GenerationState>,
     sessions: SessionManager,
     tasks: Vec<JoinHandle<()>>,
+    /// Waits on keystrokes rather than on the sessions, so it is aborted
+    /// rather than awaited at shutdown.
+    keyboard_follower: JoinHandle<()>,
     _advertiser: Option<MdnsAdvertiser>,
     _endpoint: Arc<FlowEndpoint>,
 }
@@ -59,7 +63,7 @@ impl FlowGeneration {
         observable: Arc<ObservableState>,
         channel_pool: ChannelPool,
         receiver_access: ReceiverAccess,
-        pointer_hold: Arc<PointerHold>,
+        input: Arc<FlowInput>,
     ) -> Result<Self, FlowRuntimeError> {
         let identity = tokio::task::spawn_blocking(load_machine_identity)
             .await
@@ -115,7 +119,7 @@ impl FlowGeneration {
             observable,
             channel_pool,
             receiver_access,
-            pointer_hold,
+            input,
         ));
         prepare_switch_targets(&state);
         let provider: Arc<dyn TrustedStateProvider> = state.clone();
@@ -137,11 +141,13 @@ impl FlowGeneration {
             )));
             tasks.push(tokio::spawn(watch_connection(Arc::clone(&state), handle)));
         }
+        let keyboard_follower = tokio::spawn(follow_keyboards(Arc::clone(&state)));
         info!(peers = config.peers.len(), "Flow runtime armed");
         Ok(Self {
             state,
             sessions,
             tasks,
+            keyboard_follower,
             _advertiser: advertiser,
             _endpoint: endpoint,
         })
@@ -159,6 +165,7 @@ impl FlowGeneration {
             let _lifecycle = self.state.lifecycle.lock().await;
             self.state.active.store(false, Ordering::Release);
         }
+        self.keyboard_follower.abort();
         self.sessions.shutdown().await;
         for task in self.tasks.drain(..) {
             let _ = task.await;
@@ -179,12 +186,14 @@ pub(super) struct GenerationState {
     active: AtomicBool,
     pub(super) lifecycle: Mutex<()>,
     pub(super) handoffs: HandoffBook,
-    pub(super) pointer_hold: Arc<PointerHold>,
+    pub(super) input: Arc<FlowInput>,
     /// Online devices already prepared for a one-write switch; `None` while
     /// a preparation is in flight.
     switch_targets: std::sync::Mutex<Vec<(DeviceRoute, Option<Arc<HostSwitchTarget>>)>>,
     /// Where Flow itself last moved each device, by config key, and when.
     presence: std::sync::Mutex<HashMap<String, (Presence, std::time::Instant)>>,
+    /// The peer this machine last sent the devices to.
+    handed_off_to: std::sync::Mutex<Option<String>>,
 }
 
 /// What Flow knows first-hand about a device's whereabouts.
@@ -220,8 +229,18 @@ pub(super) struct OutgoingDevice {
     key: String,
     route: DeviceRoute,
     host: u8,
+    pointing: bool,
     pub(super) identity: proto::DeviceIdentity,
 }
+
+/// When a device that should have left is checked for still answering here.
+const DEPARTURE_CHECK_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
+/// How long that check waits for an answer.
+const DEPARTURE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(600);
+/// How many times a device that did not leave is told again.
+const DEPARTURE_RETRIES: u32 = 2;
+/// When modifiers a departed keyboard left down here are released.
+const MODIFIER_RELEASE_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl GenerationState {
     fn new(
@@ -230,7 +249,7 @@ impl GenerationState {
         observable: Arc<ObservableState>,
         channel_pool: ChannelPool,
         receiver_access: ReceiverAccess,
-        pointer_hold: Arc<PointerHold>,
+        input: Arc<FlowInput>,
     ) -> Self {
         let devices = runtime_devices(&config, snapshots);
         Self {
@@ -246,9 +265,10 @@ impl GenerationState {
             active: AtomicBool::new(true),
             lifecycle: Mutex::new(()),
             handoffs: HandoffBook::default(),
-            pointer_hold,
+            input,
             switch_targets: std::sync::Mutex::new(Vec::new()),
             presence: std::sync::Mutex::new(HashMap::new()),
+            handed_off_to: std::sync::Mutex::new(None),
         }
     }
 
@@ -374,6 +394,7 @@ impl GenerationState {
                         key: device.snapshot.config_key,
                         route,
                         host,
+                        pointing: is_pointing_device(device.snapshot.kind),
                         identity: device.identity,
                     },
                 ))
@@ -435,6 +456,19 @@ impl GenerationState {
                 .collect();
             openlogi_hid::switch_hosts(&targets, &self.channel_pool).await?;
         }
+        if fast && let Some(prepared) = prepared {
+            // The mouse is busy crossing and takes the write at once; a
+            // keyboard idling in its power-saving state can miss it.
+            let unconfirmed: Vec<_> = prepared
+                .into_iter()
+                .zip(devices)
+                .filter(|(_, device)| !device.pointing)
+                .map(|(target, _)| target)
+                .collect();
+            if !unconfirmed.is_empty() {
+                tokio::spawn(confirm_departures(unconfirmed));
+            }
+        }
         self.note_presence(
             devices.iter().map(|device| device.key.as_str()),
             Presence::Departed,
@@ -473,6 +507,51 @@ impl GenerationState {
         if let Ok(mut cache) = self.switch_targets.lock() {
             cache.clear();
         }
+    }
+
+    /// The configured keyboards (every non-pointing device) that can go to
+    /// `peer`, whatever their online state: a keystroke here is the proof.
+    fn keyboards_for(&self, peer: &str) -> Vec<OutgoingDevice> {
+        self.devices_snapshot()
+            .into_iter()
+            .filter(|device| !is_pointing_device(device.snapshot.kind))
+            .filter_map(|device| {
+                let route = device.snapshot.route.clone()?;
+                let host = device.channels.get(peer).copied()?;
+                Some(OutgoingDevice {
+                    key: device.snapshot.config_key,
+                    route,
+                    host,
+                    pointing: false,
+                    identity: device.identity,
+                })
+            })
+            .collect()
+    }
+
+    /// Record the peer this machine just sent the devices to.
+    pub(super) fn set_handed_off_to(&self, peer: &str) {
+        if let Ok(mut handed_off_to) = self.handed_off_to.lock() {
+            *handed_off_to = Some(peer.to_owned());
+        }
+        self.input.departed();
+        // A keyboard that left with a modifier down (Ctrl held to cross, say)
+        // never sends its release here. Give a receiver that releases keys on
+        // disconnect time to do so first.
+        tokio::spawn(async {
+            tokio::time::sleep(MODIFIER_RELEASE_DELAY).await;
+            let released = openlogi_inject::release_stuck_modifiers();
+            if released > 0 {
+                info!(
+                    released,
+                    "released modifier keys the departed keyboard left down"
+                );
+            }
+        });
+    }
+
+    fn handed_off_to(&self) -> Option<String> {
+        self.handed_off_to.lock().ok().and_then(|peer| peer.clone())
     }
 
     pub(super) async fn send_result(&self, peer: PublicKey, result: proto::HandoffResult) {
@@ -655,8 +734,76 @@ pub(super) fn warp_entry(entry: &proto::EntryPoint) {
     let Some((x, y)) = point_on_edge(&edges, side, entry.t) else {
         return;
     };
-    if !openlogi_inject::warp_cursor(x, y) {
+    if openlogi_inject::warp_cursor(x, y) {
+        openlogi_hook::reseed_motion_baseline(openlogi_hook::CursorPosition { x, y });
+    } else {
         warn!("Flow device arrived, but cursor warp is unsupported on this display server");
+    }
+}
+
+/// Re-send the switch to a device that still answers here after it.
+///
+/// `setCurrentHost` is fire-and-forget, and a keyboard idling in its
+/// power-saving state can miss it: the mouse leaves and the keyboard silently
+/// stays. A device that left, or sleeps, no longer answers on this receiver;
+/// one that answers did not leave, so it is told again.
+async fn confirm_departures(targets: Vec<(Arc<HostSwitchTarget>, u8)>) {
+    for (target, host) in targets {
+        for attempt in 1..=DEPARTURE_RETRIES {
+            tokio::time::sleep(DEPARTURE_CHECK_DELAY).await;
+            if !target.answers(DEPARTURE_CHECK_TIMEOUT).await {
+                break;
+            }
+            warn!(
+                attempt,
+                host, "a Flow device still answers after its switch — sending it again"
+            );
+            if let Err(error) = target.switch_to(host).await {
+                warn!(%error, "repeating the Flow switch failed");
+                break;
+            }
+        }
+    }
+}
+
+/// Send a keyboard that stayed behind after a handoff on to the machine the
+/// pointer went to, whenever a keystroke here proves it did.
+async fn follow_keyboards(state: Arc<GenerationState>) {
+    loop {
+        state.input.keyboard_stayed.notified().await;
+        if !state.is_active() {
+            return;
+        }
+        let Some(peer_name) = state.handed_off_to() else {
+            continue;
+        };
+        let Some(peer) = state
+            .config
+            .peers
+            .iter()
+            .find(|peer| peer.name == peer_name)
+        else {
+            continue;
+        };
+        if state.connection(peer.public_key).is_none() {
+            warn!(
+                peer = %peer_name,
+                "keystroke here after a handoff, but the peer is unreachable — keeping the keyboard"
+            );
+            continue;
+        }
+        let keyboards = state.keyboards_for(&peer_name);
+        if keyboards.is_empty() {
+            continue;
+        }
+        warn!(
+            peer = %peer_name,
+            devices = keyboards.len(),
+            "Flow keyboard stayed behind after the handoff — sending it on"
+        );
+        if let Err(error) = state.switch_devices(&keyboards).await {
+            warn!(%error, "sending the keyboard on failed");
+        }
     }
 }
 
