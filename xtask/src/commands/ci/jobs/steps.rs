@@ -264,7 +264,7 @@ fn msrv(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
     // the pinned compiler already is that version.
     let installed = cmd!(sh, "rustc -vV").quiet().read().unwrap_or_default();
     if installed.lines().any(|line| {
-        // `rust-version = "1.98"` is satisfied by any 1.98.x compiler.
+        // `rust-version = "1.99"` is satisfied by any 1.99.x compiler.
         line.strip_prefix("release: ")
             .is_some_and(|version| version == floor || version.starts_with(&format!("{floor}.")))
     }) {

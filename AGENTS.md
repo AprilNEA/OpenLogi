@@ -150,7 +150,7 @@ A skipped job is **not** a pass. These procedures do not authorize a push.
 
 ## Rust standards
 
-Edition 2024, MSRV = current stable (1.98), one shared workspace lint table. The
+Edition 2024, MSRV = current stable (1.99), one shared workspace lint table. The
 floor tracks stable instead of trailing it — raise it the day a release ships
 something worth using, and run `devenv update rust-overlay` with it so the local
 toolchain stops being older than CI's. The full standards — the

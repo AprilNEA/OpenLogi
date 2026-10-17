@@ -180,14 +180,14 @@ jobs:
       # life this check silently ran stable and never once verified the floor.
       # RUSTUP_TOOLCHAIN outranks the file; keep it in step with the version
       # installed above and with `rust-version`.
-      RUSTUP_TOOLCHAIN: "1.98"
+      RUSTUP_TOOLCHAIN: "1.99"
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98
+      - uses: dtolnay/rust-toolchain@1.99
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
