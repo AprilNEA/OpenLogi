@@ -6,10 +6,10 @@
 //! panel is drawn at the pointer inside it.
 
 use gpui::{
-    Bounds, Context, Div, Hsla, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement,
-    Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
-    WindowBackgroundAppearance, WindowKind, WindowOptions, div, point, prelude::FluentBuilder as _,
-    px, svg,
+    AppContext as _, Bounds, Context, Div, Hsla, InteractiveElement, IntoElement, MouseMoveEvent,
+    ParentElement, Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _,
+    Styled, Window, WindowBackgroundAppearance, WindowHandle, WindowKind, WindowOptions, div,
+    point, prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
@@ -287,6 +287,50 @@ pub(crate) fn ring_window_options() -> WindowOptions {
         app_id: Some("openlogi-action-ring".to_string()),
         ..WindowOptions::default()
     }
+}
+
+/// Open one ring window, retrying a layer-shell opening as a plain window when
+/// the compositor lacks `zwlr_layer_shell_v1`.
+pub(crate) fn open_ring_window(
+    cx: &mut gpui::App,
+    options: WindowOptions,
+    invocation: &ActionRingInvocation,
+    commands: &mpsc::UnboundedSender<OverlayCommand>,
+    live: &Arc<ClickAwaySession>,
+    placement: Placement,
+) -> anyhow::Result<WindowHandle<RingView>> {
+    let open = |cx: &mut gpui::App, options| {
+        cx.open_window(options, |_, cx| {
+            cx.new(|_| RingView::new(invocation.clone(), commands.clone(), live, placement))
+        })
+    };
+    #[cfg(target_os = "linux")]
+    if let Some(fallback) = layer_shell_fallback(&options) {
+        return match open(cx, options) {
+            Err(error) if error.is::<gpui::layer_shell::LayerShellNotSupportedError>() => {
+                open(cx, fallback)
+            }
+            opened => opened,
+        };
+    }
+    open(cx, options)
+}
+
+#[cfg(target_os = "linux")]
+fn layer_shell_fallback(options: &WindowOptions) -> Option<WindowOptions> {
+    use gpui::WindowBounds;
+
+    if !matches!(options.kind, WindowKind::LayerShell(_)) {
+        return None;
+    }
+    Some(WindowOptions {
+        window_bounds: options
+            .window_bounds
+            .map(|bounds| WindowBounds::Maximized(bounds.get_bounds())),
+        display_id: options.display_id,
+        window_decorations: options.window_decorations,
+        ..ring_window_options()
+    })
 }
 
 /// Top-left of the ring panel within its window, or nothing while the pointer is unknown.
