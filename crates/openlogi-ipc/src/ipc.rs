@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
-use openlogi_core::config::Lighting;
+use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::device::{ChangedOnLight, DeviceInventory, LightState, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
@@ -107,9 +107,10 @@ pub use succession::Identity;
 ///      appended — what each standalone light reached over HID++ `0x1990`
 ///      reads back, and the settings changed on the light itself;
 ///      `Agent::reload_saved_config` appended — the reload after a save of
-///      the settings app, which keeps a change made on a light unless the
-///      save holds its value, removes the control's value, or the user chose
-///      that control.
+///      the settings app, with the revision of the file it wrote. It keeps a
+///      change made on a light unless the save holds its value, removes the
+///      control's value, or the user chose that control. A file at another
+///      revision loads as a plain reload.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -220,6 +221,17 @@ pub struct ChosenLight {
     pub brightness: bool,
     /// The user set the colour temperature.
     pub temperature: bool,
+}
+
+/// A save of the GUI, which [`Agent::reload_saved_config`] reloads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedConfig {
+    /// The revision of `config.toml` that the GUI wrote. A file at another
+    /// revision was edited after the save, so the agent loads it as
+    /// [`Agent::reload_config`] does.
+    pub revision: ConfigRevision,
+    /// The controls of lights the user set in the save without a write.
+    pub chosen: Vec<ChosenLight>,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -703,7 +715,10 @@ pub trait Agent {
     /// [`Agent::reload_config`] does, except for changes made on lights. The
     /// GUI writes a light it changes, and that write already takes the change
     /// on the light. So this reload keeps such a change unless the save holds
-    /// its value, the save removes the control's value, or `chosen` names the
-    /// control: the user set it while the light could not be written.
-    async fn reload_saved_config(chosen: Vec<ChosenLight>) -> Result<(), ConfigReloadError>;
+    /// its value, the save removes the control's value, or `saved.chosen`
+    /// names the control: the user set it while the light could not be
+    /// written. This holds only for the file the GUI wrote: a file at another
+    /// revision than `saved.revision` was edited since, and loads as
+    /// [`Agent::reload_config`] loads it.
+    async fn reload_saved_config(saved: SavedConfig) -> Result<(), ConfigReloadError>;
 }

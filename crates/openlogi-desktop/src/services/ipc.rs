@@ -44,7 +44,7 @@ use openlogi_core::hid::{
     BacklightState, DeviceRoute, EasySwitchHosts, FnLockState, LightCommand, ReportRateInfo,
     WriteError,
 };
-use openlogi_ipc::ChosenLight;
+use openlogi_ipc::SavedConfig;
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
 use tarpc::client::RpcError;
@@ -262,7 +262,7 @@ async fn observe_loop(
             Woken::Command(None) => break, // GUI dropped the sender → shut down
             // Not dispatched like the device commands below: held, and
             // delivered at the end of this turn if a connection exists.
-            Woken::Command(Some(Command::ReloadConfig(reload))) => owed.save(reload.chosen),
+            Woken::Command(Some(Command::ReloadConfig(reload))) => owed.save(reload),
             Woken::Command(Some(Command::LoadConfig(_))) => owed.load = true,
             Woken::Command(Some(cmd)) => {
                 let client = link.ensure(effects, update_tx).await;
@@ -300,23 +300,30 @@ async fn observe_loop(
 struct OwedReloads {
     /// A [`LoadConfig`] is owed.
     load: bool,
-    /// A [`ReloadConfig`] is owed, with the chosen controls of every save it
-    /// stands for.
-    save: Option<Vec<ChosenLight>>,
+    /// A [`ReloadConfig`] is owed, at the revision of the latest save it
+    /// stands for and with the chosen controls of every one of them.
+    save: Option<SavedConfig>,
 }
 
 impl OwedReloads {
-    /// Owe a [`ReloadConfig`], merging `chosen` into the one already owed.
-    fn save(&mut self, chosen: Vec<ChosenLight>) {
-        let owed = self.save.get_or_insert_with(Vec::new);
+    /// Owe `reload`, merged into the one already owed: the file is now at
+    /// the revision of this save, and its chosen controls join the others.
+    fn save(&mut self, reload: ReloadConfig) {
+        let ReloadConfig { chosen, revision } = reload;
+        let owed = self.save.get_or_insert_with(SavedConfig::default);
+        owed.revision = revision;
         for light in chosen {
-            match owed.iter_mut().find(|owed| owed.device == light.device) {
+            match owed
+                .chosen
+                .iter_mut()
+                .find(|owed| owed.device == light.device)
+            {
                 Some(owed) => {
                     owed.power |= light.power;
                     owed.brightness |= light.brightness;
                     owed.temperature |= light.temperature;
                 }
-                None => owed.push(light),
+                None => owed.chosen.push(light),
             }
         }
     }
@@ -327,10 +334,10 @@ impl OwedReloads {
     /// on a light since. A transport failure drops the link and keeps the
     /// reload for the next one.
     async fn deliver(&mut self, link: &mut Link, update_tx: &mpsc::UnboundedSender<GuiUpdate>) {
-        if let Some(chosen) = self.save.clone()
+        if let Some(SavedConfig { revision, chosen }) = self.save.clone()
             && let Some(client) = link.client()
         {
-            match request::run(ReloadConfig { chosen }, Some(client), update_tx).await {
+            match request::run(ReloadConfig { chosen, revision }, Some(client), update_tx).await {
                 Ok(()) => self.save = None,
                 Err(LinkLost) => link.lose(Instant::now()),
             }
@@ -373,11 +380,12 @@ mod tests {
 
     use std::sync::Mutex;
 
+    use openlogi_core::config::ConfigRevision;
     use openlogi_core::hid::DeviceRoute;
     use openlogi_ipc::testing::in_memory_agent;
     use openlogi_ipc::{
-        AgentRequest, AgentResponse, AgentStatus, ForegroundApps, InventoryHealth, Observation,
-        PROTOCOL_VERSION,
+        AgentRequest, AgentResponse, AgentStatus, ChosenLight, ForegroundApps, InventoryHealth,
+        Observation, PROTOCOL_VERSION,
     };
     use tokio::sync::oneshot;
 
@@ -571,9 +579,9 @@ mod tests {
     async fn saves_made_while_the_agent_is_down_reach_it_merged_and_before_the_load() {
         // Each reload re-reads the file, so the saves made while no agent
         // answers become one saved reload with the chosen controls of all of
-        // them. It goes before the load: the saved reload takes the light
-        // values of the file as copies of reports, which the load of the
-        // same file then finds in place.
+        // them, at the revision of the last. It goes before the load: the
+        // saved reload takes the light values of the file as copies of
+        // reports, which the load of the same file then finds in place.
         let seen = Arc::new(Mutex::new(Vec::new()));
         let recorded = seen.clone();
         let agent = in_memory_agent(
@@ -581,8 +589,8 @@ mod tests {
                 let recorded = recorded.clone();
                 Box::pin(async move {
                     match request {
-                        AgentRequest::ReloadSavedConfig { chosen } => {
-                            recorded.lock().unwrap().push(Some(chosen));
+                        AgentRequest::ReloadSavedConfig { saved } => {
+                            recorded.lock().unwrap().push(Some(saved));
                             Ok(AgentResponse::ReloadSavedConfig(Ok(())))
                         }
                         AgentRequest::ReloadConfig {} => {
@@ -606,15 +614,21 @@ mod tests {
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         commands.send(LoadConfig.into()).unwrap();
-        for save in [
-            vec![chosen("glow", false, true, false)],
-            Vec::new(),
-            vec![
-                chosen("glow", true, false, false),
-                chosen("beam", false, false, true),
-            ],
+        for (text, chosen) in [
+            ("first", vec![chosen("glow", false, true, false)]),
+            ("second", Vec::new()),
+            (
+                "third",
+                vec![
+                    chosen("glow", true, false, false),
+                    chosen("beam", false, false, true),
+                ],
+            ),
         ] {
-            commands.send(ReloadConfig { chosen: save }.into()).unwrap();
+            let revision = ConfigRevision::of(text);
+            commands
+                .send(ReloadConfig { chosen, revision }.into())
+                .unwrap();
         }
 
         let verdicts = tokio::select! {
@@ -636,41 +650,61 @@ mod tests {
         assert_eq!(
             *seen.lock().unwrap(),
             [
-                Some(vec![
-                    chosen("glow", true, true, false),
-                    chosen("beam", false, false, true),
-                ]),
+                Some(SavedConfig {
+                    revision: ConfigRevision::of("third"),
+                    chosen: vec![
+                        chosen("glow", true, true, false),
+                        chosen("beam", false, false, true),
+                    ],
+                }),
                 None,
-                Some(Vec::new()),
+                Some(SavedConfig::default()),
             ],
             "one saved reload with every chosen control, then the load, then the next save"
         );
     }
 
     #[test]
-    fn owed_saves_merge_their_chosen_controls_by_light() {
+    fn owed_saves_merge_their_chosen_controls_by_light_at_the_latest_revision() {
         let chosen = |device: &str, power, brightness, temperature| ChosenLight {
             device: device.to_owned(),
             power,
             brightness,
             temperature,
         };
+        let save = |text: &str, chosen| ReloadConfig {
+            chosen,
+            revision: ConfigRevision::of(text),
+        };
         // A save that chose nothing is still a save to deliver.
         let mut owed = OwedReloads::default();
-        owed.save(Vec::new());
-        assert_eq!(owed.save, Some(Vec::new()));
-        // A control any merged save chose stays chosen.
-        owed.save(vec![chosen("glow", true, true, true)]);
-        owed.save(vec![
-            chosen("glow", false, false, false),
-            chosen("beam", false, false, true),
-        ]);
+        owed.save(save("first", Vec::new()));
         assert_eq!(
             owed.save,
-            Some(vec![
-                chosen("glow", true, true, true),
+            Some(SavedConfig {
+                revision: ConfigRevision::of("first"),
+                chosen: Vec::new(),
+            })
+        );
+        // A control any merged save chose stays chosen, and the file is at
+        // the revision of the last save.
+        owed.save(save("second", vec![chosen("glow", true, true, true)]));
+        owed.save(save(
+            "third",
+            vec![
+                chosen("glow", false, false, false),
                 chosen("beam", false, false, true),
-            ])
+            ],
+        ));
+        assert_eq!(
+            owed.save,
+            Some(SavedConfig {
+                revision: ConfigRevision::of("third"),
+                chosen: vec![
+                    chosen("glow", true, true, true),
+                    chosen("beam", false, false, true),
+                ],
+            })
         );
         assert!(!owed.load);
     }

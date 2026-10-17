@@ -2,12 +2,13 @@
 //! itself stands in for the saved one until the GUI saves it, and only lights
 //! online on their own route are published and watched.
 use super::*;
-use crate::orchestrator::{LightWrite, TakenLightChange};
+use crate::orchestrator::{ConfigSource, LightWrite, TakenLightChange};
 use crate::watchers::light::WatchedLight;
+use openlogi_core::config::ConfigRevision;
 use openlogi_core::device::{ChangedOnLight, LightState, LightValueRange, LightValueUnit};
 use openlogi_core::hid::WriteError;
 use openlogi_hid::{LITRA_GLOW_PRODUCT_ID, LightChange, LightCommand, LightControls, LitraModel};
-use openlogi_ipc::{ChosenLight, ObservedLight};
+use openlogi_ipc::{ChosenLight, ObservedLight, SavedConfig};
 use tokio::sync::Mutex;
 
 const KEY: &str = "raw:046d:c900:ff43:0202:serial:glow";
@@ -640,7 +641,15 @@ fn a_gui_save_keeps_the_newer_change_on_a_light_that_went_offline() {
     orch.devices[0].online = false;
     // The GUI saves the 50 % it was told before the light went offline. An
     // offline light gets no write, so the reload writes nothing.
-    orch.reload_saved_config(config_with(settings(true, 50, 4000)), &[]);
+    let saved = SavedConfig {
+        revision: ConfigRevision::of("the GUI's save"),
+        chosen: Vec::new(),
+    };
+    orch.reload_saved_config(
+        config_with(settings(true, 50, 4000)),
+        saved.revision,
+        &saved,
+    );
     assert_eq!(
         brightness_changed_on_light(&orch),
         Some(60),
@@ -650,6 +659,58 @@ fn a_gui_save_keeps_the_newer_change_on_a_light_that_went_offline() {
         orch.effective_light_settings(KEY),
         Some(settings(true, 60, 4000))
     );
+}
+
+#[test]
+fn a_file_edited_after_a_gui_save_loads_as_a_hand_edit() {
+    let mut orch = with_glow(config_with(settings(true, 80, 4000)));
+    pressed_to_50_then_60(&mut orch);
+    // Offline, so the reload writes nothing.
+    orch.devices[0].online = false;
+    // The GUI saved a setting of another device. Before the agent reloaded
+    // the save, a hand edit set the light to 50 %.
+    let saved = SavedConfig {
+        revision: ConfigRevision::of("the GUI's save"),
+        chosen: Vec::new(),
+    };
+    orch.reload_saved_config(
+        config_with(settings(true, 50, 4000)),
+        ConfigRevision::of("the hand edit"),
+        &saved,
+    );
+    assert_eq!(
+        brightness_changed_on_light(&orch),
+        None,
+        "the hand edit replaces the press"
+    );
+    assert_eq!(
+        orch.effective_light_settings(KEY),
+        Some(settings(true, 50, 4000))
+    );
+}
+
+#[test]
+fn only_the_file_the_gui_wrote_is_its_save() {
+    let saved = SavedConfig {
+        revision: ConfigRevision::of("the GUI's save"),
+        chosen: vec![ChosenLight {
+            device: KEY.to_string(),
+            brightness: true,
+            ..ChosenLight::default()
+        }],
+    };
+    assert!(matches!(
+        ConfigSource::of_saved(saved.revision, &saved),
+        ConfigSource::Saved { chosen } if chosen == saved.chosen.as_slice()
+    ));
+    assert!(matches!(
+        ConfigSource::of_saved(ConfigRevision::of("the hand edit"), &saved),
+        ConfigSource::Loaded
+    ));
+    assert!(matches!(
+        ConfigSource::of_saved(ConfigRevision::default(), &saved),
+        ConfigSource::Loaded
+    ));
 }
 
 #[test]

@@ -329,14 +329,17 @@ impl AppState {
     /// [`Self::persist_and_reload`] for a save in which the user set controls
     /// of lights without a write to the light. `chosen` names them, so the
     /// agent drops the changes made on the lights for those controls
-    /// ([`openlogi_ipc::Agent::reload_saved_config`]).
+    /// ([`openlogi_ipc::Agent::reload_saved_config`]). The reload carries the
+    /// revision of the file this save wrote, so the agent can tell an edit
+    /// made after the save.
     fn persist_and_reload_choosing(
         &mut self,
         what: &str,
         chosen: Vec<openlogi_ipc::ChosenLight>,
     ) -> bool {
         if self.persist_config(what) {
-            self.send_ipc(crate::services::ipc::ReloadConfig { chosen });
+            let revision = self.config.revision();
+            self.send_ipc(crate::services::ipc::ReloadConfig { chosen, revision });
             true
         } else {
             false

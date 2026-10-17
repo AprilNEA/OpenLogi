@@ -139,9 +139,11 @@ Common device fields are:
   a newer change made on the light in place. A control set without a write, as
   on an offline light, replaces the change. A hand edit of this file, or an
   edit with the CLI, is a new choice, even when it matches an earlier change
-  on the light. With `auto_camera` on, a power change on the light is a manual
-  choice until the next camera transition, like the power switch in the
-  settings app
+  on the light. That holds as well for a hand edit made after a save of the
+  app and before the agent reloads that save: the agent finds the file
+  changed since the save. With `auto_camera` on, a power change on the light
+  is a manual choice until the next camera transition, like the power switch
+  in the settings app
 - `host_switch_targets` and `fn_lock` for compatible keyboards
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+

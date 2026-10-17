@@ -17,7 +17,9 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, MouseProfileTarget, canonical_device_key};
+use openlogi_core::config::{
+    Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
+};
 use openlogi_core::device::{
     Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities, LightState,
     StandaloneDevice,
@@ -28,7 +30,9 @@ use openlogi_hid::{
     DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, ReportRate,
     ReportRateInfo, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
 };
-use openlogi_ipc::{ChosenLight, InventoryHealth};
+#[cfg(test)]
+use openlogi_ipc::ChosenLight;
+use openlogi_ipc::{InventoryHealth, SavedConfig};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -1270,10 +1274,17 @@ impl Orchestrator {
         self.reload_from(config, ConfigSource::Loaded);
     }
 
-    /// [`Self::reload_config`] after a save of the GUI, with the controls of
-    /// lights the user set without a write (see [`ConfigSource::Saved`]).
-    pub fn reload_saved_config(&mut self, config: Config, chosen: &[ChosenLight]) {
-        self.reload_from(config, ConfigSource::Saved { chosen });
+    /// [`Self::reload_config`] after the GUI saved `saved`, with `config`
+    /// read from a file at revision `read`. A file still at the revision the
+    /// GUI wrote is its save; another was edited since, and loads as
+    /// [`Self::reload_config`] loads it (see [`ConfigSource::of_saved`]).
+    pub fn reload_saved_config(
+        &mut self,
+        config: Config,
+        read: ConfigRevision,
+        saved: &SavedConfig,
+    ) {
+        self.reload_from(config, ConfigSource::of_saved(read, saved));
     }
 
     /// Replace the config from `source` and write each light it changed.

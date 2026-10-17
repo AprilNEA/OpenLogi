@@ -53,9 +53,12 @@ state, and writes a value only when it differs from the one it read.
   place, so a press that reaches the agent after the app saved the previous
   one is not written over. The save names the controls the user set without a
   write, as on an offline light (`ChosenLight`): those, and the values the
-  save removed, replace the change. A plain `reload_config`, after a hand edit
-  of `config.toml`, a CLI edit or at startup, replaces the change wherever the
-  saved value differs, even when it matches an earlier report.
+  save removed, replace the change. The save also names the revision of the
+  file it wrote (`ConfigRevision`, a digest of the text). A file the agent
+  reads at another revision was edited after the save, so it loads as a plain
+  reload. A plain `reload_config`, after a hand edit of `config.toml`, a CLI
+  edit or at startup, replaces the change wherever the saved value differs,
+  even when it matches an earlier report.
 - **OpenLogi's own writes are not changes on the light.** The light echoes
   every setter as a notification. A notification that matches the value the
   agent just wrote is the echo. A brightness the light's effective maximum

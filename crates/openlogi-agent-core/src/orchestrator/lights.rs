@@ -7,11 +7,11 @@
 //! such a change the new setting, so a reconnect or an unrelated save must
 //! not undo it.
 
-use openlogi_core::config::Config;
+use openlogi_core::config::{Config, ConfigRevision};
 use openlogi_core::device::{ChangedOnLight, LightState};
 use openlogi_core::hid::WriteError;
 use openlogi_hid::{DeviceRoute, LightChange, LightCommand, LightControls, litra_model_for_route};
-use openlogi_ipc::{ChosenLight, ObservedLight};
+use openlogi_ipc::{ChosenLight, ObservedLight, SavedConfig};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -279,8 +279,9 @@ pub async fn write_light(
 #[derive(Debug, Clone, Copy)]
 pub enum ConfigSource<'a> {
     /// A file the agent did not see saved: at startup, or after a hand edit
-    /// or a CLI edit. A saved value that differs from the one before is a
-    /// new choice and replaces the change.
+    /// or a CLI edit, also when the hand edit came after a save of the GUI.
+    /// A saved value that differs from the one before is a new choice and
+    /// replaces the change.
     Loaded,
     /// A save of the GUI. The GUI writes a light it changes, and the write
     /// takes the change first, so a saved value that differs is the GUI's
@@ -291,6 +292,22 @@ pub enum ConfigSource<'a> {
         /// The controls the user set without a write, by light.
         chosen: &'a [ChosenLight],
     },
+}
+
+impl<'a> ConfigSource<'a> {
+    /// The source of a file at revision `read`, loaded after the GUI saved
+    /// `saved`. Only the file the GUI wrote is its save: a file at another
+    /// revision was edited since, so it is loaded.
+    #[must_use]
+    pub fn of_saved(read: ConfigRevision, saved: &'a SavedConfig) -> Self {
+        if read == saved.revision {
+            Self::Saved {
+                chosen: &saved.chosen,
+            }
+        } else {
+            Self::Loaded
+        }
+    }
 }
 
 /// Whether a reload removed a saved value.

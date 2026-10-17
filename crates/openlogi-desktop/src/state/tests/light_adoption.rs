@@ -97,7 +97,7 @@ fn brightness_changed_to(percent: u8) -> ChangedOnLight {
 fn saved_and_reloaded(commands: &[Command]) -> bool {
     matches!(
         commands,
-        [Command::ReloadConfig(ReloadConfig { chosen })] if chosen.is_empty()
+        [Command::ReloadConfig(ReloadConfig { chosen, .. })] if chosen.is_empty()
     )
 }
 
@@ -354,7 +354,7 @@ fn an_agent_snapshot_keeps_the_changes_it_reports() {
 /// The controls a save chose, if the commands are exactly one reload.
 fn chosen_by_reload(commands: &[Command]) -> Option<Vec<ChosenLight>> {
     match commands {
-        [Command::ReloadConfig(ReloadConfig { chosen })] => Some(chosen.clone()),
+        [Command::ReloadConfig(ReloadConfig { chosen, .. })] => Some(chosen.clone()),
         _ => None,
     }
 }

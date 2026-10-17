@@ -16,13 +16,13 @@
 
 use std::future::Future;
 
-use openlogi_core::config::Lighting;
+use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
-    AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure,
+    AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
 };
 use tarpc::client::RpcError;
 use tarpc::context;
@@ -484,15 +484,20 @@ pub struct ReloadConfig {
     /// The controls of lights the user set in the save without a write to
     /// the light. A change made on the light to one of them gives way.
     pub chosen: Vec<ChosenLight>,
+    /// The revision of `config.toml` that the save wrote. The agent takes a
+    /// file at another revision as edited after the save.
+    pub revision: ConfigRevision,
 }
 
 impl Request for ReloadConfig {
     type Answer = Result<(), ConfigReloadError>;
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
-        client
-            .reload_saved_config(context::current(), self.chosen.clone())
-            .await
+        let saved = SavedConfig {
+            revision: self.revision,
+            chosen: self.chosen.clone(),
+        };
+        client.reload_saved_config(context::current(), saved).await
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {

@@ -15,7 +15,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_core::config::{Config, Lighting};
+use openlogi_core::config::{ConfigFile, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
@@ -24,9 +24,9 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ChosenLight,
-    ClientKind, ConfigReloadError, Generation, Identity, MonitorEvent, Observation,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate, RingObservation,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
+    ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::Compat;
 
@@ -89,21 +89,23 @@ impl AgentServer {
     }
 
     /// Re-read `config.toml` for [`Agent::reload_config`], or for
-    /// [`Agent::reload_saved_config`] when `chosen` is given.
-    async fn reload(self, chosen: Option<Vec<ChosenLight>>) -> Result<(), ConfigReloadError> {
-        match Config::load_or_default() {
-            Ok(config) => {
+    /// [`Agent::reload_saved_config`] when the GUI's save is given. The
+    /// revision is that of the text the config is parsed from, so an edit
+    /// that lands after the read cannot pass for the save.
+    async fn reload(self, saved: Option<SavedConfig>) -> Result<(), ConfigReloadError> {
+        match ConfigFile::load_or_default() {
+            Ok((config, file)) => {
                 let launch_at_login = config.app_settings.launch_at_login;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
                 let language = config.app_settings.language.clone();
-                match chosen.as_deref() {
+                match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
-                    Some(chosen) => self
-                        .orchestrator
-                        .lock()
-                        .await
-                        .reload_saved_config(config, chosen),
+                    Some(saved) => self.orchestrator.lock().await.reload_saved_config(
+                        config,
+                        file.revision(),
+                        &saved,
+                    ),
                 }
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
@@ -339,9 +341,9 @@ impl Agent for AgentServer {
     async fn reload_saved_config(
         self,
         _: Context,
-        chosen: Vec<ChosenLight>,
+        saved: SavedConfig,
     ) -> Result<(), ConfigReloadError> {
-        self.reload(Some(chosen)).await
+        self.reload(Some(saved)).await
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {

@@ -60,10 +60,10 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ChosenLight,
-    ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity,
-    InventoryHealth, MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
+    ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
+    MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    PairingPhase, PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -955,7 +955,7 @@ impl Agent for MockAgent {
     async fn reload_saved_config(
         self,
         _: Context,
-        _chosen: Vec<ChosenLight>,
+        _saved: SavedConfig,
     ) -> Result<(), ConfigReloadError> {
         info!("reload_saved_config (no-op in the mock)");
         Ok(())
