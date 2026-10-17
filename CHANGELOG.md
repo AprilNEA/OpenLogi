@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.15] - 2026-10-17
+
+### Added
+
+- *(linux)* support Hyprland native remaps ([#1152](https://github.com/AprilNEA/OpenLogi/pull/1152))
+- *(linux)* route window-manager native actions through KWin D-Bus on KDE ([#1087](https://github.com/AprilNEA/OpenLogi/pull/1087))
+- *(gui)* show the receiver slot on each device card ([#1802](https://github.com/AprilNEA/OpenLogi/pull/1802))
+- *(desktop)* save a change made on a Litra as its setting ([#1870](https://github.com/AprilNEA/OpenLogi/pull/1870))
+- *(gui)* add Power User actions to the Action Ring editor ([#1445](https://github.com/AprilNEA/OpenLogi/pull/1445))
+- *(gui)* add a Reset to defaults button to the F-key binding panel ([#1255](https://github.com/AprilNEA/OpenLogi/pull/1255))
+- *(gui)* add device default option for keyboard bindings ([#702](https://github.com/AprilNEA/OpenLogi/pull/702))
+- *(agent)* keep a change made on a Litra as its setting and publish it ([#1866](https://github.com/AprilNEA/OpenLogi/pull/1866))
+- *(gui)* add a Next / Previous Desktop thumb-wheel preset ([#1848](https://github.com/AprilNEA/OpenLogi/pull/1848))
+- *(device)* reach Litra lights over HID++ 0x1990 with read-back ([#1841](https://github.com/AprilNEA/OpenLogi/pull/1841))
+- *(desktop)* add a per-device smooth wheel switch to the Scrolling card ([#1839](https://github.com/AprilNEA/OpenLogi/pull/1839))
+- *(device)* smooth a mouse's main wheel by diverting it (0x2121) ([#1837](https://github.com/AprilNEA/OpenLogi/pull/1837))
+- *(desktop)* offer hold-to-scroll-sideways for Back and Forward ([#1835](https://github.com/AprilNEA/OpenLogi/pull/1835))
+- *(device)* hold Back or Forward to scroll sideways with the main wheel (0x1b04 raw wheel) ([#1828](https://github.com/AprilNEA/OpenLogi/pull/1828))
+
+### Fixed
+
+- *(macos)* preserve fractional wheel distance ([#1154](https://github.com/AprilNEA/OpenLogi/pull/1154))
+- *(i18n)* route hardcoded GUI labels through the catalog ([#1331](https://github.com/AprilNEA/OpenLogi/pull/1331))
+- *(hid)* capture the M720 Triathlon's multiplatform gesture button ([#1613](https://github.com/AprilNEA/OpenLogi/pull/1613))
+- *(gui)* fold leftover receiver pairings into one device card ([#1801](https://github.com/AprilNEA/OpenLogi/pull/1801))
+- *(gui)* allow clearing function-key bindings ([#962](https://github.com/AprilNEA/OpenLogi/pull/962))
+- *(hid)* suppress duplicate Bolt pairing slots ([#963](https://github.com/AprilNEA/OpenLogi/pull/963))
+- *(hook)* fall back to a recent device attribution on macOS ([#805](https://github.com/AprilNEA/OpenLogi/pull/805))
+- *(linux)* grab a mouse again after it reconnects or appears late ([#1869](https://github.com/AprilNEA/OpenLogi/pull/1869))
+- *(linux)* keep "pen" out of the uinput device names ([#1868](https://github.com/AprilNEA/OpenLogi/pull/1868))
+- *(inject)* give the Windows Screenshot action its own Win+PrtScn chord ([#1867](https://github.com/AprilNEA/OpenLogi/pull/1867))
+- *(hid)* open HID++ channels concurrently, not one node at a time ([#1443](https://github.com/AprilNEA/OpenLogi/pull/1443))
+- *(gui)* enlarge About panel logo ([#1364](https://github.com/AprilNEA/OpenLogi/pull/1364))
+- *(gui)* embed the Sleep action's moon glyph ([#790](https://github.com/AprilNEA/OpenLogi/pull/790))
+- *(linux)* report input access as denied when the event node is unreadable ([#787](https://github.com/AprilNEA/OpenLogi/pull/787))
+- *(agent)* write a light only when a reload changes its settings ([#1865](https://github.com/AprilNEA/OpenLogi/pull/1865))
+- *(i18n)* translate the hold-modifiers and tap-key actions in Czech ([#1850](https://github.com/AprilNEA/OpenLogi/pull/1850))
+- *(agent)* log thumb-wheel continuous-scroll dispatch ([#1852](https://github.com/AprilNEA/OpenLogi/pull/1852))
+- *(gui)* recognize the MX Ergo precision-mode button slot ([#1855](https://github.com/AprilNEA/OpenLogi/pull/1855))
+- *(cli)* drop a paired device with no identity from fixture capture ([#1861](https://github.com/AprilNEA/OpenLogi/pull/1861))
+- *(gui)* retain observed connection icons for offline devices ([#1830](https://github.com/AprilNEA/OpenLogi/pull/1830))
+- *(gui)* show the Actions Ring tab for keyboards with a Keys panel ([#1844](https://github.com/AprilNEA/OpenLogi/pull/1844))
+
 ## [0.8.14] - 2026-10-15
 
 ### Added
