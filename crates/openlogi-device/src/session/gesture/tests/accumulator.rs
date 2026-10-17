@@ -109,6 +109,8 @@ fn motion_streams_from_the_commit_on() {
     acc.backdate_hold_for_test();
     let xy = |dx| RawControlEvent::RawXy { dx, dy: 0 };
 
+    // A fresh hold's first report predates the press and is discarded.
+    handle_reprog(&mut acc, xy(500), GESTURE, &[], &[], &tx);
     handle_reprog(&mut acc, xy(20), GESTURE, &[], &[], &tx);
     handle_reprog(&mut acc, xy(40), GESTURE, &[], &[], &tx);
     handle_reprog(&mut acc, xy(7), GESTURE, &[], &[], &tx);

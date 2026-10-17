@@ -879,6 +879,7 @@ async fn a_desktop_swipe_drives_one_live_transition_until_release() {
         registry: openlogi_hid::ChannelRegistry::default(),
         receiver_access: ReceiverAccess::default(),
         device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
     };
     let mut actions =
         crate::runtime::ActionRuntime::new(Arc::default(), device_access, ring).unwrap();
