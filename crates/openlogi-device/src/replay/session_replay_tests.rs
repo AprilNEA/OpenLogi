@@ -6,7 +6,7 @@ use openlogi_core::hid::PairingError;
 use openlogi_fixture::{
     CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{
     ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
@@ -59,14 +59,11 @@ async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown()
     .await;
     let (sink, _captured) = mpsc::unbounded_channel();
     let (shutdown, host) = replay.host(sink);
-    let capture = run_capture_session(
-        replay.route.clone(),
-        CaptureSpec {
-            divert_gesture_sources: vec![GESTURE_CID],
-            ..CaptureSpec::default()
-        },
-        host,
-    );
+    let (_spec, spec_rx) = watch::channel(CaptureSpec {
+        divert_gesture_sources: vec![GESTURE_CID],
+        ..CaptureSpec::default()
+    });
+    let capture = run_capture_session(replay.route.clone(), spec_rx, host);
 
     let (outcome, ()) = tokio::join!(capture, replay.stop_after_arm(shutdown));
 

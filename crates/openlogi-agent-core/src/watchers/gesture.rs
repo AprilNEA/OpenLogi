@@ -1,10 +1,10 @@
 //! Background HID++ control-capture watcher, one session per online device.
 //!
 //! Runs [`openlogi_hid::run_capture_session`] concurrently for every device in
-//! the shared capture-plan list (not just the GUI's selection), restarts a
-//! session when its device's plan — route, diverted controls, thumb-wheel
-//! arming — changes, and dispatches each captured input against the binding
-//! maps of the device it arrived on:
+//! the shared capture-plan list (not just the GUI's selection), reloads a
+//! session's diverted controls in place when only those change, restarts it
+//! when its route or rearm generation changes, and dispatches each captured
+//! input against the binding maps of the device it arrived on:
 //!
 //! - a gesture swipe through the gesture binding map,
 //! - a DPI/ModeShift or thumb-wheel-tap press through the button binding map,
@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
+use openlogi_hid::session::gesture::CaptureSpec;
 use openlogi_hid::{
     CaptureHost, CaptureSessionOutcome, CaptureSessionStop, CapturedInput, PendingCaptureRestore,
     run_capture_session,
@@ -712,7 +713,7 @@ fn spawn_session(
     let done_id = id.clone();
     let done_key = physical_key;
     let session_route = target.route.clone();
-    let session_spec = target.spec.clone();
+    let (spec_updates, session_spec) = watch::channel(target.spec.clone());
     let slot = Arc::clone(&channels.access.channel);
     let registry = channels.access.registry.clone();
     let device_io = channels.access.device_io.clone();
@@ -753,6 +754,23 @@ fn spawn_session(
         .await;
     });
     CaptureSession::active(id, target, dispatch, stop_tx)
+        .with_retarget(retarget_spec_in_place(spec_updates))
+}
+
+/// A target that differs only in its capture spec — a per-app binding change
+/// on app switch — is reloaded on the running session's open channel, so a
+/// control both specs divert keeps its diversion. A new route or rearm
+/// generation still retires the session.
+fn retarget_spec_in_place(
+    spec_updates: watch::Sender<CaptureSpec>,
+) -> impl Fn(&CaptureTarget, &CaptureTarget) -> bool + Send + 'static {
+    move |current, next| {
+        let same_hardware = CaptureTarget {
+            spec: next.spec.clone(),
+            ..current.clone()
+        } == *next;
+        same_hardware && spec_updates.send(next.spec.clone()).is_ok()
+    }
 }
 
 #[cfg(test)]

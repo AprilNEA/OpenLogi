@@ -17,10 +17,21 @@ use crate::{ChannelRegistry, DeviceRoute};
 
 mod accumulator;
 mod main_wheel;
+mod reload;
 mod restore;
 mod session;
 mod thumb_wheel;
 mod wheel_hold;
+
+/// A capture over `armed` whose owner never asks for another spec.
+fn gesture_capture(armed: ArmedControls) -> GestureCapture {
+    GestureCapture::new(
+        armed,
+        CaptureSpec::default(),
+        tokio::sync::watch::channel(CaptureSpec::default()).1,
+        mpsc::unbounded_channel().0,
+    )
+}
 
 fn reporting(
     diverted: bool,

@@ -128,6 +128,19 @@ pub(super) trait ArmedCapture {
     /// Forget input state that a device power-cycle invalidated.
     fn reset_input_state(&self) {}
 
+    /// Resolve once the owner wants this live session to capture different
+    /// controls. Never resolves for a capture that cannot be reconfigured.
+    async fn reconfigure_requested(&mut self) {
+        std::future::pending().await
+    }
+
+    /// Apply the latest request on the session's own channel. `false` means
+    /// firmware may not match what reports are decoded for, so the session
+    /// stops and its successor arms from scratch.
+    async fn reconfigure(&mut self, _shared: &SharedChannel) -> bool {
+        true
+    }
+
     /// Re-issue every diversion after a wireless reconnect. Failures are
     /// logged, not propagated: the next reconnection broadcast retries.
     async fn rearm(&self);
@@ -146,7 +159,7 @@ pub(super) trait ArmedCapture {
 /// for the caller to retry on the current inventory channel.
 pub(super) async fn run_capture<A: ArmedCapture>(
     shared: SharedChannel,
-    armed: A,
+    mut armed: A,
     host: CaptureHost<'_>,
 ) -> CaptureSessionOutcome {
     let CaptureHost {
@@ -201,7 +214,7 @@ pub(super) async fn run_capture<A: ArmedCapture>(
     armed.log_active(device_index, wireless.is_some());
     let stop = monitor(
         CaptureMonitor {
-            armed: &armed,
+            armed: &mut armed,
             root: &root,
             device_index,
             registry,
@@ -237,7 +250,7 @@ pub(super) async fn run_capture<A: ArmedCapture>(
 
 /// Borrowed state used while monitoring one armed capture session.
 struct CaptureMonitor<'a, A> {
-    armed: &'a A,
+    armed: &'a mut A,
     root: &'a RootFeature,
     device_index: u8,
     registry: &'a ChannelRegistry,
@@ -347,6 +360,14 @@ async fn monitor<A: ArmedCapture>(
                         stop_for_current_publication(context.registry, context.shared)
                     }
                 };
+            }
+            () = context.armed.reconfigure_requested() => {
+                // With device I/O closed, the next turn waits for it to reopen
+                // and the still-pending request resolves again.
+                if device_io.allows_io() && !context.armed.reconfigure(context.shared).await {
+                    warn!(index = context.device_index, capture = A::NAME, "capture reload failed — restarting session");
+                    return stop_for_current_publication(context.registry, context.shared);
+                }
             }
             event = async {
                 match wake_events.as_ref() {
