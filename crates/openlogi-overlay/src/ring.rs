@@ -1,35 +1,60 @@
 //! The ring itself: the GPUI view, and the window it is drawn in.
 //!
-//! Where a client can place its own windows, the window is the ring: a 360×360
-//! panel centred on the cursor and clamped to its display. Wayland allows
-//! neither half of that, so there the window covers the display and the same
-//! panel is drawn at the pointer inside it.
+//! Where a client can place its own windows, the window is the ring: a
+//! square panel centred on the cursor and clamped to its display. Wayland
+//! allows neither half of that, so there the window covers the display and the
+//! same panel is drawn at the pointer inside it.
+//!
+//! The ring is eight free-floating slots around a cancel button, with the
+//! desktop showing through between them; there is no backing disc. On open the
+//! slots fly out from the cursor to their places on the ring, so the motion
+//! itself says where the ring came from.
 
 use gpui::{
-    Bounds, Context, Div, Hsla, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement,
-    Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
-    WindowBackgroundAppearance, WindowKind, WindowOptions, div, point, prelude::FluentBuilder as _,
-    px, svg,
+    Animation, AnimationExt as _, Bounds, Context, Div, Hsla, InteractiveElement, IntoElement,
+    MouseMoveEvent, ParentElement, Pixels, Point, Render, SharedString, Size,
+    StatefulInteractiveElement as _, Styled, Window, WindowBackgroundAppearance, WindowKind,
+    WindowOptions, div, point, prelude::FluentBuilder as _, px, svg,
 };
+use openlogi_core::action_ring::geometry::{CANCEL_DIAMETER, RADIUS, SLOT_DIAMETER};
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::ipc::OverlayCommand;
 use crate::session::{self, ClickAwaySession, ShowingRing};
 
-pub(crate) const WINDOW_SIZE: f32 = 360.0;
-pub(crate) const SLOT_SIZE: f32 = 54.0;
-pub(crate) const RADIUS: f32 = 122.0;
+/// The window is the ring (`openlogi_core::action_ring::geometry`) plus room
+/// for the hover label under it and the slot shadows.
+pub(crate) const WINDOW_SIZE: f32 = 300.0;
+pub(crate) const SLOT_SIZE: f32 = SLOT_DIAMETER;
+const CANCEL_SIZE: f32 = CANCEL_DIAMETER;
+const SLOT_GLYPH: f32 = 20.0;
+const CANCEL_GLYPH_SIZE: f32 = 16.0;
+/// Widest the hover label's pill may grow. Nothing sits beside it under the
+/// ring, so it may run wider than the ring's slots; longer text is ellipsized.
+const LABEL_WIDTH: f32 = 240.0;
+
+/// How long the slots take to fly out from the cursor to their places on the
+/// ring. Short enough to read as the ring *appearing* rather than a transition
+/// the user waits on; the cubic ease-out front-loads the motion, so the slots
+/// are most of the way home by the midpoint and the tail only settles them.
+const FLY_OUT: Duration = Duration::from_millis(180);
+
+/// Cubic ease-out: fast off the cursor, settling gently into place.
+fn ease_out_cubic(delta: f32) -> f32 {
+    1.0 - (1.0 - delta).powi(3)
+}
 
 /// The ring's own neutral scale. It floats over whatever is on the desktop, so
 /// unlike the settings app it cannot take its surfaces from the OS appearance —
-/// it commits to a dark panel and rides its own contrast. Only the accent is
+/// it commits to dark slots and rides its own contrast. Only the accent is
 /// shared (`openlogi_ui::color`); these greys are local by nature.
-const PANEL: Hsla = neutral(0.06, 0.82);
+const LABEL_PILL: Hsla = neutral(0.06, 0.82);
 const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
 const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
 const GLYPH: Hsla = neutral(0.98, 1.0);
@@ -69,6 +94,21 @@ pub(crate) struct RingView {
     commands: mpsc::UnboundedSender<OverlayCommand>,
     hovered: Option<ActionRingSlot>,
     placement: Placement,
+    /// Whether the fly-out has been started. GPUI draws a new window once,
+    /// synchronously, inside `open_window` — before the platform has put it
+    /// on screen — and an animation started on that draw has its clock running
+    /// while the window is still invisible; by the first frame anyone sees,
+    /// most of the motion is gone. So the first render only parks the slots
+    /// at the cursor and asks for a frame, and the animation is started on the
+    /// frame after, which comes from the frame loop of a presented window.
+    armed: bool,
+    /// When the fly-out lands, once it has been started. Until then the
+    /// slots are stacked under the cursor on their way out, and the topmost
+    /// one would read as hovered — a spurious haptic on every open — so slot
+    /// hover and click are ignored before this instant. Under Reduce Motion
+    /// the slots are drawn in place on the first animated frame, and this is
+    /// that frame's instant.
+    settled_at: Option<Instant>,
     /// Publishes click-away identity for exactly this view's lifetime.
     _showing: ShowingRing,
 }
@@ -87,6 +127,8 @@ impl RingView {
             commands,
             hovered: None,
             placement,
+            armed: false,
+            settled_at: None,
             _showing: showing,
         }
     }
@@ -104,66 +146,123 @@ impl RingView {
         });
     }
 
+    /// Whether the slots have landed and may respond to the cursor.
+    fn settled(&self) -> bool {
+        slots_settled(self.settled_at, Instant::now())
+    }
+
     fn slot_element(
         &self,
         slot: ActionRingSlot,
+        armed: bool,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let presentation = self.invocation.slots.get(&slot)?;
         let icon_path = presentation.icon.asset_path();
         let selected = self.hovered == Some(slot);
-        let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let home = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
         let session_id = self.invocation.session_id;
-        let activate = self.commands.clone();
-        Some(
-            div()
-                .id(("ring-slot", slot.index()))
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .size(px(SLOT_SIZE))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(if selected {
-                    color::accent_at_lightness(SELECTED_FILL_L)
-                } else {
-                    SLOT_RESTING
-                })
-                .when(selected, |slot| {
-                    slot.border_2()
-                        .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
-                })
-                .shadow_md()
-                .text_color(GLYPH)
-                .cursor_pointer()
-                .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
-                .on_hover(cx.listener(move |this, hovered, _, cx| {
-                    if *hovered && this.hovered != Some(slot) {
-                        this.hovered = Some(slot);
-                        let _ = this
-                            .commands
-                            .send(OverlayCommand::Hover { session_id, slot });
-                        cx.notify();
-                    } else if !*hovered && this.hovered == Some(slot) {
-                        this.hovered = None;
-                        cx.notify();
+        let element = div()
+            .id(("ring-slot", slot.index()))
+            .absolute()
+            .size(px(SLOT_SIZE))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(if selected {
+                color::accent_at_lightness(SELECTED_FILL_L)
+            } else {
+                SLOT_RESTING
+            })
+            .when(selected, |slot| {
+                slot.border_2()
+                    .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
+            })
+            .shadow_md()
+            .text_color(GLYPH)
+            .cursor_pointer()
+            .child(svg().path(icon_path).size(px(SLOT_GLYPH)).text_color(GLYPH))
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                if *hovered && this.hovered != Some(slot) {
+                    if !this.settled() {
+                        return;
                     }
-                }))
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    let _ = activate.send(OverlayCommand::Activate { session_id, slot });
-                    session::dismiss_from_window(cx, window, session_id);
-                })
-                .into_any_element(),
-        )
+                    this.hovered = Some(slot);
+                    let _ = this
+                        .commands
+                        .send(OverlayCommand::Hover { session_id, slot });
+                    cx.notify();
+                } else if !*hovered && this.hovered == Some(slot) {
+                    this.hovered = None;
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                if !this.settled() {
+                    return;
+                }
+                let _ = this
+                    .commands
+                    .send(OverlayCommand::Activate { session_id, slot });
+                session::dismiss_from_window(cx, window, session_id);
+            }));
+        // Position is owned by the fly-out: the slot starts under the cursor
+        // and flies to `home`, fading in on the way. Before the view is armed
+        // it just waits at the start. Reduce Motion renders the end state
+        // directly (GPUI's contract for one-shot animations), so the ring
+        // simply appears in place.
+        let fly_out = move |slot: gpui::Stateful<gpui::Div>, progress: f32| {
+            let (left, top) = fly_out_position(home, progress);
+            slot.left(px(left)).top(px(top)).opacity(progress)
+        };
+        Some(if armed {
+            element
+                .with_animation(
+                    ("ring-slot-fly-out", slot.index()),
+                    Animation::new(FLY_OUT).with_easing(ease_out_cubic),
+                    fly_out,
+                )
+                .into_any_element()
+        } else {
+            fly_out(element, 0.0).into_any_element()
+        })
     }
 }
 
+/// When slots started flying out at `started` land: one [`FLY_OUT`] later,
+/// or at once under Reduce Motion, where GPUI renders the end state instead
+/// of animating (so the ring must not look ready while ignoring the cursor).
+fn fly_out_lands_at(started: Instant, reduce_motion: bool) -> Instant {
+    if reduce_motion {
+        started
+    } else {
+        started + FLY_OUT
+    }
+}
+
+/// Whether the slots have landed by `now`: never before the fly-out has been
+/// started, and not until it has run its course.
+fn slots_settled(settled_at: Option<Instant>, now: Instant) -> bool {
+    settled_at.is_some_and(|at| now >= at)
+}
+
+/// Where a slot sits `progress` (0..=1) of the way from the ring's centre to
+/// its `home` placement. Positions are the slot's top-left corner, as GPUI lays
+/// it out.
+fn fly_out_position(home: (f32, f32), progress: f32) -> (f32, f32) {
+    let centre = WINDOW_SIZE / 2.0 - SLOT_SIZE / 2.0;
+    (
+        centre + (home.0 - centre) * progress,
+        centre + (home.1 - centre) * progress,
+    )
+}
+
 impl RingView {
-    /// The fixed 360×360 ring. Both placements anchor this same element.
-    fn panel(&self, cx: &mut Context<Self>) -> Div {
+    /// The fixed ring. Both placements anchor this same element. `armed` is
+    /// whether the slots fly out on this render or wait under the cursor.
+    fn panel(&self, armed: bool, cx: &mut Context<Self>) -> Div {
         let session_id = self.invocation.session_id;
         let center_commands = self.commands.clone();
         let hovered_label = self.hovered.and_then(|slot| {
@@ -182,38 +281,37 @@ impl RingView {
         });
         let slots = ActionRingSlot::ALL
             .into_iter()
-            .filter_map(|slot| self.slot_element(slot, cx))
+            .filter_map(|slot| self.slot_element(slot, armed, cx))
             .collect::<Vec<_>>();
 
+        // The cancel button is not animated: it marks the cursor the ring was
+        // raised at, and it is there on the first frame so the press reads as
+        // acknowledged before the slots have finished arriving.
         div()
             .relative()
             .size(px(WINDOW_SIZE))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(18.0))
-                    .top(px(18.0))
-                    .size(px(WINDOW_SIZE - 36.0))
-                    .rounded_full()
-                    .bg(PANEL)
-                    .shadow_lg(),
-            )
             .children(slots)
             .child(
                 div()
                     .id("ring-cancel")
                     .absolute()
-                    .left(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .top(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .size(px(48.0))
+                    .left(px(WINDOW_SIZE / 2.0 - CANCEL_SIZE / 2.0))
+                    .top(px(WINDOW_SIZE / 2.0 - CANCEL_SIZE / 2.0))
+                    .size(px(CANCEL_SIZE))
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded_full()
                     .bg(CANCEL_RESTING)
+                    .shadow_md()
                     .text_color(CANCEL_GLYPH)
                     .cursor_pointer()
-                    .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
+                    .child(
+                        svg()
+                            .path(RING_CANCEL_ICON)
+                            .size(px(CANCEL_GLYPH_SIZE))
+                            .flex_none(),
+                    )
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         let _ = center_commands.send(OverlayCommand::Cancel { session_id });
@@ -221,16 +319,34 @@ impl RingView {
                     }),
             )
             .when_some(hovered_label, |ring, label| {
+                // With the desktop showing through the ring, the label brings
+                // its own dark pill so it stays legible over anything. It sits
+                // under the ring: the centre is too tight for text now, and
+                // below the bottom slot it never covers a target. Only one
+                // line fits between the bottom slot and the window's edge, so
+                // a long label is ellipsized rather than wrapped and clipped.
                 ring.child(
                     div()
                         .absolute()
-                        .left(px(WINDOW_SIZE / 2.0 - 80.0))
-                        .top(px(WINDOW_SIZE / 2.0 + 34.0))
-                        .w(px(160.0))
-                        .text_center()
-                        .text_sm()
-                        .text_color(LABEL)
-                        .child(label),
+                        .left(px((WINDOW_SIZE - LABEL_WIDTH) / 2.0))
+                        .top(px(WINDOW_SIZE / 2.0 + RADIUS + SLOT_SIZE / 2.0 + 6.0))
+                        .w(px(LABEL_WIDTH))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .max_w_full()
+                                .px_3()
+                                .py_1()
+                                .rounded_full()
+                                .bg(LABEL_PILL)
+                                .shadow_md()
+                                .text_center()
+                                .text_sm()
+                                .text_color(LABEL)
+                                .truncate()
+                                .child(label),
+                        ),
                 )
             })
     }
@@ -242,11 +358,20 @@ impl Render for RingView {
         let root_commands = self.commands.clone();
         let placement = self.placement;
         let panel = panel_origin(placement, window.viewport_size()).map(|origin| {
+            // The first render that draws the panel only parks the slots and
+            // asks for a frame; see `armed`.
+            let armed = std::mem::replace(&mut self.armed, true);
+            if !armed {
+                window.request_animation_frame();
+            } else if self.settled_at.is_none() {
+                // This render starts the fly-out.
+                self.settled_at = Some(fly_out_lands_at(Instant::now(), cx.reduce_motion()));
+            }
             div()
                 .absolute()
                 .left(origin.x)
                 .top(origin.y)
-                .child(self.panel(cx))
+                .child(self.panel(armed, cx))
         });
 
         div()
@@ -323,6 +448,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slots_ignore_the_cursor_until_the_fly_out_has_landed() {
+        let now = Instant::now();
+        assert!(
+            !slots_settled(None, now),
+            "not started: still parked under the cursor"
+        );
+        let lands = fly_out_lands_at(now, false);
+        assert_eq!(lands, now + FLY_OUT);
+        assert!(!slots_settled(Some(lands), now));
+        assert!(!slots_settled(Some(lands), now + FLY_OUT / 2));
+        assert!(slots_settled(Some(lands), lands));
+        assert!(slots_settled(Some(lands), lands + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn under_reduce_motion_the_slots_are_ready_on_the_frame_they_appear() {
+        let now = Instant::now();
+        let lands = fly_out_lands_at(now, true);
+        assert_eq!(lands, now, "drawn in place, so no wait");
+        assert!(slots_settled(Some(lands), now));
+    }
+
+    #[test]
+    fn slots_fly_out_from_the_centre_to_their_placement() {
+        let home = ActionRingSlot::Right.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let centre = WINDOW_SIZE / 2.0 - SLOT_SIZE / 2.0;
+        assert_eq!(fly_out_position(home, 0.0), (centre, centre));
+        assert_eq!(fly_out_position(home, 1.0), home);
+        let (mid_x, mid_y) = fly_out_position(home, 0.5);
+        assert!((mid_x - (centre + RADIUS / 2.0)).abs() < 1e-3);
+        assert!((mid_y - centre).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_fly_out_curve_is_front_loaded_and_lands_exactly() {
+        assert!((ease_out_cubic(0.0)).abs() < 1e-6);
+        assert!((ease_out_cubic(1.0) - 1.0).abs() < 1e-6);
+        assert!(ease_out_cubic(0.5) > 0.85);
+    }
+
+    #[test]
     fn overlay_origin_is_clamped_to_the_display() {
         let display = Bounds::new(point(px(100.0), px(50.0)), Size::new(px(800.0), px(600.0)));
         let size = Size::new(px(400.0), px(400.0));
@@ -339,7 +505,10 @@ mod tests {
     #[test]
     fn a_window_sized_ring_fills_its_window() {
         assert_eq!(
-            panel_origin(Placement::Window, Size::new(px(360.0), px(360.0))),
+            panel_origin(
+                Placement::Window,
+                Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE))
+            ),
             Some(Point::default())
         );
     }
@@ -364,7 +533,10 @@ mod tests {
                 },
                 Size::new(px(1920.0), px(1080.0))
             ),
-            Some(point(px(720.0), px(320.0)))
+            Some(point(
+                px(900.0 - WINDOW_SIZE / 2.0),
+                px(500.0 - WINDOW_SIZE / 2.0)
+            ))
         );
     }
 
@@ -377,7 +549,7 @@ mod tests {
                 },
                 Size::new(px(1920.0), px(1080.0))
             ),
-            Some(point(px(0.0), px(720.0)))
+            Some(point(px(0.0), px(1080.0 - WINDOW_SIZE)))
         );
     }
 
