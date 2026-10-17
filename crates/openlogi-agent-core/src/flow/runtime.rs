@@ -123,7 +123,10 @@ impl FlowGeneration {
             Arc::clone(&endpoint),
             peers,
             provider,
-            SessionPolicy::default(),
+            SessionPolicy {
+                retry_max: PEER_RETRY_MAX,
+                ..SessionPolicy::default()
+            },
         )?;
         let handles: Vec<_> = sessions.peers().cloned().collect();
         let mut tasks = Vec::with_capacity(handles.len() * 2);
@@ -198,6 +201,12 @@ pub(super) enum Presence {
     /// This machine switched the device to a peer.
     Departed,
 }
+
+/// Longest wait between attempts to reach a lost peer. A peer is a machine on
+/// the same desk: after it restarts or wakes, the link should be back within
+/// seconds, not after the session layer's 30 s default backoff ceiling. One
+/// QUIC handshake attempt every few seconds toward an absent peer costs nothing.
+const PEER_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long a switch waits for its receiver I/O lease before going ahead.
 /// The shared lease is free unless a pairing session holds the receiver.
