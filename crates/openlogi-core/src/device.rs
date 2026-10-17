@@ -11,7 +11,8 @@ use crate::hid::DeviceRoute;
 mod light;
 
 pub use light::{
-    LightCapabilities, LightState, LightValueRange, LightValueRangeError, LightValueUnit,
+    ChangedOnLight, LightCapabilities, LightState, LightValueRange, LightValueRangeError,
+    LightValueUnit,
 };
 
 /// What a paired peripheral is. Mirrors `hidpp::receiver::bolt::BoltDeviceKind`

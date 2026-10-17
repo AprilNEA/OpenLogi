@@ -456,6 +456,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             }),
             recent: Vec::new(),
         },
+        lights: Vec::new(),
     };
     TestAgent::from_profile(profile, snapshot)
 }
@@ -933,4 +934,45 @@ async fn capture_replaces_every_easy_switch_computer_name() {
         .map(|slot| slot.name.as_deref())
         .collect();
     assert_eq!(names, [Some("Computer 1"), Some("Computer"), None]);
+}
+
+#[tokio::test]
+async fn receiver_capture_drops_a_sibling_device_with_no_identity() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = directory.path().join("profile.json");
+    let agent = fixture_agent_with(|profile| {
+        let keyboard = profile.inventories[0]
+            .paired
+            .iter_mut()
+            .find(|device| device.slot == 3)
+            .expect("synthetic RGB keyboard");
+        let model = keyboard.model_info.as_mut().expect("keyboard model info");
+        model.unit_id = [0; 4];
+        model.serial_number = None;
+    });
+
+    capture_connected(
+        args(output.clone(), Some("synthetic performance mouse")),
+        test_client(agent),
+    )
+    .await
+    .expect("semantic capture succeeds");
+
+    let profile: DeviceProfile =
+        serde_json::from_slice(&std::fs::read(output).expect("profile output"))
+            .expect("typed profile");
+    profile.validate().expect("published profile validates");
+    assert_eq!(
+        profile.inventories[0].paired.len(),
+        1,
+        "the identity-less sibling has no principal and no settings route to bind \
+         to, so it is dropped from the capture entirely rather than left as a \
+         profile the generator can record but never verify (#1666)"
+    );
+    assert_eq!(profile.inventories[0].paired[0].slot, 1);
+    assert_eq!(profile.settings.len(), 1);
+    assert!(matches!(
+        profile.settings[0].route,
+        DeviceRoute::Bolt { slot: 1, .. }
+    ));
 }

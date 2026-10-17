@@ -297,7 +297,10 @@ impl InputDispatcher {
             Instant::now(),
         ) {
             WheelOutput::Idle => {}
-            WheelOutput::Scroll(delta) => self.outputs.post_scroll(session, delta),
+            WheelOutput::Scroll(delta) => {
+                debug!(key, ?button, action = %action.label(), ?delta, "thumb wheel → scroll");
+                self.outputs.post_scroll(session, delta);
+            }
             WheelOutput::FireAction(repeats) => {
                 debug!(key, ?button, action = %action.label(), repeats, "thumb wheel → action");
                 for _ in 0..repeats {

@@ -12,10 +12,11 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{
     DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
 };
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, LOGITECH_VENDOR_ID};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
+use super::device_session::ObservedConnection;
 use crate::services::assets::{AssetResolver, ResolvedAsset};
 
 /// One paired device with everything the UI needs to switch to it in O(1):
@@ -141,6 +142,39 @@ impl DeviceRecord {
             return self.inventory_key();
         }
         self.config_key.clone()
+    }
+}
+
+impl super::AppState {
+    /// Presentation-only connection mode last observed for an offline device.
+    /// After restart, only a sole recorded link is unambiguous: the saved link
+    /// index has no chronology. Never restore a hardware-write route from history.
+    pub(crate) fn offline_connection(&self, record: &DeviceRecord) -> Option<ObservedConnection> {
+        if record.route.is_some() {
+            return None;
+        }
+        if let Some(transport) = self
+            .devices
+            .sessions
+            .get(&record.device_key())
+            .and_then(|session| session.last_connection)
+        {
+            return Some(transport);
+        }
+        let mut links = self.config.devices.get(&record.config_key)?.links.keys();
+        let link = links.next()?;
+        if links.next().is_some() {
+            return None;
+        }
+        let (vendor, product) = link.strip_prefix("direct:")?.split_once(':')?;
+        if u16::from_str_radix(vendor, 16).ok()? != LOGITECH_VENDOR_ID {
+            return None;
+        }
+        record
+            .model_info
+            .as_ref()?
+            .transport_for_product_id(u16::from_str_radix(product, 16).ok()?)
+            .map(ObservedConnection::Direct)
     }
 }
 

@@ -125,9 +125,6 @@ impl DetailTab {
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
-        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
-            tabs.push(Self::ActionsRing);
-        }
         // The Keys tab needs something to bind: HID++ controls (measured, or
         // last-good for a sleeping keyboard) or the OS-hook F-row a depot
         // without control markers falls back to. A keyboard with neither
@@ -136,11 +133,22 @@ impl DetailTab {
         // rules out Keys even for a kind=Keyboard record — see
         // `can_show_mouse_model` above — so a misclassified mouse gets only
         // the Buttons panel, not both.
-        if matches!(record.kind, DeviceKind::Keyboard)
+        let shows_keys_tab = matches!(record.kind, DeviceKind::Keyboard)
             && !caps.pointer
-            && (caps.buttons || record.asset.is_some())
-        {
+            && (caps.buttons || record.asset.is_some());
+        // Keys goes first for a keyboard: it's the main screen for that device
+        // (and `default_for` picks the first tab), so adding the ring editor
+        // below must not reassign a keyboard's opening tab away from it.
+        if shows_keys_tab {
             tabs.push(Self::Keys);
+        }
+        // A key can be bound to the Actions Ring action from the Keys panel
+        // (it's in the generic action catalog, not gated on haptics or a
+        // mouse model), so any keyboard that gets a Keys tab needs the ring
+        // editor too — otherwise the ring opens but has nothing configured
+        // in it and no way to configure it (#1833).
+        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) || shows_keys_tab {
+            tabs.push(Self::ActionsRing);
         }
         if caps.pointer || caps.scroll_inversion || caps.hires_wheel {
             tabs.push(Self::Pointer);

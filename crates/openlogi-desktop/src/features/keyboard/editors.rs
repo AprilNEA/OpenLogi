@@ -42,7 +42,7 @@ pub enum PowerUserKind {
 }
 
 impl PowerUserKind {
-    fn heading_key(self) -> &'static str {
+    pub(crate) fn heading_key(self) -> &'static str {
         match self {
             Self::TypeText => "actions.type_text_heading",
             Self::RunAppleScript => "actions.run_applescript_heading",

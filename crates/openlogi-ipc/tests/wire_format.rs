@@ -36,9 +36,9 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
 use openlogi_core::config::{Lighting, ScrollResolution};
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-    DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
-    PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
+    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
+    DeviceKind, DeviceModelInfo, DeviceTransports, LightCapabilities, LightState, LightValueRange,
+    LightValueUnit, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
@@ -51,8 +51,8 @@ use openlogi_core::hid::{
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
-    Identity, InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    Identity, InventoryHealth, MonitorEvent, Observation, ObservedLight, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation,
 };
 use succession::{Compat, Run};
 
@@ -440,15 +440,17 @@ fn agent_snapshot() {
         // Pinned on its own in `foreground_apps` below, like the inventory and
         // pairing fields.
         foreground: ForegroundApps::default(),
+        // Pinned populated in `observed_light` below.
+        lights: Vec::new(),
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000");
+    assert_wire(&observed, "03010001010705302e362e36010000000000000000");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:
@@ -710,6 +712,46 @@ fn semantic_read_payloads() {
         default_fn_lock: None,
     });
     assert_wire(&legacy, "000100");
+}
+
+/// A light the agent reads over HID++, with a brightness limit and settings
+/// changed on the light.
+#[test]
+fn observed_light() {
+    let brightness =
+        LightValueRange::new(20, 250, 1, LightValueUnit::Lumens).expect("valid brightness range");
+    let observed = ObservedLight {
+        route: DeviceRoute::RawHid {
+            vendor_id: 0x046d,
+            product_id: 0xc900,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            identity: "serial:glow-1".into(),
+        },
+        state: LightState {
+            capabilities: LightCapabilities {
+                power: true,
+                brightness: Some(brightness),
+                temperature: None,
+                color: false,
+                zones: false,
+            },
+            on: true,
+            brightness: Some(150),
+            temperature_kelvin: None,
+            brightness_limit: Some(200),
+        },
+        changed_on_light: ChangedOnLight {
+            enabled: None,
+            brightness_percent: Some(57),
+            temperature_kelvin: Some(4000),
+        },
+    };
+    assert_wire(
+        &observed,
+        "03fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d31010114fa0101000000\
+         0101960001c800013901fba00f",
+    );
 }
 
 #[test]

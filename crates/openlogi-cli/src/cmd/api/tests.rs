@@ -58,6 +58,7 @@ fn snapshot() -> AgentSnapshot {
             current: None,
             recent: Vec::new(),
         },
+        lights: Vec::new(),
     }
 }
 

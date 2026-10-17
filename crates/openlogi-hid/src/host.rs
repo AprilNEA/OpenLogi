@@ -18,6 +18,7 @@ use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
 use openlogi_core::hid::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus};
 use openlogi_device::ChannelPool;
+use openlogi_device::LightWatch;
 use openlogi_device::backend::{HidBackend, HotplugStream};
 use openlogi_device::backlight::{BacklightChange, BacklightState};
 use openlogi_device::inventory::{Enumerator, InventoryError};
@@ -217,6 +218,15 @@ pub async fn read_litra_state(
     model: LitraModel,
 ) -> Result<Option<LightState>, WriteError> {
     device::read_litra_state(&*native_backend(), route, model).await
+}
+
+/// Watch the Litra `route` reaches for changes made on the light itself
+/// (`None` when only its raw report reaches it, which announces nothing).
+pub async fn watch_litra(
+    route: &DeviceRoute,
+    model: LitraModel,
+) -> Result<Option<LightWatch>, WriteError> {
+    device::watch_litra(&*native_backend(), route, model).await
 }
 
 /// Walk the HID++ feature table of the device `route` reaches.

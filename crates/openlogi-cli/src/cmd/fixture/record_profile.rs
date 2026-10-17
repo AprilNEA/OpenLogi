@@ -216,6 +216,30 @@ async fn capture_inventory(
         selected_device
     };
     sanitize::inventory(&mut retained)?;
+
+    // A paired device with a zero unit id and no serial number gets no identity
+    // representation in the fixture's ledger (openlogi-fixture's generate step
+    // skips it on this exact condition), so it has no principal for a settings
+    // route — or even a presence in `inventories.paired` — to resolve to.
+    // Leaving it in the capture produces a profile the generator can record
+    // but never verify; drop it instead (#1666), never the selected device.
+    let selected_slot = retained
+        .paired
+        .get(retained_selected)
+        .ok_or_else(|| anyhow!("the selected device is absent from the retained inventory"))?
+        .slot;
+    let mut paired_with_routes: Vec<(DeviceRoute, PairedDevice)> =
+        source_routes.into_iter().zip(retained.paired).collect();
+    paired_with_routes.retain(|(_, device)| {
+        device.slot == selected_slot
+            || device
+                .model_info
+                .as_ref()
+                .is_some_and(|model| model.unit_id != [0; 4] || model.serial_number.is_some())
+    });
+    let (source_routes, paired): (Vec<_>, Vec<_>) = paired_with_routes.into_iter().unzip();
+    retained.paired = paired;
+
     let profile_routes = retained
         .paired
         .iter()
@@ -224,6 +248,11 @@ async fn capture_inventory(
                 .ok_or_else(|| anyhow!("a sanitized profile route is not addressable"))
         })
         .collect::<Result<Vec<_>>>()?;
+    let retained_selected = retained
+        .paired
+        .iter()
+        .position(|device| device.slot == selected_slot)
+        .ok_or_else(|| anyhow!("the selected device did not survive capture filtering"))?;
     let selected_route = profile_routes
         .get(retained_selected)
         .cloned()

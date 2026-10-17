@@ -28,7 +28,7 @@ use gpui_component::{
 };
 use openlogi_core::config::{DeviceViewMode, LightSettings};
 use openlogi_core::device::{DeviceKind, DeviceModelInfo, ModelTransport};
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, ReceiverProtocol};
 use openlogi_ipc::PairingFailure;
 
 use super::AppView;
@@ -39,7 +39,7 @@ use super::widgets::{
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
 use crate::services::ipc::UnpairFailure;
-use crate::state::{AppState, DeviceRecord};
+use crate::state::{AppState, DeviceRecord, ObservedConnection};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
 use crate::ui::components::{control_input, save_cancel_footer};
 use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
@@ -160,6 +160,7 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 /// handler without giving up keyboard behavior.
 fn device_card(
     record: &DeviceRecord,
+    saved_transport: Option<ObservedConnection>,
     enabled: bool,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     light_enabled: bool,
@@ -208,7 +209,7 @@ fn device_card(
                         .absolute()
                         .top_0()
                         .left_0()
-                        .child(transport_glance(record, pal)),
+                        .child(transport_glance(record, pal, saved_transport)),
                 )
                 .when_some(record.battery.as_ref(), |image, battery| {
                     image.child(
@@ -265,11 +266,19 @@ fn device_card(
 /// Transport glyph in the card corner, colored by the transport itself —
 /// Bluetooth blue, receiver green, cable muted; the connectivity words ride
 /// its hover tip and the dimmed render already marks an offline card.
-fn transport_glance(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
+fn transport_glance(
+    record: &DeviceRecord,
+    pal: Palette,
+    saved_transport: Option<ObservedConnection>,
+) -> impl IntoElement {
     let path = if matches!(record.kind, DeviceKind::Camera) {
         "action-icons/usb.svg"
     } else {
-        connection_icon_path(record.route.as_ref(), record.model_info.as_ref())
+        connection_icon_path(
+            record.route.as_ref(),
+            record.model_info.as_ref(),
+            saved_transport,
+        )
     };
     let color: Hsla = match path {
         "action-icons/bluetooth.svg" => rgb(theme::ACCENT_BLUE).into(),
@@ -495,7 +504,11 @@ pub(super) fn open_rename_dialog(
     });
 }
 
-fn connection_view(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
+fn connection_view(
+    record: &DeviceRecord,
+    pal: Palette,
+    saved_transport: Option<ObservedConnection>,
+) -> impl IntoElement {
     h_flex()
         .w_full()
         .min_w_0()
@@ -515,7 +528,11 @@ fn connection_view(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
                 .path(if matches!(record.kind, DeviceKind::Camera) {
                     "action-icons/usb.svg"
                 } else {
-                    connection_icon_path(record.route.as_ref(), record.model_info.as_ref())
+                    connection_icon_path(
+                        record.route.as_ref(),
+                        record.model_info.as_ref(),
+                        saved_transport,
+                    )
                 })
                 .size_3()
                 .flex_none(),
@@ -593,28 +610,49 @@ fn device_image(
 /// [`DeviceModelInfo::transport_for_product_id`], rather than guessing from
 /// the static, unordered transport flags (which mislabeled a USB-connected
 /// multi-transport device as Bluetooth — issue #1218).
+/// Offline cards retain the last observed mode, or an unambiguous recorded
+/// link after restart; radio support alone does not select Bluetooth.
 pub(super) fn connection_icon_path(
     route: Option<&DeviceRoute>,
     model: Option<&DeviceModelInfo>,
+    saved_transport: Option<ObservedConnection>,
 ) -> &'static str {
-    if let Some(DeviceRoute::Direct { product_id, .. }) = route
-        && let Some(transport) = model.and_then(|m| m.transport_for_product_id(*product_id))
-    {
+    let direct_transport = match route {
+        Some(DeviceRoute::Direct { product_id, .. }) => {
+            model.and_then(|m| m.transport_for_product_id(*product_id))
+        }
+        None => match saved_transport {
+            Some(ObservedConnection::Direct(transport)) => Some(transport),
+            Some(ObservedConnection::Receiver(_)) | None => None,
+        },
+        Some(
+            DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. } | DeviceRoute::RawHid { .. },
+        ) => None,
+    };
+    if let Some(transport) = direct_transport {
         return match transport {
             ModelTransport::Equad | ModelTransport::Usb => "action-icons/usb.svg",
             ModelTransport::Bluetooth | ModelTransport::Btle => "action-icons/bluetooth.svg",
         };
     }
 
-    match route {
-        Some(DeviceRoute::Bolt { .. }) => "action-icons/bolt.svg",
-        Some(DeviceRoute::Unifying { .. }) => "action-icons/unifying.svg",
-        // Offline records retain model information but have no live route.
-        Some(DeviceRoute::Direct { .. }) | None => match model.map(|m| m.transports) {
+    match (route, saved_transport) {
+        (Some(DeviceRoute::Bolt { .. }), _)
+        | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Bolt))) => {
+            "action-icons/bolt.svg"
+        }
+        (Some(DeviceRoute::Unifying { .. }), _)
+        | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Unifying))) => {
+            "action-icons/unifying.svg"
+        }
+        // An offline model's radio capabilities do not identify a connection.
+        // Preserve the wired-only fallback; ambiguous offline links stay neutral.
+        (Some(DeviceRoute::Direct { .. }) | None, _) => match model.map(|m| m.transports) {
             Some(t) if (t.usb || t.equad) && !t.bluetooth && !t.btle => "action-icons/usb.svg",
-            _ => "action-icons/bluetooth.svg",
+            _ if route.is_some() => "action-icons/bluetooth.svg",
+            _ => "action-icons/circle-dot.svg",
         },
-        Some(DeviceRoute::RawHid { .. }) => "action-icons/usb.svg",
+        (Some(DeviceRoute::RawHid { .. }), _) => "action-icons/usb.svg",
     }
 }
 

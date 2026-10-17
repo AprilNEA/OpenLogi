@@ -19,8 +19,9 @@ use std::time::Duration;
 use hidpp::{
     channel::HidppChannel,
     device::{Device, DeviceError},
+    feature::EmittingFeature,
     feature::illumination::{
-        ControlCapabilities, ControlInfo, IlluminationFeature, IlluminationState,
+        ControlCapabilities, ControlInfo, IlluminationEvent, IlluminationFeature, IlluminationState,
     },
     protocol::v20::Hidpp20Error,
 };
@@ -117,9 +118,16 @@ fn info_range(info: ControlInfo, unit: LightValueUnit) -> Option<LightValueRange
 }
 
 impl Illumination {
+    /// The light's notifications, from now on.
+    pub(super) fn listen(
+        &self,
+    ) -> impl futures_lite::Stream<Item = IlluminationEvent> + Send + 'static {
+        self.feature.listen()
+    }
+
     /// Read the light's ranges and current state, in the order Logi Options+
     /// reads them on start.
-    async fn read_state(&self) -> Result<LightState, WriteError> {
+    pub(super) async fn read_state(&self) -> Result<LightState, WriteError> {
         let brightness_info = self
             .feature
             .get_brightness_info()
