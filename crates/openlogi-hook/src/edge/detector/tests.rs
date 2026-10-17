@@ -16,6 +16,15 @@ fn assert_near(actual: f64, expected: f64) {
     );
 }
 
+/// Defaults without corner dead zones, for tests of corner tie-breaking.
+fn no_corner_dead_zone() -> EdgeDetectorParams {
+    EdgeDetectorParams {
+        corner_dead_zone_fraction: 0.0,
+        corner_dead_zone_min: 0.0,
+        ..EdgeDetectorParams::default()
+    }
+}
+
 fn dwell_params() -> EdgeDetectorParams {
     EdgeDetectorParams {
         dwell_time: Duration::from_millis(100),
@@ -34,6 +43,8 @@ fn defaults_define_dwell_velocity_hysteresis_and_cooldown() {
     assert_near(params.arrival_velocity_threshold, 900.0);
     assert_near(params.rearm_distance, 12.0);
     assert_eq!(params.cooldown, Duration::from_millis(500));
+    assert_near(params.corner_dead_zone_fraction, 0.05);
+    assert_near(params.corner_dead_zone_min, 24.0);
 }
 
 #[test]
@@ -220,7 +231,7 @@ fn corner_prefers_greater_outward_velocity() {
         ArmedSides::ALL,
         EdgeDetectorParams {
             arrival_velocity_threshold: 500.0,
-            ..EdgeDetectorParams::default()
+            ..no_corner_dead_zone()
         },
     );
 
@@ -241,7 +252,7 @@ fn corner_exact_velocity_tie_uses_left_first_priority() {
         ArmedSides::ALL,
         EdgeDetectorParams {
             arrival_velocity_threshold: 500.0,
-            ..EdgeDetectorParams::default()
+            ..no_corner_dead_zone()
         },
     );
 
@@ -348,6 +359,71 @@ fn a_latched_arrival_waits_until_the_cursor_leaves_the_edge() {
     assert!(
         detector
             .update(point(0.0, 50.0), Duration::from_millis(1_400))
+            .is_some()
+    );
+}
+
+#[test]
+fn contact_in_a_corner_dead_zone_never_crosses() {
+    // A 1000-pixel left edge has 50-pixel dead zones (5 %) at both ends.
+    let edges = ExposedEdges::from_displays(&[rect(0.0, 0.0, 1600.0, 1000.0)]);
+    let mut detector = EdgeDetector::new(
+        edges,
+        ArmedSides::from_sides([EdgeSide::Left]),
+        dwell_params(),
+    );
+
+    for (y, start_ms, label) in [(10.0, 0, "top corner"), (980.0, 500, "bottom corner")] {
+        assert!(
+            detector
+                .update(point(0.0, y), Duration::from_millis(start_ms))
+                .is_none()
+        );
+        assert!(
+            detector
+                .update(point(0.0, y), Duration::from_millis(start_ms + 400))
+                .is_none(),
+            "a dwell in the {label} must not cross"
+        );
+    }
+
+    assert!(
+        detector
+            .update(point(0.0, 500.0), Duration::from_secs(1))
+            .is_none()
+    );
+    assert!(
+        detector
+            .update(point(0.0, 500.0), Duration::from_millis(1_200))
+            .is_some(),
+        "the middle of the edge still crosses"
+    );
+}
+
+#[test]
+fn a_short_segment_keeps_its_middle_half() {
+    // 60 pixels: the 24-pixel minimum would leave 12; a quarter (15) caps it.
+    let edges = ExposedEdges::from_displays(&[rect(0.0, 0.0, 100.0, 60.0)]);
+    let mut detector = EdgeDetector::new(
+        edges,
+        ArmedSides::from_sides([EdgeSide::Left]),
+        dwell_params(),
+    );
+
+    assert!(detector.update(point(0.0, 10.0), Duration::ZERO).is_none());
+    assert!(
+        detector
+            .update(point(0.0, 10.0), Duration::from_millis(200))
+            .is_none()
+    );
+    assert!(
+        detector
+            .update(point(0.0, 30.0), Duration::from_millis(300))
+            .is_none()
+    );
+    assert!(
+        detector
+            .update(point(0.0, 30.0), Duration::from_millis(500))
             .is_some()
     );
 }

@@ -87,6 +87,15 @@ pub struct EdgeDetectorParams {
     /// Minimum interval between crossing events, even after leaving the edge.
     /// Default: 500 ms.
     pub cooldown: Duration,
+    /// Share of each segment's length, at both of its ends, where contact
+    /// never crosses: pointing into a screen corner (a Start button, the title
+    /// bar or tab strip of a maximized window) must not hand the devices off.
+    /// Default: 5 %.
+    pub corner_dead_zone_fraction: f64,
+    /// Smallest corner dead zone, in logical pixels, whatever the segment
+    /// length. A zone never covers more than a quarter of a segment from each
+    /// end, so a short exposed segment keeps its middle half. Default: 24.
+    pub corner_dead_zone_min: f64,
 }
 
 impl Default for EdgeDetectorParams {
@@ -97,6 +106,8 @@ impl Default for EdgeDetectorParams {
             arrival_velocity_threshold: 900.0,
             rearm_distance: 12.0,
             cooldown: Duration::from_millis(500),
+            corner_dead_zone_fraction: 0.05,
+            corner_dead_zone_min: 24.0,
         }
     }
 }
@@ -189,12 +200,7 @@ impl EdgeDetector {
             return None;
         }
 
-        let candidates = candidates(
-            &self.edges,
-            position,
-            self.params.edge_tolerance,
-            self.armed_sides,
-        );
+        let candidates = candidates(&self.edges, position, &self.params, self.armed_sides);
         let preferred_segment = self.contact.map(|contact| contact.segment_index);
         let Some(candidate) = select_candidate(&candidates, preferred_segment, velocity) else {
             self.contact = None;
@@ -274,7 +280,7 @@ struct Candidate {
 fn candidates(
     edges: &ExposedEdges,
     position: CursorPosition,
-    tolerance: f64,
+    params: &EdgeDetectorParams,
     armed_sides: ArmedSides,
 ) -> Vec<Candidate> {
     edges
@@ -284,7 +290,8 @@ fn candidates(
         .enumerate()
         .filter(|(_, segment)| {
             armed_sides.contains(segment.side())
-                && contains_with_tolerance(*segment, position, tolerance)
+                && contains_with_tolerance(*segment, position, params.edge_tolerance)
+                && !in_corner_dead_zone(*segment, position, params)
         })
         .map(|(segment_index, segment)| Candidate {
             segment_index,
@@ -371,6 +378,21 @@ fn normal_coordinate(segment: EdgeSegment, position: CursorPosition) -> f64 {
         EdgeSide::Left | EdgeSide::Right => position.x,
         EdgeSide::Top | EdgeSide::Bottom => position.y,
     }
+}
+
+/// Whether `position` lies within a corner dead zone at either end of
+/// `segment` (see [`EdgeDetectorParams::corner_dead_zone_fraction`]).
+fn in_corner_dead_zone(
+    segment: EdgeSegment,
+    position: CursorPosition,
+    params: &EdgeDetectorParams,
+) -> bool {
+    let length = segment_length(segment);
+    let zone = (length * params.corner_dead_zone_fraction)
+        .max(params.corner_dead_zone_min)
+        .min(length / 4.0);
+    let along = along_coordinate(segment, position);
+    along < segment.start() + zone || along > segment.end() - zone
 }
 
 fn contains_with_tolerance(segment: EdgeSegment, position: CursorPosition, tolerance: f64) -> bool {
