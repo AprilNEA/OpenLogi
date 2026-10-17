@@ -64,9 +64,9 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
     let backlight_overlay = BacklightOverlayManager::default();
 
     // Shared between the hook callback (which mirrors events into it) and
-    // the IPC server (which the GUI polls); the janitor turns it back off.
+    // the IPC server (which the GUI polls); the GUI's first poll starts the
+    // janitor that turns it back off.
     let event_monitor = Arc::new(EventMonitor::default());
-    tokio::spawn(Arc::clone(&event_monitor).run_idle_janitor());
 
     // Pairing runs in the agent (it owns device I/O); the GUI drives it over IPC.
     let pairing = Arc::new(pairing::PairingManager::new(
