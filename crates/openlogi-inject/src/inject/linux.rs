@@ -758,6 +758,12 @@ fn kwin_invoke_shortcut(action: &Action, effect: &str) {
     }
 }
 
+/// Held across the read-then-write in [`kwin_toggle_show_desktop`]: a button
+/// press and an Actions Ring selection run on different threads, and two
+/// interleaved toggles would otherwise both read the same state and collapse
+/// into one.
+static SHOW_DESKTOP_TOGGLE: Mutex<()> = Mutex::new(());
+
 /// Toggle KWin's "show desktop" state, reading the current value first so the
 /// action mirrors the native toggle. No-op with a debug log off KDE.
 fn kwin_toggle_show_desktop(action: &Action) {
@@ -768,6 +774,9 @@ fn kwin_toggle_show_desktop(action: &Action) {
         );
         return;
     };
+    let _toggle = SHOW_DESKTOP_TOGGLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let showing = match conn.call_method(
         Some("org.kde.KWin"),
         "/KWin",
