@@ -406,6 +406,41 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
 }
 
 #[test]
+fn macos_middle_click_gesture_keeps_the_hook_fallback_beside_hidpp_capture() {
+    // A preserved Middle Click gesture map asks the capture layer for
+    // device-owned raw XY, but an ordinary middle button must keep working
+    // through the hook when the device does not declare the gesture task — so
+    // the hook maps retain the entry.
+    let mut config = Config::default();
+    config.set_gesture_mode("a", ButtonId::MiddleClick, true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+
+    let requested = orch.shared.capture_plans.borrow().plans()[0]
+        .target
+        .spec
+        .divert_gesture_navigation
+        .iter()
+        .any(|&(_, button)| button == ButtonId::MiddleClick);
+    assert_eq!(
+        requested,
+        cfg!(target_os = "macos"),
+        "only macOS requests device-owned middle-click capture"
+    );
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
+    assert!(
+        hook_maps.gestures.contains_key(&ButtonId::MiddleClick),
+        "an unconfirmed middle button keeps the hook as its fail-open owner"
+    );
+}
+
+#[test]
 fn keyboard_control_bindings_never_enter_the_mouse_capture_plan() {
     // The keyboard watcher owns `0x1b04` key diversion. The gesture watcher
     // also plans a session for every online device, so a keyboard key must

@@ -557,7 +557,10 @@ impl Orchestrator {
             for button in hidpp_side_gesture_maps_for(&self.config, key, app).keys() {
                 // macOS gives HID++ exclusive ownership of both edges.
                 // Windows deliberately keeps this global map as a passive
-                // fallback when the physical control cannot arm raw XY.
+                // fallback when the physical control cannot arm raw XY. A
+                // preserved Middle Click map is not in this set: its HID++
+                // capture is device-conditional (the control must declare the
+                // gesture task), so the hook stays its fail-open owner.
                 bindings.remove(button);
                 gestures.remove(button);
             }

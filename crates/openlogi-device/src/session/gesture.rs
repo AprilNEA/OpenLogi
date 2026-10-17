@@ -1,7 +1,8 @@
 //! Live control capture for one device: divert the device's gesture sources
-//! (DPI/ModeShift, the MX dedicated gesture button and/or the MX Master 4
-//! haptic panel), and the thumb wheel over HID++ and turn their events
-//! into [`CapturedInput`] the GUI can dispatch.
+//! (DPI/ModeShift, the MX dedicated gesture button, the MX Master 4 haptic
+//! panel, and a middle button whose control table declares it the gesture
+//! button) plus the thumb wheel over HID++, and turn their events into
+//! [`CapturedInput`] the GUI can dispatch.
 //!
 //! [`run_capture_session`] runs on the HID++ channel inventory already holds
 //! open for one device, enables diversion on whichever of those controls it
@@ -174,6 +175,15 @@ pub struct CaptureSpec {
     /// Standard-button CIDs requested as raw-XY gesture sources. A control is
     /// armed only when its HID++ capability flags advertise raw-XY support.
     pub divert_gesture_buttons: Vec<(u16, ButtonId)>,
+    /// Standard-button CIDs requested as raw-XY gesture sources only when the
+    /// device's own control table identifies them as its gesture button (see
+    /// [`CtrlIdInfo::is_gesture_button`](crate::reprog_controls::CtrlIdInfo::is_gesture_button)
+    /// and [`reprog_controls::GESTURE_BUTTON_TASK_IDS`]). The `0x0052` middle
+    /// button is an ordinary click on most mice — the MX Anywhere 2S is the
+    /// exception, where it is the gesture button — so a raw-XY-capable
+    /// middle button must not be captured for gestures without that
+    /// confirmation.
+    pub divert_gesture_navigation: Vec<(u16, ButtonId)>,
     /// Buttons to divert as plain presses (no raw-XY): the
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.

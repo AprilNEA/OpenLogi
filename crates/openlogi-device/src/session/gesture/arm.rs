@@ -35,7 +35,8 @@ pub(super) struct ArmedControls {
     /// `spec.divert_gesture_sources` members the device exposes.
     pub(super) gesture_cids: Vec<u16>,
     /// Raw-XY-capable additional CIDs diverted as gesture sources (side
-    /// buttons on supported desktops and a gesture-mode DPI/ModeShift button).
+    /// buttons on supported desktops, a gesture-mode DPI/ModeShift button, and
+    /// a middle button the device itself declares as its gesture button).
     pub(super) gesture_button_cids: Vec<(u16, ButtonId)>,
     /// DPI/ModeShift CIDs diverted as plain buttons when gesture mode is off.
     pub(super) dpi_cids: Vec<u16>,
@@ -221,6 +222,7 @@ pub(super) async fn arm_controls_into(
                 armed.gesture_button_cids.push((cid, button));
             }
         }
+        arm_gesture_navigation_controls(&rc, &controls, spec, armed).await?;
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
             let gesture_requested = spec
                 .divert_gesture_buttons
@@ -345,6 +347,38 @@ async fn arm_main_wheel(
             Ok(())
         }
     }
+}
+
+async fn arm_gesture_navigation_controls(
+    rc: &ReprogControlsV4,
+    controls: &[reprog_controls::CtrlIdInfo],
+    spec: &CaptureSpec,
+    armed: &mut ArmedControls,
+) -> Result<(), CaptureError> {
+    // A shared standard CID (the middle button) is a gesture source only when
+    // the device itself says so; capability flags alone would turn every
+    // raw-XY-capable middle click into a gesture button. The row is logged
+    // because the device's answer is what decides arming — a mis-classified
+    // model must be diagnosable from the agent log.
+    for &(cid, button) in &spec.divert_gesture_navigation {
+        let control = controls.iter().find(|c| c.cid == cid);
+        let confirmed = control.is_some_and(|control| {
+            control.is_divertable() && control.supports_raw_xy() && control.is_gesture_button()
+        });
+        debug!(
+            cid = format_args!("{cid:#06x}"),
+            task = format_args!("{:#06x}", control.map_or(0, |c| c.task_id)),
+            flags = format_args!("{:#06x}", control.map_or(0, |c| c.flags)),
+            %button,
+            confirmed,
+            "gesture-navigation capture request"
+        );
+        if confirmed {
+            arm_reprog_control(rc, cid, PointerDivert::RawXy, &mut armed.reporting).await?;
+            armed.gesture_button_cids.push((cid, button));
+        }
+    }
+    Ok(())
 }
 
 async fn arm_reprog_control(
