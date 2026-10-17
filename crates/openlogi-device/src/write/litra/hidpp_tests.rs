@@ -1378,6 +1378,108 @@ async fn a_clamp_the_button_made_still_follows_a_press_on_the_light() {
 }
 
 #[tokio::test]
+async fn a_clamp_does_not_hide_a_later_press_back_to_its_brightness() {
+    let backend = LitraBackend::new("clamp-then-presses", Opens::Hidpp, under_a_steady_limit());
+    let mut watch = watching(&backend).await;
+    // Another program's request is clamped to 120 lm. The button then goes
+    // to 105, 110 and 120 lm, one press during each read of the wake.
+    backend.press(4, |light| {
+        light.lumens = 120;
+        light.presses_during_reads = vec![105, 110, 120];
+        clamp(1, 120)
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the reads so far are reported");
+    assert!(change.on_light.brightness);
+    assert_eq!(change.state.brightness, Some(110));
+    let change = next_change(&mut watch)
+        .await
+        .expect("the last press is read");
+    assert!(
+        change.on_light.brightness,
+        "the press back to 120 lm is not explained by the old clamp"
+    );
+    assert_eq!(change.state.brightness, Some(120));
+    assert!(stays_quiet(&mut watch).await);
+}
+
+#[tokio::test]
+async fn a_clamp_the_button_made_drops_an_earlier_clamp() {
+    let backend = LitraBackend::new(
+        "request-then-button-clamp",
+        Opens::Hidpp,
+        under_a_steady_limit(),
+    );
+    let mut watch = watching(&backend).await;
+    // A request is clamped to 120 lm, and then the button holds the light
+    // at the same limit, before the watcher reads it.
+    backend.press(4, |light| {
+        light.lumens = 120;
+        clamp(1, 120)
+    });
+    backend.press(4, |_| clamp(2, 120));
+    let change = next_change(&mut watch)
+        .await
+        .expect("the new brightness is reported");
+    assert!(change.on_light.brightness, "the button chose the limit");
+    assert_eq!(change.state.brightness, Some(120));
+    assert!(stays_quiet(&mut watch).await);
+}
+
+#[tokio::test]
+async fn a_clamp_explains_only_the_brightness_it_clamped_to() {
+    let backend = LitraBackend::new(
+        "clamp-other-brightness",
+        Opens::Hidpp,
+        under_a_steady_limit(),
+    );
+    let mut watch = watching(&backend).await;
+    // The light is at 105 lm, a change it did not announce, when a request
+    // is clamped to 120 lm.
+    backend.change_silently(|light| light.lumens = 105);
+    backend.press(4, |_| clamp(1, 120));
+    let change = next_change(&mut watch)
+        .await
+        .expect("the new brightness is reported");
+    assert!(
+        change.on_light.brightness,
+        "105 lm is not the clamped brightness"
+    );
+    assert_eq!(change.state.brightness, Some(105));
+    assert!(stays_quiet(&mut watch).await);
+}
+
+#[tokio::test]
+async fn a_clamp_explains_only_the_wake_that_took_it() {
+    let backend = LitraBackend::new("clamp-one-wake", Opens::Hidpp, under_a_steady_limit());
+    let mut watch = watching(&backend).await;
+    backend.press(4, |light| {
+        light.lumens = 120;
+        clamp(1, 120)
+    });
+    let change = next_change(&mut watch)
+        .await
+        .expect("the clamped brightness is reported");
+    assert_eq!(change.on_light, LightControls::default());
+    // Brightness changes the light did not announce, each read after a
+    // temperature press.
+    for (lumens, kelvin) in [(105u16, 4100u16), (120, 4200)] {
+        backend.change_silently(|light| light.lumens = lumens);
+        backend.press(2, |light| {
+            light.kelvin = kelvin;
+            kelvin.to_be_bytes().to_vec()
+        });
+        let change = next_change(&mut watch)
+            .await
+            .expect("the press is reported");
+        assert!(change.on_light.brightness, "{lumens} lm");
+        assert_eq!(change.state.brightness, Some(lumens));
+    }
+    assert!(stays_quiet(&mut watch).await);
+}
+
+#[tokio::test]
 async fn a_press_after_a_clamp_is_still_a_change_on_the_light() {
     let backend = LitraBackend::new("pressed-after-clamp", Opens::Hidpp, under_a_steady_limit());
     let mut watch = watching(&backend).await;

@@ -326,12 +326,23 @@ impl LightWatch {
         took
     }
 
-    /// Keep the evidence of a clamp a request made.
+    /// Keep the evidence of a clamp a request made. A clamp the button made,
+    /// or a later brightness other than the clamped one, drops it: that
+    /// clamp no longer explains the light's brightness.
     fn note(&mut self, event: IlluminationEvent) {
-        if let IlluminationEvent::BrightnessClamped { source, brightness } = event
-            && !matches!(source, BrightnessClampedSource::Button)
-        {
-            self.clamped = Some(brightness);
+        match event {
+            IlluminationEvent::BrightnessClamped { source, brightness } => {
+                self.clamped = match source {
+                    BrightnessClampedSource::Button => None,
+                    _ => Some(brightness),
+                };
+            }
+            IlluminationEvent::BrightnessChanged(lumens)
+                if self.clamped.is_some_and(|clamped| clamped != lumens) =>
+            {
+                self.clamped = None;
+            }
+            _ => {}
         }
     }
 
