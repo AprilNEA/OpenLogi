@@ -168,6 +168,13 @@ impl EdgeDetector {
         self.latched = true;
     }
 
+    /// Whether a crossing or [`Self::latch`] still waits for the cursor to
+    /// leave the armed edges.
+    #[must_use]
+    pub const fn is_latched(&self) -> bool {
+        self.latched
+    }
+
     /// Consume one cursor sample and return at most one crossing.
     ///
     /// At a corner, an existing contact remains selected. A new contact chooses
