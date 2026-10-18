@@ -820,7 +820,9 @@ async fn run_application_connection(
                 Ok(event @ (RpcEvent::Request(_) | RpcEvent::Rejected(_))) => {
                     handle_rpc(Arc::clone(&state), peer, event).await;
                 }
-                Err(_) => return,
+                Err(error) if error.is_connection_lost() => return,
+                // One request the peer reset or garbled; the next may be fine.
+                Err(error) => debug!(%error, "Flow request stream failed"),
             }
         }
     };
@@ -838,11 +840,12 @@ async fn run_application_connection(
                 ) => {
                     handle_notification(Arc::clone(&state), peer, event).await;
                 }
-                Err(_) => return,
+                Err(error) if error.is_connection_lost() => return,
+                Err(error) => debug!(%error, "Flow notification stream failed"),
             }
         }
     };
-    // The connection is gone once either accept fails.
+    // The connection is gone once either accept says so.
     tokio::select! {
         () = rpcs => {}
         () = notifications => {}
