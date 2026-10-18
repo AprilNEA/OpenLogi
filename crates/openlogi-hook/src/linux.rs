@@ -663,8 +663,11 @@ fn device_thread(
                     )
                 ) {
                     *report_modifiers.get_or_insert_with(|| {
+                        // A round trip to the X server, on the thread that
+                        // forwards the pointer: only while something reads it.
                         modifier_source
                             .as_ref()
+                            .filter(|_| crate::movement_modifiers_wanted())
                             .map_or_else(KeyModifiers::default, X11ModifierSource::current)
                     })
                 } else {

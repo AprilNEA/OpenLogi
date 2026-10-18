@@ -80,6 +80,7 @@ impl FlowController {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let (movement_tx, movement_rx) = mpsc::channel(CONTROL_QUEUE);
         let edge_settings = edge_settings(&config, 0);
+        want_control_state(&config);
         observable.set_flow(status_from_config(&config));
         Self {
             inner: Arc::new(ControllerInner {
@@ -165,6 +166,7 @@ impl FlowController {
         if previous.as_ref() == Some(config) {
             return;
         }
+        want_control_state(config);
         let revision = self
             .inner
             .edge_settings
@@ -260,6 +262,13 @@ fn status_from_config(config: &FlowConfig) -> FlowStatus {
         },
         |compiled| compiled.status(),
     )
+}
+
+/// Have the hook read whether Control is held with each movement only while
+/// Flow crosses on it: on Linux that read is an X server round trip per
+/// pointer report.
+fn want_control_state(config: &FlowConfig) {
+    openlogi_hook::set_movement_modifiers_wanted(config.enabled && config.require_modifier);
 }
 
 fn edge_settings(config: &FlowConfig, revision: u64) -> EdgeSettings {

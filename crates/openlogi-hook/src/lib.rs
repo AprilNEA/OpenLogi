@@ -113,6 +113,26 @@ impl EventDevice {
 /// rather than silently per-device.
 static INVERT_SCROLL: AtomicBool = AtomicBool::new(false);
 
+/// Whether a consumer reads the modifiers of [`MouseEvent::Moved`]; see
+/// [`set_movement_modifiers_wanted`].
+static MOVEMENT_MODIFIERS: AtomicBool = AtomicBool::new(false);
+
+/// Say whether anything reads the modifiers of [`MouseEvent::Moved`].
+///
+/// Where reading them costs a round trip on the capture thread — Linux asks
+/// the X server for every pointer report — the hook skips the read while
+/// nothing wants them and reports no modifiers held. Takes effect on the next
+/// movement.
+pub fn set_movement_modifiers_wanted(wanted: bool) {
+    MOVEMENT_MODIFIERS.store(wanted, Ordering::Relaxed);
+}
+
+/// Whether [`set_movement_modifiers_wanted`] is currently on.
+#[cfg(target_os = "linux")]
+pub(crate) fn movement_modifiers_wanted() -> bool {
+    MOVEMENT_MODIFIERS.load(Ordering::Relaxed)
+}
+
 /// Whether this platform can invert the wheel in software.
 ///
 /// Linux and macOS transform the event in place, inside the capture layer,
