@@ -13,6 +13,7 @@ publish = false
 [dependencies]
 axwatch = { workspace = true }
 openlogi-core = { path = "../openlogi-core", features = ["worker"] }
+openlogi-flow = { path = "../openlogi-flow" }
 openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }

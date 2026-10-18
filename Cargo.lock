@@ -5737,6 +5737,7 @@ dependencies = [
  "futures-lite",
  "openlogi-core",
  "openlogi-fixture",
+ "openlogi-flow",
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-inject",
