@@ -54,8 +54,9 @@ changes day to day:
 
 `#[allow]` goes quiet the day it stops suppressing anything, so suppressions rot in
 place. `#[expect]` reports itself unfulfilled instead, which `-D warnings` turns into a
-failure. `allow_attributes` enforces this — but only for outer `#[allow]`; a module-wide
-`#![allow(…)]`, the shape that rots worst, is invisible to it and is on you.
+failure. `allow_attributes` enforces this — but only for outer `#[allow]`. A module-wide
+`#![allow(…)]`, the shape that rots worst, is invisible to it, so the ast-grep guard
+`workspace-no-inner-allow` rejects that shape instead.
 
 Two cases where `expect` is wrong and `allow` is correct. Each keeps its `allow` plus
 an `#[expect(clippy::allow_attributes, reason = "see above")]` and a comment saying which

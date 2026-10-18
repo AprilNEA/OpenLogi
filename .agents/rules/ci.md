@@ -174,7 +174,7 @@ The `fmt` job selects all workspace test jobs with the path filter in `ci.yml`. 
 
 Load the [ast-grep skill](../skills/ast-grep/SKILL.md) for structural searches, rewrites, and rule authoring. The following constraints govern OpenLogi guards:
 
-- Store each rule in the owning crate's `.ast-grep/rules/`, or `xtask/.ast-grep/rules/` for an xtask owner. Cross-crate guards live with the owner, even when they inspect other crates.
+- Store each rule in the owning crate's `.ast-grep/rules/`, or `xtask/.ast-grep/rules/` for an xtask owner. A workspace-wide policy that no crate owns, such as the lint table in the root `Cargo.toml`, goes in the root `.ast-grep/rules/`. Cross-crate guards live with the owner, even when they inspect other crates.
 - Register each rule directory in the root `sgconfig.yml`. Keep one project config. Rule `files` and `ignores` selectors are relative to that project root, not the YAML file.
 - Preserve unique rule IDs and name the owner in the diagnostic. For the consolidation trigger, follow [Single source of truth](../../AGENTS.md#single-source-of-truth).
 - Choose traversal depth for the intended relationship. Use `stopBy: end` only when the rule must search all ancestors or descendants.
