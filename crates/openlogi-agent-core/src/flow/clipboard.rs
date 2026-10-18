@@ -230,7 +230,7 @@ impl ConnectionClipboard {
         tokio::spawn(async move {
             let offer = shared
                 .as_ref()
-                .and_then(|shared| shared.ledger().current_offer());
+                .and_then(|shared| shared.ledger().current_offer(peer));
             match serve_fetch(rpc, offer.as_deref()).await {
                 Ok(Served::Text { sequence }) => {
                     if let Some(shared) = &shared {
@@ -366,6 +366,7 @@ async fn receive_text(
     if !shared.ledger().is_newest(ticket) {
         return;
     }
+    let copied_before = shared.backend.change_count();
     let held = match read_local(shared, false).await {
         Some(Local::Text(text)) => Some(ContentDigest::of(&text)),
         _ => None,
@@ -386,7 +387,7 @@ async fn receive_text(
             return;
         }
     };
-    if !shared.ledger().is_newest(ticket) {
+    if !shared.ledger().is_newest(ticket) || shared.backend.change_count() != copied_before {
         debug!("Flow clipboard text superseded while it was fetched");
         return;
     }
@@ -419,8 +420,11 @@ async fn receive_files(
     if let Some(Local::Files(held)) = read_local(shared, true).await
         && let Ok(held) = FilesOffer::new(0, held)
         && announced.digest() == Some(held.digest())
+        && shared.ledger().last_synced_is(held.digest())
     {
-        // The same files are on this clipboard already.
+        // The files this clipboard took from, or gave to, the last sync are
+        // still on it. A file digest covers names, sizes and modification
+        // times only, so files that merely match it are fetched all the same.
         shared.ledger().adopted(peer, held.digest());
         return;
     }
@@ -529,8 +533,9 @@ async fn read_local(shared: &Arc<Shared>, files: bool) -> Option<Local> {
 struct Ledger {
     /// The last generation this machine announced; the first is 1.
     sequence: u64,
-    /// The generation peers may fetch: the last one announced.
-    offer: Option<Arc<ClipboardOffer>>,
+    /// The generation the peer it was announced to may fetch: the last one
+    /// announced. No other peer may fetch it.
+    offer: Option<(PublicKey, Arc<ClipboardOffer>)>,
     /// The content of the last sync either way: the last offer a peer
     /// fetched, or the last content taken from a peer. Clipboard content that
     /// differs was copied here since.
@@ -562,19 +567,28 @@ impl Ledger {
         }
         let offer = Arc::new(offer);
         self.sequence = sequence;
-        self.offer = Some(Arc::clone(&offer));
+        self.offer = Some((peer, Arc::clone(&offer)));
         Some(offer)
     }
 
-    fn current_offer(&self) -> Option<Arc<ClipboardOffer>> {
-        self.offer.clone()
+    /// The generation `peer` may fetch: the current one, when it was
+    /// announced to `peer`.
+    fn current_offer(&self, peer: PublicKey) -> Option<Arc<ClipboardOffer>> {
+        self.offer
+            .as_ref()
+            .filter(|(recipient, _)| *recipient == peer)
+            .map(|(_, offer)| Arc::clone(offer))
+    }
+
+    /// Whether `digest` is the content of the last sync either way.
+    fn last_synced_is(&self, digest: ContentDigest) -> bool {
+        self.last_synced == Some(digest)
     }
 
     /// `peer` fetched generation `sequence`'s text in full.
     fn served(&mut self, peer: PublicKey, sequence: u64) {
         let Some(digest) = self
-            .offer
-            .as_ref()
+            .current_offer(peer)
             .filter(|offer| offer.sequence() == sequence)
             .map(|offer| offer.digest())
         else {

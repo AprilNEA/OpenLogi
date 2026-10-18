@@ -111,7 +111,24 @@ fn every_offer_is_a_new_generation() {
 
     assert_eq!(first.sequence(), 1);
     assert_eq!(second.sequence(), 2);
-    assert_eq!(ledger.current_offer().unwrap().sequence(), 2);
+    assert_eq!(ledger.current_offer(peer(1)).unwrap().sequence(), 2);
+}
+
+#[test]
+fn an_offer_is_fetched_only_by_the_peer_it_was_announced_to() {
+    let mut ledger = Ledger::default();
+    let offer = ledger
+        .offer(peer(1), Local::Text("for one".to_owned()))
+        .unwrap();
+
+    assert!(ledger.current_offer(peer(2)).is_none());
+    // Nor does a fetch by another peer count as sharing it.
+    ledger.served(peer(2), offer.sequence());
+    assert!(
+        ledger
+            .offer(peer(2), Local::Text("for one".to_owned()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -186,7 +203,7 @@ fn only_a_complete_fetch_of_the_current_offer_counts_as_shared() {
 fn empty_text_is_never_offered() {
     let mut ledger = Ledger::default();
     assert!(ledger.offer(peer(1), Local::Text(String::new())).is_none());
-    assert!(ledger.current_offer().is_none());
+    assert!(ledger.current_offer(peer(1)).is_none());
 }
 
 #[test]
@@ -384,6 +401,47 @@ async fn text_copied_on_the_sender_lands_on_the_receivers_clipboard() {
 }
 
 #[tokio::test]
+async fn text_copied_on_the_receiver_during_the_fetch_is_kept() {
+    let receiver_clipboard = FakeClipboard::holding("older text on machine B");
+    let machines = Machines::connect(
+        text_sync(FakeClipboard::holding("copied on machine A")),
+        text_sync(receiver_clipboard.clone()),
+    )
+    .await;
+
+    assert!(
+        machines.offer(ARRIVAL).await,
+        "the sender announces its text"
+    );
+    let RpcEvent::Request(fetch) =
+        tokio::time::timeout(ARRIVAL, machines.sender_connection.accept_rpc())
+            .await
+            .expect("the receiver fetches the text")
+            .unwrap()
+    else {
+        panic!("the fetch was rejected");
+    };
+    // The user copies on machine B while the fetch is on the wire.
+    receiver_clipboard
+        .write_text("copied on machine B")
+        .unwrap();
+    machines
+        .sender
+        .connection(
+            machines.receiver_key,
+            Arc::clone(&machines.sender_connection),
+        )
+        .serve(fetch);
+
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(
+        receiver_clipboard.text().as_deref(),
+        Some("copied on machine B")
+    );
+    assert_eq!(receiver_clipboard.writes(), 1, "only the user's copy");
+}
+
+#[tokio::test]
 async fn text_the_receiver_already_holds_is_neither_fetched_nor_written() {
     let receiver_clipboard = FakeClipboard::holding("same on both");
     let machines = Machines::connect(
@@ -518,25 +576,38 @@ async fn files_copied_on_the_sender_land_on_the_receivers_clipboard() {
 }
 
 #[tokio::test]
-async fn files_the_receiver_already_holds_are_neither_fetched_nor_written() {
+async fn files_that_only_match_by_name_size_and_time_are_fetched() {
     let here = tempfile::tempdir().unwrap();
     let there = tempfile::tempdir().unwrap();
-    let receiver_clipboard = FakeClipboard::holding_files(copy_some_files(there.path()));
+    let received = tempfile::tempdir().unwrap();
+    let held = copy_some_files(there.path());
+    // Same name, size and modification time, other bytes.
+    write_file(
+        &there.path().join("report.txt"),
+        b"QUARTERLY NUMBERS",
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+    );
+    let receiver_clipboard = FakeClipboard::holding_files(held);
     let machines = Machines::connect(
         text_sync(FakeClipboard::holding_files(copy_some_files(here.path()))),
-        text_sync(receiver_clipboard.clone()),
+        sync(receiver_clipboard.clone(), received.path()),
     )
     .await;
+    machines.serve_every_fetch();
 
     assert!(
         machines.offer(ARRIVAL).await,
         "the sender announces its files"
     );
-    assert!(
-        !machines.serve_fetch(QUIET).await,
-        "a receiver holding the same files does not fetch them"
-    );
-    assert_eq!(receiver_clipboard.writes(), 0);
+    tokio::time::timeout(ARRIVAL, async {
+        while receiver_clipboard.writes() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the receiver fetches files it cannot prove it holds");
+    let pasted = receiver_clipboard.files().unwrap();
+    assert_eq!(fs::read(&pasted[0]).unwrap(), b"quarterly numbers");
 }
 
 #[tokio::test]
