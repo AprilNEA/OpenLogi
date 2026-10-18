@@ -151,9 +151,19 @@ impl FlowController {
     }
 
     /// Apply a live `[flow]` config reload.
+    ///
+    /// Every saved setting reloads the whole config, so an unchanged `[flow]`
+    /// leaves the running sessions alone, and so does a change to the Control
+    /// requirement alone, which the edge watcher reads on every movement.
     pub fn update_config(&self, config: &FlowConfig) {
-        if let Ok(mut current) = self.inner.config.write() {
-            *current = config.clone();
+        let previous = self
+            .inner
+            .config
+            .write()
+            .ok()
+            .map(|mut current| std::mem::replace(&mut *current, config.clone()));
+        if previous.as_ref() == Some(config) {
+            return;
         }
         let revision = self
             .inner
@@ -162,6 +172,15 @@ impl FlowController {
             .map_or(1, |settings| settings.revision.wrapping_add(1));
         if let Ok(mut settings) = self.inner.edge_settings.write() {
             *settings = edge_settings(config, revision);
+        }
+        let edge_only = previous.is_some_and(|previous| {
+            FlowConfig {
+                require_modifier: config.require_modifier,
+                ..previous
+            } == *config
+        });
+        if edge_only {
+            return;
         }
         if self.inner.armed.load(Ordering::Acquire)
             && self
@@ -393,5 +412,71 @@ async fn run_edge_input(
                 input.release();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn armed(config: &FlowConfig) -> (FlowController, mpsc::UnboundedReceiver<Control>) {
+        let controller = FlowController::new(
+            config.clone(),
+            Arc::new(ObservableState::new("test".to_owned())),
+            openlogi_hid::channel_pool(),
+            ReceiverAccess::default(),
+        );
+        controller.inner.armed.store(true, Ordering::Release);
+        let control = controller
+            .inner
+            .control_rx
+            .lock()
+            .expect("control receiver lock")
+            .take()
+            .expect("control receiver");
+        (controller, control)
+    }
+
+    #[test]
+    fn a_reload_restarts_the_sessions_only_for_their_own_settings() {
+        let config = FlowConfig {
+            enabled: true,
+            ..FlowConfig::default()
+        };
+        let (controller, mut control) = armed(&config);
+
+        controller.update_config(&config);
+        assert!(
+            control.try_recv().is_err(),
+            "an unchanged [flow] reconnected"
+        );
+
+        let holding_control = FlowConfig {
+            require_modifier: true,
+            ..config
+        };
+        controller.update_config(&holding_control);
+        assert!(
+            control.try_recv().is_err(),
+            "the Control choice reconnected"
+        );
+        assert!(
+            controller
+                .inner
+                .edge_settings
+                .read()
+                .expect("edge settings")
+                .require_modifier
+        );
+
+        let no_clipboard = FlowConfig {
+            clipboard: false,
+            ..holding_control
+        };
+        controller.update_config(&no_clipboard);
+        assert!(matches!(
+            control.try_recv(),
+            Ok(Control::Reconfigure(next)) if next == no_clipboard
+        ));
     }
 }
