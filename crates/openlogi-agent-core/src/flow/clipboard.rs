@@ -318,15 +318,18 @@ enum Local {
 }
 
 async fn offer_clipboard(shared: &Arc<Shared>, peer: PublicKey, connection: &FlowConnection) {
-    let Some(local) = read_local(shared, true).await else {
-        return;
-    };
-    if matches!(local, Local::Files(_)) && !files_sync_enabled(connection) {
+    // Asked before the files are walked: a walk can take long, on a network
+    // drive say, and holds every later clipboard job behind it.
+    let files = files_sync_enabled(connection);
+    if !files && holds_files(shared).await {
         info!(
             "Flow clipboard files not offered: the other computer's OpenLogi does not take files"
         );
         return;
     }
+    let Some(local) = read_local(shared, files).await else {
+        return;
+    };
     let Some(offer) = shared.ledger().offer(peer, local) else {
         debug!("Flow clipboard already shared with this peer");
         return;
@@ -488,6 +491,16 @@ async fn receive_files(
         }
         Err(error) => warn!(%error, "Flow clipboard write task failed"),
     }
+}
+
+/// Whether this clipboard holds files, without reading them.
+async fn holds_files(shared: &Arc<Shared>) -> bool {
+    let backend = Arc::clone(&shared.backend);
+    tokio::task::spawn_blocking(move || {
+        backend.files() && matches!(backend.read_files(), Ok(Some(_)))
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// This clipboard's content, files first when `files` sync is on, or `None`
