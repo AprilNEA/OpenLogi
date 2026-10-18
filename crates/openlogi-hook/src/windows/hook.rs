@@ -21,8 +21,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_F1, VK_LWIN, VK_MENU, VK_RWIN,
-    VK_SHIFT,
+    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_F1, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
+    VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
@@ -129,6 +129,39 @@ impl Reseed {
             x: (packed >> 32) as u32 as i32,
             y: packed as u32 as i32,
         })
+    }
+}
+
+/// Physical keys currently down, by virtual-key code. `WH_KEYBOARD_LL` reports
+/// a held key's auto-repeat as another key-down, and a keyboard that switched
+/// to another computer with a key held can keep repeating it here: only a key
+/// that was up makes a new press.
+static KEYS_DOWN: KeysDown = KeysDown::new();
+
+/// A 256-bit set of virtual-key codes.
+struct KeysDown([AtomicU64; 4]);
+
+impl KeysDown {
+    const fn new() -> Self {
+        Self([const { AtomicU64::new(0) }; 4])
+    }
+
+    /// Mark `vk` down; whether it was up, i.e. this is a press and not a
+    /// repeat. A code outside the set always counts as a press.
+    fn press(&self, vk: u32) -> bool {
+        Self::slot(vk)
+            .is_none_or(|(word, bit)| self.0[word].fetch_or(bit, Ordering::Relaxed) & bit == 0)
+    }
+
+    fn release(&self, vk: u32) {
+        if let Some((word, bit)) = Self::slot(vk) {
+            self.0[word].fetch_and(!bit, Ordering::Relaxed);
+        }
+    }
+
+    fn slot(vk: u32) -> Option<(usize, u64)> {
+        let vk = usize::try_from(vk).ok().filter(|vk| *vk < 256)?;
+        Some((vk / 64, 1 << (vk % 64)))
     }
 }
 
@@ -649,11 +682,12 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     let Some(data) = (unsafe { key_hook_data(lparam) }) else {
         return call_next(code, wparam, lparam);
     };
+    let new_press = track_key(wparam, data);
     let event = match translate_key(wparam, data, current_modifiers()) {
         Some(event) => HookEvent::Key(event),
-        // Every other physical press still counts as keyboard activity; which
-        // key it was is never passed on.
-        None if is_physical_key_down(wparam, data) => HookEvent::KeyPressed,
+        // Every other new press of a typing key still counts as keyboard
+        // activity; which key it was is never passed on.
+        None if new_press && !is_modifier(data.vkCode) => HookEvent::KeyPressed,
         None => return call_next(code, wparam, lparam),
     };
 
@@ -667,14 +701,47 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     }
 }
 
-/// Whether a `WH_KEYBOARD_LL` message is a key going down on a real keyboard,
-/// not one OpenLogi or another program synthesized.
+/// Keep [`KEYS_DOWN`] current and return whether this `WH_KEYBOARD_LL`
+/// message is a new press on a real keyboard: a key that was up going down,
+/// not an auto-repeat and not one OpenLogi or another program synthesized.
+/// Every release marks its key up, synthesized ones too, so a modifier that
+/// OpenLogi releases for a departed keyboard is up again here.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "WPARAM carries a 32-bit window message by ABI"
 )]
-fn is_physical_key_down(wparam: WPARAM, data: KBDLLHOOKSTRUCT) -> bool {
-    data.flags & LLKHF_INJECTED == 0 && matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN)
+fn track_key(wparam: WPARAM, data: KBDLLHOOKSTRUCT) -> bool {
+    match wparam as u32 {
+        WM_KEYUP | WM_SYSKEYUP => {
+            KEYS_DOWN.release(data.vkCode);
+            false
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN if data.flags & LLKHF_INJECTED == 0 => {
+            KEYS_DOWN.press(data.vkCode)
+        }
+        _ => false,
+    }
+}
+
+/// Shift, Ctrl, Alt and Windows: held for a shortcut, a pointer gesture or
+/// Flow's edge modifier, never typing on their own.
+fn is_modifier(vk: u32) -> bool {
+    u16::try_from(vk).is_ok_and(|vk| {
+        matches!(
+            vk,
+            VK_SHIFT
+                | VK_LSHIFT
+                | VK_RSHIFT
+                | VK_CONTROL
+                | VK_LCONTROL
+                | VK_RCONTROL
+                | VK_MENU
+                | VK_LMENU
+                | VK_RMENU
+                | VK_LWIN
+                | VK_RWIN
+        )
+    })
 }
 
 /// Copy the `KBDLLHOOKSTRUCT` the OS passed in `lparam`, or `None` if `lparam`
@@ -901,6 +968,30 @@ mod tests {
         assert!(translate_key(WM_KEYDOWN as WPARAM, key(0x41), mods).is_none());
         // VK_F20, one past the modeled range.
         assert!(translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 19), mods).is_none());
+    }
+
+    /// A held key's auto-repeat arrives as more key-downs, and a keyboard
+    /// that left for another computer with a key held keeps repeating it:
+    /// neither is a new press.
+    #[test]
+    fn a_held_key_is_one_press_until_released() {
+        let keys = KeysDown::new();
+        assert!(keys.press(0x41), "the key goes down");
+        assert!(!keys.press(0x41), "its auto-repeat");
+        assert!(keys.press(0x42), "another key is its own press");
+
+        keys.release(0x41);
+        assert!(keys.press(0x41), "pressed again after its release");
+        assert!(keys.press(0x1_0000), "a code outside the set counts");
+    }
+
+    #[test]
+    fn modifiers_are_not_typing() {
+        for vk in [VK_LSHIFT, VK_RCONTROL, VK_CONTROL, VK_LMENU, VK_RWIN] {
+            assert!(is_modifier(u32::from(vk)), "VK {vk:#x}");
+        }
+        assert!(!is_modifier(0x41), "'A'");
+        assert!(!is_modifier(u32::from(VK_ESCAPE)));
     }
 
     /// Wheel-forward (away from the user) must produce a positive `delta_y`, the

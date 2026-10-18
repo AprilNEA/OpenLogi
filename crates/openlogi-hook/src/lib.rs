@@ -259,10 +259,12 @@ pub enum HookEvent {
     Mouse(MouseEvent),
     /// Keyboard event (function-key remapper path).
     Key(KeyEvent),
-    /// A physical key outside the remapper's set went down. Carries no key:
-    /// only that one was pressed, for consumers that track keyboard activity
-    /// (a keyboard that stayed behind after a Flow handoff). Reported where
-    /// the platform hook does not already turn every key into [`Self::Key`].
+    /// A physical typing key outside the remapper's set went down. Carries no
+    /// key: only that one was pressed, for consumers that track keyboard
+    /// activity (a keyboard that stayed behind after a Flow handoff).
+    /// Auto-repeats of a held key and the Shift, Ctrl, Alt and Windows keys
+    /// are not typing and are not reported. Reported where the platform hook
+    /// does not already turn every key into [`Self::Key`].
     KeyPressed,
 }
 
