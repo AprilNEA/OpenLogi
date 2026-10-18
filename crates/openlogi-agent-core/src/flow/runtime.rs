@@ -769,7 +769,12 @@ async fn run_application_connection(
     loop {
         tokio::select! {
             rpc = connection.accept_rpc() => match rpc {
-                Ok(RpcEvent::Request(rpc)) if rpc.request().kind == FrameKind::ClipboardFetch => {
+                Ok(RpcEvent::Request(rpc))
+                    if matches!(
+                        rpc.request().kind,
+                        FrameKind::ClipboardFetch | FrameKind::FileFetch
+                    ) =>
+                {
                     clipboard.serve(rpc);
                 }
                 Ok(event @ (RpcEvent::Request(_) | RpcEvent::Rejected(_))) => {

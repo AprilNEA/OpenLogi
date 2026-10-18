@@ -18,10 +18,10 @@ pub struct FlowConfig {
     /// screen edge.
     #[serde(default)]
     pub require_modifier: bool,
-    /// Whether text copied on this machine follows the pointer to the peer it
-    /// crosses to, and text arriving that way replaces this machine's
-    /// clipboard. Both machines must have it on. Defaults to `true` and is only
-    /// serialized when disabled.
+    /// Whether the text or files copied on this machine follow the pointer to
+    /// the peer it crosses to, and what arrives that way replaces this
+    /// machine's clipboard. Both machines must have it on. Defaults to `true`
+    /// and is only serialized when disabled.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub clipboard: bool,
     /// Trusted peer machines.

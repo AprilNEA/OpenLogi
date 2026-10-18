@@ -22,7 +22,7 @@ openlogi-clipboard = { path = "../openlogi-clipboard" }
 futures-lite = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util"] }
 tracing = { workspace = true }
 
 [lints]

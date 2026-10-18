@@ -1,27 +1,34 @@
-//! Clipboard sync: the text copied here goes with the pointer to the peer it
-//! crosses to.
+//! Clipboard sync: the text or files copied here go with the pointer to the
+//! peer it crosses to.
 //!
-//! Once a peer accepts a handoff, this machine announces its clipboard text
-//! (FLOW-PROTOCOL.md §Clipboard & files). The peer fetches it at once and
-//! puts it on its own clipboard, so the text is there before the keyboard
-//! that pastes it. Sync needs `CAPABILITY_CLIPBOARD_TEXT` on both ends, which
-//! a machine lists only with `[flow] clipboard` on and a clipboard backend for
-//! its OS. Text over [`MAX_TEXT_BYTES`] is skipped, never truncated, and no
-//! text is ever logged.
+//! Once a peer accepts a handoff, this machine announces its clipboard
+//! (FLOW-PROTOCOL.md §Clipboard & files). The peer fetches it at once and puts
+//! it on its own clipboard, so it is there before the keyboard that pastes it:
+//! text as text, and files downloaded into a folder of OpenLogi's, then placed
+//! as a file copy. Text needs `CAPABILITY_CLIPBOARD_TEXT` on both ends, and
+//! files `CAPABILITY_CLIPBOARD_FILES` as well; a machine lists them only with
+//! `[flow] clipboard` on and a clipboard backend for its OS. Content over the
+//! limits ([`MAX_TEXT_BYTES`], [`MAX_FILES`], [`MAX_FILES_BYTES`]) is skipped,
+//! never truncated, and neither text nor a file name is ever logged.
 //!
 //! [`Ledger`] decides what to send and what to keep. One worker runs every
 //! clipboard read, fetch and write in the order they were asked for, so a
 //! write from an earlier crossing cannot land after a later one; answering a
 //! peer's fetch never waits behind it.
+//!
+//! [`MAX_FILES`]: openlogi_flow::clipboard::MAX_FILES
+//! [`MAX_FILES_BYTES`]: openlogi_flow::clipboard::MAX_FILES_BYTES
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use openlogi_clipboard::{ClipboardError, ClipboardText};
 use openlogi_flow::clipboard::{
-    Announced, AnnouncedText, MAX_TEXT_BYTES, Served, TextDigest, TextOffer, fetch_text,
-    serve_fetch, text_sync_enabled,
+    Announced, AnnouncedFiles, AnnouncedText, ClipboardOffer, ContentDigest, FilesOffer,
+    MAX_TEXT_BYTES, OfferedFile, Served, TextOffer, fetch_file_list, fetch_text,
+    files_sync_enabled, serve_fetch, text_sync_enabled,
 };
 use openlogi_flow::frame::{Envelope, FrameKind, InboundRole};
 use openlogi_flow::generated as proto;
@@ -30,7 +37,10 @@ use openlogi_flow::transport::{FlowConnection, IncomingRpc, message_envelope};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-/// How long fetching a peer's text may take before it is given up.
+mod files;
+
+/// How long fetching a peer's text, or its file list, may take before it is
+/// given up.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The OS clipboard as clipboard sync uses it; the seam the tests fake.
@@ -39,6 +49,16 @@ pub(super) trait ClipboardBackend: Send + Sync {
     fn read_text(&self, max_bytes: usize) -> Result<ClipboardText, ClipboardError>;
     /// Replaces the clipboard's contents with `text`.
     fn write_text(&self, text: &str) -> Result<(), ClipboardError>;
+    /// Whether this backend reads and writes copied files; without, only
+    /// text is synced.
+    fn files(&self) -> bool;
+    /// The files on the clipboard, or `None` when it holds none.
+    fn read_files(&self) -> Result<Option<Vec<PathBuf>>, ClipboardError>;
+    /// Replaces the clipboard's contents with a copy of `paths`.
+    fn write_files(&self, paths: &[PathBuf]) -> Result<(), ClipboardError>;
+    /// A number that changes whenever the clipboard does, where the OS keeps
+    /// one: a fetch that took long must not replace what was copied since.
+    fn change_count(&self) -> Option<u64>;
 }
 
 /// This machine's clipboard.
@@ -51,6 +71,22 @@ impl ClipboardBackend for SystemClipboard {
 
     fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
         openlogi_clipboard::write_text(text)
+    }
+
+    fn files(&self) -> bool {
+        openlogi_clipboard::available()
+    }
+
+    fn read_files(&self) -> Result<Option<Vec<PathBuf>>, ClipboardError> {
+        openlogi_clipboard::read_files()
+    }
+
+    fn write_files(&self, paths: &[PathBuf]) -> Result<(), ClipboardError> {
+        openlogi_clipboard::write_files(paths)
+    }
+
+    fn change_count(&self) -> Option<u64> {
+        openlogi_clipboard::change_count()
     }
 }
 
@@ -68,6 +104,8 @@ struct Worker {
 
 struct Shared {
     backend: Arc<dyn ClipboardBackend>,
+    /// Where files fetched from peers go, one folder per transfer.
+    received: PathBuf,
     ledger: Mutex<Ledger>,
 }
 
@@ -78,16 +116,24 @@ impl Shared {
 }
 
 enum Job {
-    /// Announce this clipboard's text to a peer that accepted a handoff.
+    /// Announce this clipboard to a peer that accepted a handoff.
     Offer {
         peer: PublicKey,
         connection: Arc<FlowConnection>,
     },
     /// Fetch the text a peer announced and put it on this clipboard.
-    Fetch {
+    FetchText {
         peer: PublicKey,
         connection: Arc<FlowConnection>,
         announced: AnnouncedText,
+        ticket: u64,
+    },
+    /// Fetch the files a peer announced and put a copy of them on this
+    /// clipboard.
+    FetchFiles {
+        peer: PublicKey,
+        connection: Arc<FlowConnection>,
+        announced: AnnouncedFiles,
         ticket: u64,
     },
 }
@@ -96,17 +142,21 @@ impl ClipboardSync {
     /// Sync through this machine's clipboard: on when `enabled` (the
     /// `[flow] clipboard` setting) and the OS has a clipboard backend.
     pub(super) fn system(enabled: bool) -> Self {
-        if enabled && openlogi_clipboard::available() {
-            Self::with_backend(Arc::new(SystemClipboard))
-        } else {
-            Self { worker: None }
+        if !enabled || !openlogi_clipboard::available() {
+            return Self { worker: None };
         }
+        let received = openlogi_core::paths::data_dir()
+            .unwrap_or_else(|_| std::env::temp_dir().join("openlogi"))
+            .join(files::RECEIVED_DIR);
+        Self::with_backend(Arc::new(SystemClipboard), received)
     }
 
-    /// Sync through `backend`. Spawns the worker, so it needs a runtime.
-    fn with_backend(backend: Arc<dyn ClipboardBackend>) -> Self {
+    /// Sync through `backend`, putting received files under `received`.
+    /// Spawns the worker, so it needs a runtime.
+    fn with_backend(backend: Arc<dyn ClipboardBackend>, received: PathBuf) -> Self {
         let shared = Arc::new(Shared {
             backend,
+            received,
             ledger: Mutex::new(Ledger::default()),
         });
         let (jobs, queue) = mpsc::unbounded_channel();
@@ -118,14 +168,18 @@ impl ClipboardSync {
 
     /// The capabilities this machine lists in its `Hello` for clipboard sync.
     pub(super) fn capabilities(&self) -> Vec<proto::Capability> {
-        self.worker
-            .iter()
-            .map(|_| proto::Capability::ClipboardText)
-            .collect()
+        let Some(worker) = &self.worker else {
+            return Vec::new();
+        };
+        let mut capabilities = vec![proto::Capability::ClipboardText];
+        if worker.shared.backend.files() {
+            capabilities.push(proto::Capability::ClipboardFiles);
+        }
+        capabilities
     }
 
-    /// Offers this clipboard's text to `peer`, which just accepted a handoff.
-    /// Does nothing unless both ends negotiated clipboard sync.
+    /// Offers this clipboard to `peer`, which just accepted a handoff. Does
+    /// nothing unless both ends negotiated clipboard sync.
     pub(super) fn offer(&self, peer: PublicKey, connection: &Arc<FlowConnection>) {
         let Some(worker) = &self.worker else {
             return;
@@ -165,8 +219,8 @@ pub(super) struct ConnectionClipboard {
 }
 
 impl ConnectionClipboard {
-    /// Answers the peer's `ClipboardFetch` from the text offered now, on a
-    /// task of its own.
+    /// Answers the peer's `ClipboardFetch` or `FileFetch` from what is
+    /// offered now, on a task of its own.
     pub(super) fn serve(&self, rpc: IncomingRpc) {
         let shared = self
             .worker
@@ -178,14 +232,15 @@ impl ConnectionClipboard {
                 .as_ref()
                 .and_then(|shared| shared.ledger().current_offer());
             match serve_fetch(rpc, offer.as_deref()).await {
-                Ok(Served::Sent { sequence }) => {
+                Ok(Served::Text { sequence }) => {
                     if let Some(shared) = &shared {
                         shared.ledger().served(peer, sequence);
                     }
                     debug!(sequence, "Flow clipboard text sent");
                 }
+                Ok(Served::Files { sequence }) => debug!(sequence, "Flow clipboard file sent"),
                 Ok(Served::Refused) => {
-                    debug!("Flow clipboard fetch for a generation no longer offered refused");
+                    debug!("Flow clipboard fetch for something no longer offered refused");
                 }
                 Err(error) => debug!(%error, "Flow clipboard fetch could not be answered"),
             }
@@ -193,7 +248,7 @@ impl ConnectionClipboard {
     }
 
     /// Takes the peer's `ClipboardAnnounce`: the newest one supersedes every
-    /// fetch still pending, and text within the limit is fetched.
+    /// fetch still pending, and text or files within the limits are fetched.
     pub(super) fn announced(&mut self, envelope: &Envelope) {
         let Some(worker) = &self.worker else {
             return;
@@ -211,48 +266,64 @@ impl ConnectionClipboard {
         }
         self.highest_sequence = announce.sequence;
         let ticket = worker.shared.ledger().announced();
-        match Announced::from_announce(&announce) {
-            Announced::Text(announced) => {
-                let _ = worker.jobs.send(Job::Fetch {
-                    peer: self.peer,
-                    connection: Arc::clone(&self.connection),
-                    announced,
-                    ticket,
-                });
-            }
+        let peer = self.peer;
+        let connection = Arc::clone(&self.connection);
+        let job = match Announced::from_announce(&announce) {
+            Announced::Text(announced) => Job::FetchText {
+                peer,
+                connection,
+                announced,
+                ticket,
+            },
+            Announced::Files(announced) => Job::FetchFiles {
+                peer,
+                connection,
+                announced,
+                ticket,
+            },
             Announced::TooLarge => {
-                debug!("Flow clipboard text over the sync limit skipped");
+                debug!("Flow clipboard content over the sync limit skipped");
+                return;
             }
-            Announced::NoText => {}
-        }
+            Announced::Nothing => return,
+        };
+        let _ = worker.jobs.send(job);
     }
 }
 
 async fn run_jobs(shared: Arc<Shared>, mut queue: mpsc::UnboundedReceiver<Job>) {
     while let Some(job) = queue.recv().await {
         match job {
-            Job::Offer { peer, connection } => offer_text(&shared, peer, &connection).await,
-            Job::Fetch {
+            Job::Offer { peer, connection } => offer_clipboard(&shared, peer, &connection).await,
+            Job::FetchText {
                 peer,
                 connection,
                 announced,
                 ticket,
             } => receive_text(&shared, peer, &connection, &announced, ticket).await,
+            Job::FetchFiles {
+                peer,
+                connection,
+                announced,
+                ticket,
+            } => receive_files(&shared, peer, &connection, &announced, ticket).await,
         }
     }
 }
 
-async fn offer_text(shared: &Arc<Shared>, peer: PublicKey, connection: &FlowConnection) {
-    let text = match read_local(shared).await {
-        Some(ClipboardText::Text(text)) => text,
-        Some(ClipboardText::TooLarge) => {
-            debug!("Flow clipboard text over the sync limit not offered");
-            return;
-        }
-        Some(ClipboardText::Absent) | None => return,
+/// What this clipboard holds, as clipboard sync can offer it.
+enum Local {
+    Text(String),
+    Files(Vec<OfferedFile>),
+}
+
+async fn offer_clipboard(shared: &Arc<Shared>, peer: PublicKey, connection: &FlowConnection) {
+    let files = files_sync_enabled(connection);
+    let Some(local) = read_local(shared, files).await else {
+        return;
     };
-    let Some(offer) = shared.ledger().offer(peer, text) else {
-        debug!("Flow clipboard text already shared with this peer");
+    let Some(offer) = shared.ledger().offer(peer, local) else {
+        debug!("Flow clipboard already shared with this peer");
         return;
     };
     let announce = match message_envelope(FrameKind::ClipboardAnnounce, &offer.announce()) {
@@ -263,11 +334,19 @@ async fn offer_text(shared: &Arc<Shared>, peer: PublicKey, connection: &FlowConn
         }
     };
     match connection.notify(announce).await {
-        Ok(()) => debug!(
-            sequence = offer.sequence(),
-            bytes = offer.size_bytes(),
-            "Flow clipboard text offered"
-        ),
+        Ok(()) => match &*offer {
+            ClipboardOffer::Text(text) => debug!(
+                sequence = text.sequence(),
+                bytes = text.size_bytes(),
+                "Flow clipboard text offered"
+            ),
+            ClipboardOffer::Files(files) => debug!(
+                sequence = files.sequence(),
+                files = files.file_count(),
+                bytes = files.total_bytes(),
+                "Flow clipboard files offered"
+            ),
+        },
         Err(error) => debug!(%error, "Flow clipboard announce failed"),
     }
 }
@@ -282,8 +361,8 @@ async fn receive_text(
     if !shared.ledger().is_newest(ticket) {
         return;
     }
-    let held = match read_local(shared).await {
-        Some(ClipboardText::Text(text)) => Some(TextDigest::of(&text)),
+    let held = match read_local(shared, false).await {
+        Some(Local::Text(text)) => Some(ContentDigest::of(&text)),
         _ => None,
     };
     if let Some(held) = held.filter(|held| announced.digest() == Some(*held)) {
@@ -306,7 +385,7 @@ async fn receive_text(
         debug!("Flow clipboard text superseded while it was fetched");
         return;
     }
-    let digest = TextDigest::of(&text);
+    let digest = ContentDigest::of(&text);
     let backend = Arc::clone(&shared.backend);
     match tokio::task::spawn_blocking(move || backend.write_text(&text)).await {
         Ok(Ok(())) => {
@@ -318,11 +397,112 @@ async fn receive_text(
     }
 }
 
-/// This clipboard's text, or `None` when it cannot be read.
-async fn read_local(shared: &Arc<Shared>) -> Option<ClipboardText> {
+async fn receive_files(
+    shared: &Arc<Shared>,
+    peer: PublicKey,
+    connection: &FlowConnection,
+    announced: &AnnouncedFiles,
+    ticket: u64,
+) {
+    if !shared.ledger().is_newest(ticket)
+        || !shared.backend.files()
+        || !files_sync_enabled(connection)
+    {
+        return;
+    }
+    let copied_before = shared.backend.change_count();
+    if let Some(Local::Files(held)) = read_local(shared, true).await
+        && let Ok(held) = FilesOffer::new(0, held)
+        && announced.digest() == Some(held.digest())
+    {
+        // The same files are on this clipboard already.
+        shared.ledger().adopted(peer, held.digest());
+        return;
+    }
+    let listed =
+        match tokio::time::timeout(FETCH_TIMEOUT, fetch_file_list(connection, announced)).await {
+            Ok(Ok(listed)) => listed,
+            Ok(Err(error)) => {
+                debug!(%error, "Flow clipboard file list fetch failed");
+                return;
+            }
+            Err(_) => {
+                debug!("Flow clipboard file list fetch timed out");
+                return;
+            }
+        };
+    let still_wanted = || shared.ledger().is_newest(ticket);
+    let received = match files::receive(
+        connection,
+        announced.sequence(),
+        &listed,
+        &shared.received,
+        &still_wanted,
+    )
+    .await
+    {
+        Ok(received) => received,
+        Err(error) => {
+            debug!(%error, "Flow clipboard files fetch failed");
+            return;
+        }
+    };
+    if !still_wanted() || shared.backend.change_count() != copied_before {
+        debug!("Flow clipboard files superseded while they were fetched");
+        files::discard(received.folder());
+        return;
+    }
+    let digest = announced.digest().or_else(|| received.digest());
+    let paths = received.top_level();
     let backend = Arc::clone(&shared.backend);
-    match tokio::task::spawn_blocking(move || backend.read_text(MAX_TEXT_BYTES)).await {
-        Ok(Ok(text)) => Some(text),
+    match tokio::task::spawn_blocking(move || backend.write_files(&paths)).await {
+        Ok(Ok(())) => {
+            if let Some(digest) = digest {
+                shared.ledger().adopted(peer, digest);
+            }
+            info!(
+                files = listed.len(),
+                bytes = received.total_bytes(),
+                "Flow clipboard files received"
+            );
+            let root = shared.received.clone();
+            tokio::task::spawn_blocking(move || files::prune(&root));
+        }
+        Ok(Err(error)) => {
+            warn!(%error, "Flow could not place the received clipboard files");
+            files::discard(received.folder());
+        }
+        Err(error) => warn!(%error, "Flow clipboard write task failed"),
+    }
+}
+
+/// This clipboard's content, files first when `files` sync is on, or `None`
+/// when there is nothing to offer or it cannot be read.
+async fn read_local(shared: &Arc<Shared>, files: bool) -> Option<Local> {
+    let backend = Arc::clone(&shared.backend);
+    let files = files && backend.files();
+    let read = tokio::task::spawn_blocking(move || -> Result<Option<Local>, ClipboardError> {
+        if files && let Some(paths) = backend.read_files()? {
+            return Ok(match files::collect(&paths) {
+                Ok(files) => Some(Local::Files(files)),
+                Err(error) => {
+                    info!(%error, "Flow clipboard files not offered");
+                    None
+                }
+            });
+        }
+        Ok(match backend.read_text(MAX_TEXT_BYTES)? {
+            ClipboardText::Text(text) => Some(Local::Text(text)),
+            ClipboardText::TooLarge => {
+                debug!("Flow clipboard text over the sync limit not offered");
+                None
+            }
+            ClipboardText::Absent => None,
+        })
+    })
+    .await;
+    match read {
+        Ok(Ok(local)) => local,
         Ok(Err(error)) => {
             debug!(%error, "Flow could not read the clipboard");
             None
@@ -340,41 +520,47 @@ struct Ledger {
     /// The last generation this machine announced; the first is 1.
     sequence: u64,
     /// The generation peers may fetch: the last one announced.
-    offer: Option<Arc<TextOffer>>,
-    /// The text of the last sync either way: the last offer a peer fetched,
-    /// or the last text taken from a peer. Clipboard text that differs was
-    /// copied here since.
-    last_synced: Option<TextDigest>,
-    /// The text each peer is known to hold, from the same two events.
-    peer_holds: HashMap<PublicKey, TextDigest>,
+    offer: Option<Arc<ClipboardOffer>>,
+    /// The content of the last sync either way: the last offer a peer
+    /// fetched, or the last content taken from a peer. Clipboard content that
+    /// differs was copied here since.
+    last_synced: Option<ContentDigest>,
+    /// The content each peer is known to hold, from the same two events.
+    peer_holds: HashMap<PublicKey, ContentDigest>,
     /// Arrival order of the newest peer announce.
     newest: u64,
 }
 
 impl Ledger {
-    /// The generation to announce to `peer` for `text`, just read off this
-    /// clipboard; `None` when the peer gains nothing from it.
+    /// The generation to announce to `peer` for `local`, just read off this
+    /// clipboard; `None` when there is nothing to send or the peer gains
+    /// nothing from it.
     ///
     /// That is only when nothing was copied here since the last sync and the
-    /// peer is known to hold the text. Resending it otherwise would put stale
-    /// text back over whatever the peer's user copied since — a screenshot,
-    /// say, which this sync cannot carry.
-    fn offer(&mut self, peer: PublicKey, text: String) -> Option<Arc<TextOffer>> {
-        let digest = TextDigest::of(&text);
+    /// peer is known to hold the content. Resending it otherwise would put
+    /// stale content back over whatever the peer's user copied since — a
+    /// screenshot, say, which this sync cannot carry.
+    fn offer(&mut self, peer: PublicKey, local: Local) -> Option<Arc<ClipboardOffer>> {
+        let sequence = self.sequence + 1;
+        let offer = match local {
+            Local::Text(text) => ClipboardOffer::Text(TextOffer::new(sequence, text).ok()?),
+            Local::Files(files) => ClipboardOffer::Files(FilesOffer::new(sequence, files).ok()?),
+        };
+        let digest = offer.digest();
         if self.last_synced == Some(digest) && self.peer_holds.get(&peer) == Some(&digest) {
             return None;
         }
-        let offer = Arc::new(TextOffer::new(self.sequence + 1, text).ok()?);
-        self.sequence = offer.sequence();
+        let offer = Arc::new(offer);
+        self.sequence = sequence;
         self.offer = Some(Arc::clone(&offer));
         Some(offer)
     }
 
-    fn current_offer(&self) -> Option<Arc<TextOffer>> {
+    fn current_offer(&self) -> Option<Arc<ClipboardOffer>> {
         self.offer.clone()
     }
 
-    /// `peer` fetched generation `sequence` in full.
+    /// `peer` fetched generation `sequence`'s text in full.
     fn served(&mut self, peer: PublicKey, sequence: u64) {
         let Some(digest) = self
             .offer
@@ -387,13 +573,13 @@ impl Ledger {
         self.synced(peer, digest);
     }
 
-    /// Text `peer` announced is on this clipboard now, written or already
+    /// Content `peer` announced is on this clipboard now, written or already
     /// there.
-    fn adopted(&mut self, peer: PublicKey, digest: TextDigest) {
+    fn adopted(&mut self, peer: PublicKey, digest: ContentDigest) {
         self.synced(peer, digest);
     }
 
-    fn synced(&mut self, peer: PublicKey, digest: TextDigest) {
+    fn synced(&mut self, peer: PublicKey, digest: ContentDigest) {
         self.last_synced = Some(digest);
         self.peer_holds.insert(peer, digest);
     }
@@ -407,6 +593,37 @@ impl Ledger {
 
     fn is_newest(&self, ticket: u64) -> bool {
         ticket == self.newest
+    }
+}
+
+/// The folder files from one transfer were put in, and what is in it.
+pub(super) struct ReceivedFiles {
+    folder: PathBuf,
+    top_level: Vec<PathBuf>,
+    total_bytes: u64,
+    offered: Vec<OfferedFile>,
+}
+
+impl ReceivedFiles {
+    fn folder(&self) -> &Path {
+        &self.folder
+    }
+
+    /// The paths a file copy of the transfer names: its top-level files and
+    /// folders, in the order the peer listed them.
+    fn top_level(&self) -> Vec<PathBuf> {
+        self.top_level.clone()
+    }
+
+    const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    /// The digest these files have when this machine offers them on.
+    fn digest(&self) -> Option<ContentDigest> {
+        FilesOffer::new(0, self.offered.clone())
+            .ok()
+            .map(|offer| offer.digest())
     }
 }
 

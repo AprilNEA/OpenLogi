@@ -12,7 +12,8 @@ use std::{
 
 use openlogi_flow::{
     clipboard::{
-        Announced, FetchError, Served, TEXT_MIME, TextOffer, fetch_text, serve_fetch,
+        Announced, ClipboardOffer, FetchError, FilesOffer, OfferedFile, Served, TEXT_MIME,
+        TextOffer, fetch_file, fetch_file_list, fetch_text, files_sync_enabled, serve_fetch,
         text_sync_enabled,
     },
     frame::{Envelope, FrameKind, MAX_PAYLOAD_LEN},
@@ -46,6 +47,14 @@ impl ConnectedPair {
     async fn trusted_clipboard() -> TestResult<Self> {
         let text = &[proto::Capability::ClipboardText];
         Self::connect((1, 1), (1, 1), false, (text, text)).await
+    }
+
+    async fn trusted_clipboard_files() -> TestResult<Self> {
+        let both = &[
+            proto::Capability::ClipboardText,
+            proto::Capability::ClipboardFiles,
+        ];
+        Self::connect((1, 1), (1, 1), false, (both, both)).await
     }
 
     /// Only `first` lists clipboard text, as against a peer that predates it.
@@ -419,7 +428,7 @@ async fn clipboard_text_round_trips_through_announce_fetch_and_serve() -> TestRe
     assert!(text_sync_enabled(&pair.second));
     // Several chunks, with multi-byte characters straddling their boundaries.
     let text = "Flow \u{2713} clipboard \u{2014} ".repeat(9_000);
-    let offer = TextOffer::new(1, text.clone())?;
+    let offer = ClipboardOffer::Text(TextOffer::new(1, text.clone())?);
     pair.first
         .notify(message_envelope(
             FrameKind::ClipboardAnnounce,
@@ -443,7 +452,7 @@ async fn clipboard_text_round_trips_through_announce_fetch_and_serve() -> TestRe
         TestResult::Ok(serve_fetch(rpc, Some(&offer)).await?)
     };
     let (served, fetched) = tokio::join!(serve, fetch_text(&pair.second, &announced));
-    assert_eq!(served?, Served::Sent { sequence: 1 });
+    assert_eq!(served?, Served::Text { sequence: 1 });
     assert_eq!(fetched?, text);
     Ok(())
 }
@@ -452,7 +461,7 @@ async fn clipboard_text_round_trips_through_announce_fetch_and_serve() -> TestRe
 async fn a_fetch_for_a_superseded_clipboard_generation_is_refused() -> TestResult {
     let pair = ConnectedPair::trusted_clipboard().await?;
     let stale = TextOffer::new(1, "older".to_owned())?;
-    let current = TextOffer::new(2, "newer".to_owned())?;
+    let current = ClipboardOffer::Text(TextOffer::new(2, "newer".to_owned())?);
     let Announced::Text(announced) = Announced::from_announce(&stale.announce()) else {
         return Err("the announce carried no fetchable text".into());
     };
@@ -548,6 +557,176 @@ async fn a_transfer_longer_than_its_announce_is_rejected() -> TestResult {
         matches!(fetched, Err(FetchError::Invalid(_))),
         "excess text must fail the fetch, got {fetched:?}"
     );
+    Ok(())
+}
+
+/// The longest a test waits on a silent peer.
+const STALL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A file under `root` holding `bytes`, offered as `relative_path`.
+fn offered_file(
+    root: &std::path::Path,
+    relative_path: &str,
+    bytes: &[u8],
+) -> TestResult<OfferedFile> {
+    let source = root.join(relative_path);
+    if let Some(folder) = source.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    std::fs::write(&source, bytes)?;
+    Ok(OfferedFile {
+        relative_path: relative_path.to_owned(),
+        size_bytes: u64::try_from(bytes.len())?,
+        modified_at_ms: 0,
+        source,
+    })
+}
+
+/// Answers the next `requests` fetches on `connection` from `offer`.
+async fn serve_fetches(
+    connection: &FlowConnection,
+    offer: &ClipboardOffer,
+    requests: usize,
+) -> TestResult<Vec<Served>> {
+    let mut served = Vec::with_capacity(requests);
+    for _ in 0..requests {
+        let RpcEvent::Request(rpc) = connection.accept_rpc().await? else {
+            return Err("a clipboard fetch was rejected".into());
+        };
+        served.push(serve_fetch(rpc, Some(offer)).await?);
+    }
+    Ok(served)
+}
+
+#[tokio::test]
+async fn clipboard_files_round_trip_through_the_list_and_file_fetches() -> TestResult {
+    let pair = ConnectedPair::trusted_clipboard_files().await?;
+    assert!(files_sync_enabled(&pair.first));
+    assert!(files_sync_enabled(&pair.second));
+    let root = tempfile::tempdir()?;
+    // Several chunks, one byte short of a whole number of them; and an empty
+    // file, which has no chunk at all.
+    let large: Vec<u8> = (0..200_003_u32).map(|index| (index % 251) as u8).collect();
+    let files = vec![
+        offered_file(root.path(), "notes.txt", b"copied on the other computer")?,
+        offered_file(root.path(), "photos/large.bin", &large)?,
+        offered_file(root.path(), "photos/empty.txt", b"")?,
+    ];
+    let offer = ClipboardOffer::Files(FilesOffer::new(3, files)?);
+    pair.first
+        .notify(message_envelope(
+            FrameKind::ClipboardAnnounce,
+            &offer.announce(),
+        )?)
+        .await?;
+    let NotificationEvent::Notification(announce) = pair.second.accept_notification().await? else {
+        return Err("ClipboardAnnounce was dropped".into());
+    };
+    let Announced::Files(announced) =
+        Announced::from_announce(&decode::<proto::ClipboardAnnounce>(&announce)?)
+    else {
+        return Err("the announce carried no file list".into());
+    };
+    assert_eq!(announced.digest(), Some(offer.digest()));
+
+    let fetch = async {
+        let listed = fetch_file_list(&pair.second, &announced).await?;
+        let mut contents = Vec::new();
+        for (index, file) in listed.iter().enumerate() {
+            let mut sink = Vec::new();
+            fetch_file(
+                &pair.second,
+                announced.sequence(),
+                u32::try_from(index)?,
+                file,
+                &mut sink,
+                STALL,
+                || true,
+            )
+            .await?;
+            contents.push((file.relative_path().to_owned(), sink));
+        }
+        TestResult::Ok(contents)
+    };
+    let (served, fetched) = tokio::join!(serve_fetches(&pair.first, &offer, 4), fetch);
+    assert_eq!(served?, vec![Served::Files { sequence: 3 }; 4]);
+    let fetched = fetched?;
+    assert_eq!(fetched.len(), 3);
+    assert_eq!(
+        fetched[0],
+        (
+            "notes.txt".to_owned(),
+            b"copied on the other computer".to_vec()
+        )
+    );
+    assert_eq!(fetched[1], ("photos/large.bin".to_owned(), large));
+    assert_eq!(fetched[2], ("photos/empty.txt".to_owned(), Vec::new()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_file_that_changed_since_its_offer_is_refused() -> TestResult {
+    let pair = ConnectedPair::trusted_clipboard_files().await?;
+    let root = tempfile::tempdir()?;
+    let file = offered_file(root.path(), "draft.txt", b"first version")?;
+    let source = file.source.clone();
+    let offer = ClipboardOffer::Files(FilesOffer::new(1, vec![file])?);
+    let Announced::Files(announced) = Announced::from_announce(&offer.announce()) else {
+        return Err("the announce carried no file list".into());
+    };
+    std::fs::write(&source, b"a longer second version")?;
+
+    let fetch = async {
+        let listed = fetch_file_list(&pair.second, &announced).await?;
+        let mut sink = Vec::new();
+        let result = fetch_file(&pair.second, 1, 0, &listed[0], &mut sink, STALL, || true).await;
+        TestResult::Ok(result)
+    };
+    let (served, fetched) = tokio::join!(serve_fetches(&pair.first, &offer, 2), fetch);
+    assert_eq!(
+        served?,
+        vec![Served::Files { sequence: 1 }, Served::Refused]
+    );
+    let fetched = fetched?;
+    assert!(
+        matches!(
+            fetched,
+            Err(FetchError::Refused(code)) if code.as_known() == Some(proto::ErrorCode::Invalid)
+        ),
+        "a file that changed since its offer must be refused INVALID, got {fetched:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn file_fetches_need_both_peers_to_list_the_files_capability() -> TestResult {
+    let pair = ConnectedPair::trusted_clipboard().await?;
+    assert!(text_sync_enabled(&pair.second));
+    assert!(!files_sync_enabled(&pair.second));
+    let root = tempfile::tempdir()?;
+    let file = offered_file(root.path(), "a.txt", b"abc")?;
+    let offer = FilesOffer::new(1, vec![file])?;
+    let Announced::Files(announced) = Announced::from_announce(&offer.announce()) else {
+        return Err("the announce carried no file list".into());
+    };
+    let serve = async {
+        let RpcEvent::Request(rpc) = pair.first.accept_rpc().await? else {
+            return Err("the file list fetch was rejected".into());
+        };
+        TestResult::Ok(serve_fetch(rpc, Some(&ClipboardOffer::Files(offer))).await?)
+    };
+    let fetch = async {
+        let listed = fetch_file_list(&pair.second, &announced).await?;
+        let mut sink = Vec::new();
+        TestResult::Ok(fetch_file(&pair.second, 1, 0, &listed[0], &mut sink, STALL, || true).await)
+    };
+    let (_served, fetched) = tokio::join!(serve, fetch);
+    assert!(matches!(
+        fetched?,
+        Err(FetchError::Transport(TransportError::SendGated(
+            FrameKind::FileFetch
+        )))
+    ));
     Ok(())
 }
 

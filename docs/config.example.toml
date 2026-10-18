@@ -24,8 +24,8 @@ app_icon = "openlogi"
 
 # Cross-machine device handoff. Pairing writes the peer's pinned public key;
 # manual addresses keep Flow usable across VPNs, VLANs, and overlay networks.
-# `clipboard` (on by default) sends the text copied here along with the
-# pointer; both machines must have it on.
+# `clipboard` (on by default) sends the text or files copied here along with
+# the pointer; both machines must have it on.
 # [flow]
 # enabled = true
 # require_modifier = false

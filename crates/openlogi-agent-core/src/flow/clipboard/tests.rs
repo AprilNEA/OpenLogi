@@ -1,5 +1,7 @@
+use std::fs;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::SystemTime;
 
 use openlogi_flow::transport::{
     FlowEndpoint, MachineIdentity, NotificationEvent, PeerTrust, RpcEvent,
@@ -12,10 +14,11 @@ const ARRIVAL: Duration = Duration::from_secs(5);
 /// How long to wait for a frame that must not come.
 const QUIET: Duration = Duration::from_millis(300);
 
-/// An in-memory clipboard that counts writes.
+/// An in-memory clipboard, holding text or file paths, that counts writes.
 #[derive(Default)]
 struct FakeClipboard {
     text: Mutex<Option<String>>,
+    files: Mutex<Option<Vec<PathBuf>>>,
     writes: AtomicUsize,
 }
 
@@ -26,8 +29,18 @@ impl FakeClipboard {
         Arc::new(clipboard)
     }
 
+    fn holding_files(paths: Vec<PathBuf>) -> Arc<Self> {
+        let clipboard = Self::default();
+        *clipboard.files.lock().unwrap() = Some(paths);
+        Arc::new(clipboard)
+    }
+
     fn text(&self) -> Option<String> {
         self.text.lock().unwrap().clone()
+    }
+
+    fn files(&self) -> Option<Vec<PathBuf>> {
+        self.files.lock().unwrap().clone()
     }
 
     fn writes(&self) -> usize {
@@ -47,9 +60,39 @@ impl ClipboardBackend for FakeClipboard {
 
     fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
         *self.text.lock().unwrap() = Some(text.to_owned());
+        *self.files.lock().unwrap() = None;
         self.writes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+
+    fn files(&self) -> bool {
+        true
+    }
+
+    fn read_files(&self) -> Result<Option<Vec<PathBuf>>, ClipboardError> {
+        Ok(self.files())
+    }
+
+    fn write_files(&self, paths: &[PathBuf]) -> Result<(), ClipboardError> {
+        *self.files.lock().unwrap() = Some(paths.to_vec());
+        *self.text.lock().unwrap() = None;
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn change_count(&self) -> Option<u64> {
+        u64::try_from(self.writes()).ok()
+    }
+}
+
+/// Sync through `clipboard`, putting received files under `received`.
+fn sync(clipboard: Arc<FakeClipboard>, received: &Path) -> ClipboardSync {
+    ClipboardSync::with_backend(clipboard, received.to_owned())
+}
+
+/// Sync through `clipboard` for a test that receives no files.
+fn text_sync(clipboard: Arc<FakeClipboard>) -> ClipboardSync {
+    sync(clipboard, Path::new("no-files-expected"))
 }
 
 fn peer(byte: u8) -> PublicKey {
@@ -59,8 +102,12 @@ fn peer(byte: u8) -> PublicKey {
 #[test]
 fn every_offer_is_a_new_generation() {
     let mut ledger = Ledger::default();
-    let first = ledger.offer(peer(1), "one".to_owned()).unwrap();
-    let second = ledger.offer(peer(1), "two".to_owned()).unwrap();
+    let first = ledger
+        .offer(peer(1), Local::Text("one".to_owned()))
+        .unwrap();
+    let second = ledger
+        .offer(peer(1), Local::Text("two".to_owned()))
+        .unwrap();
 
     assert_eq!(first.sequence(), 1);
     assert_eq!(second.sequence(), 2);
@@ -70,47 +117,75 @@ fn every_offer_is_a_new_generation() {
 #[test]
 fn text_a_peer_already_holds_is_not_offered_again() {
     let mut ledger = Ledger::default();
-    let offer = ledger.offer(peer(1), "copied".to_owned()).unwrap();
+    let offer = ledger
+        .offer(peer(1), Local::Text("copied".to_owned()))
+        .unwrap();
     ledger.served(peer(1), offer.sequence());
 
-    assert!(ledger.offer(peer(1), "copied".to_owned()).is_none());
+    assert!(
+        ledger
+            .offer(peer(1), Local::Text("copied".to_owned()))
+            .is_none()
+    );
     // A third machine has not seen it: the text goes on with the pointer.
-    assert!(ledger.offer(peer(2), "copied".to_owned()).is_some());
+    assert!(
+        ledger
+            .offer(peer(2), Local::Text("copied".to_owned()))
+            .is_some()
+    );
 }
 
 #[test]
 fn text_taken_from_a_peer_is_not_sent_back() {
     let mut ledger = Ledger::default();
-    ledger.adopted(peer(1), TextDigest::of("from the peer"));
+    ledger.adopted(peer(1), ContentDigest::of("from the peer"));
 
-    assert!(ledger.offer(peer(1), "from the peer".to_owned()).is_none());
+    assert!(
+        ledger
+            .offer(peer(1), Local::Text("from the peer".to_owned()))
+            .is_none()
+    );
 }
 
 #[test]
 fn text_copied_here_after_a_sync_is_offered_even_to_a_peer_that_held_it() {
     let mut ledger = Ledger::default();
-    let offer = ledger.offer(peer(1), "first".to_owned()).unwrap();
+    let offer = ledger
+        .offer(peer(1), Local::Text("first".to_owned()))
+        .unwrap();
     ledger.served(peer(1), offer.sequence());
     // Another peer's text arrived, then the user copied "first" again.
-    ledger.adopted(peer(2), TextDigest::of("from elsewhere"));
+    ledger.adopted(peer(2), ContentDigest::of("from elsewhere"));
 
-    assert!(ledger.offer(peer(1), "first".to_owned()).is_some());
+    assert!(
+        ledger
+            .offer(peer(1), Local::Text("first".to_owned()))
+            .is_some()
+    );
 }
 
 #[test]
 fn only_a_complete_fetch_of_the_current_offer_counts_as_shared() {
     let mut ledger = Ledger::default();
-    let stale = ledger.offer(peer(1), "older".to_owned()).unwrap();
-    ledger.offer(peer(1), "newer".to_owned()).unwrap();
+    let stale = ledger
+        .offer(peer(1), Local::Text("older".to_owned()))
+        .unwrap();
+    ledger
+        .offer(peer(1), Local::Text("newer".to_owned()))
+        .unwrap();
     ledger.served(peer(1), stale.sequence());
 
-    assert!(ledger.offer(peer(1), "older".to_owned()).is_some());
+    assert!(
+        ledger
+            .offer(peer(1), Local::Text("older".to_owned()))
+            .is_some()
+    );
 }
 
 #[test]
 fn empty_text_is_never_offered() {
     let mut ledger = Ledger::default();
-    assert!(ledger.offer(peer(1), String::new()).is_none());
+    assert!(ledger.offer(peer(1), Local::Text(String::new())).is_none());
     assert!(ledger.current_offer().is_none());
 }
 
@@ -132,8 +207,11 @@ async fn clipboard_sync_is_advertised_only_when_it_runs() {
         !openlogi_clipboard::available()
     );
     assert_eq!(
-        ClipboardSync::with_backend(Arc::new(FakeClipboard::default())).capabilities(),
-        [proto::Capability::ClipboardText]
+        text_sync(Arc::new(FakeClipboard::default())).capabilities(),
+        [
+            proto::Capability::ClipboardText,
+            proto::Capability::ClipboardFiles
+        ]
     );
 }
 
@@ -223,6 +301,21 @@ impl Machines {
         true
     }
 
+    /// The sender's connection loop answers every fetch from now on, as the
+    /// runtime's does: a file transfer takes one per file and one more for
+    /// the list.
+    fn serve_every_fetch(&self) {
+        let connection = Arc::clone(&self.sender_connection);
+        let clipboard = self
+            .sender
+            .connection(self.receiver_key, Arc::clone(&connection));
+        tokio::spawn(async move {
+            while let Ok(RpcEvent::Request(fetch)) = connection.accept_rpc().await {
+                clipboard.serve(fetch);
+            }
+        });
+    }
+
     /// The sender's connection loop answers one fetch. Returns whether the
     /// receiver fetched within `wait`.
     async fn serve_fetch(&self, wait: Duration) -> bool {
@@ -271,8 +364,8 @@ async fn text_copied_on_the_sender_lands_on_the_receivers_clipboard() {
     let sender_clipboard = FakeClipboard::holding("copied on machine A");
     let receiver_clipboard = FakeClipboard::holding("older text on machine B");
     let machines = Machines::connect(
-        ClipboardSync::with_backend(sender_clipboard.clone()),
-        ClipboardSync::with_backend(receiver_clipboard.clone()),
+        text_sync(sender_clipboard.clone()),
+        text_sync(receiver_clipboard.clone()),
     )
     .await;
 
@@ -294,8 +387,8 @@ async fn text_copied_on_the_sender_lands_on_the_receivers_clipboard() {
 async fn text_the_receiver_already_holds_is_neither_fetched_nor_written() {
     let receiver_clipboard = FakeClipboard::holding("same on both");
     let machines = Machines::connect(
-        ClipboardSync::with_backend(FakeClipboard::holding("same on both")),
-        ClipboardSync::with_backend(receiver_clipboard.clone()),
+        text_sync(FakeClipboard::holding("same on both")),
+        text_sync(receiver_clipboard.clone()),
     )
     .await;
 
@@ -314,8 +407,8 @@ async fn text_the_receiver_already_holds_is_neither_fetched_nor_written() {
 async fn nothing_crosses_to_a_peer_that_does_not_list_clipboard_sync() {
     let receiver_clipboard = FakeClipboard::holding("kept");
     let machines = Machines::connect_listing(
-        ClipboardSync::with_backend(FakeClipboard::holding("copied")),
-        ClipboardSync::with_backend(receiver_clipboard.clone()),
+        text_sync(FakeClipboard::holding("copied")),
+        text_sync(receiver_clipboard.clone()),
         Vec::new(),
     )
     .await;
@@ -332,8 +425,8 @@ async fn nothing_crosses_to_a_peer_that_does_not_list_clipboard_sync() {
 async fn text_over_the_limit_is_skipped_without_an_announce() {
     let receiver_clipboard = FakeClipboard::holding("kept");
     let machines = Machines::connect(
-        ClipboardSync::with_backend(FakeClipboard::holding(&"x".repeat(MAX_TEXT_BYTES + 1))),
-        ClipboardSync::with_backend(receiver_clipboard.clone()),
+        text_sync(FakeClipboard::holding(&"x".repeat(MAX_TEXT_BYTES + 1))),
+        text_sync(receiver_clipboard.clone()),
     )
     .await;
 
@@ -342,4 +435,124 @@ async fn text_over_the_limit_is_skipped_without_an_announce() {
         "text over the limit is not announced"
     );
     assert_eq!(receiver_clipboard.writes(), 0);
+}
+
+/// Writes `bytes` to `path`, making its folders, and stamps it with
+/// `modified` so copies of it can match.
+fn write_file(path: &Path, bytes: &[u8], modified: SystemTime) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bytes).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+}
+
+/// Copied files: a file and a folder holding a nested folder.
+fn copy_some_files(root: &Path) -> Vec<PathBuf> {
+    let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    write_file(&root.join("report.txt"), b"quarterly numbers", modified);
+    write_file(
+        &root.join("photos/2024/beach.jpg"),
+        &vec![7; 150_000],
+        modified,
+    );
+    write_file(&root.join("photos/cover.png"), b"png", modified);
+    vec![root.join("report.txt"), root.join("photos")]
+}
+
+/// Waits for `clipboard` to hold files.
+async fn wait_for_files(clipboard: &FakeClipboard) -> Vec<PathBuf> {
+    tokio::time::timeout(ARRIVAL, async {
+        loop {
+            if let Some(files) = clipboard.files() {
+                return files;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the receiver's clipboard takes the sender's files")
+}
+
+#[tokio::test]
+async fn files_copied_on_the_sender_land_on_the_receivers_clipboard() {
+    let copied = tempfile::tempdir().unwrap();
+    let received = tempfile::tempdir().unwrap();
+    let sender_clipboard = FakeClipboard::holding_files(copy_some_files(copied.path()));
+    let receiver_clipboard = FakeClipboard::holding("older text on machine B");
+    let machines = Machines::connect(
+        text_sync(sender_clipboard),
+        sync(receiver_clipboard.clone(), received.path()),
+    )
+    .await;
+    machines.serve_every_fetch();
+
+    assert!(
+        machines.offer(ARRIVAL).await,
+        "the sender announces its files"
+    );
+    let pasted = wait_for_files(&receiver_clipboard).await;
+
+    assert_eq!(pasted.len(), 2, "the two copied items, in their order");
+    assert_eq!(pasted[0].file_name().unwrap(), "report.txt");
+    assert_eq!(pasted[1].file_name().unwrap(), "photos");
+    assert!(pasted.iter().all(|path| path.starts_with(received.path())));
+    assert_eq!(fs::read(&pasted[0]).unwrap(), b"quarterly numbers");
+    assert_eq!(
+        fs::read(pasted[1].join("2024").join("beach.jpg")).unwrap(),
+        vec![7; 150_000]
+    );
+    assert_eq!(fs::read(pasted[1].join("cover.png")).unwrap(), b"png");
+    assert_eq!(
+        fs::metadata(&pasted[0]).unwrap().modified().unwrap(),
+        fs::metadata(copied.path().join("report.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        "a received file keeps its modification time"
+    );
+    assert_eq!(receiver_clipboard.writes(), 1);
+}
+
+#[tokio::test]
+async fn files_the_receiver_already_holds_are_neither_fetched_nor_written() {
+    let here = tempfile::tempdir().unwrap();
+    let there = tempfile::tempdir().unwrap();
+    let receiver_clipboard = FakeClipboard::holding_files(copy_some_files(there.path()));
+    let machines = Machines::connect(
+        text_sync(FakeClipboard::holding_files(copy_some_files(here.path()))),
+        text_sync(receiver_clipboard.clone()),
+    )
+    .await;
+
+    assert!(
+        machines.offer(ARRIVAL).await,
+        "the sender announces its files"
+    );
+    assert!(
+        !machines.serve_fetch(QUIET).await,
+        "a receiver holding the same files does not fetch them"
+    );
+    assert_eq!(receiver_clipboard.writes(), 0);
+}
+
+#[tokio::test]
+async fn files_go_only_to_a_peer_that_lists_file_sync() {
+    let copied = tempfile::tempdir().unwrap();
+    let receiver_clipboard = FakeClipboard::holding("kept");
+    let machines = Machines::connect_listing(
+        text_sync(FakeClipboard::holding_files(copy_some_files(copied.path()))),
+        text_sync(receiver_clipboard.clone()),
+        vec![proto::Capability::ClipboardText],
+    )
+    .await;
+
+    assert!(
+        !machines.offer(QUIET).await,
+        "files are not announced to a peer that syncs text only"
+    );
+    assert_eq!(receiver_clipboard.text().as_deref(), Some("kept"));
 }

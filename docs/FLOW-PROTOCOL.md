@@ -203,8 +203,8 @@ the promised/delayed rendering every target OS supports (NSPasteboard
 promises, Windows delayed rendering, X11/Wayland are lazy by construction).
 OpenLogi today sits at the eager end, which needs no rendering hooks: it
 announces its clipboard to a peer as soon as that peer accepts a handoff, and
-the peer fetches the text at once and places it on its own clipboard, ahead
-of the keyboard that is arriving to paste it.
+the peer fetches the text, or the files, at once and places them on its own
+clipboard, ahead of the keyboard that is arriving to paste them.
 
 - `ClipboardAnnounce{sequence, formats}` goes only to a connected trusted
   peer that listed `CLIPBOARD_TEXT`. `sequence` is a monotonic per-peer
@@ -223,6 +223,17 @@ of the keyboard that is arriving to paste it.
   the identical bulk shape. `relative_path` must be relative, `/`-separated,
   free of `..` — the receiver rejects violations and places files under its
   own download directory.
+- OpenLogi offers the files a file manager copied (Windows `CF_HDROP`):
+  copied folders are walked in name order, links are skipped, and at most
+  1000 files and 1 GiB go in one generation; more is not offered at all. It
+  rejects a list with a path another platform could not create (a reserved
+  device name such as `CON`, a character such as `:`, a trailing dot) or two
+  paths that collide ignoring case. Each transfer lands in a folder of its
+  own under the data directory, keeping modification times, and the received
+  files go on the clipboard as a copy. The `FileList` digest covers paths,
+  sizes and modification times, so a machine whose clipboard already holds
+  the same files skips the fetch, and files never bounce back. A served file
+  whose size changed since the announce is answered `Error INVALID`.
 
 ## Robustness rules
 
