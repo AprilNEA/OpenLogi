@@ -188,6 +188,7 @@ crates/
   openlogi-hid/     device discovery, HID++ reads/writes, and control capture over async-hid
   openlogi-assets/  device-render registry schema + cached HTTP fetch from OpenLogi asset mirrors
   openlogi-cli/     CLI implementation: command tree + `run()`, called by the `openlogi` binary
+  openlogi-flow/    Flow protobuf protocol, framing, pairing, identity, and QUIC transport
   openlogi-agent-core/  shared orchestration + the agent/GUI IPC contract
   openlogi-agent/   the `openlogi-agent` binary — background agent owning device I/O and the hook
   openlogi-hook/    OS mouse hook: macOS CGEventTap, Linux evdev/uinput, Windows WH_MOUSE_LL
