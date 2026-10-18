@@ -23,14 +23,6 @@
 //!   while the receiver still watches.
 //! - Once any write was attempted the sender must not cancel. The device may
 //!   already be on its way, and the receiver reports the outcome.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Flow runtime later in this stack drives the state"
-    )
-)]
-
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 

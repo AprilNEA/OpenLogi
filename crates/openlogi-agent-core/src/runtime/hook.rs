@@ -28,6 +28,7 @@ use super::{
     log_bound_action,
 };
 use crate::event_monitor::SharedEventMonitor;
+use crate::flow::FlowInput;
 pub(crate) use diverted::DivertedButtons;
 
 /// The button maps and HID++ capture observations the OS-hook callback reads,
@@ -519,6 +520,7 @@ pub fn start(
     dispatcher: ActionDispatcher,
     scroll: ScrollInputHandle,
     monitor: SharedEventMonitor,
+    flow: FlowInput,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -550,6 +552,7 @@ pub fn start(
                     openlogi_hook::frontmost_safari_pid,
                 ),
                 MouseEvent::Moved { delta_x, delta_y } => {
+                    flow.moved();
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
                 MouseEvent::CaptureInterrupted => {
