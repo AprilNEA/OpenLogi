@@ -5,12 +5,13 @@ use hidpp::channel::HidppChannel;
 use super::{
     ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, PendingHostSwitchRestore,
     ReportingMode, event_host, host_change_required, host_channel, prepare_host_change_on,
-    restoration_change, rollback_host_switch_start, shares_channel,
+    restoration_change, rollback_host_switch_start, shares_channel, switch_host_on,
 };
 use crate::backend::NodeId;
 use crate::channel::scripted::{
     ScriptedRawHidChannel, feature_error, scripted_channel as raw_scripted_channel,
 };
+use crate::replay::ReplayChannelHandle;
 use crate::reprog_controls::{
     AnalyticsKeyEvent, CidReporting, ControlId, CtrlIdInfo, ReprogControlsEvent,
 };
@@ -172,6 +173,70 @@ async fn switching_to_a_paired_slot_proceeds() {
         .expect("a paired slot must be switchable");
 
     assert!(change.required, "host 1 differs from the current host 0");
+}
+
+/// A shared channel for one Bolt device, plus the handle that records writes.
+async fn shared_device(
+    responder: crate::channel::scripted::Responder,
+) -> (SharedChannel, ReplayChannelHandle) {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(responder);
+    let channel = raw_scripted_channel(raw).await;
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "AABB".into(),
+        slot: 1,
+    };
+    (SharedChannel::new(channel, route), handle)
+}
+
+/// Whether a `ChangeHost setCurrentHost(host)` report was written.
+fn wrote_set_current_host(handle: &ReplayChannelHandle, host: u8) -> bool {
+    handle.written_reports().iter().any(|report| {
+        report.len() >= 5
+            && report[2] == CHANGE_HOST_INDEX
+            && report[3] >> 4 == 1
+            && report[4] == host
+    })
+}
+
+#[tokio::test]
+async fn switching_one_device_issues_the_fire_and_forget_write() {
+    let (shared, handle) = shared_device(keyboard_with_an_empty_third_slot).await;
+
+    let changed = switch_host_on(&shared, 1)
+        .await
+        .expect("a paired slot must be switchable");
+
+    assert!(changed);
+    assert!(wrote_set_current_host(&handle, 1));
+}
+
+#[tokio::test]
+async fn switching_one_device_honours_a_name_over_a_stuck_empty_status() {
+    // #1709 on the single-device path: Flow must still reach an MX Vertical
+    // whose status byte reads Empty for every slot.
+    let (shared, handle) = shared_device(keyboard_with_stuck_empty_status).await;
+
+    let changed = switch_host_on(&shared, 2)
+        .await
+        .expect("a named slot must be switchable despite a stuck Empty status");
+
+    assert!(changed);
+    assert!(wrote_set_current_host(&handle, 2));
+}
+
+#[tokio::test]
+async fn switching_one_device_to_an_unpaired_slot_writes_nothing() {
+    let (shared, handle) = shared_device(keyboard_with_an_empty_third_slot).await;
+
+    let error = switch_host_on(&shared, 2)
+        .await
+        .expect_err("an unpaired slot must be refused");
+
+    assert!(
+        matches!(error, HostSwitchError::HostSlotEmpty { host: 2 }),
+        "got {error:?}"
+    );
+    assert!(!wrote_set_current_host(&handle, 2));
 }
 
 #[tokio::test]
@@ -398,10 +463,59 @@ fn different_valid_host_requires_a_change() {
 
 #[test]
 fn host_outside_device_range_is_rejected() {
-    assert!(
-        host_change_required(0, 2, 2).is_err(),
-        "host 2 is outside a device that reports 2 hosts and must be rejected"
-    );
+    let error = host_change_required(0, 2, 2).expect_err("host 2 must be rejected");
+
+    assert!(matches!(
+        error,
+        HostSwitchError::HostOutOfRange {
+            host: 2,
+            host_count: 2
+        }
+    ));
+}
+
+#[test]
+fn host_switch_errors_cross_ipc_as_the_easy_switch_vocabulary() {
+    use openlogi_core::hid::{HidppOperation, WriteError};
+
+    let cases = [
+        (
+            HostSwitchError::FeatureUnsupported,
+            WriteError::FeatureUnsupported {
+                feature_hex: 0x1814,
+            },
+        ),
+        (
+            HostSwitchError::HostOutOfRange {
+                host: 3,
+                host_count: 2,
+            },
+            WriteError::HostOutOfRange {
+                slot: 3,
+                host_count: 2,
+            },
+        ),
+        (
+            HostSwitchError::HostSlotEmpty { host: 2 },
+            WriteError::HostSlotEmpty { slot: 2 },
+        ),
+        (
+            HostSwitchError::TimedOut {
+                operation: "reading current host",
+            },
+            WriteError::RequestTimedOut {
+                operation: HidppOperation::ChangeHost,
+            },
+        ),
+        (HostSwitchError::TargetNotFound, WriteError::DeviceNotFound),
+        (
+            HostSwitchError::Hidpp("busy".into()),
+            WriteError::Hidpp("busy".into()),
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(WriteError::from(error), expected);
+    }
 }
 
 #[test]

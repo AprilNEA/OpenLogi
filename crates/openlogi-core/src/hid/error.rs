@@ -181,8 +181,8 @@ pub enum WriteError {
     /// Nothing was written.
     #[error("the device does not let software rename its Easy-Switch hosts")]
     HostRenameUnsupported,
-    /// A rename of an Easy-Switch slot that has no computer paired, or that
-    /// the device does not have.
+    /// A rename of, or a switch to, an Easy-Switch slot that has no computer
+    /// paired, or (for a rename) that the device does not have.
     ///
     /// Nothing was written.
     #[error("Easy-Switch channel {} has no paired computer", u16::from(*slot) + 1)]
@@ -207,6 +207,20 @@ pub enum WriteError {
         requested: String,
         /// The name the device reports afterwards, if any.
         actual: Option<String>,
+    },
+    /// A switch to an Easy-Switch slot beyond the channels the device's
+    /// `0x1814 ChangeHost` reports.
+    ///
+    /// Nothing was written. Appended last — variant order is wire format.
+    #[error(
+        "Easy-Switch channel {} is beyond the device's {host_count} channels",
+        u16::from(*slot) + 1
+    )]
+    HostOutOfRange {
+        /// The zero-based slot index asked for.
+        slot: u8,
+        /// Number of host channels the device reports.
+        host_count: u8,
     },
 }
 
@@ -270,6 +284,9 @@ pub enum HidppOperation {
     /// Write an Easy-Switch slot's `0x1815` host name. Appended last —
     /// variant order is wire format.
     RenameHost,
+    /// Switch a device to another Easy-Switch host through `0x1814
+    /// ChangeHost`. Appended last — variant order is wire format.
+    ChangeHost,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

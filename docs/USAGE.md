@@ -13,12 +13,15 @@ openlogi diag pointer-speed             # test 0x2205 pointer scaling and attemp
 openlogi diag smartshift                # toggle SmartShift and restore (smoke test)
 openlogi diag smartshift --torque 60    # set scrolling force / feedback intensity (1-100%)
 openlogi diag lighting ff0000           # solid colour for a wired RGB keyboard (any RRGGBB hex)
+openlogi diag host-switch --device "MX Master 3S" --host 1   # move a device to Easy-Switch channel 2
 ```
 
 Running `openlogi` with no subcommand defaults to `list`. Set
 `OPENLOGI_LOG=debug` for verbose tracing in the CLI, GUI, or agent.
 
 `openlogi diag pointer-speed` temporarily changes the selected device's pointer scaling. The command attempts to restore and verify the original scaling even when the test write fails. `--device NAME` selects a device; `--target RAW` sets the temporary 8.8 fixed-point value (`256` is 1×). By default, the command halves the current value, or doubles it when the raw value is `1`. Firmware may accept extreme values without clipping. A restoration error means the original speed could not be confirmed.
+
+`openlogi diag host-switch` asks the running agent to move one device to another Easy-Switch channel through HID++ `0x1814`. `--host` is zero-based, so `--host 1` is channel 2. `--device NAME` must match exactly one online device; a unique exact name wins over longer matches. The agent refuses a channel the device does not have and a channel the device reports as unpaired, before anything is written. Success means the agent sent the switch. It does not confirm that the device arrived, because the device then leaves this computer's radio link.
 
 ## Automation API
 
