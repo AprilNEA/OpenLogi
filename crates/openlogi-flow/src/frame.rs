@@ -39,6 +39,10 @@ pub enum FrameKind {
     PairOutcome,
     /// Pairing cancellation.
     PairAbort,
+    /// Pairing commitment opening.
+    PairReveal,
+    /// Pairing commitment verified.
+    PairRevealed,
     /// Peer information request.
     GetPeerInfo,
     /// Peer information response.
@@ -89,6 +93,8 @@ impl FrameKind {
             Self::PairConfirm => 0x12,
             Self::PairOutcome => 0x13,
             Self::PairAbort => 0x14,
+            Self::PairReveal => 0x15,
+            Self::PairRevealed => 0x16,
             Self::GetPeerInfo => 0x20,
             Self::PeerInfo => 0x21,
             Self::AnnounceDevices => 0x22,
@@ -139,6 +145,8 @@ impl From<u16> for FrameKind {
             0x12 => Self::PairConfirm,
             0x13 => Self::PairOutcome,
             0x14 => Self::PairAbort,
+            0x15 => Self::PairReveal,
+            0x16 => Self::PairRevealed,
             0x20 => Self::GetPeerInfo,
             0x21 => Self::PeerInfo,
             0x22 => Self::AnnounceDevices,

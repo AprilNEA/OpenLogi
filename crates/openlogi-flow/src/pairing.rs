@@ -1,4 +1,18 @@
 //! Pairing ceremony state machine and injected peer-key persistence.
+//!
+//! The ceremony is commit-then-reveal (FLOW-PROTOCOL.md §Pairing):
+//!
+//! ```text
+//! initiator                                 responder
+//! start(nI)        ── PairStart{c} ──────►  receive_start(nR)
+//! receive_prompted ◄─ PairPrompted{nR} ───
+//!                  ── PairReveal{nI} ────►  receive_reveal   (checks c)
+//! receive_revealed ◄─ PairRevealed ───────
+//!         both sides now show sas_code() and exchange PairConfirm
+//! ```
+//!
+//! The state machine performs no I/O and draws no randomness: callers inject
+//! the nonce ([`PairingNonce::random`] in production) and the clock.
 
 use std::time::{Duration, Instant};
 
@@ -6,7 +20,10 @@ use thiserror::Error;
 
 use crate::{
     generated as proto,
-    sas::{PublicKey, SasCode, SessionNonce, derive_sas},
+    sas::{
+        FixedBytesError, HelloDigest, NonceCommitment, PairingNonce, PairingParty, PublicKey,
+        SasCode, derive_sas,
+    },
 };
 
 /// Default time for users to compare and confirm the pairing code.
@@ -42,7 +59,8 @@ impl PersistPeerKeyError {
 pub enum PairingAbortReason {
     /// A user cancelled the ceremony.
     UserCancelled,
-    /// A user reported that the displayed codes differ.
+    /// A user reported that the displayed codes differ, or the initiator's
+    /// revealed nonce did not match its commitment.
     CodeMismatch,
     /// The confirmation deadline expired.
     Timeout,
@@ -58,16 +76,36 @@ impl From<PairingAbortReason> for proto::PairAbortReason {
     }
 }
 
+/// Which side of the ceremony a session plays.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingRole {
+    /// This side sent `PairStart` and committed to its nonce first.
+    Initiator,
+    /// This side answered `PairStart` with its own nonce.
+    Responder,
+}
+
 /// Externally observable pairing state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PairingState {
-    /// No `PairStart` / `PairPrompted` exchange has completed.
+    /// No ceremony has started on this connection.
     Idle,
-    /// This side sent `PairStart` and is waiting for `PairPrompted`.
+    /// The initiator sent its commitment and waits for `PairPrompted`.
     AwaitingPrompt,
-    /// Both prompts may be shown and confirmations are pending.
+    /// The responder sent its nonce and waits for `PairReveal`.
+    AwaitingReveal {
+        /// Responder-declared timeout in milliseconds.
+        timeout_ms: u32,
+    },
+    /// The initiator revealed its nonce and waits for `PairRevealed`.
+    AwaitingRevealed {
+        /// Responder-declared timeout in milliseconds.
+        timeout_ms: u32,
+    },
+    /// Both nonces are known and verified; the code may be shown and
+    /// confirmations are pending.
     Prompted {
-        /// Receiver-declared timeout in milliseconds.
+        /// Responder-declared timeout in milliseconds.
         timeout_ms: u32,
         /// Whether this side has sent `PairConfirm`.
         local_confirmed: bool,
@@ -78,7 +116,7 @@ pub enum PairingState {
     Paired,
     /// A user declined the ceremony.
     Rejected,
-    /// The receiver-declared confirmation deadline expired.
+    /// The responder-declared deadline expired.
     TimedOut,
     /// Either peer aborted the ceremony.
     Aborted(PairingAbortReason),
@@ -93,23 +131,78 @@ pub enum PairingError {
     /// A required open enum carried an unspecified or unknown value.
     #[error("invalid pairing enum value {0}")]
     InvalidEnum(i32),
+    /// A fixed-width pairing field had the wrong length.
+    #[error("pairing field `{field}` is malformed: {source}")]
+    InvalidField {
+        /// Protobuf field name.
+        field: &'static str,
+        /// Length mismatch detail.
+        source: FixedBytesError,
+    },
+    /// The revealed nonce does not open the initiator's commitment.
+    ///
+    /// The session is aborted with [`PairingAbortReason::CodeMismatch`].
+    #[error("revealed pairing nonce does not match its commitment")]
+    CommitmentMismatch,
     /// The peer key could not be durably persisted.
     #[error(transparent)]
     Persistence(#[from] PersistPeerKeyError),
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Prompted {
+struct Deadline {
     timeout_ms: u32,
-    deadline: Instant,
+    at: Instant,
+}
+
+impl Deadline {
+    fn new(now: Instant, timeout: Duration) -> Self {
+        let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+        Self {
+            timeout_ms,
+            at: now + Duration::from_millis(u64::from(timeout_ms)),
+        }
+    }
+
+    fn expired(self, now: Instant) -> bool {
+        now >= self.at
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Prompted {
+    code: SasCode,
+    deadline: Deadline,
     local_confirmed: bool,
     peer_confirmed: bool,
+}
+
+impl Prompted {
+    const fn new(code: SasCode, deadline: Deadline) -> Self {
+        Self {
+            code,
+            deadline,
+            local_confirmed: false,
+            peer_confirmed: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 enum Phase {
     Idle,
-    AwaitingPrompt,
+    AwaitingPrompt {
+        nonce: PairingNonce,
+    },
+    AwaitingReveal {
+        commitment: NonceCommitment,
+        nonce: PairingNonce,
+        deadline: Deadline,
+    },
+    AwaitingRevealed {
+        code: SasCode,
+        deadline: Deadline,
+    },
     Prompted(Prompted),
     Paired,
     Rejected,
@@ -117,31 +210,36 @@ enum Phase {
     Aborted(PairingAbortReason),
 }
 
-/// One connection-scoped, symmetric Flow pairing ceremony.
+/// One connection-scoped Flow pairing ceremony.
 ///
-/// The session owns the two nonces and discards them on every terminal path.
-/// A retry therefore requires a fresh connection and fresh [`SessionNonce`]s.
+/// The session owns its nonces and code and discards them on every terminal
+/// path. A retry therefore requires a fresh connection and fresh nonces.
 #[derive(Clone, Debug)]
 pub struct PairingSession {
-    peer_key: PublicKey,
     local_key: PublicKey,
-    nonces: Option<(SessionNonce, SessionNonce)>,
+    peer_key: PublicKey,
+    local_hello: HelloDigest,
+    peer_hello: HelloDigest,
+    role: Option<PairingRole>,
     phase: Phase,
 }
 
 impl PairingSession {
-    /// Creates an idle session from the authenticated TLS identities and Hello nonces.
+    /// Creates an idle session from the TLS identities and the digests of the
+    /// two `Hello` payloads exchanged on this connection.
     #[must_use]
     pub const fn new(
         local_key: PublicKey,
         peer_key: PublicKey,
-        local_nonce: SessionNonce,
-        peer_nonce: SessionNonce,
+        local_hello: HelloDigest,
+        peer_hello: HelloDigest,
     ) -> Self {
         Self {
-            peer_key,
             local_key,
-            nonces: Some((local_nonce, peer_nonce)),
+            peer_key,
+            local_hello,
+            peer_hello,
+            role: None,
             phase: Phase::Idle,
         }
     }
@@ -151,9 +249,15 @@ impl PairingSession {
     pub const fn state(&self) -> PairingState {
         match self.phase {
             Phase::Idle => PairingState::Idle,
-            Phase::AwaitingPrompt => PairingState::AwaitingPrompt,
+            Phase::AwaitingPrompt { .. } => PairingState::AwaitingPrompt,
+            Phase::AwaitingReveal { deadline, .. } => PairingState::AwaitingReveal {
+                timeout_ms: deadline.timeout_ms,
+            },
+            Phase::AwaitingRevealed { deadline, .. } => PairingState::AwaitingRevealed {
+                timeout_ms: deadline.timeout_ms,
+            },
             Phase::Prompted(prompted) => PairingState::Prompted {
-                timeout_ms: prompted.timeout_ms,
+                timeout_ms: prompted.deadline.timeout_ms,
                 local_confirmed: prompted.local_confirmed,
                 peer_confirmed: prompted.peer_confirmed,
             },
@@ -164,53 +268,157 @@ impl PairingSession {
         }
     }
 
+    /// Returns the role this side took, once the ceremony started.
+    #[must_use]
+    pub const fn role(&self) -> Option<PairingRole> {
+        self.role
+    }
+
     /// Returns the TLS-authenticated peer key this ceremony can persist.
     #[must_use]
     pub const fn peer_key(&self) -> PublicKey {
         self.peer_key
     }
 
-    /// Derives the code shown on this side while the ceremony is active.
+    /// Returns whether this ceremony was created for exactly these
+    /// identities and `Hello` transcript.
+    pub(crate) fn is_bound_to(
+        &self,
+        local_key: PublicKey,
+        peer_key: PublicKey,
+        local_hello: HelloDigest,
+        peer_hello: HelloDigest,
+    ) -> bool {
+        self.local_key == local_key
+            && self.peer_key == peer_key
+            && self.local_hello == local_hello
+            && self.peer_hello == peer_hello
+    }
+
+    /// Returns the code to show, only while confirmations are pending.
+    ///
+    /// The code exists only after the responder verified the initiator's
+    /// commitment, so neither side shows a code an attacker could have chosen.
     #[must_use]
-    pub fn sas_code(&self) -> Option<SasCode> {
-        self.nonces.map(|(local_nonce, peer_nonce)| {
-            derive_sas(self.local_key, self.peer_key, local_nonce, peer_nonce)
-        })
+    pub const fn sas_code(&self) -> Option<SasCode> {
+        match self.phase {
+            Phase::Prompted(prompted) => Some(prompted.code),
+            _ => None,
+        }
     }
 
     /// Begins an initiating-side ceremony and creates its `PairStart` request.
-    pub fn start(&mut self) -> Result<proto::PairStart, PairingError> {
+    pub fn start(&mut self, nonce: PairingNonce) -> Result<proto::PairStart, PairingError> {
         self.ensure_idle()?;
-        self.phase = Phase::AwaitingPrompt;
-        Ok(proto::PairStart::default())
+        let commitment = NonceCommitment::commit(self.local_key, self.peer_key, nonce);
+        self.role = Some(PairingRole::Initiator);
+        self.phase = Phase::AwaitingPrompt { nonce };
+        Ok(proto::PairStart {
+            nonce_commitment: commitment.as_bytes().to_vec(),
+            ..Default::default()
+        })
     }
 
-    /// Handles `PairStart` and returns the receiver-declared prompt timeout.
+    /// Handles `PairStart` and answers with this side's nonce and deadline.
+    ///
+    /// A malformed commitment leaves the session idle; answer it with
+    /// `Error INVALID`.
     pub fn receive_start(
         &mut self,
+        start: &proto::PairStart,
+        nonce: PairingNonce,
         now: Instant,
         timeout: Option<Duration>,
     ) -> Result<proto::PairPrompted, PairingError> {
         self.ensure_idle()?;
-        let timeout = timeout.unwrap_or(DEFAULT_PAIRING_TIMEOUT);
-        Ok(self.enter_prompted(now, timeout))
+        let commitment = NonceCommitment::try_from(start.nonce_commitment.as_slice())
+            .map_err(|source| invalid_field("nonce_commitment", source))?;
+        let deadline = Deadline::new(now, timeout.unwrap_or(DEFAULT_PAIRING_TIMEOUT));
+        self.role = Some(PairingRole::Responder);
+        self.phase = Phase::AwaitingReveal {
+            commitment,
+            nonce,
+            deadline,
+        };
+        Ok(proto::PairPrompted {
+            timeout_ms: deadline.timeout_ms,
+            nonce: nonce.as_bytes().to_vec(),
+            ..Default::default()
+        })
     }
 
-    /// Handles a `PairPrompted` response on the initiating side.
+    /// Handles `PairPrompted` on the initiator and creates its `PairReveal`.
+    ///
+    /// A malformed nonce leaves the session waiting; the caller should
+    /// [`abort`](Self::abort) it.
     pub fn receive_prompted(
         &mut self,
         prompted: &proto::PairPrompted,
         now: Instant,
-    ) -> Result<(), PairingError> {
-        if !matches!(self.phase, Phase::AwaitingPrompt) {
+    ) -> Result<proto::PairReveal, PairingError> {
+        let Phase::AwaitingPrompt { nonce } = self.phase else {
             return Err(PairingError::InvalidTransition(self.state()));
-        }
+        };
+        let peer_nonce = PairingNonce::try_from(prompted.nonce.as_slice())
+            .map_err(|source| invalid_field("nonce", source))?;
         let timeout = if prompted.timeout_ms == 0 {
             DEFAULT_PAIRING_TIMEOUT
         } else {
             Duration::from_millis(u64::from(prompted.timeout_ms))
         };
-        self.enter_prompted(now, timeout);
+        let code = derive_sas(&self.local_party(nonce), &self.peer_party(peer_nonce));
+        self.phase = Phase::AwaitingRevealed {
+            code,
+            deadline: Deadline::new(now, timeout),
+        };
+        Ok(proto::PairReveal {
+            nonce: nonce.as_bytes().to_vec(),
+            ..Default::default()
+        })
+    }
+
+    /// Handles `PairReveal` on the responder and verifies the commitment.
+    ///
+    /// On [`PairingError::CommitmentMismatch`] the session is already aborted;
+    /// answer with `Error INVALID`.
+    pub fn receive_reveal(
+        &mut self,
+        reveal: &proto::PairReveal,
+        now: Instant,
+    ) -> Result<proto::PairRevealed, PairingError> {
+        let Phase::AwaitingReveal {
+            commitment,
+            nonce,
+            deadline,
+        } = self.phase
+        else {
+            return Err(PairingError::InvalidTransition(self.state()));
+        };
+        if deadline.expired(now) {
+            self.terminal(Phase::TimedOut);
+            return Err(PairingError::InvalidTransition(self.state()));
+        }
+        let peer_nonce = PairingNonce::try_from(reveal.nonce.as_slice())
+            .map_err(|source| invalid_field("nonce", source))?;
+        if !commitment.opens_to(self.peer_key, self.local_key, peer_nonce) {
+            self.terminal(Phase::Aborted(PairingAbortReason::CodeMismatch));
+            return Err(PairingError::CommitmentMismatch);
+        }
+        let code = derive_sas(&self.peer_party(peer_nonce), &self.local_party(nonce));
+        self.phase = Phase::Prompted(Prompted::new(code, deadline));
+        Ok(proto::PairRevealed::default())
+    }
+
+    /// Handles `PairRevealed` on the initiator; the code may now be shown.
+    pub fn receive_revealed(&mut self, now: Instant) -> Result<(), PairingError> {
+        let Phase::AwaitingRevealed { code, deadline } = self.phase else {
+            return Err(PairingError::InvalidTransition(self.state()));
+        };
+        if deadline.expired(now) {
+            self.terminal(Phase::TimedOut);
+            return Err(PairingError::InvalidTransition(self.state()));
+        }
+        self.phase = Phase::Prompted(Prompted::new(code, deadline));
         Ok(())
     }
 
@@ -233,10 +441,7 @@ impl PairingSession {
         store: &mut impl PeerKeyStore,
     ) -> Result<proto::PairOutcome, PairingError> {
         let result = self.confirm(ConfirmationSide::Peer, now, store)?;
-        Ok(proto::PairOutcome {
-            result: result.into(),
-            ..Default::default()
-        })
+        Ok(pair_outcome(result))
     }
 
     /// Applies a peer-provided `PairOutcome` after validating its open enum.
@@ -268,14 +473,14 @@ impl PairingSession {
 
     /// Rejects the local prompt and returns the terminal RPC outcome.
     pub fn reject(&mut self) -> Result<proto::PairOutcome, PairingError> {
-        self.ensure_prompted()?;
+        self.ensure_active()?;
         self.terminal(Phase::Rejected);
         Ok(pair_outcome(proto::PairResult::Rejected))
     }
 
-    /// Aborts the current ceremony and discards its nonces.
+    /// Aborts the current ceremony and discards its nonces and code.
     pub fn abort(&mut self, reason: PairingAbortReason) -> Result<proto::PairAbort, PairingError> {
-        self.ensure_prompted()?;
+        self.ensure_active()?;
         self.terminal(Phase::Aborted(reason));
         Ok(proto::PairAbort {
             reason: proto::PairAbortReason::from(reason).into(),
@@ -285,7 +490,7 @@ impl PairingSession {
 
     /// Handles a peer `PairAbort` after validating its open enum.
     pub fn receive_abort(&mut self, abort: &proto::PairAbort) -> Result<(), PairingError> {
-        self.ensure_prompted()?;
+        self.ensure_active()?;
         let reason = match abort.reason.as_known() {
             Some(proto::PairAbortReason::UserCancelled) => PairingAbortReason::UserCancelled,
             Some(proto::PairAbortReason::CodeMismatch) => PairingAbortReason::CodeMismatch,
@@ -298,32 +503,38 @@ impl PairingSession {
         Ok(())
     }
 
-    /// Transitions an expired prompted session to `TIMEOUT`.
+    /// Transitions an expired session to `TIMEOUT`.
     ///
-    /// Returns `None` when the deadline has not expired or the session is
-    /// already terminal.
+    /// Returns `None` when no deadline is running, it has not expired, or the
+    /// session is already terminal.
     pub fn check_timeout(&mut self, now: Instant) -> Option<proto::PairOutcome> {
-        let Phase::Prompted(prompted) = self.phase else {
-            return None;
+        let deadline = match self.phase {
+            Phase::AwaitingReveal { deadline, .. } | Phase::AwaitingRevealed { deadline, .. } => {
+                deadline
+            }
+            Phase::Prompted(prompted) => prompted.deadline,
+            _ => return None,
         };
-        if now < prompted.deadline {
+        if !deadline.expired(now) {
             return None;
         }
         self.terminal(Phase::TimedOut);
         Some(pair_outcome(proto::PairResult::Timeout))
     }
 
-    fn enter_prompted(&mut self, now: Instant, timeout: Duration) -> proto::PairPrompted {
-        let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
-        self.phase = Phase::Prompted(Prompted {
-            timeout_ms,
-            deadline: now + Duration::from_millis(u64::from(timeout_ms)),
-            local_confirmed: false,
-            peer_confirmed: false,
-        });
-        proto::PairPrompted {
-            timeout_ms,
-            ..Default::default()
+    const fn local_party(&self, nonce: PairingNonce) -> PairingParty {
+        PairingParty {
+            key: self.local_key,
+            hello: self.local_hello,
+            nonce,
+        }
+    }
+
+    const fn peer_party(&self, nonce: PairingNonce) -> PairingParty {
+        PairingParty {
+            key: self.peer_key,
+            hello: self.peer_hello,
+            nonce,
         }
     }
 
@@ -346,7 +557,7 @@ impl PairingSession {
         let Phase::Prompted(mut prompted) = self.phase else {
             return Err(PairingError::InvalidTransition(self.state()));
         };
-        if now >= prompted.deadline {
+        if prompted.deadline.expired(now) {
             self.terminal(Phase::TimedOut);
             return Ok(proto::PairResult::Timeout);
         }
@@ -380,8 +591,21 @@ impl PairingSession {
         }
     }
 
+    fn ensure_active(&self) -> Result<(), PairingError> {
+        if matches!(
+            self.phase,
+            Phase::AwaitingPrompt { .. }
+                | Phase::AwaitingReveal { .. }
+                | Phase::AwaitingRevealed { .. }
+                | Phase::Prompted(_)
+        ) {
+            Ok(())
+        } else {
+            Err(PairingError::InvalidTransition(self.state()))
+        }
+    }
+
     fn terminal(&mut self, phase: Phase) {
-        self.nonces = None;
         self.phase = phase;
     }
 }
@@ -392,6 +616,10 @@ enum ConfirmationSide {
     Peer,
 }
 
+const fn invalid_field(field: &'static str, source: FixedBytesError) -> PairingError {
+    PairingError::InvalidField { field, source }
+}
+
 fn pair_outcome(result: proto::PairResult) -> proto::PairOutcome {
     proto::PairOutcome {
         result: result.into(),
@@ -400,185 +628,4 @@ fn pair_outcome(result: proto::PairResult) -> proto::PairOutcome {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Default)]
-    struct MemoryStore(Vec<PublicKey>);
-
-    impl PeerKeyStore for MemoryStore {
-        fn persist_peer_key(&mut self, key: PublicKey) -> Result<(), PersistPeerKeyError> {
-            self.0.push(key);
-            Ok(())
-        }
-    }
-
-    fn session() -> PairingSession {
-        PairingSession::new(
-            PublicKey::new([1; 32]),
-            PublicKey::new([2; 32]),
-            SessionNonce::new([3; 16]),
-            SessionNonce::new([4; 16]),
-        )
-    }
-
-    #[test]
-    fn both_confirms_persist_once_and_pair() {
-        let now = Instant::now();
-        let mut session = session();
-        let mut store = MemoryStore::default();
-        session.receive_start(now, None).unwrap();
-
-        assert_eq!(
-            session.confirm_local(now, &mut store).unwrap(),
-            proto::PairResult::PendingLocal
-        );
-        assert_eq!(
-            session
-                .receive_confirm(now, &mut store)
-                .unwrap()
-                .result
-                .as_known(),
-            Some(proto::PairResult::Paired)
-        );
-        assert_eq!(session.state(), PairingState::Paired);
-        assert_eq!(store.0, [PublicKey::new([2; 32])]);
-        assert!(session.sas_code().is_none());
-
-        assert_eq!(
-            session
-                .receive_confirm(now, &mut store)
-                .unwrap()
-                .result
-                .as_known(),
-            Some(proto::PairResult::Paired)
-        );
-        assert_eq!(store.0.len(), 1);
-    }
-
-    #[test]
-    fn confirmation_at_deadline_times_out_without_persisting() {
-        let now = Instant::now();
-        let mut session = session();
-        let mut store = MemoryStore::default();
-        session
-            .receive_start(now, Some(Duration::from_secs(1)))
-            .unwrap();
-
-        assert_eq!(
-            session.confirm_local(now, &mut store).unwrap(),
-            proto::PairResult::PendingLocal
-        );
-        assert_eq!(
-            session
-                .receive_confirm(now + Duration::from_secs(1), &mut store)
-                .unwrap()
-                .result
-                .as_known(),
-            Some(proto::PairResult::Timeout)
-        );
-        assert_eq!(session.state(), PairingState::TimedOut);
-        assert!(store.0.is_empty());
-        assert!(session.sas_code().is_none());
-    }
-
-    #[test]
-    fn timeout_uses_default_and_discards_nonce() {
-        let now = Instant::now();
-        let mut session = session();
-        let prompted = session.receive_start(now, None).unwrap();
-        assert_eq!(prompted.timeout_ms, 120_000);
-        assert!(
-            session
-                .check_timeout(now + Duration::from_secs(119))
-                .is_none()
-        );
-        assert_eq!(
-            session
-                .check_timeout(now + Duration::from_secs(120))
-                .unwrap()
-                .result
-                .as_known(),
-            Some(proto::PairResult::Timeout)
-        );
-        assert_eq!(session.state(), PairingState::TimedOut);
-        assert!(session.sas_code().is_none());
-    }
-
-    #[test]
-    fn abort_paths_are_terminal() {
-        for reason in [
-            PairingAbortReason::UserCancelled,
-            PairingAbortReason::CodeMismatch,
-            PairingAbortReason::Timeout,
-        ] {
-            let mut session = session();
-            session.receive_start(Instant::now(), None).unwrap();
-            session.abort(reason).unwrap();
-            assert_eq!(session.state(), PairingState::Aborted(reason));
-            assert!(session.sas_code().is_none());
-        }
-    }
-
-    #[test]
-    fn outcomes_cannot_start_or_overwrite_a_session() {
-        let mut session = session();
-        for result in [
-            proto::PairResult::PendingLocal,
-            proto::PairResult::Rejected,
-            proto::PairResult::Timeout,
-        ] {
-            assert_eq!(
-                session.receive_outcome(&pair_outcome(result)),
-                Err(PairingError::InvalidTransition(PairingState::Idle))
-            );
-        }
-
-        session.receive_start(Instant::now(), None).unwrap();
-        session.reject().unwrap();
-        assert_eq!(
-            session.receive_outcome(&pair_outcome(proto::PairResult::Timeout)),
-            Err(PairingError::InvalidTransition(PairingState::Rejected))
-        );
-    }
-
-    #[test]
-    fn prompted_requires_a_locally_started_session() {
-        let mut session = session();
-        let prompted = proto::PairPrompted {
-            timeout_ms: 1_000,
-            ..Default::default()
-        };
-        assert_eq!(
-            session.receive_prompted(&prompted, Instant::now()),
-            Err(PairingError::InvalidTransition(PairingState::Idle))
-        );
-        session.start().unwrap();
-        session.receive_prompted(&prompted, Instant::now()).unwrap();
-        assert!(matches!(
-            session.state(),
-            PairingState::Prompted {
-                timeout_ms: 1_000,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn repeated_peer_confirm_replays_terminal_outcome() {
-        let now = Instant::now();
-        let mut session = session();
-        let mut store = MemoryStore::default();
-        session.receive_start(now, None).unwrap();
-        session.reject().unwrap();
-        assert_eq!(
-            session
-                .receive_confirm(now, &mut store)
-                .unwrap()
-                .result
-                .as_known(),
-            Some(proto::PairResult::Rejected)
-        );
-        assert!(store.0.is_empty());
-    }
-}
+mod tests;

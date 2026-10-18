@@ -43,6 +43,8 @@ enum FrameKind {
   FRAME_KIND_PAIR_CONFIRM = 0x0012;
   FRAME_KIND_PAIR_OUTCOME = 0x0013;
   FRAME_KIND_PAIR_ABORT = 0x0014;
+  FRAME_KIND_PAIR_REVEAL = 0x0015;
+  FRAME_KIND_PAIR_REVEALED = 0x0016;
 
   // Peer info / state family, 0x0020-0x002F.
   FRAME_KIND_GET_PEER_INFO = 0x0020;
@@ -84,8 +86,9 @@ message Hello {
   // certificate; mismatch closes the connection (Error INVALID).
   bytes public_key = 3;
 
-  // 16 random bytes per connection, consumed by the pairing-code derivation
-  // (FLOW-PROTOCOL.md §Pairing). Fresh on every connection.
+  // 16 random bytes, fresh on every connection. The pairing transcript hashes
+  // both Hellos (FLOW-PROTOCOL.md §Pairing), so this nonce binds a pairing
+  // code to the one connection that displayed it.
   bytes session_nonce = 4;
 
   // Presentation for pairing prompts and peer lists.
@@ -168,21 +171,42 @@ message Pong {
 // Pairing family (allowed pre-trust)
 // ---------------------------------------------------------------------------
 //
-// Both sides derive the same 6-digit code from the two public keys and the
-// two session nonces (exact derivation: FLOW-PROTOCOL.md §Pairing). A
-// man-in-the-middle terminates two different sessions and therefore produces
-// two different codes; the user comparing screens is the authentication.
+// Commit-then-reveal: the initiator commits to its pairing nonce, the
+// responder answers with its own nonce in the clear, and only then does the
+// initiator reveal. Neither side can choose its nonce after seeing the other
+// one, so a man-in-the-middle cannot steer two sessions to the same code.
+// Both sides derive the 6-digit code from the Hello transcript, the two public
+// keys, and the two pairing nonces (exact derivation: FLOW-PROTOCOL.md
+// §Pairing). The user comparing screens is the authentication.
 
-// Request: begin pairing. The responder shows its prompt (key fingerprint,
-// machine name, the code) to its user.
-message PairStart {}
+// Request: begin pairing. The responder may show who is pairing (machine name,
+// key fingerprint) but has no code to show until PairReveal arrives.
+message PairStart {
+  // SHA-256 commitment to the initiator's 16-byte pairing nonce. Exactly 32
+  // bytes; anything else is answered Error INVALID.
+  bytes nonce_commitment = 1;
+}
 
-// Response to PairStart: the prompt is on screen; the requester may now show
-// its own prompt and both users compare codes.
+// Response to PairStart. The responder's deadline starts when it sends this.
 message PairPrompted {
   // How long the responder will keep the session pending before it aborts.
   uint32 timeout_ms = 1;
+  // The responder's 16 random pairing-nonce bytes, chosen after the
+  // commitment arrived.
+  bytes nonce = 2;
 }
+
+// Request: open the initiator's commitment. Sent exactly once, after
+// PairPrompted. A nonce that does not match the commitment ends the ceremony
+// and is answered Error INVALID.
+message PairReveal {
+  // The initiator's 16-byte pairing nonce.
+  bytes nonce = 1;
+}
+
+// Response to PairReveal: the commitment matched. Both sides now know both
+// nonces and show the code; users compare it before confirming.
+message PairRevealed {}
 
 // Request: this side's user confirmed the code matches. Pairing completes
 // when each side has both sent and received a confirm.

@@ -224,9 +224,11 @@ compatibility hazard that no golden test covers.
   the pinned peer keys from the trust store, **in both directions** (mutual
   authentication — lan-mouse's one-way trust is the counterexample).
 - Pairing: peers exchange keys over the first (unauthenticated) connection and
-  the user confirms a short code derived from both keys on both screens; on
-  confirmation each side persists the other's key. The code authorizes the
-  pinning, it is not key material.
+  the user confirms a short code on both screens. The code is derived from
+  both keys, both `Hello` transcripts, and per-ceremony nonces exchanged
+  commit-then-reveal, so an attacker cannot steer two sessions to one code
+  (FLOW-PROTOCOL.md §Pairing). On confirmation each side persists the other's
+  key. The code authorizes the pinning, it is not key material.
 - Discovery: mDNS (`mdns-sd` crate — pure Rust, no Avahi/Bonjour daemon
   dependency), service `_openlogi-flow._udp.local`, TXT records carrying
   instance id and supported protocol range so incompatible peers are filtered
@@ -266,9 +268,11 @@ already committed to:
   first place.
 - **Unknown-field preservation** by default, and zero-copy `MessageView<'a>`
   decode for `Chunk` frames. Nice, not decisive.
-- Same codegen shape (`buffa-build` + `protoc` on PATH, like `prost-build`),
-  and it deliberately ships no schema-less `#[derive(Message)]` — the
-  `.proto` file stays the only contract, which is this design's stance.
+- Same codegen shape (`buffa-build`, like `prost-build`), and it deliberately
+  ships no schema-less `#[derive(Message)]` — the `.proto` file stays the
+  only contract, which is this design's stance. The build script compiles
+  the descriptor set with `protox` (pure Rust), so no build machine, CI job,
+  or package recipe needs a `protoc` binary.
 - The accepted risk: buffa is pre-1.0 (breaking changes on minor versions)
   and young (2026), versus prost's decade of production use. The wire format
   is standard protobuf either way, so the codec is swappable: churn or a

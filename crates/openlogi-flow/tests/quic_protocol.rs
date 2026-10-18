@@ -7,40 +7,59 @@ use std::{
     error::Error as StdError,
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use openlogi_flow::{
     frame::{Envelope, FrameKind, MAX_PAYLOAD_LEN},
     generated as proto,
-    pairing::{PairingSession, PeerKeyStore, PersistPeerKeyError},
-    sas::{PublicKey, SessionNonce},
+    pairing::{PairingState, PeerKeyStore, PersistPeerKeyError},
+    sas::{PairingNonce, PublicKey},
     transport::{
-        BulkRpcResponse, FlowConnection, FlowEndpoint, MachineIdentity, PeerTrust, RpcEvent,
-        SessionTrust, TransportError, message_envelope,
+        BulkRpcResponse, EndpointLimits, FlowConnection, FlowEndpoint, MachineIdentity,
+        NotificationEvent, PeerTrust, RpcEvent, SessionTrust, TransportError, message_envelope,
     },
 };
+use tokio::task::JoinSet;
 
 type TestResult<T = ()> = Result<T, Box<dyn StdError + Send + Sync>>;
 
 struct ConnectedPair {
-    _first_endpoint: Arc<FlowEndpoint>,
-    _second_endpoint: Arc<FlowEndpoint>,
+    first_endpoint: Arc<FlowEndpoint>,
+    second_endpoint: Arc<FlowEndpoint>,
     first: FlowConnection,
     second: FlowConnection,
 }
 
 impl ConnectedPair {
     async fn trusted(first_range: (u32, u32), second_range: (u32, u32)) -> TestResult<Self> {
-        Self::connect(first_range, second_range, false, &[]).await
+        Self::connect(
+            first_range,
+            second_range,
+            false,
+            &[],
+            EndpointLimits::default(),
+        )
+        .await
     }
 
     async fn pairing() -> TestResult<Self> {
-        Self::connect((1, 1), (1, 1), true, &[]).await
+        Self::connect((1, 1), (1, 1), true, &[], EndpointLimits::default()).await
     }
 
     async fn trusted_clipboard() -> TestResult<Self> {
-        Self::connect((1, 1), (1, 1), false, &[proto::Capability::ClipboardText]).await
+        Self::connect(
+            (1, 1),
+            (1, 1),
+            false,
+            &[proto::Capability::ClipboardText],
+            EndpointLimits::default(),
+        )
+        .await
+    }
+
+    async fn trusted_with_limits(limits: EndpointLimits) -> TestResult<Self> {
+        Self::connect((1, 1), (1, 1), false, &[], limits).await
     }
 
     async fn connect(
@@ -48,6 +67,7 @@ impl ConnectedPair {
         second_range: (u32, u32),
         pairing: bool,
         capabilities: &[proto::Capability],
+        limits: EndpointLimits,
     ) -> TestResult<Self> {
         let first_identity = MachineIdentity::generate()?;
         let second_identity = MachineIdentity::generate()?;
@@ -61,29 +81,44 @@ impl ConnectedPair {
         } else {
             PeerTrust::pinned([first_identity.public_key()])
         };
-        let first = Arc::new(FlowEndpoint::bind(
+        let first = Arc::new(FlowEndpoint::bind_with_limits(
             localhost(),
             first_identity.clone(),
             first_trust,
-            hello_with_capabilities(&first_identity, [1; 16], first_range, capabilities),
+            hello_with_capabilities(&first_identity, first_range, capabilities),
+            limits,
         )?);
-        let second = Arc::new(FlowEndpoint::bind(
+        let second = Arc::new(FlowEndpoint::bind_with_limits(
             localhost(),
             second_identity.clone(),
             second_trust,
-            hello_with_capabilities(&second_identity, [2; 16], second_range, capabilities),
+            hello_with_capabilities(&second_identity, second_range, capabilities),
+            limits,
         )?);
-        let second_acceptor = Arc::clone(&second);
-        let accept = tokio::spawn(async move { second_acceptor.accept().await });
-        let first_connection = first.connect(second.local_addr()?).await?;
-        let second_connection = accept.await??;
+        let (first_connection, second_connection) = dial(&first, &second).await?;
         Ok(Self {
-            _first_endpoint: first,
-            _second_endpoint: second,
+            first_endpoint: first,
+            second_endpoint: second,
             first: first_connection,
             second: second_connection,
         })
     }
+
+    /// Opens another connection between the same two endpoints.
+    async fn reconnect(&self) -> TestResult<(FlowConnection, FlowConnection)> {
+        dial(&self.first_endpoint, &self.second_endpoint).await
+    }
+}
+
+async fn dial(
+    first: &Arc<FlowEndpoint>,
+    second: &Arc<FlowEndpoint>,
+) -> TestResult<(FlowConnection, FlowConnection)> {
+    let second_acceptor = Arc::clone(second);
+    let accept = tokio::spawn(async move { second_acceptor.accept().await });
+    let first_connection = first.connect(second.local_addr()?).await?;
+    let second_connection = accept.await??;
+    Ok((first_connection, second_connection))
 }
 
 #[derive(Default)]
@@ -125,13 +160,13 @@ async fn version_disjoint_hello_is_rejected() -> TestResult {
         localhost(),
         first_identity.clone(),
         PeerTrust::pinned([second_identity.public_key()]),
-        hello(&first_identity, [1; 16], (1, 1)),
+        hello(&first_identity, (1, 1)),
     )?);
     let second = Arc::new(FlowEndpoint::bind(
         localhost(),
         second_identity.clone(),
         PeerTrust::pinned([first_identity.public_key()]),
-        hello(&second_identity, [2; 16], (2, 2)),
+        hello(&second_identity, (2, 2)),
     )?);
     let second_acceptor = Arc::clone(&second);
     let accepted = tokio::spawn(async move { second_acceptor.accept().await });
@@ -199,33 +234,20 @@ async fn malformed_pairing_request_is_answered_invalid() -> TestResult {
 #[tokio::test]
 async fn full_pairing_ceremony_agrees_on_sas_and_promotes_trust() -> TestResult {
     let pair = ConnectedPair::pairing().await?;
-    let first_nonce = SessionNonce::try_from(pair.second.peer_hello().session_nonce.as_slice())?;
-    let second_nonce = SessionNonce::try_from(pair.first.peer_hello().session_nonce.as_slice())?;
-    let mut first_session = PairingSession::new(
-        pair.second.peer_key(),
-        pair.first.peer_key(),
-        first_nonce,
-        second_nonce,
-    );
-    let mut second_session = PairingSession::new(
-        pair.first.peer_key(),
-        pair.second.peer_key(),
-        second_nonce,
-        first_nonce,
-    );
-    assert_eq!(first_session.sas_code(), second_session.sas_code());
-    assert!(first_session.sas_code().is_some());
+    let mut first_session = pair.first.pairing_session();
+    let mut second_session = pair.second.pairing_session();
 
-    let start = message_envelope(FrameKind::PairStart, &first_session.start()?)?;
+    let start = message_envelope(
+        FrameKind::PairStart,
+        &first_session.start(PairingNonce::random()?)?,
+    )?;
     let server_side = async {
         let RpcEvent::Request(request) = pair.second.accept_rpc().await? else {
             return Err("PairStart was rejected".into());
         };
-        request
-            .request()
-            .decode::<proto::PairStart>(openlogi_flow::frame::InboundRole::Request)
-            .map_err(|_| "PairStart payload was invalid")?;
-        let prompted = second_session.receive_start(Instant::now(), None)?;
+        let start = decode::<proto::PairStart>(request.request())?;
+        let prompted =
+            second_session.receive_start(&start, PairingNonce::random()?, Instant::now(), None)?;
         request
             .respond(message_envelope(FrameKind::PairPrompted, &prompted)?)
             .await?;
@@ -233,8 +255,29 @@ async fn full_pairing_ceremony_agrees_on_sas_and_promotes_trust() -> TestResult 
     };
     let (server_result, prompted) = tokio::join!(server_side, pair.first.call(start));
     server_result?;
-    let prompted = decode::<proto::PairPrompted>(&prompted?)?;
-    first_session.receive_prompted(&prompted, Instant::now())?;
+    let reveal = first_session
+        .receive_prompted(&decode::<proto::PairPrompted>(&prompted?)?, Instant::now())?;
+    assert_eq!(first_session.sas_code(), None);
+    assert_eq!(second_session.sas_code(), None);
+
+    let reveal = message_envelope(FrameKind::PairReveal, &reveal)?;
+    let server_side = async {
+        let RpcEvent::Request(request) = pair.second.accept_rpc().await? else {
+            return Err("PairReveal was rejected".into());
+        };
+        let reveal = decode::<proto::PairReveal>(request.request())?;
+        let revealed = second_session.receive_reveal(&reveal, Instant::now())?;
+        request
+            .respond(message_envelope(FrameKind::PairRevealed, &revealed)?)
+            .await?;
+        TestResult::Ok(())
+    };
+    let (server_result, revealed) = tokio::join!(server_side, pair.first.call(reveal));
+    server_result?;
+    assert_eq!(revealed?.kind, FrameKind::PairRevealed);
+    first_session.receive_revealed(Instant::now())?;
+    let code = first_session.sas_code().ok_or("initiator has no code")?;
+    assert_eq!(second_session.sas_code(), Some(code));
 
     let mut first_store = MemoryKeyStore::default();
     let mut second_store = MemoryKeyStore::default();
@@ -283,6 +326,216 @@ async fn full_pairing_ceremony_agrees_on_sas_and_promotes_trust() -> TestResult 
     assert_eq!(first_store.0, [pair.first.peer_key()]);
     assert_eq!(second_store.0, [pair.second.peer_key()]);
     Ok(())
+}
+
+#[tokio::test]
+async fn hello_nonce_is_fresh_on_every_connection() -> TestResult {
+    let pair = ConnectedPair::trusted((1, 1), (1, 1)).await?;
+    let (first_again, second_again) = pair.reconnect().await?;
+
+    let nonces = [
+        &pair.first.peer_hello().session_nonce,
+        &pair.second.peer_hello().session_nonce,
+        &first_again.peer_hello().session_nonce,
+        &second_again.peer_hello().session_nonce,
+    ];
+    for (index, nonce) in nonces.iter().enumerate() {
+        assert_eq!(nonce.len(), 16);
+        for other in &nonces[index + 1..] {
+            assert_ne!(nonce, other, "two connections reused a Hello nonce");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn bind_rejects_a_caller_supplied_session_nonce() -> TestResult {
+    let identity = MachineIdentity::generate()?;
+    let mut fixed_nonce = hello(&identity, (1, 1));
+    fixed_nonce.session_nonce = vec![7; 16];
+    assert!(matches!(
+        FlowEndpoint::bind(localhost(), identity, PeerTrust::pinned([]), fixed_nonce),
+        Err(TransportError::InvalidLocalHello(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn ceremony_from_an_earlier_connection_cannot_promote_a_new_one() -> TestResult {
+    let pair = ConnectedPair::pairing().await?;
+    let (first_session, second_session) = pair_in_memory(&pair.first, &pair.second)?;
+    assert_eq!(first_session.state(), PairingState::Paired);
+
+    let ConnectedPair {
+        first_endpoint,
+        second_endpoint,
+        first,
+        second,
+    } = pair;
+    drop((first, second));
+    let (first_again, second_again) = dial(&first_endpoint, &second_endpoint).await?;
+
+    assert!(matches!(
+        first_again.promote_after_pairing(&first_session),
+        Err(TransportError::PairingNotComplete)
+    ));
+    assert!(matches!(
+        second_again.promote_after_pairing(&second_session),
+        Err(TransportError::PairingNotComplete)
+    ));
+    assert_eq!(first_again.trust(), SessionTrust::Untrusted);
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_slot_is_claimed_only_by_completed_handshakes() -> TestResult {
+    let pairing_identity = MachineIdentity::generate()?;
+    let pairing_trust = PeerTrust::pairing([]);
+    let acceptor = Arc::new(FlowEndpoint::bind(
+        localhost(),
+        pairing_identity.clone(),
+        pairing_trust.clone(),
+        hello(&pairing_identity, (1, 1)),
+    )?);
+    let candidate = |range| -> TestResult<Arc<FlowEndpoint>> {
+        let identity = MachineIdentity::generate()?;
+        Ok(Arc::new(FlowEndpoint::bind(
+            localhost(),
+            identity.clone(),
+            PeerTrust::pairing([]),
+            hello(&identity, range),
+        )?))
+    };
+
+    // TLS succeeds but Hello is rejected: the dial must not keep the slot.
+    let stale = candidate((2, 2))?;
+    dial(&stale, &acceptor).await.unwrap_err();
+    assert_eq!(pairing_trust.pairing_candidate(), None);
+
+    let first = candidate((1, 1))?;
+    let (first_side, accepted) = dial(&first, &acceptor).await?;
+    assert_eq!(pairing_trust.pairing_candidate(), Some(first.public_key()));
+
+    // A second unknown peer is refused while the first one holds the slot.
+    let second = candidate((1, 1))?;
+    let refused = {
+        let acceptor = Arc::clone(&acceptor);
+        tokio::spawn(async move { acceptor.accept().await })
+    };
+    let _ = second.connect(acceptor.local_addr()?).await;
+    refused.await?.unwrap_err();
+    assert_eq!(pairing_trust.pairing_candidate(), Some(first.public_key()));
+
+    drop((first_side, accepted));
+    assert_eq!(pairing_trust.pairing_candidate(), None);
+    let (_second_side, _accepted) = dial(&second, &acceptor).await?;
+    assert_eq!(pairing_trust.pairing_candidate(), Some(second.public_key()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn rpc_stream_that_never_finishes_times_out() -> TestResult {
+    let pair = ConnectedPair::trusted_with_limits(EndpointLimits {
+        stream_read_timeout: Duration::from_millis(200),
+        ..EndpointLimits::default()
+    })
+    .await?;
+    let frame =
+        message_envelope(FrameKind::GetPeerInfo, &proto::GetPeerInfo::default())?.to_bytes()?;
+
+    // Half a header, then silence.
+    let (mut rpc_send, _rpc_receive) = pair.first.open_rpc_stream().await?;
+    rpc_send.write_all(&frame[..4]).await?;
+    let started = Instant::now();
+    assert!(matches!(
+        pair.second.accept_rpc().await,
+        Err(TransportError::StreamTimeout)
+    ));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    Ok(())
+}
+
+#[tokio::test]
+async fn select_loop_over_stream_accepts_loses_no_request() -> TestResult {
+    let pair = ConnectedPair::trusted((1, 1), (1, 1)).await?;
+    let request =
+        message_envelope(FrameKind::GetPeerInfo, &proto::GetPeerInfo::default())?.to_bytes()?;
+    let client = async {
+        // The request arrives in two parts with a notification in between, so
+        // a loop that read inside `select!` would drop the half-read request.
+        let (mut send, mut receive) = pair.first.open_rpc_stream().await?;
+        send.write_all(&request[..4]).await?;
+        pair.first
+            .notify(message_envelope(
+                FrameKind::PeerState,
+                &proto::PeerState::default(),
+            )?)
+            .await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        send.write_all(&request[4..]).await?;
+        send.finish()?;
+        TestResult::Ok(Envelope::read_from(&mut receive).await?)
+    };
+    let server = async {
+        let mut reads = JoinSet::new();
+        let (mut notified, mut answered) = (false, false);
+        while !(notified && answered) {
+            tokio::select! {
+                rpc = pair.second.accept_rpc_stream() => {
+                    reads.spawn(rpc?.read());
+                }
+                notification = pair.second.accept_notification_stream() => {
+                    let NotificationEvent::Notification(frame) = notification?.read().await? else {
+                        return Err("PeerState was dropped".into());
+                    };
+                    assert_eq!(frame.kind, FrameKind::PeerState);
+                    notified = true;
+                }
+                Some(read) = reads.join_next(), if !reads.is_empty() => {
+                    let RpcEvent::Request(request) = read?? else {
+                        return Err("GetPeerInfo was rejected".into());
+                    };
+                    request
+                        .respond(message_envelope(FrameKind::PeerInfo, &proto::PeerInfo::default())?)
+                        .await?;
+                    answered = true;
+                }
+            }
+        }
+        TestResult::Ok(())
+    };
+    let (server, response) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(server, client)
+    })
+    .await?;
+    server?;
+    assert_eq!(response?.kind, FrameKind::PeerInfo);
+    Ok(())
+}
+
+/// Runs a whole ceremony on two connections' state machines without I/O.
+fn pair_in_memory(
+    first: &FlowConnection,
+    second: &FlowConnection,
+) -> TestResult<(
+    openlogi_flow::pairing::PairingSession,
+    openlogi_flow::pairing::PairingSession,
+)> {
+    let now = Instant::now();
+    let mut initiator = first.pairing_session();
+    let mut responder = second.pairing_session();
+    let start = initiator.start(PairingNonce::random()?)?;
+    let prompted = responder.receive_start(&start, PairingNonce::random()?, now, None)?;
+    let reveal = initiator.receive_prompted(&prompted, now)?;
+    responder.receive_reveal(&reveal, now)?;
+    initiator.receive_revealed(now)?;
+    let (mut first_store, mut second_store) =
+        (MemoryKeyStore::default(), MemoryKeyStore::default());
+    initiator.confirm_local(now, &mut first_store)?;
+    responder.receive_confirm(now, &mut second_store)?;
+    responder.confirm_local(now, &mut second_store)?;
+    initiator.receive_confirm(now, &mut first_store)?;
+    Ok((initiator, responder))
 }
 
 #[tokio::test]
@@ -448,13 +701,13 @@ async fn assert_pin_failure(
         localhost(),
         client_identity.clone(),
         PeerTrust::pinned([server_pin]),
-        hello(&client_identity, [1; 16], (1, 1)),
+        hello(&client_identity, (1, 1)),
     )?);
     let server = Arc::new(FlowEndpoint::bind(
         localhost(),
         server_identity.clone(),
         PeerTrust::pinned([client_pin]),
-        hello(&server_identity, [2; 16], (1, 1)),
+        hello(&server_identity, (1, 1)),
     )?);
     let server_acceptor = Arc::clone(&server);
     let accepted = tokio::spawn(async move { server_acceptor.accept().await });
@@ -468,16 +721,11 @@ async fn assert_pin_failure(
     Ok(())
 }
 
-fn hello(
-    identity: &MachineIdentity,
-    nonce: [u8; 16],
-    (proto_min, proto_max): (u32, u32),
-) -> proto::Hello {
+fn hello(identity: &MachineIdentity, (proto_min, proto_max): (u32, u32)) -> proto::Hello {
     proto::Hello {
         proto_min,
         proto_max,
         public_key: identity.public_key().as_bytes().to_vec(),
-        session_nonce: nonce.to_vec(),
         machine_name: "test-peer".to_owned(),
         app_version: "test".to_owned(),
         ..Default::default()
@@ -486,13 +734,12 @@ fn hello(
 
 fn hello_with_capabilities(
     identity: &MachineIdentity,
-    nonce: [u8; 16],
     range: (u32, u32),
     capabilities: &[proto::Capability],
 ) -> proto::Hello {
     proto::Hello {
         capabilities: capabilities.iter().copied().map(Into::into).collect(),
-        ..hello(identity, nonce, range)
+        ..hello(identity, range)
     }
 }
 

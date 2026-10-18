@@ -33,6 +33,9 @@ use crate::{
 
 const INCOMING_QUEUE: usize = 4;
 const TRUST_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Inbound handshakes allowed to run at once; further dials are refused
+/// before TLS until one finishes or hits the endpoint's handshake deadline.
+const MAX_PENDING_HANDSHAKES: usize = 16;
 
 /// Churn-safe state of a configured peer session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -321,24 +324,34 @@ async fn accept_connections(
     routes: BTreeMap<PublicKey, mpsc::Sender<FlowConnection>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    // Each handshake runs in its own task, so a peer that stalls TLS or never
+    // sends Hello delays nobody else. Dropping the set on return aborts them.
+    let mut handshakes = JoinSet::new();
     loop {
         if *shutdown.borrow() {
             return;
         }
         tokio::select! {
-            accepted = endpoint.accept() => match accepted {
-                Ok(connection) => {
-                    let Some(route) = routes.get(&connection.peer_key()) else {
-                        connection.close();
-                        continue;
-                    };
-                    if let Err(error) = route.try_send(connection) {
-                        error.into_inner().close();
-                    }
+            incoming = endpoint.accept_incoming() => match incoming {
+                Ok(incoming) if handshakes.len() >= MAX_PENDING_HANDSHAKES => incoming.refuse(),
+                Ok(incoming) => {
+                    handshakes.spawn(incoming.establish());
                 }
                 Err(crate::transport::TransportError::EndpointClosed) => return,
                 Err(_) => {}
             },
+            Some(finished) = handshakes.join_next(), if !handshakes.is_empty() => {
+                let Ok(Ok(connection)) = finished else {
+                    continue;
+                };
+                let Some(route) = routes.get(&connection.peer_key()) else {
+                    connection.close();
+                    continue;
+                };
+                if let Err(error) = route.try_send(connection) {
+                    error.into_inner().close();
+                }
+            }
             _ = shutdown.changed() => return,
         }
     }
@@ -708,5 +721,73 @@ mod tests {
             invalid.validate(),
             Err(SessionManagerError::InvalidPolicy(_))
         ));
+    }
+
+    struct EmptyState;
+
+    impl TrustedStateProvider for EmptyState {
+        fn initial_state(&self, _peer_key: PublicKey) -> TrustedInitialState {
+            TrustedInitialState::default()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_inbound_handshake_does_not_block_a_configured_peer() {
+        use crate::transport::{
+            MachineIdentity, PeerTrust,
+            test_support::{hello, localhost, stalled_dial},
+        };
+
+        let managed_identity = MachineIdentity::generate().unwrap();
+        let staller_identity = MachineIdentity::generate().unwrap();
+        let peer_identity = MachineIdentity::generate().unwrap();
+        // Default limits: a stalled handshake would hold a serial acceptor for
+        // ten seconds, well past this test's three-second budget.
+        let managed = Arc::new(
+            FlowEndpoint::bind(
+                localhost(),
+                managed_identity.clone(),
+                PeerTrust::pinned([staller_identity.public_key(), peer_identity.public_key()]),
+                hello(&managed_identity),
+            )
+            .unwrap(),
+        );
+        let address = managed.local_addr().unwrap();
+        let sessions = SessionManager::start(
+            managed,
+            [PeerConfig {
+                public_key: peer_identity.public_key(),
+                sources: Vec::new(),
+            }],
+            Arc::new(EmptyState),
+            policy(),
+        )
+        .unwrap();
+        let managed_trust = PeerTrust::pinned([managed_identity.public_key()]);
+        let _staller = stalled_dial(&staller_identity, managed_trust.clone(), address).await;
+
+        let peer = FlowEndpoint::bind(
+            localhost(),
+            peer_identity.clone(),
+            managed_trust,
+            hello(&peer_identity),
+        )
+        .unwrap();
+        let _connection = tokio::time::timeout(Duration::from_secs(3), peer.connect(address))
+            .await
+            .expect("configured peer waited behind the stalled handshake")
+            .unwrap();
+        let mut state = sessions
+            .peer(peer_identity.public_key())
+            .unwrap()
+            .subscribe_state();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            state.wait_for(|state| *state == LinkState::Connected),
+        )
+        .await
+        .expect("session never became connected")
+        .unwrap();
+        sessions.shutdown().await;
     }
 }
