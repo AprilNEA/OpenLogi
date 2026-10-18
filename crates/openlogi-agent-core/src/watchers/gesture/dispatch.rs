@@ -134,7 +134,7 @@ impl InputDispatcher {
     /// Whether `session` still holds an admitted gesture press for `button`.
     #[cfg(test)]
     pub(super) fn holds_gesture_press(&self, session: &HidppSessionId, button: ButtonId) -> bool {
-        self.gesture_presses.get(session, button).is_some()
+        self.held_presses.get(session, button).is_some()
     }
 
     /// Cancel every input lifecycle retained for one capture session.

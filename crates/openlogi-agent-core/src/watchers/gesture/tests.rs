@@ -792,6 +792,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         registry: openlogi_hid::ChannelRegistry::default(),
         receiver_access: ReceiverAccess::default(),
         device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
     };
     let mut actions =
         crate::runtime::ActionRuntime::new(Arc::default(), device_access, ring).unwrap();
