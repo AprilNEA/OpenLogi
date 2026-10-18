@@ -565,6 +565,18 @@ impl IncomingRpc {
         Ok(())
     }
 
+    /// Sends the `ClipboardData` head of a bulk response and returns the
+    /// writer for the rest, for a payload produced while it is sent, such as
+    /// a file read from disk.
+    pub async fn start_bulk(mut self, head: Envelope) -> Result<BulkWriter, TransportError> {
+        if !is_bulk_request(self.request.kind) {
+            return Err(TransportError::InvalidRequestKind(self.request.kind));
+        }
+        validate_sequence_frame(&head, FrameKind::ClipboardData)?;
+        head.write_to(&mut self.send).await?;
+        Ok(BulkWriter { send: self.send })
+    }
+
     /// Sends `ClipboardData`, zero or more `Chunk`s, and one `ChunkEnd`.
     pub async fn respond_bulk(
         mut self,
@@ -582,6 +594,30 @@ impl IncomingRpc {
             chunk.write_to(&mut self.send).await?;
         }
         validate_sequence_frame(&end, FrameKind::ChunkEnd)?;
+        end.write_to(&mut self.send).await?;
+        self.send.finish()?;
+        Ok(())
+    }
+}
+
+/// A bulk response after its head: `Chunk`s, then one `ChunkEnd`. Dropping it
+/// unfinished resets the stream, which fails the peer's fetch.
+#[derive(Debug)]
+pub struct BulkWriter {
+    send: SendStream,
+}
+
+impl BulkWriter {
+    /// Sends one `Chunk`.
+    pub async fn chunk(&mut self, chunk: &Envelope) -> Result<(), TransportError> {
+        validate_sequence_frame(chunk, FrameKind::Chunk)?;
+        chunk.write_to(&mut self.send).await?;
+        Ok(())
+    }
+
+    /// Sends the terminal `ChunkEnd` and finishes the stream.
+    pub async fn finish(mut self, end: &Envelope) -> Result<(), TransportError> {
+        validate_sequence_frame(end, FrameKind::ChunkEnd)?;
         end.write_to(&mut self.send).await?;
         self.send.finish()?;
         Ok(())
