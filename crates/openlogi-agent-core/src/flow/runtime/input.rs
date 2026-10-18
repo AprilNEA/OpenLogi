@@ -92,6 +92,9 @@ pub(crate) struct FlowInput {
     /// detector latches so that placement cannot read as a crossing.
     latch_pending: AtomicBool,
     arrival: Arrival,
+    /// How many handoffs have placed the pointer here: work a departure left
+    /// behind stops once this moves on, as the devices came back.
+    arrivals: AtomicU64,
     keyboard: KeyboardFollow,
     /// Wakes the task that sends a lingering keyboard on.
     pub(super) keyboard_stayed: Notify,
@@ -140,6 +143,7 @@ impl FlowInput {
             hold_until_ms: AtomicU64::new(0),
             latch_pending: AtomicBool::new(false),
             arrival: Arrival::default(),
+            arrivals: AtomicU64::new(0),
             keyboard: KeyboardFollow::default(),
             keyboard_stayed: Notify::new(),
             burst: Notify::new(),
@@ -184,6 +188,7 @@ impl FlowInput {
         // Nothing of ours is leaving: a hold from this machine's own last
         // departure must not freeze the pointer that is arriving.
         self.release();
+        self.arrivals.fetch_add(1, Ordering::AcqRel);
         self.keyboard.handed_off.store(false, Ordering::Release);
         self.keyboard.suppress_until_ms.store(0, Ordering::Release);
         let arrival = &self.arrival;
@@ -202,6 +207,12 @@ impl FlowInput {
     /// since: a keystroke here then means the keyboard stayed behind.
     pub(super) fn keyboard_handed_off(&self) -> bool {
         self.keyboard.handed_off.load(Ordering::Acquire)
+    }
+
+    /// The arrival count; compare a later read to tell whether a handoff
+    /// brought the devices back in between.
+    pub(super) fn arrivals(&self) -> u64 {
+        self.arrivals.load(Ordering::Acquire)
     }
 
     pub(super) fn take_latch(&self) -> bool {

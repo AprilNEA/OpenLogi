@@ -122,7 +122,7 @@ async fn run_outgoing(
     // Queued, not awaited: the text reaches the peer while the devices move.
     state.clipboard.offer(peer.public_key, &connection);
     match state.switch_devices(&targets).await {
-        Ok(true) => state.set_handed_off_to(&peer.name),
+        Ok(true) => state.set_handed_off_to(&peer.name, &targets),
         Ok(false) => {
             state.handoffs.remove_outgoing(transfer_id).await;
             state

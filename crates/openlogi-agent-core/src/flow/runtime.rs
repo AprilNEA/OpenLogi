@@ -540,7 +540,7 @@ impl GenerationState {
                 .map(|(target, _)| target)
                 .collect();
             if !unconfirmed.is_empty() {
-                tokio::spawn(confirm_departures(unconfirmed));
+                tokio::spawn(confirm_departures(Arc::clone(&self.input), unconfirmed));
             }
         }
         self.note_presence(
@@ -603,17 +603,27 @@ impl GenerationState {
             .collect()
     }
 
-    /// Record the peer this machine just sent the devices to.
-    pub(super) fn set_handed_off_to(&self, peer: &str) {
+    /// Record the peer this machine just sent `devices` to.
+    pub(super) fn set_handed_off_to(&self, peer: &str, devices: &[OutgoingDevice]) {
         if let Ok(mut handed_off_to) = self.handed_off_to.lock() {
             *handed_off_to = Some(peer.to_owned());
         }
         self.input.departed();
+        if devices.iter().all(|device| device.pointing) {
+            // Every keyboard stayed: a modifier down now is held on purpose.
+            return;
+        }
         // A keyboard that left with a modifier down (Ctrl held to cross, say)
         // never sends its release here. Give a receiver that releases keys on
         // disconnect time to do so first.
-        tokio::spawn(async {
+        let input = Arc::clone(&self.input);
+        let arrivals = input.arrivals();
+        tokio::spawn(async move {
             tokio::time::sleep(MODIFIER_RELEASE_DELAY).await;
+            if input.arrivals() != arrivals {
+                // The keyboard came back: what it holds down now is held.
+                return;
+            }
             let released = openlogi_inject::release_stuck_modifiers();
             if released > 0 {
                 info!(
@@ -860,13 +870,22 @@ pub(super) fn warp_entry(entry: &proto::EntryPoint) {
 /// `setCurrentHost` is fire-and-forget, and a keyboard idling in its
 /// power-saving state can miss it: the mouse leaves and the keyboard silently
 /// stays. A device that left, or sleeps, no longer answers on this receiver;
-/// one that answers did not leave, so it is told again.
-async fn confirm_departures(targets: Vec<(Arc<HostSwitchTarget>, u8)>) {
+/// one that answers did not leave, so it is told again — unless a handoff
+/// brought the devices back meanwhile, when answering is where it belongs.
+async fn confirm_departures(input: Arc<FlowInput>, targets: Vec<(Arc<HostSwitchTarget>, u8)>) {
+    let arrivals = input.arrivals();
     for (target, host) in targets {
         for attempt in 1..=DEPARTURE_RETRIES {
             tokio::time::sleep(DEPARTURE_CHECK_DELAY).await;
+            if input.arrivals() != arrivals {
+                return;
+            }
             if !target.answers(DEPARTURE_CHECK_TIMEOUT).await {
                 break;
+            }
+            // Checked again: the devices may have come back while it answered.
+            if input.arrivals() != arrivals {
+                return;
             }
             warn!(
                 attempt,
