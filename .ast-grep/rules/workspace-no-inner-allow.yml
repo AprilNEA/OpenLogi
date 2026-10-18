@@ -12,8 +12,29 @@ note: >-
   `#[expect(<lint>, reason = "…")]`. When `expect` cannot work (the two cases in
   rust.md), use an outer `#[allow(<lint>, reason = "…")]` with
   `#[expect(clippy::allow_attributes, reason = "see above")]`.
+# Structural, not textual: an `allow(` inside a string or a comment is no
+# suppression, and a comment between `allow` and `(` does not hide one.
+# `#![expect(…)]` reports itself when stale, so it stays legal.
 rule:
   kind: inner_attribute_item
-  # `#![allow(…)]` and `#![cfg_attr(<pred>, …, allow(…))]`. `#![expect(…)]`
-  # reports itself when stale, so it stays legal.
-  regex: '^#!\[\s*(?:allow|cfg_attr\s*\([\s\S]*\ballow)\s*\('
+  has:
+    kind: attribute
+    any:
+      # `#![allow(…)]`: the attribute's own path is `allow`.
+      - has:
+          kind: identifier
+          regex: ^allow$
+      # `#![cfg_attr(<pred>, …, allow(…))]`, nested `cfg_attr` included. A
+      # string is a `string_literal` with no identifiers in it, and the anchors
+      # keep `clippy::allow_attributes` out.
+      - all:
+          - has:
+              kind: identifier
+              regex: ^cfg_attr$
+          - has:
+              field: arguments
+              kind: token_tree
+              has:
+                kind: identifier
+                regex: ^allow$
+                stopBy: end
