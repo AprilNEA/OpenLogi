@@ -16,7 +16,9 @@ use tokio::sync::watch;
 
 use super::{Binding, FlowRuntime, FlowStart, hello};
 use crate::flow::devices::InventoryDevice;
-use crate::flow::test_support::{KEYBOARD, config_with_key, configured, record, unit_identity};
+use crate::flow::test_support::{
+    KEYBOARD, config_with_key, configured, no_hardware, record, unit_identity,
+};
 use crate::observable::ObservableState;
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -102,11 +104,13 @@ async fn a_peer_hands_a_keyboard_to_this_host() {
     );
     let (inventory_tx, inventory_rx) = watch::channel(inventory(false));
     let observable = Arc::new(ObservableState::new("test".to_owned()));
+    let (_device_io, hardware) = no_hardware();
     let runtime = FlowRuntime::start_on(
         FlowStart {
             config: Arc::new(config),
             inventory: inventory_rx,
             observable: Arc::clone(&observable),
+            hardware,
         },
         Binding {
             identity: local,

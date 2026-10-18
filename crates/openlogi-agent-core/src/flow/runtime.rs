@@ -9,6 +9,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use openlogi_core::config::{FlowConfig, FlowPeer};
 use openlogi_flow::discovery::{
@@ -37,10 +38,13 @@ use crate::observable::ObservableState;
 
 mod actor;
 mod link;
+mod sender;
 #[cfg(test)]
 mod tests;
 
-use actor::{Actor, ActorPeer};
+use actor::{Actor, ActorInputs, ActorPeer};
+pub(crate) use sender::FlowHardware;
+use sender::SendReport;
 
 const PROTOCOL_MIN: u32 = 1;
 const PROTOCOL_MAX: u32 = 1;
@@ -60,6 +64,11 @@ enum Event {
     Request { peer: PublicKey, rpc: IncomingRpc },
     /// A notification the peer sent.
     Notification { peer: PublicKey, envelope: Envelope },
+    /// An outgoing transfer ended.
+    Sent {
+        transfer_id: u64,
+        report: SendReport,
+    },
 }
 
 /// What a generation needs from the agent.
@@ -70,6 +79,8 @@ pub(crate) struct FlowStart {
     pub(crate) inventory: watch::Receiver<Arc<[InventoryDevice]>>,
     /// Where the generation publishes its peer status.
     pub(crate) observable: Arc<ObservableState>,
+    /// The device access outgoing transfers use.
+    pub(crate) hardware: FlowHardware,
 }
 
 /// Why a generation could not start.
@@ -145,6 +156,7 @@ impl FlowRuntime {
             config,
             inventory,
             observable,
+            hardware,
         } = start;
         let Binding {
             identity,
@@ -185,16 +197,20 @@ impl FlowRuntime {
         }
         // The actor publishes the initial state before any session can
         // become trusted and read it.
-        let actor = Actor::new(
+        let mut actor = Actor::new(
             Arc::clone(&config),
             peers,
             inventory,
             state_tx,
             pointer,
             observable,
-            events_rx,
-            crossings_rx,
-            stop_rx.clone(),
+            hardware,
+            ActorInputs {
+                events: events_rx,
+                events_tx: events_tx.clone(),
+                crossings: crossings_rx,
+                stop: stop_rx.clone(),
+            },
         );
 
         let sessions = SessionManager::start(
@@ -208,6 +224,7 @@ impl FlowRuntime {
             SessionPolicy::default(),
         )?;
 
+        actor.attach(&sessions);
         let mut tasks = Vec::with_capacity(writers.len() * 3);
         for (key, frames) in writers {
             let Some(handle) = sessions.peer(key).cloned() else {
@@ -275,6 +292,15 @@ impl FlowRuntime {
         }
         info!("Flow runtime stopped");
     }
+}
+
+/// Milliseconds since the Unix epoch, or zero before it.
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 /// Where the session looks for `peer`: mDNS when available, then its manual

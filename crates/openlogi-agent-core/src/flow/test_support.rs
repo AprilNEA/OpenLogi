@@ -1,6 +1,7 @@
 //! Builders shared by the Flow unit tests.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use openlogi_core::config::{
     FlowConfig, FlowConfigParts, FlowDevice, FlowHostSlot, FlowPeer, FlowPeerName, FlowPublicKey,
@@ -9,9 +10,12 @@ use openlogi_core::device::DeviceKind;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_flow::generated as proto;
 use openlogi_flow::identity::CanonicalDeviceIdentifier;
-use openlogi_hid::DeviceRoute;
+use openlogi_hid::replay::{ReplayBackend, ReplayTopology};
+use openlogi_hid::{ChannelPool, DeviceIoSignal, DeviceRoute, device_io_channel};
 
 use super::devices::InventoryDevice;
+use super::runtime::FlowHardware;
+use crate::receiver_access::ReceiverAccess;
 
 /// A mouse with unit id `0x0a`.
 pub(super) const MOUSE: &str = "unit:0000000a";
@@ -83,4 +87,21 @@ pub(super) fn unit_identity(unit: u8) -> proto::DeviceIdentity {
         ids: vec![CanonicalDeviceIdentifier::unit_id(u32::from(unit)).into()],
         ..Default::default()
     }
+}
+
+/// Device access with no device behind it, and the signal that controls its
+/// I/O gate. The gate starts open.
+pub(super) fn no_hardware() -> (DeviceIoSignal, FlowHardware) {
+    let topology = ReplayTopology {
+        nodes: Vec::new(),
+        channels: Vec::new(),
+    };
+    let backend = ReplayBackend::new(topology, Vec::new()).expect("an empty topology is valid");
+    let (signal, device_io) = device_io_channel();
+    let hardware = FlowHardware {
+        channel_pool: ChannelPool::with_backend(Arc::new(backend)),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+    };
+    (signal, hardware)
 }
