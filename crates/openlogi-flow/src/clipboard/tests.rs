@@ -282,9 +282,11 @@ fn a_file_list_is_accepted_only_when_every_file_can_be_created() {
         entry("photos/c.jpg", 7),
     ]))
     .unwrap();
-    assert_eq!(listed.len(), 3);
-    assert_eq!(listed[1].relative_path(), "photos/b.jpg");
-    assert_eq!(listed[2].size_bytes(), 7);
+    let files = listed.files();
+    assert_eq!(files.len(), 3);
+    assert_eq!(files[1].relative_path(), "photos/b.jpg");
+    assert_eq!(files[2].size_bytes(), 7);
+    assert!(listed.folders().is_empty());
 
     for (entries, why) in [
         (Vec::new(), "an empty list"),
@@ -315,11 +317,52 @@ fn a_file_list_is_accepted_only_when_every_file_can_be_created() {
 }
 
 #[test]
+fn empty_folders_travel_with_the_files() {
+    let offer = FilesOffer::with_folders(
+        1,
+        vec![offered("photos/a.jpg", 3)],
+        vec!["photos/empty".to_owned(), "drafts".to_owned()],
+    )
+    .unwrap();
+    let only_files = FilesOffer::new(1, vec![offered("photos/a.jpg", 3)]).unwrap();
+    assert_ne!(
+        offer.digest(),
+        only_files.digest(),
+        "a copy with an empty folder is not the same copy"
+    );
+    FilesOffer::with_folders(1, Vec::new(), vec!["empty".to_owned()])
+        .expect("an empty folder alone is a copy");
+    assert_eq!(
+        FilesOffer::with_folders(
+            1,
+            vec![offered("photos/a.jpg", 3)],
+            vec!["photos".to_owned()]
+        )
+        .unwrap_err(),
+        OfferError::UnsafePath,
+        "a folder listed empty holds a file"
+    );
+
+    let listed = validate_file_list(proto::FileList {
+        files: vec![entry("photos/a.jpg", 3)],
+        folders: vec!["photos/empty".to_owned()],
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(listed.folders()[0].relative_path(), "photos/empty");
+    validate_file_list(proto::FileList {
+        folders: vec!["../escape".to_owned()],
+        ..Default::default()
+    })
+    .expect_err("an escaping folder");
+}
+
+#[test]
 fn debug_output_never_carries_file_names() {
     let file = offered("secret-plans.docx", 10);
     let offer = FilesOffer::new(2, vec![file.clone()]).unwrap();
     let listed = validate_file_list(list_of(vec![entry("secret-plans.docx", 10)])).unwrap();
-    let printed = format!("{file:?} {offer:?} {:?}", listed[0]);
+    let printed = format!("{file:?} {offer:?} {listed:?}");
     assert!(!printed.contains("secret"));
     assert!(printed.contains("size_bytes: 10"));
 }

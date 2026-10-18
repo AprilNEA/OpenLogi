@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openlogi_flow::clipboard::{
-    FetchError, ListedFile, MAX_FILES, MAX_FILES_BYTES, OfferedFile, fetch_file,
-    is_safe_relative_path,
+    FetchError, FileListing, ListedFile, ListedFolder, MAX_FILES, MAX_FILES_BYTES, OfferedFile,
+    fetch_file, is_safe_relative_path,
 };
 use openlogi_flow::transport::FlowConnection;
 use tracing::debug;
@@ -34,7 +34,8 @@ const STALL: Duration = Duration::from_secs(10);
 /// Why the copied files cannot be offered.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum CollectError {
-    /// More than [`MAX_FILES`] files or [`MAX_FILES_BYTES`] bytes.
+    /// More than [`MAX_FILES`] files and empty folders, or [`MAX_FILES_BYTES`]
+    /// bytes.
     #[error("the files exceed the sync limit of {MAX_FILES} files and {MAX_FILES_BYTES} bytes")]
     TooLarge,
     /// A name is not Unicode, or another computer could not create it.
@@ -45,10 +46,20 @@ pub(super) enum CollectError {
     Io(#[from] io::Error),
 }
 
+/// What was copied, as clipboard sync offers it.
+#[derive(Clone, Debug, Default)]
+pub(super) struct CopiedFiles {
+    pub(super) files: Vec<OfferedFile>,
+    /// The copied folders that hold no file, `/`-separated: the files' paths
+    /// imply the others.
+    pub(super) folders: Vec<String>,
+}
+
 /// The files under `roots` — the copied files and folders, in clipboard
-/// order — as offered files. Folders are walked in name order, and links are
-/// skipped, so nothing outside what was copied is reached.
-pub(super) fn collect(roots: &[PathBuf]) -> Result<Vec<OfferedFile>, CollectError> {
+/// order — as offered files, and the folders among them that hold none.
+/// Folders are walked in name order, and links are skipped, so nothing
+/// outside what was copied is reached.
+pub(super) fn collect(roots: &[PathBuf]) -> Result<CopiedFiles, CollectError> {
     let mut walk = Walk::default();
     let mut taken = HashSet::new();
     for root in roots {
@@ -64,17 +75,29 @@ pub(super) fn collect(roots: &[PathBuf]) -> Result<Vec<OfferedFile>, CollectErro
             walk.file(root, name, &metadata)?;
         }
     }
-    Ok(walk.files)
+    Ok(walk.copied)
 }
 
 #[derive(Default)]
 struct Walk {
-    files: Vec<OfferedFile>,
+    copied: CopiedFiles,
     bytes: u64,
 }
 
 impl Walk {
+    /// Whether one more file or empty folder at `relative_path` can go.
+    fn admit(&self, relative_path: &str) -> Result<(), CollectError> {
+        if self.copied.files.len() + self.copied.folders.len() == MAX_FILES {
+            return Err(CollectError::TooLarge);
+        }
+        if !is_safe_relative_path(relative_path) {
+            return Err(CollectError::Name);
+        }
+        Ok(())
+    }
+
     fn folder(&mut self, folder: &Path, relative: &str) -> Result<(), CollectError> {
+        let before = (self.copied.files.len(), self.copied.folders.len());
         let mut entries = fs::read_dir(folder)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(fs::DirEntry::file_name);
         for entry in entries {
@@ -93,6 +116,11 @@ impl Walk {
                 self.file(&entry.path(), path, &entry.metadata()?)?;
             }
         }
+        if (self.copied.files.len(), self.copied.folders.len()) == before {
+            // Nothing under it was taken, so no file path implies it.
+            self.admit(relative)?;
+            self.copied.folders.push(relative.to_owned());
+        }
         Ok(())
     }
 
@@ -102,18 +130,13 @@ impl Walk {
         relative_path: String,
         metadata: &fs::Metadata,
     ) -> Result<(), CollectError> {
-        if self.files.len() == MAX_FILES {
-            return Err(CollectError::TooLarge);
-        }
+        self.admit(&relative_path)?;
         self.bytes = self
             .bytes
             .checked_add(metadata.len())
             .filter(|bytes| *bytes <= MAX_FILES_BYTES)
             .ok_or(CollectError::TooLarge)?;
-        if !is_safe_relative_path(&relative_path) {
-            return Err(CollectError::Name);
-        }
-        self.files.push(OfferedFile {
+        self.copied.files.push(OfferedFile {
             relative_path,
             size_bytes: metadata.len(),
             modified_at_ms: modified_ms(metadata),
@@ -151,28 +174,44 @@ fn modified_ms(metadata: &fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-/// Fetches every file of `listed` into a new transfer folder under `root`,
-/// keeping their paths and modification times. `still_wanted` is asked as
-/// the files come in; on any failure the folder is removed.
+/// Fetches every file of `listing` into a new transfer folder under `root`,
+/// keeping their paths and modification times, and makes its empty folders.
+/// `still_wanted` is asked as the files come in; on any failure the folder
+/// is removed.
 pub(super) async fn receive(
     connection: &FlowConnection,
     sequence: u64,
-    listed: &[ListedFile],
+    listing: &FileListing,
     root: &Path,
     still_wanted: &impl Fn() -> bool,
 ) -> Result<ReceivedFiles, FetchError> {
+    let listed = listing.files();
+    let folders: Vec<&str> = listing
+        .folders()
+        .iter()
+        .map(ListedFolder::relative_path)
+        .collect();
     let folder = new_folder(root).await.map_err(FetchError::Write)?;
-    if let Err(error) = receive_into(connection, sequence, listed, &folder, still_wanted).await {
+    if let Err(error) = receive_into(
+        connection,
+        sequence,
+        listed,
+        &folders,
+        &folder,
+        still_wanted,
+    )
+    .await
+    {
         discard(&folder);
         return Err(error);
     }
     let mut top_level: Vec<PathBuf> = Vec::new();
-    for file in listed {
-        let first = file
-            .relative_path()
-            .split('/')
-            .next()
-            .unwrap_or_else(|| file.relative_path());
+    for relative_path in listed
+        .iter()
+        .map(ListedFile::relative_path)
+        .chain(folders.iter().copied())
+    {
+        let first = relative_path.split('/').next().unwrap_or(relative_path);
         let path = folder.join(first);
         if !top_level.contains(&path) {
             top_level.push(path);
@@ -181,15 +220,18 @@ pub(super) async fn receive(
     Ok(ReceivedFiles {
         top_level,
         total_bytes: listed.iter().map(ListedFile::size_bytes).sum(),
-        offered: listed
-            .iter()
-            .map(|file| OfferedFile {
-                relative_path: file.relative_path().to_owned(),
-                size_bytes: file.size_bytes(),
-                modified_at_ms: file.modified_at_ms(),
-                source: local_path(&folder, file),
-            })
-            .collect(),
+        copied: CopiedFiles {
+            files: listed
+                .iter()
+                .map(|file| OfferedFile {
+                    relative_path: file.relative_path().to_owned(),
+                    size_bytes: file.size_bytes(),
+                    modified_at_ms: file.modified_at_ms(),
+                    source: local_path(&folder, file.relative_path()),
+                })
+                .collect(),
+            folders: folders.iter().map(|&path| path.to_owned()).collect(),
+        },
         folder,
     })
 }
@@ -198,12 +240,18 @@ async fn receive_into(
     connection: &FlowConnection,
     sequence: u64,
     listed: &[ListedFile],
+    folders: &[&str],
     folder: &Path,
     still_wanted: &impl Fn() -> bool,
 ) -> Result<(), FetchError> {
+    for relative_path in folders {
+        tokio::fs::create_dir_all(local_path(folder, relative_path))
+            .await
+            .map_err(FetchError::Write)?;
+    }
     for (index, file) in listed.iter().enumerate() {
         let index = u32::try_from(index).map_err(|_| FetchError::Invalid("too many files"))?;
-        let path = local_path(folder, file);
+        let path = local_path(folder, file.relative_path());
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -234,10 +282,10 @@ async fn receive_into(
     Ok(())
 }
 
-/// Where `file` goes under `folder`. Its path passed
+/// Where `relative_path` goes under `folder`. It passed
 /// [`is_safe_relative_path`], so every segment is a plain name.
-fn local_path(folder: &Path, file: &ListedFile) -> PathBuf {
-    file.relative_path()
+fn local_path(folder: &Path, relative_path: &str) -> PathBuf {
+    relative_path
         .split('/')
         .fold(folder.to_path_buf(), |path, segment| path.join(segment))
 }
@@ -327,8 +375,16 @@ mod tests {
         write(&root.join("photos/2024/a.jpg"), b"a");
         write(&root.join("photos/a.png"), b"");
         fs::create_dir_all(root.join("photos/empty")).unwrap();
+        fs::create_dir_all(root.join("drafts")).unwrap();
 
-        let files = collect(&[root.join("photos"), root.join("notes.txt")]).unwrap();
+        let copied = collect(&[
+            root.join("photos"),
+            root.join("notes.txt"),
+            root.join("drafts"),
+        ])
+        .unwrap();
+        assert_eq!(copied.folders, ["photos/empty", "drafts"]);
+        let files = copied.files;
         assert_eq!(
             relative_paths(&files),
             [
@@ -352,7 +408,7 @@ mod tests {
         write(&second.path().join("data/x"), b"x");
         write(&first.path().join("data/y"), b"y");
 
-        let files = collect(&[
+        let copied = collect(&[
             first.path().join("report.txt"),
             second.path().join("Report.txt"),
             second.path().join("data"),
@@ -360,7 +416,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(
-            relative_paths(&files),
+            relative_paths(&copied.files),
             ["report.txt", "Report (2).txt", "data/x", "data (2)/y"]
         );
     }

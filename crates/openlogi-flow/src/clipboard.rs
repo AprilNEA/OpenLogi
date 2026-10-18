@@ -130,7 +130,8 @@ pub enum OfferError {
     /// There are no files to place on a peer's clipboard.
     #[error("no clipboard files")]
     NoFiles,
-    /// More than [`MAX_FILES`] files, or more than [`MAX_FILES_BYTES`] bytes.
+    /// More than [`MAX_FILES`] files and empty folders, or more than
+    /// [`MAX_FILES_BYTES`] bytes.
     #[error(
         "clipboard files exceed the sync limit of {MAX_FILES} files and {MAX_FILES_BYTES} bytes"
     )]
@@ -241,13 +242,29 @@ impl FilesOffer {
     /// Wraps the files of clipboard generation `sequence`, in the order a
     /// peer fetches them by index.
     pub fn new(sequence: u64, files: Vec<OfferedFile>) -> Result<Self, OfferError> {
-        if files.is_empty() {
+        Self::with_folders(sequence, files, Vec::new())
+    }
+
+    /// Wraps the files of clipboard generation `sequence`, in the order a
+    /// peer fetches them by index, and the copied `folders` that hold no
+    /// file, `/`-separated like the files' paths.
+    pub fn with_folders(
+        sequence: u64,
+        files: Vec<OfferedFile>,
+        folders: Vec<String>,
+    ) -> Result<Self, OfferError> {
+        if files.is_empty() && folders.is_empty() {
             return Err(OfferError::NoFiles);
         }
         let total_bytes = total_size(files.iter().map(|file| file.size_bytes))
-            .filter(|_| files.len() <= MAX_FILES)
+            .filter(|_| files.len() + folders.len() <= MAX_FILES)
             .ok_or(OfferError::FilesTooLarge)?;
-        if !paths_can_coexist(files.iter().map(|file| file.relative_path.as_str())) {
+        if !paths_can_coexist(
+            files
+                .iter()
+                .map(|file| file.relative_path.as_str())
+                .chain(folders.iter().map(String::as_str)),
+        ) {
             return Err(OfferError::UnsafePath);
         }
         let list = proto::FileList {
@@ -260,6 +277,7 @@ impl FilesOffer {
                     ..Default::default()
                 })
                 .collect(),
+            folders,
             ..Default::default()
         }
         .try_encode_to_vec()
@@ -476,6 +494,49 @@ impl AnnouncedFiles {
     }
 }
 
+/// A peer's file list, checked: its files and the folders that hold none,
+/// all safe to create side by side under a folder of this machine's choosing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileListing {
+    files: Vec<ListedFile>,
+    folders: Vec<ListedFolder>,
+}
+
+impl FileListing {
+    /// The files, in the order a fetch names them by index.
+    #[must_use]
+    pub fn files(&self) -> &[ListedFile] {
+        &self.files
+    }
+
+    /// The folders that hold no file.
+    #[must_use]
+    pub fn folders(&self) -> &[ListedFolder] {
+        &self.folders
+    }
+}
+
+/// A folder of a peer's file list that holds no file.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ListedFolder(String);
+
+impl ListedFolder {
+    /// Where the folder goes, `/`-separated; it passed
+    /// [`is_safe_relative_path`].
+    #[must_use]
+    pub fn relative_path(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ListedFolder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ListedFolder")
+            .finish_non_exhaustive()
+    }
+}
+
 /// One file of a peer's file list, checked to be safe to create under a
 /// folder of this machine's choosing.
 #[derive(Clone, Eq, PartialEq)]
@@ -561,7 +622,7 @@ pub async fn fetch_text(
 pub async fn fetch_file_list(
     connection: &FlowConnection,
     announced: &AnnouncedFiles,
-) -> Result<Vec<ListedFile>, FetchError> {
+) -> Result<FileListing, FetchError> {
     let bytes = fetch_payload(
         connection,
         announced.sequence,
@@ -745,27 +806,35 @@ fn check_end_digest(
 }
 
 /// A peer's file list as this machine accepts it, or why not.
-fn validate_file_list(list: proto::FileList) -> Result<Vec<ListedFile>, &'static str> {
-    if list.files.is_empty() {
+fn validate_file_list(list: proto::FileList) -> Result<FileListing, &'static str> {
+    if list.files.is_empty() && list.folders.is_empty() {
         return Err("the file list is empty");
     }
-    if list.files.len() > MAX_FILES
+    if list.files.len() + list.folders.len() > MAX_FILES
         || total_size(list.files.iter().map(|file| file.size_bytes)).is_none()
     {
         return Err("the files exceed the sync limit");
     }
-    if !paths_can_coexist(list.files.iter().map(|file| file.relative_path.as_str())) {
+    if !paths_can_coexist(
+        list.files
+            .iter()
+            .map(|file| file.relative_path.as_str())
+            .chain(list.folders.iter().map(String::as_str)),
+    ) {
         return Err("the file list names an unsafe or colliding path");
     }
-    Ok(list
-        .files
-        .into_iter()
-        .map(|file| ListedFile {
-            relative_path: file.relative_path,
-            size_bytes: file.size_bytes,
-            modified_at_ms: file.modified_at_ms,
-        })
-        .collect())
+    Ok(FileListing {
+        files: list
+            .files
+            .into_iter()
+            .map(|file| ListedFile {
+                relative_path: file.relative_path,
+                size_bytes: file.size_bytes,
+                modified_at_ms: file.modified_at_ms,
+            })
+            .collect(),
+        folders: list.folders.into_iter().map(ListedFolder).collect(),
+    })
 }
 
 /// The sum of `sizes`, when it is within [`MAX_FILES_BYTES`].

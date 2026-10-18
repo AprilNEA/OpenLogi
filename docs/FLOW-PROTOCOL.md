@@ -225,14 +225,17 @@ clipboard, ahead of the keyboard that is arriving to paste them.
   own download directory.
 - OpenLogi offers the files a file manager copied (Windows `CF_HDROP`):
   copied folders are walked in name order, links are skipped, and at most
-  1000 files and 1 GiB go in one generation; more is not offered at all. It
+  1000 files and empty folders and 1 GiB go in one generation; more is not
+  offered at all. `FileList.folders` names the copied folders that hold no
+  file, so they are recreated too; a folder holding a file is implied by it. It
   rejects a list with a path another platform could not create (a reserved
   device name such as `CON`, a character such as `:`, a trailing dot) or two
   paths that collide ignoring case. Each transfer lands in a folder of its
   own under the data directory, keeping modification times, and the received
   files go on the clipboard as a copy. The `FileList` digest covers paths,
-  sizes and modification times, so a machine whose clipboard already holds
-  the same files skips the fetch, and files never bounce back. A served file
+  sizes and modification times, not contents, so a machine skips the fetch
+  only for the files its clipboard took from, or gave to, the last sync, and
+  files never bounce back. A served file
   whose size changed since the announce is answered `Error INVALID`.
 
 ## Robustness rules

@@ -508,7 +508,8 @@ fn write_file(path: &Path, bytes: &[u8], modified: SystemTime) {
         .unwrap();
 }
 
-/// Copied files: a file and a folder holding a nested folder.
+/// Copied files: a file and a folder holding a nested folder and an empty
+/// one.
 fn copy_some_files(root: &Path) -> Vec<PathBuf> {
     let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     write_file(&root.join("report.txt"), b"quarterly numbers", modified);
@@ -518,6 +519,7 @@ fn copy_some_files(root: &Path) -> Vec<PathBuf> {
         modified,
     );
     write_file(&root.join("photos/cover.png"), b"png", modified);
+    fs::create_dir_all(root.join("photos/empty")).unwrap();
     vec![root.join("report.txt"), root.join("photos")]
 }
 
@@ -564,6 +566,10 @@ async fn files_copied_on_the_sender_land_on_the_receivers_clipboard() {
         vec![7; 150_000]
     );
     assert_eq!(fs::read(pasted[1].join("cover.png")).unwrap(), b"png");
+    assert!(
+        pasted[1].join("empty").is_dir(),
+        "an empty folder comes along"
+    );
     assert_eq!(
         fs::metadata(&pasted[0]).unwrap().modified().unwrap(),
         fs::metadata(copied.path().join("report.txt"))

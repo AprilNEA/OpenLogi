@@ -27,8 +27,8 @@ use std::time::Duration;
 use openlogi_clipboard::{ClipboardError, ClipboardText};
 use openlogi_flow::clipboard::{
     Announced, AnnouncedFiles, AnnouncedText, ClipboardOffer, ContentDigest, FilesOffer,
-    ListedFile, MAX_TEXT_BYTES, OfferedFile, Served, TextOffer, fetch_file_list, fetch_text,
-    files_sync_enabled, serve_fetch, text_sync_enabled,
+    ListedFile, MAX_TEXT_BYTES, Served, TextOffer, fetch_file_list, fetch_text, files_sync_enabled,
+    serve_fetch, text_sync_enabled,
 };
 use openlogi_flow::frame::{Envelope, FrameKind, InboundRole};
 use openlogi_flow::generated as proto;
@@ -38,6 +38,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 mod files;
+use files::CopiedFiles;
 
 /// How long fetching a peer's text, or its file list, may take before it is
 /// given up.
@@ -314,7 +315,7 @@ async fn run_jobs(shared: Arc<Shared>, mut queue: mpsc::UnboundedReceiver<Job>) 
 /// What this clipboard holds, as clipboard sync can offer it.
 enum Local {
     Text(String),
-    Files(Vec<OfferedFile>),
+    Files(CopiedFiles),
 }
 
 async fn offer_clipboard(shared: &Arc<Shared>, peer: PublicKey, connection: &FlowConnection) {
@@ -421,7 +422,7 @@ async fn receive_files(
     }
     let copied_before = shared.backend.change_count();
     if let Some(Local::Files(held)) = read_local(shared, true).await
-        && let Ok(held) = FilesOffer::new(0, held)
+        && let Ok(held) = FilesOffer::with_folders(0, held.files, held.folders)
         && announced.digest() == Some(held.digest())
         && shared.ledger().last_synced_is(held.digest())
     {
@@ -431,9 +432,9 @@ async fn receive_files(
         shared.ledger().adopted(peer, held.digest());
         return;
     }
-    let listed =
+    let listing =
         match tokio::time::timeout(FETCH_TIMEOUT, fetch_file_list(connection, announced)).await {
-            Ok(Ok(listed)) => listed,
+            Ok(Ok(listing)) => listing,
             Ok(Err(error)) => {
                 warn!(%error, "Flow clipboard file list fetch failed");
                 return;
@@ -444,15 +445,20 @@ async fn receive_files(
             }
         };
     info!(
-        files = listed.len(),
-        bytes = listed.iter().map(ListedFile::size_bytes).sum::<u64>(),
+        files = listing.files().len(),
+        folders = listing.folders().len(),
+        bytes = listing
+            .files()
+            .iter()
+            .map(ListedFile::size_bytes)
+            .sum::<u64>(),
         "Flow clipboard files incoming"
     );
     let still_wanted = || shared.ledger().is_newest(ticket);
     let received = match files::receive(
         connection,
         announced.sequence(),
-        &listed,
+        &listing,
         &shared.received,
         &still_wanted,
     )
@@ -478,7 +484,7 @@ async fn receive_files(
                 shared.ledger().adopted(peer, digest);
             }
             info!(
-                files = listed.len(),
+                files = listing.files().len(),
                 bytes = received.total_bytes(),
                 "Flow clipboard files received"
             );
@@ -572,7 +578,9 @@ impl Ledger {
         let sequence = self.sequence + 1;
         let offer = match local {
             Local::Text(text) => ClipboardOffer::Text(TextOffer::new(sequence, text).ok()?),
-            Local::Files(files) => ClipboardOffer::Files(FilesOffer::new(sequence, files).ok()?),
+            Local::Files(copied) => ClipboardOffer::Files(
+                FilesOffer::with_folders(sequence, copied.files, copied.folders).ok()?,
+            ),
         };
         let digest = offer.digest();
         if self.last_synced == Some(digest) && self.peer_holds.get(&peer) == Some(&digest) {
@@ -638,7 +646,7 @@ pub(super) struct ReceivedFiles {
     folder: PathBuf,
     top_level: Vec<PathBuf>,
     total_bytes: u64,
-    offered: Vec<OfferedFile>,
+    copied: CopiedFiles,
 }
 
 impl ReceivedFiles {
@@ -658,7 +666,7 @@ impl ReceivedFiles {
 
     /// The digest these files have when this machine offers them on.
     fn digest(&self) -> Option<ContentDigest> {
-        FilesOffer::new(0, self.offered.clone())
+        FilesOffer::with_folders(0, self.copied.files.clone(), self.copied.folders.clone())
             .ok()
             .map(|offer| offer.digest())
     }

@@ -509,6 +509,10 @@ message ChunkEnd {
 // The decoded payload of "application/x-openlogi-files".
 message FileList {
   repeated FileEntry files = 1;
+  // Folders that hold no file, with the same path rules as
+  // FileEntry.relative_path; a folder holding a file is implied by it. A peer
+  // that predates this field drops them.
+  repeated string folders = 2;
 }
 
 message FileEntry {

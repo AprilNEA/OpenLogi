@@ -632,7 +632,7 @@ async fn clipboard_files_round_trip_through_the_list_and_file_fetches() -> TestR
     let fetch = async {
         let listed = fetch_file_list(&pair.second, &announced).await?;
         let mut contents = Vec::new();
-        for (index, file) in listed.iter().enumerate() {
+        for (index, file) in listed.files().iter().enumerate() {
             let mut sink = Vec::new();
             fetch_file(
                 &pair.second,
@@ -679,7 +679,16 @@ async fn a_file_that_changed_since_its_offer_is_refused() -> TestResult {
     let fetch = async {
         let listed = fetch_file_list(&pair.second, &announced).await?;
         let mut sink = Vec::new();
-        let result = fetch_file(&pair.second, 1, 0, &listed[0], &mut sink, STALL, || true).await;
+        let result = fetch_file(
+            &pair.second,
+            1,
+            0,
+            &listed.files()[0],
+            &mut sink,
+            STALL,
+            || true,
+        )
+        .await;
         TestResult::Ok(result)
     };
     let (served, fetched) = tokio::join!(serve_fetches(&pair.first, &offer, 2), fetch);
@@ -718,7 +727,18 @@ async fn file_fetches_need_both_peers_to_list_the_files_capability() -> TestResu
     let fetch = async {
         let listed = fetch_file_list(&pair.second, &announced).await?;
         let mut sink = Vec::new();
-        TestResult::Ok(fetch_file(&pair.second, 1, 0, &listed[0], &mut sink, STALL, || true).await)
+        TestResult::Ok(
+            fetch_file(
+                &pair.second,
+                1,
+                0,
+                &listed.files()[0],
+                &mut sink,
+                STALL,
+                || true,
+            )
+            .await,
+        )
     };
     let (_served, fetched) = tokio::join!(serve, fetch);
     assert!(matches!(
