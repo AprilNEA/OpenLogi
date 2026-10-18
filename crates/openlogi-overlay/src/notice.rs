@@ -13,10 +13,9 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use gpui::{
-    AppContext as _, Bounds, Context, FontWeight, Hsla, InteractiveElement, IntoElement,
-    ParentElement, Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _,
-    Styled, Window, WindowBackgroundAppearance, WindowKind, WindowOptions, div, point, px, size,
-    svg,
+    AppContext as _, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
+    Pixels, Render, SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
+    WindowBackgroundAppearance, WindowKind, WindowOptions, div, px, size, svg,
 };
 use openlogi_ipc::{Notice, NoticeKind};
 use openlogi_ui::action_icons::LOW_BATTERY_ICON;
@@ -120,12 +119,19 @@ pub(crate) fn stack_size(count: usize) -> Size<Pixels> {
 
 /// Top-left of a window of `window` size placed at the bottom centre of
 /// `area`, [`BOTTOM_MARGIN`] above its bottom edge, and kept inside it.
-pub(crate) fn bottom_centre(area: Bounds<Pixels>, window: Size<Pixels>) -> Point<Pixels> {
-    let desired = point(
+///
+/// Windows places the notice in physical pixels instead (see
+/// `platform/windows.rs`), so only the other platforms and the tests use this.
+#[cfg(any(not(windows), test))]
+pub(crate) fn bottom_centre(
+    area: gpui::Bounds<Pixels>,
+    window: Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    let desired = gpui::point(
         area.origin.x + (area.size.width - window.width) / 2.0,
         area.bottom() - window.height - px(BOTTOM_MARGIN),
     );
-    let max = point(
+    let max = gpui::point(
         (area.right() - window.width).max(area.origin.x),
         (area.bottom() - window.height).max(area.origin.y),
     );
