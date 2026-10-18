@@ -4,14 +4,6 @@
 //! online or not. [`LocalDevices::join`] keeps the ones the Flow configuration
 //! names. An offline device stays in the view because its transition to
 //! online is the receiver's evidence that a handoff arrived.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Flow runtime later in this stack consumes the view"
-    )
-)]
-
 use openlogi_core::config::{FlowConfig, FlowDevice, FlowHostSlot, FlowPeerName};
 use openlogi_core::device::DeviceKind;
 use openlogi_core::device_order::PhysicalDeviceKey;

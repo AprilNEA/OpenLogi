@@ -22,6 +22,7 @@ use tracing::{info, warn};
 use super::scroll::ScrollInputHandle;
 use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
 use crate::event_monitor::SharedEventMonitor;
+use crate::flow::FlowInput;
 
 /// The button maps and selected-device thumb-wheel polarity the OS-hook callback
 /// reads, kept behind ONE lock so a config rebuild publishes one coherent
@@ -445,6 +446,7 @@ pub fn start(
     dispatcher: ActionDispatcher,
     scroll: ScrollInputHandle,
     monitor: SharedEventMonitor,
+    flow: FlowInput,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -476,6 +478,7 @@ pub fn start(
                     openlogi_hook::frontmost_safari_pid,
                 ),
                 MouseEvent::Moved { delta_x, delta_y } => {
+                    flow.moved();
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
                 MouseEvent::CaptureInterrupted => {
