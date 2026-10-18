@@ -19,7 +19,7 @@ use openlogi_flow::session::{
 };
 use openlogi_flow::transport::{
     FlowConnection, FlowEndpoint, MachineIdentity, NotificationEvent, PeerTrust, RpcEvent,
-    message_envelope,
+    TransportError, message_envelope,
 };
 use openlogi_hid::{ChannelPool, DeviceRoute, HostSwitchTarget};
 use openlogi_hook::edge::{EdgeSide, ExposedEdges};
@@ -39,6 +39,12 @@ use crate::receiver_access::ReceiverAccess;
 const FLOW_IDENTITY_FILE: &str = "flow-identity.pk8";
 const PROTOCOL_MIN: u32 = 1;
 const PROTOCOL_MAX: u32 = 1;
+/// How long a stopping generation waits for its connections to drain.
+const ENDPOINT_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
+/// Binding the port is tried this many times, `BIND_RETRY` apart, while the
+/// previous generation still holds it.
+const BIND_ATTEMPTS: u32 = 30;
+const BIND_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 
 mod controller;
 mod input;
@@ -54,7 +60,7 @@ struct FlowGeneration {
     /// rather than awaited at shutdown.
     keyboard_follower: JoinHandle<()>,
     _advertiser: Option<MdnsAdvertiser>,
-    _endpoint: Arc<FlowEndpoint>,
+    endpoint: Arc<FlowEndpoint>,
 }
 
 impl FlowGeneration {
@@ -85,12 +91,15 @@ impl FlowGeneration {
                 .collect(),
             ..Default::default()
         };
-        let endpoint = Arc::new(FlowEndpoint::bind(
-            SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT)),
-            identity,
-            PeerTrust::pinned(config.peers.iter().map(|peer| peer.public_key)),
-            hello,
-        )?);
+        let endpoint = Arc::new(
+            bind_endpoint(
+                SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT)),
+                identity,
+                PeerTrust::pinned(config.peers.iter().map(|peer| peer.public_key)),
+                hello,
+            )
+            .await?,
+        );
         let record = MdnsRecord::new(endpoint.public_key(), PROTOCOL_MIN, PROTOCOL_MAX)?;
         let advertiser = match MdnsAdvertiser::start(record, endpoint.local_addr()?.port()) {
             Ok(advertiser) => Some(advertiser),
@@ -157,7 +166,7 @@ impl FlowGeneration {
             tasks,
             keyboard_follower,
             _advertiser: advertiser,
-            _endpoint: endpoint,
+            endpoint,
         })
     }
 
@@ -177,6 +186,42 @@ impl FlowGeneration {
         self.sessions.shutdown().await;
         for task in self.tasks.drain(..) {
             let _ = task.await;
+        }
+        // The next generation binds the same port, which stays taken while
+        // any connection of this one is alive: drop the ones this generation
+        // holds and drain the rest. `bind_endpoint` waits out stragglers.
+        if let Ok(mut connections) = self.state.connections.write() {
+            connections.clear();
+        }
+        if tokio::time::timeout(ENDPOINT_DRAIN, self.endpoint.close())
+            .await
+            .is_err()
+        {
+            warn!("Flow endpoint still draining at shutdown");
+        }
+    }
+}
+
+/// Bind Flow's port, retrying while it is still taken. A reload restarts
+/// the runtime, and the previous generation releases the socket only once
+/// its last connection handle is gone.
+async fn bind_endpoint(
+    address: SocketAddr,
+    identity: MachineIdentity,
+    trust: PeerTrust,
+    hello: proto::Hello,
+) -> Result<FlowEndpoint, TransportError> {
+    let mut attempt = 1;
+    loop {
+        match FlowEndpoint::bind(address, identity.clone(), trust.clone(), hello.clone()) {
+            Err(TransportError::Io(error))
+                if error.kind() == io::ErrorKind::AddrInUse && attempt < BIND_ATTEMPTS =>
+            {
+                debug!(attempt, "Flow port still taken, retrying");
+                attempt += 1;
+                tokio::time::sleep(BIND_RETRY).await;
+            }
+            result => return result,
         }
     }
 }
@@ -1040,6 +1085,36 @@ mod tests {
             point_on_edge(&edges, proto::Side::Left, 0.75),
             Some((1.0, 250.0))
         );
+    }
+
+    #[tokio::test]
+    async fn binding_waits_for_the_previous_generation_to_release_the_port() {
+        let directory = tempdir().expect("temporary directory");
+        let identity = load_machine_identity_at(&directory.path().join(FLOW_IDENTITY_FILE))
+            .expect("generate identity");
+        let hello = proto::Hello {
+            proto_min: PROTOCOL_MIN,
+            proto_max: PROTOCOL_MAX,
+            public_key: identity.public_key().as_bytes().to_vec(),
+            session_nonce: rand::random::<[u8; 16]>().to_vec(),
+            machine_name: machine_name(),
+            platform: platform().into(),
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            ..Default::default()
+        };
+        let previous =
+            std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("hold a free port");
+        let address = previous.local_addr().expect("held address");
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(BIND_RETRY * 3).await;
+            drop(previous);
+        });
+
+        let endpoint = bind_endpoint(address, identity, PeerTrust::pinned([]), hello)
+            .await
+            .expect("bound once the port was released");
+        assert_eq!(endpoint.local_addr().expect("bound address"), address);
+        release.await.expect("release task");
     }
 
     #[test]

@@ -99,8 +99,10 @@ impl FlowEndpoint {
             .await
     }
 
-    /// Gracefully closes all connections owned by this endpoint.
-    pub async fn close(self) {
+    /// Gracefully closes all connections owned by this endpoint and waits for
+    /// them to drain. The socket itself is released once the last
+    /// [`FlowConnection`] handle is dropped.
+    pub async fn close(&self) {
         self.endpoint.close(VarInt::from_u32(0), b"endpoint closed");
         self.endpoint.wait_idle().await;
     }
