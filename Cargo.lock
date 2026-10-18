@@ -5740,6 +5740,7 @@ dependencies = [
  "openlogi-hook",
  "openlogi-inject",
  "openlogi-ipc",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
