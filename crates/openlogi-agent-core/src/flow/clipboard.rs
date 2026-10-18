@@ -44,6 +44,11 @@ use files::CopiedFiles;
 /// given up.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long reading this clipboard, copied folders walked, may take before
+/// it is not offered: a folder on a slow or unreachable network drive must
+/// not hold every later clipboard job behind it.
+const READ_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// The OS clipboard as clipboard sync uses it; the seam the tests fake.
 pub(super) trait ClipboardBackend: Send + Sync {
     /// Reads the clipboard's text, copying it out only within `max_bytes`.
@@ -532,8 +537,12 @@ async fn read_local(shared: &Arc<Shared>, files: bool) -> Option<Local> {
             }
             ClipboardText::Absent => None,
         })
-    })
-    .await;
+    });
+    // On timeout the walk finishes on its blocking thread and is dropped.
+    let Ok(read) = tokio::time::timeout(READ_TIMEOUT, read).await else {
+        info!("Flow clipboard not offered: reading the copied files took too long");
+        return None;
+    };
     match read {
         Ok(Ok(local)) => local,
         Ok(Err(error)) => {
