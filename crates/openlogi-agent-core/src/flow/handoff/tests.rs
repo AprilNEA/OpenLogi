@@ -127,6 +127,29 @@ async fn a_new_transfer_from_the_same_peer_replaces_the_one_it_gave_up() {
 }
 
 #[tokio::test]
+async fn a_retry_is_not_refused_for_a_device_its_given_up_transfer_assumed() {
+    let book = HandoffBook::default();
+    let peer = PublicKey::new([7; 32]);
+    let offline = vec![device("mouse", 1, false)];
+    book.arm(peer, &request(10, &offline), &offline, true).await;
+    assert!(book.mark_accepted(peer, 10).await);
+
+    // Accepting 10 made the receiver's view count the mouse online.
+    let assumed = vec![device("mouse", 1, true)];
+    assert!(matches!(
+        book.arm(peer, &request(11, &assumed), &assumed, true).await,
+        ArmDecision::New(_)
+    ));
+    // Another peer's request is still refused while 11 is pending.
+    let other = PublicKey::new([8; 32]);
+    assert!(matches!(
+        book.arm(other, &request(12, &assumed), &assumed, true)
+            .await,
+        ArmDecision::Reject(_)
+    ));
+}
+
+#[tokio::test]
 async fn receiver_reports_arrived_partial_and_timeout_from_fresh_inventory() {
     let peer = PublicKey::new([7; 32]);
     let configured = vec![device("mouse", 1, false), device("keyboard", 2, false)];
@@ -231,7 +254,11 @@ async fn response_failure_cannot_disarm_accepted_transfer_but_cancel_can() {
         book.arm(peer, &request, &offline, true).await,
         ArmDecision::Duplicate(_)
     ));
-    assert!(book.cancel_incoming(peer, 11).await);
+    assert_eq!(
+        book.cancel_incoming(peer, 11).await,
+        Some(vec!["mouse".to_owned()]),
+        "the mouse never arrived"
+    );
     assert!(matches!(
         book.arm(peer, &request, &offline, true).await,
         ArmDecision::New(_)

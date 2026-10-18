@@ -345,6 +345,21 @@ impl GenerationState {
         }
     }
 
+    /// Drop the arrival an accepted handoff assumed for these config keys: the
+    /// devices never came.
+    pub(super) fn forget_arrival(&self, keys: &[String]) {
+        if let Ok(mut record) = self.presence.lock() {
+            for key in keys {
+                if record
+                    .get(key)
+                    .is_some_and(|(presence, _)| *presence == Presence::Arrived)
+                {
+                    record.remove(key);
+                }
+            }
+        }
+    }
+
     /// The devices with their inventory online state corrected by what Flow
     /// itself did within [`PRESENCE_TTL`].
     pub(super) fn effective_devices(&self) -> Vec<RuntimeDevice> {

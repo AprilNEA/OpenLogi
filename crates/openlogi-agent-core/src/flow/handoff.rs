@@ -117,6 +117,9 @@ impl HandoffBook {
                 result: completed.result.clone(),
             };
         }
+        // Devices of a transfer the same peer gave up that never arrived: the
+        // caller's view counts them online only on that transfer's say-so.
+        let mut superseded: &[PendingDevice] = &[];
         if let Some(pending) = &ledger.pending {
             if pending.peer == peer && pending.transfer_id == request.transfer_id {
                 return ArmDecision::Duplicate(accept(request.transfer_id));
@@ -131,6 +134,7 @@ impl HandoffBook {
                     "another transfer is already armed",
                 );
             }
+            superseded = &pending.devices;
         }
 
         let mut matched = Vec::with_capacity(request.devices.len());
@@ -144,7 +148,10 @@ impl HandoffBook {
                     "a requested device is not configured locally",
                 );
             };
-            if local.snapshot.online {
+            let assumed = superseded.iter().any(|device| {
+                device.arrived_at.is_none() && device.key == local.snapshot.config_key
+            });
+            if local.snapshot.online && !assumed {
                 return reject(
                     proto::HandoffRejectReason::NotReady,
                     "a requested device is already online on the receiver",
@@ -282,18 +289,14 @@ impl HandoffBook {
         }
     }
 
-    async fn cancel_incoming(&self, peer: PublicKey, transfer_id: u64) -> bool {
+    /// Drop the pending `transfer_id`, returning the config keys of its
+    /// devices that never arrived; `None` when it is not the pending one.
+    async fn cancel_incoming(&self, peer: PublicKey, transfer_id: u64) -> Option<Vec<String>> {
         let mut ledger = self.incoming.lock().await;
-        if ledger
+        let pending = ledger
             .pending
-            .as_ref()
-            .is_some_and(|pending| pending.peer == peer && pending.transfer_id == transfer_id)
-        {
-            ledger.pending = None;
-            true
-        } else {
-            false
-        }
+            .take_if(|pending| pending.peer == peer && pending.transfer_id == transfer_id)?;
+        Some(missing_keys(&pending.devices))
     }
 
     async fn register_outgoing(
@@ -418,7 +421,9 @@ async fn accept_pending(state: Arc<GenerationState>, peer: PublicKey, transfer_i
     let completed = {
         let _lifecycle = state.lifecycle.lock().await;
         if !state.is_active() {
-            state.handoffs.cancel_incoming(peer, transfer_id).await;
+            if let Some(missing) = state.handoffs.cancel_incoming(peer, transfer_id).await {
+                state.forget_arrival(&missing);
+            }
             state
                 .send_cancel(peer, transfer_id, proto::HandoffCancelReason::Shutdown)
                 .await;
@@ -497,6 +502,8 @@ pub(super) async fn inventory_changed(state: Arc<GenerationState>) {
 }
 
 async fn finish_incoming(state: Arc<GenerationState>, completed: CompletedTransfer) {
+    // Accepting assumed every device here; the ones that timed out are not.
+    state.forget_arrival(&completed.missing);
     let _lifecycle = state.lifecycle.lock().await;
     if !state.is_active() {
         state
@@ -553,6 +560,12 @@ pub(super) async fn handle_notification(
                 .handoffs
                 .cancel_incoming(peer, cancel.transfer_id)
                 .await;
+            // The sender's switch failed: what accepting assumed arrived did
+            // not, and must not block its retry as "already online".
+            if let Some(missing) = &incoming {
+                state.forget_arrival(missing);
+            }
+            let incoming = incoming.is_some();
             let outgoing = state
                 .handoffs
                 .cancel_outgoing(peer, cancel.transfer_id)
@@ -571,6 +584,16 @@ pub(super) async fn handle_notification(
 struct CompletedTransfer {
     peer: PublicKey,
     result: proto::HandoffResult,
+    /// Config keys of the devices that never arrived.
+    missing: Vec<String>,
+}
+
+fn missing_keys(devices: &[PendingDevice]) -> Vec<String> {
+    devices
+        .iter()
+        .filter(|device| device.arrived_at.is_none())
+        .map(|device| device.key.clone())
+        .collect()
 }
 
 fn complete_pending(
@@ -633,6 +656,7 @@ fn complete_pending(
     CompletedTransfer {
         peer: pending.peer,
         result,
+        missing: missing_keys(&pending.devices),
     }
 }
 
