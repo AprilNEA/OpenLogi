@@ -34,7 +34,9 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
-use openlogi_core::config::{ConfigRevision, Lighting, ScrollResolution};
+use openlogi_core::config::{
+    ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
+};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
     DeviceKind, DeviceModelInfo, DeviceTransports, LightCapabilities, LightState, LightValueRange,
@@ -51,9 +53,9 @@ use openlogi_core::hid::{
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind, ConfigReloadError,
-    ForegroundApps, FoundDevice, Identity, InventoryHealth, MonitorEvent, Observation,
-    ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig,
+    FlowLinkState, FlowPeerStatus, FlowStatus, ForegroundApps, FoundDevice, Identity,
+    InventoryHealth, MonitorEvent, Observation, ObservedLight, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::{Compat, Run};
 
@@ -495,15 +497,40 @@ fn agent_snapshot() {
         foreground: ForegroundApps::default(),
         // Pinned populated in `observed_light` below.
         lights: Vec::new(),
+        // Pinned populated in `flow_status` below.
+        flow: FlowStatus::default(),
     };
-    assert_wire(&snapshot, "010001010705302e362e36010000000000000000");
+    assert_wire(&snapshot, "010001010705302e362e360100000000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e36010000000000000000");
+    assert_wire(&observed, "03010001010705302e362e360100000000000000000000");
+}
+
+/// Flow state rides the snapshot. The key travels as its canonical
+/// `ed25519:<hex>` text, so a corrupt key fails to decode.
+#[test]
+fn flow_status() {
+    assert_wire(&FlowLinkState::Connected, "00");
+    assert_wire(&FlowLinkState::Degraded, "01");
+    assert_wire(&FlowLinkState::Lost, "02");
+    assert_wire(&FlowStatus::default(), "0000");
+    assert_wire(
+        &FlowStatus {
+            enabled: true,
+            peers: vec![FlowPeerStatus {
+                name: FlowPeerName::new("desk").expect("valid peer name"),
+                public_key: FlowPublicKey::from_bytes([0xab; 32]),
+                state: FlowLinkState::Degraded,
+            }],
+        },
+        "0101046465736b48656432353531393a\
+         61626162616261626162616261626162616261626162616261626162616261626162616261626162\
+         61626162616261626162616261626162616261626162616201",
+    );
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:

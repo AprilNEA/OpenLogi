@@ -61,9 +61,10 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    BacklightObservation, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation,
-    Identity, InventoryHealth, MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    BacklightObservation, ClientKind, ConfigReloadError, FlowStatus, ForegroundApps, FoundDevice,
+    Generation, Identity, InventoryHealth, MonitorEvent, OBSERVE_HOLD, Observation,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
+    RingObservation, SavedConfig,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -714,6 +715,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         pairing: state.phase.clone(),
         foreground: state.foreground(),
         lights: Vec::new(),
+        flow: FlowStatus::default(),
     }
 }
 
