@@ -35,6 +35,7 @@ pub(crate) fn load() -> Result<MachineIdentity, IdentityLoadError> {
 fn load_at(path: &Path) -> Result<MachineIdentity, IdentityLoadError> {
     match fs::read(path) {
         Ok(bytes) => {
+            #[cfg(unix)]
             restrict(path)?;
             return Ok(MachineIdentity::from_pkcs8(bytes)?);
         }
@@ -67,15 +68,12 @@ fn load_at(path: &Path) -> Result<MachineIdentity, IdentityLoadError> {
 }
 
 /// Make an existing identity file readable only by its owner.
+///
+/// Unix only: on Windows the file inherits the per-user data directory's ACL.
+#[cfg(unix)]
 fn restrict(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(test)]
