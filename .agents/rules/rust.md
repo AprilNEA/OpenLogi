@@ -82,8 +82,9 @@ single suppression when a file converts the same pair of types over and over.
 Sweeping for rot is mechanical: rewrite every non-`cfg_attr` `allow(` to `expect(`, run
 clippy, and each "this lint expectation is unfulfilled" is a suppression to delete.
 Do it on all three lanes — `cargo clippy`, `--target x86_64-pc-windows-gnu`, and
-`--target aarch64-unknown-linux-musl` — because CI has no macOS clippy job and a
-platform-gated suppression is only ever evaluated on its own platform.
+`--target aarch64-unknown-linux-musl` — because a platform-gated suppression is only
+ever evaluated on its own platform, and CI reports a stale `expect` but never a stale
+`allow`.
 
 Encode invariants in the type system instead of checking them at runtime:
 

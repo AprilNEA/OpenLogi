@@ -382,6 +382,30 @@ jobs:
       # never compile.
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # The only job that lints the macOS cfg: the ObjC surface, the CGEventTap
+  # hook, CGEvent synthesis, the AVFoundation camera backend, and the
+  # launchd/SMAppService registration, none of which the Linux or Windows
+  # clippy jobs compile. The pre-push hook runs the same command on a Mac, but
+  # a hook can be skipped. Same cache key as `tests (macos)`.
+  clippy-macos:
+    name: clippy (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cargo
+          shared-key: macos-stable-debug
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
   wasm:
     name: wasm (portable crates)
     runs-on: ubuntu-latest
