@@ -41,7 +41,7 @@ fn future_version_is_rejected_before_incompatible_fields_are_parsed() {
 }
 
 #[test]
-fn v9_without_disabled_keys_loads_and_a_save_stamps_v10() {
+fn v9_without_disabled_keys_loads_and_a_save_stamps_the_current_schema() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");
     fs::write(
