@@ -5827,6 +5827,7 @@ dependencies = [
  "openlogi-device",
  "openlogi-device-registry",
  "openlogi-fixture",
+ "openlogi-flow",
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-inject",

@@ -5,4 +5,7 @@
 //! bounds; the decisions here are Flow policy, so they live beside the rest of
 //! the agent's orchestration rather than in the OS capture crate.
 
+mod devices;
 pub mod edge;
+#[cfg(test)]
+mod test_support;
