@@ -8,6 +8,12 @@
 //! flag — without it Cargo starts no new unit after the first failing one, and
 //! a lint that fires only in a crate's test build could go unseen.
 //!
+//! A run whose build failed for any reason other than lints raised as errors
+//! is broken, and none of its counts are used. A compile error shows up as a
+//! diagnostic. A failed build script or download shows up only on stderr, so
+//! the sweep reads Cargo's closing `build-finished` message instead of the
+//! exit status; that keeps stderr streaming to the terminal.
+//!
 //! Each edit is written in place and put back by a guard, so the sweep refuses
 //! to start on a file with uncommitted changes. If the process is killed
 //! mid-run, `git checkout -- <file>` restores it.
@@ -78,8 +84,8 @@ pub(crate) fn run(out: &Path) -> Result<()> {
     let rustc = cmd!(sh, "rustc -V").read()?;
     eprintln!("==> baseline clippy on {lane}");
     let baseline = clippy(&sh)?;
-    if baseline.hard_errors > 0 {
-        bail!("the unedited tree does not compile under clippy; fix that before sweeping");
+    if baseline.broken() {
+        bail!("the unedited tree does not build under clippy; fix that before sweeping");
     }
 
     let mut sites = Vec::new();
@@ -151,7 +157,7 @@ fn clippy(sh: &Shell) -> Result<Counts> {
 }
 
 fn verdict(lint: &str, baseline: &Counts, run: &Counts) -> Verdict {
-    if run.hard_errors > 0 || LINT_GROUPS.contains(&lint) {
+    if run.broken() || LINT_GROUPS.contains(&lint) {
         Verdict::Inconclusive
     } else if run.of(lint) > baseline.of(lint) {
         Verdict::Fires
@@ -167,6 +173,12 @@ struct Counts {
     /// Errors that are not lints: the edit broke the build, so no lint count
     /// from this run can be trusted.
     hard_errors: usize,
+    /// Lints raised as errors, by `-D warnings` or a `deny` level. They are
+    /// what a failed build is allowed to fail on.
+    lint_errors: usize,
+    /// `success` from Cargo's `build-finished` message; `None` when Cargo
+    /// stopped before printing one.
+    finished: Option<bool>,
 }
 
 impl Counts {
@@ -176,6 +188,10 @@ impl Counts {
             let Ok(message) = serde_json::from_str::<CargoMessage>(line) else {
                 continue;
             };
+            if message.reason == "build-finished" {
+                counts.finished = message.success;
+                continue;
+            }
             let (true, Some(diagnostic)) = (message.reason == "compiler-message", message.message)
             else {
                 continue;
@@ -183,8 +199,12 @@ impl Counts {
             let is_error = diagnostic.level.starts_with("error");
             match diagnostic.code {
                 Some(code) => {
-                    if is_error && is_error_code(&code.code) {
-                        counts.hard_errors += 1;
+                    if is_error {
+                        if is_error_code(&code.code) {
+                            counts.hard_errors += 1;
+                        } else {
+                            counts.lint_errors += 1;
+                        }
                     }
                     *counts.by_code.entry(code.code).or_default() += 1;
                 }
@@ -197,6 +217,12 @@ impl Counts {
             }
         }
         counts
+    }
+
+    /// The run cannot be trusted: a compile error, or a failed build that no
+    /// lint raised as an error explains (a build script, a download, a lock).
+    fn broken(&self) -> bool {
+        self.hard_errors > 0 || (self.finished != Some(true) && self.lint_errors == 0)
     }
 
     fn of(&self, lint: &str) -> usize {
@@ -213,6 +239,8 @@ fn is_error_code(code: &str) -> bool {
 struct CargoMessage {
     reason: String,
     message: Option<Diagnostic>,
+    /// Set on `build-finished` only.
+    success: Option<bool>,
 }
 
 #[derive(Deserialize)]

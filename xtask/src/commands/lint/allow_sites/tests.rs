@@ -61,11 +61,33 @@ fn a_cfg_attr_of_only_allows_is_removed_whole() {
 }
 
 #[test]
+fn a_nested_cfg_attr_allow_is_a_site() {
+    let source = "#[cfg_attr(unix, cfg_attr(test, allow(dead_code, reason = \"x\")))]\nfn f() {}\n";
+    let site = only(source);
+    assert_eq!(site.lints, ["dead_code"]);
+    assert_eq!(site.apply(source), "\nfn f() {}\n");
+}
+
+#[test]
+fn a_nested_cfg_attr_keeps_its_other_metas() {
+    let source = "#[cfg_attr(unix, inline, cfg_attr(test, allow(dead_code), cold))]\nfn f() {}\n";
+    let site = only(source);
+    assert_eq!(site.lints, ["dead_code"]);
+    let edited = site.apply(source);
+    assert!(find(&edited).is_empty(), "an allow survived: {edited}");
+    assert_eq!(
+        edited,
+        "#[cfg_attr(unix, inline, cfg_attr(test, cold))]\nfn f() {}\n"
+    );
+}
+
+#[test]
 fn other_attributes_are_not_sites() {
     let source = r#"
 #[expect(dead_code, reason = "allow(x) in a reason")]
 #[cfg_attr(test, expect(clippy::float_cmp, reason = "x"))]
 #[cfg_attr(feature = "allow-x", derive(Debug))]
+#[cfg_attr(unix, cfg_attr(test, expect(dead_code, reason = "allow(x)")))]
 #[doc = "allow(x)"]
 #![allow(dead_code)]
 fn f() {}

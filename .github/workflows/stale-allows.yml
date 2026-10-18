@@ -101,4 +101,7 @@ jobs:
         with:
           pattern: stale-allows-*
           path: reports
-      - run: cargo xtask lint merge-allows reports/*/stale-allows.json | tee -a "$GITHUB_STEP_SUMMARY"
+      # An explicit `shell: bash` adds `-o pipefail`; the default `bash -e`
+      # would take `tee`'s exit status and pass a failed verdict.
+      - shell: bash
+        run: cargo xtask lint merge-allows reports/*/stale-allows.json | tee -a "$GITHUB_STEP_SUMMARY"

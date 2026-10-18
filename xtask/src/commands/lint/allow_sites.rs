@@ -69,14 +69,25 @@ pub(crate) fn find(source: &str) -> Vec<AllowSite> {
         .collect()
 }
 
-/// For an `allow(…)` or a `cfg_attr(…)` holding one: the replacement text and
-/// the lints it names. `None` for any other attribute.
+/// For an `allow(…)` or a `cfg_attr(…)` holding one at any depth: the
+/// replacement text and the lints it names. `None` for any other attribute.
 fn classify(meta: &Meta) -> Option<(String, Vec<String>)> {
+    let (rest, lints) = without_allows(meta)?;
+    Some((
+        rest.map_or_else(String::new, |rest| format!("#[{rest}]")),
+        lints,
+    ))
+}
+
+/// `meta` with every `allow` in it removed, inside nested `cfg_attr` too:
+/// what is left (`None` when nothing is) and the lints the removed `allow`s
+/// name. `None` when `meta` holds no `allow`.
+fn without_allows(meta: &Meta) -> Option<(Option<String>, Vec<String>)> {
     let Meta::List(list) = meta else {
         return None;
     };
     if list.path.is_ident("allow") {
-        return Some((String::new(), lint_names(meta)));
+        return Some((None, lint_names(meta)));
     }
     if !list.path.is_ident("cfg_attr") {
         return None;
@@ -86,26 +97,29 @@ fn classify(meta: &Meta) -> Option<(String, Vec<String>)> {
         .ok()?;
     let mut args = args.into_iter();
     let predicate = args.next()?;
-    let (allows, kept): (Vec<Meta>, Vec<Meta>) =
-        args.partition(|attr| attr.path().is_ident("allow"));
-    if allows.is_empty() {
+    let mut found = false;
+    let mut kept = Vec::new();
+    let mut lints = Vec::new();
+    for attr in args {
+        if let Some((rest, names)) = without_allows(&attr) {
+            found = true;
+            kept.extend(rest);
+            lints.extend(names);
+        } else {
+            kept.push(attr.to_token_stream().to_string());
+        }
+    }
+    if !found {
         return None;
     }
-    let lints = allows.iter().flat_map(lint_names).collect();
-    let replacement = if kept.is_empty() {
-        String::new()
-    } else {
-        let kept: Vec<String> = kept
-            .iter()
-            .map(|attr| attr.to_token_stream().to_string())
-            .collect();
+    let rest = (!kept.is_empty()).then(|| {
         format!(
-            "#[cfg_attr({}, {})]",
+            "cfg_attr({}, {})",
             predicate.to_token_stream(),
             kept.join(", ")
         )
-    };
-    Some((replacement, lints))
+    });
+    Some((rest, lints))
 }
 
 /// The lint paths inside one `allow(…)`, skipping `reason = "…"`.

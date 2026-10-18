@@ -12,6 +12,9 @@ not json at all
 {"reason":"build-finished","success":true}
 "#;
 
+/// A run that built and raised nothing.
+const CLEAN: &str = r#"{"reason":"build-finished","success":true}"#;
+
 #[test]
 fn lints_are_counted_by_code() {
     let counts = Counts::from_cargo_json(RUN);
@@ -19,6 +22,7 @@ fn lints_are_counted_by_code() {
     assert_eq!(counts.of("unfulfilled_lint_expectations"), 1);
     assert_eq!(counts.of("clippy::double_must_use"), 0);
     assert_eq!(counts.hard_errors, 0);
+    assert!(!counts.broken());
 }
 
 #[test]
@@ -40,7 +44,7 @@ fn a_parse_error_without_a_code_is_hard() {
 
 #[test]
 fn verdicts_compare_against_the_baseline() {
-    let clean = Counts::from_cargo_json("");
+    let clean = Counts::from_cargo_json(CLEAN);
     let run = Counts::from_cargo_json(RUN);
     assert_eq!(verdict("dead_code", &clean, &run), Verdict::Fires);
     assert_eq!(
@@ -55,6 +59,37 @@ fn verdicts_compare_against_the_baseline() {
         r#"{"reason":"compiler-message","message":{"level":"error","message":"x","code":{"code":"E0425","explanation":null}}}"#,
     );
     assert_eq!(verdict("dead_code", &clean, &broken), Verdict::Inconclusive);
+}
+
+#[test]
+fn a_failed_build_with_no_lint_error_is_broken() {
+    // A build script failed: Cargo says so on stderr, and the JSON stream
+    // only ends unsuccessfully.
+    let run = Counts::from_cargo_json(
+        r#"{"reason":"compiler-message","message":{"level":"warning","message":"x","code":{"code":"dead_code","explanation":null}}}
+{"reason":"build-finished","success":false}"#,
+    );
+    assert!(run.broken());
+    let clean = Counts::from_cargo_json(CLEAN);
+    assert_eq!(verdict("dead_code", &clean, &run), Verdict::Inconclusive);
+}
+
+#[test]
+fn a_run_cargo_never_finished_is_broken() {
+    assert!(Counts::from_cargo_json("").broken());
+    assert!(Counts::from_cargo_json(r#"{"reason":"compiler-artifact"}"#).broken());
+}
+
+#[test]
+fn lints_raised_as_errors_explain_a_failed_build() {
+    // `-D warnings`: the lint the edit exposed fails the build, as intended.
+    let run = Counts::from_cargo_json(
+        r#"{"reason":"compiler-message","message":{"level":"error","message":"x","code":{"code":"dead_code","explanation":null}}}
+{"reason":"build-finished","success":false}"#,
+    );
+    assert!(!run.broken());
+    let clean = Counts::from_cargo_json(CLEAN);
+    assert_eq!(verdict("dead_code", &clean, &run), Verdict::Fires);
 }
 
 #[test]
