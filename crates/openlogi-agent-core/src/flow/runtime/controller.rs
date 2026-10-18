@@ -363,14 +363,12 @@ async fn run_edge_input(
             |_| edge_settings(&FlowConfig::default(), 0),
             |value| value.clone(),
         );
-        let arrived = input.take_latch();
         if !current.enabled || (current.require_modifier && !movement.control_held) {
             // Rebuild on the next armed movement rather than at the next
             // geometry refresh, so pressing Control at the edge crosses at
-            // once. Crossing back then takes Control on purpose, so an
-            // arrival's latch has nothing left to guard.
+            // once. An arrival's latch waits for that rebuild: a pointer still
+            // on the edge it arrived on must leave it before crossing back.
             detector = None;
-            latch_pending = false;
             active_revision = u64::MAX;
             continue;
         }
@@ -395,7 +393,7 @@ async fn run_edge_input(
             active_revision = current.revision;
             refreshed_at = Instant::now();
         }
-        latch_pending |= arrived;
+        latch_pending |= input.take_latch();
         if latch_pending && let Some(detector) = detector.as_mut() {
             detector.latch();
             latch_pending = false;
