@@ -133,8 +133,7 @@ pub struct Config {
     // that exists conditionally is a struct whose shape depends on a feature.
     #[cfg_attr(
         not(feature = "fs"),
-        expect(clippy::allow_attributes, reason = "see above"),
-        allow(dead_code, reason = "only the `fs` half suppresses a save")
+        expect(dead_code, reason = "only the `fs` half suppresses a save")
     )]
     ephemeral: bool,
     /// Per-device state, normally keyed by the stable physical-device

@@ -57,20 +57,21 @@ place. `#[expect]` reports itself unfulfilled instead, which `-D warnings` turns
 failure. `allow_attributes` enforces this — but only for outer `#[allow]`; a module-wide
 `#![allow(…)]`, the shape that rots worst, is invisible to it and is on you.
 
-Three cases where `expect` is wrong and `allow` is correct. Each keeps its `allow` plus
+Two cases where `expect` is wrong and `allow` is correct. Each keeps its `allow` plus
 an `#[expect(clippy::allow_attributes, reason = "see above")]` and a comment saying which
 case applies — riding the same `cfg_attr` predicate when there is one:
 
-- **The lint fires only under some `cfg`.** `platform::os_version` returns `Some(…)` on
-  macOS (so `unnecessary_wraps` fires) and `None` elsewhere (so it does not). An
-  `expect` there is green on macOS and red on the other two lanes.
 - **Fulfilment differs between a crate's targets.** A `dead_code` suppression on a
   helper that only the tests call is fulfilled in the `--lib` build and unfulfilled in
   the `--test` build; `--all-targets` compiles both, so one of them always warns. Being
   `cfg_attr`-wrapped is *not* itself a reason to reach for `allow` — check.
 - **The lint is raised inside a macro expansion.** rustc does not credit an expectation
-  with such a lint: it suppresses the warning *and* reports itself unfulfilled. A
-  `float_cmp` on floats compared inside `assert_eq!` is the case in this tree.
+  with such a lint: it suppresses the warning *and* reports itself unfulfilled.
+  `double_must_use` on the methods `#[async_trait]` generates is the case in this tree.
+
+A lint that fires only under some `cfg` is not a third case: put the `expect` behind
+that `cfg`. `platform::os_version` returns `Some(…)` on macOS, so `unnecessary_wraps`
+fires only there, and `#[cfg_attr(target_os = "macos", expect(…))]` holds on every lane.
 
 Scope a suppression to the item that needs it. A file-level `#![expect(cast_…)]` also
 covers every cast added to that file later, which is how a bounded-by-construction

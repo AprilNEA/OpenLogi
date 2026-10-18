@@ -17,12 +17,6 @@
     clippy::needless_pass_by_value,
     reason = "GPUI builders take owned Copy palette values"
 )]
-// Not `expect`: these fire inside `assert_eq!`, and rustc does not credit an
-// expectation with a lint raised in a macro expansion.
-#![allow(
-    clippy::float_cmp,
-    reason = "test and product compute the callout px through the same path"
-)]
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -134,11 +128,6 @@ impl FunctionRowView {
     /// target.
     pub(crate) fn click_key(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.select_key(next_selection_after_click(self.selected_key, idx), cx);
-    }
-
-    #[expect(dead_code, reason = "public accessor for the selection state")]
-    pub(crate) fn selected_key(&self) -> Option<usize> {
-        self.selected_key
     }
 
     pub(crate) fn set_hovered_key(&mut self, idx: Option<usize>, cx: &mut Context<Self>) {
