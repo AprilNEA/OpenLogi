@@ -223,6 +223,7 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | `crates/openlogi-ui/locales/**` | `cargo test -p openlogi-ui locale`; also `cargo test -p openlogi-desktop i18n` when binary wiring or desktop resolution changed |
 | `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `nix fmt -- --check devenv.nix` and `devenv --no-tui shell -- true` |
 | `flake.nix` / `flake.lock` / `packaging/linux/**` | Nix CI: `nix fmt -- --check flake.nix devenv.nix packaging/linux/package.nix packaging/linux/nixos-module.nix` and `nix flake check --all-systems --no-build --show-trace` |
+| `xtask/src/commands/lint/**` | `cargo test -p xtask lint::` and `cargo xtask lint sweep-allows`; the PR runs Stale allows on all three hosts |
 | `xtask/**` / `packaging/**` | unsigned `cargo xtask` package for that platform; the Build workflow is not part of `cargo xtask ci` |
 
 ## Other PR workflows
@@ -242,6 +243,10 @@ Not part of `ci.yml`, not in the default run:
   --default-branch=stable build packaging/linux/flatpak/org.openlogi.OpenLogi.yml`,
   and keep the build tree off `/tmp` if it is a tmpfs: the workspace needs well
   over 10 GB to compile inside the sandbox.
+- **Stale allows** (weekly, and path-filtered to the sweep itself): removes each
+  `#[allow]` in turn on Linux, Windows, and macOS, and fails on a lint that fires on
+  none of them. Local: `cargo xtask lint sweep-allows` for this host, then
+  `cargo xtask lint merge-allows <reports…>` over every host's report.
 
 ## When you add a CI job
 

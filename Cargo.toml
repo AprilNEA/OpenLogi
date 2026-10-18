@@ -136,7 +136,8 @@ assert_is_empty = "allow"
 # suppression states a reason, and reaches for `expect` unless it cannot work.
 # `allow_attributes` only sees outer `#[allow]`. The module-wide `#![allow(…)]`
 # it cannot see — the shape that rots worst — is rejected by the ast-grep guard
-# `workspace-no-inner-allow` in the root .ast-grep/rules/.
+# `workspace-no-inner-allow` in the root .ast-grep/rules/. An `allow` that
+# stops suppressing anything stays quiet; `stale-allows.yml` sweeps for those.
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 # Shared lint set, kept in sync with

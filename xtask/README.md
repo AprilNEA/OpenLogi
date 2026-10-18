@@ -24,6 +24,10 @@ devenv shell -- cargo run -p xtask -- <command>
   optionally sign it, then create the branded DMG.
 - `linux package` — build release binaries and package `.deb`, `.rpm`, and
   `.pkg.tar.zst` artifacts with nfpm.
+- `lint sweep-allows [--out <path>]` — remove each `#[allow]` in turn, run
+  clippy, and record which of its lints fire on this host.
+- `lint merge-allows <reports…>` — join the per-host reports and fail on a lint
+  that fires on none of them. `stale-allows.yml` runs both weekly.
 - `release changelog` — write the next workspace version's section into
   `CHANGELOG.md` with git-cliff.
 - `release check-publish` — verify that every crates.io package has a publishable,
@@ -136,6 +140,14 @@ xtask/
       linux/
         package.rs
         package/tests.rs
+      lint.rs                # lint hygiene one clippy run cannot check
+      lint/
+        allow_sites.rs       # where each `#[allow]` is, and the edit removing it
+        allow_sites/tests.rs
+        report.rs            # per-host reports and the cross-host verdict
+        report/tests.rs
+        sweep.rs             # one clippy run per `allow`, counted by lint code
+        sweep/tests.rs
       release.rs             # release metadata entry
       release/
         appcast.rs           # per-architecture Sparkle feeds, EdDSA-signed
