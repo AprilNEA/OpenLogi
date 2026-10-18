@@ -11,6 +11,7 @@ use futures::StreamExt as _;
 use futures::stream::{self, Stream};
 
 use openlogi_agent_core::action_ring::ActionRingManager;
+use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
@@ -35,6 +36,7 @@ pub(crate) struct Core {
     pub(crate) observable: Arc<ObservableState>,
     pub(crate) event_monitor: Arc<EventMonitor>,
     pub(crate) inputs: InputServices,
+    pub(crate) backlight_overlay: BacklightOverlayManager,
     pub(crate) ring_haptics: server::RingHapticPlayer,
     /// Client declarations forwarded by the IPC server — the dormancy gate's
     /// demand channel. It buffers, so a declaration that lands before the
@@ -59,6 +61,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
     )));
     let shared = orchestrator.lock().await.shared();
     let inputs = InputServices::start(&shared)?;
+    let backlight_overlay = BacklightOverlayManager::default();
 
     // Shared between the hook callback (which mirrors events into it) and
     // the IPC server (which the GUI polls); the janitor turns it back off.
@@ -78,6 +81,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         Arc::clone(&pairing),
         Arc::clone(&event_monitor),
         &inputs,
+        backlight_overlay.clone(),
     );
     Some(Core {
         orchestrator,
@@ -85,6 +89,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         observable,
         event_monitor,
         inputs,
+        backlight_overlay,
         ring_haptics,
         demand,
     })
@@ -97,6 +102,7 @@ fn spawn_ipc_server(
     pairing: Arc<pairing::PairingManager>,
     event_monitor: Arc<EventMonitor>,
     inputs: &InputServices,
+    backlight_overlay: BacklightOverlayManager,
 ) -> (
     server::RingHapticPlayer,
     tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
@@ -109,6 +115,7 @@ fn spawn_ipc_server(
         event_monitor,
         Arc::clone(&inputs.ring),
         inputs.dispatcher.clone(),
+        backlight_overlay,
     );
     let ring_haptics = server.ring_haptics.clone();
     tokio::spawn(server::run(server));

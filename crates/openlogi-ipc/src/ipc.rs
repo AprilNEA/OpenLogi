@@ -110,7 +110,9 @@ pub use succession::Identity;
 ///      the settings app, with the revision of the file it wrote. It keeps a
 ///      change made on a light unless the save holds its value, removes the
 ///      control's value, or the user chose that control. A file at another
-///      revision loads as a plain reload.
+///      revision loads as a plain reload. `Agent::observe_backlight`
+///      appended — the level a keyboard's backlight keys set, for the
+///      overlay's transient indicator.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -499,6 +501,19 @@ pub struct RingObservation {
     pub invocation: Option<ActionRingInvocation>,
 }
 
+/// A transient keyboard backlight level indicator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacklightObservation {
+    /// Generation of this observation on the backlight channel.
+    pub generation: Generation,
+    /// Current level, where zero is off.
+    pub current_level: u8,
+    /// Number of levels reported by the keyboard, including level zero.
+    pub levels: u8,
+    /// Whether the firmware reports a visible backlight state.
+    pub visible: bool,
+}
+
 /// Why an Actions Ring interaction command was rejected.
 ///
 /// Variants are append-only because this enum crosses bincode IPC.
@@ -721,4 +736,6 @@ pub trait Agent {
     /// revision than `saved.revision` was edited since, and loads as
     /// [`Agent::reload_config`] loads it.
     async fn reload_saved_config(saved: SavedConfig) -> Result<(), ConfigReloadError>;
+    /// Block until the transient keyboard-backlight indicator changes.
+    async fn observe_backlight(since: Generation) -> BacklightObservation;
 }

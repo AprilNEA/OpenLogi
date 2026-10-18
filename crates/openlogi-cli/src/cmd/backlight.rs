@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
+use openlogi_core::hid::backlight::max_backlight_level;
 use openlogi_hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, DeviceRoute,
 };
@@ -123,7 +124,7 @@ fn print_state(label: &str, state: BacklightState) {
         mode_label(state.mode),
         status_label(state.status),
         state.current_level,
-        state.nb_levels,
+        max_backlight_level(state.nb_levels),
         state.power_save,
     );
 }

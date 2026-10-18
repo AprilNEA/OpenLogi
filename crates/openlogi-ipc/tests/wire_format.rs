@@ -50,10 +50,10 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, ChosenLight, ClientKind, ConfigReloadError, ForegroundApps,
-    FoundDevice, Identity, InventoryHealth, MonitorEvent, Observation, ObservedLight,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig,
+    AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind, ConfigReloadError,
+    ForegroundApps, FoundDevice, Identity, InventoryHealth, MonitorEvent, Observation,
+    ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::{Compat, Run};
 
@@ -337,6 +337,13 @@ fn reload_saved_config() {
     );
 }
 
+/// The overlay long-polls the backlight indicator by generation, like
+/// the other observe calls.
+#[test]
+fn observe_backlight() {
+    assert_wire(&AgentRequest::ObserveBacklight { since: 7 }, "2507");
+}
+
 /// A chord crosses the wire as its modifier bits and the key's HID usage.
 #[test]
 fn key_combo_modifier_bits() {
@@ -390,6 +397,15 @@ fn action_ring_types() {
             invocation: None,
         },
         "0500",
+    );
+    assert_wire(
+        &BacklightObservation {
+            generation: 7,
+            current_level: 3,
+            levels: 8,
+            visible: true,
+        },
+        "07030801",
     );
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");

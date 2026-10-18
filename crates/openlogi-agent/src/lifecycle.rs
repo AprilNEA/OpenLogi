@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
@@ -232,6 +233,7 @@ impl Wanted {
             observable,
             event_monitor,
             inputs,
+            backlight_overlay,
             ring_haptics,
             demand,
         } = core;
@@ -245,6 +247,7 @@ impl Wanted {
                 observable,
                 event_monitor,
                 inputs,
+                backlight_overlay,
                 ring_haptics,
                 signals,
                 shutdown_requests,
@@ -271,6 +274,7 @@ struct Running {
     observable: Arc<ObservableState>,
     event_monitor: Arc<EventMonitor>,
     inputs: InputServices,
+    backlight_overlay: BacklightOverlayManager,
     ring_haptics: server::RingHapticPlayer,
     signals: ShutdownSignals,
     shutdown_requests: ShutdownRequests,
@@ -469,6 +473,14 @@ impl Running {
                     .lock()
                     .await
                     .reapply_volatile_on_next_refresh();
+            }
+            InventoryEvent::BacklightChanged {
+                device_index: _,
+                current_level,
+                levels,
+                visible,
+            } => {
+                self.backlight_overlay.show(current_level, levels, visible);
             }
             // A device broadcast its own reconnection (`0x1d4b`): reconfigure
             // it on the next snapshot even if no reconciliation ever saw it

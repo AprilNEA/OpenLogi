@@ -60,10 +60,10 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
-    ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
-    MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
+    BacklightObservation, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation,
+    Identity, InventoryHealth, MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -766,6 +766,16 @@ impl Agent for MockAgent {
         RingObservation {
             generation: 1,
             invocation: None,
+        }
+    }
+
+    async fn observe_backlight(self, _: Context, _since: Generation) -> BacklightObservation {
+        tokio::time::sleep(OBSERVE_HOLD).await;
+        BacklightObservation {
+            generation: 1,
+            current_level: 0,
+            levels: 0,
+            visible: false,
         }
     }
 

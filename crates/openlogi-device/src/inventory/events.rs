@@ -12,6 +12,10 @@
 //! publishes as [`PairedDevice::settings_revision`]. A client re-reads the
 //! device's settings when it sees the revision move.
 //!
+//! A keyboard's backlight broadcast additionally carries its new level, which
+//! goes through a separate latest-value channel to the transient on-screen
+//! indicator ([`EventReceiver::backlights`]).
+//!
 //! [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,7 +23,9 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use hidpp::channel::{HidppChannel, HidppMessage, MessageListenerGuard};
 use hidpp::feature::adc_measurement::AdcMeasurementFeature;
-use hidpp::feature::backlight::BacklightFeature;
+use hidpp::feature::backlight::{
+    BacklightEvent, BacklightFeature, BacklightInfoUpdate, BacklightStatus,
+};
 use hidpp::feature::battery_status::BatteryStatusFeature;
 use hidpp::feature::battery_voltage::BatteryVoltageFeature;
 use hidpp::feature::extended_dpi::ExtendedDpiFeature;
@@ -35,7 +41,7 @@ use hidpp::receiver::{bolt, unifying};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use tokio::sync::Notify;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::ReceiverProtocol;
 
@@ -92,14 +98,47 @@ impl HidppEventSource {
     }
 }
 
-/// The sending half of the bounded HID++ reconciliation-request channel.
+/// Complete latest-value reading from a keyboard's `backlightInfoEvent`, for
+/// the transient on-screen indicator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BacklightUpdate {
+    /// HID++ device index that emitted the event.
+    pub device_index: u8,
+    /// Current backlight level.
+    pub current_level: u8,
+    /// Number of selectable backlight levels, including zero.
+    pub levels: u8,
+    /// Whether the backlight is lit, so the indicator should show.
+    pub visible: bool,
+}
+
+impl BacklightUpdate {
+    fn from_info(device_index: u8, info: BacklightInfoUpdate) -> Self {
+        Self {
+            device_index,
+            current_level: info.current_level,
+            levels: info.nb_levels,
+            visible: !matches!(
+                info.status,
+                BacklightStatus::DisabledBySoftware
+                    | BacklightStatus::DisabledByCriticalBattery
+                    | BacklightStatus::AlsSaturated
+            ),
+        }
+    }
+}
+
+/// The sending half of the HID++ notification channels.
 ///
-/// Clones are installed only on inventory-owned channels. Capacity is one:
-/// every source asks for the same full reconciliation, so a burst has no
-/// additional meaning and must not grow memory while a slow probe is running.
+/// Clones are installed only on inventory-owned channels. Reconciliation
+/// requests share a capacity-one queue: every source asks for the same full
+/// reconciliation, so a burst has no additional meaning and must not grow
+/// memory while a slow probe is running. Backlight readings keep only their
+/// latest value in a separate channel, so a slow probe never drops one.
 #[derive(Clone)]
 pub struct EventNotifier {
     sender: mpsc::Sender<HidppEventSource>,
+    backlight: watch::Sender<Option<BacklightUpdate>>,
     #[cfg(test)]
     observation: Option<Arc<EventObservation>>,
 }
@@ -113,22 +152,59 @@ impl EventNotifier {
             observation.changed.notify_waiters();
         }
     }
+
+    fn notify_backlight(&self, update: BacklightUpdate) {
+        self.backlight.send_replace(Some(update));
+    }
 }
 
-/// The receiving half of the coalesced HID++ reconciliation-request channel.
-pub type EventReceiver = mpsc::Receiver<HidppEventSource>;
+/// The receiving half of the reconciliation-request queue and the latest
+/// backlight reading.
+pub struct EventReceiver {
+    lifecycle: mpsc::Receiver<HidppEventSource>,
+    backlight: watch::Receiver<Option<BacklightUpdate>>,
+}
 
-/// Build the bounded channel used by an inventory watcher and its enumerator.
+impl EventReceiver {
+    /// Receive the next reconciliation request.
+    pub async fn recv(&mut self) -> Option<HidppEventSource> {
+        self.lifecycle.recv().await
+    }
+
+    /// Receive a queued reconciliation request without waiting.
+    ///
+    /// # Errors
+    ///
+    /// [`mpsc::error::TryRecvError::Empty`] when nothing is queued, and
+    /// [`mpsc::error::TryRecvError::Disconnected`] once every notifier is gone.
+    pub fn try_recv(&mut self) -> Result<HidppEventSource, mpsc::error::TryRecvError> {
+        self.lifecycle.try_recv()
+    }
+
+    /// Subscribe to the latest backlight reading, independently of inventory.
+    #[must_use]
+    pub fn backlights(&self) -> watch::Receiver<Option<BacklightUpdate>> {
+        self.backlight.clone()
+    }
+}
+
+/// Build the reconciliation and backlight channels used by an inventory
+/// watcher and its enumerator.
 #[must_use]
 pub fn event_channel() -> (EventNotifier, EventReceiver) {
     let (sender, receiver) = mpsc::channel(1);
+    let (backlight, backlight_receiver) = watch::channel(None);
     (
         EventNotifier {
             sender,
+            backlight,
             #[cfg(test)]
             observation: None,
         },
-        receiver,
+        EventReceiver {
+            lifecycle: receiver,
+            backlight: backlight_receiver,
+        },
     )
 }
 
@@ -161,6 +237,7 @@ impl EventObserver {
 #[cfg(test)]
 pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventObserver) {
     let (sender, receiver) = mpsc::channel(1);
+    let (backlight, backlight_receiver) = watch::channel(None);
     let observation = Arc::new(EventObservation {
         count: AtomicUsize::new(0),
         changed: Notify::new(),
@@ -168,9 +245,13 @@ pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventOb
     (
         EventNotifier {
             sender,
+            backlight,
             observation: Some(Arc::clone(&observation)),
         },
-        receiver,
+        EventReceiver {
+            lifecycle: receiver,
+            backlight: backlight_receiver,
+        },
         EventObserver { observation },
     )
 }
@@ -356,6 +437,17 @@ impl SubscriptionState {
             {
                 device.settings_revision = device.settings_revision.wrapping_add(1);
             }
+        }
+        // The same broadcast also carries the level for the on-screen
+        // indicator, published whether or not a reconciliation is queued.
+        if source == HidppEventSource::Backlight
+            && let Some(BacklightEvent::InfoChanged(info)) = BacklightEvent::decode(
+                message.header().function_id.to_lo(),
+                &message.extend_payload(),
+            )
+        {
+            self.notifier
+                .notify_backlight(BacklightUpdate::from_info(device_index, info));
         }
         Some(source)
     }
@@ -934,6 +1026,103 @@ mod tests {
         assert_eq!(state.decode(report(0, 0), true), None);
         assert_eq!(state.decode(report(0, 0xd), false), None);
         assert_eq!(handle.settings_revision(1), 1);
+    }
+
+    #[test]
+    fn backlight_info_broadcasts_publish_the_latest_level() {
+        let keyboard =
+            EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x40a3, 0x1982, 0x4531]);
+        let (notifier, receiver) = event_channel();
+        let state = Arc::new(SubscriptionState {
+            protocol: Some(ReceiverProtocol::Bolt),
+            devices: RwLock::new(Vec::new()),
+            receiver_snapshot_depth: AtomicUsize::new(0),
+            notifier,
+        });
+        EventSubscriptionHandle {
+            state: Arc::clone(&state),
+        }
+        .register_device(1, keyboard);
+        let backlights = receiver.backlights();
+        // nb_levels, current_level, status, effect.
+        let report = |current_level: u8, status: u8| {
+            v20::Message::Long(
+                v20::MessageHeader {
+                    device_index: 1,
+                    feature_index: 4,
+                    function_id: U4::from_lo(0),
+                    software_id: U4::from_lo(0),
+                },
+                [
+                    8,
+                    current_level,
+                    status,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            )
+            .into()
+        };
+
+        // A reply to our own `getBacklightInfo` is not a reading to show.
+        assert_eq!(state.decode(report(4, 5), true), None);
+        assert_eq!(*backlights.borrow(), None);
+
+        assert_eq!(
+            state.decode(report(4, 5), false),
+            Some(HidppEventSource::Backlight)
+        );
+        assert_eq!(
+            *backlights.borrow(),
+            Some(BacklightUpdate {
+                device_index: 1,
+                current_level: 4,
+                levels: 8,
+                visible: true,
+            })
+        );
+
+        // Turned off in software: the indicator hides.
+        let _ = state.decode(report(0, 0), false);
+        assert_eq!(
+            backlights.borrow().map(|update| update.visible),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_backlight_survives_a_full_reconciliation_queue() {
+        let (notifier, mut receiver) = event_channel();
+        let mut backlights = receiver.backlights();
+        let update = |current_level| BacklightUpdate {
+            device_index: 2,
+            current_level,
+            levels: 8,
+            visible: true,
+        };
+        notifier.notify(HidppEventSource::ReceiverConnection);
+        notifier.notify(HidppEventSource::Backlight);
+        notifier.notify_backlight(update(3));
+        notifier.notify_backlight(update(7));
+
+        backlights.changed().await.expect("sender is live");
+        assert_eq!(*backlights.borrow_and_update(), Some(update(7)));
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(HidppEventSource::ReceiverConnection)
+        );
+        assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     }
 
     #[test]
