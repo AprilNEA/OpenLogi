@@ -383,20 +383,41 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let Some(data) = (unsafe { hook_data(lparam) }) else {
         return call_next(code, wparam, lparam);
     };
-    let Some(event) = translate_event(wparam, data) else {
-        return call_next(code, wparam, lparam);
-    };
-
-    let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
-    let disposition = callback
-        .as_ref()
-        .map_or(EventDisposition::PassThrough, |cb| {
-            cb(HookEvent::Mouse(event))
-        });
+    let disposition = dispatch_mouse_event(wparam, data, |event| {
+        invoke_callback(HookEvent::Mouse(event))
+    });
     match disposition {
         EventDisposition::PassThrough => call_next(code, wparam, lparam),
         EventDisposition::Suppress => 1,
     }
+}
+
+fn invoke_callback(event: HookEvent) -> EventDisposition {
+    let callback = CALLBACK.try_lock().ok().and_then(|slot| slot.clone());
+    callback
+        .as_ref()
+        .map_or(EventDisposition::PassThrough, |cb| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(event)))
+                .unwrap_or(EventDisposition::PassThrough)
+        })
+}
+
+fn dispatch_mouse_event(
+    message: WPARAM,
+    data: MSLLHOOKSTRUCT,
+    callback: impl FnOnce(MouseEvent) -> EventDisposition,
+) -> EventDisposition {
+    let previous = LAST_POINT.get();
+    let Some(event) = translate_event(message, data) else {
+        return EventDisposition::PassThrough;
+    };
+    let disposition = callback(event);
+    if message == WM_MOUSEMOVE as WPARAM && disposition == EventDisposition::Suppress {
+        // A suppressed move never changes the native cursor. The next hook
+        // point is relative to that same anchor, not to the rejected point.
+        LAST_POINT.set(previous);
+    }
+    disposition
 }
 
 /// Copy the `MSLLHOOKSTRUCT` the OS passed in `lparam`, or `None` if `lparam`
@@ -528,12 +549,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         return call_next(code, wparam, lparam);
     };
 
-    let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
-    let disposition = callback
-        .as_ref()
-        .map_or(EventDisposition::PassThrough, |cb| {
-            cb(HookEvent::Key(event))
-        });
+    let disposition = invoke_callback(HookEvent::Key(event));
     match disposition {
         EventDisposition::PassThrough => call_next(code, wparam, lparam),
         EventDisposition::Suppress => 1,
@@ -634,6 +650,40 @@ fn last_error(context: &str) -> HookError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suppressed_pan_moves_keep_the_cursor_anchor_until_release() {
+        let at = |x, y| MSLLHOOKSTRUCT {
+            pt: POINT { x, y },
+            ..MSLLHOOKSTRUCT::default()
+        };
+        LAST_POINT.set(Some(POINT { x: 500, y: 400 }));
+        for _ in 0..3 {
+            assert_eq!(
+                dispatch_mouse_event(WM_MOUSEMOVE as WPARAM, at(510, 405), |event| {
+                    assert!(matches!(
+                        event,
+                        MouseEvent::Moved {
+                            delta_x: 10,
+                            delta_y: 5
+                        }
+                    ));
+                    EventDisposition::Suppress
+                }),
+                EventDisposition::Suppress
+            );
+        }
+        dispatch_mouse_event(WM_MOUSEMOVE as WPARAM, at(510, 405), |_| {
+            EventDisposition::PassThrough
+        });
+        assert!(matches!(
+            translate_event(WM_MOUSEMOVE as WPARAM, at(512, 406)),
+            Some(MouseEvent::Moved {
+                delta_x: 2,
+                delta_y: 1
+            })
+        ));
+    }
 
     /// A gesture button pressed before the hook has seen any motion used to
     /// leave the baseline empty, so the swipe's first move was swallowed as the

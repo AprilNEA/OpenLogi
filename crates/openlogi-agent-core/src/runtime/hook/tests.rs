@@ -54,6 +54,7 @@ fn test_dispatcher() -> (
             action_ring,
         },
         buttons: owner.input(),
+        pan: super::super::pan::PanInput::default(),
     };
     (dispatcher, owner, received)
 }

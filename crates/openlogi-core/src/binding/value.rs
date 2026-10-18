@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::action::Action;
+use super::action::{Action, ActionContext};
 use super::defaults::default_gesture_binding;
 use super::gesture::GestureDirection;
 
@@ -185,14 +185,18 @@ impl Binding {
     /// A long-press binding keeps its short action as `Click`; its long action
     /// is discarded because gesture and threshold modes are mutually exclusive.
     /// A wheel-hold binding keeps its click action the same way.
+    /// An action that needs a held pointer resets to the default gesture click.
     /// A no-op when this is already a [`Gesture`](Binding::Gesture).
     pub fn upgrade_to_gesture(&mut self) {
-        let click = match self {
+        let mut click = match self {
             Binding::Single(action) => action.clone(),
             Binding::LongPress(binding) => binding.short().clone(),
             Binding::WheelHold(binding) => binding.click().clone(),
             Binding::Gesture(_) => return,
         };
+        if !click.is_available_for(ActionContext::OneShot) {
+            click = default_gesture_binding(GestureDirection::Click);
+        }
         *self = Binding::Gesture(BTreeMap::from([(GestureDirection::Click, click)]));
     }
 

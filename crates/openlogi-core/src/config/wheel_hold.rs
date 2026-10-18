@@ -5,7 +5,7 @@
 //! ([`Binding::WheelHold`]), never a separate flag. Switching it keeps the
 //! button's click action, so a press without scrolling does what it did.
 use super::Config;
-use crate::binding::{Binding, ButtonId, WheelHoldBinding, default_binding};
+use crate::binding::{ActionContext, Binding, ButtonId, WheelHoldBinding, default_binding};
 
 impl Config {
     /// Whether `button` of `device_key` is stored as a wheel-hold binding.
@@ -25,6 +25,8 @@ impl Config {
     /// resulting click action becomes the wheel-hold press; a long press
     /// keeps its short action and loses its long one, because the same
     /// release cannot decide both.
+    /// An action that requires a held pointer (Pan) resets to the button's
+    /// default click, since wheel-hold can only fire it on release.
     ///
     /// Off: demote to a [`Binding::Single`] of the click action.
     ///
@@ -37,10 +39,13 @@ impl Config {
         if enabled && self.is_gesture_mode(device_key, button) {
             self.set_gesture_mode(device_key, button, false);
         }
-        let click = self
+        let mut click = self
             .stored_binding(device_key, button)
             .map_or_else(|| default_binding(button), Binding::click_action);
         let binding = if enabled {
+            if !click.is_available_for(ActionContext::OneShot) {
+                click = default_binding(button);
+            }
             Binding::WheelHold(WheelHoldBinding::horizontal_scroll(click))
         } else {
             Binding::Single(click)

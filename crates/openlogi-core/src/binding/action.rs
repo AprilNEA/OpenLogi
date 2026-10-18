@@ -2,11 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::ButtonId;
 use super::application_target::ApplicationTarget;
 use super::category::Category;
 use super::key_combo::KeyCombo;
 
-/// What pressing a [`ButtonId`](crate::binding::ButtonId) should do.
+/// What pressing a [`ButtonId`] should do.
 ///
 /// Serialization uses serde's default external tagging: unit variants
 /// serialize as a bare string (`"BrowserBack"`) and the tuple variant
@@ -206,6 +207,19 @@ pub enum Action {
     /// this to a balanced tap of the whole chord, exactly as they do for
     /// [`Action::HoldShortcut`].
     TapKeyHoldingModifiers(KeyCombo),
+    /// Pan continuously while a Windows mouse button's single binding is held.
+    /// The agent captures the shared system pointer until the press ends.
+    Pan,
+}
+
+/// The activation lifecycle an action picker or dispatcher can provide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionContext {
+    /// A mouse button's single binding, with paired down and up edges.
+    SingleButton(ButtonId),
+    /// Ring slots, keyboard mappings, gestures, or actions fired on release.
+    /// Held shortcuts retain their existing balanced-tap fallback here.
+    OneShot,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -315,6 +329,7 @@ macro_rules! for_each_unit_action {
             CycleDpiPresets "Cycle DPI Presets" "pointer.cycle_dpi_presets" Dpi Gauge,
             ToggleSmartShift "Toggle SmartShift" "pointer.toggle_smartshift" Dpi Refresh,
             // Scroll
+            Pan "Pan (hold and move)" "actions.pan" Scroll Mouse,
             ScrollUp "Scroll Up" "actions.scroll_up" Scroll ArrowUp,
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" "actions.scroll_left" Scroll ScrollLeft,
@@ -435,6 +450,41 @@ macro_rules! derive_action_core {
 for_each_unit_action!(derive_action_core);
 
 impl Action {
+    /// Whether this host and activation lifecycle can execute the action.
+    ///
+    /// Pan uses Windows' shared system pointer. Other hosts need per-source
+    /// motion attribution before they can safely capture it; one-shot actions
+    /// have no release edge at all. Keep those decisions shared by UI and runtime.
+    #[must_use]
+    pub fn is_available_for(&self, context: ActionContext) -> bool {
+        if !matches!(self, Self::Pan) {
+            return true;
+        }
+        cfg!(target_os = "windows")
+            && matches!(
+                context,
+                ActionContext::SingleButton(
+                    ButtonId::MiddleClick
+                        | ButtonId::Back
+                        | ButtonId::Forward
+                        | ButtonId::DpiToggle
+                        | ButtonId::GestureButton
+                        | ButtonId::HapticPanel
+                        | ButtonId::WheelTiltLeft
+                        | ButtonId::WheelTiltRight
+                )
+            )
+    }
+
+    /// Pickable actions that the given activation lifecycle can execute.
+    #[must_use]
+    pub fn catalog_for(context: ActionContext) -> Vec<Action> {
+        Self::catalog()
+            .into_iter()
+            .filter(|action| action.is_available_for(context))
+            .collect()
+    }
+
     /// The chord whose output must remain down until the originating press
     /// ends, together with which of its keys stay down. `None` for an
     /// instantaneous action.

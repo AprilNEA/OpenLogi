@@ -307,6 +307,7 @@ smooth_wheel_other_connection = "Гэта прылада падтрымліва�
 smartshift = "SmartShift"
 
 [actions]
+pan = "Pan (hold and move)"
 bind_control = "Прывязаць %{name}"
 bind_control_in_app = "Прывязаць %{name} у %{app}"
 unbound = "Не прывязана"

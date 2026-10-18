@@ -11,7 +11,7 @@ use nutype::nutype;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::Action;
+use super::{Action, ActionContext};
 use crate::app::overlay_for;
 
 mod icon;
@@ -110,13 +110,16 @@ pub enum RingActionError {
     /// A ring cannot recursively open itself.
     #[error("Show Actions Ring cannot be assigned inside an Actions Ring")]
     RecursiveTrigger,
+    /// The action cannot run from a one-shot ring activation.
+    #[error("This action requires a supported physical button hold")]
+    RequiresButtonHold,
 }
 
 /// An action that is valid inside an Actions Ring.
 ///
 /// Construction and deserialization reject actions that would make the ring's
 /// state ambiguous (`None`) or recursively invoke another ring
-/// (`ShowActionsRing`).
+/// (`ShowActionsRing`), or require a physical button hold (`Pan`).
 #[nutype(
     validate(with = validate_ring_action, error = RingActionError),
     derive(Clone, Debug, PartialEq, Eq, Hash, AsRef, TryFrom, Into, Serialize, Deserialize),
@@ -146,6 +149,9 @@ fn validate_ring_action(action: &Action) -> Result<(), RingActionError> {
     match action {
         Action::None => Err(RingActionError::EmptyAction),
         Action::ShowActionsRing => Err(RingActionError::RecursiveTrigger),
+        action if !action.is_available_for(ActionContext::OneShot) => {
+            Err(RingActionError::RequiresButtonHold)
+        }
         _ => Ok(()),
     }
 }
@@ -345,6 +351,14 @@ const fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ring_rejects_pan_without_a_physical_release() {
+        assert!(
+            RingAction::new(Action::Pan).is_err(),
+            "a ring activation cannot sustain or release pointer capture"
+        );
+    }
 
     #[test]
     fn default_layout_populates_every_position() {

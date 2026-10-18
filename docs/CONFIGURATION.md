@@ -41,6 +41,37 @@ profiles so they keep their native direction.
 
 ## Shape
 
+### Hold-to-pan
+
+On Windows, choose **Pan (hold and move)** in a mouse button's single-action
+picker to scroll in both axes while holding it. Content follows the movement and the pointer
+stays anchored. Release, device disconnect, profile change, and agent shutdown
+end the capture. This is continuous scrolling, independent of wheel inversion,
+rather than a one-shot directional gesture.
+
+For the MX Master 3S button behind the main wheel, use the existing physical
+device key and set `DpiToggle = "Pan"` in its `bindings` table. `MiddleClick`
+means pressing the wheel itself, not the button behind it. Panning requires
+mouse-event capture to be enabled and a working OS input hook.
+
+Pan is not available in Actions Ring slots, keyboard mappings, gesture directions,
+long-press actions, or wheel-hold click actions. Switching to gesture or wheel-hold mode
+restores that mode's default click action. macOS and Linux do not offer Pan yet.
+
+The Windows implementation uses `WH_MOUSE_LL` for movement capture and
+`SendInput` wheel/horizontal-wheel events on the action worker. Movement is
+coalesced so high polling rates cannot flood the button lifecycle queue. Because
+`WH_MOUSE_LL` has no device identity, capture applies to the shared system pointer:
+moving another mouse or touchpad while the Pan button is held also pans. Applications
+must support the corresponding scroll direction; this does not emulate an
+application-specific CAD or graphics-editor tool. Like other `SendInput`
+actions, a normal-privilege agent cannot inject into elevated applications.
+See Microsoft's [low-level mouse hook](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelmouseproc)
+and [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
+contracts.
+
+### Stored fields
+
 `schema_version` is required and currently `8`. `selected_device` is an
 optional physical device key.
 

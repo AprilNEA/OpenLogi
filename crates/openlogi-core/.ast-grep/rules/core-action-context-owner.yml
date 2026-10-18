@@ -1,0 +1,10 @@
+# Owner: Action::catalog_for / Action::is_available_for in openlogi-core.
+id: core-action-context-owner
+language: rust
+severity: error
+message: Binding editors must use Action::catalog_for(context); openlogi_core::binding::Action owns platform and activation availability.
+note: The raw vocabulary includes actions such as Pan that a ring, keyboard, gesture, or non-Windows host cannot execute.
+files:
+  - crates/openlogi-desktop/src/features/**/*.rs
+rule:
+  pattern: Action::catalog()

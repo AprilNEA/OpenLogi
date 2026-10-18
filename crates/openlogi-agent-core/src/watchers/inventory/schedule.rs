@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
+use openlogi_hid::backend::HotplugEvent;
 use openlogi_hid::inventory::PROBE_CACHE_FRESHNESS;
 use openlogi_hid::inventory::events::HidppEventSource;
 
@@ -55,7 +56,7 @@ pub(super) enum ReconcileTrigger {
     /// A persistent HID++ channel reported lifecycle state.
     HidEvent(HidppEventSource),
     /// The host HID node set changed.
-    Hotplug,
+    Hotplug(HotplugEvent),
     /// Native notification or wall/monotonic gap reported system resume.
     SystemResume,
     /// Volatile setting writes still need their bounded confirmation pass.

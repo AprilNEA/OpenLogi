@@ -226,7 +226,7 @@ fn emit_settled_events(
                 matches!(press.behavior, PressBehavior::LongPressFired)
                     && due_presses.contains(press.token())
             }
-            ButtonRuntimeEvent::Started(_) => false,
+            ButtonRuntimeEvent::Started(_) | ButtonRuntimeEvent::PanMotion { .. } => false,
         });
     for event in deadline_events.into_iter().chain(ordered_events) {
         emit(event);
@@ -303,6 +303,11 @@ pub(super) fn process_input(
             }
         }
         ButtonInput::WheelWhilePressed { token } => state.wheel_moved(&token),
+        ButtonInput::PanMotion { token } => {
+            if let Some(press) = state.active(&token).cloned() {
+                emit(ButtonRuntimeEvent::PanMotion { press });
+            }
+        }
     }
 }
 

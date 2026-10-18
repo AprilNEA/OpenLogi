@@ -14,7 +14,7 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, Binding, ButtonId, LONG_PRESS_THRESHOLD};
+use openlogi_core::binding::{Action, ActionContext, Binding, ButtonId, LONG_PRESS_THRESHOLD};
 use tracing::warn;
 
 use super::ActionDispatchTarget;
@@ -185,6 +185,8 @@ enum PressBehavior {
     LifecycleOnly,
     /// Existing behavior: fire once when the press starts.
     Immediate(Action),
+    /// A gesture fallback or firmware pulse without a physical hold lifecycle.
+    OneShot(Action),
     /// Wait for either release or the threshold, whichever occurs first.
     LongPressPending {
         short: Action,
@@ -205,7 +207,7 @@ impl PressBehavior {
         match binding {
             None => Self::LifecycleOnly,
             Some(Binding::Single(action)) => Self::Immediate(action.clone()),
-            Some(binding @ Binding::Gesture(_)) => Self::Immediate(binding.click_action()),
+            Some(binding @ Binding::Gesture(_)) => Self::OneShot(binding.click_action()),
             Some(Binding::LongPress(binding)) => Self::LongPressPending {
                 short: binding.short().clone(),
                 long: binding.long().clone(),
@@ -222,6 +224,7 @@ impl PressBehavior {
             Self::LongPressPending { deadline, .. } => Some(*deadline),
             Self::LifecycleOnly
             | Self::Immediate(_)
+            | Self::OneShot(_)
             | Self::LongPressFired
             | Self::WheelHoldPending { .. }
             | Self::WheelHoldScrolled => None,
@@ -230,7 +233,7 @@ impl PressBehavior {
 
     fn start_action(&self) -> Option<&Action> {
         match self {
-            Self::Immediate(action) => Some(action),
+            Self::Immediate(action) | Self::OneShot(action) => Some(action),
             Self::LifecycleOnly
             | Self::LongPressPending { .. }
             | Self::LongPressFired
@@ -245,6 +248,7 @@ impl PressBehavior {
             Self::WheelHoldPending { click } => Some(click),
             Self::LifecycleOnly
             | Self::Immediate(_)
+            | Self::OneShot(_)
             | Self::LongPressFired
             | Self::WheelHoldScrolled => None,
         }
@@ -288,6 +292,15 @@ impl ActivePress {
         self.behavior.start_action()
     }
 
+    pub(crate) fn action_context(&self) -> ActionContext {
+        match (&self.token.key.control, &self.behavior) {
+            (PressControl::Button(button), PressBehavior::Immediate(_)) => {
+                ActionContext::SingleButton(*button)
+            }
+            _ => ActionContext::OneShot,
+        }
+    }
+
     pub(crate) fn target(&self) -> ActionDispatchTarget {
         self.target
     }
@@ -327,6 +340,10 @@ pub(crate) enum EndReason {
 
 /// Typed output from the lifecycle worker.
 pub(crate) enum ButtonRuntimeEvent {
+    /// Pointer movement admitted by the exact press that owns panning.
+    PanMotion {
+        press: ActivePress,
+    },
     Started(ActivePress),
     Ended {
         press: ActivePress,
@@ -342,6 +359,9 @@ pub(crate) enum ButtonRuntimeEvent {
 
 /// Inputs cannot represent `Up + action` or a source-authored `Cancel`.
 enum ButtonInput {
+    PanMotion {
+        token: PressToken,
+    },
     Down(ActivePress),
     Up {
         key: PressKey,
@@ -495,6 +515,24 @@ pub(crate) struct ButtonInputHandle {
 }
 
 impl ButtonInputHandle {
+    pub(super) fn accepts_press(&self, token: &PressToken) -> bool {
+        self.accepting.load(Ordering::Acquire)
+            && token.generation == self.generation.load(Ordering::Acquire)
+    }
+
+    pub(super) fn try_pan_motion(&self, token: &PressToken) -> bool {
+        let generation = self.generation.load(Ordering::Acquire);
+        if token.generation != generation {
+            return false;
+        }
+        self.try_input(
+            generation,
+            ButtonInput::PanMotion {
+                token: token.clone(),
+            },
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn try_hook_down(
         &self,
@@ -585,9 +623,13 @@ impl ButtonInputHandle {
         target: ActionDispatchTarget,
     ) -> bool {
         let generation = self.generation.load(Ordering::Acquire);
+        let behavior = match PressBehavior::new(binding, Instant::now()) {
+            PressBehavior::Immediate(action) => PressBehavior::OneShot(action),
+            other => other,
+        };
         let press = self.new_press(
             PressKey::new(ButtonSource::Hidpp(session.clone()), button),
-            PressBehavior::new(binding, Instant::now()),
+            behavior,
             generation,
             target,
         );

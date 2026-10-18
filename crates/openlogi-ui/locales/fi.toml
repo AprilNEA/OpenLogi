@@ -307,6 +307,7 @@ smooth_wheel_other_connection = "Laite tukee tasaista rullaa toisella yhteydell�
 smartshift = "SmartShift"
 
 [actions]
+pan = "Pan (hold and move)"
 bind_control = "M채채rit채 %{name}"
 bind_control_in_app = "M채채rit채 %{name} sovelluksessa %{app}"
 unbound = "Ei m채채ritetty"
