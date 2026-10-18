@@ -12,7 +12,7 @@ use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{Action, ActionContext, ButtonId, GestureDirection, default_binding};
 
 use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
@@ -239,12 +239,21 @@ fn button_inspector(
             panel.child(action_library(
                 "inspector-action",
                 Some(&action),
+                button_action_context(button, data),
                 picker,
                 &on_pick,
                 pal,
                 cx,
             ))
         })
+}
+
+fn button_action_context(button: ButtonId, data: &BindingInspectorData<'_>) -> ActionContext {
+    if data.editing_app.is_none() && data.wheel_hold.contains(&button) {
+        ActionContext::OneShot
+    } else {
+        ActionContext::SingleButton(button)
+    }
 }
 
 /// The heading's status line. A button that holds the wheel is customized
@@ -373,6 +382,7 @@ fn inherited_gesture_inspector(
             panel.child(action_library(
                 "inspector-gesture-override",
                 None,
+                ActionContext::SingleButton(button),
                 picker,
                 &on_pick,
                 pal,
@@ -440,6 +450,7 @@ fn gesture_inspector(
             panel.child(action_library(
                 "inspector-gesture-action",
                 Some(&current),
+                ActionContext::OneShot,
                 picker,
                 &on_pick,
                 pal,
@@ -757,13 +768,14 @@ fn selection_card(
 fn action_library(
     id_prefix: &'static str,
     current: Option<&Action>,
+    context: ActionContext,
     picker: ActionPickerContext<'_>,
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
     let query = picker.search.read(cx).value();
-    let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
+    let rows = action_rows_matching(id_prefix, current, &query, context, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()
@@ -1017,6 +1029,24 @@ mod tests {
         assert_eq!(
             button_status(ButtonId::Back, &action, &data, false),
             tr!("profiles.customized")
+        );
+    }
+
+    #[test]
+    fn pan_picker_tracks_the_binding_that_will_be_saved() {
+        let (bindings, gestures) = (BTreeMap::new(), BTreeMap::new());
+        let wheel_hold = BTreeSet::from([ButtonId::Back]);
+        let mut data = global_profile(&bindings, &gestures, &wheel_hold);
+        assert!(!Action::Pan.is_available_for(button_action_context(ButtonId::Back, &data)));
+        assert_eq!(
+            Action::Pan.is_available_for(button_action_context(ButtonId::DpiToggle, &data)),
+            cfg!(target_os = "windows")
+        );
+        // An app override replaces the global wheel-hold with a single action.
+        data.editing_app = Some("example.app");
+        assert_eq!(
+            Action::Pan.is_available_for(button_action_context(ButtonId::Back, &data)),
+            cfg!(target_os = "windows")
         );
     }
 }

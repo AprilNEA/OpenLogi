@@ -7,7 +7,7 @@ use gpui::{
     Styled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
-use openlogi_core::binding::{Action, Category, GestureDirection};
+use openlogi_core::binding::{Action, ActionContext, Category, GestureDirection};
 
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
@@ -22,9 +22,9 @@ pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 
 /// The action catalog grouped by [`Category`], preserving catalog order within
 /// each group and first-seen order across groups.
-pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
+pub(crate) fn grouped_catalog(context: ActionContext) -> Vec<(Category, Vec<Action>)> {
     let mut sections: Vec<(Category, Vec<Action>)> = Vec::new();
-    for action in Action::catalog() {
+    for action in Action::catalog_for(context) {
         let category = action.category();
         if let Some(section) = sections
             .iter_mut()
@@ -117,7 +117,7 @@ pub(crate) fn action_rows(
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
-    action_rows_matching(id_prefix, current, "", on_pick, pal)
+    action_rows_matching(id_prefix, current, "", ActionContext::OneShot, on_pick, pal)
 }
 
 /// Build action rows filtered by localized action or category name.
@@ -125,13 +125,14 @@ pub(crate) fn action_rows_matching(
     id_prefix: &'static str,
     current: Option<&Action>,
     query: &str,
+    context: ActionContext,
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
     let query = query.trim().to_lowercase();
     let mut catalog_index = 0usize;
     let mut sections = Vec::new();
-    for (category, actions) in grouped_catalog() {
+    for (category, actions) in grouped_catalog(context) {
         let category_label = rust_i18n::t!(category.translation_key());
         let category_matches = category_label.to_lowercase().contains(&query);
         // Number the full catalog before filtering so typing in the search box
@@ -245,11 +246,12 @@ mod tests {
 
     #[test]
     fn gesture_action_catalog_includes_actions_ring() {
-        let actions = grouped_catalog()
+        let actions = grouped_catalog(ActionContext::OneShot)
             .into_iter()
             .flat_map(|(_, actions)| actions)
             .collect::<Vec<_>>();
         assert!(actions.contains(&Action::ShowActionsRing));
+        assert!(!actions.contains(&Action::Pan));
     }
 
     /// [`action_icon_path`] is exhaustive over [`Action`], so the compiler
@@ -277,7 +279,13 @@ mod tests {
                 ApplicationTarget::new("/usr/bin/true", "true").expect("non-empty path"),
             ),
         ];
-        for action in Action::catalog().into_iter().chain(uncataloged) {
+        for action in Action::catalog_for(ActionContext::SingleButton(
+            openlogi_core::binding::ButtonId::DpiToggle,
+        ))
+        .into_iter()
+        .chain(uncataloged)
+        .chain([Action::Pan])
+        {
             let path = action_icon_path(&action);
             assert!(
                 matches!(ActionIcons.load(path), Ok(Some(_))),

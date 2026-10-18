@@ -3,6 +3,20 @@
 use super::*;
 
 #[test]
+fn switching_pan_to_gestures_restores_a_runnable_click() {
+    let mut cfg = Config::default();
+    cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Pan));
+    cfg.set_gesture_mode("2b042", ButtonId::Back, true);
+    assert_eq!(
+        cfg.stored_bindings("2b042")
+            .get(&ButtonId::Back)
+            .unwrap()
+            .click_action(),
+        default_gesture_binding(GestureDirection::Click)
+    );
+}
+
+#[test]
 fn set_gesture_direction_upgrades_single_to_gesture() {
     let mut cfg = Config::default();
     // Start from a Single binding, then bind a swipe direction.

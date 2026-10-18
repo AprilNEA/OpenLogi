@@ -361,7 +361,7 @@ fn action_sections(
 
 fn ring_catalog() -> Vec<(Category, Vec<Action>)> {
     let mut sections: Vec<(Category, Vec<Action>)> = Vec::new();
-    for action in Action::catalog() {
+    for action in Action::catalog_for(openlogi_core::binding::ActionContext::OneShot) {
         if RingAction::new(action.clone()).is_err() {
             continue;
         }

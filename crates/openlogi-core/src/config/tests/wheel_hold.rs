@@ -5,6 +5,17 @@ use crate::binding::{LongPressBinding, WheelHoldBinding};
 
 const KEY: &str = "2b042";
 
+#[test]
+fn switching_pan_to_wheel_hold_restores_a_runnable_click() {
+    let mut cfg = Config::default();
+    cfg.set_binding(KEY, ButtonId::Back, Binding::Single(Action::Pan));
+    cfg.set_wheel_hold(KEY, ButtonId::Back, true);
+    assert_eq!(
+        cfg.stored_bindings(KEY).get(&ButtonId::Back),
+        Some(&wheel_hold(default_binding(ButtonId::Back)))
+    );
+}
+
 fn wheel_hold(click: Action) -> Binding {
     Binding::WheelHold(WheelHoldBinding::horizontal_scroll(click))
 }

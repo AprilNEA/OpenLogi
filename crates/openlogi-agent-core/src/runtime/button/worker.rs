@@ -303,9 +303,9 @@ pub(super) fn process_input(
             }
         }
         ButtonInput::WheelWhilePressed { token } => state.wheel_moved(&token),
-        ButtonInput::PanMotion { token, delta } => {
+        ButtonInput::PanMotion { token } => {
             if let Some(press) = state.active(&token).cloned() {
-                emit(ButtonRuntimeEvent::PanMotion { press, delta });
+                emit(ButtonRuntimeEvent::PanMotion { press });
             }
         }
     }

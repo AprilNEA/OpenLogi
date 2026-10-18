@@ -843,3 +843,22 @@ fn mouse_buttons_sort_ahead_of_every_keyboard_control() {
     }
     assert_eq!(default_binding(ButtonId::control(0x01f3)), Action::None);
 }
+#[test]
+fn pan_is_only_offered_for_supported_windows_button_holds() {
+    assert_eq!(
+        Action::catalog_for(ActionContext::SingleButton(ButtonId::DpiToggle))
+            .contains(&Action::Pan),
+        cfg!(target_os = "windows")
+    );
+    for context in [
+        ActionContext::OneShot,
+        ActionContext::SingleButton(ButtonId::ThumbwheelScrollUp),
+        ActionContext::SingleButton(ButtonId::control(0x0141)),
+        ActionContext::SingleButton(ButtonId::LeftClick),
+    ] {
+        let catalog = Action::catalog_for(context);
+        assert!(!catalog.contains(&Action::Pan));
+        assert!(catalog.contains(&Action::ScrollUp));
+        assert!(catalog.contains(&Action::Copy));
+    }
+}

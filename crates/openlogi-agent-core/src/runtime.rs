@@ -16,7 +16,7 @@ use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, ActionContext, Binding, ButtonId};
 use tracing::{debug, info, warn};
 
 use self::button::{
@@ -109,6 +109,10 @@ impl ActionExecutor {
     }
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
+        if !action.is_available_for(ActionContext::OneShot) {
+            debug!(action = %action.label(), "action requires a supported physical button hold — skipped");
+            return;
+        }
         // The ring is drawn by OpenLogi at the cursor and acts on no window, so
         // no pointer target gates it. It must not: while the ring is showing,
         // the pointer is over the ring's own floating window, which classifies
@@ -221,20 +225,32 @@ impl ButtonEventHandler {
 
     fn handle(&mut self, event: ButtonRuntimeEvent) {
         match event {
-            ButtonRuntimeEvent::PanMotion { press, delta } => {
-                if self.pan.owns(press.token()) && press.target().resolve(&Action::Pan).is_some() {
+            ButtonRuntimeEvent::PanMotion { press } => {
+                // Admission happened once at press start. Pointer/profile/source
+                // changes cancel the owning press through the lifecycle worker.
+                if let Some(delta) = self.pan.take_delta(press.token()) {
                     openlogi_inject::post_scroll(delta);
-                } else {
-                    self.pan.end(press.token());
                 }
             }
             ButtonRuntimeEvent::Started(press) => {
                 if let Some(action) = press.start_action() {
-                    self.start_action(press.token(), action, press.device_key(), press.target());
+                    self.start_action(
+                        press.token(),
+                        action,
+                        press.device_key(),
+                        press.target(),
+                        press.action_context(),
+                    );
                 }
             }
             ButtonRuntimeEvent::Triggered { press, action } => {
-                self.start_action(press.token(), &action, press.device_key(), press.target());
+                self.start_action(
+                    press.token(),
+                    &action,
+                    press.device_key(),
+                    press.target(),
+                    ActionContext::OneShot,
+                );
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
                 self.held.end(press.token());
@@ -259,7 +275,11 @@ impl ButtonEventHandler {
         action: &Action,
         device_key: Option<&str>,
         target: ActionDispatchTarget,
+        context: ActionContext,
     ) {
+        if !action.is_available_for(context) {
+            return;
+        }
         if matches!(action, Action::Pan) {
             if target.resolve(action).is_some() {
                 self.pan.start(press);
@@ -334,9 +354,7 @@ impl ActionRuntime {
 impl ActionDispatcher {
     /// The native hook must never inject or wait for the button worker.
     fn try_pan_motion(&self, dx: i32, dy: i32) -> bool {
-        self.pan
-            .try_press()
-            .is_some_and(|press| self.buttons.try_pan_motion(&press, pan::pan_delta(dx, dy)))
+        self.pan.try_motion(&self.buttons, dx, dy)
     }
 
     /// Route one action without blocking the input callback.
@@ -571,24 +589,100 @@ mod tests {
 
     static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    fn test_executor() -> (
+        ActionExecutor,
+        tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
+    ) {
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (action_ring, ring_rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            ActionExecutor {
+                dpi_cycle: Arc::default(),
+                access: DeviceAccess {
+                    channel: openlogi_hid::CaptureChannelSlot::default(),
+                    registry: openlogi_hid::ChannelRegistry::default(),
+                    receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                    device_io,
+                    transport_turns: crate::hardware::TransportTurns::default(),
+                },
+                action_ring,
+            },
+            ring_rx,
+        )
+    }
+
+    #[test]
+    fn pan_capture_requires_a_supported_button_hold_on_this_host() {
+        let mut handler = ButtonEventHandler::new(test_executor().0);
+        let input = handler.pan.input();
+        let press = PressToken::hook_for_test(1, ButtonId::DpiToggle);
+        handler.start_action(
+            &press,
+            &Action::Pan,
+            None,
+            ActionDispatchTarget::Keyboard,
+            ActionContext::OneShot,
+        );
+        assert!(!input.is_capturing());
+        handler.start_action(
+            &press,
+            &Action::Pan,
+            None,
+            ActionDispatchTarget::Keyboard,
+            ActionContext::SingleButton(ButtonId::DpiToggle),
+        );
+        assert_eq!(input.is_capturing(), cfg!(target_os = "windows"));
+        drop(handler);
+        assert!(!input.is_capturing());
+    }
+
+    #[test]
+    fn pan_capture_ends_with_release_disconnect_invalidation_and_shutdown() {
+        let mut handler = ButtonEventHandler::new(test_executor().0);
+        let pan = handler.pan.input();
+        let (sent, received) = std::sync::mpsc::channel();
+        let mut runtime = ButtonRuntimeOwner::spawn(move |event| {
+            handler.handle(event);
+            sent.send(()).unwrap();
+        })
+        .unwrap();
+        let input = runtime.input();
+        let session = HidppSessionId::with_epoch("pan-test-mouse", 1);
+        let press = || {
+            input
+                .try_hidpp_down(
+                    &session,
+                    ButtonId::DpiToggle,
+                    Some(&Binding::Single(Action::Pan)),
+                    ActionDispatchTarget::Keyboard,
+                )
+                .unwrap();
+            received.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(pan.is_capturing(), cfg!(target_os = "windows"));
+        };
+        press();
+        assert!(input.try_hidpp_up(&session, ButtonId::DpiToggle));
+        received.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(!pan.is_capturing());
+        press();
+        input.cancel_hidpp_session(&session);
+        received.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(!pan.is_capturing());
+        press();
+        input.invalidate_all();
+        received.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(!pan.is_capturing());
+        press();
+        assert!(runtime.shutdown());
+        assert!(!pan.is_capturing());
+    }
+
     #[test]
     fn ring_trigger_reaches_the_ring_over_an_unavailable_pointer_target() {
         // The second press that toggles the ring closed lands on the ring's
         // own overlay window, which the pointer hit test reports as
         // unavailable.
-        let (_signal, device_io) = openlogi_hid::device_io_channel();
-        let (action_ring, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
-        let executor = ActionExecutor {
-            dpi_cycle: Arc::default(),
-            access: DeviceAccess {
-                channel: openlogi_hid::CaptureChannelSlot::default(),
-                registry: openlogi_hid::ChannelRegistry::default(),
-                receiver_access: crate::receiver_access::ReceiverAccess::default(),
-                device_io,
-                transport_turns: crate::hardware::TransportTurns::default(),
-            },
-            action_ring,
-        };
+        let (executor, mut ring_rx) = test_executor();
 
         executor.dispatch_to(
             &Action::ShowActionsRing,

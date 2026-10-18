@@ -61,11 +61,9 @@ fn wheel(press: &ActivePress) -> ButtonInput {
 
 #[test]
 fn pan_motion_is_rejected_after_release_and_session_cancellation() {
-    let delta = openlogi_core::scroll::ScrollDelta::wheel_ticks(-0.25, 0.5);
     let events = events_after_press(&Binding::Single(Action::Pan), |press| {
         let motion = || ButtonInput::PanMotion {
             token: press.token.clone(),
-            delta,
         };
         vec![motion(), up(press), motion()]
     });
@@ -86,10 +84,7 @@ fn pan_motion_is_rejected_after_release_and_session_cancellation() {
     state.cancel_source(&press.token.key.source);
     process_input(
         &mut state,
-        ButtonInput::PanMotion {
-            token: press.token,
-            delta,
-        },
+        ButtonInput::PanMotion { token: press.token },
         &mut |_| panic!("canceled pan must never emit scroll"),
     );
 }
@@ -108,6 +103,86 @@ fn recv_event(receiver: &mpsc::Receiver<ButtonRuntimeEvent>) -> ButtonRuntimeEve
     receiver
         .recv_timeout(Duration::from_secs(1))
         .expect("button worker should emit an event")
+}
+
+#[test]
+fn pan_motion_burst_preserves_the_button_release() {
+    let mut pan = super::super::pan::PanOwner::default();
+    let motion = pan.input();
+    let (started, ready) = mpsc::channel();
+    let (resume, blocked) = mpsc::channel();
+    let (events, received) = mpsc::channel();
+    let (scroll, scrolled) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        match &event {
+            ButtonRuntimeEvent::Started(press) => {
+                pan.start(press.token());
+                started.send(()).unwrap();
+                blocked.recv().unwrap();
+            }
+            ButtonRuntimeEvent::Ended { press, .. } => pan.end(press.token()),
+            ButtonRuntimeEvent::PanMotion { press } => {
+                scroll.send(pan.take_delta(press.token()).unwrap()).unwrap();
+            }
+            ButtonRuntimeEvent::Triggered { .. } => {}
+        }
+        events.send(event).unwrap();
+    })
+    .unwrap();
+    let input = owner.input();
+    input
+        .try_hook_down_with_target(
+            ButtonId::Back,
+            Some(&Binding::Single(Action::Pan)),
+            ActionDispatchTarget::Keyboard,
+        )
+        .unwrap();
+    ready.recv_timeout(Duration::from_secs(1)).unwrap();
+    let accepted = (0..512).all(|_| motion.try_motion(&input, 40, 80));
+    let released = input.try_hook_up(ButtonId::Back);
+    resume.send(()).unwrap();
+    let mut events = Vec::new();
+    loop {
+        let event = recv_event(&received);
+        let ended = matches!(event, ButtonRuntimeEvent::Ended { .. });
+        events.push(event);
+        if ended {
+            break;
+        }
+    }
+    assert!(owner.shutdown());
+    assert!(
+        accepted,
+        "motion must coalesce instead of invalidating every held button"
+    );
+    assert!(
+        released,
+        "the physical release must still fit in the lifecycle queue"
+    );
+    assert_eq!(
+        scrolled.try_iter().collect::<Vec<_>>(),
+        [openlogi_core::scroll::ScrollDelta::wheel_ticks(
+            -512.0, 1024.0
+        )]
+    );
+    assert!(
+        !motion.try_motion(&input, 40, 80),
+        "release must restore normal pointer motion"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(_),
+            ..
+        }
+    )));
 }
 
 fn emit_due_long_presses(
@@ -652,6 +727,7 @@ fn pulse_has_an_immediate_balanced_lifecycle() {
     let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
         panic!("pulse must start before ending");
     };
+    assert_eq!(started.action_context(), ActionContext::OneShot);
     let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
         panic!("pulse must end immediately");
     };
