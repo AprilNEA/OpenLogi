@@ -5899,6 +5899,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "sha2 0.10.9",
+ "socket2",
  "subtle",
  "tempfile",
  "thiserror 2.0.18",

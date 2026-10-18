@@ -18,6 +18,7 @@ quinn = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 sha2 = { workspace = true }
+socket2 = "0.6"
 subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "net"] }

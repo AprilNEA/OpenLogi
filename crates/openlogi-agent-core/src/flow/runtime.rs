@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -93,8 +93,8 @@ impl FlowGeneration {
             ..Default::default()
         };
         let endpoint = Arc::new(
-            bind_endpoint(
-                SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT)),
+            bind_dual_stack(
+                DEFAULT_PORT,
                 identity,
                 PeerTrust::pinned(config.peers.iter().map(|peer| peer.public_key)),
                 hello,
@@ -206,6 +206,36 @@ impl FlowGeneration {
 /// Bind Flow's port, retrying while it is still taken. A reload restarts
 /// the runtime, and the previous generation releases the socket only once
 /// its last connection handle is gone.
+/// Binds Flow's endpoint on `port` dual-stack, so a peer reachable over IPv6
+/// alone connects too; IPv4 alone where this host has no IPv6.
+async fn bind_dual_stack(
+    port: u16,
+    identity: MachineIdentity,
+    trust: PeerTrust,
+    hello: proto::Hello,
+) -> Result<FlowEndpoint, TransportError> {
+    match bind_endpoint(
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+        identity.clone(),
+        trust.clone(),
+        hello.clone(),
+    )
+    .await
+    {
+        Err(TransportError::Io(error)) if error.kind() != io::ErrorKind::AddrInUse => {
+            debug!(%error, "Flow IPv6 endpoint unavailable — listening on IPv4");
+            bind_endpoint(
+                SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+                identity,
+                trust,
+                hello,
+            )
+            .await
+        }
+        result => result,
+    }
+}
+
 async fn bind_endpoint(
     address: SocketAddr,
     identity: MachineIdentity,
