@@ -198,6 +198,12 @@ impl FlowInput {
         self.latch_pending.store(true, Ordering::Release);
     }
 
+    /// Whether the devices were sent away with no local movement or arrival
+    /// since: a keystroke here then means the keyboard stayed behind.
+    pub(super) fn keyboard_handed_off(&self) -> bool {
+        self.keyboard.handed_off.load(Ordering::Acquire)
+    }
+
     pub(super) fn take_latch(&self) -> bool {
         self.latch_pending.swap(false, Ordering::AcqRel)
     }

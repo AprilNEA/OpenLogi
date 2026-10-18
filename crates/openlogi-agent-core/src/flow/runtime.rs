@@ -777,10 +777,13 @@ async fn run_application_connection(
     peer: PublicKey,
     connection: Arc<FlowConnection>,
 ) {
-    let mut clipboard = state.clipboard.connection(peer, Arc::clone(&connection));
-    loop {
-        tokio::select! {
-            rpc = connection.accept_rpc() => match rpc {
+    // One loop per stream kind, never a `select!` over both accepts: neither
+    // is cancel-safe, so the losing branch would drop a stream it had
+    // already accepted, and the request or notification on it.
+    let rpcs = async {
+        let clipboard = state.clipboard.connection(peer, Arc::clone(&connection));
+        loop {
+            match connection.accept_rpc().await {
                 Ok(RpcEvent::Request(rpc))
                     if matches!(
                         rpc.request().kind,
@@ -793,19 +796,31 @@ async fn run_application_connection(
                     handle_rpc(Arc::clone(&state), peer, event).await;
                 }
                 Err(_) => return,
-            },
-            notification = connection.accept_notification() => match notification {
+            }
+        }
+    };
+    let notifications = async {
+        let mut clipboard = state.clipboard.connection(peer, Arc::clone(&connection));
+        loop {
+            match connection.accept_notification().await {
                 Ok(NotificationEvent::Notification(announce))
                     if announce.kind == FrameKind::ClipboardAnnounce =>
                 {
                     clipboard.announced(&announce);
                 }
-                Ok(event @ (NotificationEvent::Notification(_) | NotificationEvent::Dropped(_))) => {
+                Ok(
+                    event @ (NotificationEvent::Notification(_) | NotificationEvent::Dropped(_)),
+                ) => {
                     handle_notification(Arc::clone(&state), peer, event).await;
                 }
                 Err(_) => return,
-            },
+            }
         }
+    };
+    // The connection is gone once either accept fails.
+    tokio::select! {
+        () = rpcs => {}
+        () = notifications => {}
     }
 }
 
@@ -857,6 +872,11 @@ async fn follow_keyboards(state: Arc<GenerationState>) {
         state.input.keyboard_stayed.notified().await;
         if !state.is_active() {
             return;
+        }
+        // The keystroke was queued before an arrival or local movement put
+        // the keyboard back here: it stays.
+        if !state.input.keyboard_handed_off() {
+            continue;
         }
         let Some(peer_name) = state.handed_off_to() else {
             continue;
