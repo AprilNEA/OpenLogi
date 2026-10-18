@@ -1,4 +1,4 @@
-//! App-level settings (launch-at-login, theme, assets, language).
+//! App-level settings (launch-at-login, theme, assets, language, Flow).
 
 use super::device_key::DeviceKey;
 use super::events::StateEvents;
@@ -6,8 +6,8 @@ use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_component::ThemeMode;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MouseProfileTarget,
-    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, FlowConfig,
+    MouseProfileTarget, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 
 impl AppState {
@@ -402,5 +402,35 @@ impl AppState {
         self.persist_and_reload("language setting");
         openlogi_core::locale::activate(self.config.app_settings.language.as_deref());
         StateEvents::from(StateEvent::LanguageChanged).and(StateEvent::SettingsChanged)
+    }
+    /// The `[flow]` section behind the Settings window's Flow page. Read-only
+    /// view; mutate via the `commit_flow_*` methods below.
+    #[must_use]
+    pub fn flow_config(&self) -> &FlowConfig {
+        &self.config.flow
+    }
+    /// Choose whether crossing a Flow screen edge also needs Control held, and
+    /// persist it. The agent's edge watcher applies it on reload without
+    /// reconnecting to peers. An already-set value writes nothing; failed saves
+    /// restore the previous choice.
+    pub fn commit_flow_require_modifier(&mut self, required: bool) -> StateEvents {
+        if self.config.flow.require_modifier == required {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.flow.require_modifier = required);
+        self.persist_and_reload("Flow edge modifier");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Toggle sharing copied text with Flow peers and persist it. The agent
+    /// restarts its Flow sessions on reload to apply it. An already-set value
+    /// writes nothing; failed saves restore the previous value.
+    pub fn commit_flow_clipboard(&mut self, enabled: bool) -> StateEvents {
+        if self.config.flow.clipboard == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config.edit(|config| config.flow.clipboard = enabled);
+        self.persist_and_reload("Flow clipboard sharing");
+        StateEvent::SettingsChanged.into()
     }
 }
