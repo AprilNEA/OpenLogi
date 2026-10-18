@@ -116,6 +116,9 @@ async fn a_peer_hands_a_keyboard_to_this_host() {
             identity: local,
             address: loopback(),
             mdns: false,
+            // No pointer, as on Wayland or a headless host: receiving must
+            // not depend on it.
+            probe: false,
         },
     )
     .expect("start the runtime");

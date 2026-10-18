@@ -85,6 +85,10 @@ pub(super) struct Actor {
     events: mpsc::Receiver<Event>,
     events_tx: mpsc::Sender<Event>,
     crossings: mpsc::Receiver<EdgeCrossing>,
+    /// False once the pointer thread has gone, which it does at once when
+    /// this session has no pointer probe (Wayland, or no display). Incoming
+    /// handoffs still work; only outgoing ones need a crossing.
+    crossings_open: bool,
     stop: watch::Receiver<bool>,
 }
 
@@ -125,6 +129,7 @@ impl Actor {
             events,
             events_tx,
             crossings,
+            crossings_open: true,
             stop,
         };
         actor.publish_state();
@@ -158,10 +163,14 @@ impl Actor {
                     self.inventory_changed();
                 }
                 () = sleep_until(deadline) => self.expire(),
-                crossing = self.crossings.recv() => match crossing {
-                    Some(crossing) => self.crossed(&crossing),
-                    None => break,
-                },
+                crossing = self.crossings.recv(), if self.crossings_open => {
+                    if let Some(crossing) = crossing {
+                        self.crossed(&crossing);
+                    } else {
+                        info!("Flow has no pointer in this session; outgoing handoffs are off");
+                        self.crossings_open = false;
+                    }
+                }
             }
         }
         if let Some(outgoing) = self.outgoing.take() {
