@@ -29,6 +29,7 @@
 
 mod foreground;
 pub(crate) mod pointer;
+pub(crate) mod probe;
 mod supervisor;
 
 use std::io;

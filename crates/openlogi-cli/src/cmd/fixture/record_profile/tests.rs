@@ -19,9 +19,9 @@ use openlogi_fixture::{
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, BacklightObservation,
-    ClientKind, ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth,
-    MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig,
+    ClientKind, ConfigReloadError, FlowStatus, ForegroundApps, Generation, Identity,
+    InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -477,6 +477,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             recent: Vec::new(),
         },
         lights: Vec::new(),
+        flow: FlowStatus::default(),
     };
     TestAgent::from_profile(profile, snapshot)
 }

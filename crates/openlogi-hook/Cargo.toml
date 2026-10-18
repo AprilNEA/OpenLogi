@@ -20,7 +20,7 @@ futures-lite = { workspace = true }
 libc = "0.2"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["randr"] }
 zbus = "5"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
@@ -42,7 +42,17 @@ objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSApplication", "NSEvent", "NSResponder", "NSRunningApplication", "NSWindow", "NSWorkspace"] }
 objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement", "AXError"] }
 objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString"] }
-objc2-core-graphics = { workspace = true, features = ["std", "CGWindow", "CGWindowLevel"] }
+objc2-core-graphics = { workspace = true, features = [
+    "std",
+    "CGDirectDisplay",
+    "CGError",
+    "CGEventSource",
+    "CGEventTypes",
+    "CGRemoteOperation",
+    "CGWindow",
+    "CGWindowLevel",
+    "libc",
+] }
 objc2-foundation = { workspace = true, features = [
     "block2",
     "NSDictionary",

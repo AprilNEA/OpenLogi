@@ -392,8 +392,87 @@ pub async fn switch_linked_hosts(
 /// count, [`HostSwitchError::HostSlotEmpty`] for an unpaired slot, and the
 /// transport or timeout variants when the device does not answer.
 pub async fn switch_host_on(shared: &SharedChannel, host: u8) -> Result<bool, HostSwitchError> {
-    let change = prepare_host_change_on(shared.channel(), shared.device_index(), host).await?;
-    apply_host_change(change).await
+    prepare_host_switch_on(shared, host).await?.apply().await
+}
+
+/// A host switch that passed every read-only check and waits for its write.
+///
+/// A caller that moves several devices prepares all of them first and writes
+/// only after every preparation succeeded. A device that fails a check then
+/// leaves every device where it was, because `setCurrentHost` takes the device
+/// off this host and cannot be undone from here.
+///
+/// The value keeps the device's channel open until it is applied or dropped.
+/// Dropping it writes nothing.
+#[must_use = "dropping a prepared host switch writes nothing"]
+pub struct PreparedHostSwitch(PreparedHostChange);
+
+impl PreparedHostSwitch {
+    /// The zero-based destination host slot.
+    #[must_use]
+    pub const fn host(&self) -> u8 {
+        self.0.host
+    }
+
+    /// Whether the device still has to move. `false` means the device already
+    /// reported the destination as its current host.
+    #[must_use]
+    pub const fn is_required(&self) -> bool {
+        self.0.required
+    }
+
+    /// Issue the fire-and-forget `setCurrentHost` write.
+    ///
+    /// The result means the same as [`switch_host_on`]'s. The device state is
+    /// not read again: a device that changed host since the preparation
+    /// receives the write for the prepared slot.
+    ///
+    /// # Errors
+    ///
+    /// The transport or timeout variants of [`HostSwitchError`] when the write
+    /// is not acknowledged. A timeout does not prove that the device ignored
+    /// the write.
+    pub async fn apply(self) -> Result<bool, HostSwitchError> {
+        apply_host_change(self.0).await
+    }
+}
+
+/// Run every read-only check for moving one device on an already-open shared
+/// channel to the zero-based `host`. [`PreparedHostSwitch::apply`] writes.
+///
+/// # Errors
+///
+/// As [`switch_host_on`], except that no write is issued.
+pub async fn prepare_host_switch_on(
+    shared: &SharedChannel,
+    host: u8,
+) -> Result<PreparedHostSwitch, HostSwitchError> {
+    prepare_host_change_on(shared.channel(), shared.device_index(), host)
+        .await
+        .map(PreparedHostSwitch)
+}
+
+/// Open `route` from `channel_pool` and run every read-only check for moving
+/// that device to the zero-based `host`. [`PreparedHostSwitch::apply`] writes.
+///
+/// The caller must hold exclusive receiver access for the whole preparation
+/// and write, as the keyboard-driven host transition does.
+///
+/// # Errors
+///
+/// [`HostSwitchError::TargetNotFound`] when the pool has no channel for
+/// `route`, and otherwise as [`prepare_host_switch_on`].
+pub async fn prepare_host_switch(
+    channel_pool: &ChannelPool,
+    route: &DeviceRoute,
+    host: u8,
+) -> Result<PreparedHostSwitch, HostSwitchError> {
+    let channel = open_channel(channel_pool, route, "opening host-change device channel")
+        .await?
+        .ok_or(HostSwitchError::TargetNotFound)?;
+    prepare_host_change_on(&channel, route.device_index(), host)
+        .await
+        .map(PreparedHostSwitch)
 }
 
 async fn arm_host_controls_inner(

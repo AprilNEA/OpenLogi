@@ -5,7 +5,8 @@ use hidpp::channel::HidppChannel;
 use super::{
     ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, PendingHostSwitchRestore,
     ReportingMode, event_host, host_change_required, host_channel, prepare_host_change_on,
-    restoration_change, rollback_host_switch_start, shares_channel, switch_host_on,
+    prepare_host_switch_on, restoration_change, rollback_host_switch_start, shares_channel,
+    switch_host_on,
 };
 use crate::backend::NodeId;
 use crate::channel::scripted::{
@@ -237,6 +238,36 @@ async fn switching_one_device_to_an_unpaired_slot_writes_nothing() {
         "got {error:?}"
     );
     assert!(!wrote_set_current_host(&handle, 2));
+}
+
+#[tokio::test]
+async fn a_prepared_switch_writes_only_when_applied() {
+    // Flow prepares every device before it writes to any of them, so the
+    // preparation must not move this one.
+    let (shared, handle) = shared_device(keyboard_with_an_empty_third_slot).await;
+
+    let prepared = prepare_host_switch_on(&shared, 1)
+        .await
+        .expect("a paired slot must be switchable");
+
+    assert_eq!(prepared.host(), 1);
+    assert!(prepared.is_required());
+    assert!(!wrote_set_current_host(&handle, 1));
+    assert!(prepared.apply().await.expect("the write is acknowledged"));
+    assert!(wrote_set_current_host(&handle, 1));
+}
+
+#[tokio::test]
+async fn a_prepared_switch_to_the_current_host_writes_nothing() {
+    let (shared, handle) = shared_device(keyboard_with_an_empty_third_slot).await;
+
+    let prepared = prepare_host_switch_on(&shared, 0)
+        .await
+        .expect("staying on the current host is always fine");
+
+    assert!(!prepared.is_required());
+    assert!(!prepared.apply().await.expect("nothing to write"));
+    assert!(!wrote_set_current_host(&handle, 0));
 }
 
 #[tokio::test]
