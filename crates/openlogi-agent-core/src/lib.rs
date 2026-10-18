@@ -15,6 +15,7 @@ pub mod backlight_overlay;
 pub mod capture_plan;
 mod dpi;
 pub mod event_monitor;
+pub mod flow;
 pub mod hardware;
 pub mod observable;
 pub mod orchestrator;
