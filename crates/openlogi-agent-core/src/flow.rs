@@ -8,5 +8,6 @@
 mod devices;
 pub mod edge;
 mod handoff;
+mod pointer;
 #[cfg(test)]
 mod test_support;
