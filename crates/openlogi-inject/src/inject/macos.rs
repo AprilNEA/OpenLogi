@@ -245,6 +245,10 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
     super::parse_shortcut(text)
 }
 
+/// The Apple menu's Lock Screen chord. The menu item matches the character Q,
+/// so the chord goes through the layout like any shortcut.
+const LOCK_SCREEN_CHORD: &str = "Cmd+Ctrl+Q";
+
 /// Dispatch a window-manager or power [`NativeAction`].
 ///
 /// Window-manager actions and screenshots go straight to the Dock or
@@ -259,9 +263,7 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::NextDesktop => next_desktop(),
         NativeAction::ShowDesktop => show_desktop(),
         NativeAction::LaunchpadShow => launchpad(),
-        // The Apple menu's Lock Screen item matches the character Q, so the
-        // chord goes through the layout like any shortcut.
-        NativeAction::LockScreen => press_combo(&super::parse_shortcut("Cmd+Ctrl+Q")),
+        NativeAction::LockScreen => press_combo(&super::parse_shortcut(LOCK_SCREEN_CHORD)),
         NativeAction::Screenshot => screenshot(),
         NativeAction::CaptureRegion => capture_region(),
         // Sleep has no CGEvent equivalent (the WindowServer ignores a
