@@ -25,6 +25,7 @@ mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod onboard;
 mod os_layout;
 mod pointer_scaling;
 mod report_rate;
@@ -32,8 +33,9 @@ mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
 pub use diagnostics::{
-    FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
-    dump_firmware_entities, dump_reprog_controls, read_battery_raw,
+    FeatureEntry, FirmwareEntity, FirmwareEntityInfo, OnboardMemoryDump, ReprogControlEntry,
+    dump_features, dump_firmware_entities, dump_onboard_memory, dump_reprog_controls,
+    read_battery_raw,
 };
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
@@ -62,6 +64,10 @@ pub use litra::{
     LightWatch, LitraDescriptor, LitraModel, apply as apply_litra,
     encode_command as encode_litra_command, find_litra, litra_model_for_route, matches_litra,
     read_state as read_litra_state, watch as watch_litra,
+};
+pub use onboard::{
+    read_onboard_memory, read_onboard_memory_on, set_memory_mode, set_memory_mode_on,
+    write_onboard_profile, write_onboard_profile_on,
 };
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,

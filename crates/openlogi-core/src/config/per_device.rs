@@ -15,7 +15,7 @@ use super::{
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
 };
-use crate::hid::{Dpi, ReportRate};
+use crate::hid::{Dpi, MemoryMode, ReportRate};
 
 impl Config {
     /// The bindings stored for `device_key` as they were committed, or an
@@ -326,6 +326,23 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .report_rate = Some(rate);
+    }
+    /// Where `device_key`'s onboard-memory mouse takes its settings from;
+    /// onboard unless the user chose software control.
+    #[must_use]
+    pub fn memory_mode(&self, device_key: &str) -> MemoryMode {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.memory_mode)
+            .unwrap_or_default()
+    }
+    /// Record where `device_key`'s onboard-memory mouse takes its settings
+    /// from; the agent enforces it on every connect.
+    pub fn set_memory_mode(&mut self, device_key: &str, mode: MemoryMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .memory_mode = Some(mode);
     }
     /// Record the SmartShift wheel config for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).

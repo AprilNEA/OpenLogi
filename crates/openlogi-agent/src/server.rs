@@ -18,6 +18,7 @@ use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{ConfigFile, Lighting};
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::hid::{MemoryMode, OnboardMemory, OnboardProfileChange};
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     HapticWaveform, HidppOperation, LightCommand, ReceiverSelector, ReportRate, ReportRateInfo,
@@ -325,6 +326,37 @@ impl Agent for AgentServer {
         change: BacklightChange,
     ) -> Result<BacklightState, WriteError> {
         self.shared.set_backlight(&route, change).await
+    }
+
+    async fn read_onboard_memory(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardMemory, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadOnboardMemory, |c| async move {
+                openlogi_hid::read_onboard_memory_on(&c).await
+            })
+            .await
+    }
+
+    async fn set_memory_mode(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        mode: MemoryMode,
+    ) -> Result<OnboardMemory, WriteError> {
+        self.shared.set_memory_mode(&route, mode).await
+    }
+
+    async fn write_onboard_profile(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        change: OnboardProfileChange,
+    ) -> Result<OnboardMemory, WriteError> {
+        self.shared.write_onboard_profile(&route, change).await
     }
 
     async fn read_easy_switch_hosts(

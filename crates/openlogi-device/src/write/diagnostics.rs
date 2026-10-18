@@ -365,3 +365,57 @@ pub(crate) async fn dump_firmware_entities_on_channel(
     }
     Ok(entries)
 }
+
+/// Raw `0x8100 OnboardProfiles` state of one device, for `openlogi diag
+/// onboard`: what the memory description, mode and active-profile functions
+/// answer, and the bytes of the directory and active profile sectors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnboardMemoryDump {
+    /// The memory description.
+    pub info: hidpp::feature::onboard_profiles::OnboardProfilesInfo,
+    /// The current mode.
+    pub mode: hidpp::feature::onboard_profiles::OnboardMode,
+    /// The sector of the active profile.
+    pub active: hidpp::feature::onboard_profiles::SectorAddress,
+    /// The directory sector.
+    pub directory: Vec<u8>,
+    /// The active profile sector.
+    pub profile: Vec<u8>,
+}
+
+/// Read the raw onboard memory state of the device on `route`. Reads only.
+pub async fn dump_onboard_memory(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<OnboardMemoryDump, WriteError> {
+    use hidpp::feature::onboard_profiles::{OnboardProfilesFeature, SectorAddress};
+
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let operation = HidppOperation::ReadOnboardMemory;
+        let classify = |e| classify_hidpp_error(e, operation, OnboardProfilesFeature::ID);
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<OnboardProfilesFeature>(&mut device).await?;
+        let info = feature.get_info().await.map_err(classify)?;
+        let mode = feature.get_mode().await.map_err(classify)?;
+        let active = feature.get_current_profile().await.map_err(classify)?;
+        let directory = feature
+            .read_sector(SectorAddress::DIRECTORY, info.sector_size)
+            .await
+            .map_err(classify)?;
+        let profile = feature
+            .read_sector(active, info.sector_size)
+            .await
+            .map_err(classify)?;
+        Ok(OnboardMemoryDump {
+            info,
+            mode,
+            active,
+            directory,
+            profile,
+        })
+    })
+    .await
+}

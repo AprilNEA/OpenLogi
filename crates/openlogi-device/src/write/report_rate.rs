@@ -240,7 +240,7 @@ pub async fn get_report_rate_info_on(shared: &SharedChannel) -> Result<ReportRat
     get_report_rate_info_on_channel(shared.channel(), shared.device_index()).await
 }
 
-async fn get_report_rate_info_on_channel(
+pub(super) async fn get_report_rate_info_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
 ) -> Result<ReportRateInfo, WriteError> {

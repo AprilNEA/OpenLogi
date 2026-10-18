@@ -294,6 +294,18 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_fn_lock_written(&key, result));
                 });
             }
+            ipc::GuiUpdate::OnboardWritten {
+                key,
+                route,
+                write,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_onboard_written(&key, &route, write, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::ReportRateWritten { key, route, result } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| {

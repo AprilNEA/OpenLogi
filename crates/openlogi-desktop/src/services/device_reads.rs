@@ -8,7 +8,7 @@ use std::time::Duration;
 use gpui::{Context, Subscription};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DpiInfo, EasySwitchHosts, FnLockState,
-    ReportRateInfo, SmartShiftStatus, WriteError,
+    OnboardMemory, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use swr_core::{
     MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
@@ -18,12 +18,12 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::{
-    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadReportRate,
-    ReadSmartShift,
+    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadOnboardMemory,
+    ReadReportRate, ReadSmartShift,
 };
 use crate::state::{
     AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, HostRenameRefusal,
-    Load, ReportRateLoad, SmartShiftLoad, StateEvent,
+    Load, OnboardLoad, ReportRateLoad, SmartShiftLoad, StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -33,6 +33,7 @@ const FN_LOCK: &str = "fn-lock";
 const REPORT_RATE: &str = "report-rate";
 const BACKLIGHT: &str = "backlight";
 const EASY_SWITCH: &str = "easy-switch";
+const ONBOARD: &str = "onboard";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -78,6 +79,18 @@ pub(crate) struct DeviceReads {
     /// out on; cleared with that read.
     host_renames: BTreeMap<DeviceKey, HostRenames>,
     next_host_rename: u64,
+    onboard: BTreeMap<DeviceKey, DeviceRead<OnboardMemory>>,
+    /// Onboard writes in flight or refused per mouse, for the read on the
+    /// route they went out on; cleared with that read.
+    onboard_writes: BTreeMap<DeviceKey, OnboardWrites>,
+}
+
+/// The onboard writes sent to one mouse that have not been answered yet,
+/// and why the newest answered one did not land.
+#[derive(Default)]
+struct OnboardWrites {
+    pending: usize,
+    refused: Option<WriteError>,
 }
 
 /// The Easy-Switch host renames sent to one device that have not been
@@ -536,6 +549,156 @@ impl DeviceReads {
         self.report_rate.get(key).map(|read| &read.load)
     }
 
+    /// Start the onboard memory query unless the same mouse route is already
+    /// subscribed. Writes answer through [`Self::finish_onboard_write`].
+    pub(crate) fn ensure_onboard(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .onboard
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_onboard(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| ReadOnboardMemory { route, reply }.into(),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !onboard_error_is_permanent(error));
+        let handle = client.subscribe(query_key(ONBOARD, &key), fetcher, QueryOptions::immutable());
+        read_through(&client, ONBOARD, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), onboard_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), onboard_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_onboard(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::OnboardChanged(observed_key.clone()));
+            }
+        });
+        self.onboard.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// `key`'s onboard memory load, or `None` while nothing has subscribed
+    /// to it.
+    #[must_use]
+    pub(crate) fn onboard_load(&self, key: &DeviceKey) -> Option<&OnboardLoad> {
+        self.onboard.get(key).map(|read| &read.load)
+    }
+
+    /// Retry an exhausted onboard memory query.
+    pub(crate) fn retry_onboard(&mut self, key: &DeviceKey) {
+        let Some(read) = self.onboard.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
+    /// Record an onboard write going out to `key` on `route`. Returns
+    /// whether a read is subscribed there to show its progress.
+    pub(crate) fn begin_onboard_write(&mut self, key: &DeviceKey, route: &DeviceRoute) -> bool {
+        if !self
+            .onboard
+            .get(key)
+            .is_some_and(|read| read.route == *route)
+        {
+            return false;
+        }
+        let writes = self.onboard_writes.entry(key.clone()).or_default();
+        writes.pending += 1;
+        writes.refused = None;
+        true
+    }
+
+    /// The mouse's answer to an onboard write: show its memory as read
+    /// back, or keep the refusal and re-read the mouse for the truth. Only
+    /// the read still subscribed on `route` takes it; returns whether one
+    /// did.
+    pub(crate) fn finish_onboard_write(
+        &mut self,
+        key: &DeviceKey,
+        route: &DeviceRoute,
+        result: Result<OnboardMemory, WriteError>,
+    ) -> bool {
+        let Some(read) = self
+            .onboard
+            .get_mut(key)
+            .filter(|read| read.route == *route)
+        else {
+            return false;
+        };
+        let writes = self.onboard_writes.entry(key.clone()).or_default();
+        writes.pending = writes.pending.saturating_sub(1);
+        match result {
+            Ok(memory) => {
+                let value = Arc::new(memory);
+                read.load = Load::Ready(value.clone());
+                if let Some(client) = &self.client {
+                    client.set::<_, Cached<OnboardMemory>, WriteError>(
+                        query_key(ONBOARD, key),
+                        Some(value),
+                    );
+                }
+            }
+            Err(error) => {
+                writes.refused = Some(error);
+                read.query.revalidate();
+            }
+        }
+        true
+    }
+
+    /// Whether an onboard write to `key` is waiting for its answer.
+    #[must_use]
+    pub(crate) fn onboard_writing(&self, key: &DeviceKey) -> bool {
+        self.onboard_writes
+            .get(key)
+            .is_some_and(|writes| writes.pending > 0)
+    }
+
+    /// Why the newest answered onboard write to `key` did not land, until
+    /// another is sent.
+    #[must_use]
+    pub(crate) fn onboard_refusal(&self, key: &DeviceKey) -> Option<&WriteError> {
+        self.onboard_writes
+            .get(key)
+            .and_then(|writes| writes.refused.as_ref())
+    }
+
     /// Start the backlight query unless the same keyboard route is already
     /// subscribed. A change goes out through [`Self::begin_backlight_write`]
     /// and is answered through [`Self::finish_backlight_write`].
@@ -968,6 +1131,7 @@ impl DeviceReads {
         self.remove_report_rate(key);
         self.remove_backlight(key);
         self.remove_easy_switch(key);
+        self.remove_onboard(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -1014,6 +1178,14 @@ impl DeviceReads {
         }
     }
 
+    fn remove_onboard(&mut self, key: &DeviceKey) {
+        self.onboard_writes.remove(key);
+        if let Some(read) = self.onboard.remove(key) {
+            drop(read);
+            self.clear::<OnboardMemory>(ONBOARD, key);
+        }
+    }
+
     /// Forget every query whose device is no longer present.
     pub(crate) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
         let removed: BTreeSet<_> = self
@@ -1024,6 +1196,7 @@ impl DeviceReads {
             .chain(self.report_rate.keys())
             .chain(self.backlight.keys())
             .chain(self.easy_switch.keys())
+            .chain(self.onboard.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -1074,6 +1247,21 @@ impl DeviceReads {
     fn update_fn_lock(&mut self, key: &DeviceKey, flight: u64, load: FnLockLoad) -> bool {
         let Some(read) = self
             .fn_lock
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_onboard(&mut self, key: &DeviceKey, flight: u64, load: OnboardLoad) -> bool {
+        let Some(read) = self
+            .onboard
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {
@@ -1238,6 +1426,15 @@ fn fn_lock_error_is_permanent(error: &WriteError) -> bool {
 
 fn report_rate_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+/// A mouse without `0x8100` never gains it. A layout OpenLogi cannot decode
+/// does not change on a re-read either.
+fn onboard_error_is_permanent(error: &WriteError) -> bool {
+    matches!(
+        error,
+        WriteError::FeatureUnsupported { .. } | WriteError::OnboardLayoutUnsupported { .. }
+    )
 }
 
 fn backlight_error_is_permanent(error: &WriteError) -> bool {

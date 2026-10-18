@@ -76,7 +76,13 @@ impl AppState {
         let Some(record) = self.current_record() else {
             return DEFAULT_DPI;
         };
-        let live = self.pointer.reads.dpi_load(&record.device_key());
+        // The sensor's reading is the onboard profile's while the mouse runs
+        // from its memory; OpenLogi's own value is the one being edited.
+        let live = self
+            .pointer
+            .reads
+            .dpi_load(&record.device_key())
+            .filter(|_| self.applies_live());
         let configured = record
             .persistent_config_key()
             .and_then(|key| self.config.devices.get(key))
@@ -138,7 +144,7 @@ impl AppState {
                 "transient device DPI applied without persistence"
             );
         }
-        if let Some(route) = route {
+        if let Some(route) = route.filter(|_| self.applies_live()) {
             self.send_ipc(crate::services::ipc::SetDpi { route, dpi });
         }
         events

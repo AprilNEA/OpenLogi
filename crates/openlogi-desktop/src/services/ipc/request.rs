@@ -19,7 +19,8 @@ use std::future::Future;
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
+    LightCommand, MemoryMode, OnboardMemory, OnboardProfileChange, ReceiverSelector, ReportRate,
+    ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
@@ -29,7 +30,7 @@ use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use super::{GuiUpdate, UnpairFailure, UnpairIntent};
+use super::{GuiUpdate, OnboardWrite, UnpairFailure, UnpairIntent};
 use crate::state::DeviceKey;
 
 /// The GPUI-bound update stream a request may deliver through.
@@ -190,6 +191,67 @@ impl Request for SetReportRate {
         let _ = updates.send(GuiUpdate::ReportRateWritten {
             key: self.key,
             route: self.route,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Switch a mouse between its onboard memory and software control now,
+/// answered as [`GuiUpdate::OnboardWritten`] with its memory read back.
+pub struct SetMemoryMode {
+    pub route: DeviceRoute,
+    pub mode: MemoryMode,
+    pub key: DeviceKey,
+}
+
+impl Request for SetMemoryMode {
+    type Answer = Result<OnboardMemory, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_memory_mode(context::current(), self.route.clone(), self.mode)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::OnboardWritten {
+            key: self.key,
+            route: self.route,
+            write: OnboardWrite::Mode,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// How long the GUI waits for an onboard profile save: longer than the
+/// agent's own budget for the memory transaction, so the agent, not this
+/// deadline, decides when a slow mouse has failed.
+const ONBOARD_SAVE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Save a change to a mouse's active onboard profile, answered as
+/// [`GuiUpdate::OnboardWritten`] with its memory read back.
+pub struct WriteOnboardProfile {
+    pub route: DeviceRoute,
+    pub change: OnboardProfileChange,
+    pub key: DeviceKey,
+}
+
+impl Request for WriteOnboardProfile {
+    type Answer = Result<OnboardMemory, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        let mut ctx = context::current();
+        ctx.deadline = std::time::Instant::now() + ONBOARD_SAVE_DEADLINE;
+        client
+            .write_onboard_profile(ctx, self.route.clone(), self.change.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::OnboardWritten {
+            key: self.key,
+            route: self.route,
+            write: OnboardWrite::Profile,
             result: or_unavailable(outcome),
         });
     }
@@ -404,6 +466,26 @@ impl Request for ReadReportRate {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_report_rate(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a mouse's onboard memory; the answer goes back over `reply`.
+pub struct ReadOnboardMemory {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<OnboardMemory, WriteError>>,
+}
+
+impl Request for ReadOnboardMemory {
+    type Answer = Result<OnboardMemory, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_onboard_memory(context::current(), self.route.clone())
             .await
     }
 
@@ -724,6 +806,8 @@ commands! {
     SetFnLock,
     SetReportRate,
     SetBacklight,
+    SetMemoryMode,
+    WriteOnboardProfile,
     RenameEasySwitchHost,
     ReadDpi,
     ReadSmartShift,
@@ -731,6 +815,7 @@ commands! {
     ReadReportRate,
     ReadBacklight,
     ReadEasySwitchHosts,
+    ReadOnboardMemory,
     LoadConfig,
     ReloadConfig,
     RequestAccessibilityPrompt,

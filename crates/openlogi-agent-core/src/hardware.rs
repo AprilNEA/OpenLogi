@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
+use openlogi_core::hid::MemoryMode;
 use openlogi_hid::{
     CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation, HostOs,
     OsLayoutOutcome, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus,
@@ -48,6 +49,11 @@ pub(crate) use write_order::{WriteOrder, WriteTicket};
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Response budget for an onboard memory write: reading, writing and reading
+/// back a sector is some fifty requests, and cutting it off part way leaves
+/// the sector half written.
+pub(crate) const ONBOARD_WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Physical transport behind a route. Slots on one receiver share a HID writer,
 /// so they share one turnstile even though their device indices differ.
@@ -397,6 +403,24 @@ impl DeviceOp {
         W: FnOnce(SharedChannel) -> WriteFut,
         WriteFut: Future<Output = Result<T, WriteError>>,
     {
+        self.run_in_order_within(op, ticket, WRITE_TIMEOUT, write)
+            .await
+    }
+
+    /// [`Self::run_in_order`] with `budget` in place of `WRITE_TIMEOUT`, for
+    /// a write made of many requests — an onboard memory transaction — that
+    /// must not be cut off part way.
+    pub(crate) async fn run_in_order_within<W, WriteFut, T>(
+        self,
+        op: HidppOperation,
+        ticket: WriteTicket,
+        budget: Duration,
+        write: W,
+    ) -> Result<T, WriteError>
+    where
+        W: FnOnce(SharedChannel) -> WriteFut,
+        WriteFut: Future<Output = Result<T, WriteError>>,
+    {
         if !self.access.device_io.allows_io() {
             return Err(WriteError::DeviceNotFound);
         }
@@ -406,7 +430,7 @@ impl DeviceOp {
                 let _lease = self.access.receiver_access.acquire_for_io().await;
                 after_transport_turn(&turn, async {
                     let shared = self.resolve()?;
-                    timed(op, write(shared)).await
+                    timed_within(budget, op, write(shared)).await
                 })
                 .await
             })
@@ -783,6 +807,10 @@ pub(crate) fn keep_os_layout_in_background(
 /// them. `None` leaves that setting alone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VolatileMouseSettings {
+    /// The onboard-memory mode a mouse with `0x8100` is kept in. Written
+    /// first, so a software-mode mouse is in host mode before the DPI and
+    /// report rate below reach it.
+    pub memory_mode: Option<MemoryMode>,
     /// Native HiResWheel resolution and inversion.
     pub wheel: Option<WheelModeChange>,
     /// Sensor DPI.
@@ -838,6 +866,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
         }
     }
     let VolatileMouseSettings {
+        memory_mode,
         wheel,
         dpi,
         report_rate,
@@ -865,6 +894,15 @@ pub(crate) fn reapply_mouse_volatile_in_background(
             }
             let op = DeviceOp { access, route };
             let turn = op.access.transport_turns.turn_for(&op.route);
+            if let Some(mode) = memory_mode {
+                let result = timed_on_current_channel(&op, &turn, |shared| async move {
+                    openlogi_hid::set_memory_mode_on(&shared, mode).await
+                })
+                .await;
+                log_outcome(index, "onboard mode write", result, |memory| {
+                    debug!(index, mode = ?memory.mode, "onboard mode kept");
+                });
+            }
             if let Some(change) = wheel {
                 let (plans, route) = (&capture_plans, &op.route);
                 let result = timed_on_current_channel(&op, &turn, |shared| async move {
@@ -1111,7 +1149,15 @@ async fn timed<T>(
     operation: HidppOperation,
     fut: impl Future<Output = Result<T, WriteError>>,
 ) -> Result<T, WriteError> {
-    tokio::time::timeout(WRITE_TIMEOUT, fut)
+    timed_within(WRITE_TIMEOUT, operation, fut).await
+}
+
+async fn timed_within<T>(
+    budget: Duration,
+    operation: HidppOperation,
+    fut: impl Future<Output = Result<T, WriteError>>,
+) -> Result<T, WriteError> {
+    tokio::time::timeout(budget, fut)
         .await
         .map_err(|_| WriteError::RequestTimedOut { operation })?
 }
