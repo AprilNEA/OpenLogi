@@ -21,8 +21,8 @@ use openlogi_core::config::{
     Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
-    Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities, LightState,
-    StandaloneDevice,
+    BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
+    LightState, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
@@ -32,7 +32,7 @@ use openlogi_hid::{
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
-use openlogi_ipc::{InventoryHealth, SavedConfig};
+use openlogi_ipc::{InventoryHealth, NoticeKind, SavedConfig};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -43,6 +43,7 @@ use crate::capture_plan::{
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
 };
+use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
@@ -93,6 +94,10 @@ struct AgentDevice {
     /// it moves when the device reports a setting changed on it. Comparable
     /// only between snapshots of the same route.
     settings_revision: u64,
+    /// The name the device reports over HID++, for its low-battery notice.
+    codename: Option<String>,
+    /// The device's latest battery reading, `None` when it has none.
+    battery: Option<BatteryInfo>,
 }
 
 /// Cheaply cloneable handles handed to hooks and background managers.
@@ -397,6 +402,8 @@ pub struct Orchestrator {
     /// facts republishes here, so the cell cannot go stale behind a new code
     /// path — see [`ObservableState`].
     observable: Arc<ObservableState>,
+    /// Which devices' low batteries have been announced.
+    low_battery: LowBatteryWatch,
 }
 
 /// See [`Orchestrator::inventory`] (the field) — the agent-side superset of
@@ -493,6 +500,7 @@ impl Orchestrator {
             watched_lights_tx,
             shared,
             observable,
+            low_battery: LowBatteryWatch::default(),
         };
         orch.rebuild();
         orch.observable
@@ -860,6 +868,7 @@ impl Orchestrator {
         };
         self.publish_inventory();
         let devices = build_devices(&self.config, inventories, standalone);
+        self.announce_low_batteries(&devices);
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
         // wheel mode) live in device RAM and reset on a power cycle. Every
         // reconnect shape re-applies the persisted values (#189): a first
@@ -927,6 +936,39 @@ impl Orchestrator {
     #[must_use]
     pub fn needs_reapply_confirmation(&self) -> bool {
         !self.reapply_followup.is_empty()
+    }
+
+    /// Post a low-battery notice for each online device whose battery has just
+    /// come to need attention, while the user wants these notices. An offline
+    /// device's reading is only its last known one, and says nothing new.
+    /// While the notices are off, nothing is taken in: a battery that ran low
+    /// meanwhile is announced on the first reading after they are turned on.
+    fn announce_low_batteries(&mut self, devices: &[AgentDevice]) {
+        if !self.config.app_settings.low_battery_notifications {
+            return;
+        }
+        for device in devices.iter().filter(|device| device.online) {
+            let Some(battery) = device.battery.as_ref() else {
+                continue;
+            };
+            if !self.low_battery.observe(&device.config_key, battery) {
+                continue;
+            }
+            let name = self
+                .config
+                .device_custom_name(&device.config_key)
+                .map(str::to_owned)
+                .or_else(|| device.codename.as_deref().map(prettify_codename));
+            info!(device = %device.config_key, ?battery, "announcing a low battery");
+            self.observable.notices().post(
+                NoticeKind::LowBattery {
+                    name,
+                    kind: device.kind,
+                    battery: battery.clone(),
+                },
+                self.config.app_settings.language.clone(),
+            );
+        }
     }
 
     /// Force a volatile-settings re-apply for every online device on the next

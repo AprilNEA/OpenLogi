@@ -76,6 +76,8 @@ show_in_menu_bar = "Zobrazovat v řádku nabídek"
 menu_bar_visibility_description = "Zobrazovat ikonu OpenLogi v řádku nabídek. Po vypnutí zůstane v Docku."
 show_in_the_notification_area = "Zobrazovat v oznamovací oblasti"
 notification_area_visibility_description = "Zobrazovat ikonu OpenLogi v oznamovací oblasti hlavního panelu po restartu agenta na pozadí."
+low_battery_notifications = "Upozornění na slabou baterii"
+low_battery_notifications_description = "Zobrazit upozornění v dolní části obrazovky, když dochází baterie zařízení."
 openlogi = "OpenLogi"
 
 [device]

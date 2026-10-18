@@ -76,6 +76,8 @@ show_in_menu_bar = "Näytä valikkorivillä"
 menu_bar_visibility_description = "Pidä OpenLogin kuvake valikkorivillä. Kun pois päältä, se pysyy Dockissa."
 show_in_the_notification_area = "Näytä ilmoitusalueella"
 notification_area_visibility_description = "Pitää OpenLogin kuvakkeen tehtäväpalkin ilmoitusalueella. Tulee voimaan, kun taustaprosessi käynnistyy seuraavan kerran."
+low_battery_notifications = "Ilmoitukset akun vähyydestä"
+low_battery_notifications_description = "Näytä ilmoitus näytön alareunassa, kun laitteen akku on vähissä."
 openlogi = "OpenLogi"
 
 [device]

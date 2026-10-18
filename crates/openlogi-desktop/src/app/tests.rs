@@ -1,7 +1,7 @@
 use super::home::{connection_icon_path, ordered_device_indices};
 use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
 use crate::services::assets::ResolvedAsset;
-use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
+use crate::ui::battery::battery_charging_no_reading;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports, LightCapabilities,
     LightValueRange, LightValueUnit,
@@ -300,33 +300,6 @@ fn charging_without_reading_suppresses_percentage() {
         level: BatteryLevel::Unknown,
         status: BatteryStatus::Charging,
     }));
-}
-
-#[test]
-fn low_discharging_battery_needs_attention() {
-    let battery = |percentage, status| BatteryInfo {
-        percentage,
-        level: BatteryLevel::Low,
-        status,
-    };
-
-    assert!(battery_needs_attention(&battery(
-        Some(20),
-        BatteryStatus::Discharging
-    )));
-    assert!(!battery_needs_attention(&battery(
-        Some(21),
-        BatteryStatus::Discharging
-    )));
-    assert!(!battery_needs_attention(&battery(
-        Some(20),
-        BatteryStatus::Charging
-    )));
-    // A device without a percentage is judged by its level.
-    assert!(battery_needs_attention(&battery(
-        None,
-        BatteryStatus::Discharging
-    )));
 }
 
 /// Builds a [`DeviceModelInfo`] with `transports` and the packed per-transport

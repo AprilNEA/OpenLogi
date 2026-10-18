@@ -76,6 +76,8 @@ show_in_menu_bar = "Afficher dans la barre des menus"
 menu_bar_visibility_description = "Conserver l’icône d’OpenLogi dans la barre des menus. Si désactivé, elle reste dans le Dock."
 show_in_the_notification_area = "Afficher dans la zone de notification"
 notification_area_visibility_description = "Garde l’icône d’OpenLogi dans la zone de notification de la barre des tâches. Prend effet au prochain démarrage de l’agent en arrière-plan."
+low_battery_notifications = "Alertes de batterie faible"
+low_battery_notifications_description = "Afficher une alerte en bas de l'écran lorsque la batterie d'un appareil est faible."
 openlogi = "OpenLogi"
 
 [device]

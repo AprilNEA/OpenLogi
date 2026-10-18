@@ -156,3 +156,22 @@ fn config_without_asset_source_keeps_automatic_selection() {
         AssetSourcePreference::Automatic
     );
 }
+
+#[test]
+fn low_battery_notifications_stay_on_unless_turned_off() {
+    assert!(Config::default().app_settings.low_battery_notifications);
+
+    let predating: Config = toml::from_str(
+        r"
+            schema_version = 8
+            [app_settings]
+            auto_download_assets = false
+        ",
+    )
+    .expect("config predating the low-battery setting loads");
+    assert!(predating.app_settings.low_battery_notifications);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.low_battery_notifications = false;
+    assert!(!write_and_read(&cfg).app_settings.low_battery_notifications);
+}

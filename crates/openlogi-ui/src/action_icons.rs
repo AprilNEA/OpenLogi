@@ -1,4 +1,5 @@
-//! The vendored Actions Ring glyphs, as a GPUI [`AssetSource`].
+//! The vendored glyphs the overlay draws — Actions Ring slots and its
+//! notices — as a GPUI [`AssetSource`].
 //!
 //! Both frontends draw ring slots, so both need these bytes; nothing else in
 //! either app's artwork is shared, which is why this source serves *only*
@@ -29,6 +30,7 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/arrow-left.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/arrow-left.svg"))),
     ("action-icons/arrow-right.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/arrow-right.svg"))),
     ("action-icons/ban.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/ban.svg"))),
+    ("action-icons/battery-low.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/battery-low.svg"))),
     ("action-icons/bell.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/bell.svg"))),
     ("action-icons/bluetooth.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/bluetooth.svg"))),
     ("action-icons/book-open.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/book-open.svg"))),
@@ -102,6 +104,9 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
 /// the same mark, so neither side names the asset itself.
 pub const RING_CANCEL_ICON: &str = "action-icons/x.svg";
 
+/// The glyph on the overlay's low-battery notice.
+pub const LOW_BATTERY_ICON: &str = "action-icons/battery-low.svg";
+
 /// GPUI asset source for the embedded ring glyphs, and nothing else.
 pub struct ActionIcons;
 
@@ -139,6 +144,15 @@ mod tests {
         assert!(
             matches!(loaded, Ok(Some(_))),
             "{RING_CANCEL_ICON} is missing"
+        );
+    }
+
+    #[test]
+    fn the_low_battery_notice_icon_is_embedded() {
+        let loaded = ActionIcons.load(LOW_BATTERY_ICON);
+        assert!(
+            matches!(loaded, Ok(Some(_))),
+            "{LOW_BATTERY_ICON} is missing"
         );
     }
 

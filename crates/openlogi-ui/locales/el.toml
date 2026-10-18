@@ -76,6 +76,8 @@ show_in_menu_bar = "Εμφάνιση στη γραμμή μενού"
 menu_bar_visibility_description = "Διατήρηση του εικονιδίου του OpenLogi στη γραμμή μενού. Όταν είναι ανενεργό, παραμένει στο Dock."
 show_in_the_notification_area = "Εμφάνιση στην περιοχή ειδοποιήσεων"
 notification_area_visibility_description = "Διατηρεί το εικονίδιο του OpenLogi στην περιοχή ειδοποιήσεων της γραμμής εργασιών. Ισχύει από την επόμενη εκκίνηση της υπηρεσίας παρασκηνίου."
+low_battery_notifications = "Ειδοποιήσεις χαμηλής μπαταρίας"
+low_battery_notifications_description = "Εμφάνιση ειδοποίησης στο κάτω μέρος της οθόνης όταν η μπαταρία μιας συσκευής εξαντλείται."
 openlogi = "OpenLogi"
 
 [device]

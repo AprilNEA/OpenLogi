@@ -16,6 +16,7 @@ pub mod capture_plan;
 mod dpi;
 pub mod event_monitor;
 pub mod hardware;
+pub mod notices;
 pub mod observable;
 pub mod orchestrator;
 pub mod receiver_access;

@@ -76,6 +76,8 @@ show_in_menu_bar = "Паказваць у радку меню"
 menu_bar_visibility_description = "Паказваць значок OpenLogi ў радку меню. Калі выключана, ён застаецца ў Dock."
 show_in_the_notification_area = "Паказваць у вобласці апавяшчэнняў"
 notification_area_visibility_description = "Паказваць значок OpenLogi ў вобласці апавяшчэнняў панэлі задач пасля перазапуску фонавага агента."
+low_battery_notifications = "Апавяшчэнні пра нізкі зарад"
+low_battery_notifications_description = "Паказваць апавяшчэнне ўнізе экрана, калі батарэя прылады разраджаецца."
 openlogi = "OpenLogi"
 
 [device]

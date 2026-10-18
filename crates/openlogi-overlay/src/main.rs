@@ -1,8 +1,10 @@
-//! Lightweight GPUI host for the cursor-centred Actions Ring.
+//! Lightweight GPUI host for the cursor-centred Actions Ring and the notices
+//! the agent posts.
 //!
 //! This process is a pure IPC client. The agent owns HID++, session validation,
 //! haptic output, and action execution; the overlay only renders the
-//! agent-snapshotted actions and reports hover/activate/cancel interactions.
+//! agent-snapshotted actions and reports hover/activate/cancel interactions,
+//! and draws whichever notices the agent says are current.
 
 #![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
@@ -16,10 +18,13 @@ rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
 mod backlight;
 mod ipc;
+mod notice;
 mod platform;
 mod ring;
 mod session;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -30,10 +35,12 @@ use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
 use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
+use crate::notice::NoticeShelf;
 use crate::platform::RingPlacement;
 use crate::ring::RingView;
 use crate::session::{
-    ClickAwaySession, claim_the_role, close_ring_windows, spawn_click_away_dismissal,
+    ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
+    spawn_click_away_dismissal,
 };
 
 #[expect(
@@ -49,6 +56,7 @@ fn main() -> Result<()> {
     let ipc::Handle {
         mut invocations,
         mut backlights,
+        mut notices,
         commands,
     } = ipc::spawn();
 
@@ -66,28 +74,29 @@ fn main() -> Result<()> {
         platform::configure_application();
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
+        let shelf = Rc::new(RefCell::new(NoticeShelf::default()));
+        cx.spawn(async move |cx| {
+            while let Some(observed) = notices.recv().await {
+                openlogi_core::locale::activate(observed.language.as_deref());
+                let Some(cards) = shelf.borrow_mut().observe(observed.notices) else {
+                    continue;
+                };
+                cx.update(|cx| notice::present(cx, &shelf, &cards));
+            }
+        })
+        .detach();
         cx.spawn(async move |cx| {
             while let Some(observed) = invocations.recv().await {
                 // No ring is what a dismissal looks like: close whatever is
                 // showing and open nothing. The agent has already forgotten the
                 // session, so there is nothing to acknowledge either.
                 let Some(invocation) = observed else {
-                    cx.update(|cx| {
-                        for handle in cx.windows() {
-                            if handle.downcast::<RingView>().is_some() {
-                                let _ = handle.update(cx, |_, window, _| window.remove_window());
-                            }
-                        }
-                    });
+                    cx.update(close_all_ring_windows);
                     continue;
                 };
                 openlogi_core::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
-                    for handle in cx.windows() {
-                        if handle.downcast::<RingView>().is_some() {
-                            let _ = handle.update(cx, |_, window, _| window.remove_window());
-                        }
-                    }
+                    close_all_ring_windows(cx);
                     #[cfg_attr(
                         windows,
                         expect(

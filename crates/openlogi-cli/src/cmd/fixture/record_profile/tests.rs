@@ -20,8 +20,8 @@ use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, BacklightObservation,
     ClientKind, ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth,
-    MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig,
+    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -382,6 +382,10 @@ impl Agent for TestAgent {
         _saved: SavedConfig,
     ) -> Result<(), ConfigReloadError> {
         unreachable!("profile capture is read-only")
+    }
+
+    async fn observe_notices(self, _: TarpcContext, _since: Generation) -> NoticeObservation {
+        unreachable!("profile capture must not inspect the overlay's notices")
     }
 }
 

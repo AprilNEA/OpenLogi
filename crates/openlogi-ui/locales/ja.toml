@@ -76,6 +76,8 @@ show_in_menu_bar = "メニューバーに表示"
 menu_bar_visibility_description = "OpenLogi のアイコンをメニューバーに表示します。オフにすると Dock に残ります。"
 show_in_the_notification_area = "通知領域に表示"
 notification_area_visibility_description = "タスクバーの通知領域に OpenLogi のアイコンを表示します。バックグラウンドエージェントの次回起動時に反映されます。"
+low_battery_notifications = "バッテリー残量低下の通知"
+low_battery_notifications_description = "デバイスのバッテリー残量が少なくなったときに、画面下部に通知を表示します。"
 openlogi = "OpenLogi"
 
 [device]

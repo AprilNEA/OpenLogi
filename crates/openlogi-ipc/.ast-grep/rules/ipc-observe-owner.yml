@@ -5,10 +5,10 @@
 id: ipc-observe-owner
 language: rust
 severity: error
-message: Observing the agent is openlogi_ipc::client::Observer's job (Observer::state or Observer::action_ring, then next()). Do not call observe or observe_action_ring on the client here.
+message: Observing the agent is openlogi_ipc::client::Observer's job (Observer::state, Observer::action_ring or Observer::notices, then next()). Do not call observe, observe_action_ring or observe_notices on the client here.
 note: |
   The settings app and the overlay each kept their own client, ledger and
-  call-in-flight bundle around these two calls. See "Single source of truth"
+  call-in-flight bundle around these calls. See "Single source of truth"
   in AGENTS.md.
 files:
   - crates/openlogi-desktop/**/*.rs
@@ -17,6 +17,7 @@ files:
 rule:
   any:
     - pattern: $CLIENT.observe_action_ring($$$ARGS)
+    - pattern: $CLIENT.observe_notices($$$ARGS)
     # tarpc's observe takes a request context first; GPUI's `cx.observe` takes
     # an entity and a closure, and is not this.
     - all:

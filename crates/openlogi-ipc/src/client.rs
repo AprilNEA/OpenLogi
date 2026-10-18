@@ -33,8 +33,8 @@ use tarpc::client::{self, RpcError};
 use tarpc::context::{self, Context};
 
 use crate::{
-    AgentClient, BacklightObservation, ClientKind, Generation, OBSERVE_HOLD, Observation,
-    PROTOCOL_VERSION, RingObservation, transport,
+    AgentClient, BacklightObservation, ClientKind, Generation, NoticeObservation, OBSERVE_HOLD,
+    Observation, PROTOCOL_VERSION, RingObservation, transport,
 };
 
 /// Why a client could not be established.
@@ -221,6 +221,12 @@ impl Stamped for BacklightObservation {
     }
 }
 
+impl Stamped for NoticeObservation {
+    fn generation(&self) -> Generation {
+        self.generation
+    }
+}
+
 /// One connection's view of the agent's generation counter.
 ///
 /// Starts at 0 — "I have seen nothing" — so the first answer is the agent's
@@ -323,6 +329,17 @@ impl Observer<BacklightObservation> {
         Self::new(client, |client, since| {
             let client = client.clone();
             Box::pin(async move { client.observe_backlight(observe_context(), since).await })
+        })
+    }
+}
+
+impl Observer<NoticeObservation> {
+    /// Observe the notices the overlay should be showing over `client`.
+    #[must_use]
+    pub fn notices(client: AgentClient) -> Self {
+        Self::new(client, |client, since| {
+            let client = client.clone();
+            Box::pin(async move { client.observe_notices(observe_context(), since).await })
         })
     }
 }
@@ -654,5 +671,62 @@ mod tests {
             observer.next().await.is_err(),
             "asking again must not poll the finished call"
         );
+    }
+
+    /// The `since` each observer of `kind` asked with, in order.
+    fn asked_by(asked: &Mutex<Vec<(&'static str, Generation)>>, kind: &str) -> Vec<Generation> {
+        asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(channel, _)| *channel == kind)
+            .map(|(_, since)| *since)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_notice_and_backlight_observers_follow_their_own_channels() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let recorded = asked.clone();
+        let client = in_memory_agent(
+            move |request| {
+                let recorded = recorded.clone();
+                Box::pin(async move {
+                    let answer = match request {
+                        AgentRequest::ObserveNotices { since } => {
+                            recorded.lock().unwrap().push(("notices", since));
+                            AgentResponse::ObserveNotices(NoticeObservation {
+                                generation: since + 1,
+                                notices: Vec::new(),
+                                language: None,
+                            })
+                        }
+                        AgentRequest::ObserveBacklight { since } => {
+                            recorded.lock().unwrap().push(("backlight", since));
+                            AgentResponse::ObserveBacklight(BacklightObservation {
+                                generation: since + 1,
+                                current_level: 1,
+                                levels: 3,
+                                visible: true,
+                            })
+                        }
+                        other => panic!("an observer sent an unexpected request: {other:?}"),
+                    };
+                    Ok(answer)
+                })
+            },
+            std::future::pending(),
+        );
+        let mut notices = Observer::notices(client.clone());
+        let mut backlight = Observer::backlight(client);
+
+        for expected in [1, 2] {
+            let observed = notices.next().await.expect("the agent is up");
+            assert_eq!(observed.map(|observed| observed.generation), Some(expected));
+            let observed = backlight.next().await.expect("the agent is up");
+            assert_eq!(observed.map(|observed| observed.generation), Some(expected));
+        }
+        assert_eq!(asked_by(&asked, "notices"), [0, 1]);
+        assert_eq!(asked_by(&asked, "backlight"), [0, 1]);
     }
 }

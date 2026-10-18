@@ -4,6 +4,40 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: Low-battery notices are drawn by the overlay, not sent as OS notifications
+
+Logi Options+ 2.8 shows a low battery in its own on-screen toast
+(`logi::overlay::battery_notification`, the `low_battery` entry of its
+`notification_resources.json`), on by default. It sends OS notifications only
+for macros and integrations. OpenLogi follows the same split.
+
+- **No notification permission.** An OS notification needs authorization on
+  macOS, a registered app identity on Windows, and a notification daemon on
+  Linux. The overlay runs whenever the agent is armed, with or without the
+  settings app, and already places windows per display.
+- **One rule for low.** `BatteryInfo::needs_attention` in `openlogi-core`
+  decides it for the agent's notice and the settings app's battery colour, and
+  an ast-grep rule keeps a second copy out.
+- **The agent owns a notice.** It decides when to post one and when it ends
+  (8 seconds), so an overlay that starts or reconnects sees only the notices
+  that are current. Notices travel in their own observation cell
+  (`observe_notices`), not in the agent snapshot, so a notice does not wake
+  every state observer. When the connection to the agent drops, the overlay
+  clears the cards at once, because nothing else would ever end them. The
+  backlight indicator follows the same rule.
+- **Once per discharge.** A device is announced when it becomes low, and
+  again only after it charges or reads 30% or more, so a reading that wobbles
+  around 20% does not repeat the notice.
+- **Not click-through.** The card sits at the bottom centre of the usable area
+  of the display under the cursor (macOS visible frame, Windows work area,
+  Wayland layer-shell surface anchored to the bottom edge, X11 display). It
+  opens without taking focus, and a click closes it.
+
+Verified with unit tests, and on screen on macOS against the mock agent's
+demo: the card appears at the bottom centre above the Dock and closes after 8
+seconds. A click to close is covered by unit tests only. The Windows and Linux
+windows are checked only by CI builds; nobody has seen them on screen yet.
+
 ## 2026-10: Litra is reached over HID++ `0x1990`, with the raw report as fallback
 
 The "raw" Litra report `[0x11, 0xff, 0x04, …]` was always a HID++ 2.0 long

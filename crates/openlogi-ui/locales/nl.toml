@@ -76,6 +76,8 @@ show_in_menu_bar = "Weergeven in menubalk"
 menu_bar_visibility_description = "Houd het OpenLogi-pictogram in de menubalk. Indien uit, blijft het in het Dock."
 show_in_the_notification_area = "Weergeven in het systeemvak"
 notification_area_visibility_description = "Houdt het OpenLogi-pictogram in het systeemvak van de taakbalk. Wordt van kracht wanneer de achtergrondagent opnieuw start."
+low_battery_notifications = "Meldingen bij bijna lege batterij"
+low_battery_notifications_description = "Toon een melding onder aan het scherm wanneer de batterij van een apparaat bijna leeg is."
 openlogi = "OpenLogi"
 
 [device]

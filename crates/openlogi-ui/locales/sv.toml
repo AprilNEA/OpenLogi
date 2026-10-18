@@ -76,6 +76,8 @@ show_in_menu_bar = "Visa i menyraden"
 menu_bar_visibility_description = "Behåll OpenLogis ikon i menyraden. När av stannar den i Dock i stället."
 show_in_the_notification_area = "Visa i meddelandefältet"
 notification_area_visibility_description = "Behåller OpenLogis ikon i aktivitetsfältets meddelandefält. Träder i kraft nästa gång bakgrundsagenten startar."
+low_battery_notifications = "Aviseringar om låg batterinivå"
+low_battery_notifications_description = "Visa en avisering längst ned på skärmen när batteriet i en enhet börjar ta slut."
 openlogi = "OpenLogi"
 
 [device]

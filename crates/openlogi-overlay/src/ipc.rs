@@ -16,9 +16,10 @@ use std::{
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_ipc::client::{self, ConnectError, Observer};
+use openlogi_ipc::client::{self, ConnectError, Observer, Stamped};
 use openlogi_ipc::{
-    ActionRingInvocation, AgentClient, BacklightObservation, ClientKind, RingObservation,
+    ActionRingInvocation, AgentClient, BacklightObservation, ClientKind, NoticeObservation,
+    RingObservation,
 };
 use succession::Standing;
 use tarpc::context;
@@ -56,6 +57,9 @@ pub(crate) struct Handle {
     pub(crate) invocations: mpsc::UnboundedReceiver<Option<ActionRingInvocation>>,
     /// Transient keyboard-backlight indicator state.
     pub(crate) backlights: mpsc::UnboundedReceiver<BacklightObservation>,
+    /// The notices the agent says should be showing, each time that changes.
+    /// An empty list is no notice, which is also how the last one ends.
+    pub(crate) notices: mpsc::UnboundedReceiver<NoticeObservation>,
     /// Where the view reports hover, activation, and cancellation.
     pub(crate) commands: mpsc::UnboundedSender<OverlayCommand>,
 }
@@ -65,12 +69,20 @@ pub(crate) struct Handle {
 pub(crate) fn spawn() -> Handle {
     let (invocation_tx, invocations) = mpsc::unbounded_channel();
     let (backlight_tx, backlights) = mpsc::unbounded_channel();
+    let (notice_tx, notices) = mpsc::unbounded_channel();
     let (commands, mut command_rx) = mpsc::unbounded_channel();
     let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
         runtime.block_on(async {
             tokio::join!(
-                observe_invocations(invocation_tx),
-                observe_backlights(backlight_tx),
+                observe(connect, RING, |ring| invocation_tx
+                    .send(ring.invocation)
+                    .is_ok()),
+                observe(connect, BACKLIGHT, |observed| backlight_tx
+                    .send(observed)
+                    .is_ok()),
+                observe(connect, NOTICES, |observed| notice_tx
+                    .send(observed)
+                    .is_ok()),
                 send_commands(&mut command_rx)
             );
         });
@@ -81,48 +93,65 @@ pub(crate) fn spawn() -> Handle {
     Handle {
         invocations,
         backlights,
+        notices,
         commands,
     }
 }
 
-async fn observe_backlights(tx: mpsc::UnboundedSender<BacklightObservation>) {
-    loop {
-        let Some(client) = connect().await else {
-            tokio::time::sleep(RETRY_PERIOD).await;
-            continue;
-        };
-        let mut observer = Observer::backlight(client);
-        loop {
-            match observer.next().await {
-                Ok(Some(observation)) => {
-                    if tx.send(observation).is_err() {
-                        return;
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    debug!(?error, "backlight observation channel disconnected");
-                    // The expiry timer lives in the agent, so a lost agent can
-                    // never send the hide that closes a visible indicator.
-                    if tx.send(agent_lost()).is_err() {
-                        return;
-                    }
-                    break;
-                }
-            }
-        }
-    }
+/// One of the agent's observed cells, as the overlay follows it.
+struct Cell<T: Stamped> {
+    /// Start observing it over a fresh connection.
+    open: fn(AgentClient) -> Observer<T>,
+    /// What to call it in the log.
+    what: &'static str,
+    /// What to show once the agent is gone, for a cell whose agent also ends
+    /// what it shows: the agent's timer went with it, so nothing else would
+    /// ever end what is on screen.
+    lost: Option<fn() -> T>,
 }
+
+/// The Actions Ring. It needs no `lost` value: the overlay owns how long a
+/// ring shows ([`DISPLAY_LIFETIME`]).
+const RING: Cell<RingObservation> = Cell {
+    open: Observer::action_ring,
+    what: "Actions Ring state",
+    lost: None,
+};
+
+/// The keyboard-backlight indicator, which the agent hides when its time is
+/// up.
+const BACKLIGHT: Cell<BacklightObservation> = Cell {
+    open: Observer::backlight,
+    what: "backlight",
+    lost: Some(backlight_lost),
+};
+
+/// The notices, which the agent ends when their time is up.
+const NOTICES: Cell<NoticeObservation> = Cell {
+    open: Observer::notices,
+    what: "notice",
+    lost: Some(no_notices),
+};
 
 /// The observation that closes the indicator when the agent that was driving
 /// it is gone. The generation is meaningless to the window, which only reads
 /// `visible`.
-const fn agent_lost() -> BacklightObservation {
+const fn backlight_lost() -> BacklightObservation {
     BacklightObservation {
         generation: 0,
         current_level: 0,
         levels: 0,
         visible: false,
+    }
+}
+
+/// The observation that clears the notices of an agent that is gone. The
+/// window reads only the list.
+const fn no_notices() -> NoticeObservation {
+    NoticeObservation {
+        generation: 0,
+        notices: Vec::new(),
+        language: None,
     }
 }
 
@@ -176,18 +205,18 @@ const GIVE_UP_AFTER: Duration = Duration::from_mins(1);
 /// How long to wait between attempts to reach an agent.
 const RETRY_PERIOD: Duration = Duration::from_secs(1);
 
-/// The connection that carries invocations: its phase, and the state
+/// The connection that carries one observed cell: its phase, and the state
 /// meaningful within each phase.
 ///
 /// A successful connection owns its [`Observer`], and with it the generation
 /// cursor; a reconnect episode owns its give-up clock. Transitioning between
 /// them resets the fact from the previous phase by construction.
-enum InvocationLink {
+enum ObservationLink<T: Stamped> {
     Reconnecting { unreachable_since: Option<Instant> },
-    Observing(Observer<RingObservation>),
+    Observing(Observer<T>),
 }
 
-impl Default for InvocationLink {
+impl<T: Stamped> Default for ObservationLink<T> {
     fn default() -> Self {
         Self::Reconnecting {
             unreachable_since: None,
@@ -195,9 +224,9 @@ impl Default for InvocationLink {
     }
 }
 
-impl InvocationLink {
-    fn connected(&mut self, client: AgentClient) {
-        *self = Self::Observing(Observer::action_ring(client));
+impl<T: Stamped> ObservationLink<T> {
+    fn connected(&mut self, observer: Observer<T>) {
+        *self = Self::Observing(observer);
     }
 
     fn connect_failed(&mut self, now: Instant) -> bool {
@@ -215,16 +244,29 @@ impl InvocationLink {
     }
 }
 
-async fn observe_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>>) {
-    let mut link = InvocationLink::default();
+/// Follow one of the agent's observed cells for as long as this process runs,
+/// handing each new value to `deliver` until it reports that nobody is
+/// listening any more. A lost connection hands over the cell's `lost` value
+/// first, if it has one.
+///
+/// Every cell runs one of these. Each keeps its own connection and give-up
+/// clock, so they reach the same verdict about an agent that has gone, and a
+/// failure on one does not interrupt the others. `connect` is [`connect`] in
+/// production.
+async fn observe<T: Stamped, C: Future<Output = Option<AgentClient>>>(
+    mut connect: impl FnMut() -> C,
+    cell: Cell<T>,
+    mut deliver: impl FnMut(T) -> bool,
+) {
+    let mut link = ObservationLink::<T>::default();
     loop {
-        if matches!(&link, InvocationLink::Reconnecting { .. }) {
+        if matches!(&link, ObservationLink::Reconnecting { .. }) {
             if let Some(client) = connect().await {
                 // Generation 0 says "I have seen nothing", so the first
                 // answer is whatever is showing right now. A replacement
                 // agent numbers its own generations, so every connection
                 // starts there independently.
-                link.connected(client);
+                link.connected((cell.open)(client));
             } else {
                 if link.connect_failed(Instant::now()) {
                     stand_down(&format!("no agent has answered for {GIVE_UP_AFTER:?}"));
@@ -233,21 +275,26 @@ async fn observe_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocati
                 continue;
             }
         }
-        let InvocationLink::Observing(observer) = &mut link else {
+        let ObservationLink::Observing(observer) = &mut link else {
             continue;
         };
         match observer.next().await {
             // The hold elapsing with nothing new, or a stale reply: still
             // alive, nothing to show.
             Ok(None) => {}
-            Ok(Some(ring)) => {
-                if tx.send(ring.invocation).is_err() {
+            Ok(Some(latest)) => {
+                if !deliver(latest) {
                     return;
                 }
             }
             Err(error) => {
-                debug!(?error, "Actions Ring state channel disconnected");
+                debug!(?error, "{} channel disconnected", cell.what);
                 link.disconnected();
+                if let Some(lost) = cell.lost
+                    && !deliver(lost())
+                {
+                    return;
+                }
             }
         }
     }

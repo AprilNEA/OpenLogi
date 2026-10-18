@@ -283,6 +283,13 @@ pub struct AppSettings {
     /// unidentified pointer targets use focus.
     #[serde(default)]
     pub mouse_profile_target: MouseProfileTarget,
+    /// Whether the overlay shows a notice when a device's battery runs low.
+    /// **On by default**, as in Logi Options+. A device announces itself once
+    /// per discharge and again only after it has been charged; see
+    /// [`BatteryInfo::needs_attention`](crate::device::BatteryInfo::needs_attention)
+    /// for what counts as low.
+    #[serde(default = "default_true")]
+    pub low_battery_notifications: bool,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -485,14 +492,16 @@ impl Default for AppSettings {
             theme_dark: None,
             ui_radius: None,
             mouse_profile_target: MouseProfileTarget::Pointer,
+            low_battery_notifications: true,
         }
     }
 }
 
 /// serde default for the on-by-default [`AppSettings`] toggles
 /// ([`AppSettings::show_in_menu_bar`], [`AppSettings::capture_mouse_events`],
-/// [`AppSettings::auto_download_assets`]), so configs predating a field keep the
-/// out-of-the-box behavior.
+/// [`AppSettings::auto_download_assets`],
+/// [`AppSettings::low_battery_notifications`]), so configs predating a field
+/// keep the out-of-the-box behavior.
 fn default_true() -> bool {
     true
 }

@@ -51,9 +51,9 @@ use openlogi_core::hid::{
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind, ConfigReloadError,
-    ForegroundApps, FoundDevice, Identity, InventoryHealth, MonitorEvent, Observation,
-    ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig,
+    ForegroundApps, FoundDevice, Identity, InventoryHealth, MonitorEvent, Notice, NoticeKind,
+    NoticeObservation, Observation, ObservedLight, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::{Compat, Run};
 
@@ -342,6 +342,40 @@ fn reload_saved_config() {
 #[test]
 fn observe_backlight() {
     assert_wire(&AgentRequest::ObserveBacklight { since: 7 }, "2507");
+}
+
+/// The overlay long-polls the notices by generation; a low-battery notice
+/// carries the device's name and kind and the reading that made it low.
+#[test]
+fn notices() {
+    assert_wire(&AgentRequest::ObserveNotices { since: 5 }, "2605");
+    assert_wire(
+        &NoticeObservation {
+            generation: 3,
+            notices: vec![Notice {
+                id: 2,
+                kind: NoticeKind::LowBattery {
+                    name: Some("MX".into()),
+                    kind: DeviceKind::Mouse,
+                    battery: BatteryInfo {
+                        percentage: Some(15),
+                        level: BatteryLevel::Low,
+                        status: BatteryStatus::Discharging,
+                    },
+                },
+            }],
+            language: Some("de".into()),
+        },
+        "0301020001024d5800010f010001026465",
+    );
+    assert_wire(
+        &NoticeObservation {
+            generation: 1,
+            notices: Vec::new(),
+            language: None,
+        },
+        "010000",
+    );
 }
 
 /// A chord crosses the wire as its modifier bits and the key's HID usage.

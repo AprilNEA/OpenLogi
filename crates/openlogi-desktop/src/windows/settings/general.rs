@@ -82,6 +82,8 @@ pub(super) fn general_page(
         }),
     );
 
+    let group = group.item(low_battery_notifications_item());
+
     SettingPage::new(tr!("app.general"))
         .icon(IconName::Settings)
         .resettable(false)
@@ -136,6 +138,20 @@ fn smooth_scrolling_item() -> SettingItem {
         ),
     )
     .description(tr!("pointer.smooth_scrolling_description"))
+}
+
+/// The switch for the overlay's low-battery notices.
+fn low_battery_notifications_item() -> SettingItem {
+    SettingItem::new(
+        tr!("app.low_battery_notifications"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().low_battery_notifications),
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_low_battery_notifications(enabled));
+            },
+        ),
+    )
+    .description(tr!("app.low_battery_notifications_description"))
 }
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {

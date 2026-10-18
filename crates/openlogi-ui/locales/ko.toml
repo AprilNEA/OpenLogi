@@ -76,6 +76,8 @@ show_in_menu_bar = "메뉴 막대에 표시"
 menu_bar_visibility_description = "OpenLogi 아이콘을 메뉴 막대에 유지합니다. 끄면 대신 Dock에 남습니다."
 show_in_the_notification_area = "알림 영역에 표시"
 notification_area_visibility_description = "작업 표시줄 알림 영역에 OpenLogi 아이콘을 유지합니다. 백그라운드 에이전트가 다음에 시작될 때 적용됩니다."
+low_battery_notifications = "배터리 부족 알림"
+low_battery_notifications_description = "기기의 배터리가 부족해지면 화면 하단에 알림을 표시합니다."
 openlogi = "OpenLogi"
 
 [device]

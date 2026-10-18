@@ -28,6 +28,11 @@ tarpc = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+# An in-memory agent, and a paused clock, for the observation loop's tests.
+openlogi-ipc = { path = "../openlogi-ipc", features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util"] }
+
 [build-dependencies]
 embed-resource = "3.0.9"
 
@@ -37,7 +42,8 @@ embed-resource = "3.0.9"
 # (its bounds are display-relative). C FFI, so core-graphics.
 core-graphics = { workspace = true }
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSEvent", "block2"] }
+# NSScreen: the notice sits above the Dock, so it needs each screen's visible frame.
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSEvent", "NSScreen", "block2"] }
 # NSEvent global-monitor handlers are ObjC blocks (click-away dismissal).
 block2 = { workspace = true }
 

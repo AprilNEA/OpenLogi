@@ -76,6 +76,8 @@ show_in_menu_bar = "Показувати в рядку меню"
 menu_bar_visibility_description = "Залишати піктограму OpenLogi у рядку меню. Якщо вимкнено, вона залишається в Dock."
 show_in_the_notification_area = "Показувати в області сповіщень"
 notification_area_visibility_description = "Залишати піктограму OpenLogi в області сповіщень панелі завдань. Застосується після наступного запуску фонового агента."
+low_battery_notifications = "Сповіщення про низький заряд"
+low_battery_notifications_description = "Показувати сповіщення внизу екрана, коли батарея пристрою розряджається."
 openlogi = "OpenLogi"
 
 [device]

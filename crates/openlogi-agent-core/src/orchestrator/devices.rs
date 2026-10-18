@@ -160,6 +160,8 @@ pub(super) fn build_devices(
                 light_capabilities: None,
                 online: paired.online,
                 settings_revision: paired.settings_revision,
+                codename: paired.codename.clone(),
+                battery: paired.battery.clone(),
             });
         }
     }
@@ -190,6 +192,9 @@ pub(super) fn build_devices(
             online: device.online,
             // A standalone device reports no device-side setting changes.
             settings_revision: 0,
+            // Its name is its display name, and it reports no battery.
+            codename: None,
+            battery: None,
         });
     }
     // Order by the same canonical key the GUI carousel uses, so the

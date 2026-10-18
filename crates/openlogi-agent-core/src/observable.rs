@@ -13,6 +13,10 @@
 //! The cell has more than one writer — [`Orchestrator`](crate::orchestrator::Orchestrator)
 //! for the device and config facts, the agent binary for the hook ones — so it
 //! is shared as an `Arc` and every setter takes `&self`.
+//!
+//! The overlay's notices ride beside the snapshot in a cell of their own,
+//! [`NoticeBoard`]: a notice comes and goes without moving the GUI's
+//! generation.
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::is_openlogi_foreground_id;
@@ -24,9 +28,12 @@ use openlogi_ipc::{
 };
 use tokio::sync::watch;
 
+use crate::notices::NoticeBoard;
+
 /// The agent's observable state, and the notification that it changed.
 pub struct ObservableState {
     tx: watch::Sender<Observation>,
+    notices: NoticeBoard,
 }
 
 impl ObservableState {
@@ -63,7 +70,16 @@ impl ObservableState {
                 lights: Vec::new(),
             },
         });
-        Self { tx }
+        Self {
+            tx,
+            notices: NoticeBoard::default(),
+        }
+    }
+
+    /// The notices the overlay shows.
+    #[must_use]
+    pub fn notices(&self) -> &NoticeBoard {
+        &self.notices
     }
 
     /// Clone the whole current state.
