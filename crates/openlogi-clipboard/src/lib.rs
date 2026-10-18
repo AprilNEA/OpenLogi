@@ -1,9 +1,9 @@
-//! Plain-text access to the operating system clipboard, for Flow's clipboard
-//! sync.
+//! Text and file access to the operating system clipboard, for Flow's
+//! clipboard sync.
 //!
 //! | Platform | Implementation |
 //! |----------|----------------|
-//! | Windows  | `CF_UNICODETEXT` via `OpenClipboard` / `GetClipboardData` / `SetClipboardData` |
+//! | Windows  | `CF_UNICODETEXT` for text and `CF_HDROP` for files, via `OpenClipboard` / `GetClipboardData` / `SetClipboardData` |
 //! | macOS, Linux, others | none yet: [`available`] is `false` and every call fails with [`ClipboardError::Unsupported`] |
 //!
 //! Calls block — Windows retries briefly while another program holds the
@@ -12,6 +12,7 @@
 //! carries clipboard contents.
 
 use std::fmt;
+use std::path::PathBuf;
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -84,6 +85,25 @@ pub fn read_text(max_bytes: usize) -> Result<ClipboardText, ClipboardError> {
 /// Replaces the clipboard's contents with `text`.
 pub fn write_text(text: &str) -> Result<(), ClipboardError> {
     platform::write_text(text)
+}
+
+/// The files on the clipboard — what a file manager's Copy or Cut put there —
+/// or `None` when it holds none.
+pub fn read_files() -> Result<Option<Vec<PathBuf>>, ClipboardError> {
+    platform::read_files()
+}
+
+/// Replaces the clipboard's contents with `paths`, as a file manager's Copy
+/// would: pasting them copies them, never moves them.
+pub fn write_files(paths: &[PathBuf]) -> Result<(), ClipboardError> {
+    platform::write_files(paths)
+}
+
+/// A number that changes whenever the clipboard's contents do, to tell
+/// whether anything was copied between two looks; `None` without a backend.
+#[must_use]
+pub fn change_count() -> Option<u64> {
+    platform::change_count()
 }
 
 #[cfg(test)]

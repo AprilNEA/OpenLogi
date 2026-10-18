@@ -1,4 +1,5 @@
-//! Windows clipboard text through `CF_UNICODETEXT`.
+//! Windows clipboard text through `CF_UNICODETEXT`, and files through
+//! `CF_HDROP`.
 //!
 //! The clipboard is opened without an owner window: only delayed rendering
 //! needs one, and this renders immediately. Windows synthesizes `CF_TEXT` and
@@ -8,25 +9,37 @@
     reason = "the Win32 clipboard is only reachable through FFI"
 )]
 
+use std::ffi::{OsString, c_void};
 use std::io;
+use std::iter;
 use std::marker::PhantomData;
+use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+use std::path::PathBuf;
 use std::ptr;
 use std::thread;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{GlobalFree, HGLOBAL};
 use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
+    IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows_sys::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
-use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+use windows_sys::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT, DROPEFFECT_COPY};
+use windows_sys::Win32::UI::Shell::{DROPFILES, DragQueryFileW};
 
 use crate::{ClipboardError, ClipboardText};
 
 pub(crate) const AVAILABLE: bool = true;
+
+/// The registered format through which a file copy tells a paste to copy or
+/// to move.
+const PREFERRED_DROP_EFFECT: &str = "Preferred DropEffect";
+
+/// The `DROPFILES` header in front of a `CF_HDROP` path list.
+const DROPFILES_LEN: usize = size_of::<DROPFILES>();
 
 /// How often opening a clipboard that another program holds is tried, and
 /// the pause between tries: holders let go within milliseconds.
@@ -71,6 +84,103 @@ pub(crate) fn write_text(text: &str) -> Result<(), ClipboardError> {
     }
     memory.hand_over();
     Ok(())
+}
+
+pub(crate) fn read_files() -> Result<Option<Vec<PathBuf>>, ClipboardError> {
+    let format = u32::from(CF_HDROP);
+    // SAFETY: takes a format id by value and needs no open clipboard.
+    if unsafe { IsClipboardFormatAvailable(format) } == 0 {
+        return Ok(None);
+    }
+    let _open = OpenClipboardGuard::open()?;
+    // SAFETY: this thread holds the clipboard open; the handle stays the
+    // clipboard's, and is only used before `_open` closes it.
+    let drop = unsafe { GetClipboardData(format) };
+    if drop.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: `drop` is the open clipboard's live CF_HDROP; index u32::MAX
+    // with no buffer asks for the number of files.
+    let count = unsafe { DragQueryFileW(drop, u32::MAX, ptr::null_mut(), 0) };
+    let mut paths = Vec::new();
+    for index in 0..count {
+        // SAFETY: as above; no buffer asks for the path's length in UTF-16
+        // units, without its NUL.
+        let len = unsafe { DragQueryFileW(drop, index, ptr::null_mut(), 0) };
+        if len == 0 {
+            continue;
+        }
+        let mut units = vec![0_u16; len as usize + 1];
+        // SAFETY: `units` has room for `len + 1` units: the path and its NUL.
+        let copied = unsafe { DragQueryFileW(drop, index, units.as_mut_ptr(), len + 1) };
+        units.truncate(copied as usize);
+        paths.push(PathBuf::from(OsString::from_wide(&units)));
+    }
+    Ok((!paths.is_empty()).then_some(paths))
+}
+
+pub(crate) fn write_files(paths: &[PathBuf]) -> Result<(), ClipboardError> {
+    // Filled before the clipboard is taken, so it is held open only for the
+    // swap itself.
+    let drop_files = encode_drop_files(paths);
+    let files = GlobalMemory::alloc(drop_files.len())?;
+    Locked::new(files.0)?.bytes_mut()[..drop_files.len()].copy_from_slice(&drop_files);
+    let effect_bytes = DROPEFFECT_COPY.to_le_bytes();
+    let effect = GlobalMemory::alloc(effect_bytes.len())?;
+    Locked::new(effect.0)?.bytes_mut()[..effect_bytes.len()].copy_from_slice(&effect_bytes);
+    let effect_name = encode_units(PREFERRED_DROP_EFFECT);
+    // SAFETY: `effect_name` is NUL-terminated UTF-16 that outlives the call.
+    let effect_format = unsafe { RegisterClipboardFormatW(effect_name.as_ptr()) };
+
+    let _open = OpenClipboardGuard::open()?;
+    // SAFETY: this thread holds the clipboard open.
+    if unsafe { EmptyClipboard() } == 0 {
+        return Err(os_error("empty"));
+    }
+    // SAFETY: this thread holds the clipboard open and just emptied it, and
+    // `files` is an unlocked moveable object; on success the system owns it.
+    if unsafe { SetClipboardData(u32::from(CF_HDROP), files.0) }.is_null() {
+        return Err(os_error("write"));
+    }
+    files.hand_over();
+    // Without it a paste copies anyway; with it no target can take the files
+    // for a move.
+    // SAFETY: as above, for the unlocked `effect` object.
+    if effect_format != 0 && !unsafe { SetClipboardData(effect_format, effect.0) }.is_null() {
+        effect.hand_over();
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the platforms without a backend have no counter to return"
+)]
+pub(crate) fn change_count() -> Option<u64> {
+    // SAFETY: a plain query with no preconditions.
+    Some(u64::from(unsafe { GetClipboardSequenceNumber() }))
+}
+
+/// `paths` as a `CF_HDROP` object: a `DROPFILES` header marking the list
+/// wide, then every path NUL-terminated, then one more NUL.
+fn encode_drop_files(paths: &[PathBuf]) -> Vec<u8> {
+    let mut units: Vec<u16> = paths
+        .iter()
+        .flat_map(|path| path.as_os_str().encode_wide().chain(iter::once(0)))
+        .collect();
+    units.push(0);
+    if paths.is_empty() {
+        units.push(0);
+    }
+    let mut bytes = Vec::with_capacity(DROPFILES_LEN + size_of_val(units.as_slice()));
+    // DROPFILES { pFiles, pt: POINT { x, y }, fNC, fWide }, little-endian.
+    let list_offset = u32::try_from(DROPFILES_LEN)
+        .unwrap_or_else(|_| unreachable!("DROPFILES is a 20-byte header"));
+    bytes.extend_from_slice(&list_offset.to_le_bytes());
+    bytes.extend_from_slice(&[0; 12]);
+    bytes.extend_from_slice(&1_i32.to_le_bytes());
+    bytes.extend(units.iter().flat_map(|unit| unit.to_le_bytes()));
+    bytes
 }
 
 /// The text of a `CF_UNICODETEXT` buffer: UTF-16 up to the first NUL, which a
@@ -138,24 +248,24 @@ impl Drop for OpenClipboardGuard {
 /// A global memory object, locked for access until dropped.
 struct Locked {
     handle: HGLOBAL,
-    data: *mut u16,
-    units: usize,
+    data: *mut c_void,
+    bytes: usize,
 }
 
 impl Locked {
     fn new(handle: HGLOBAL) -> Result<Self, ClipboardError> {
         // SAFETY: `handle` is a live global memory object, from
         // GetClipboardData under an open clipboard or from GlobalAlloc.
-        let data = unsafe { GlobalLock(handle) }.cast::<u16>();
+        let data = unsafe { GlobalLock(handle) };
         if data.is_null() {
             return Err(os_error("lock"));
         }
         // SAFETY: as above; a locked object's size does not change.
-        let units = unsafe { GlobalSize(handle) } / size_of::<u16>();
+        let bytes = unsafe { GlobalSize(handle) };
         Ok(Self {
             handle,
             data,
-            units,
+            bytes,
         })
     }
 
@@ -163,12 +273,17 @@ impl Locked {
         // SAFETY: GlobalLock returned the start of the object's GlobalSize
         // bytes, which stay valid and in place while it is locked, and global
         // memory is 8-byte aligned.
-        unsafe { std::slice::from_raw_parts(self.data, self.units) }
+        unsafe { std::slice::from_raw_parts(self.data.cast::<u16>(), self.bytes / 2) }
     }
 
     fn units_mut(&mut self) -> &mut [u16] {
         // SAFETY: as in `units`; `&mut self` makes this the only view.
-        unsafe { std::slice::from_raw_parts_mut(self.data, self.units) }
+        unsafe { std::slice::from_raw_parts_mut(self.data.cast::<u16>(), self.bytes / 2) }
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: as in `units`.
+        unsafe { std::slice::from_raw_parts_mut(self.data.cast::<u8>(), self.bytes) }
     }
 }
 
@@ -255,6 +370,46 @@ mod tests {
             decode_units(&[u16::from(b'a'), 0xd800, u16::from(b'b')], 64),
             ClipboardText::Text("a\u{fffd}b".to_owned())
         );
+    }
+
+    /// Reads a wide `CF_HDROP` object back, as `DragQueryFileW` would.
+    fn decode_drop_files(bytes: &[u8]) -> Vec<PathBuf> {
+        let offset = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert_eq!(
+            i32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+            1,
+            "fWide"
+        );
+        let units: Vec<u16> = bytes[offset..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect();
+        assert_eq!(units.last(), Some(&0), "the list ends in an extra NUL");
+        units[..units.len() - 1]
+            .split(|&unit| unit == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| PathBuf::from(OsString::from_wide(path)))
+            .collect()
+    }
+
+    #[test]
+    fn the_drop_files_header_matches_the_win32_layout() {
+        assert_eq!(DROPFILES_LEN, 20);
+        assert_eq!(std::mem::offset_of!(DROPFILES, pFiles), 0);
+        assert_eq!(std::mem::offset_of!(DROPFILES, fWide), 16);
+    }
+
+    #[test]
+    fn copied_files_are_encoded_as_a_wide_double_nul_list() {
+        let paths = vec![
+            PathBuf::from(r"C:\Users\me\Downloads\report.pdf"),
+            PathBuf::from(r"D:\Fotos\Ünïcødé folder"),
+        ];
+        let bytes = encode_drop_files(&paths);
+        assert_eq!(decode_drop_files(&bytes), paths);
+        assert_eq!(&bytes[bytes.len() - 4..], &[0, 0, 0, 0], "double NUL");
     }
 
     #[test]

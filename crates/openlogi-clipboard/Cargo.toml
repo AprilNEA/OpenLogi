@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Plain-text access to the OS clipboard for OpenLogi Flow's clipboard sync."
+description = "Text and file access to the OS clipboard for OpenLogi Flow's clipboard sync."
 # Agent-internal; no published crate depends on it.
 publish = false
 
@@ -19,6 +19,7 @@ windows-sys = { workspace = true, features = [
   "Win32_System_DataExchange",
   "Win32_System_Memory",
   "Win32_System_Ole",
+  "Win32_UI_Shell",
 ] }
 
 # The round-trip test runs against a private window station's clipboard.

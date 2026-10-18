@@ -16,9 +16,14 @@
     reason = "window stations and desktops are only reachable through FFI"
 )]
 
+use std::sync::{Mutex, PoisonError};
 use std::{io, iter, ptr, thread};
 
-use openlogi_clipboard::{ClipboardText, read_text, write_text};
+use std::path::PathBuf;
+
+use openlogi_clipboard::{
+    ClipboardText, change_count, read_files, read_text, write_files, write_text,
+};
 use windows_sys::Win32::Foundation::GENERIC_ALL;
 use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard};
 use windows_sys::Win32::System::StationsAndDesktops::{
@@ -28,6 +33,9 @@ use windows_sys::Win32::System::StationsAndDesktops::{
 
 /// The interactive window station, whose clipboard is the user's.
 const INTERACTIVE_STATION: &str = "WinSta0";
+
+/// The window station belongs to the whole process: one test in it at a time.
+static STATION: Mutex<()> = Mutex::new(());
 
 /// The process's window station while a non-interactive one replaces it.
 struct PrivateStation {
@@ -143,6 +151,7 @@ fn wide(text: &str) -> Vec<u16> {
 #[test]
 #[ignore = "changes the process window station; run explicitly"]
 fn text_round_trips_through_a_private_clipboard() {
+    let _one_at_a_time = STATION.lock().unwrap_or_else(PoisonError::into_inner);
     // A fresh thread has no windows or hooks, as SetThreadDesktop requires.
     thread::spawn(|| {
         let _station = PrivateStation::enter().expect("enter a non-interactive window station");
@@ -164,6 +173,37 @@ fn text_round_trips_through_a_private_clipboard() {
             read_text(64).expect("read replaced text"),
             ClipboardText::Text("second".to_owned())
         );
+    })
+    .join()
+    .expect("clipboard thread");
+}
+
+#[test]
+#[ignore = "changes the process window station; run explicitly"]
+fn files_round_trip_through_a_private_clipboard() {
+    let _one_at_a_time = STATION.lock().unwrap_or_else(PoisonError::into_inner);
+    // A fresh thread has no windows or hooks, as SetThreadDesktop requires.
+    thread::spawn(|| {
+        let _station = PrivateStation::enter().expect("enter a non-interactive window station");
+        assert_eq!(read_files().expect("read empty"), None);
+        let before = change_count();
+
+        // A file drop names paths; none has to exist.
+        let paths = vec![
+            PathBuf::from(r"C:\Users\Public\Documents\report.pdf"),
+            PathBuf::from(r"C:\Users\Public\Pictures\u{dc}n\u{ef}c\u{f8}d\u{e9}"),
+        ];
+        write_files(&paths).expect("write files");
+        assert_eq!(read_files().expect("read files"), Some(paths));
+        assert_ne!(change_count(), before, "a write changes the count");
+        assert_eq!(
+            read_text(64).expect("read text"),
+            ClipboardText::Absent,
+            "a file drop is not text"
+        );
+
+        write_text("replaced").expect("replace files with text");
+        assert_eq!(read_files().expect("read replaced files"), None);
     })
     .join()
     .expect("clipboard thread");
