@@ -781,7 +781,6 @@ async fn pending_restore_follows_a_disabled_devices_latest_route() {
     );
 }
 
-
 #[tokio::test]
 async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
     use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};

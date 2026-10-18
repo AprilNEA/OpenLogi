@@ -18,8 +18,13 @@ pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
 /// Options+. Larger than [`GESTURE_SWIPE_THRESHOLD`] so the overshoot of a
 /// single swipe doesn't double-fire; backtracking subtracts from it, so a
 /// wobble never accumulates into a repeat.
+///
+/// A fast hand-width sweep on an MX Master 3 over Bluetooth is about 2000
+/// raw-XY units. At 150 (3x the threshold) such a sweep repeated every
+/// 30-40 ms and ran past four desktops; 600 gives about three repeats per hand
+/// width (#1652).
 // ponytail: fixed constant, make it a user setting if people want to tune it.
-pub const GESTURE_REPEAT_DISTANCE: i32 = 3 * GESTURE_SWIPE_THRESHOLD;
+pub const GESTURE_REPEAT_DISTANCE: i32 = 12 * GESTURE_SWIPE_THRESHOLD;
 /// How long the pointer must rest mid-hold to end a stroke: the next swipe then
 /// starts fresh and may repeat the last direction at the normal threshold.
 pub const GESTURE_REARM_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -432,7 +437,7 @@ mod tests {
         );
         // Each report leans right, but together they are too diagonal to be
         // a swipe, so they must not repeat Right.
-        for _ in 0..15 {
+        for _ in 0..(GESTURE_REPEAT_DISTANCE / 10 + 5) {
             assert_eq!(acc.accumulate(10, 9), None);
         }
     }
@@ -464,10 +469,16 @@ mod tests {
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
             Some(GestureDirection::Right)
         );
-        assert_eq!(acc.accumulate(140, 0), None);
+        assert_eq!(acc.accumulate(GESTURE_REPEAT_DISTANCE - 10, 0), None);
         // Straight enough overall to repeat, but the carried tail is this
         // diagonal report, so it must not fire again on a nudge.
-        assert_eq!(acc.accumulate(160, 100), Some(GestureDirection::Right));
+        assert_eq!(
+            acc.accumulate(
+                GESTURE_REPEAT_DISTANCE + 10,
+                GESTURE_REPEAT_DISTANCE * 2 / 5
+            ),
+            Some(GestureDirection::Right)
+        );
         assert_eq!(acc.accumulate(1, 0), None);
     }
 
@@ -480,12 +491,13 @@ mod tests {
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
             Some(GestureDirection::Right)
         );
-        // 150 along with 75 drift: too diagonal to repeat yet.
-        for _ in 0..15 {
-            assert_eq!(acc.accumulate(10, -5), None);
+        // A repeat distance along with 40% of it as drift: too diagonal to
+        // repeat yet.
+        for _ in 0..(GESTURE_REPEAT_DISTANCE / 10) {
+            assert_eq!(acc.accumulate(10, -4), None);
         }
         // Backing up undoes drift too, so the corrected stroke repeats.
-        assert_eq!(acc.accumulate(-20, 30), None);
+        assert_eq!(acc.accumulate(-20, 40), None);
         assert_eq!(acc.accumulate(20, 0), Some(GestureDirection::Right));
     }
 
@@ -498,10 +510,17 @@ mod tests {
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
             Some(GestureDirection::Right)
         );
-        // 180 along with 70 drift overall: too diagonal to repeat.
+        // 1.2 repeat distances along: the last report's drift alone is
+        // straight enough to repeat, but with the sideways report at zero
+        // progress the stroke is too diagonal. The sideways report stays
+        // under the threshold so it commits no Up of its own.
+        let half = GESTURE_REPEAT_DISTANCE * 3 / 5;
         assert_eq!(acc.accumulate(0, -40), None);
-        assert_eq!(acc.accumulate(90, 0), None);
-        assert_eq!(acc.accumulate(90, -30), None);
+        assert_eq!(acc.accumulate(half, 0), None);
+        assert_eq!(
+            acc.accumulate(half, -(GESTURE_REPEAT_DISTANCE * 2 / 5 - 20)),
+            None
+        );
     }
 
     #[test]
