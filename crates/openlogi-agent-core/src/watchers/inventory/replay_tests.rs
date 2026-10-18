@@ -274,6 +274,38 @@ const PUBLISH_WINDOW: Duration = Duration::from_secs(5);
 /// delays: a reconciliation the gate failed to hold would publish inside it.
 const PAUSED_WINDOW: Duration = Duration::from_secs(1);
 
+#[tokio::test]
+async fn coalesced_reconnect_reapplies_settings_before_an_identical_snapshot() {
+    let mouse = SleepingMouse::new();
+    let (_signal, device_io) = device_io_channel();
+    let mut watcher = spawn_with_hardware(
+        HardwareContext::injected(mouse.backend.clone(), device_io),
+        ChannelRegistry::default(),
+    );
+    let awake = published(&mut watcher, has_devices).await;
+    // Both edges arrive inside the native hotplug settling window. Inventory
+    // never publishes an offline state, but firmware has lost its settings.
+    mouse.sleep();
+    mouse.wake();
+    let mut reconfigure = false;
+    let woken = tokio::time::timeout(PUBLISH_WINDOW, async {
+        loop {
+            match watcher.events.recv().await.expect("watcher stays alive") {
+                InventoryEvent::DeviceWake => reconfigure = true,
+                InventoryEvent::Snapshot { inventories, .. } => break inventories,
+                event => panic!("unexpected reconnect event: {event:?}"),
+            }
+        }
+    })
+    .await
+    .expect("reconnect publishes a bounded snapshot");
+    assert_eq!(woken, awake);
+    assert!(
+        reconfigure,
+        "an identical online snapshot still needs volatile settings replay"
+    );
+}
+
 /// The first inventory snapshot within `window` that satisfies `wanted`.
 /// Repair retries publish their own snapshots, so the one a test waits for is
 /// not necessarily the next one.

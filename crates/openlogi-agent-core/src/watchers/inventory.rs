@@ -13,6 +13,7 @@ use std::time::{Instant, SystemTime};
 
 use futures_lite::StreamExt as _;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_hid::backend::HotplugEvent;
 use openlogi_hid::inventory::events::{BacklightUpdate, HidppEventSource};
 use openlogi_hid::{ChannelRegistry, DeviceIoGate};
 use tokio::sync::{mpsc, watch};
@@ -72,8 +73,8 @@ pub enum InventoryEvent {
         levels: u8,
         visible: bool,
     },
-    /// A device's `WirelessDeviceStatus` feature (`0x1d4b`) broadcast a
-    /// reconnection — the firmware explicitly asking the host to reconfigure
+    /// A native device arrival or `WirelessDeviceStatus` feature (`0x1d4b`)
+    /// reconnection requests that the host reconfigure
     /// it after a nap. A nap can be too short for any reconciliation to have
     /// observed the device offline, so the agent must not rely on an
     /// offline→online transition in the snapshot that follows: it re-applies
@@ -432,16 +433,26 @@ impl InventoryWorker {
 
     async fn settle_trigger(&mut self, trigger: ReconcileTrigger) -> bool {
         match trigger {
-            ReconcileTrigger::Hotplug => {
+            ReconcileTrigger::Hotplug(first) => {
                 tokio::time::sleep(HOTPLUG_SETTLE).await;
+                let mut reconnected = first == HotplugEvent::Connected;
                 if let Some(stream) = self.hotplug.as_mut() {
                     while let Some(drained) = futures_lite::future::poll_once(stream.next()).await {
-                        if drained.is_none() {
+                        if let Some(event) = drained {
+                            reconnected |= event == HotplugEvent::Connected;
+                        } else {
                             self.hotplug = None;
                             warn!("hotplug stream ended — recovery scan remains active");
                             break;
                         }
                     }
+                }
+                // A detach and arrival can coalesce into the same online
+                // snapshot. Device firmware still lost its volatile settings.
+                // Native events carry no identity, so reuse the bounded,
+                // idempotent device-wake replay and capture-rearm path.
+                if reconnected && self.events.send(InventoryEvent::DeviceWake).is_err() {
+                    return false;
                 }
             }
             ReconcileTrigger::HidEvent(source) => {
@@ -532,7 +543,7 @@ impl InventoryWorker {
                     }
                 } => if let Some(event) = hotplug_event {
                     debug!(?event, "hotplug event — scheduling settled reconciliation");
-                    break ReconcileTrigger::Hotplug;
+                    break ReconcileTrigger::Hotplug(event);
                 } else {
                     self.hotplug = None;
                     warn!("hotplug stream ended — recovery scan remains active");
