@@ -27,7 +27,7 @@ use std::time::Duration;
 use openlogi_clipboard::{ClipboardError, ClipboardText};
 use openlogi_flow::clipboard::{
     Announced, AnnouncedFiles, AnnouncedText, ClipboardOffer, ContentDigest, FilesOffer,
-    MAX_TEXT_BYTES, OfferedFile, Served, TextOffer, fetch_file_list, fetch_text,
+    ListedFile, MAX_TEXT_BYTES, OfferedFile, Served, TextOffer, fetch_file_list, fetch_text,
     files_sync_enabled, serve_fetch, text_sync_enabled,
 };
 use openlogi_flow::frame::{Envelope, FrameKind, InboundRole};
@@ -318,10 +318,15 @@ enum Local {
 }
 
 async fn offer_clipboard(shared: &Arc<Shared>, peer: PublicKey, connection: &FlowConnection) {
-    let files = files_sync_enabled(connection);
-    let Some(local) = read_local(shared, files).await else {
+    let Some(local) = read_local(shared, true).await else {
         return;
     };
+    if matches!(local, Local::Files(_)) && !files_sync_enabled(connection) {
+        info!(
+            "Flow clipboard files not offered: the other computer's OpenLogi does not take files"
+        );
+        return;
+    }
     let Some(offer) = shared.ledger().offer(peer, local) else {
         debug!("Flow clipboard already shared with this peer");
         return;
@@ -340,7 +345,7 @@ async fn offer_clipboard(shared: &Arc<Shared>, peer: PublicKey, connection: &Flo
                 bytes = text.size_bytes(),
                 "Flow clipboard text offered"
             ),
-            ClipboardOffer::Files(files) => debug!(
+            ClipboardOffer::Files(files) => info!(
                 sequence = files.sequence(),
                 files = files.file_count(),
                 bytes = files.total_bytes(),
@@ -423,14 +428,19 @@ async fn receive_files(
         match tokio::time::timeout(FETCH_TIMEOUT, fetch_file_list(connection, announced)).await {
             Ok(Ok(listed)) => listed,
             Ok(Err(error)) => {
-                debug!(%error, "Flow clipboard file list fetch failed");
+                warn!(%error, "Flow clipboard file list fetch failed");
                 return;
             }
             Err(_) => {
-                debug!("Flow clipboard file list fetch timed out");
+                warn!("Flow clipboard file list fetch timed out");
                 return;
             }
         };
+    info!(
+        files = listed.len(),
+        bytes = listed.iter().map(ListedFile::size_bytes).sum::<u64>(),
+        "Flow clipboard files incoming"
+    );
     let still_wanted = || shared.ledger().is_newest(ticket);
     let received = match files::receive(
         connection,
@@ -443,12 +453,12 @@ async fn receive_files(
     {
         Ok(received) => received,
         Err(error) => {
-            debug!(%error, "Flow clipboard files fetch failed");
+            warn!(%error, "Flow clipboard files fetch failed");
             return;
         }
     };
     if !still_wanted() || shared.backend.change_count() != copied_before {
-        debug!("Flow clipboard files superseded while they were fetched");
+        info!("Flow clipboard files superseded while they were fetched");
         files::discard(received.folder());
         return;
     }

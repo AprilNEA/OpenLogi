@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use openlogi_flow::clipboard::{files_sync_enabled, text_sync_enabled};
 use openlogi_flow::discovery::{
     CandidateSource, DEFAULT_PORT, ManualCandidateSource, MdnsAdvertiser, MdnsCandidateSource,
     MdnsRecord,
@@ -743,6 +744,17 @@ async fn watch_connection(state: Arc<GenerationState>, handle: PeerSessionHandle
         let connection = changes.borrow_and_update().clone();
         state.set_connection(peer, connection.clone());
         if let Some(connection) = connection {
+            info!(
+                peer = state
+                    .config
+                    .peers
+                    .iter()
+                    .find(|configured| configured.public_key == peer)
+                    .map_or("?", |configured| configured.name.as_str()),
+                clipboard_text = text_sync_enabled(&connection),
+                clipboard_files = files_sync_enabled(&connection),
+                "Flow peer connected"
+            );
             application = Some(tokio::spawn(run_application_connection(
                 Arc::clone(&state),
                 peer,
