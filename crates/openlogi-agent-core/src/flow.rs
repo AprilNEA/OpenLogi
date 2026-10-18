@@ -8,6 +8,16 @@
 mod devices;
 pub mod edge;
 mod handoff;
+#[expect(
+    dead_code,
+    reason = "the Flow runtime is the only user until the agent starts it"
+)]
+mod identity;
 mod pointer;
+#[expect(
+    dead_code,
+    reason = "the agent starts the Flow runtime later in this stack"
+)]
+mod runtime;
 #[cfg(test)]
 mod test_support;
