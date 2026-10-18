@@ -40,7 +40,10 @@ use file::resolve_symlinks;
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]
 use file::{backup_existing_config, config_backup_path};
-pub use flow::{FlowConfig, FlowDevice, FlowEdge, FlowLayout, FlowPeer};
+pub use flow::{
+    FlowConfig, FlowConfigError, FlowConfigParts, FlowDevice, FlowEdge, FlowHostSlot, FlowLayout,
+    FlowPeer, FlowPeerName, FlowPublicKey, SELF_CHANNEL,
+};
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
@@ -60,6 +63,11 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
+/// v9 adds the `[flow]` section for cross-machine device handoff. Nothing
+/// older needs migrating, and a file without it loads as disabled Flow. The
+/// bump makes a v8 build refuse a file that may hold `[flow]` at the version
+/// check, instead of failing on the unknown field.
+///
 /// v8 adds `{ click = ..., wheel = "HorizontalScroll" }` wheel-hold button
 /// bindings and the per-device `smooth_wheel` switch. Nothing older needs
 /// migrating; the bump makes a v7 build refuse a file that may hold either at
@@ -72,9 +80,6 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// reversal (see `Config::migrate_thumbwheel_native_direction`).
 ///
 /// v6 adds threshold-based `{ short = ..., long = ... }` button bindings.
-///
-/// Flow is an additive, default-empty section and does not require a schema
-/// migration; configs without it continue to deserialize to disabled Flow.
 ///
 /// v5 also drops the transport prefix from `direct:` keys: `direct:046d:c08d:unit:6be9d300`
 /// names the mouse *and the cable it was plugged into*, so a device moved to a
@@ -111,7 +116,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
