@@ -85,8 +85,8 @@ impl CandidateSource for BarrierSource {
 async fn managers_establish_a_session_and_send_trusted_initial_state() -> TestResult {
     let first_identity = MachineIdentity::generate()?;
     let second_identity = MachineIdentity::generate()?;
-    let first = endpoint(&first_identity, second_identity.public_key(), [1; 16])?;
-    let second = endpoint(&second_identity, first_identity.public_key(), [2; 16])?;
+    let first = endpoint(&first_identity, second_identity.public_key())?;
+    let second = endpoint(&second_identity, first_identity.public_key())?;
     let first_provider = Arc::new(CountingProvider::new(11));
     let second_provider = Arc::new(CountingProvider::new(22));
 
@@ -139,8 +139,8 @@ async fn managers_establish_a_session_and_send_trusted_initial_state() -> TestRe
 async fn simultaneous_dial_converges_on_the_key_order_tiebreak() -> TestResult {
     let first_identity = MachineIdentity::generate()?;
     let second_identity = MachineIdentity::generate()?;
-    let first = endpoint(&first_identity, second_identity.public_key(), [7; 16])?;
-    let second = endpoint(&second_identity, first_identity.public_key(), [8; 16])?;
+    let first = endpoint(&first_identity, second_identity.public_key())?;
+    let second = endpoint(&second_identity, first_identity.public_key())?;
     let barrier = Arc::new(Barrier::new(2));
     let first_manager = SessionManager::start(
         Arc::clone(&first),
@@ -195,8 +195,8 @@ async fn simultaneous_dial_converges_on_the_key_order_tiebreak() -> TestResult {
 async fn manager_reconnects_after_peer_session_is_dropped() -> TestResult {
     let first_identity = MachineIdentity::generate()?;
     let second_identity = MachineIdentity::generate()?;
-    let first = endpoint(&first_identity, second_identity.public_key(), [3; 16])?;
-    let second = endpoint(&second_identity, first_identity.public_key(), [4; 16])?;
+    let first = endpoint(&first_identity, second_identity.public_key())?;
+    let second = endpoint(&second_identity, first_identity.public_key())?;
     let first_provider = Arc::new(CountingProvider::new(1));
     let second_provider = Arc::new(CountingProvider::new(2));
     let first_manager = SessionManager::start(
@@ -246,8 +246,8 @@ async fn manager_reconnects_after_peer_session_is_dropped() -> TestResult {
 async fn missing_pong_degrades_then_transport_close_marks_lost() -> TestResult {
     let managed_identity = MachineIdentity::generate()?;
     let silent_identity = MachineIdentity::generate()?;
-    let managed = endpoint(&managed_identity, silent_identity.public_key(), [5; 16])?;
-    let silent = endpoint(&silent_identity, managed_identity.public_key(), [6; 16])?;
+    let managed = endpoint(&managed_identity, silent_identity.public_key())?;
+    let silent = endpoint(&silent_identity, managed_identity.public_key())?;
     let silent_acceptor = Arc::clone(&silent);
     let accepted = tokio::spawn(async move { silent_acceptor.accept().await });
     let provider = Arc::new(CountingProvider::new(1));
@@ -275,11 +275,7 @@ async fn missing_pong_degrades_then_transport_close_marks_lost() -> TestResult {
     Ok(())
 }
 
-fn endpoint(
-    identity: &MachineIdentity,
-    peer_key: PublicKey,
-    nonce: [u8; 16],
-) -> TestResult<Arc<FlowEndpoint>> {
+fn endpoint(identity: &MachineIdentity, peer_key: PublicKey) -> TestResult<Arc<FlowEndpoint>> {
     Ok(Arc::new(FlowEndpoint::bind(
         SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         identity.clone(),
@@ -288,7 +284,6 @@ fn endpoint(
             proto_min: 1,
             proto_max: 1,
             public_key: identity.public_key().as_bytes().to_vec(),
-            session_nonce: nonce.to_vec(),
             machine_name: "session-test".to_owned(),
             app_version: "test".to_owned(),
             ..Default::default()

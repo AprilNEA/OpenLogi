@@ -42,7 +42,7 @@ bottom.
 | Frame family | Carried on |
 |---|---|
 | `Hello`, `HelloReject` | control stream |
-| `PairStart→Prompted`, `PairConfirm→Outcome`, `GetPeerInfo→PeerInfo`, `HandoffRequest→Accept/Reject`, `ClipboardFetch`/`FileFetch`→`ClipboardData`+`Chunk`*+`ChunkEnd` | one bi-stream per request |
+| `PairStart→Prompted`, `PairReveal→Revealed`, `PairConfirm→Outcome`, `GetPeerInfo→PeerInfo`, `HandoffRequest→Accept/Reject`, `ClipboardFetch`/`FileFetch`→`ClipboardData`+`Chunk`*+`ChunkEnd` | one bi-stream per request |
 | `PairAbort`, `AnnounceDevices`, `PeerState`, `HandoffResult`, `HandoffCancel`, `ClipboardAnnounce` | one uni-stream each |
 | `Ping`, `Pong` | datagrams |
 | `Error` | response position on any bi-stream |
@@ -91,11 +91,18 @@ dial ──► TLS (pinned-key verifier) ──► Hello exchange ──► trus
 
 1. TLS: the verifier accepts a pinned peer key → session starts *trusted*;
    accepts an unknown key only while pairing mode is active → session starts
-   *untrusted*.
+   *untrusted*. Only one untrusted connection at a time holds the **pairing
+   slot**. It claims the slot after the `Hello` exchange succeeds and
+   releases it when the connection closes, so a failed or abandoned dial
+   never locks pairing out. Any other unknown peer is closed with
+   application code 3 (`pairing busy`).
 2. Both sides send `Hello`. `agreed = min(proto_max_A, proto_max_B)`; if
    `agreed < max(proto_min_A, proto_min_B)` → `HelloReject VERSION_DISJOINT`
    and close (the GUI names which side is stale). `Hello.public_key` must
    equal the TLS identity → else `HelloReject KEY_MISMATCH`.
+   `Hello.session_nonce` is 16 bytes from the OS CSPRNG, drawn fresh for
+   every connection and never reused. It makes each connection's `Hello`
+   transcript unique, and pairing binds to that transcript.
 3. On an **untrusted** session, only link-family and pairing-family frames
    are legal; anything else is answered `Error NOT_PAIRED` and ignored.
 4. On becoming trusted (pinned key, or pairing just completed): each side
@@ -111,12 +118,17 @@ kinds/fields skipped) is the safety net, gating is the contract.
 ## Pairing
 
 Trust ceremony (design doc §Transport chose pinned keys; this is how pins
-are created). Runs on an untrusted session:
+are created). Runs on an untrusted session. The ceremony is
+**commit-then-reveal**: A commits to its nonce before it sees B's nonce, and
+B picks its nonce before A reveals. Neither side can pick its nonce after it
+sees the other one.
 
 ```
-A                                   B
-│ ──── PairStart ────────────────► │  B shows prompt: name, code, fingerprint
-│ ◄─── PairPrompted{timeout} ───── │  A shows its prompt
+A (initiator)                       B (responder)
+│ ── PairStart{commit(nA)} ──────► │  B shows who is pairing, no code yet
+│ ◄─ PairPrompted{timeout, nB} ─── │  B's deadline starts
+│ ── PairReveal{nA} ─────────────► │  B checks nA against the commitment
+│ ◄─ PairRevealed ──────────────── │  both sides show the code now
 │        (users compare the 6-digit code on both screens)
 │ ──── PairConfirm ──────────────► │
 │ ◄─── PairOutcome{PENDING_LOCAL} ─│  (B's user hasn't confirmed yet)
@@ -125,20 +137,42 @@ A                                   B
 │                                  │  becomes trusted in place
 ```
 
+- **Nonces**: `nA` and `nB` are 16 bytes each from the OS CSPRNG, drawn
+  fresh for each ceremony. They are separate from the `Hello` session
+  nonces.
+- **Commitment**: `PairStart.nonce_commitment =
+  SHA-256("openlogi-flow-pair-commit-v1" ‖ pkA ‖ pkB ‖ nA)` (32 bytes),
+  with `pkA` = initiator key and `pkB` = responder key. B answers a
+  commitment of any other length with `Error INVALID`. If `PairReveal.nonce`
+  does not open the commitment, B answers `Error INVALID` and aborts with
+  reason `CODE_MISMATCH`.
+- A side may show the code only after the reveal step: B after the
+  commitment check, A after `PairRevealed`. A `PairConfirm` that arrives
+  earlier is a protocol error.
 - Completion condition: a side considers pairing complete when it has both
   **sent and received** a `PairConfirm`; it persists the peer's key and
   answers/expects `PairOutcome{PAIRED}`.
 - **Code derivation (SAS)**: both sides compute
-  `HKDF-SHA256(ikm = min(pkA,pkB) ‖ max(pkA,pkB), salt = min(nA,nB) ‖ max(nA,nB), info = "openlogi-flow-sas-v1")`,
+  `HKDF-SHA256(salt = hA ‖ hB, ikm = pkA ‖ pkB ‖ nA ‖ nB, info = "openlogi-flow-sas-v1")`,
   take the first 4 output bytes as a big-endian integer, `mod 1_000_000`,
-  render as 6 digits. `pk` = the 32-byte Ed25519 keys, `n` = the 16-byte
-  `session_nonce`s from the two `Hello`s; `min`/`max` byte-lexicographic. A
-  man-in-the-middle necessarily terminates two distinct sessions and shows
-  two different codes — the human comparison is the authentication.
+  and render the result as 6 digits. `pk` = the 32-byte Ed25519 keys, `n` =
+  the pairing nonces, and `h` = SHA-256 of each side's encoded `Hello`
+  payload on this connection. Every input is ordered by **role**
+  (initiator first), never by byte value.
+- **Why this authenticates**: a man-in-the-middle terminates two distinct
+  sessions. In each session it must fix its own nonce before it learns the
+  honest peer's nonce. It therefore cannot steer the two codes to match;
+  each attempt succeeds with probability 10⁻⁶. The human comparison is the
+  authentication.
+- Fixed test vector (keys `00..1f` / `20..3f`, nonces `00..0f` / `10..1f`,
+  `h` = SHA-256 of `"initiator hello"` / `"responder hello"`): commitment
+  `8d89a09a832cc87779e32053024ef40dbe98bacaacefb05ff934eda83902b31f`,
+  code `469603`.
 - Abort paths: `PairAbort{USER_CANCELLED | CODE_MISMATCH}` from either side;
   `PairOutcome{TIMEOUT}` after `PairPrompted.timeout_ms` (default 120 s);
   `PairOutcome{REJECTED}` if a user declines. All abort paths discard the
-  session nonces; retry starts a fresh connection with fresh nonces.
+  pairing nonces and the code; retry starts a fresh connection with fresh
+  nonces.
 
 ## Device identity
 
@@ -227,6 +261,12 @@ rendering, X11/Wayland are lazy by construction).
 - **Timeouts** are receiver-declared where one side waits on the other
   (`PairPrompted.timeout_ms`, `HandoffAccept.arm_timeout_ms`) so the two
   sides never disagree about who gave up first.
+- **Local deadlines** bound what a silent peer can hold. They are local
+  policy, not wire values. Defaults: TLS plus the `Hello` exchange must
+  finish in **10 s**. Each inbound request or notification must deliver its
+  frame and FIN within **10 s**; otherwise the receiver resets the stream
+  with application code 4. At most **16** inbound handshakes run at once;
+  the receiver refuses further dials before TLS starts.
 - **Wall-clock time is diagnostics-only** (`sent_at_ms`, `modified_at_ms`);
   no protocol decision compares clocks across machines. Durations are
   relative milliseconds.

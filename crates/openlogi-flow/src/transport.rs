@@ -1,5 +1,9 @@
 //! QUIC transport binding for Flow frames, streams, datagrams, and mutual trust.
 
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
+mod tests;
 mod tls;
 
 use std::{
@@ -9,27 +13,51 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use buffa::Message;
 use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 use rustls::pki_types::CertificateDer;
 use thiserror::Error;
+use tokio::time::{Instant, timeout, timeout_at};
 
 use crate::{
     frame::{Envelope, FrameError, FrameKind, InboundRole, InvalidDecision},
     generated as proto,
     negotiation::{HelloRejection, Negotiated, SendGate, negotiate},
     pairing::{PairingSession, PairingState},
-    sas::{PublicKey, SessionNonce},
+    sas::{HelloDigest, PublicKey, RandomError, SessionNonce},
 };
 
 pub use tls::{
-    ALPN, IdentityError, MachineIdentity, PeerTrust, SessionTrust, public_key_from_certificate,
+    ALPN, CandidateLease, IdentityError, MachineIdentity, PeerTrust, SessionTrust,
+    public_key_from_certificate,
 };
 
 const CLOSE_PROTOCOL: VarInt = VarInt::from_u32(1);
 const STOP_OVERSIZED: VarInt = VarInt::from_u32(2);
+const CLOSE_PAIRING_BUSY: VarInt = VarInt::from_u32(3);
+const STOP_TIMEOUT: VarInt = VarInt::from_u32(4);
+
+/// Deadlines that keep one slow or silent peer from holding local resources.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EndpointLimits {
+    /// Deadline for TLS plus the `Hello` exchange, for dials and accepts.
+    pub handshake_timeout: Duration,
+    /// Deadline for reading one inbound request or notification frame and
+    /// its stream FIN.
+    pub stream_read_timeout: Duration,
+}
+
+impl Default for EndpointLimits {
+    fn default() -> Self {
+        Self {
+            handshake_timeout: Duration::from_secs(10),
+            stream_read_timeout: Duration::from_secs(10),
+        }
+    }
+}
 
 /// Whether the local endpoint initiated a Flow connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,18 +72,39 @@ pub enum ConnectionDirection {
 #[derive(Debug)]
 pub struct FlowEndpoint {
     endpoint: Endpoint,
+    shared: Arc<EndpointShared>,
+}
+
+#[derive(Debug)]
+struct EndpointShared {
     identity: MachineIdentity,
     trust: PeerTrust,
     hello: proto::Hello,
+    limits: EndpointLimits,
 }
 
 impl FlowEndpoint {
     /// Binds a Flow endpoint and configures both TLS directions with one trust policy.
+    ///
+    /// `hello` is the template for every connection. Its `public_key` must be
+    /// this identity's key and its `session_nonce` must be empty: the endpoint
+    /// draws a fresh nonce for each connection.
     pub fn bind(
         address: SocketAddr,
         identity: MachineIdentity,
         trust: PeerTrust,
         hello: proto::Hello,
+    ) -> Result<Self, TransportError> {
+        Self::bind_with_limits(address, identity, trust, hello, EndpointLimits::default())
+    }
+
+    /// Binds a Flow endpoint with explicit handshake and stream deadlines.
+    pub fn bind_with_limits(
+        address: SocketAddr,
+        identity: MachineIdentity,
+        trust: PeerTrust,
+        hello: proto::Hello,
+        limits: EndpointLimits,
     ) -> Result<Self, TransportError> {
         validate_local_hello(&hello, identity.public_key())?;
         let (server_config, client_config) = quic_configs(&identity, trust.clone())?;
@@ -63,9 +112,12 @@ impl FlowEndpoint {
         endpoint.set_default_client_config(client_config);
         Ok(Self {
             endpoint,
-            identity,
-            trust,
-            hello,
+            shared: Arc::new(EndpointShared {
+                identity,
+                trust,
+                hello,
+                limits,
+            }),
         })
     }
 
@@ -76,27 +128,46 @@ impl FlowEndpoint {
 
     /// Returns this endpoint's stable machine identity.
     #[must_use]
-    pub const fn public_key(&self) -> PublicKey {
-        self.identity.public_key()
+    pub fn public_key(&self) -> PublicKey {
+        self.shared.identity.public_key()
     }
 
-    /// Dials and performs the control-stream Hello exchange.
+    /// Dials and performs the control-stream Hello exchange within the
+    /// handshake deadline.
     pub async fn connect(&self, address: SocketAddr) -> Result<FlowConnection, TransportError> {
-        let connection = self.endpoint.connect(address, "openlogi-flow")?.await?;
-        self.establish(connection, ConnectionDirection::Outgoing)
-            .await
+        let connecting = self.endpoint.connect(address, "openlogi-flow")?;
+        let shared = &self.shared;
+        timeout(shared.limits.handshake_timeout, async move {
+            let connection = connecting.await?;
+            establish(shared, connection, ConnectionDirection::Outgoing).await
+        })
+        .await
+        .map_err(|_| TransportError::HandshakeTimeout)?
     }
 
-    /// Accepts one dial and performs the control-stream Hello exchange.
-    pub async fn accept(&self) -> Result<FlowConnection, TransportError> {
+    /// Waits for the next inbound dial without spending a handshake on it.
+    ///
+    /// Cancel-safe: dropping the future never loses a dial. Run
+    /// [`IncomingConnection::establish`] concurrently (for example in a
+    /// spawned task) so that one slow peer cannot delay the next.
+    pub async fn accept_incoming(&self) -> Result<IncomingConnection, TransportError> {
         let incoming = self
             .endpoint
             .accept()
             .await
             .ok_or(TransportError::EndpointClosed)?;
-        let connection = incoming.await?;
-        self.establish(connection, ConnectionDirection::Incoming)
-            .await
+        Ok(IncomingConnection {
+            incoming,
+            shared: Arc::clone(&self.shared),
+        })
+    }
+
+    /// Accepts one dial and performs its handshake inline.
+    ///
+    /// Convenience for single-peer callers and tests. Long-lived acceptors
+    /// use [`Self::accept_incoming`] so that handshakes run concurrently.
+    pub async fn accept(&self) -> Result<FlowConnection, TransportError> {
+        self.accept_incoming().await?.establish().await
     }
 
     /// Gracefully closes all connections owned by this endpoint.
@@ -104,92 +175,144 @@ impl FlowEndpoint {
         self.endpoint.close(VarInt::from_u32(0), b"endpoint closed");
         self.endpoint.wait_idle().await;
     }
+}
 
-    async fn establish(
-        &self,
-        connection: Connection,
-        direction: ConnectionDirection,
-    ) -> Result<FlowConnection, TransportError> {
-        verify_alpn(&connection)?;
-        let peer_key = connection_peer_key(&connection)?;
-        let initial_trust = self
-            .trust
-            .classify(peer_key)
-            .map_err(|error| TransportError::Trust(error.to_string()))?;
-        let (mut control_send, mut control_recv) = match direction {
-            ConnectionDirection::Outgoing => connection.open_bi().await?,
-            ConnectionDirection::Incoming => connection.accept_bi().await?,
-        };
+/// An inbound dial whose TLS and `Hello` handshake has not run yet.
+#[derive(Debug)]
+pub struct IncomingConnection {
+    incoming: quinn::Incoming,
+    shared: Arc<EndpointShared>,
+}
 
-        message_envelope(FrameKind::Hello, &self.hello)?
-            .write_to(&mut control_send)
-            .await?;
-        let peer_frame = Envelope::read_from(&mut control_recv).await?;
-        if peer_frame.flags != 0 {
-            reject_hello(
-                &connection,
-                &mut control_send,
-                &self.hello,
-                proto::RejectReason::Malformed,
-                "Hello frame used reserved flags",
-            )
-            .await?;
-            return Err(TransportError::InvalidControlFrame);
-        }
-        if peer_frame.kind == FrameKind::HelloReject {
-            let rejection = peer_frame
-                .decode::<proto::HelloReject>(InboundRole::Request)
-                .map_err(|_| TransportError::InvalidControlFrame)?;
-            return Err(TransportError::PeerHelloRejected(rejection.reason.to_i32()));
-        }
-        if peer_frame.kind != FrameKind::Hello {
-            reject_hello(
-                &connection,
-                &mut control_send,
-                &self.hello,
-                proto::RejectReason::Malformed,
-                "control stream did not carry Hello",
-            )
-            .await?;
-            return Err(TransportError::InvalidControlFrame);
-        }
-        let peer_hello = peer_frame
-            .decode::<proto::Hello>(InboundRole::Request)
-            .map_err(|_| TransportError::InvalidControlFrame)?;
-        let negotiated = match negotiate(&self.hello, &peer_hello, &peer_key) {
-            Ok(negotiated) => negotiated,
-            Err(rejection) => {
-                reject_hello(
-                    &connection,
-                    &mut control_send,
-                    &self.hello,
-                    rejection.reason(),
-                    &rejection.to_string(),
-                )
-                .await?;
-                return Err(TransportError::HelloRejected(rejection));
-            }
-        };
-
-        let trusted = Arc::new(AtomicBool::new(initial_trust == SessionTrust::Trusted));
-        let monitor_connection = connection.clone();
-        let control_monitor = tokio::spawn(async move {
-            let _ = control_recv.read_chunk(1, true).await;
-            monitor_connection.close(CLOSE_PROTOCOL, b"control stream closed");
-        });
-        Ok(FlowConnection {
-            connection,
-            _control_send: control_send,
-            control_monitor,
-            direction,
-            local_key: self.identity.public_key(),
-            peer_key,
-            peer_hello,
-            send_gate: SendGate::new(negotiated.clone()),
-            negotiated,
-            trusted,
-        })
+impl IncomingConnection {
+    /// Returns the dialing peer's claimed address. It is a hint, never identity.
+    #[must_use]
+    pub fn remote_address(&self) -> SocketAddr {
+        self.incoming.remote_address()
     }
+
+    /// Refuses the dial without running a TLS handshake.
+    pub fn refuse(self) {
+        self.incoming.refuse();
+    }
+
+    /// Runs TLS and the `Hello` exchange within the handshake deadline.
+    pub async fn establish(self) -> Result<FlowConnection, TransportError> {
+        let Self { incoming, shared } = self;
+        timeout(shared.limits.handshake_timeout, async {
+            let connection = incoming.await?;
+            establish(&shared, connection, ConnectionDirection::Incoming).await
+        })
+        .await
+        .map_err(|_| TransportError::HandshakeTimeout)?
+    }
+}
+
+async fn establish(
+    shared: &EndpointShared,
+    connection: Connection,
+    direction: ConnectionDirection,
+) -> Result<FlowConnection, TransportError> {
+    verify_alpn(&connection)?;
+    let peer_key = connection_peer_key(&connection)?;
+    let initial_trust = shared
+        .trust
+        .classify(peer_key)
+        .map_err(|error| TransportError::Trust(error.to_string()))?;
+    let (mut control_send, mut control_recv) = match direction {
+        ConnectionDirection::Outgoing => connection.open_bi().await?,
+        ConnectionDirection::Incoming => connection.accept_bi().await?,
+    };
+
+    let mut local_hello = shared.hello.clone();
+    local_hello.session_nonce = SessionNonce::random()?.as_bytes().to_vec();
+    let local_frame = message_envelope(FrameKind::Hello, &local_hello)?;
+    let local_hello_digest = HelloDigest::of(&local_frame.payload);
+    local_frame.write_to(&mut control_send).await?;
+    let peer_frame = Envelope::read_from(&mut control_recv).await?;
+    if peer_frame.flags != 0 {
+        reject_hello(
+            &connection,
+            &mut control_send,
+            &local_hello,
+            proto::RejectReason::Malformed,
+            "Hello frame used reserved flags",
+        )
+        .await?;
+        return Err(TransportError::InvalidControlFrame);
+    }
+    if peer_frame.kind == FrameKind::HelloReject {
+        let rejection = peer_frame
+            .decode::<proto::HelloReject>(InboundRole::Request)
+            .map_err(|_| TransportError::InvalidControlFrame)?;
+        return Err(TransportError::PeerHelloRejected(rejection.reason.to_i32()));
+    }
+    if peer_frame.kind != FrameKind::Hello {
+        reject_hello(
+            &connection,
+            &mut control_send,
+            &local_hello,
+            proto::RejectReason::Malformed,
+            "control stream did not carry Hello",
+        )
+        .await?;
+        return Err(TransportError::InvalidControlFrame);
+    }
+    let peer_hello = peer_frame
+        .decode::<proto::Hello>(InboundRole::Request)
+        .map_err(|_| TransportError::InvalidControlFrame)?;
+    let negotiated = match negotiate(&local_hello, &peer_hello, &peer_key) {
+        Ok(negotiated) => negotiated,
+        Err(rejection) => {
+            reject_hello(
+                &connection,
+                &mut control_send,
+                &local_hello,
+                rejection.reason(),
+                &rejection.to_string(),
+            )
+            .await?;
+            return Err(TransportError::HelloRejected(rejection));
+        }
+    };
+
+    // Only a completed handshake may claim the single pairing slot, so a
+    // failed or abandoned dial can never lock pairing out.
+    let candidate_lease = match initial_trust {
+        SessionTrust::Trusted => None,
+        SessionTrust::Untrusted => {
+            let Some(lease) = shared.trust.lease_candidate(peer_key) else {
+                connection.close(CLOSE_PAIRING_BUSY, b"another peer is pairing");
+                return Err(TransportError::PairingBusy);
+            };
+            Some(lease)
+        }
+    };
+
+    let trusted = Arc::new(AtomicBool::new(initial_trust == SessionTrust::Trusted));
+    let monitor_connection = connection.clone();
+    let control_monitor = tokio::spawn(async move {
+        let _ = control_recv.read_chunk(1, true).await;
+        monitor_connection.close(CLOSE_PROTOCOL, b"control stream closed");
+    });
+    Ok(FlowConnection {
+        connection,
+        _control_send: control_send,
+        control_monitor,
+        direction,
+        local_key: shared.identity.public_key(),
+        peer_key,
+        local_hello_digest,
+        peer_hello_digest: HelloDigest::of(&peer_frame.payload),
+        peer_hello,
+        inbound: InboundPolicy {
+            trusted,
+            send_gate: SendGate::new(negotiated.clone()),
+            read_timeout: shared.limits.stream_read_timeout,
+        },
+        negotiated,
+        _candidate_lease: candidate_lease,
+    })
 }
 
 /// An authenticated Flow connection after Hello negotiation.
@@ -201,10 +324,30 @@ pub struct FlowConnection {
     direction: ConnectionDirection,
     local_key: PublicKey,
     peer_key: PublicKey,
+    local_hello_digest: HelloDigest,
+    peer_hello_digest: HelloDigest,
     peer_hello: proto::Hello,
-    send_gate: SendGate,
+    inbound: InboundPolicy,
     negotiated: Negotiated,
+    _candidate_lease: Option<CandidateLease>,
+}
+
+/// Validation state shared by a connection and the streams it accepts.
+#[derive(Clone, Debug)]
+struct InboundPolicy {
     trusted: Arc<AtomicBool>,
+    send_gate: SendGate,
+    read_timeout: Duration,
+}
+
+impl InboundPolicy {
+    fn trust(&self) -> SessionTrust {
+        if self.trusted.load(Ordering::Acquire) {
+            SessionTrust::Trusted
+        } else {
+            SessionTrust::Untrusted
+        }
+    }
 }
 
 impl FlowConnection {
@@ -212,6 +355,12 @@ impl FlowConnection {
     #[must_use]
     pub const fn direction(&self) -> ConnectionDirection {
         self.direction
+    }
+
+    /// Returns this endpoint's own key.
+    #[must_use]
+    pub const fn local_key(&self) -> PublicKey {
+        self.local_key
     }
 
     /// Returns the TLS-authenticated peer key.
@@ -235,19 +384,38 @@ impl FlowConnection {
     /// Returns this connection's current trust classification.
     #[must_use]
     pub fn trust(&self) -> SessionTrust {
-        if self.trusted.load(Ordering::Acquire) {
-            SessionTrust::Trusted
-        } else {
-            SessionTrust::Untrusted
-        }
+        self.inbound.trust()
     }
 
-    /// Promotes an untrusted connection after its pairing state machine persists this peer key.
+    /// Creates the idle pairing ceremony bound to this connection's identities
+    /// and `Hello` transcript.
+    #[must_use]
+    pub const fn pairing_session(&self) -> PairingSession {
+        PairingSession::new(
+            self.local_key,
+            self.peer_key,
+            self.local_hello_digest,
+            self.peer_hello_digest,
+        )
+    }
+
+    /// Promotes an untrusted connection after its own pairing ceremony
+    /// persisted this peer key.
+    ///
+    /// A ceremony from another connection is refused even for the same peer:
+    /// its code was derived from a different `Hello` transcript.
     pub fn promote_after_pairing(&self, pairing: &PairingSession) -> Result<(), TransportError> {
-        if pairing.state() != PairingState::Paired || pairing.peer_key() != self.peer_key {
+        if pairing.state() != PairingState::Paired
+            || !pairing.is_bound_to(
+                self.local_key,
+                self.peer_key,
+                self.local_hello_digest,
+                self.peer_hello_digest,
+            )
+        {
             return Err(TransportError::PairingNotComplete);
         }
-        self.trusted.store(true, Ordering::Release);
+        self.inbound.trusted.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -327,55 +495,26 @@ impl FlowConnection {
         }))
     }
 
-    /// Accepts and validates one inbound RPC stream.
+    /// Waits for the peer to open its next RPC stream without reading it.
     ///
-    /// Envelope, stream-binding, size, and pre-pairing violations are answered
-    /// automatically with the mandated `Error` code.
+    /// Cancel-safe: dropping the future never loses a stream, so it can sit in
+    /// a `select!` loop next to [`Self::accept_notification_stream`]. Read the
+    /// request with [`InboundRpc::read`], typically in a spawned task.
+    pub async fn accept_rpc_stream(&self) -> Result<InboundRpc, TransportError> {
+        let (send, receive) = self.connection.accept_bi().await?;
+        Ok(InboundRpc {
+            send,
+            receive,
+            policy: self.inbound.clone(),
+        })
+    }
+
+    /// Accepts and reads one inbound RPC stream.
+    ///
+    /// Not cancel-safe: dropping the future after the stream was accepted
+    /// abandons that request. Event loops use [`Self::accept_rpc_stream`].
     pub async fn accept_rpc(&self) -> Result<RpcEvent, TransportError> {
-        let (send, mut receive) = self.connection.accept_bi().await?;
-        let request = match Envelope::read_from(&mut receive).await {
-            Ok(request) => request,
-            Err(error @ FrameError::TooLarge { .. }) => {
-                let _ = receive.stop(STOP_OVERSIZED);
-                return reject_rpc(send, proto::ErrorCode::TooLarge, error).await;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        ensure_stream_finished(&mut receive).await?;
-        if let Some(decision) = request.policy(InboundRole::Request) {
-            let InvalidDecision::Respond(code) = decision else {
-                return Err(TransportError::InvalidControlFrame);
-            };
-            return reject_rpc(send, code, "invalid request envelope").await;
-        }
-        if !is_request_kind(request.kind) {
-            return reject_rpc(
-                send,
-                proto::ErrorCode::Invalid,
-                "invalid RPC stream binding",
-            )
-            .await;
-        }
-        if self.trust() == SessionTrust::Untrusted && !request.kind.is_pretrust() {
-            return reject_rpc(send, proto::ErrorCode::NotPaired, "peer is not paired").await;
-        }
-        if !self.send_gate.may_send_kind(request.kind) {
-            return reject_rpc(
-                send,
-                proto::ErrorCode::Invalid,
-                "request kind was not enabled by Hello negotiation",
-            )
-            .await;
-        }
-        if !payload_decodes(&request) {
-            return reject_rpc(
-                send,
-                proto::ErrorCode::Invalid,
-                "request payload is not valid protobuf for its frame kind",
-            )
-            .await;
-        }
-        Ok(RpcEvent::Request(IncomingRpc { request, send }))
+        self.accept_rpc_stream().await?.read().await
     }
 
     /// Sends one notification frame on its own unidirectional stream.
@@ -391,39 +530,23 @@ impl FlowConnection {
         Ok(())
     }
 
-    /// Accepts and validates one notification stream.
+    /// Waits for the peer to open its next notification stream without reading it.
+    ///
+    /// Cancel-safe, like [`Self::accept_rpc_stream`]. Read the frame with
+    /// [`InboundNotification::read`].
+    pub async fn accept_notification_stream(&self) -> Result<InboundNotification, TransportError> {
+        let receive = self.connection.accept_uni().await?;
+        Ok(InboundNotification {
+            receive,
+            policy: self.inbound.clone(),
+        })
+    }
+
+    /// Accepts and reads one notification stream.
+    ///
+    /// Not cancel-safe; event loops use [`Self::accept_notification_stream`].
     pub async fn accept_notification(&self) -> Result<NotificationEvent, TransportError> {
-        let mut receive = self.connection.accept_uni().await?;
-        let notification = match Envelope::read_from(&mut receive).await {
-            Ok(notification) => notification,
-            Err(FrameError::TooLarge { .. }) => {
-                let _ = receive.stop(STOP_OVERSIZED);
-                return Ok(NotificationEvent::Dropped(proto::ErrorCode::TooLarge));
-            }
-            Err(error) => return Err(error.into()),
-        };
-        ensure_stream_finished(&mut receive).await?;
-        if let Some(InvalidDecision::Drop) = notification.policy(InboundRole::Notification) {
-            let code = if notification.flags == 0 {
-                proto::ErrorCode::UnsupportedKind
-            } else {
-                proto::ErrorCode::UnsupportedFlags
-            };
-            return Ok(NotificationEvent::Dropped(code));
-        }
-        if !is_notification_kind(notification.kind) {
-            return Ok(NotificationEvent::Dropped(proto::ErrorCode::Invalid));
-        }
-        if self.trust() == SessionTrust::Untrusted && !notification.kind.is_pretrust() {
-            return Ok(NotificationEvent::Dropped(proto::ErrorCode::NotPaired));
-        }
-        if !self.send_gate.may_send_kind(notification.kind) {
-            return Ok(NotificationEvent::Dropped(proto::ErrorCode::Invalid));
-        }
-        if !payload_decodes(&notification) {
-            return Ok(NotificationEvent::Dropped(proto::ErrorCode::Invalid));
-        }
-        Ok(NotificationEvent::Notification(notification))
+        self.accept_notification_stream().await?.read().await
     }
 
     /// Sends a `Ping` or `Pong` envelope as a QUIC datagram.
@@ -463,7 +586,7 @@ impl FlowConnection {
         if self.trust() == SessionTrust::Untrusted && !kind.is_pretrust() {
             return Err(TransportError::NotPaired(kind));
         }
-        if !self.send_gate.may_send_kind(kind) {
+        if !self.inbound.send_gate.may_send_kind(kind) {
             return Err(TransportError::SendGated(kind));
         }
         Ok(())
@@ -475,6 +598,130 @@ impl Drop for FlowConnection {
         self.connection
             .close(VarInt::from_u32(0), b"Flow connection dropped");
         self.control_monitor.abort();
+    }
+}
+
+/// An accepted RPC stream whose request has not been read yet.
+#[derive(Debug)]
+pub struct InboundRpc {
+    send: SendStream,
+    receive: RecvStream,
+    policy: InboundPolicy,
+}
+
+impl InboundRpc {
+    /// Reads and validates the request within the stream-read deadline.
+    ///
+    /// Envelope, stream-binding, size, and pre-pairing violations are answered
+    /// automatically with the mandated `Error` code. A peer that does not
+    /// deliver the frame and its FIN in time gets both stream directions reset
+    /// and [`TransportError::StreamTimeout`].
+    pub async fn read(self) -> Result<RpcEvent, TransportError> {
+        let Self {
+            mut send,
+            mut receive,
+            policy,
+        } = self;
+        let deadline = Instant::now() + policy.read_timeout;
+        let request = match timeout_at(deadline, Envelope::read_from(&mut receive)).await {
+            Err(_) => return Err(abandon_stream(&mut receive, Some(&mut send))),
+            Ok(Ok(request)) => request,
+            Ok(Err(error @ FrameError::TooLarge { .. })) => {
+                let _ = receive.stop(STOP_OVERSIZED);
+                return reject_rpc(send, proto::ErrorCode::TooLarge, error).await;
+            }
+            Ok(Err(error)) => return Err(error.into()),
+        };
+        match timeout_at(deadline, ensure_stream_finished(&mut receive)).await {
+            Err(_) => return Err(abandon_stream(&mut receive, Some(&mut send))),
+            Ok(finished) => finished?,
+        }
+        if let Some(decision) = request.policy(InboundRole::Request) {
+            let InvalidDecision::Respond(code) = decision else {
+                return Err(TransportError::InvalidControlFrame);
+            };
+            return reject_rpc(send, code, "invalid request envelope").await;
+        }
+        if !is_request_kind(request.kind) {
+            return reject_rpc(
+                send,
+                proto::ErrorCode::Invalid,
+                "invalid RPC stream binding",
+            )
+            .await;
+        }
+        if policy.trust() == SessionTrust::Untrusted && !request.kind.is_pretrust() {
+            return reject_rpc(send, proto::ErrorCode::NotPaired, "peer is not paired").await;
+        }
+        if !policy.send_gate.may_send_kind(request.kind) {
+            return reject_rpc(
+                send,
+                proto::ErrorCode::Invalid,
+                "request kind was not enabled by Hello negotiation",
+            )
+            .await;
+        }
+        if !payload_decodes(&request) {
+            return reject_rpc(
+                send,
+                proto::ErrorCode::Invalid,
+                "request payload is not valid protobuf for its frame kind",
+            )
+            .await;
+        }
+        Ok(RpcEvent::Request(IncomingRpc { request, send }))
+    }
+}
+
+/// An accepted notification stream whose frame has not been read yet.
+#[derive(Debug)]
+pub struct InboundNotification {
+    receive: RecvStream,
+    policy: InboundPolicy,
+}
+
+impl InboundNotification {
+    /// Reads and validates the notification within the stream-read deadline.
+    pub async fn read(self) -> Result<NotificationEvent, TransportError> {
+        let Self {
+            mut receive,
+            policy,
+        } = self;
+        let deadline = Instant::now() + policy.read_timeout;
+        let notification = match timeout_at(deadline, Envelope::read_from(&mut receive)).await {
+            Err(_) => return Err(abandon_stream(&mut receive, None)),
+            Ok(Ok(notification)) => notification,
+            Ok(Err(FrameError::TooLarge { .. })) => {
+                let _ = receive.stop(STOP_OVERSIZED);
+                return Ok(NotificationEvent::Dropped(proto::ErrorCode::TooLarge));
+            }
+            Ok(Err(error)) => return Err(error.into()),
+        };
+        match timeout_at(deadline, ensure_stream_finished(&mut receive)).await {
+            Err(_) => return Err(abandon_stream(&mut receive, None)),
+            Ok(finished) => finished?,
+        }
+        if let Some(InvalidDecision::Drop) = notification.policy(InboundRole::Notification) {
+            let code = if notification.flags == 0 {
+                proto::ErrorCode::UnsupportedKind
+            } else {
+                proto::ErrorCode::UnsupportedFlags
+            };
+            return Ok(NotificationEvent::Dropped(code));
+        }
+        if !is_notification_kind(notification.kind) {
+            return Ok(NotificationEvent::Dropped(proto::ErrorCode::Invalid));
+        }
+        if policy.trust() == SessionTrust::Untrusted && !notification.kind.is_pretrust() {
+            return Ok(NotificationEvent::Dropped(proto::ErrorCode::NotPaired));
+        }
+        if !policy.send_gate.may_send_kind(notification.kind) {
+            return Ok(NotificationEvent::Dropped(proto::ErrorCode::Invalid));
+        }
+        if !payload_decodes(&notification) {
+            return Ok(NotificationEvent::Dropped(proto::ErrorCode::Invalid));
+        }
+        Ok(NotificationEvent::Notification(notification))
     }
 }
 
@@ -710,6 +957,18 @@ pub enum TransportError {
     /// The pairing session did not authenticate this connection's peer key.
     #[error("pairing is not complete for this peer")]
     PairingNotComplete,
+    /// The operating system's secure random generator failed.
+    #[error(transparent)]
+    Random(#[from] RandomError),
+    /// TLS plus the `Hello` exchange did not finish within the handshake deadline.
+    #[error("Flow handshake did not finish in time")]
+    HandshakeTimeout,
+    /// An inbound stream did not deliver its frame and FIN within the read deadline.
+    #[error("inbound stream did not finish in time")]
+    StreamTimeout,
+    /// Another unknown peer holds the single pairing slot.
+    #[error("another unknown peer is already pairing")]
+    PairingBusy,
 }
 
 fn quic_configs(
@@ -756,8 +1015,11 @@ fn validate_local_hello(hello: &proto::Hello, public_key: PublicKey) -> Result<(
             "public key differs from TLS identity",
         ));
     }
-    SessionNonce::try_from(hello.session_nonce.as_slice())
-        .map_err(|_| TransportError::InvalidLocalHello("session nonce is not 16 bytes"))?;
+    if !hello.session_nonce.is_empty() {
+        return Err(TransportError::InvalidLocalHello(
+            "session nonce must be empty; the endpoint draws one per connection",
+        ));
+    }
     if hello.proto_min == 0 || hello.proto_min > hello.proto_max {
         return Err(TransportError::InvalidLocalHello(
             "protocol version range is invalid",
@@ -820,6 +1082,15 @@ async fn ensure_stream_finished(receive: &mut RecvStream) -> Result<(), Transpor
     }
 }
 
+/// Resets both directions of a stream whose peer missed the read deadline.
+fn abandon_stream(receive: &mut RecvStream, send: Option<&mut SendStream>) -> TransportError {
+    let _ = receive.stop(STOP_TIMEOUT);
+    if let Some(send) = send {
+        let _ = send.reset(STOP_TIMEOUT);
+    }
+    TransportError::StreamTimeout
+}
+
 async fn reject_rpc(
     mut send: SendStream,
     code: proto::ErrorCode,
@@ -835,6 +1106,7 @@ async fn reject_rpc(
 fn expected_response(request: FrameKind) -> Option<&'static [FrameKind]> {
     match request {
         FrameKind::PairStart => Some(&[FrameKind::PairPrompted]),
+        FrameKind::PairReveal => Some(&[FrameKind::PairRevealed]),
         FrameKind::PairConfirm => Some(&[FrameKind::PairOutcome]),
         FrameKind::GetPeerInfo => Some(&[FrameKind::PeerInfo]),
         FrameKind::HandoffRequest => Some(&[FrameKind::HandoffAccept, FrameKind::HandoffReject]),
@@ -904,6 +1176,8 @@ fn payload_decodes(envelope: &Envelope) -> bool {
         FrameKind::PairConfirm => decodes!(proto::PairConfirm),
         FrameKind::PairOutcome => decodes!(proto::PairOutcome),
         FrameKind::PairAbort => decodes!(proto::PairAbort),
+        FrameKind::PairReveal => decodes!(proto::PairReveal),
+        FrameKind::PairRevealed => decodes!(proto::PairRevealed),
         FrameKind::GetPeerInfo => decodes!(proto::GetPeerInfo),
         FrameKind::PeerInfo => decodes!(proto::PeerInfo),
         FrameKind::AnnounceDevices => decodes!(proto::AnnounceDevices),

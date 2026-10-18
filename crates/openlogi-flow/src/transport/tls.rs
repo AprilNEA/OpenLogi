@@ -130,14 +130,23 @@ pub enum SessionTrust {
 #[derive(Debug)]
 struct TrustState {
     pinned: BTreeSet<PublicKey>,
-    pairing_candidate: Option<Mutex<Option<PublicKey>>>,
+    pairing_slot: Option<Mutex<CandidateSlot>>,
+}
+
+#[derive(Debug, Default)]
+struct CandidateSlot {
+    holder: Option<(PublicKey, u64)>,
+    next_lease: u64,
 }
 
 /// Pinned peer-key policy shared by the TLS client and server verifiers.
 ///
-/// Pairing mode is explicit and admits at most one distinct unknown key. It
-/// records the candidate but never persists it; persistence belongs to the
-/// pairing state machine after user confirmation.
+/// Pairing mode is explicit. TLS admits unknown keys as untrusted, but only
+/// one connection at a time may hold the pairing slot, and only after its
+/// handshake and `Hello` exchange completed ([`CandidateLease`]). The slot is
+/// released when that connection drops, so failed or abandoned dials never
+/// lock pairing out. Persisting a key belongs to the pairing state machine
+/// after user confirmation.
 #[derive(Clone, Debug)]
 pub struct PeerTrust(Arc<TrustState>);
 
@@ -147,7 +156,7 @@ impl PeerTrust {
     pub fn pinned(keys: impl IntoIterator<Item = PublicKey>) -> Self {
         Self(Arc::new(TrustState {
             pinned: keys.into_iter().collect(),
-            pairing_candidate: None,
+            pairing_slot: None,
         }))
     }
 
@@ -156,19 +165,24 @@ impl PeerTrust {
     pub fn pairing(keys: impl IntoIterator<Item = PublicKey>) -> Self {
         Self(Arc::new(TrustState {
             pinned: keys.into_iter().collect(),
-            pairing_candidate: Some(Mutex::new(None)),
+            pairing_slot: Some(Mutex::new(CandidateSlot::default())),
         }))
     }
 
-    /// Returns the unknown key admitted by pairing mode, if any.
+    /// Returns the unknown key whose live connection holds the pairing slot.
     #[must_use]
     pub fn pairing_candidate(&self) -> Option<PublicKey> {
         self.0
-            .pairing_candidate
+            .pairing_slot
             .as_ref()
-            .and_then(|candidate| candidate.lock().ok().and_then(|guard| *guard))
+            .and_then(|slot| slot.lock().ok().and_then(|slot| slot.holder))
+            .map(|(key, _)| key)
     }
 
+    /// Classifies a TLS identity without reserving anything.
+    ///
+    /// While another key holds the pairing slot, further unknown keys are
+    /// refused early; [`Self::lease_candidate`] remains the authority.
     pub(super) fn classify(&self, key: PublicKey) -> Result<SessionTrust, RustlsError> {
         if self
             .0
@@ -178,19 +192,68 @@ impl PeerTrust {
         {
             return Ok(SessionTrust::Trusted);
         }
-        let Some(candidate) = &self.0.pairing_candidate else {
+        let Some(slot) = &self.0.pairing_slot else {
             return Err(untrusted_certificate());
         };
-        let mut candidate = candidate
+        let slot = slot
             .lock()
             .map_err(|_| RustlsError::General("pairing candidate lock poisoned".to_owned()))?;
-        match *candidate {
-            Some(existing) if constant_time_key_eq(existing, key) => Ok(SessionTrust::Untrusted),
-            Some(_) => Err(untrusted_certificate()),
-            None => {
-                *candidate = Some(key);
-                Ok(SessionTrust::Untrusted)
-            }
+        match slot.holder {
+            Some((holder, _)) if !constant_time_key_eq(holder, key) => Err(untrusted_certificate()),
+            _ => Ok(SessionTrust::Untrusted),
+        }
+    }
+
+    /// Claims the pairing slot for one completed untrusted connection.
+    ///
+    /// Returns `None` outside pairing mode or while any live connection,
+    /// including another one from the same key, holds the slot.
+    pub(super) fn lease_candidate(&self, key: PublicKey) -> Option<CandidateLease> {
+        let mut slot = self.0.pairing_slot.as_ref()?.lock().ok()?;
+        if slot.holder.is_some() {
+            return None;
+        }
+        let id = slot.next_lease;
+        slot.next_lease = slot.next_lease.wrapping_add(1);
+        slot.holder = Some((key, id));
+        Some(CandidateLease {
+            trust: self.clone(),
+            key,
+            id,
+        })
+    }
+}
+
+/// Exclusive hold on the pairing slot, released when dropped.
+///
+/// Each lease carries a unique id, so a stale lease can never clear a newer
+/// holder.
+#[derive(Debug)]
+pub struct CandidateLease {
+    trust: PeerTrust,
+    key: PublicKey,
+    id: u64,
+}
+
+impl CandidateLease {
+    /// Returns the unknown key holding the slot.
+    #[must_use]
+    pub const fn key(&self) -> PublicKey {
+        self.key
+    }
+}
+
+impl Drop for CandidateLease {
+    fn drop(&mut self) {
+        let Some(slot) = &self.trust.0.pairing_slot else {
+            return;
+        };
+        let mut slot = match slot.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if slot.holder == Some((self.key, self.id)) {
+            slot.holder = None;
         }
     }
 }
@@ -381,14 +444,57 @@ mod tests {
     }
 
     #[test]
-    fn pairing_mode_admits_only_one_unknown_key() {
+    fn classification_alone_never_claims_the_pairing_slot() {
         let policy = PeerTrust::pairing([]);
-        assert_eq!(
-            policy.classify(PublicKey::new([1; 32])).unwrap(),
-            SessionTrust::Untrusted
+        for key in [PublicKey::new([1; 32]), PublicKey::new([2; 32])] {
+            assert_eq!(policy.classify(key).unwrap(), SessionTrust::Untrusted);
+        }
+        assert_eq!(policy.pairing_candidate(), None);
+    }
+
+    #[test]
+    fn one_lease_holds_the_slot_until_dropped() {
+        let policy = PeerTrust::pairing([]);
+        let (first, second) = (PublicKey::new([1; 32]), PublicKey::new([2; 32]));
+
+        let lease = policy.lease_candidate(first).unwrap();
+        assert_eq!(lease.key(), first);
+        assert_eq!(policy.pairing_candidate(), Some(first));
+        policy.classify(second).unwrap_err();
+        assert!(policy.lease_candidate(second).is_none());
+        assert!(
+            policy.lease_candidate(first).is_none(),
+            "a second connection from the holder must not share the slot"
         );
-        assert_eq!(policy.pairing_candidate(), Some(PublicKey::new([1; 32])));
-        policy.classify(PublicKey::new([2; 32])).unwrap_err();
+
+        drop(lease);
+        assert_eq!(policy.pairing_candidate(), None);
+        let _lease = policy.lease_candidate(second).unwrap();
+        assert_eq!(policy.pairing_candidate(), Some(second));
+    }
+
+    #[test]
+    fn a_stale_lease_never_clears_a_newer_holder() {
+        let policy = PeerTrust::pairing([]);
+        let key = PublicKey::new([1; 32]);
+        let first = policy.lease_candidate(key).unwrap();
+        let stale_id = first.id;
+        drop(first);
+        let _current = policy.lease_candidate(key).unwrap();
+        // A late destructor for the earlier lease of the same key.
+        drop(CandidateLease {
+            trust: policy.clone(),
+            key,
+            id: stale_id,
+        });
+        assert_eq!(policy.pairing_candidate(), Some(key));
+    }
+
+    #[test]
+    fn pinned_mode_never_leases() {
+        let policy = PeerTrust::pinned([]);
+        assert!(policy.lease_candidate(PublicKey::new([1; 32])).is_none());
+        policy.classify(PublicKey::new([1; 32])).unwrap_err();
     }
 
     #[test]
