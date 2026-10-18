@@ -45,6 +45,9 @@ pub use pointer::{
     pointer_target_is_focused,
 };
 
+mod probe;
+pub use probe::{DesktopPoint, DisplayBounds, PointerProbe, PointerState, WarpError};
+
 /// Logitech's USB/Bluetooth vendor id (`0x046D`), widened from
 /// [`openlogi_core::hid::LOGITECH_VENDOR_ID`] because the hook's identity
 /// sources (IOKit, evdev) hand it back as a `u32`.
