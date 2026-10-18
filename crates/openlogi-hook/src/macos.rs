@@ -7,6 +7,7 @@
 mod foreground;
 mod grant;
 pub(crate) mod pointer;
+pub(crate) mod probe;
 mod sender;
 mod translate;
 mod watchdog;
