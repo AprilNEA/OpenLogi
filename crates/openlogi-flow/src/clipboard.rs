@@ -578,8 +578,8 @@ pub async fn fetch_file_list(
 /// Streams file `index` of clipboard generation `sequence` into `sink`, and
 /// checks it against `file`: same size, and the digest the peer sends at the
 /// end. `still_wanted` is asked before every chunk, and a no stops the fetch
-/// with [`FetchError::Superseded`]; a peer silent for `stall` fails it with
-/// [`FetchError::Stalled`]. What was written to `sink` before a failure is
+/// with [`FetchError::Superseded`]; a peer silent for `stall`, before its
+/// response opens or between frames, fails it with [`FetchError::Stalled`]. What was written to `sink` before a failure is
 /// the caller's to discard.
 pub async fn fetch_file(
     connection: &FlowConnection,
@@ -599,7 +599,9 @@ pub async fn fetch_file(
             ..Default::default()
         },
     )?;
-    let mut response = call_bulk(connection, request).await?;
+    let mut response = tokio::time::timeout(stall, call_bulk(connection, request))
+        .await
+        .map_err(|_| FetchError::Stalled)??;
     let head = decode::<proto::ClipboardData>(response.head())?;
     if head.sequence != sequence || !head.mime.eq_ignore_ascii_case(FILE_DATA_MIME) {
         return Err(FetchError::Invalid(
@@ -826,10 +828,13 @@ fn is_safe_name(name: &str) -> bool {
         .iter()
         .any(|device| stem.eq_ignore_ascii_case(device))
         || NUMBERED.iter().any(|device| {
+            // `get`, not indexing: a 4-byte stem such as `a€` has no char
+            // boundary at 3.
             stem.len() == 4
-                && stem[..3].eq_ignore_ascii_case(device)
-                && stem.as_bytes()[3].is_ascii_digit()
-                && stem.as_bytes()[3] != b'0'
+                && stem
+                    .get(..3)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(device))
+                && matches!(stem.as_bytes()[3], b'1'..=b'9')
         });
     !reserved
 }

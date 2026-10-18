@@ -239,6 +239,9 @@ fn safe_relative_paths_stay_under_the_receivers_folder() {
         "lpt0",
         "consent.txt",
         "über/naïve – €.txt",
+        // Four bytes with no char boundary at 3, where the `COM1` check looks.
+        "a€.txt",
+        "Cé1.txt",
     ] {
         assert!(is_safe_relative_path(path), "{path} is safe");
     }
