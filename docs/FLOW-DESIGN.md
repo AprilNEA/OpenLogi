@@ -420,14 +420,16 @@ detector, which reports "crossed edge E at normalized position t".
 - Only the edges whose peer is connected are armed.
 - macOS: the HID system state gives the location and modifier flags; Core
   Graphics gives the display bounds.
-- Windows: `GetCursorPos` and `GetAsyncKeyState`; per-monitor rectangles in
-  DPI-independent pixels, the same space as the hook's cursor positions.
+- Windows: `GetCursorPos` and `GetAsyncKeyState`; per-monitor rectangles from
+  `EnumDisplayMonitors`, all in Win32 virtual-screen coordinates. This is not
+  the hook's `CursorPosition` space, which divides by each monitor's DPI scale.
 - Linux X11: `QueryPointer` and RandR monitors on the thread's own
   connection.
 - Linux Wayland: no global cursor, but two proven routes exist (wlroots
   layer-shell 1 px edge surfaces + pointer constraints; InputCapture portal +
   libei) — deferred to its own milestone, not excluded. The probe reports no
-  pointer there, so Flow stays off the edges.
+  pointer there, so no edge fires. The runtime keeps running without the
+  pointer thread, and incoming handoffs still work.
 - The thread needs the OS mouse hook to wake it. With
   `app_settings.capture_mouse_events = false`, or without Accessibility on
   macOS, no edge fires; incoming handoffs still work.

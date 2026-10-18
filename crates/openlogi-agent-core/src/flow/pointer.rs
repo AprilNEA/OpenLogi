@@ -106,6 +106,20 @@ impl PointerThread {
         Self::spawn_with(PointerProbe::connect, crossings)
     }
 
+    /// Start the thread on this session's pointer, or with `probe` off on
+    /// no pointer at all, as in a session that has no probe. Such a thread
+    /// exits at once and drops `crossings`.
+    pub(crate) fn start(
+        probe: bool,
+        crossings: async_mpsc::Sender<EdgeCrossing>,
+    ) -> std::io::Result<Self> {
+        if probe {
+            Self::spawn(crossings)
+        } else {
+            Self::spawn_with(|| None::<PointerProbe>, crossings)
+        }
+    }
+
     /// Start the thread on the pointer `connect` opens on the new thread.
     fn spawn_with<P, F>(
         connect: F,

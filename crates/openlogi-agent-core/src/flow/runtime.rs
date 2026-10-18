@@ -127,12 +127,49 @@ pub(crate) struct FlowRuntime {
     advertiser: Option<MdnsAdvertiser>,
 }
 
+/// Start the three tasks of each configured peer: link-state forwarding,
+/// stream reading, and frame writing.
+fn spawn_links(
+    sessions: &SessionManager,
+    writers: Vec<(PublicKey, mpsc::Receiver<Envelope>)>,
+    events: &mpsc::Sender<Event>,
+    state: &watch::Receiver<TrustedInitialState>,
+    stop: &watch::Receiver<bool>,
+) -> Vec<JoinHandle<()>> {
+    let mut tasks = Vec::with_capacity(writers.len() * 3);
+    for (key, frames) in writers {
+        let Some(handle) = sessions.peer(key).cloned() else {
+            continue;
+        };
+        tasks.push(tokio::spawn(link::watch_link(
+            handle.clone(),
+            events.clone(),
+            stop.clone(),
+        )));
+        tasks.push(tokio::spawn(link::read_peer(
+            handle.clone(),
+            events.clone(),
+            stop.clone(),
+        )));
+        tasks.push(tokio::spawn(link::write_peer(
+            handle,
+            frames,
+            state.clone(),
+            stop.clone(),
+        )));
+    }
+    tasks
+}
+
 /// Where and as whom a generation listens.
 struct Binding {
     identity: MachineIdentity,
     address: SocketAddr,
     /// Advertise and browse with mDNS. Tests use manual addresses only.
     mdns: bool,
+    /// Open the session's pointer probe. Without it, as on Wayland or with
+    /// no display, the generation still receives handoffs.
+    probe: bool,
 }
 
 impl FlowRuntime {
@@ -147,6 +184,7 @@ impl FlowRuntime {
                 identity,
                 address: SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT)),
                 mdns: true,
+                probe: true,
             },
         )
     }
@@ -162,6 +200,7 @@ impl FlowRuntime {
             identity,
             address,
             mdns,
+            probe,
         } = binding;
         let local_key = identity.public_key();
         let peer_keys: Vec<PublicKey> = config
@@ -185,7 +224,8 @@ impl FlowRuntime {
         let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
         let (crossings_tx, crossings_rx) = mpsc::channel(CROSSING_QUEUE);
         let (state_tx, state_rx) = watch::channel(TrustedInitialState::default());
-        let pointer = PointerThread::spawn(crossings_tx).map_err(FlowRuntimeError::Pointer)?;
+        let pointer =
+            PointerThread::start(probe, crossings_tx).map_err(FlowRuntimeError::Pointer)?;
         let waker = pointer.waker();
 
         let mut writers = Vec::with_capacity(peer_keys.len());
@@ -225,28 +265,7 @@ impl FlowRuntime {
         )?;
 
         actor.attach(&sessions);
-        let mut tasks = Vec::with_capacity(writers.len() * 3);
-        for (key, frames) in writers {
-            let Some(handle) = sessions.peer(key).cloned() else {
-                continue;
-            };
-            tasks.push(tokio::spawn(link::watch_link(
-                handle.clone(),
-                events_tx.clone(),
-                stop_rx.clone(),
-            )));
-            tasks.push(tokio::spawn(link::read_peer(
-                handle.clone(),
-                events_tx.clone(),
-                stop_rx.clone(),
-            )));
-            tasks.push(tokio::spawn(link::write_peer(
-                handle,
-                frames,
-                state_rx.clone(),
-                stop_rx.clone(),
-            )));
-        }
+        let tasks = spawn_links(&sessions, writers, &events_tx, &state_rx, &stop_rx);
         info!(peers = peer_keys.len(), "Flow runtime started");
         Ok(Self {
             stop,
