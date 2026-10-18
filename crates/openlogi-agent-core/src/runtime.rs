@@ -7,6 +7,7 @@
 
 mod button;
 pub mod hook;
+mod pan;
 mod pointer;
 pub mod scroll;
 
@@ -206,6 +207,7 @@ impl ActionExecutor {
 struct ButtonEventHandler {
     executor: ActionExecutor,
     held: HeldShortcuts,
+    pan: pan::PanOwner,
 }
 
 impl ButtonEventHandler {
@@ -213,11 +215,19 @@ impl ButtonEventHandler {
         Self {
             executor,
             held: HeldShortcuts::default(),
+            pan: pan::PanOwner::default(),
         }
     }
 
     fn handle(&mut self, event: ButtonRuntimeEvent) {
         match event {
+            ButtonRuntimeEvent::PanMotion { press, delta } => {
+                if self.pan.owns(press.token()) && press.target().resolve(&Action::Pan).is_some() {
+                    openlogi_inject::post_scroll(delta);
+                } else {
+                    self.pan.end(press.token());
+                }
+            }
             ButtonRuntimeEvent::Started(press) => {
                 if let Some(action) = press.start_action() {
                     self.start_action(press.token(), action, press.device_key(), press.target());
@@ -228,6 +238,7 @@ impl ButtonEventHandler {
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
                 self.held.end(press.token());
+                self.pan.end(press.token());
                 if let EndReason::Canceled(reason) = reason {
                     match press.control() {
                         PressControl::Button(button) => {
@@ -249,6 +260,12 @@ impl ButtonEventHandler {
         device_key: Option<&str>,
         target: ActionDispatchTarget,
     ) {
+        if matches!(action, Action::Pan) {
+            if target.resolve(action).is_some() {
+                self.pan.start(press);
+            }
+            return;
+        }
         if action.held_chord().is_some() && target.resolve(action).is_none() {
             return;
         }
@@ -264,6 +281,7 @@ impl ButtonEventHandler {
 pub struct ActionDispatcher {
     executor: ActionExecutor,
     buttons: ButtonInputHandle,
+    pan: pan::PanInput,
 }
 
 /// Unique owner of the button worker plus its cloneable action dispatcher.
@@ -288,12 +306,14 @@ impl ActionRuntime {
             action_ring,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
+        let pan = button_handler.pan.input();
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;
         let input = buttons.input();
         Ok(Self {
             dispatcher: ActionDispatcher {
                 executor,
                 buttons: input,
+                pan,
             },
             buttons,
         })
@@ -312,6 +332,13 @@ impl ActionRuntime {
 }
 
 impl ActionDispatcher {
+    /// The native hook must never inject or wait for the button worker.
+    fn try_pan_motion(&self, dx: i32, dy: i32) -> bool {
+        self.pan
+            .try_press()
+            .is_some_and(|press| self.buttons.try_pan_motion(&press, pan::pan_delta(dx, dy)))
+    }
+
     /// Route one action without blocking the input callback.
     pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.executor.dispatch(action, device_key);

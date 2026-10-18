@@ -476,6 +476,9 @@ pub fn start(
                     openlogi_hook::frontmost_safari_pid,
                 ),
                 MouseEvent::Moved { delta_x, delta_y } => {
+                    if dispatcher.try_pan_motion(delta_x, delta_y) {
+                        return EventDisposition::Suppress;
+                    }
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
                 MouseEvent::CaptureInterrupted => {

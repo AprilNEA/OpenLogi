@@ -307,6 +307,7 @@ smooth_wheel_other_connection = "Enheten støtter jevnt hjul via den andre tilko
 smartshift = "SmartShift"
 
 [actions]
+pan = "Pan (hold and move)"
 bind_control = "Tilordne %{name}"
 bind_control_in_app = "Tilordne %{name} i %{app}"
 unbound = "Ikke tildelt"

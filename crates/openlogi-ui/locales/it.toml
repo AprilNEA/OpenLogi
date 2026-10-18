@@ -307,6 +307,7 @@ smooth_wheel_other_connection = "Il dispositivo supporta la rotellina fluida con
 smartshift = "SmartShift"
 
 [actions]
+pan = "Pan (hold and move)"
 bind_control = "Associa %{name}"
 bind_control_in_app = "Associa %{name} in %{app}"
 unbound = "Non associato"

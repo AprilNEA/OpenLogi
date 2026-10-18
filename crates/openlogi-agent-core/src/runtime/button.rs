@@ -327,6 +327,11 @@ pub(crate) enum EndReason {
 
 /// Typed output from the lifecycle worker.
 pub(crate) enum ButtonRuntimeEvent {
+    /// Pointer movement admitted by the exact press that owns panning.
+    PanMotion {
+        press: ActivePress,
+        delta: openlogi_core::scroll::ScrollDelta,
+    },
     Started(ActivePress),
     Ended {
         press: ActivePress,
@@ -342,6 +347,10 @@ pub(crate) enum ButtonRuntimeEvent {
 
 /// Inputs cannot represent `Up + action` or a source-authored `Cancel`.
 enum ButtonInput {
+    PanMotion {
+        token: PressToken,
+        delta: openlogi_core::scroll::ScrollDelta,
+    },
     Down(ActivePress),
     Up {
         key: PressKey,
@@ -495,6 +504,24 @@ pub(crate) struct ButtonInputHandle {
 }
 
 impl ButtonInputHandle {
+    pub(crate) fn try_pan_motion(
+        &self,
+        token: &PressToken,
+        delta: openlogi_core::scroll::ScrollDelta,
+    ) -> bool {
+        let generation = self.generation.load(Ordering::Acquire);
+        if token.generation != generation {
+            return false;
+        }
+        self.try_input(
+            generation,
+            ButtonInput::PanMotion {
+                token: token.clone(),
+                delta,
+            },
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn try_hook_down(
         &self,

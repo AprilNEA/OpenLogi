@@ -206,6 +206,9 @@ pub enum Action {
     /// this to a balanced tap of the whole chord, exactly as they do for
     /// [`Action::HoldShortcut`].
     TapKeyHoldingModifiers(KeyCombo),
+    /// Pan continuously in both axes while the physical button is held.
+    /// The agent captures pointer movement and releases capture with the press.
+    Pan,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -315,6 +318,7 @@ macro_rules! for_each_unit_action {
             CycleDpiPresets "Cycle DPI Presets" "pointer.cycle_dpi_presets" Dpi Gauge,
             ToggleSmartShift "Toggle SmartShift" "pointer.toggle_smartshift" Dpi Refresh,
             // Scroll
+            Pan "Pan (hold and move)" "actions.pan" Scroll Mouse,
             ScrollUp "Scroll Up" "actions.scroll_up" Scroll ArrowUp,
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" "actions.scroll_left" Scroll ScrollLeft,

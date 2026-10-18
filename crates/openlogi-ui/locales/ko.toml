@@ -307,6 +307,7 @@ smooth_wheel_other_connection = "다른 연결 방식에서는 부드러운 휠�
 smartshift = "SmartShift"
 
 [actions]
+pan = "Pan (hold and move)"
 bind_control = "%{name} 지정"
 bind_control_in_app = "%{app}에서 %{name} 지정"
 unbound = "할당되지 않음"

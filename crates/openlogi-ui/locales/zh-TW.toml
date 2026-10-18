@@ -307,6 +307,7 @@ smooth_wheel_other_connection = "此裝置使用另一種連線時支援平滑�
 smartshift = "SmartShift"
 
 [actions]
+pan = "按住並移動以平移"
 bind_control = "設定 %{name}"
 bind_control_in_app = "在 %{app} 中設定 %{name}"
 unbound = "未設定"

@@ -451,6 +451,7 @@ fn persisted_action_variant_names_are_stable() {
         "NextTrack",
         "None",
         "OpenApplication",
+        "Pan",
         "Paste",
         "PlayPause",
         "PrevTab",

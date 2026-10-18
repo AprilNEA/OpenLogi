@@ -59,6 +59,41 @@ fn wheel(press: &ActivePress) -> ButtonInput {
     }
 }
 
+#[test]
+fn pan_motion_is_rejected_after_release_and_session_cancellation() {
+    let delta = openlogi_core::scroll::ScrollDelta::wheel_ticks(-0.25, 0.5);
+    let events = events_after_press(&Binding::Single(Action::Pan), |press| {
+        let motion = || ButtonInput::PanMotion {
+            token: press.token.clone(),
+            delta,
+        };
+        vec![motion(), up(press), motion()]
+    });
+    assert!(matches!(
+        events.as_slice(),
+        [
+            ButtonRuntimeEvent::PanMotion { .. },
+            ButtonRuntimeEvent::Ended {
+                reason: EndReason::Released,
+                ..
+            }
+        ]
+    ));
+
+    let mut state = ButtonState::default();
+    let press = hook_press_bound(2, &Binding::Single(Action::Pan));
+    state.press(press.clone());
+    state.cancel_source(&press.token.key.source);
+    process_input(
+        &mut state,
+        ButtonInput::PanMotion {
+            token: press.token,
+            delta,
+        },
+        &mut |_| panic!("canceled pan must never emit scroll"),
+    );
+}
+
 fn triggered(events: &[ButtonRuntimeEvent]) -> Vec<&Action> {
     events
         .iter()

@@ -41,6 +41,30 @@ profiles so they keep their native direction.
 
 ## Shape
 
+### Hold-to-pan
+
+Choose **Pan (hold and move)** in a mouse button's action picker to scroll in
+both axes while holding it. Content follows the mouse movement and the pointer
+stays anchored. Release, device disconnect, profile change, and agent shutdown
+end the capture. This is continuous scrolling, independent of wheel inversion,
+rather than a one-shot directional gesture.
+
+For the MX Master 3S button behind the main wheel, use the existing physical
+device key and set `DpiToggle = "Pan"` in its `bindings` table. `MiddleClick`
+means pressing the wheel itself, not the button behind it. Panning requires
+mouse-event capture to be enabled and a working OS input hook.
+
+The Windows implementation uses `WH_MOUSE_LL` for movement capture and
+`SendInput` wheel/horizontal-wheel events on the action worker. Applications
+must support the corresponding scroll direction; this does not emulate an
+application-specific CAD or graphics-editor tool. Like other `SendInput`
+actions, a normal-privilege agent cannot inject into elevated applications.
+See Microsoft's [low-level mouse hook](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelmouseproc)
+and [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
+contracts.
+
+### Stored fields
+
 `schema_version` is required and currently `8`. `selected_device` is an
 optional physical device key.
 

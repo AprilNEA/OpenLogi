@@ -307,6 +307,7 @@ smooth_wheel_other_connection = "別の接続方式ではスムーズホイー�
 smartshift = "SmartShift"
 
 [actions]
+pan = "押しながら動かしてパン"
 bind_control = "%{name} を割り当て"
 bind_control_in_app = "%{app} で %{name} を割り当て"
 unbound = "未割り当て"

@@ -971,3 +971,8 @@ fn report_rate_dtos_and_errors() {
         "fbe803037dfbf401fbe803",
     );
 }
+
+#[test]
+fn pan_action_is_appended() {
+    assert_wire(&openlogi_core::binding::Action::Pan, "36");
+}

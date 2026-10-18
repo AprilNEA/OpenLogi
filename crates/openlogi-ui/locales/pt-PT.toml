@@ -307,6 +307,7 @@ smooth_wheel_other_connection = "O dispositivo suporta a roda suave na outra lig
 smartshift = "SmartShift"
 
 [actions]
+pan = "Pan (hold and move)"
 bind_control = "Atribuir %{name}"
 bind_control_in_app = "Atribuir %{name} em %{app}"
 unbound = "Não atribuído"
