@@ -87,7 +87,7 @@ async fn receiver_rejects_conflict_unknown_and_already_online() {
         ArmDecision::New(_)
     ));
     assert!(matches!(
-        book.arm(peer, &request(2, &offline), &offline, true).await,
+        book.arm(PublicKey::new([8; 32]), &request(2, &offline), &offline, true).await,
         ArmDecision::Reject(proto::HandoffReject { reason, .. })
             if reason.as_known() == Some(proto::HandoffRejectReason::AlreadyPending)
     ));
@@ -106,6 +106,24 @@ async fn receiver_rejects_conflict_unknown_and_already_online() {
         ArmDecision::Reject(proto::HandoffReject { reason, .. })
             if reason.as_known() == Some(proto::HandoffRejectReason::UnknownDevice)
     ));
+}
+
+#[tokio::test]
+async fn a_new_transfer_from_the_same_peer_replaces_the_one_it_gave_up() {
+    let book = HandoffBook::default();
+    let peer = PublicKey::new([7; 32]);
+    let devices = vec![device("mouse", 1, false)];
+    book.arm(peer, &request(10, &devices), &devices, true).await;
+    assert!(book.mark_accepted(peer, 10).await);
+
+    // The sender's request timed out before the accept reached it, and it
+    // crossed again.
+    assert!(matches!(
+        book.arm(peer, &request(11, &devices), &devices, true).await,
+        ArmDecision::New(_)
+    ));
+    assert!(book.expire(peer, 10).await.is_none(), "the old one is gone");
+    assert!(book.mark_accepted(peer, 11).await);
 }
 
 #[tokio::test]

@@ -121,10 +121,16 @@ impl HandoffBook {
             if pending.peer == peer && pending.transfer_id == request.transfer_id {
                 return ArmDecision::Duplicate(accept(request.transfer_id));
             }
-            return reject(
-                proto::HandoffRejectReason::AlreadyPending,
-                "another transfer is already armed",
-            );
+            // A sender runs one handoff at a time, so a new transfer from the
+            // peer that armed the pending one means it gave that one up — its
+            // request timed out, say, or its switch failed and the cancel was
+            // lost. Only another peer's transfer still blocks this one.
+            if pending.peer != peer {
+                return reject(
+                    proto::HandoffRejectReason::AlreadyPending,
+                    "another transfer is already armed",
+                );
+            }
         }
 
         let mut matched = Vec::with_capacity(request.devices.len());
