@@ -7,5 +7,6 @@
 
 mod devices;
 pub mod edge;
+mod handoff;
 #[cfg(test)]
 mod test_support;
