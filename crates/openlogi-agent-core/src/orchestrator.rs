@@ -984,7 +984,7 @@ impl Orchestrator {
                     .map(Dpi::new)
                     .collect();
             }
-            let committed = self.config.dpi(&dev.config_key);
+            let committed = configured_dpi(&self.config, dev);
             let previous = guard
                 .by_key
                 .get(&dev.config_key)

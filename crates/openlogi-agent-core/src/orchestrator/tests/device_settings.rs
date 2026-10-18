@@ -651,6 +651,37 @@ fn dpi_cycle_drops_offline_device_and_restores_on_return() {
     );
 }
 
+#[test]
+fn dpi_shift_returns_to_the_dpi_saved_for_the_current_link() {
+    let mouse = dev("mouse", 1, true);
+    let mut config = Config::default();
+    config.set_dpi("mouse", Dpi::new(1600));
+    config
+        .devices
+        .entry("mouse".to_string())
+        .or_default()
+        .links
+        .insert(
+            stable_id(&mouse).route_key(),
+            openlogi_core::config::LinkConfig {
+                capabilities: None,
+                overrides: openlogi_core::config::LinkOverrides {
+                    dpi: Some(Dpi::new(800)),
+                    ..Default::default()
+                },
+            },
+        );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![mouse];
+    orch.rebuild();
+    let Ok(dpi) = orch.shared.dpi_cycle.read() else {
+        panic!("DPI cycle lock should not be poisoned");
+    };
+    let state = &dpi.by_key["mouse"];
+    assert_eq!(state.committed, Some(Dpi::new(800)));
+    assert_eq!(state.current, Some(Dpi::new(800)));
+}
+
 fn keyboard(key: &str, slot: u8, online: bool) -> AgentDevice {
     let mut device = dev(key, slot, online);
     device.kind = DeviceKind::Keyboard;
