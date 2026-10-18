@@ -933,3 +933,87 @@ async fn a_desktop_swipe_drives_one_live_transition_until_release() {
     scroll.shutdown();
     actions.shutdown();
 }
+
+#[tokio::test]
+async fn a_refused_next_leg_drops_the_holds_live_transition() {
+    use std::cell::{Cell, RefCell};
+
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use openlogi_inject::SpaceSwipePhase;
+
+    thread_local! {
+        static POSTED: RefCell<Vec<SpaceSwipePhase>> = const { RefCell::new(Vec::new()) };
+        static BEGANS: Cell<u32> = const { Cell::new(0) };
+    }
+    /// Accepts the hold's first Began and refuses the next, as when a one-shot
+    /// switch takes the Dock between two legs.
+    fn refuse_second_began(_progress: f64, phase: SpaceSwipePhase) -> bool {
+        POSTED.with_borrow_mut(|posted| posted.push(phase));
+        if phase != SpaceSwipePhase::Began {
+            return true;
+        }
+        BEGANS.set(BEGANS.get() + 1);
+        BEGANS.get() == 1
+    }
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), device_access, ring).unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ))
+    .with_landing_space_output(800.0, refuse_second_began);
+
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [
+            (GestureDirection::Left, Action::PreviousDesktop),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]
+        .into(),
+    );
+    let session = live_session_from_plan(7, held);
+    let id = session.id().clone();
+    let button = ButtonId::GestureButton;
+    let motion = |dx| CapturedInput::GestureMotion { button, dx, dy: 0 };
+    for input in [
+        CapturedInput::ButtonDown(button),
+        CapturedInput::Gesture(button, GestureDirection::Right),
+        // A full desktop width finishes the first leg; the switch lands at once.
+        motion(800),
+        // The next leg's Began is refused.
+        motion(100),
+        // Nothing owns the Dock for this hold any more.
+        motion(100),
+        CapturedInput::ButtonUp(button),
+    ] {
+        dispatcher.dispatch(&id, session.dispatch(), input);
+    }
+    assert_eq!(
+        POSTED.with_borrow(Clone::clone),
+        vec![
+            SpaceSwipePhase::Began,
+            SpaceSwipePhase::Ended,
+            SpaceSwipePhase::Began
+        ]
+    );
+
+    scroll.shutdown();
+    actions.shutdown();
+}

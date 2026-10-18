@@ -165,12 +165,36 @@ impl InputDispatcher {
         self
     }
 
+    /// [`Self::with_space_output`] on a desktop whose every switch lands at
+    /// once, so a hold reaches its next leg without waiting out the settle.
+    #[cfg(test)]
+    pub(super) fn with_landing_space_output(
+        self,
+        travel: f64,
+        post: fn(f64, SpaceSwipePhase) -> bool,
+    ) -> Self {
+        static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mut this = self.with_space_output(travel, post);
+        this.spaces = SpaceSwipes::new(
+            Some(travel),
+            SpaceProbe {
+                position: || None,
+                changes: || Some(CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
+            },
+        );
+        this
+    }
+
     /// Post live Space frames in order. After a refused frame the remaining
     /// progress frames are skipped, but an ending is still attempted, and an
     /// ending the Dock path refuses falls back to a cancel: a Dock gesture
     /// left open would hang mid-transition.
-    fn post_space_frames(&self, key: &str, button: ButtonId, frames: &[Frame]) {
+    ///
+    /// Returns whether a Began was refused. The Dock never opened that
+    /// transition, so the caller drops it instead of posting frames for it.
+    fn post_space_frames(&self, key: &str, button: ButtonId, frames: &[Frame]) -> bool {
         let mut refused = false;
+        let mut began_refused = false;
         for frame in frames {
             let ending = frame.phase != SpaceSwipePhase::Changed;
             if refused && !ending {
@@ -184,10 +208,15 @@ impl InputDispatcher {
             }
             debug!(key, %button, phase = ?frame.phase, "live Space frame not posted");
             refused = true;
-            if frame.phase == SpaceSwipePhase::Ended {
-                let _ = (self.post_space)(frame.progress, SpaceSwipePhase::Cancelled);
+            match frame.phase {
+                SpaceSwipePhase::Began => began_refused = true,
+                SpaceSwipePhase::Ended => {
+                    let _ = (self.post_space)(frame.progress, SpaceSwipePhase::Cancelled);
+                }
+                SpaceSwipePhase::Changed | SpaceSwipePhase::Cancelled => {}
             }
         }
+        began_refused
     }
 
     /// Whether `button`'s admitted gesture press on `session` is still live:
@@ -411,7 +440,14 @@ impl InputDispatcher {
         } else {
             self.spaces.cancel(session, button)
         };
-        self.post_space_frames(session.device_key(), button, &frames);
+        if self.post_space_frames(session.device_key(), button, &frames) {
+            // The next leg's Began was refused: another hold's transition or a
+            // one-shot switch owns the Dock. End this hold's transition, so its
+            // later motion and release post nothing and its later swipe
+            // commits start over as actions.
+            debug!(key = session.device_key(), %button, "live Space leg refused — transition dropped");
+            self.spaces.abandon(session, button);
+        }
     }
 
     fn dispatch_wheel(

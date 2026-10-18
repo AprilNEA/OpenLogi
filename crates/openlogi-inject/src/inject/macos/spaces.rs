@@ -601,7 +601,9 @@ fn dock_swipe_hid_event(
 /// [`crate::post_space_swipe`].
 /// The one-shot switch's lease, held by a live transition from its Began
 /// frame to its Ended or Cancelled one, so a one-shot switch and a live swipe
-/// never drive the Dock at once.
+/// never drive the Dock at once. It also admits one live transition at a
+/// time: a second hold's Began is refused rather than sharing the first
+/// hold's Dock gesture.
 static LIVE_LEASE: Mutex<Option<Lease<'static>>> = Mutex::new(None);
 
 pub(in crate::inject) fn post_space_swipe(progress: f64, phase: SpaceSwipePhase) -> bool {
@@ -612,12 +614,26 @@ pub(in crate::inject) fn post_space_swipe(progress: f64, phase: SpaceSwipePhase)
         return false;
     }
     let mut lease = LIVE_LEASE.lock().unwrap_or_else(PoisonError::into_inner);
-    if phase == SpaceSwipePhase::Began && lease.is_none() {
-        let Some(acquired) = Lease::acquire(&BUSY) else {
-            tracing::debug!("Space switch pending — live swipe not started");
+    match phase {
+        SpaceSwipePhase::Began => {
+            if lease.is_some() {
+                tracing::debug!("live Space swipe already in flight — not started");
+                return false;
+            }
+            let Some(acquired) = Lease::acquire(&BUSY) else {
+                tracing::debug!("Space switch pending — live swipe not started");
+                return false;
+            };
+            *lease = Some(acquired);
+        }
+        // Later frames belong to the transition that owns the lease. Without
+        // one (its Began was refused), they must not reach the Dock while a
+        // one-shot switch may be driving it.
+        _ if lease.is_none() => {
+            tracing::debug!(?phase, "no live Space swipe in flight — frame dropped");
             return false;
-        };
-        *lease = Some(acquired);
+        }
+        _ => {}
     }
     let posted = if let Some(event) = live_swipe_event(progress, phase) {
         CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
@@ -626,11 +642,18 @@ pub(in crate::inject) fn post_space_swipe(progress: f64, phase: SpaceSwipePhase)
         tracing::warn!(?phase, "could not build a live Space swipe event");
         false
     };
-    // A terminal frame, or a Began that never reached the Dock, releases the
-    // lease even when its event could not be built, so a failed live swipe
-    // never locks one-shot switches out.
-    let finished = matches!(phase, SpaceSwipePhase::Ended | SpaceSwipePhase::Cancelled);
-    if finished || (phase == SpaceSwipePhase::Began && !posted) {
+    // The transition ends with a posted Ended or any Cancelled, and a Began
+    // that never reached the Dock never started one. A refused Ended keeps
+    // the lease so the caller's Cancelled fallback can still close the Dock
+    // gesture; that Cancelled releases it even when its own event cannot be
+    // built, so a failed live swipe never locks one-shot switches out.
+    let finished = match phase {
+        SpaceSwipePhase::Began => !posted,
+        SpaceSwipePhase::Changed => false,
+        SpaceSwipePhase::Ended => posted,
+        SpaceSwipePhase::Cancelled => true,
+    };
+    if finished {
         *lease = None;
     }
     posted

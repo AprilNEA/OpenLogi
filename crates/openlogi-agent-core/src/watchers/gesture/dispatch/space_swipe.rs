@@ -224,7 +224,8 @@ impl SpaceSwipes {
         Some(Frame::new(0.0, SpaceSwipePhase::Began))
     }
 
-    /// Forget a transition whose first frame could not be posted.
+    /// Forget a transition whose Began, for its first leg or a later one,
+    /// could not be posted.
     pub(super) fn abandon(&mut self, session: &HidppSessionId, button: ButtonId) {
         self.active.remove(&(session.clone(), button));
     }

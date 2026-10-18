@@ -687,6 +687,12 @@ pub enum SpaceSwipePhase {
 /// posted (no such transition on this platform, a macOS whose Dock swipe event
 /// layout is unverified, or non-finite progress), so the caller can fall back
 /// to the one-shot desktop action.
+///
+/// One transition runs at a time, from an accepted [`SpaceSwipePhase::Began`]
+/// to a posted [`SpaceSwipePhase::Ended`] or any [`SpaceSwipePhase::Cancelled`].
+/// A `Began` while one runs, or while a one-shot switch is pending, is refused;
+/// so is every other phase while none runs. A refused `Ended` leaves the
+/// transition open for the caller's `Cancelled`.
 #[must_use]
 pub fn post_space_swipe(progress: f64, phase: SpaceSwipePhase) -> bool {
     if !progress.is_finite() {
