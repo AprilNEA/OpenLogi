@@ -546,6 +546,18 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
             payload[..8].copy_from_slice(&[0, 0x01, 0x90, 0x03, 0x20, 0x06, 0x40, 0]);
             true
         }
+        // Enhanced SmartShift capabilities: this wheel advertises tunable
+        // torque, so the status read reports the level below.
+        (0x06, 0x00) => {
+            payload[..4].copy_from_slice(&[
+                hidpp::feature::smartshift_enhanced::SmartShiftEnhancedCapabilities::TUNABLE_TORQUE
+                    .bits(),
+                0x1e,
+                50,
+                0x40,
+            ]);
+            true
+        }
         // Enhanced SmartShift status.
         (0x06, 0x01) => {
             payload[..3].copy_from_slice(&[u8::from(WheelMode::Ratchet), 10, 33]);
