@@ -41,4 +41,5 @@ openlogi-device = { path = "../openlogi-device", features = ["test-support"] }
 openlogi-fixture = { workspace = true, features = ["fs"] }
 # Keypad identities the orchestrator tests stand a wired keypad up from.
 openlogi-device-registry = { workspace = true }
+tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }

@@ -5834,6 +5834,7 @@ dependencies = [
  "openlogi-ipc",
  "openlogi-ui",
  "resvg 0.46.0",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

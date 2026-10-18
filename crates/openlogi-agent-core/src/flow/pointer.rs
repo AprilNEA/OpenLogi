@@ -8,9 +8,12 @@
 //! edges only when the layout changed. It also places the cursor when a
 //! handoff arrives, so one thread reads and moves the cursor in one coordinate
 //! space.
-#![expect(
-    dead_code,
-    reason = "the Flow runtime later in this stack starts the thread"
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the agent starts the Flow runtime, and with it this thread, later in this stack"
+    )
 )]
 
 use std::sync::Arc;

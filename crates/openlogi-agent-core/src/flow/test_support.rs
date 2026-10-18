@@ -43,12 +43,17 @@ pub(super) fn configured(device: &str, peer_slot: Option<u8>) -> FlowDevice {
 
 /// An enabled configuration with [`peer`] and `devices`.
 pub(super) fn config(devices: Vec<FlowDevice>) -> FlowConfig {
+    config_with_key(FlowPublicKey::from_bytes([7; 32]), devices)
+}
+
+/// [`config`] with [`peer`] pinned to `public_key`.
+pub(super) fn config_with_key(public_key: FlowPublicKey, devices: Vec<FlowDevice>) -> FlowConfig {
     FlowConfig::try_from(FlowConfigParts {
         enabled: true,
         require_modifier: false,
         peers: vec![FlowPeer {
             name: peer(),
-            public_key: FlowPublicKey::from_bytes([7; 32]),
+            public_key,
             addresses: Vec::new(),
         }],
         layout: Vec::new(),
