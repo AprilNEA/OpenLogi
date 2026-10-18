@@ -540,11 +540,11 @@ fn insert_discovered_service(
 }
 
 fn public_key_hex(public_key: PublicKey) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
+    use std::fmt::Write as _;
     let mut encoded = String::with_capacity(64);
     for byte in public_key.as_bytes() {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        write!(encoded, "{byte:02x}")
+            .unwrap_or_else(|_| unreachable!("writing to String succeeds"));
     }
     encoded
 }

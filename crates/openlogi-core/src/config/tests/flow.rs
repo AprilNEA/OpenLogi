@@ -16,7 +16,7 @@ clipboard = false
 
 [[flow.peers]]
 name = "work-laptop"
-public_key = "ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+public_key = "ed25519:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 addresses = ["work-laptop.tailnet.example", "10.0.0.7"]
 
 [[flow.layout]]
@@ -35,7 +35,7 @@ peer_channels = { self = 0, "work-laptop" = 1 }
         clipboard: false,
         peers: vec![FlowPeer {
             name: "work-laptop".into(),
-            public_key: "ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            public_key: "ed25519:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
                 .into(),
             addresses: vec!["work-laptop.tailnet.example".into(), "10.0.0.7".into()],
         }],
@@ -97,7 +97,7 @@ fn malformed_flow_entries_are_rejected() {
         "schema_version = 6\n[flow]\nunknown = true\n",
         "schema_version = 6\n[flow]\nclipboard = \"text\"\n",
         "schema_version = 6\n[[flow.peers]]\nname = \"peer\"\n",
-        "schema_version = 6\n[[flow.peers]]\nname = \"peer\"\npublic_key = \"ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\naddresses = \"peer.example\"\n",
+        "schema_version = 6\n[[flow.peers]]\nname = \"peer\"\npublic_key = \"ed25519:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"\naddresses = \"peer.example\"\n",
         "schema_version = 6\n[[flow.layout]]\nedge = \"diagonal\"\npeer = \"peer\"\n",
         "schema_version = 6\n[[flow.devices]]\nkey = \"unit:0f1e2d3c\"\npeer_channels = { self = \"zero\" }\n",
     ] {
