@@ -487,7 +487,7 @@ impl GenerationState {
     }
 
     pub(super) async fn switch_devices(
-        &self,
+        self: &Arc<Self>,
         devices: &[OutgoingDevice],
     ) -> Result<bool, openlogi_hid::HostSwitchError> {
         let started = std::time::Instant::now();
@@ -540,7 +540,7 @@ impl GenerationState {
                 .map(|(target, _)| target)
                 .collect();
             if !unconfirmed.is_empty() {
-                tokio::spawn(confirm_departures(Arc::clone(&self.input), unconfirmed));
+                tokio::spawn(confirm_departures(Arc::clone(self), unconfirmed));
             }
         }
         self.note_presence(
@@ -874,20 +874,26 @@ pub(super) fn warp_entry(entry: &proto::EntryPoint) {
 /// power-saving state can miss it: the mouse leaves and the keyboard silently
 /// stays. A device that left, or sleeps, no longer answers on this receiver;
 /// one that answers did not leave, so it is told again — unless a handoff
-/// brought the devices back meanwhile, when answering is where it belongs.
-async fn confirm_departures(input: Arc<FlowInput>, targets: Vec<(Arc<HostSwitchTarget>, u8)>) {
-    let arrivals = input.arrivals();
+/// brought the devices back meanwhile, when answering is where it belongs,
+/// or this generation stopped, Flow turned off or reconfigured.
+async fn confirm_departures(
+    state: Arc<GenerationState>,
+    targets: Vec<(Arc<HostSwitchTarget>, u8)>,
+) {
+    let arrivals = state.input.arrivals();
+    let current = || state.is_active() && state.input.arrivals() == arrivals;
     for (target, host) in targets {
         for attempt in 1..=DEPARTURE_RETRIES {
             tokio::time::sleep(DEPARTURE_CHECK_DELAY).await;
-            if input.arrivals() != arrivals {
+            if !current() {
                 return;
             }
             if !target.answers(DEPARTURE_CHECK_TIMEOUT).await {
                 break;
             }
-            // Checked again: the devices may have come back while it answered.
-            if input.arrivals() != arrivals {
+            // Checked again: the devices may have come back, or Flow stopped,
+            // while it answered.
+            if !current() {
                 return;
             }
             warn!(
