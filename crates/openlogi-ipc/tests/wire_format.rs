@@ -114,7 +114,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 43);
+    assert_eq!(PROTOCOL_VERSION, 44);
 }
 
 #[test]
@@ -442,6 +442,20 @@ fn lock_keys() {
             language: None,
         },
         "0301020000",
+    );
+}
+
+#[test]
+fn switch_host() {
+    assert_wire(
+        &AgentRequest::SwitchHost {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            host: 2,
+        },
+        "30000846303044434146450102",
     );
 }
 
@@ -1119,6 +1133,7 @@ fn easy_switch_hosts_and_errors() {
     assert_wire(&HidppOperation::ReadHosts, "15");
     assert_wire(&HidppOperation::RenameHost, "16");
     assert_wire(&HidppOperation::WriteLed, "17");
+    assert_wire(&HidppOperation::ChangeHost, "1e");
     assert_wire(&WriteError::HostRenameUnsupported, "16");
     assert_wire(&WriteError::HostSlotEmpty { slot: 2 }, "1702");
     assert_wire(&WriteError::HostNameRejected { max_len: 24 }, "1818");
@@ -1128,6 +1143,13 @@ fn easy_switch_hosts_and_errors() {
             actual: Some("Old".into()),
         },
         "19044465736b01034f6c64",
+    );
+    assert_wire(
+        &WriteError::HostOutOfRange {
+            slot: 3,
+            host_count: 2,
+        },
+        "1f0302",
     );
 }
 

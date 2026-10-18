@@ -1288,6 +1288,12 @@ impl Agent for MockAgent {
         info!(%route, slot, "rename_easy_switch_host");
         Ok(stored.clone())
     }
+
+    async fn switch_host(self, _: Context, route: DeviceRoute, host: u8) -> Result<(), WriteError> {
+        self.state.lock().await.settings_for(&route)?;
+        info!(%route, host, "switch_host (no-op in the mock)");
+        Ok(())
+    }
     /// The mock reports no changes on its lights, so it has none to keep.
     async fn reload_saved_config(
         self,
