@@ -1,10 +1,12 @@
 //! `openlogi diag` — real-device smoke tests for the HID++ write path.
 //!
-//! Subcommands exercise direct HID++ reads and verified writes. The intent is
-//! diagnosis, not persistent configuration: nothing here
-//! touches `config.toml` or talks to the GUI; everything runs through the
-//! same `openlogi_hid` API the GPUI app uses, so a green diag means the
-//! GUI's write path works on this host.
+//! Most subcommands exercise direct HID++ reads and verified writes. The
+//! intent is diagnosis, not persistent configuration: nothing here touches
+//! `config.toml` or talks to the GUI. They run through the same `openlogi_hid`
+//! API the GPUI app uses, so a green diag means the GUI's write path works on
+//! this host. `host-switch` instead goes through the running agent, because
+//! the agent owns the device's HID channel and the device leaves this
+//! computer's radio link after the write.
 
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
@@ -15,6 +17,7 @@ pub mod battery;
 pub mod controls;
 pub mod dpi;
 pub mod features;
+pub mod host_switch;
 pub mod lighting;
 pub mod pointer_speed;
 pub mod smartshift;
@@ -38,12 +41,16 @@ pub enum DiagCmd {
     Wheel(wheel::WheelArgs),
     /// Read 0x2205 pointer scaling → write a test value → read back → restore.
     PointerSpeed(pointer_speed::PointerSpeedArgs),
+    /// Switch a multi-host device through the running agent (HID++ 0x1814).
+    HostSwitch(host_switch::HostSwitchArgs),
 }
 
 impl DiagCmd {
     pub async fn run(self) -> Result<()> {
         #[cfg(target_os = "macos")]
-        request_input_monitoring().await?;
+        if self.opens_devices_directly() {
+            request_input_monitoring().await?;
+        }
 
         match self {
             Self::Features(args) => features::run(args).await,
@@ -54,7 +61,16 @@ impl DiagCmd {
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
             Self::PointerSpeed(args) => pointer_speed::run(args).await,
+            Self::HostSwitch(args) => host_switch::run(args).await,
         }
+    }
+
+    /// Whether this subcommand opens a device itself. `host-switch` writes
+    /// through the agent's channel, so it needs no Input Monitoring grant of
+    /// its own.
+    #[cfg(target_os = "macos")]
+    fn opens_devices_directly(&self) -> bool {
+        !matches!(self, Self::HostSwitch(_))
     }
 }
 
@@ -129,6 +145,27 @@ fn online_candidates(inventory: &DeviceInventory) -> Vec<Candidate> {
     candidates
 }
 
+/// The first device in `devices` whose name contains `query`,
+/// case-insensitively.
+fn select_named_device(devices: &[Candidate], query: &str) -> Result<(DeviceRoute, String)> {
+    let needle = query.to_lowercase();
+    devices
+        .iter()
+        .find(|c| c.name.to_lowercase().contains(&needle))
+        .map(|c| (c.route.clone(), c.name.clone()))
+        .ok_or_else(|| no_match_err(devices, Some(query)))
+}
+
+/// Pick an online device by name from an inventory the agent reported, for
+/// subcommands that write through the agent instead of opening a device.
+pub(crate) fn select_inventory_device(
+    inventories: &[DeviceInventory],
+    query: &str,
+) -> Result<(DeviceRoute, String)> {
+    let devices: Vec<Candidate> = inventories.iter().flat_map(online_candidates).collect();
+    select_named_device(&devices, query)
+}
+
 /// Build a helpful "couldn't pick a device" error that lists what *is* online.
 fn no_match_err(devices: &[Candidate], query: Option<&str>) -> anyhow::Error {
     if devices.is_empty() {
@@ -166,12 +203,7 @@ pub(crate) async fn select_device(
     let devices = online_devices().await?;
 
     if let Some(q) = query {
-        let needle = q.to_lowercase();
-        return devices
-            .iter()
-            .find(|c| c.name.to_lowercase().contains(&needle))
-            .map(|c| (c.route.clone(), c.name.clone()))
-            .ok_or_else(|| no_match_err(&devices, query));
+        return select_named_device(&devices, q);
     }
 
     if !required_features.is_empty() {
@@ -212,7 +244,7 @@ mod tests {
     };
     use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
-    use super::{Candidate, no_match_err, online_candidates};
+    use super::{Candidate, no_match_err, online_candidates, select_inventory_device};
 
     fn candidate(name: &str) -> Candidate {
         Candidate {
@@ -319,6 +351,30 @@ mod tests {
         );
 
         assert!(online_candidates(&inventory).is_empty());
+    }
+
+    #[test]
+    fn agent_inventory_selection_skips_offline_devices() {
+        let inventories = [inventory(
+            0xc547,
+            Some("receiver-uid"),
+            vec![
+                paired(1, "MX Master 3S", false),
+                paired(2, "MX Master 3S", true),
+            ],
+        )];
+
+        let (route, name) =
+            select_inventory_device(&inventories, "master").expect("the online device matches");
+
+        assert_eq!(name, "MX Master 3S");
+        assert_eq!(
+            route,
+            DeviceRoute::Unifying {
+                receiver_uid: "receiver-uid".into(),
+                slot: 2,
+            }
+        );
     }
 
     fn inventory(
