@@ -1,25 +1,29 @@
 //! The Flow actor: the one owner of a generation's mutable state.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use openlogi_core::config::{FlowConfig, FlowPeer, FlowPeerName, FlowPublicKey};
+use openlogi_core::config::{FlowConfig, FlowEdge, FlowPeer, FlowPeerName, FlowPublicKey};
 use openlogi_flow::frame::{Envelope, FrameKind, InboundRole};
 use openlogi_flow::generated as proto;
 use openlogi_flow::sas::PublicKey;
-use openlogi_flow::session::{LinkState, TrustedInitialState};
+use openlogi_flow::session::{LinkState, PeerSessionHandle, SessionManager, TrustedInitialState};
 use openlogi_flow::transport::{IncomingRpc, TransportError, error_envelope, message_envelope};
 use openlogi_ipc::{FlowLinkState, FlowPeerStatus, FlowStatus};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use super::Event;
 use super::link::NOTIFY_TIMEOUT;
+use super::sender::{self, FlowHardware, Negotiation, SendReport};
+use super::{Event, unix_millis};
 use crate::flow::devices::{InventoryDevice, LocalDevices};
-use crate::flow::edge::EdgeCrossing;
-use crate::flow::handoff::{ArmDecision, CancelOutcome, CompletedTransfer, IncomingLedger};
-use crate::flow::pointer::PointerThread;
+use crate::flow::edge::{ArmedSides, EdgeCrossing, EdgeSide};
+use crate::flow::handoff::{
+    ArmDecision, CancelOutcome, CompletedTransfer, IncomingLedger, entry_point,
+};
+use crate::flow::pointer::{PointerSettings, PointerThread};
 use crate::observable::ObservableState;
 
 /// One configured peer as the actor sees it.
@@ -29,6 +33,8 @@ pub(super) struct ActorPeer {
     public_key: FlowPublicKey,
     link: LinkState,
     frames: mpsc::Sender<Envelope>,
+    /// Set by [`Actor::attach`] once the sessions run.
+    handle: Option<PeerSessionHandle>,
 }
 
 impl ActorPeer {
@@ -39,8 +45,29 @@ impl ActorPeer {
             public_key: peer.public_key,
             link: LinkState::Lost,
             frames,
+            handle: None,
         }
     }
+}
+
+/// How long a stopping actor waits for its outgoing transfer.
+const SENDER_GRACE: Duration = Duration::from_secs(3);
+
+/// The channels the actor reads, and the sender its transfer tasks report on.
+pub(super) struct ActorInputs {
+    pub(super) events: mpsc::Receiver<Event>,
+    pub(super) events_tx: mpsc::Sender<Event>,
+    pub(super) crossings: mpsc::Receiver<EdgeCrossing>,
+    pub(super) stop: watch::Receiver<bool>,
+}
+
+/// The one transfer this host is sending.
+struct Outgoing {
+    peer: PublicKey,
+    transfer_id: u64,
+    /// Taken when the peer's result arrives.
+    result: Option<oneshot::Sender<proto::HandoffResult>>,
+    task: JoinHandle<()>,
 }
 
 pub(super) struct Actor {
@@ -53,7 +80,10 @@ pub(super) struct Actor {
     revision: u64,
     pointer: PointerThread,
     observable: Arc<ObservableState>,
+    hardware: FlowHardware,
+    outgoing: Option<Outgoing>,
     events: mpsc::Receiver<Event>,
+    events_tx: mpsc::Sender<Event>,
     crossings: mpsc::Receiver<EdgeCrossing>,
     stop: watch::Receiver<bool>,
 }
@@ -70,10 +100,15 @@ impl Actor {
         state: watch::Sender<TrustedInitialState>,
         pointer: PointerThread,
         observable: Arc<ObservableState>,
-        events: mpsc::Receiver<Event>,
-        crossings: mpsc::Receiver<EdgeCrossing>,
-        stop: watch::Receiver<bool>,
+        hardware: FlowHardware,
+        inputs: ActorInputs,
     ) -> Self {
+        let ActorInputs {
+            events,
+            events_tx,
+            crossings,
+            stop,
+        } = inputs;
         let devices = LocalDevices::join(&config, &inventory.borrow_and_update());
         let mut actor = Self {
             config,
@@ -85,13 +120,25 @@ impl Actor {
             revision: initial_revision(),
             pointer,
             observable,
+            hardware,
+            outgoing: None,
             events,
+            events_tx,
             crossings,
             stop,
         };
         actor.publish_state();
         actor.publish_status();
         actor
+    }
+
+    /// Give each peer its session handle, then arm the edges of the
+    /// connected peers.
+    pub(super) fn attach(&mut self, sessions: &SessionManager) {
+        for peer in &mut self.peers {
+            peer.handle = sessions.peer(peer.key).cloned();
+        }
+        self.arm_pointer();
     }
 
     pub(super) async fn run(mut self) {
@@ -112,9 +159,18 @@ impl Actor {
                 }
                 () = sleep_until(deadline) => self.expire(),
                 crossing = self.crossings.recv() => match crossing {
-                    Some(crossing) => debug!(?crossing.side, "Flow edge crossing ignored"),
+                    Some(crossing) => self.crossed(&crossing),
                     None => break,
                 },
+            }
+        }
+        if let Some(outgoing) = self.outgoing.take() {
+            // The sender sees the stop signal and returns without waiting for
+            // a result.
+            let mut task = outgoing.task;
+            if tokio::time::timeout(SENDER_GRACE, &mut task).await.is_err() {
+                warn!("the Flow sender did not stop in time");
+                task.abort();
             }
         }
         let pointer = self.pointer;
@@ -131,6 +187,10 @@ impl Actor {
             Event::Link { peer, state } => self.link_changed(peer, state),
             Event::Request { peer, rpc } => self.request(peer, rpc),
             Event::Notification { peer, envelope } => self.notification(peer, &envelope),
+            Event::Sent {
+                transfer_id,
+                report,
+            } => self.sent(transfer_id, &report),
         }
     }
 
@@ -142,7 +202,108 @@ impl Actor {
             info!(peer = %peer.name, ?state, "Flow peer link changed");
             peer.link = state;
             self.publish_status();
+            self.arm_pointer();
         }
+    }
+
+    /// Arm the edges whose peer is connected.
+    fn arm_pointer(&self) {
+        let sides = self
+            .config
+            .layout()
+            .iter()
+            .filter(|layout| {
+                self.peers
+                    .iter()
+                    .any(|peer| peer.name == layout.peer && peer.link == LinkState::Connected)
+            })
+            .map(|layout| edge_side(layout.edge));
+        self.pointer.configure(PointerSettings {
+            sides: ArmedSides::from_sides(sides),
+            require_modifier: self.config.require_modifier,
+        });
+    }
+
+    /// Start handing the devices to the peer beyond the crossed edge. One
+    /// transfer runs at a time, in either direction.
+    fn crossed(&mut self, crossing: &EdgeCrossing) {
+        if self.outgoing.is_some() || self.ledger.deadline().is_some() {
+            debug!(?crossing.side, "Flow transfer in progress; crossing ignored");
+            return;
+        }
+        let Some(peer) = self
+            .config
+            .layout()
+            .iter()
+            .find(|layout| edge_side(layout.edge) == crossing.side)
+            .and_then(|layout| self.peers.iter().find(|peer| peer.name == layout.peer))
+        else {
+            return;
+        };
+        let connection = (peer.link == LinkState::Connected)
+            .then(|| peer.handle.as_ref().and_then(PeerSessionHandle::connection))
+            .flatten();
+        let Some(connection) = connection else {
+            debug!(peer = %peer.name, "Flow peer not connected; crossing ignored");
+            return;
+        };
+        let devices = self.devices.outgoing(&peer.name);
+        if devices.is_empty() {
+            debug!(peer = %peer.name, "no device to hand to the Flow peer");
+            return;
+        }
+        let transfer_id = sender::new_transfer_id();
+        info!(
+            peer = %peer.name,
+            transfer = transfer_id,
+            devices = devices.len(),
+            "Flow handoff starting"
+        );
+        let (result_tx, result_rx) = oneshot::channel();
+        let hardware = self.hardware.clone();
+        let entry = entry_point(crossing);
+        let stop = self.stop.clone();
+        let events = self.events_tx.clone();
+        let task = tokio::spawn(async move {
+            let report = match sender::acquire_and_prepare(&hardware, &devices).await {
+                Ok((lease, switches)) => {
+                    let negotiation = Negotiation {
+                        connection,
+                        transfer_id,
+                        entry,
+                        switches,
+                        result: result_rx,
+                        stop,
+                    };
+                    sender::negotiate(negotiation, lease).await
+                }
+                Err(report) => report,
+            };
+            // The actor may have stopped; nothing is left to tell then.
+            let _ = events
+                .send(Event::Sent {
+                    transfer_id,
+                    report,
+                })
+                .await;
+        });
+        self.outgoing = Some(Outgoing {
+            peer: peer.key,
+            transfer_id,
+            result: Some(result_tx),
+            task,
+        });
+    }
+
+    fn sent(&mut self, transfer_id: u64, report: &SendReport) {
+        if self
+            .outgoing
+            .as_ref()
+            .is_some_and(|outgoing| outgoing.transfer_id == transfer_id)
+        {
+            self.outgoing = None;
+        }
+        info!(transfer = transfer_id, ?report, "Flow handoff sent");
     }
 
     fn request(&mut self, peer: PublicKey, rpc: IncomingRpc) {
@@ -224,6 +385,24 @@ impl Actor {
                         );
                     }
                     CancelOutcome::Unknown => {}
+                }
+            }
+            FrameKind::HandoffResult => {
+                let Ok(result) = envelope.decode::<proto::HandoffResult>(InboundRole::Notification)
+                else {
+                    debug!("malformed Flow handoff result");
+                    return;
+                };
+                let waiting = self
+                    .outgoing
+                    .as_mut()
+                    .filter(|outgoing| {
+                        outgoing.peer == peer && outgoing.transfer_id == result.transfer_id
+                    })
+                    .and_then(|outgoing| outgoing.result.take());
+                if let Some(waiting) = waiting {
+                    // The sender may have given up already.
+                    let _ = waiting.send(result);
                 }
             }
             kind => debug!(?kind, "Flow notification ignored"),
@@ -318,11 +497,16 @@ impl Actor {
 /// A revision above any this machine sent before a restart: peers drop state
 /// older than what they hold, so counting from zero again would be ignored.
 fn initial_revision() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
-        .unwrap_or(0)
+    unix_millis()
+}
+
+const fn edge_side(edge: FlowEdge) -> EdgeSide {
+    match edge {
+        FlowEdge::Left => EdgeSide::Left,
+        FlowEdge::Right => EdgeSide::Right,
+        FlowEdge::Top => EdgeSide::Top,
+        FlowEdge::Bottom => EdgeSide::Bottom,
+    }
 }
 
 async fn sleep_until(deadline: Option<Instant>) {
