@@ -101,18 +101,11 @@ pub(crate) fn run(out: &Path) -> Result<()> {
                 let _restore = Restore::write(&path, source, &site.apply(source))?;
                 clippy(&sh)?
             };
-            let lints = site
-                .lints
-                .iter()
-                .map(|lint| LintReport {
-                    lint: lint.clone(),
-                    verdict: verdict(lint, &baseline, &run),
-                })
-                .collect();
             sites.push(SiteReport {
                 file: file.clone(),
                 line: site.line,
-                lints,
+                column: site.column,
+                lints: judge(&site.lints, &baseline, &run),
             });
         }
     }
@@ -164,6 +157,24 @@ fn verdict(lint: &str, baseline: &Counts, run: &Counts) -> Verdict {
     } else {
         Verdict::Silent
     }
+}
+
+/// One verdict per distinct lint of a site. A lint the attribute names more
+/// than once is inconclusive: the edit removes every `allow` in the
+/// attribute, so a needed one would hide a redundant one.
+fn judge(lints: &[String], baseline: &Counts, run: &Counts) -> Vec<LintReport> {
+    let mut reports: Vec<LintReport> = Vec::new();
+    for lint in lints {
+        if let Some(seen) = reports.iter_mut().find(|report| report.lint == *lint) {
+            seen.verdict = Verdict::Inconclusive;
+        } else {
+            reports.push(LintReport {
+                lint: lint.clone(),
+                verdict: verdict(lint, baseline, run),
+            });
+        }
+    }
+    reports
 }
 
 /// Diagnostic counts from one clippy run.

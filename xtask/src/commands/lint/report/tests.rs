@@ -9,6 +9,7 @@ fn lane(name: &str, rows: &[(&str, usize, &str, Verdict)]) -> LaneReport {
             .map(|&(file, line, lint, verdict)| SiteReport {
                 file: file.to_owned(),
                 line,
+                column: 1,
                 lints: vec![LintReport {
                     lint: lint.to_owned(),
                     verdict,
@@ -75,6 +76,26 @@ fn each_lint_of_a_site_is_judged_on_its_own() {
 }
 
 #[test]
+fn two_attributes_on_one_line_stay_two_rows() {
+    // `#[allow(dead_code)] #[allow(dead_code)] fn f() {}`: the first fires,
+    // the second is redundant. Neither result may overwrite the other.
+    let mut report = lane("linux", &[("a.rs", 3, "dead_code", Verdict::Fires)]);
+    report.sites.push(SiteReport {
+        file: "a.rs".to_owned(),
+        line: 3,
+        column: 21,
+        lints: vec![LintReport {
+            lint: "dead_code".to_owned(),
+            verdict: Verdict::Silent,
+        }],
+    });
+    let rows = merge(&[report]);
+    let outcomes: Vec<(usize, Outcome)> =
+        rows.iter().map(|row| (row.column, row.outcome)).collect();
+    assert_eq!(outcomes, [(1, Outcome::Needed), (21, Outcome::Stale)]);
+}
+
+#[test]
 fn the_table_has_a_column_per_host() {
     let reports = [
         lane("linux", &[("a.rs", 3, "dead_code", Verdict::Silent)]),
@@ -88,7 +109,7 @@ fn the_table_has_a_column_per_host() {
         "{table}"
     );
     assert!(
-        table.contains("| `a.rs:3` | `dead_code` | silent | missing | **inconclusive** |"),
+        table.contains("| `a.rs:3:1` | `dead_code` | silent | missing | **inconclusive** |"),
         "{table}"
     );
 }

@@ -82,6 +82,16 @@ fn a_nested_cfg_attr_keeps_its_other_metas() {
 }
 
 #[test]
+fn two_attributes_on_one_line_are_two_sites() {
+    let source = "fn g() {}\n    #[allow(dead_code)] #[allow(dead_code)] fn f() {}\n";
+    let at: Vec<(usize, usize)> = find(source)
+        .iter()
+        .map(|site| (site.line, site.column))
+        .collect();
+    assert_eq!(at, [(2, 5), (2, 25)]);
+}
+
+#[test]
 fn other_attributes_are_not_sites() {
     let source = r#"
 #[expect(dead_code, reason = "allow(x) in a reason")]

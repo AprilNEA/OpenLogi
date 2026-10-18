@@ -26,6 +26,8 @@ use syn::{Meta, Token};
 pub(crate) struct AllowSite {
     /// 1-based line of the attribute's `#`.
     pub(crate) line: usize,
+    /// 1-based column of the attribute's `#`, in chars.
+    pub(crate) column: usize,
     /// Byte range of the whole attribute, `#` through `]`.
     pub(crate) span: Range<usize>,
     /// What replaces `span` to remove the `allow` and keep everything else.
@@ -59,8 +61,10 @@ pub(crate) fn find(source: &str) -> Vec<AllowSite> {
                 return None;
             }
             let (replacement, lints) = classify(&syn::parse_str::<Meta>(meta).ok()?)?;
+            let line_start = source[..span.start].rfind('\n').map_or(0, |at| at + 1);
             Some(AllowSite {
                 line: source[..span.start].matches('\n').count() + 1,
+                column: source[line_start..span.start].chars().count() + 1,
                 span,
                 replacement,
                 lints,

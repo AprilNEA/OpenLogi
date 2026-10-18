@@ -1,4 +1,4 @@
-use super::{Counts, is_error_code, verdict};
+use super::{Counts, is_error_code, judge, verdict};
 use crate::commands::lint::report::Verdict;
 
 /// A trimmed `cargo clippy --message-format=json` run: one lint, one
@@ -98,4 +98,26 @@ fn only_e_codes_are_compile_errors() {
     assert!(!is_error_code("dead_code"));
     assert!(!is_error_code("E042"));
     assert!(!is_error_code("Exxxx"));
+}
+
+#[test]
+fn a_lint_the_attribute_names_twice_is_inconclusive() {
+    // `#[cfg_attr(unix, allow(dead_code), cfg_attr(test, allow(dead_code)))]`:
+    // one edit removes both, so a firing `dead_code` cannot tell which one
+    // is needed.
+    let clean = Counts::from_cargo_json(CLEAN);
+    let run = Counts::from_cargo_json(RUN);
+    let lints = ["dead_code", "clippy::float_cmp", "dead_code"].map(str::to_owned);
+    let reports = judge(&lints, &clean, &run);
+    let judged: Vec<(&str, Verdict)> = reports
+        .iter()
+        .map(|report| (report.lint.as_str(), report.verdict))
+        .collect();
+    assert_eq!(
+        judged,
+        [
+            ("dead_code", Verdict::Inconclusive),
+            ("clippy::float_cmp", Verdict::Silent)
+        ]
+    );
 }

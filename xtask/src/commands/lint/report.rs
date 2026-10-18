@@ -29,6 +29,8 @@ pub(crate) struct SiteReport {
     /// Repository-relative path.
     pub(crate) file: String,
     pub(crate) line: usize,
+    /// 1-based column of the attribute's `#`: two attributes can share a line.
+    pub(crate) column: usize,
     pub(crate) lints: Vec<LintReport>,
 }
 
@@ -46,7 +48,8 @@ pub(crate) enum Verdict {
     Fires,
     /// Clippy did not raise it on this host.
     Silent,
-    /// The edited tree did not compile, or the name is a lint group.
+    /// The edited tree did not build, the name is a lint group, or the
+    /// attribute names the lint more than once.
     Inconclusive,
 }
 
@@ -65,6 +68,7 @@ pub(crate) enum Outcome {
 pub(crate) struct Row {
     pub(crate) file: String,
     pub(crate) line: usize,
+    pub(crate) column: usize,
     pub(crate) lint: String,
     /// One entry per report, in argument order; `None` when that report has
     /// no such site.
@@ -74,12 +78,13 @@ pub(crate) struct Row {
 
 /// Join `reports` into one row per (site, lint).
 pub(crate) fn merge(reports: &[LaneReport]) -> Vec<Row> {
-    let mut table: BTreeMap<(String, usize, String), Vec<Option<Verdict>>> = BTreeMap::new();
+    type Key = (String, usize, usize, String);
+    let mut table: BTreeMap<Key, Vec<Option<Verdict>>> = BTreeMap::new();
     for (index, report) in reports.iter().enumerate() {
         for site in &report.sites {
             for lint in &site.lints {
                 let verdicts = table
-                    .entry((site.file.clone(), site.line, lint.lint.clone()))
+                    .entry((site.file.clone(), site.line, site.column, lint.lint.clone()))
                     .or_insert_with(|| vec![None; reports.len()]);
                 verdicts[index] = Some(lint.verdict);
             }
@@ -87,10 +92,11 @@ pub(crate) fn merge(reports: &[LaneReport]) -> Vec<Row> {
     }
     table
         .into_iter()
-        .map(|((file, line, lint), verdicts)| Row {
+        .map(|((file, line, column, lint), verdicts)| Row {
             outcome: outcome(&verdicts),
             file,
             line,
+            column,
             lint,
             verdicts,
         })
@@ -120,7 +126,11 @@ pub(crate) fn render(lanes: &[&str], rows: &[Row]) -> String {
     table.push_str(&" --- |".repeat(lanes.len() + 1));
     table.push('\n');
     for row in rows {
-        let _ = write!(table, "| `{}:{}` | `{}` |", row.file, row.line, row.lint);
+        let _ = write!(
+            table,
+            "| `{}:{}:{}` | `{}` |",
+            row.file, row.line, row.column, row.lint
+        );
         for verdict in &row.verdicts {
             let _ = write!(table, " {} |", verdict.map_or("missing", Verdict::label));
         }
