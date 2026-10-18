@@ -344,6 +344,20 @@ fn observe_backlight() {
     assert_wire(&AgentRequest::ObserveBacklight { since: 7 }, "2507");
 }
 
+#[test]
+fn switch_host() {
+    assert_wire(
+        &AgentRequest::SwitchHost {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            host: 2,
+        },
+        "26000846303044434146450102",
+    );
+}
+
 /// A chord crosses the wire as its modifier bits and the key's HID usage.
 #[test]
 fn key_combo_modifier_bits() {
@@ -911,6 +925,7 @@ fn easy_switch_hosts_and_errors() {
     );
     assert_wire(&HidppOperation::ReadHosts, "15");
     assert_wire(&HidppOperation::RenameHost, "16");
+    assert_wire(&HidppOperation::ChangeHost, "17");
     assert_wire(&WriteError::HostRenameUnsupported, "16");
     assert_wire(&WriteError::HostSlotEmpty { slot: 2 }, "1702");
     assert_wire(&WriteError::HostNameRejected { max_len: 24 }, "1818");
@@ -920,6 +935,13 @@ fn easy_switch_hosts_and_errors() {
             actual: Some("Old".into()),
         },
         "19044465736b01034f6c64",
+    );
+    assert_wire(
+        &WriteError::HostOutOfRange {
+            slot: 3,
+            host_count: 2,
+        },
+        "1a0302",
     );
 }
 

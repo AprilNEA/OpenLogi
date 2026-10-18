@@ -475,6 +475,50 @@ fn host_outside_device_range_is_rejected() {
 }
 
 #[test]
+fn host_switch_errors_cross_ipc_as_the_easy_switch_vocabulary() {
+    use openlogi_core::hid::{HidppOperation, WriteError};
+
+    let cases = [
+        (
+            HostSwitchError::FeatureUnsupported,
+            WriteError::FeatureUnsupported {
+                feature_hex: 0x1814,
+            },
+        ),
+        (
+            HostSwitchError::HostOutOfRange {
+                host: 3,
+                host_count: 2,
+            },
+            WriteError::HostOutOfRange {
+                slot: 3,
+                host_count: 2,
+            },
+        ),
+        (
+            HostSwitchError::HostSlotEmpty { host: 2 },
+            WriteError::HostSlotEmpty { slot: 2 },
+        ),
+        (
+            HostSwitchError::TimedOut {
+                operation: "reading current host",
+            },
+            WriteError::RequestTimedOut {
+                operation: HidppOperation::ChangeHost,
+            },
+        ),
+        (HostSwitchError::TargetNotFound, WriteError::DeviceNotFound),
+        (
+            HostSwitchError::Hidpp("busy".into()),
+            WriteError::Hidpp("busy".into()),
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(WriteError::from(error), expected);
+    }
+}
+
+#[test]
 fn diverted_cleanup_restores_only_the_original_temporary_bits() {
     let change = restoration_change(ArmedControl {
         cid: 0x00d3,

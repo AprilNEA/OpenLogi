@@ -376,6 +376,15 @@ impl Agent for TestAgent {
     ) -> Result<EasySwitchHosts, WriteError> {
         unreachable!("profile capture must never rename a host")
     }
+
+    async fn switch_host(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _host: u8,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must never switch a host")
+    }
     async fn reload_saved_config(
         self,
         _: TarpcContext,

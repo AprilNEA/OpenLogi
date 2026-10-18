@@ -18,6 +18,7 @@ use hidpp::{
     },
     protocol::v20,
 };
+use openlogi_core::hid::{HidppOperation, WriteError};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -121,6 +122,37 @@ pub enum HostSwitchError {
 impl From<IoSuspended> for HostSwitchError {
     fn from(error: IoSuspended) -> Self {
         Self::Hid(error.into())
+    }
+}
+
+/// Carries a host-switch failure across the IPC boundary in the vocabulary
+/// the other Easy-Switch commands already use.
+///
+/// The impl lives here for the same reason as `From<BackendError>`: the
+/// orphan rule allows one home, and `openlogi-core` must not depend on this
+/// crate. A timeout keeps only the coarse [`HidppOperation::ChangeHost`],
+/// because [`WriteError::RequestTimedOut`] names operations, not steps.
+impl From<HostSwitchError> for WriteError {
+    fn from(error: HostSwitchError) -> Self {
+        match error {
+            HostSwitchError::Hid(error) => error.into(),
+            HostSwitchError::KeyboardNotFound | HostSwitchError::TargetNotFound => {
+                Self::DeviceNotFound
+            }
+            HostSwitchError::Hidpp(message) => Self::Hidpp(message),
+            HostSwitchError::FeatureUnsupported => Self::FeatureUnsupported {
+                feature_hex: ChangeHostFeature::ID,
+            },
+            HostSwitchError::TimedOut { .. } => Self::RequestTimedOut {
+                operation: HidppOperation::ChangeHost,
+            },
+            error @ HostSwitchError::UnsupportedKeyboard => Self::Hidpp(error.to_string()),
+            HostSwitchError::HostSlotEmpty { host } => Self::HostSlotEmpty { slot: host },
+            HostSwitchError::HostOutOfRange { host, host_count } => Self::HostOutOfRange {
+                slot: host,
+                host_count,
+            },
+        }
     }
 }
 

@@ -112,7 +112,9 @@ pub use succession::Identity;
 ///      control's value, or the user chose that control. A file at another
 ///      revision loads as a plain reload. `Agent::observe_backlight`
 ///      appended — the level a keyboard's backlight keys set, for the
-///      overlay's transient indicator.
+///      overlay's transient indicator. `Agent::switch_host`,
+///      `WriteError::HostOutOfRange` and `HidppOperation::ChangeHost`
+///      appended — software-initiated `0x1814` host switching of one device.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -738,4 +740,14 @@ pub trait Agent {
     async fn reload_saved_config(saved: SavedConfig) -> Result<(), ConfigReloadError>;
     /// Block until the transient keyboard-backlight indicator changes.
     async fn observe_backlight(since: Generation) -> BacklightObservation;
+    /// Switch the device on `route` to the zero-based Easy-Switch slot `host`
+    /// through HID++ `0x1814 ChangeHost`.
+    ///
+    /// The agent refuses a slot beyond the device's channel count with
+    /// [`WriteError::HostOutOfRange`], and a slot `0x1815 HostsInfo` reports
+    /// as unpaired with [`WriteError::HostSlotEmpty`]; nothing is written
+    /// then. `Ok` means the device already used `host` or the fire-and-forget
+    /// write was issued. It does not mean the device arrived: once the write
+    /// takes effect, its radio link has left this computer.
+    async fn switch_host(route: DeviceRoute, host: u8) -> Result<(), WriteError>;
 }
