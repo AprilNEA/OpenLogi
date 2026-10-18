@@ -203,7 +203,7 @@ impl Job {
                 "clippy (macos)",
                 &["clippy-macos"],
                 &[Host::Macos],
-                "CI lints the whole workspace natively on macos-latest (arm64), the only job that compiles the macOS cfg. No other host can reproduce it. On a Mac it is the same command as host `clippy`, so the second run is a cache hit.",
+                "CI lints the whole workspace natively on macos-latest (arm64), the only job that lints the macOS cfg (`tests (macos)` compiles it, without clippy). No other host can reproduce it. On a Mac it is the same command as host `clippy`, so the second run is a cache hit.",
             ),
             Self::Wasm => default_spec(
                 "wasm (portable crates)",

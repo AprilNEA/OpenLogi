@@ -159,7 +159,7 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 | `tests (windows)` | `cargo test --workspace --exclude openlogi-desktop` | **Windows** only — the one place the `cfg(windows)` tests execute; nothing reproduces it elsewhere |
 | `cargo-deny` | `cargo deny --config .cargo/deny.toml --all-features --manifest-path crates/openlogi/Cargo.toml check` | any (needs `cargo-deny`; `nix run nixpkgs#cargo-deny -- …` also works) |
 | `clippy (windows)` | `cargo clippy --workspace --all-targets -- -D warnings` | **Windows**. Elsewhere: `devenv tasks run openlogi:check-windows` (ring-free subset, not the full workspace) |
-| `clippy (macos)` | `cargo clippy --workspace --all-targets -- -D warnings` | **macOS** only. CI runs it on `macos-latest` (arm64); it is the one job that compiles the macOS `cfg`, and no other host can reproduce it |
+| `clippy (macos)` | `cargo clippy --workspace --all-targets -- -D warnings` | **macOS** only. CI runs it on `macos-latest` (arm64); it is the one job that lints the macOS `cfg` (`tests (macos)` compiles it, without clippy), and no other host can reproduce it |
 | `wasm (portable crates)` | `cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown` then `cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown` | any (needs the `wasm32-unknown-unknown` std; devenv installs it) |
 
 CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, and
