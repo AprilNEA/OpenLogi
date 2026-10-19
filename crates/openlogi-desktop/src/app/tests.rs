@@ -211,6 +211,7 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
                 input_monitoring_granted: true,
                 hid_open_failures: false,
                 secure_input: openlogi_ipc::SecureInput::Off,
+                battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
             }));
             state
         });

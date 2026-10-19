@@ -323,6 +323,7 @@ fn an_agent_snapshot_keeps_the_changes_it_reports() {
             input_monitoring_granted: true,
             hid_open_failures: false,
             secure_input: openlogi_ipc::SecureInput::Off,
+            battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
         },
         inventory: Vec::new(),
         standalone: vec![light.clone()],
