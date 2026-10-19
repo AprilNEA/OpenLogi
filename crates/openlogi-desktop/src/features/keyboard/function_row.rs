@@ -17,12 +17,6 @@
     clippy::needless_pass_by_value,
     reason = "GPUI builders take owned Copy palette values"
 )]
-// Not `expect`: these fire inside `assert_eq!`, and rustc does not credit an
-// expectation with a lint raised in a macro expansion.
-#![allow(
-    clippy::float_cmp,
-    reason = "test and product compute the callout px through the same path"
-)]
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -33,6 +27,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, WorkflowStep};
 
@@ -133,11 +128,6 @@ impl FunctionRowView {
     /// target.
     pub(crate) fn click_key(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.select_key(next_selection_after_click(self.selected_key, idx), cx);
-    }
-
-    #[expect(dead_code, reason = "public accessor for the selection state")]
-    pub(crate) fn selected_key(&self) -> Option<usize> {
-        self.selected_key
     }
 
     pub(crate) fn set_hovered_key(&mut self, idx: Option<usize>, cx: &mut Context<Self>) {
@@ -514,9 +504,15 @@ impl RenderOnce for KeyCallout {
         let binding = self.slot.binding;
         let binding_icon = self.slot.binding_icon;
         let highlighted = self.highlighted;
+        let full_label = self.slot.label.clone();
 
         v_flex()
             .id(("key-callout", idx))
+            // The bubble itself truncates the key name to one line (#1687 —
+            // a long translation, e.g. German's compound names, wrapped to
+            // several lines and overflowed into neighbouring callouts); the
+            // tooltip is where the untruncated name stays readable.
+            .tooltip(move |window, cx| Tooltip::new(full_label.clone()).build(window, cx))
             .absolute()
             .top(px(top))
             .left(px(left))
@@ -548,6 +544,9 @@ impl RenderOnce for KeyCallout {
             })
             .child(
                 div()
+                    .max_w(px(KEY_CALLOUT_W - 8.))
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_caption()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(if highlighted {
@@ -765,6 +764,10 @@ fn callout_lane_is_lower(idx: usize) -> bool {
     idx.is_multiple_of(2)
 }
 
+fn binding_after_pick(current: Option<&Action>, picked: Action) -> Option<Action> {
+    (current != Some(&picked)).then_some(picked)
+}
+
 /// The scrollable config panel for the selected key. Lists the same action
 /// catalog the mouse picker uses, plus a Power User section. Renders the rows
 /// directly (no popover) in a tall card.
@@ -807,54 +810,57 @@ impl FunctionRowView {
 
         let view_for_pick = view.clone();
         let target_for_pick = target.clone();
+        let current_for_pick = current.clone();
         let on_pick: PickFn = Rc::new(move |action, _window, cx| {
             AppState::apply(cx, |state| {
-                commit_key_action(state, &target_for_pick, Some(action))
+                commit_key_action(
+                    state,
+                    &target_for_pick,
+                    binding_after_pick(current_for_pick.as_ref(), action),
+                )
             });
             view_for_pick.update(cx, |_, vcx| vcx.notify());
         });
 
         let mut rows = Vec::new();
-        if let KeyTarget::Control(_) = target {
-            // A control's resting state is its firmware function, which is
-            // not an action in the catalog: give it a row of its own so the
-            // key can be returned to native (#1172).
-            let view_for_native = view.clone();
-            let target_for_native = target.clone();
-            rows.push(
-                v_flex().child(
-                    MenuRow::new("panel-native")
-                        .selected(current.is_none())
-                        .role(Role::MenuItem)
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    svg()
-                                        .path("action-icons/keyboard.svg")
-                                        .size_4()
-                                        .flex_none()
-                                        .text_color(pal.text_muted),
-                                )
-                                .child(div().child(tr!("keyboard.native_function"))),
-                        )
-                        .when(current.is_none(), |row| {
-                            row.child(
-                                gpui_component::Icon::new(gpui_component::IconName::Check)
-                                    .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
+        // Unbound is not a catalog action. A control rests on its firmware
+        // function (#1172); a function key rests on the key itself. The row
+        // clears the override so either key returns to that native behavior.
+        let view_for_native = view.clone();
+        let target_for_native = target.clone();
+        rows.push(
+            v_flex().child(
+                MenuRow::new("panel-native")
+                    .selected(current.is_none())
+                    .role(Role::MenuItem)
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                svg()
+                                    .path("action-icons/keyboard.svg")
+                                    .size_4()
+                                    .flex_none()
+                                    .text_color(pal.text_muted),
                             )
-                        })
-                        .on_click(move |_ev, _window, cx| {
-                            AppState::apply(cx, |state| {
-                                commit_key_action(state, &target_for_native, None)
-                            });
-                            view_for_native.update(cx, |_, vcx| vcx.notify());
-                        }),
-                ),
-            );
-        }
+                            .child(div().child(tr!("keyboard.native_function"))),
+                    )
+                    .when(current.is_none(), |row| {
+                        row.child(
+                            gpui_component::Icon::new(gpui_component::IconName::Check)
+                                .size_3()
+                                .text_color(rgb(ACCENT_BLUE)),
+                        )
+                    })
+                    .on_click(move |_ev, _window, cx| {
+                        AppState::apply(cx, |state| {
+                            commit_key_action(state, &target_for_native, None)
+                        });
+                        view_for_native.update(cx, |_, vcx| vcx.notify());
+                    }),
+            ),
+        );
         rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
 
         compact_panel(pal)
@@ -897,25 +903,25 @@ fn panel_action_rows(
 ) -> Vec<gpui::Div> {
     let mut children = action_rows("panel-action", current, on_pick, *pal);
 
-    let power_user_actions: &[(PowerUserKind, &str, &'static str)] = &[
+    let power_user_actions: &[(PowerUserKind, SharedString, &'static str)] = &[
         (
             PowerUserKind::TypeText,
-            "Type Text…",
+            tr!("actions.type_text"),
             "action-icons/keyboard.svg",
         ),
         (
             PowerUserKind::RunAppleScript,
-            "Run AppleScript…",
+            tr!("actions.run_applescript"),
             "action-icons/terminal.svg",
         ),
         (
             PowerUserKind::RunShellCommand,
-            "Run Shell Command…",
+            tr!("actions.run_shell_command"),
             "action-icons/terminal.svg",
         ),
         (
             PowerUserKind::Workflow,
-            "Workflow…",
+            tr!("actions.workflow"),
             "action-icons/list-checks.svg",
         ),
     ];
@@ -943,6 +949,7 @@ fn panel_action_rows(
                     MenuRow::new(format!("panel-power-{idx}"))
                         .selected(selected)
                         .role(Role::MenuItem)
+                        .aria_label(label.clone())
                         .child(
                             h_flex()
                                 .items_center()
@@ -954,7 +961,7 @@ fn panel_action_rows(
                                         .flex_none()
                                         .text_color(pal.text_muted),
                                 )
-                                .child(div().child((*label).to_string())),
+                                .child(div().child(label.clone())),
                         )
                         .when(selected, |s| {
                             s.child(

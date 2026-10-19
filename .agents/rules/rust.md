@@ -54,23 +54,25 @@ changes day to day:
 
 `#[allow]` goes quiet the day it stops suppressing anything, so suppressions rot in
 place. `#[expect]` reports itself unfulfilled instead, which `-D warnings` turns into a
-failure. `allow_attributes` enforces this — but only for outer `#[allow]`; a module-wide
-`#![allow(…)]`, the shape that rots worst, is invisible to it and is on you.
+failure. `allow_attributes` enforces this — but only for outer `#[allow]`. A module-wide
+`#![allow(…)]`, the shape that rots worst, is invisible to it, so the ast-grep guard
+`workspace-no-inner-allow` rejects that shape instead.
 
-Three cases where `expect` is wrong and `allow` is correct. Each keeps its `allow` plus
+Two cases where `expect` is wrong and `allow` is correct. Each keeps its `allow` plus
 an `#[expect(clippy::allow_attributes, reason = "see above")]` and a comment saying which
 case applies — riding the same `cfg_attr` predicate when there is one:
 
-- **The lint fires only under some `cfg`.** `platform::os_version` returns `Some(…)` on
-  macOS (so `unnecessary_wraps` fires) and `None` elsewhere (so it does not). An
-  `expect` there is green on macOS and red on the other two lanes.
 - **Fulfilment differs between a crate's targets.** A `dead_code` suppression on a
   helper that only the tests call is fulfilled in the `--lib` build and unfulfilled in
   the `--test` build; `--all-targets` compiles both, so one of them always warns. Being
   `cfg_attr`-wrapped is *not* itself a reason to reach for `allow` — check.
 - **The lint is raised inside a macro expansion.** rustc does not credit an expectation
-  with such a lint: it suppresses the warning *and* reports itself unfulfilled. A
-  `float_cmp` on floats compared inside `assert_eq!` is the case in this tree.
+  with such a lint: it suppresses the warning *and* reports itself unfulfilled.
+  `double_must_use` on the methods `#[async_trait]` generates is the case in this tree.
+
+A lint that fires only under some `cfg` is not a third case: put the `expect` behind
+that `cfg`. `platform::os_version` returns `Some(…)` on macOS, so `unnecessary_wraps`
+fires only there, and `#[cfg_attr(target_os = "macos", expect(…))]` holds on every lane.
 
 Scope a suppression to the item that needs it. A file-level `#![expect(cast_…)]` also
 covers every cast added to that file later, which is how a bounded-by-construction
@@ -79,11 +81,13 @@ argument silently becomes a blanket one. Prefer removing the need instead: `cast
 coercions, `to_le_bytes` for byte splitting, or one shared conversion helper carrying the
 single suppression when a file converts the same pair of types over and over.
 
-Sweeping for rot is mechanical: rewrite every non-`cfg_attr` `allow(` to `expect(`, run
-clippy, and each "this lint expectation is unfulfilled" is a suppression to delete.
-Do it on all three lanes — `cargo clippy`, `--target x86_64-pc-windows-gnu`, and
-`--target aarch64-unknown-linux-musl` — because CI has no macOS clippy job and a
-platform-gated suppression is only ever evaluated on its own platform.
+Sweeping for rot is automated. `stale-allows.yml` runs weekly on Linux, Windows, and
+macOS: `cargo xtask lint sweep-allows` removes each `allow` in turn and records which of
+its lints fire, and `cargo xtask lint merge-allows` fails on a lint that fires on no
+platform. Rewriting `allow(` to `expect(` and collecting the unfulfilled ones is not a
+sweep: an `allow` is only legitimate when its lint is silent in some build, so every
+legitimate one would come back unfulfilled. Locally, `sweep-allows` checks the current
+host only; `stale` in its table means silent here, not stale everywhere.
 
 Encode invariants in the type system instead of checking them at runtime:
 

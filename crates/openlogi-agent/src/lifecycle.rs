@@ -27,12 +27,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
+use openlogi_agent_core::watchers::light::LightEvent;
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
@@ -231,6 +233,7 @@ impl Wanted {
             observable,
             event_monitor,
             inputs,
+            backlight_overlay,
             ring_haptics,
             demand,
         } = core;
@@ -244,12 +247,14 @@ impl Wanted {
                 observable,
                 event_monitor,
                 inputs,
+                backlight_overlay,
                 ring_haptics,
                 signals,
                 shutdown_requests,
                 hidpp_watchers: WatcherFleet::Inactive,
                 hook: None,
                 capture_mouse_events,
+                held_pointer: None,
             },
         }
     }
@@ -269,6 +274,7 @@ struct Running {
     observable: Arc<ObservableState>,
     event_monitor: Arc<EventMonitor>,
     inputs: InputServices,
+    backlight_overlay: BacklightOverlayManager,
     ring_haptics: server::RingHapticPlayer,
     signals: ShutdownSignals,
     shutdown_requests: ShutdownRequests,
@@ -277,6 +283,10 @@ struct Running {
     /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
+    /// The pointer context held back while the ring was showing, applied when
+    /// it closes. The watcher publishes only transitions, so a pointer that
+    /// left the ring for another unidentifiable surface sends nothing more.
+    held_pointer: Option<openlogi_hook::PointerContext>,
 }
 
 impl Armed {
@@ -294,6 +304,7 @@ impl Armed {
         // HID++ watchers need no Accessibility — start them up front.
         running.restart_hidpp_watchers();
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
+        let mut ring = running.inputs.ring.subscribe();
 
         info!("openlogi-agent started");
         loop {
@@ -319,6 +330,9 @@ impl Armed {
                 Some(device_key) = running.inputs.triggers.recv() => {
                     running.begin_action_ring(device_key.as_deref()).await;
                 }
+                Ok(()) = ring.changed() => {
+                    running.apply_held_pointer().await;
+                }
                 else => break,
             }
         }
@@ -326,11 +340,11 @@ impl Armed {
 }
 
 impl Running {
-    /// Retire a terminal Windows hook worker and publish that input capture is
-    /// no longer installed. The native callbacks have already been cleared,
-    /// so the interval before this check remains pass-through rather than
+    /// Retire a terminal hook worker and publish that input capture is no
+    /// longer installed. The native callbacks have already been cleared, so
+    /// the interval before this check remains pass-through rather than
     /// suppressing input without a consumer.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     async fn apply_hook_health(&mut self) {
         let Some(hook) = self.hook.as_ref() else {
             return;
@@ -338,14 +352,32 @@ impl Running {
         if hook.is_running() {
             return;
         }
-        warn!("Windows hook worker exited — marking input capture unavailable");
+        warn!("input hook stopped — marking input capture unavailable");
         self.stop_hook();
+        self.publish_hook().await;
+    }
+
+    /// The Linux hook only grabs mice present at start, so retry on inventory changes.
+    #[cfg(target_os = "linux")]
+    async fn reinstall_hook(&mut self) {
+        if self.hook.is_some() || !self.capture_mouse_events {
+            return;
+        }
+        self.hook = self.start_hook();
+        if self.hook.is_some() {
+            self.publish_hook().await;
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    async fn publish_hook(&self) {
+        let installed = self.hook.is_some();
         self.orchestrator
             .lock()
             .await
-            .set_os_mouse_hook_available(false);
+            .set_os_mouse_hook_available(installed);
         self.observable
-            .set_accessibility_and_hook(Hook::has_accessibility(), false);
+            .set_accessibility_and_hook(Hook::has_accessibility(), installed);
     }
 
     /// Fold one watcher event into the agent's state.
@@ -358,21 +390,40 @@ impl Running {
 
         // Inventory and foreground-app samples make this a health
         // reconciliation without another timer in the control-plane loop.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         self.apply_hook_health().await;
 
         match event {
             WatcherEvent::Inventory(event) => {
+                #[cfg(target_os = "linux")]
+                let has_devices = matches!(
+                    &event,
+                    InventoryEvent::Snapshot { inventories, .. } if !inventories.is_empty()
+                );
                 self.apply_inventory(event, inventory_refresh).await;
+                #[cfg(target_os = "linux")]
+                if has_devices {
+                    self.reinstall_hook().await;
+                }
             }
             WatcherEvent::Camera(active) => {
                 self.orchestrator.lock().await.set_camera_active(active);
             }
             WatcherEvent::App(app) => self.apply_foreground(app).await,
+            WatcherEvent::Pointer(context) if self.pointer_is_over_the_ring(context.target) => {
+                debug!("pointer is over the Actions Ring — keeping the profile that opened it");
+                self.held_pointer = Some(context);
+            }
             WatcherEvent::Pointer(context) => self.apply_pointer_context(context).await,
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
                 self.observable.set_input_monitoring_granted(granted);
+            }
+            WatcherEvent::Light(LightEvent::Read { route, state }) => {
+                self.orchestrator.lock().await.light_read(&route, state);
+            }
+            WatcherEvent::Light(LightEvent::Changed { route, change }) => {
+                self.orchestrator.lock().await.light_changed(&route, change);
             }
             // Watcher thread death — without a snapshot the GUI would scan
             // forever.
@@ -385,7 +436,7 @@ impl Running {
                 warn!("camera watcher channel closed — disabling camera automation updates");
             }
             WatcherEvent::Lost(Watcher::Pointer) if openlogi_hook::pointer_context_supported() => {
-                warn!("pointer watcher channel closed — disabling pointer-scoped remaps");
+                warn!("pointer watcher channel closed — using an unidentified pointer context");
                 self.apply_pointer_context(openlogi_hook::PointerContext {
                     app: None,
                     target: openlogi_hook::PointerTarget::Unavailable,
@@ -423,6 +474,26 @@ impl Running {
                     .await
                     .reapply_volatile_on_next_refresh();
             }
+            InventoryEvent::BacklightChanged {
+                device_index: _,
+                current_level,
+                levels,
+                visible,
+            } => {
+                self.backlight_overlay.show(current_level, levels, visible);
+            }
+            InventoryEvent::LockKeyChanged(change) => {
+                self.orchestrator.lock().await.announce_lock_key(change);
+            }
+            // A device broadcast its own reconnection (`0x1d4b`): reconfigure
+            // it on the next snapshot even if no reconciliation ever saw it
+            // offline.
+            InventoryEvent::DeviceWake => {
+                self.orchestrator
+                    .lock()
+                    .await
+                    .reapply_reconnected_on_next_refresh();
+            }
         }
     }
 
@@ -434,7 +505,33 @@ impl Running {
         }
     }
 
-    async fn apply_pointer_context(&self, context: openlogi_hook::PointerContext) {
+    /// While the ring is showing, the pointer is over the ring's own floating
+    /// window, which classifies as `PointerTarget::Unavailable`. Publishing
+    /// that context would rebuild the bindings without the per-app profile, so
+    /// a ring bound only in that app's profile would hear its second trigger
+    /// press as the button's global action and never close. The ring belongs
+    /// to the app it was opened over; its window is not a profile change.
+    fn pointer_is_over_the_ring(&self, target: openlogi_hook::PointerTarget) -> bool {
+        target == openlogi_hook::PointerTarget::Unavailable && self.inputs.ring.is_showing()
+    }
+
+    /// Once the ring has closed, apply the pointer context held back while it
+    /// showed. An `Unavailable` surface is not always the ring: the pointer may
+    /// have moved onto another floating window and stayed there, and without
+    /// this the opening app's bindings would outlive the ring.
+    async fn apply_held_pointer(&mut self) {
+        if self.held_pointer.is_none() || self.inputs.ring.is_showing() {
+            return;
+        }
+        if let Some(context) = self.held_pointer.take() {
+            debug!("Actions Ring closed — applying the pointer context held while it showed");
+            self.apply_pointer_context(context).await;
+        }
+    }
+
+    async fn apply_pointer_context(&mut self, context: openlogi_hook::PointerContext) {
+        // Anything newer supersedes what the ring held back.
+        self.held_pointer = None;
         let current = context.target;
         if self.orchestrator.lock().await.set_pointer_context(context) {
             self.inputs
@@ -567,6 +664,10 @@ impl Running {
 
     /// Leave for good: nobody wants the agent until asked again, so the next
     /// start in this login is a GUI demand, never a respawn to re-arm.
+    ///
+    /// Hands `0x8071` RGB control back first, as G HUB and Solaar do on exit,
+    /// while inventory still publishes the channels it needs. A handover or
+    /// replacement keeps it: the successor repaints on arrival.
     async fn shut_down(
         &mut self,
         reason: &str,
@@ -574,6 +675,7 @@ impl Running {
     ) -> ! {
         #[cfg(target_os = "macos")]
         armed_session::clear();
+        self.shared.release_rgb_control().await;
         self.leave(reason, tray_guard).await
     }
 

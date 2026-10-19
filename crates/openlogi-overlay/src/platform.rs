@@ -1,4 +1,5 @@
-//! Native window policy for the standalone Actions Ring overlay.
+//! Native window policy for the standalone overlay: the Actions Ring and its
+//! notices.
 
 #[cfg(not(target_os = "windows"))]
 mod placement;
@@ -7,9 +8,9 @@ mod placement;
 mod windows;
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) use placement::RingPlacement;
+pub(crate) use placement::{NoticePlacement, RingPlacement};
 #[cfg(target_os = "windows")]
-pub(crate) use windows::RingPlacement;
+pub(crate) use windows::{NoticePlacement, RingPlacement};
 
 /// Keep the overlay out of the Dock and app switcher.
 #[cfg(target_os = "macos")]
@@ -151,5 +152,45 @@ pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
 /// nothing to resolve natively.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn display_containing(_x: f64, _y: f64) -> Option<CursorDisplay> {
+    None
+}
+
+/// The part of `display` that windows may use — without the menu bar and the
+/// Dock — in the display's own top-left-origin points.
+///
+/// AppKit reports this per `NSScreen`, in its own bottom-left-origin global
+/// space; [`placement::usable_in_display`] finds the screen that is `display`
+/// and translates.
+#[cfg(target_os = "macos")]
+pub fn usable_area(display: &CursorDisplay) -> Option<gpui::Bounds<gpui::Pixels>> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSScreen;
+
+    let screens = NSScreen::screens(MainThreadMarker::new()?);
+    let primary_height = screens.firstObject()?.frame().size.height;
+    screens.to_vec().iter().find_map(|screen| {
+        let (frame, visible) = (screen.frame(), screen.visibleFrame());
+        placement::usable_in_display(
+            placement::CocoaRect {
+                x: frame.origin.x,
+                y: frame.origin.y,
+                width: frame.size.width,
+                height: frame.size.height,
+            },
+            placement::CocoaRect {
+                x: visible.origin.x,
+                y: visible.origin.y,
+                width: visible.size.width,
+                height: visible.size.height,
+            },
+            primary_height,
+            display.origin,
+        )
+    })
+}
+
+/// Linux resolves no native display, so there is no usable area to report.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn usable_area(_display: &CursorDisplay) -> Option<gpui::Bounds<gpui::Pixels>> {
     None
 }

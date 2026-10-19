@@ -37,6 +37,12 @@ pub(crate) enum StateEvent {
         name: String,
         failure: UnpairFailure,
     },
+    /// A leftover pairing the user asked to remove stayed on its receiver.
+    StalePairingRemovalFailed {
+        /// The device's display name.
+        name: String,
+        failure: UnpairFailure,
+    },
     /// The active device changed.
     DeviceSelected(DeviceKey),
     /// Mouse, keyboard, gesture, or Actions Ring bindings changed.
@@ -47,6 +53,12 @@ pub(crate) enum StateEvent {
     SmartShiftChanged(DeviceKey),
     /// The keyboard's Fn-lock read landed or changed.
     FnLockChanged(DeviceKey),
+    /// The mouse's report-rate read landed or changed.
+    ReportRateChanged(DeviceKey),
+    /// The keyboard's backlight read landed or changed.
+    BacklightChanged(DeviceKey),
+    /// The device's Easy-Switch host read landed or changed.
+    EasySwitchChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -79,6 +91,9 @@ impl StateEvent {
             | Self::DpiChanged(key)
             | Self::SmartShiftChanged(key)
             | Self::FnLockChanged(key)
+            | Self::ReportRateChanged(key)
+            | Self::BacklightChanged(key)
+            | Self::EasySwitchChanged(key)
             | Self::LightingChanged(key)
             | Self::DeviceConfigChanged(key) => Some(key),
             Self::AgentChanged
@@ -86,6 +101,7 @@ impl StateEvent {
             | Self::DiagnosticsChanged
             | Self::InventoryChanged
             | Self::DeviceRemovalFailed { .. }
+            | Self::StalePairingRemovalFailed { .. }
             | Self::CameraChanged
             | Self::CameraPermissionChanged
             | Self::SettingsChanged
@@ -215,7 +231,8 @@ impl AppState {
         match event {
             StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
             // A dialog, not panel content.
-            StateEvent::DeviceRemovalFailed { .. } => false,
+            StateEvent::DeviceRemovalFailed { .. }
+            | StateEvent::StalePairingRemovalFailed { .. } => false,
             StateEvent::AgentChanged
             | StateEvent::ForegroundChanged
             | StateEvent::DiagnosticsChanged
@@ -223,6 +240,9 @@ impl AppState {
             | StateEvent::DpiChanged(_)
             | StateEvent::SmartShiftChanged(_)
             | StateEvent::FnLockChanged(_)
+            | StateEvent::ReportRateChanged(_)
+            | StateEvent::BacklightChanged(_)
+            | StateEvent::EasySwitchChanged(_)
             | StateEvent::LightingChanged(_)
             | StateEvent::CameraChanged
             | StateEvent::CameraPermissionChanged

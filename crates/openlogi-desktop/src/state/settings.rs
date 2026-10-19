@@ -304,6 +304,33 @@ impl AppState {
         self.persist_and_reload("smooth scroll");
         StateEvent::SettingsChanged.into()
     }
+    /// Toggle the overlay's low-battery notices and persist it. The agent
+    /// decides when a battery is low, so it reads the new value on config
+    /// reload; while off it posts no notice. An already-set value writes
+    /// nothing and is still reported; disk failures restore the persisted
+    /// value.
+    pub fn commit_low_battery_notifications(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.low_battery_notifications == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.low_battery_notifications = enabled);
+        self.persist_and_reload("low-battery notifications setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Toggle the overlay's lock-key indicator and persist it. The agent
+    /// decides what the indicator shows, so it reads the new value on config
+    /// reload; while off it shows nothing. An already-set value writes nothing
+    /// and is still reported; disk failures restore the persisted value.
+    pub fn commit_lock_key_notifications(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.lock_key_notifications == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.lock_key_notifications = enabled);
+        self.persist_and_reload("lock-key notifications setting");
+        StateEvent::SettingsChanged.into()
+    }
     /// Set traditional vertical mouse-wheel sensitivity and persist it. The
     /// agent publishes the value to its scroll worker on config reload. An
     /// already-set value writes nothing and is still reported; disk failures

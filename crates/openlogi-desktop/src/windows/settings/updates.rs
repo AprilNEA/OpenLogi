@@ -40,9 +40,7 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
                         AppState::try_read(cx)
                             .is_some_and(|s| s.app_settings().auto_install_updates)
                     },
-                    |enabled, cx| {
-                        AppState::apply(cx, |state| state.commit_auto_install_updates(enabled));
-                    },
+                    crate::platform::updater::set_auto_install_updates,
                 ),
             )
             .description(tr!("updates.automatic_update_description")),
@@ -98,6 +96,8 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
             Some(t) if *t > 0 => {
                 tr!("updates.update_downloading_percent", percent => (*downloaded * 100 / *t).to_string())
             }
+            // Sparkle reports no byte counts; its own window shows the progress.
+            _ if *downloaded == 0 => tr!("updates.update_downloading"),
             _ => {
                 tr!("updates.update_downloading_size", size => (*downloaded / 1_048_576).to_string())
             }
@@ -125,7 +125,7 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
                 .outline()
                 .label(tr!("updates.restart_to_update"))
                 .on_click(move |_, _, cx| {
-                    u.update(cx, |u, cx| u.restart(cx));
+                    u.update(cx, Updater::restart);
                 }),
             _ => Button::new("update-check")
                 .outline()

@@ -47,6 +47,21 @@ fn builds_temporary_diversion_payload() {
     assert_eq!(payload[5], 0);
 }
 
+/// `setCidReporting` reads remap `0` as "keep the previously configured remap",
+/// so a remap is cleared by remapping the control to itself, never by `None`.
+#[test]
+fn remap_none_keeps_and_the_own_cid_clears() {
+    let cid = ControlId(0x00c3);
+    let keep = CidReportingChange::default().to_payload(cid);
+    assert_eq!(&keep[3..=4], &[0, 0]);
+    let clear = CidReportingChange {
+        remap: Some(cid),
+        ..Default::default()
+    }
+    .to_payload(cid);
+    assert_eq!(&clear[3..=4], &0x00c3u16.to_be_bytes());
+}
+
 #[test]
 fn parses_reporting_state() {
     let mut payload = [0; 16];

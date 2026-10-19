@@ -20,7 +20,8 @@ use crate::state::AppState;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
 use gpui::{
-    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce, Styled, Window, div, px, svg,
+    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce,
+    StatefulInteractiveElement as _, Styled, Window, div, px, svg,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _,
@@ -41,7 +42,7 @@ pub enum PowerUserKind {
 }
 
 impl PowerUserKind {
-    fn heading_key(self) -> &'static str {
+    pub(crate) fn heading_key(self) -> &'static str {
         match self {
             Self::TypeText => "actions.type_text_heading",
             Self::RunAppleScript => "actions.run_applescript_heading",
@@ -243,17 +244,34 @@ struct WorkflowStepRow {
 
 impl RenderOnce for WorkflowStepRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (type_label, glyph): (&'static str, &'static str) = match &self.step {
-            WorkflowStep::TypeText(_) => ("Type Text", "action-icons/keyboard.svg"),
-            WorkflowStep::PressKey(_) => ("Press Key", "action-icons/keyboard.svg"),
-            WorkflowStep::Delay { .. } => ("Delay", "action-icons/chevrons-right.svg"),
-            WorkflowStep::RunAppleScript(_) => ("AppleScript", "action-icons/terminal.svg"),
-            WorkflowStep::RunShellCommand(_) => ("Shell", "action-icons/terminal.svg"),
+        let (type_label, glyph): (gpui::SharedString, &'static str) = match &self.step {
+            WorkflowStep::TypeText(_) => (
+                tr!("actions.workflow_step_type_text"),
+                "action-icons/keyboard.svg",
+            ),
+            WorkflowStep::PressKey(_) => (
+                tr!("actions.workflow_step_press_key"),
+                "action-icons/keyboard.svg",
+            ),
+            WorkflowStep::Delay { .. } => (
+                tr!("actions.workflow_step_delay"),
+                "action-icons/chevrons-right.svg",
+            ),
+            WorkflowStep::RunAppleScript(_) => (
+                tr!("actions.workflow_step_applescript"),
+                "action-icons/terminal.svg",
+            ),
+            WorkflowStep::RunShellCommand(_) => (
+                tr!("actions.workflow_step_shell"),
+                "action-icons/terminal.svg",
+            ),
         };
         let pal = theme::palette(cx);
         let view_remove = self.view;
+        let aria_label = format!("{type_label}: {}", step_preview_text(&self.step));
 
         MenuRow::new(("wf-step", self.idx))
+            .aria_label(aria_label)
             .child(
                 h_flex()
                     .w_full()
@@ -286,8 +304,12 @@ impl RenderOnce for WorkflowStepRow {
     }
 }
 
-fn step_preview(step: &WorkflowStep, pal: Palette) -> impl IntoElement {
-    let text: String = match step {
+/// The step's visible/announced payload preview — a text step's content, a
+/// key combo's rendered label, or a delay's duration. Shared by
+/// [`step_preview`] (sighted) and [`WorkflowStepRow`]'s accessible name
+/// (screen readers), so both stay in sync.
+fn step_preview_text(step: &WorkflowStep) -> String {
+    match step {
         WorkflowStep::TypeText(s) => {
             if s.is_empty() {
                 "…".to_string()
@@ -304,11 +326,14 @@ fn step_preview(step: &WorkflowStep, pal: Palette) -> impl IntoElement {
                 s.clone()
             }
         }
-    };
+    }
+}
+
+fn step_preview(step: &WorkflowStep, pal: Palette) -> impl IntoElement {
     div()
         .text_caption()
         .text_color(pal.text_primary)
-        .child(text)
+        .child(step_preview_text(step))
 }
 
 fn key_combo_preview(combo: &KeyCombo) -> String {

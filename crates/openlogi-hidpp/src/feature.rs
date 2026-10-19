@@ -11,6 +11,7 @@ use crate::{
     protocol::v20::{self, Hidpp20Error},
 };
 
+pub mod adc_measurement;
 pub mod adjustable_dpi;
 pub mod backlight;
 pub mod battery_status;
@@ -35,11 +36,13 @@ pub mod haptic_feedback;
 pub mod hires_wheel;
 pub mod hosts_info;
 pub mod illumination;
+pub mod lock_key_state;
 pub mod mode_status;
 pub mod mouse_pointer;
 pub mod multi_platform;
 pub mod per_key_lighting;
 pub mod persistent_remappable_action;
+pub mod pointer_motion_scaling;
 pub mod registry;
 pub mod report_rate;
 pub mod reprog_controls;

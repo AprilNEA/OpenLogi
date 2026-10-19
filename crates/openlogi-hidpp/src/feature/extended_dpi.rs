@@ -24,12 +24,24 @@ pub use types::{
 use self::types::{parse_dpi_list, parse_dpi_ranges, parse_lod_list, terminated_word_len};
 use crate::{
     feature::{EventSource, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{self, Hidpp20Error},
 };
 
 /// Upper bound on the number of `getSensorDpiRanges` pages fetched before the
 /// device is considered to be returning a malformed, unterminated list.
 const MAX_RANGE_PAGES: u8 = 16;
+
+/// Byte 0 of every per-sensor reply echoes the request's sensor index. Logi
+/// Options+ rejects a reply naming another sensor in each of these calls
+/// (`devio::Feature2202ExtendedAdjustableDPI`), and so does this: such a reply
+/// is not an answer for the sensor asked about, nor the result of its write.
+fn expect_sensor(payload: &[u8; 16], sensor_index: u8) -> Result<(), Hidpp20Error> {
+    if payload[0] == sensor_index {
+        Ok(())
+    } else {
+        Err(Hidpp20Error::UnsupportedResponse)
+    }
+}
 
 /// Implements the `ExtendedAdjustableDpi` / `0x2202` feature.
 #[derive(Feature)]
@@ -43,12 +55,32 @@ pub struct ExtendedDpiFeature {
 }
 
 impl ExtendedDpiFeature {
+    /// Whether an unsolicited report with `function_id` is the device's
+    /// DPI-parameters broadcast (event `0`, decoded as
+    /// [`ExtendedDpiEvent::ParametersChanged`]), sent when the sensor's DPI
+    /// changes on the device — a DPI button, say.
+    ///
+    /// Deliberately independent of the payload, like
+    /// `BatteryStatusFeature::is_status_broadcast`: a listener that only needs
+    /// to know *that* the DPI changed re-reads it with
+    /// [`Self::get_sensor_dpi_parameters`]. A calibration result (event `1`)
+    /// changes no setting and is not one.
+    #[must_use]
+    pub const fn is_parameters_broadcast(function_id: u8) -> bool {
+        function_id == 0
+    }
+
     /// Retrieves the number of motion sensors the device exposes.
     pub async fn get_sensor_count(&self) -> Result<u8, Hidpp20Error> {
         Ok(self.endpoint.call(0, [0; 3]).await?.extend_payload()[0])
     }
 
     /// Retrieves the capabilities and DPI-level count of `sensor_index`.
+    ///
+    /// A reply echoing a different sensor yields
+    /// [`Hidpp20Error::UnsupportedResponse`]: these bits decide which fields a
+    /// [`SetDpiParameters`] write may carry, so they must belong to the sensor
+    /// being written.
     pub async fn get_sensor_capabilities(
         &self,
         sensor_index: u8,
@@ -58,6 +90,7 @@ impl ExtendedDpiFeature {
             .call(1, [sensor_index, 0, 0])
             .await?
             .extend_payload();
+        expect_sensor(&payload, sensor_index)?;
         Ok(SensorCapabilitiesInfo {
             sensor_index: payload[0],
             dpi_level_count: payload[1],
@@ -104,6 +137,8 @@ impl ExtendedDpiFeature {
     ///
     /// Only meaningful when the sensor supports profiles
     /// ([`SensorCapabilities::PROFILE`]); otherwise the device returns an error.
+    /// A reply echoing another sensor or direction yields
+    /// [`Hidpp20Error::UnsupportedResponse`].
     pub async fn get_sensor_dpi_list(
         &self,
         sensor_index: u8,
@@ -114,7 +149,10 @@ impl ExtendedDpiFeature {
             .call(3, [sensor_index, direction.into(), 0])
             .await?
             .extend_payload();
-        // Skip the echoed sensor index and direction in bytes 0 and 1.
+        expect_sensor(&payload, sensor_index)?;
+        if payload[1] != u8::from(direction) {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        }
         Ok(parse_dpi_list(&payload[2..]))
     }
 
@@ -134,20 +172,24 @@ impl ExtendedDpiFeature {
             .call(4, [sensor_index, 0, 0])
             .await?
             .extend_payload();
-        // Skip the echoed sensor index in byte 0.
+        expect_sensor(&payload, sensor_index)?;
         parse_lod_list(&payload[1..], usize::from(dpi_level_count))
     }
 
     /// Retrieves the current and default DPI parameters of `sensor_index`.
+    ///
+    /// The ten parameter bytes need a long reply: a short one, zero-filled,
+    /// would read the default DPI, the Y DPI and the lift-off as zero.
+    /// Options+ refuses a reply under ten bytes too.
     pub async fn get_sensor_dpi_parameters(
         &self,
         sensor_index: u8,
     ) -> Result<DpiParameters, Hidpp20Error> {
-        let payload = self
-            .endpoint
-            .call(5, [sensor_index, 0, 0])
-            .await?
-            .extend_payload();
+        let v20::Message::Long(_, payload) = self.endpoint.call(5, [sensor_index, 0, 0]).await?
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
+        expect_sensor(&payload, sensor_index)?;
         Ok(DpiParameters {
             sensor_index: payload[0],
             dpi_x: u16::from_be_bytes([payload[1], payload[2]]),
@@ -160,7 +202,11 @@ impl ExtendedDpiFeature {
 
     /// Sets the DPI and lift-off distance of `sensor_index`.
     ///
-    /// `params.dpi_y` must be `0` when the sensor has no independent Y axis.
+    /// `params.dpi_y` must be `0` when the sensor has no independent Y axis and
+    /// `params.lod` [`Lod::NotSupported`] when it has no lift-off control;
+    /// [`SetDpiParameters::for_sensor`] builds parameters that satisfy both.
+    /// A reply echoing another sensor yields
+    /// [`Hidpp20Error::UnsupportedResponse`].
     pub async fn set_sensor_dpi_parameters(
         &self,
         sensor_index: u8,
@@ -171,8 +217,8 @@ impl ExtendedDpiFeature {
         args[1..3].copy_from_slice(&params.dpi_x.to_be_bytes());
         args[3..5].copy_from_slice(&params.dpi_y.to_be_bytes());
         args[5] = params.lod.into();
-        self.endpoint.call_long(6, args).await?;
-        Ok(())
+        let reply = self.endpoint.call_long(6, args).await?;
+        expect_sensor(&reply.extend_payload(), sensor_index)
     }
 
     /// Asks the device to show `params.dpi_level` on its DPI status LED.
@@ -190,21 +236,22 @@ impl ExtendedDpiFeature {
             params.led_hold_type.into(),
             params.button_num,
         ]);
-        self.endpoint.call_long(7, args).await?;
-        Ok(())
+        let reply = self.endpoint.call_long(7, args).await?;
+        expect_sensor(&reply.extend_payload(), sensor_index)
     }
 
     /// Retrieves the reference information needed to start a calibration of
-    /// `sensor_index`.
+    /// `sensor_index`. Like the DPI parameters, its eight bytes need a long
+    /// reply.
     pub async fn get_dpi_calibration_info(
         &self,
         sensor_index: u8,
     ) -> Result<DpiCalibrationInfo, Hidpp20Error> {
-        let payload = self
-            .endpoint
-            .call(8, [sensor_index, 0, 0])
-            .await?
-            .extend_payload();
+        let v20::Message::Long(_, payload) = self.endpoint.call(8, [sensor_index, 0, 0]).await?
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
+        expect_sensor(&payload, sensor_index)?;
         Ok(DpiCalibrationInfo {
             sensor_index: payload[0],
             mouse_width: payload[1],
@@ -237,8 +284,8 @@ impl ExtendedDpiFeature {
             params.hw_process_timeout,
             params.sw_process_timeout,
         ]);
-        self.endpoint.call_long(9, args).await?;
-        Ok(())
+        let reply = self.endpoint.call_long(9, args).await?;
+        expect_sensor(&reply.extend_payload(), sensor_index)
     }
 
     /// Applies a calibration correction to `sensor_index` along `direction`.
@@ -254,7 +301,7 @@ impl ExtendedDpiFeature {
         let [cor_hi, cor_lo] = correction.to_wire()?.to_be_bytes();
         let mut args = [0; 16];
         args[..4].copy_from_slice(&[sensor_index, direction.into(), cor_hi, cor_lo]);
-        self.endpoint.call_long(10, args).await?;
-        Ok(())
+        let reply = self.endpoint.call_long(10, args).await?;
+        expect_sensor(&reply.extend_payload(), sensor_index)
     }
 }

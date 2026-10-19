@@ -101,9 +101,10 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::ScrollDown => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
-        Action::CustomShortcut(_) | Action::HoldShortcut(_) | Action::TypeText(_) => {
-            "action-icons/keyboard.svg"
-        }
+        Action::CustomShortcut(_)
+        | Action::HoldShortcut(_)
+        | Action::TapKeyHoldingModifiers(_)
+        | Action::TypeText(_) => "action-icons/keyboard.svg",
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
     }
 }
@@ -163,6 +164,7 @@ pub(crate) fn action_rows_matching(
                     let icon_path = action_icon_path(&action);
                     let on_pick = on_pick.clone();
                     MenuRow::new((id_prefix, action_key))
+                        .debug_selector(|| format!("{id_prefix}-{action:?}"))
                         .selected(selected)
                         .role(Role::MenuItem)
                         .aria_label(accessible_label)
@@ -247,5 +249,39 @@ mod tests {
             .flat_map(|(_, actions)| actions)
             .collect::<Vec<_>>();
         assert!(actions.contains(&Action::ShowActionsRing));
+    }
+
+    /// [`action_icon_path`] is exhaustive over [`Action`], so the compiler
+    /// catches a missing arm — but nothing checks that the path an arm names is
+    /// actually embedded, and an unembedded path renders as a blank slot with
+    /// no error anywhere. [`Action::catalog`] misses the parameterised arms,
+    /// which hold the only references to the keyboard and terminal glyphs.
+    #[test]
+    fn every_reachable_action_icon_is_embedded() {
+        use gpui::AssetSource as _;
+        use openlogi_core::binding::ApplicationTarget;
+        use openlogi_ui::action_icons::ActionIcons;
+
+        let combo = || "Ctrl+A".parse().expect("Ctrl+A is a valid combo");
+        let uncataloged = [
+            Action::SetDpiPreset(0),
+            Action::CustomShortcut(combo()),
+            Action::HoldShortcut(combo()),
+            Action::TapKeyHoldingModifiers(combo()),
+            Action::TypeText(String::new()),
+            Action::RunShellCommand(String::new()),
+            Action::RunAppleScript(String::new()),
+            Action::Workflow(Vec::new()),
+            Action::OpenApplication(
+                ApplicationTarget::new("/usr/bin/true", "true").expect("non-empty path"),
+            ),
+        ];
+        for action in Action::catalog().into_iter().chain(uncataloged) {
+            let path = action_icon_path(&action);
+            assert!(
+                matches!(ActionIcons.load(path), Ok(Some(_))),
+                "{path}, bound to {action:?}, is not embedded"
+            );
+        }
     }
 }

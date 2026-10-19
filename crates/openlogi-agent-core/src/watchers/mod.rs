@@ -12,6 +12,7 @@ pub mod host_switch;
 pub mod input_monitoring;
 pub mod inventory;
 pub mod keyboard;
+pub mod light;
 pub mod pairing;
 pub mod pointer;
 mod poll;

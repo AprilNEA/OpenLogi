@@ -22,7 +22,9 @@ mod key_trigger;
 mod migrate;
 mod per_app;
 mod per_device;
+mod revision;
 mod settings;
+mod wheel_hold;
 
 // Stacked, not `all(test, …)`: clippy reads the combined form as a test
 // outside a test module and withdraws the `unwrap`/`expect` exemption.
@@ -31,6 +33,8 @@ mod settings;
 mod tests;
 
 pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
+#[cfg(all(test, feature = "fs", unix))]
+use file::resolve_symlinks;
 #[cfg(feature = "fs")]
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]
@@ -38,6 +42,7 @@ use file::{backup_existing_config, config_backup_path};
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
+pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, DeviceViewMode,
@@ -52,6 +57,12 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v8 adds `{ click = ..., wheel = "HorizontalScroll" }` wheel-hold button
+/// bindings and the per-device `smooth_wheel` switch. Nothing older needs
+/// migrating; the bump makes a v7 build refuse a file that may hold either at
+/// the version check, instead of failing on the binding shape or the unknown
+/// device field.
 ///
 /// v7 aligns the thumb-wheel scroll defaults with its normalised physical
 /// direction. Pre-v7 explicit default pairs are migrated in device and
@@ -95,7 +106,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,8 +133,7 @@ pub struct Config {
     // that exists conditionally is a struct whose shape depends on a feature.
     #[cfg_attr(
         not(feature = "fs"),
-        expect(clippy::allow_attributes, reason = "see above"),
-        allow(dead_code, reason = "only the `fs` half suppresses a save")
+        expect(dead_code, reason = "only the `fs` half suppresses a save")
     )]
     ephemeral: bool,
     /// Per-device state, normally keyed by the stable physical-device

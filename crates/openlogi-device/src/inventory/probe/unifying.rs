@@ -377,6 +377,7 @@ pub(in crate::inventory) async fn probe_unifying_slot(
         register_kind,
         probe,
         event.online,
+        pass.settings_revision(slot),
     );
     Some((device, outcome))
 }
@@ -402,6 +403,7 @@ pub(in crate::inventory) fn assemble_unifying_device(
     register_kind: DeviceKind,
     probe: ProbedFeatures,
     online: bool,
+    settings_revision: u64,
 ) -> PairedDevice {
     PairedDevice {
         slot,
@@ -412,6 +414,7 @@ pub(in crate::inventory) fn assemble_unifying_device(
         battery: probe.battery,
         model_info: probe.model_info,
         capabilities: probe.capabilities,
+        settings_revision,
     }
 }
 

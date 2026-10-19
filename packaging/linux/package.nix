@@ -54,6 +54,8 @@ let
       (src + "/crates")
       (src + "/design/icon")
       (src + "/docs/config.example.toml")
+      # Workspace tests require the recorded corpus in the filtered source.
+      (src + "/fixtures/devices")
       (src + "/packaging/linux/desktop")
       (src + "/packaging/linux/systemd")
       (src + "/packaging/linux/udev")

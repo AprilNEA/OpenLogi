@@ -5,44 +5,25 @@
 # without write access is silently ignored by GitHub. Grant write access
 # before adding someone below.
 #
-# The LAST matching pattern wins. The order is deliberate: a broad default,
-# then delegated paths, then the high-risk paths that always narrow back to
-# the maintainer.
+# The last matching pattern wins. Shared ownership applies unless a later
+# rule requires AprilNEA's review.
 
 # ── Default ────────────────────────────────────────────────────────────────
-*                               @AprilNEA
-
-# ── Windows port ───────────────────────────────────────────────────────────
-# Listed file by file rather than by a `*windows*` glob: in this repo the word
-# means two different things, and `openlogi-gui/src/windows.rs` is the app's
-# auxiliary-window registry (Settings, Add Device), not Win32 code.
-#
-# Windows-only branches living in multi-platform files (openlogi-agent's
-# main.rs / autostart.rs / binary_watch/ / takeover.rs, hid/transport.rs,
-# hook/lib.rs, …) stay with the maintainer: CODEOWNERS scopes by path, so it
-# cannot hand out ownership of a single `#[cfg(windows)]` branch.
-#
-# The installer manifest (packaging/windows) and the signing workflow also stay
-# with the maintainer — see the supply-chain block below.
-/crates/openlogi-agent/src/resume_windows.rs    @AprilNEA @davidbudnick
-/crates/openlogi-agent/src/tray_windows.rs      @AprilNEA @davidbudnick
-/crates/openlogi-camera/src/capture_windows.rs  @AprilNEA @davidbudnick
-/crates/openlogi-camera/src/com_windows.rs      @AprilNEA @davidbudnick
-/crates/openlogi-camera/src/uvc_windows.rs      @AprilNEA @davidbudnick
-/crates/openlogi-hid/src/transport/windows.rs   @AprilNEA @davidbudnick
-/crates/openlogi-hid/src/windows_hid.rs         @AprilNEA @davidbudnick
-/crates/openlogi-hook/src/windows/hook.rs      @AprilNEA @davidbudnick
-/crates/openlogi-inject/src/inject/windows.rs   @AprilNEA @davidbudnick
+*                               @AprilNEA @davidbudnick
 
 # ── Release, packaging, supply chain ───────────────────────────────────────
-# Anything here can reach the release pipeline's signing and notarization
-# credentials, or change what ends up inside a published artifact.
+# These paths control release credentials, packaging, dependencies, or build
+# and verification commands.
 /.github/                       @AprilNEA
 /xtask/                         @AprilNEA
 /packaging/                     @AprilNEA
 /.config/                       @AprilNEA
 /.cargo/                        @AprilNEA
-/Cargo.toml                     @AprilNEA
+**/.ast-grep/                   @AprilNEA
+/.envrc                         @AprilNEA
+/sgconfig.yml                   @AprilNEA
+**/Cargo.toml                   @AprilNEA
+**/build.rs                     @AprilNEA
 /Cargo.lock                     @AprilNEA
 /release-plz.toml               @AprilNEA
 /rust-toolchain.toml            @AprilNEA
@@ -53,6 +34,9 @@
 /devenv.nix                     @AprilNEA
 /devenv.yaml                    @AprilNEA
 /devenv.lock                    @AprilNEA
+
+# ── Update verification ───────────────────────────────────────────────────
+/crates/openlogi-desktop/src/platform/updater.rs @AprilNEA
 
 # ── Licensing and brand ────────────────────────────────────────────────────
 # design/ is proprietary; the license files define the dual-license boundary.
@@ -69,7 +53,7 @@
 /crates/openlogi-hidpp-derive/  @AprilNEA
 
 # ── Agent guides ───────────────────────────────────────────────────────────
-/AGENTS.md                      @AprilNEA
-/CLAUDE.md                      @AprilNEA
+**/AGENTS.md                    @AprilNEA
+**/CLAUDE.md                    @AprilNEA
 /.claude/                       @AprilNEA
 /.agents/                       @AprilNEA

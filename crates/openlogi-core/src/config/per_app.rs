@@ -108,7 +108,7 @@ impl Config {
     }
 
     /// Whether `device_key` has a non-empty per-app binding overlay for the
-    /// foreground app `app` (bundle id). Drives the menu-bar popover's "override
+    /// foreground app `app`. Drives the menu-bar popover's "override
     /// active" badge — when the current app has its own bindings for this
     /// device, the global bindings are (partly) overridden.
     #[must_use]

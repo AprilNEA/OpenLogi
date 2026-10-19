@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
-use openlogi_core::device::StandaloneDevice;
+use openlogi_core::device::{LightState, StandaloneDevice};
 use openlogi_core::hid::{LightCommand, PairingError, WriteError};
 use openlogi_hid::backend::{HidBackend, HotplugStream};
 use openlogi_hid::inventory::persist::ProbeCacheStore;
 use openlogi_hid::{
     ChannelPool, DeviceIoGate, DeviceRoute, Enumerator, FileProbeCacheStore, InventoryError,
-    LitraModel, PairingCommand, PairingEvent, ReceiverSelector,
+    LightWatch, LitraModel, PairingCommand, PairingEvent, ReceiverSelector,
 };
 use tokio::sync::mpsc;
 
@@ -123,8 +123,18 @@ impl HardwareContext {
         route: &DeviceRoute,
         model: LitraModel,
         command: LightCommand,
-    ) -> Result<(), WriteError> {
+    ) -> Result<Option<LightState>, WriteError> {
         openlogi_hid::write::apply_litra(&*self.backend, route, model, command).await
+    }
+
+    /// Watch the Litra `route` reaches for changes made on the light itself
+    /// (`None` when only its raw report reaches it).
+    pub(crate) async fn watch_litra(
+        &self,
+        route: &DeviceRoute,
+        model: LitraModel,
+    ) -> Result<Option<LightWatch>, WriteError> {
+        openlogi_hid::write::watch_litra(&*self.backend, route, model).await
     }
 
     fn from_parts(
@@ -141,3 +151,7 @@ impl HardwareContext {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "context/corpus_tests.rs"]
+mod corpus_tests;

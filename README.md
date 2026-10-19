@@ -1,7 +1,7 @@
 > [!WARNING]
 > **OpenLogi is under active development** and not yet stable — features and config may still change. Give the repo a **Star** ⭐ and **Watch** 👀 it to get notified when a new release lands.
 
-<h4 align="right"><strong>English</strong> | <a href="docs/README.zh-CN.md">简体中文</a> | <a href="docs/README.ja.md">日本語</a> | <a href="docs/README.de.md">Deutsch</a> | <a href="docs/README.fr.md">Français</a> | <a href="docs/README.ko.md">한국어</a> | <a href="docs/README.ru.md">Русский</a></h4>
+<h4 align="right"><strong>English</strong> | <a href="docs/README.zh-CN.md">简体中文</a> | <a href="docs/README.ja.md">日本語</a> | <a href="docs/README.de.md">Deutsch</a> | <a href="docs/README.fr.md">Français</a> | <a href="docs/README.ko.md">한국어</a> | <a href="docs/README.ru.md">Русский</a> | <a href="docs/README.es.md">Español</a> | <a href="docs/README.pt-BR.md">Português</a> | <a href="docs/README.tr.md">Türkçe</a></h4>
 
 <p align="center">
     <img src="https://assets.openlogi.org/brand/openlogi-icon.png" width="138" alt="OpenLogi"/>
@@ -47,11 +47,14 @@ Things OpenLogi does that Options+ won't:
 - **Run on Linux.** Linux is a first-class platform in OpenLogi.
 - **Gestures on supported buttons.** Assign gesture actions to supported controls — or turn gestures off entirely.
 - **Plain-text config.** Everything is one TOML file you can sync between machines however you like.
-- **Script it.** A real CLI alongside the GUI.
+- **Script it.** A real CLI alongside the GUI, with [hardware diagnostics](docs/USAGE.md) for DPI, pointer scaling, and SmartShift.
 
 ## Features
 
 - Devices connected over Logi Bolt receivers, Unifying receivers, Bluetooth, or a wired connection, with battery percentage and charge state
+- Low-battery notices at the bottom of the screen, once per discharge, without an OS notification permission (on by default; Settings › General)
+- An on-screen indicator when a keyboard turns Caps Lock on or off, and Num Lock or Scroll Lock on Windows and Linux (`0x4220`, supported keyboards; on by default; Settings › General)
+- Easy-Switch channels: the name, OS, and connection of the computer paired on each channel, with a rename on devices that allow it (`0x1815`, supported devices)
 - Button remapping via the OS input hook: a built-in action catalog plus custom keyboard shortcuts authored in the TOML config, including independent short/long-press actions and hold-until-release chords for push-to-talk¹
 - Per-application profile overlays that auto-switch on app focus (macOS + Windows; Linux on X11 / XWayland only)
 - Litra lights: power, brightness, and color temperature, with optional auto power that follows camera activity
@@ -59,9 +62,9 @@ Things OpenLogi does that Options+ won't:
 **Mouse**
 
 - Capture and remap the middle, mode-shift, and thumbwheel buttons (middle everywhere, the rest where the device exposes them)
-- Per-direction gesture bindings with live capture on supported buttons: Back/Forward, DPI/ModeShift, the dedicated gesture button, and the haptic panel
+- Per-direction gesture bindings with live capture on supported buttons: Middle Click, Back/Forward, DPI/ModeShift, the dedicated gesture button, and the haptic panel
   - DPI/ModeShift gestures require device-reported diversion and raw-XY support.
-  - Primary clicks and wheel controls cannot be newly assigned gestures; existing Middle Click gesture bindings are preserved.
+  - Primary clicks and wheel rotation/tilt cannot be newly assigned gestures.
 - Actions Ring: a cursor-centred, eight-slot overlay of actions (`ShowActionsRing`), with per-application layouts
 - DPI control with presets and Cycle / Set-preset actions (`0x2201`)
 - SmartShift wheel: mode toggle, sensitivity, and a permanent-ratchet panel (`0x2111`)
@@ -76,7 +79,7 @@ Things OpenLogi does that Options+ won't:
 
 - Any Logitech UVC webcam (Brio, StreamCam, the C920 series, …), plug and play
 - Live preview that opens the camera only while you watch — leaving it releases the camera entirely and the LED goes off
-- Image controls written straight to the UVC hardware — zoom, focus, exposure, brightness, contrast, saturation, sharpness, white balance, tint, anti-flicker, and low-light compensation, with auto-mode toggles for focus / exposure / white balance — so changes apply in Meet / Zoom / OBS and every other app using the camera
+- Image controls written straight to the UVC hardware — zoom, pan, tilt, focus, exposure, brightness, contrast, saturation, sharpness, gain, backlight compensation, white balance, tint, anti-flicker, and low-light compensation, with auto-mode toggles for focus / exposure / white balance — so changes apply in Meet / Zoom / OBS and every other app using the camera
 - One-click profiles: built-in Default / Streaming / Video call plus custom snapshots; settings persist per camera and are written back to the hardware on the next view
 
 ¹ Media key actions use D-Bus MPRIS on Linux; a handful of macOS-specific actions have no universal Linux equivalent and are no-ops. Windows maps platform actions to native equivalents where available.
@@ -136,6 +139,27 @@ normal user, not with `sudo`. It installs the latest release by default. Use
 
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
 Pre-built packages require GLIBC 2.35 or newer (Ubuntu 22.04 baseline).
+
+Each release also carries a Flatpak bundle, for `amd64` and `arm64`:
+
+```sh
+flatpak install --user ./openlogi-*.flatpak
+```
+
+It is a one-time install: there is no remote behind it, so `flatpak update` has
+nothing to check and a new version means downloading the next bundle.
+
+A Flatpak cannot write to `/etc`, so its udev rules go on the host separately.
+They ship inside the application, so this needs no extra download:
+
+```sh
+flatpak run --command=cat org.openlogi.OpenLogi /app/share/openlogi/udev/70-openlogi.rules | sudo tee /etc/udev/rules.d/70-openlogi.rules >/dev/null && sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+Until that runs, no devices are detected at all. Nothing extra is needed for
+`/dev/uinput`: the rules create its node at boot with `static_node=uinput`, and
+opening it loads the module. The agent is launched by the application itself, so
+unlike the packages below there is no user service to enable.
 
 NixOS users can instead import the repository's module, which installs the
 package and udev rules and starts the agent with the graphical session:
@@ -199,11 +223,12 @@ See [USAGE.md](docs/USAGE.md)
 
 ## Configuration
 
-See [CONFIGURATION.md](docs/CONFIGURATION.md)
+Settings use plain TOML; saves preserve symlinked config files. See
+[CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Developing
 
-See [DEVELOPMENT.md](docs/DEVELOPMENT.md)
+See [DEVELOPMENT.md](docs/DEVELOPMENT.md), including [macOS input-hook safety](docs/DEVELOPMENT.md#macos-input-hook-safety).
 
 ## Acknowledgments
 

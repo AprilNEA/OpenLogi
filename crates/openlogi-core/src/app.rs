@@ -17,9 +17,12 @@ use serde::{Deserialize, Serialize};
 /// exists only so a UI never has to show a reverse-DNS string to a human.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForegroundApp {
-    /// The exact string a per-app profile key is compared against: a macOS
-    /// bundle identifier, an X11 `WM_CLASS` class or a Wayland xdg `app_id` on
-    /// Linux, or the lower-cased executable path on Windows.
+    /// The exact application identifier a per-app profile key is compared against:
+    ///
+    /// - macOS: the bundle identifier, or the executable path when no bundle
+    ///   identifier is available. Paths retain their original spelling and case.
+    /// - Linux: the X11 `WM_CLASS` class or Wayland xdg `app_id`.
+    /// - Windows: the lower-cased executable path.
     ///
     /// Those namespaces do not map onto one another by any simple string rule,
     /// which is why a profile authored under one of them will not match under

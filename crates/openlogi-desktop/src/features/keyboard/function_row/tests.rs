@@ -24,6 +24,20 @@ fn clicking_the_selected_key_closes_the_panel() {
 }
 
 #[test]
+fn picking_the_current_action_clears_the_binding() {
+    assert_eq!(binding_after_pick(Some(&Action::Copy), Action::Copy), None);
+}
+
+#[test]
+fn picking_an_action_sets_or_replaces_the_binding() {
+    assert_eq!(binding_after_pick(None, Action::Copy), Some(Action::Copy));
+    assert_eq!(
+        binding_after_pick(Some(&Action::Paste), Action::Copy),
+        Some(Action::Copy)
+    );
+}
+
+#[test]
 fn hover_or_selection_highlights_a_key() {
     assert!(key_is_highlighted(2, Some(2), None));
     assert!(key_is_highlighted(2, None, Some(2)));
@@ -61,6 +75,7 @@ fn fallback_key_positions_cover_the_full_top_row() {
 /// F1–F3, so the first marked key is F4's backlight control (#711).
 #[test]
 fn control_markers_become_control_slots_in_reading_order() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
     let asset = asset_with_controls(&[
         (0x00e2, 27.9, 13.8),
@@ -101,6 +116,7 @@ fn control_markers_become_control_slots_in_reading_order() {
 /// still a key, named by its number.
 #[test]
 fn control_slots_read_row_by_row_and_name_unknown_controls_by_number() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
     let asset = asset_with_controls(&[
         (0x0118, 93.6, 25.3),

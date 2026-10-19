@@ -1,8 +1,8 @@
 use core_graphics::event::{CGEventFlags, EventField};
 use openlogi_core::binding::Shortcut;
 
-use super::{combo, held_key_event, hid_usage_to_macos, key_event};
-use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
+use super::{LOCK_SCREEN_CHORD, combo, held_key_event, hid_usage_to_macos, key_event};
+use crate::inject::{HeldKey, HeldModifiers, KeyPhase, parse_shortcut};
 
 #[test]
 fn hid_usages_map_to_macos_virtual_keys() {
@@ -38,6 +38,19 @@ fn combo_table_pins_representative_shortcuts() {
             "{shortcut:?} table entry has no macOS virtual-key mapping"
         );
     }
+}
+
+/// Lock Screen is the one chord outside the `combo` table, so the table loop
+/// above never parses it. Pin it the same way: it must parse to the chord the
+/// Apple menu shows, and its key must resolve to a macOS virtual key.
+#[test]
+fn lock_screen_chord_parses_and_resolves() {
+    let chord = parse_shortcut(LOCK_SCREEN_CHORD);
+    assert_eq!(chord.rendered_label(), "Cmd+Ctrl+Q");
+    assert!(
+        hid_usage_to_macos(chord.key().code()).is_some(),
+        "the Lock Screen chord has no macOS virtual-key mapping"
+    );
 }
 
 #[test]

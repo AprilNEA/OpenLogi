@@ -6,7 +6,13 @@
 //! without panicking.
 
 use std::io;
-use std::sync::{LazyLock, Mutex};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
+use std::sync::{
+    LazyLock, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
@@ -131,44 +137,329 @@ fn dispatch_media(key: MediaKey) {
 /// Dispatch a window-manager or power [`NativeAction`]. `action` is only
 /// used for its label in the "no Linux equivalent" debug log.
 fn dispatch_native(action: &Action, native: NativeAction) {
+    if hyprland_session() {
+        tracing::debug!(
+            desktop = std::env::var("XDG_CURRENT_DESKTOP")
+                .ok()
+                .as_deref()
+                .unwrap_or(""),
+            "Hyprland native table selected"
+        );
+        dispatch_hyprland_native(action, native);
+        return;
+    }
+    dispatch_generic_linux_native(action, native);
+}
+
+fn dispatch_generic_linux_native(action: &Action, native: NativeAction) {
     let ctrl = KeyCode::KEY_LEFTCTRL;
     let alt = KeyCode::KEY_LEFTALT;
     match native {
-        // No universal Linux equivalent; the compositor shortcut varies.
-        NativeAction::MissionControl
-        | NativeAction::AppExpose
-        | NativeAction::ShowDesktop
-        | NativeAction::LaunchpadShow => {
-            tracing::debug!(
-                action = action.label(),
-                "no Linux equivalent — action skipped"
-            );
+        // On KDE, KWin's Overview effect via its global-shortcut component.
+        // GNOME's overlay key toggles the Activities overview on a bare tap;
+        // no other tested desktop binds Super alone the same way (KDE opens
+        // KRunner), so the key only fires under GNOME. Activities shows every
+        // window across every app, not just the frontmost app's — that is
+        // MissionControl's contract, not AppExpose's, so AppExpose must not
+        // share this arm without its own promised single-app scope.
+        NativeAction::MissionControl => {
+            if is_kde() {
+                kwin_invoke_shortcut(action, "Overview");
+            } else {
+                gnome_key_or_skip(action, &[], KeyCode::KEY_LEFTMETA);
+            }
         }
-        // Ctrl+Alt+←/→ is the default in GNOME and KDE.
-        NativeAction::PreviousDesktop => press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
-        NativeAction::NextDesktop => press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
+        // KWin's "Expose windows of current class" effect keeps the
+        // single-app scope. GNOME has no stock single-app window-exposé
+        // binding (Activities shows every app), so everywhere else skips
+        // rather than substitute the wrong scope.
+        NativeAction::AppExpose => {
+            if is_kde() {
+                kwin_invoke_shortcut(action, "ExposeClass");
+            } else {
+                tracing::debug!(
+                    action = action.label(),
+                    "no Linux equivalent — action skipped"
+                );
+            }
+        }
+        // KWin's show-desktop toggle on KDE; GNOME's default "Show desktop"
+        // keybinding otherwise.
+        NativeAction::ShowDesktop => {
+            if is_kde() {
+                kwin_toggle_show_desktop(action);
+            } else {
+                gnome_key_or_skip(action, &[KeyCode::KEY_LEFTMETA], KeyCode::KEY_D);
+            }
+        }
+        // GNOME's default "Show Applications" keybinding.
+        NativeAction::LaunchpadShow => {
+            gnome_key_or_skip(action, &[KeyCode::KEY_LEFTMETA], KeyCode::KEY_A);
+        }
+        // Ctrl+Alt+←/→ is the default in GNOME and KDE; on KDE, drive KWin's
+        // D-Bus API directly and fall back to the key combo elsewhere.
+        NativeAction::PreviousDesktop => {
+            kwin_switch_desktop("previousDesktop")
+                .unwrap_or_else(|| press_key(&[ctrl, alt], KeyCode::KEY_LEFT));
+        }
+        NativeAction::NextDesktop => {
+            kwin_switch_desktop("nextDesktop")
+                .unwrap_or_else(|| press_key(&[ctrl, alt], KeyCode::KEY_RIGHT));
+        }
         // logind LockSession() via the system bus; falls back to Super+L.
         NativeAction::LockScreen => lock_screen(),
-        // Region vs full-screen capture depends on the desktop environment's
-        // screenshot handler for Print Screen, so both map to the same key.
-        NativeAction::Screenshot | NativeAction::CaptureRegion => {
-            press_key(&[], KeyCode::KEY_SYSRQ);
+        NativeAction::Screenshot => press_key(&[], KeyCode::KEY_SYSRQ),
+        // Print alone only opens the region selector on GNOME >= 42; other
+        // desktops need an extra chord (see `capture_region_mods`).
+        NativeAction::CaptureRegion => {
+            press_key(
+                &capture_region_mods(current_desktop().as_deref()),
+                KeyCode::KEY_SYSRQ,
+            );
         }
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
     }
 }
 
+fn dispatch_hyprland_native(action: &Action, native: NativeAction) {
+    match native {
+        NativeAction::MissionControl | NativeAction::AppExpose | NativeAction::ShowDesktop => {
+            skip_unsupported_native(action);
+        }
+        NativeAction::LaunchpadShow | NativeAction::PreviousDesktop | NativeAction::NextDesktop => {
+            if let Some((helper, fallback)) = hyprland_helper(native) {
+                run_helper_or_chord(helper, fallback);
+            }
+        }
+        NativeAction::LockScreen => lock_screen_hyprland(),
+        NativeAction::Screenshot | NativeAction::CaptureRegion => {
+            press_key(&[], KeyCode::KEY_SYSRQ);
+        }
+        NativeAction::Sleep => sleep_system(),
+    }
+}
+
+fn skip_unsupported_native(action: &Action) {
+    tracing::debug!(
+        action = action.label(),
+        "no Linux equivalent — action skipped"
+    );
+}
+
+/// Hyprland compositor session. Gate is the instance signature only —
+/// `XDG_CURRENT_DESKTOP` is logged for diagnostics and must not select the table.
+fn hyprland_session() -> bool {
+    hyprland_session_from_signature(std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok().as_deref())
+}
+
+fn hyprland_session_from_signature(signature: Option<&str>) -> bool {
+    signature.is_some_and(|value| !value.is_empty())
+}
+
+const HELPER_PREFIXES: [&str; 2] = ["/usr/bin", "/usr/local/bin"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HelperSpec {
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChordSpec {
+    modifiers: &'static [KeyCode],
+    key: KeyCode,
+}
+
+fn hyprland_helper(native: NativeAction) -> Option<(HelperSpec, ChordSpec)> {
+    match native {
+        NativeAction::LaunchpadShow => Some((
+            HelperSpec {
+                program: "omarchy-menu",
+                args: &["toggle"],
+            },
+            ChordSpec {
+                modifiers: &[KeyCode::KEY_LEFTMETA],
+                key: KeyCode::KEY_SPACE,
+            },
+        )),
+        NativeAction::NextDesktop => Some((
+            HelperSpec {
+                program: "hyprctl",
+                args: &["dispatch", "workspace", "e+1"],
+            },
+            ChordSpec {
+                modifiers: &[KeyCode::KEY_LEFTMETA],
+                key: KeyCode::KEY_TAB,
+            },
+        )),
+        NativeAction::PreviousDesktop => Some((
+            HelperSpec {
+                program: "hyprctl",
+                args: &["dispatch", "workspace", "e-1"],
+            },
+            ChordSpec {
+                modifiers: &[KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT],
+                key: KeyCode::KEY_TAB,
+            },
+        )),
+        _ => None,
+    }
+}
+
+fn hyprland_lock_helper() -> HelperSpec {
+    HelperSpec {
+        program: "omarchy-system-lock",
+        args: &[],
+    }
+}
+
+fn hyprland_lock_fallback_chord() -> ChordSpec {
+    ChordSpec {
+        modifiers: &[KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTCTRL],
+        key: KeyCode::KEY_L,
+    }
+}
+
+fn generic_linux_lock_fallback_chord() -> ChordSpec {
+    ChordSpec {
+        modifiers: &[KeyCode::KEY_LEFTMETA],
+        key: KeyCode::KEY_L,
+    }
+}
+
+fn run_helper_or_chord(helper: HelperSpec, fallback: ChordSpec) {
+    if run_fixed_argv(helper.program, helper.args, fallback) {
+        return;
+    }
+    press_key(fallback.modifiers, fallback.key);
+}
+
+/// Spawn one allowlisted absolute helper. Never searches `PATH` and never
+/// shells out through `/bin/sh -c` (that path is only for user
+/// `RunShellCommand`). A concurrent request uses its keyboard fallback instead
+/// of creating another process.
+fn run_fixed_argv(program: &str, args: &[&str], fallback: ChordSpec) -> bool {
+    let Some(path) = resolve_allowlisted(program) else {
+        tracing::debug!(
+            program,
+            "Hyprland helper not in an allowlisted directory — using chord fallback"
+        );
+        return false;
+    };
+    if HELPER_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+        tracing::debug!(
+            program,
+            "Hyprland helper already in flight — using chord fallback"
+        );
+        return false;
+    }
+    match Command::new(&path).args(args).spawn() {
+        Ok(child) => {
+            std::thread::spawn(move || wait_for_helper(child, fallback));
+            true
+        }
+        Err(error) => {
+            HELPER_IN_FLIGHT.store(false, Ordering::Release);
+            tracing::warn!(
+                program = %path.display(),
+                %error,
+                "failed to spawn Hyprland helper — using chord fallback"
+            );
+            false
+        }
+    }
+}
+
+const HELPER_TIMEOUT: Duration = Duration::from_secs(2);
+static HELPER_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+fn wait_for_helper(mut child: Child, fallback: ChordSpec) {
+    let deadline = Instant::now() + HELPER_TIMEOUT;
+    let succeeded = loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break true,
+            Ok(Some(status)) => {
+                tracing::debug!(
+                    %status,
+                    "Hyprland helper exited unsuccessfully — using chord fallback"
+                );
+                break false;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                tracing::warn!("Hyprland helper timed out — using chord fallback");
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed while waiting for Hyprland helper — using chord fallback"
+                );
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+        }
+    };
+    if !succeeded {
+        press_key(fallback.modifiers, fallback.key);
+    }
+    HELPER_IN_FLIGHT.store(false, Ordering::Release);
+}
+
+fn resolve_allowlisted(name: &str) -> Option<PathBuf> {
+    resolve_allowlisted_under(name, &HELPER_PREFIXES)
+}
+
+fn resolve_allowlisted_under(name: &str, prefixes: &[&str]) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    prefixes
+        .iter()
+        .map(|prefix| Path::new(prefix).join(name))
+        .find(|path| path.is_file())
+}
+
+/// Press `mods`+`key` under GNOME; log the existing "no Linux equivalent"
+/// skip everywhere else, since Super-based bindings vary by desktop.
+fn gnome_key_or_skip(action: &Action, mods: &[KeyCode], key: KeyCode) {
+    if is_gnome() {
+        press_key(mods, key);
+    } else {
+        tracing::debug!(
+            action = action.label(),
+            "no Linux equivalent — action skipped"
+        );
+    }
+}
+
+fn is_gnome() -> bool {
+    desktop_is_gnome(std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default())
+}
+
+/// The pure half of [`is_gnome`], taking the desktop string directly instead
+/// of reading it from the process environment — so tests can drive it
+/// without `std::env::set_var`, which cannot be scoped to just this test:
+/// the process environment is process-wide, and a private test-only mutex
+/// only serializes callers that take it, not every other reader (including
+/// `is_gnome` itself, called from unrelated code running concurrently).
+fn desktop_is_gnome(current_desktop: impl AsRef<str>) -> bool {
+    current_desktop.as_ref().to_lowercase().contains("gnome")
+}
+
 /// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
 /// (-1/0/1) scaled by the fixed relative-axis magnitude the four
 /// `Scroll*`/`HorizontalScroll*` actions have always used.
 fn dispatch_scroll(dx: i8, dy: i8) {
-    if dy != 0 {
-        scroll(RelativeAxisCode::REL_WHEEL, i32::from(dy) * 3);
-    }
-    if dx != 0 {
-        scroll(RelativeAxisCode::REL_HWHEEL, i32::from(dx) * 3);
-    }
+    post_scroll(action_scroll(dx, dy));
+}
+
+fn action_scroll(dx: i8, dy: i8) -> ScrollDelta {
+    ScrollDelta::wheel_ticks(f64::from(dx) * 3.0, f64::from(dy) * 3.0)
 }
 
 /// Not implemented yet: unicode text has no uinput encoding without a keymap.
@@ -189,13 +480,22 @@ pub(super) fn run_shell_command(cmd: &str) {
         .output();
 }
 
-const DEVICE_NAME: &str = "OpenLogi action injector";
+/// Settle time after creating the uinput device, before its first emit.
+///
+/// `/dev/uinput` creation is synchronous, but udev, libinput, and the display
+/// server noticing the new event node and opening it are not — and an evdev
+/// reader never sees events written before it opens the device. Emitting the
+/// very first action right after creation races that pickup and is silently
+/// dropped, with every later action working once the display server has
+/// caught up (#1800).
+const UINPUT_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
 
 static VIRTUAL_INPUT: LazyLock<Option<Mutex<VirtualDevice>>> = LazyLock::new(|| {
-    build()
-        .map(Mutex::new)
+    let device = build()
         .map_err(|e| tracing::warn!("failed to create uinput action device: {e}"))
-        .ok()
+        .ok()?;
+    std::thread::sleep(UINPUT_SETTLE);
+    Some(Mutex::new(device))
 });
 
 #[rustfmt::skip]
@@ -222,7 +522,7 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     KeyCode::KEY_HOME,  KeyCode::KEY_END,   KeyCode::KEY_PAGEUP,   KeyCode::KEY_PAGEDOWN,
     KeyCode::KEY_TAB,   KeyCode::KEY_ENTER, KeyCode::KEY_BACKSPACE, KeyCode::KEY_DELETE,
     KeyCode::KEY_ESC,   KeyCode::KEY_SPACE,
-    // Modifiers (KEY_LEFTMETA used by the LockScreen Super+L fallback)
+    // Modifiers (KEY_LEFTMETA used by LockScreen Super+L and Hyprland Super+Ctrl+L)
     KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_LEFTALT, KeyCode::KEY_LEFTMETA,
     // Function keys
     KeyCode::KEY_F1,  KeyCode::KEY_F2,  KeyCode::KEY_F3,  KeyCode::KEY_F4,
@@ -261,8 +561,7 @@ fn build() -> io::Result<VirtualDevice> {
         axes.insert(a);
     }
 
-    VirtualDevice::builder()?
-        .name(DEVICE_NAME)
+    crate::uinput::builder(crate::uinput::Device::ActionInjector)?
         .with_keys(&keys)?
         .with_relative_axes(&axes)?
         .build()
@@ -336,11 +635,6 @@ fn click(button: KeyCode) {
     emit(&[key_ev(button, 0), syn()]);
 }
 
-/// Inject a single relative-axis delta followed by `SYN_REPORT`.
-fn scroll(axis: RelativeAxisCode, value: i32) {
-    emit(&[rel_ev(axis, value), syn()]);
-}
-
 pub(super) fn post_scroll(delta: ScrollDelta) {
     let ScrollDelta::WheelTicks { .. } = delta else {
         tracing::debug!("pixel scroll output is unsupported on Linux");
@@ -350,12 +644,20 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
         tracing::warn!("Linux scroll quantizer mutex poisoned");
         return;
     };
+    let events = scroll_events(&mut output, delta);
+    drop(output);
+    if !events.is_empty() {
+        emit(&events);
+    }
+}
+
+/// One `SYN_REPORT` frame carrying `delta` on the hi-res and legacy axes, or
+/// nothing while the quantizers hold less than one unit.
+fn scroll_events(output: &mut ScrollOutput, delta: ScrollDelta) -> Vec<InputEvent> {
     let high_resolution = output
         .high_resolution
         .quantize(delta, HIGH_RES_UNITS_PER_TICK);
     let legacy = output.legacy.quantize(delta, 1.0);
-    drop(output);
-
     let mut events = Vec::with_capacity(5);
     push_scroll_axes(
         &mut events,
@@ -371,8 +673,8 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
     );
     if !events.is_empty() {
         events.push(syn());
-        emit(&events);
     }
+    events
 }
 
 fn push_scroll_axes(
@@ -563,32 +865,83 @@ static SYSTEM_BUS: LazyLock<Option<DbusConn>> = LazyLock::new(|| {
         .ok()
 });
 
+/// Lock the session identified by `$XDG_SESSION_ID` via logind. Returns
+/// `true` when the D-Bus call succeeded. Skips the bus entirely when the
+/// session id is unset so we never lock every session on the machine.
+fn try_logind_lock() -> bool {
+    let (Some(conn), Ok(id)) = (SYSTEM_BUS.as_ref(), std::env::var("XDG_SESSION_ID")) else {
+        return false;
+    };
+    match conn.call_method(
+        Some("org.freedesktop.login1"),
+        "/org/freedesktop/login1",
+        Some("org.freedesktop.login1.Manager"),
+        "LockSession",
+        &(id.as_str(),),
+    ) {
+        Ok(_) => {
+            tracing::debug!("LockScreen via logind");
+            true
+        }
+        Err(e) => {
+            tracing::warn!("logind LockSession failed: {e}");
+            false
+        }
+    }
+}
+
 /// Lock the screen via logind `LockSession($XDG_SESSION_ID)` on the system
 /// bus, falling back to Super+L.
 ///
-/// Only the session identified by `$XDG_SESSION_ID` is locked; if the
-/// variable is unset the D-Bus path is skipped entirely to avoid locking
-/// all sessions on the machine. Super+L covers non-systemd systems and the
-/// no-session-id case.
+/// Super+L covers non-systemd systems and the no-session-id case on GNOME/KDE.
 fn lock_screen() {
-    if let (Some(conn), Ok(id)) = (SYSTEM_BUS.as_ref(), std::env::var("XDG_SESSION_ID")) {
-        match conn.call_method(
-            Some("org.freedesktop.login1"),
-            "/org/freedesktop/login1",
-            Some("org.freedesktop.login1.Manager"),
-            "LockSession",
-            &(id.as_str(),),
-        ) {
-            Ok(_) => {
-                tracing::debug!("LockScreen via logind");
-                return;
-            }
-            Err(e) => tracing::warn!("logind LockSession failed: {e}"),
-        }
+    if try_logind_lock() {
+        return;
     }
     // Super+L is the standard lock shortcut on GNOME and KDE.
     tracing::debug!("LockScreen via Super+L key combo");
-    press_key(&[KeyCode::KEY_LEFTMETA], KeyCode::KEY_L);
+    let chord = generic_linux_lock_fallback_chord();
+    press_key(chord.modifiers, chord.key);
+}
+
+/// Hyprland lock: `omarchy-system-lock`, then Super+Ctrl+L.
+///
+/// Do not call logind `LockSession` here. A successful D-Bus reply only
+/// signals the session; Hyprland does not listen, so treating OK as locked
+/// skips the Omarchy helper and leaves the screen unlocked. Never Super+L —
+/// that chord toggles workspace layout on Omarchy.
+fn lock_screen_hyprland() {
+    let helper = hyprland_lock_helper();
+    run_helper_or_chord(helper, hyprland_lock_fallback_chord());
+}
+
+/// `$XDG_CURRENT_DESKTOP`, lowercased, or `None` if unset.
+fn current_desktop() -> Option<String> {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .ok()
+        .map(|d| d.to_lowercase())
+}
+
+/// The extra modifiers Print needs to open the region selector instead of
+/// taking a full-screen shot, chosen from the (colon-separated)
+/// `$XDG_CURRENT_DESKTOP` value.
+///
+/// GNOME >= 42 already opens the interactive selector on a bare Print, and
+/// that is what an unset or unrecognised desktop keeps. Cinnamon, MATE and
+/// XFCE bind region capture to Shift+Print; KDE Plasma binds it to
+/// Meta+Shift+Print.
+fn capture_region_mods(desktop: Option<&str>) -> Vec<KeyCode> {
+    let Some(desktop) = desktop else {
+        return Vec::new();
+    };
+    let mut desktops = desktop.split(':');
+    if desktops.clone().any(|d| d == "kde") {
+        vec![KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT]
+    } else if desktops.any(|d| matches!(d, "x-cinnamon" | "cinnamon" | "mate" | "xfce")) {
+        vec![KeyCode::KEY_LEFTSHIFT]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Suspend the system via logind's `Suspend()` on the system bus. The
@@ -609,6 +962,123 @@ fn sleep_system() {
     ) {
         Ok(_) => tracing::debug!("Sleep via logind Suspend"),
         Err(e) => tracing::warn!("logind Suspend failed: {e}"),
+    }
+}
+
+fn is_kde() -> bool {
+    current_desktop().is_some_and(|d| d.contains("kde"))
+}
+
+/// The KWin session bus, but only on KDE. KDE is identified by the XDG_CURRENT_DESKTOP
+/// environment variable
+fn kwin_bus() -> Option<&'static DbusConn> {
+    if !is_kde() {
+        return None;
+    }
+    SESSION_BUS.as_ref().or_else(|| {
+        tracing::warn!("KDE session but no D-Bus session bus — KWin action skipped");
+        None
+    })
+}
+
+/// Trigger a named KWin effect (`Overview`, `ExposeClass`, …) through the
+/// KDE global-shortcut component. No-op with a debug log off KDE.
+fn kwin_invoke_shortcut(action: &Action, effect: &str) {
+    let Some(conn) = kwin_bus() else {
+        tracing::debug!(
+            action = action.label(),
+            "only implemented for KDE — action skipped"
+        );
+        return;
+    };
+    match conn.call_method(
+        Some("org.kde.kglobalaccel"),
+        "/component/kwin",
+        Some("org.kde.kglobalaccel.Component"),
+        "invokeShortcut",
+        &(effect,),
+    ) {
+        Ok(_) => tracing::debug!(effect, "invoked KWin shortcut"),
+        Err(e) => tracing::warn!("KWin invokeShortcut({effect}) failed: {e}"),
+    }
+}
+
+/// Held across the read-then-write in [`kwin_toggle_show_desktop`]: a button
+/// press and an Actions Ring selection run on different threads, and two
+/// interleaved toggles would otherwise both read the same state and collapse
+/// into one.
+static SHOW_DESKTOP_TOGGLE: Mutex<()> = Mutex::new(());
+
+/// Toggle KWin's "show desktop" state, reading the current value first so the
+/// action mirrors the native toggle. No-op with a debug log off KDE.
+fn kwin_toggle_show_desktop(action: &Action) {
+    let Some(conn) = kwin_bus() else {
+        tracing::debug!(
+            action = action.label(),
+            "only implemented for KDE — action skipped"
+        );
+        return;
+    };
+    let _toggle = SHOW_DESKTOP_TOGGLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let showing = match conn.call_method(
+        Some("org.kde.KWin"),
+        "/KWin",
+        Some("org.freedesktop.DBus.Properties"),
+        "Get",
+        &("org.kde.KWin", "showingDesktop"),
+    ) {
+        Ok(reply) => match reply.body().deserialize::<zbus::zvariant::Value<'_>>() {
+            Ok(value) => match value.downcast::<bool>() {
+                Ok(showing) => showing,
+                Err(e) => {
+                    tracing::warn!("KWin showingDesktop decode failed: {e}");
+                    return;
+                }
+            },
+            Err(e) => {
+                tracing::warn!("KWin showingDesktop decode failed: {e}");
+                return;
+            }
+        },
+        Err(e) => {
+            tracing::warn!("KWin showingDesktop query failed: {e}");
+            return;
+        }
+    };
+    match conn.call_method(
+        Some("org.kde.KWin"),
+        "/KWin",
+        Some("org.kde.KWin"),
+        "showDesktop",
+        &(!showing,),
+    ) {
+        Ok(_) => tracing::debug!(showing = !showing, "toggled KWin show-desktop"),
+        Err(e) => tracing::warn!("KWin showDesktop failed: {e}"),
+    }
+}
+
+/// Call a KWin virtual-desktop navigation method (`previousDesktop` /
+/// `nextDesktop`). Returns `None` when the action was not handled — off KDE,
+/// or when the D-Bus call failed — so the caller can fall back to a key combo.
+fn kwin_switch_desktop(method: &str) -> Option<()> {
+    let conn = kwin_bus()?;
+    match conn.call_method(
+        Some("org.kde.KWin"),
+        "/KWin",
+        Some("org.kde.KWin"),
+        method,
+        &(),
+    ) {
+        Ok(_) => {
+            tracing::debug!(method, "switched virtual desktop via KWin");
+            Some(())
+        }
+        Err(e) => {
+            tracing::warn!("KWin {method} failed: {e}");
+            None
+        }
     }
 }
 
@@ -670,10 +1140,16 @@ fn try_mpris_command(command: &str) -> Option<()> {
 
 #[cfg(test)]
 mod tests {
-    use evdev::KeyCode;
-    use openlogi_core::binding::{KeyCombo, Shortcut};
+    use evdev::{KeyCode, RelativeAxisCode};
+    use openlogi_core::binding::{KeyCombo, NativeAction, Shortcut};
 
-    use super::{combo, hid_usage_to_linux, key_ev, key_phase_events, modifiers_to_keycodes, syn};
+    use super::{
+        HELPER_PREFIXES, ScrollOutput, action_scroll, capture_region_mods, combo,
+        generic_linux_lock_fallback_chord, hid_usage_to_linux, hyprland_helper,
+        hyprland_lock_fallback_chord, hyprland_lock_helper, hyprland_session_from_signature,
+        key_ev, key_phase_events, modifiers_to_keycodes, rel_ev, resolve_allowlisted_under,
+        scroll_events, syn,
+    };
     use crate::inject::KeyPhase;
 
     #[test]
@@ -697,6 +1173,32 @@ mod tests {
                 syn(),
             ]
         );
+    }
+
+    /// libinput reads only the hi-res axes of a device that has them, so a
+    /// scroll action without them does nothing.
+    #[test]
+    fn scroll_actions_send_hi_res_and_legacy_axes_in_one_frame() {
+        let (wheel, wheel_hi) = (
+            RelativeAxisCode::REL_WHEEL,
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+        );
+        let (hwheel, hwheel_hi) = (
+            RelativeAxisCode::REL_HWHEEL,
+            RelativeAxisCode::REL_HWHEEL_HI_RES,
+        );
+        for (dx, dy, hi_res, legacy, sign) in [
+            (0, 1, wheel_hi, wheel, 1),
+            (0, -1, wheel_hi, wheel, -1),
+            (1, 0, hwheel_hi, hwheel, 1),
+            (-1, 0, hwheel_hi, hwheel, -1),
+        ] {
+            assert_eq!(
+                scroll_events(&mut ScrollOutput::default(), action_scroll(dx, dy)),
+                vec![rel_ev(hi_res, sign * 360), rel_ev(legacy, sign * 3), syn()],
+                "scroll ({dx}, {dy})"
+            );
+        }
     }
 
     #[test]
@@ -746,5 +1248,148 @@ mod tests {
                 "{shortcut:?} table entry has no Linux keycode mapping"
             );
         }
+    }
+
+    #[test]
+    fn hyprland_gate_is_signature_only() {
+        assert!(!hyprland_session_from_signature(None));
+        assert!(!hyprland_session_from_signature(Some("")));
+        assert!(hyprland_session_from_signature(Some(
+            "wayland-1_1234567890_1111111111"
+        )));
+    }
+
+    #[test]
+    fn hyprland_launchpad_maps_to_absolute_omarchy_menu_toggle() {
+        let (helper, fallback) = hyprland_helper(NativeAction::LaunchpadShow)
+            .expect("LaunchpadShow must have a Hyprland helper");
+        assert_eq!(helper.program, "omarchy-menu");
+        assert_eq!(helper.args, ["toggle"]);
+        assert_eq!(HELPER_PREFIXES, ["/usr/bin", "/usr/local/bin"]);
+        assert_eq!(fallback.modifiers, [KeyCode::KEY_LEFTMETA]);
+        assert_eq!(fallback.key, KeyCode::KEY_SPACE);
+    }
+
+    #[test]
+    fn hyprland_desktops_map_to_hyprctl_workspace() {
+        let (next, next_fallback) = hyprland_helper(NativeAction::NextDesktop)
+            .expect("NextDesktop must have a Hyprland helper");
+        assert_eq!(next.program, "hyprctl");
+        assert_eq!(next.args, ["dispatch", "workspace", "e+1"]);
+        assert_eq!(next_fallback.modifiers, [KeyCode::KEY_LEFTMETA]);
+        assert_eq!(next_fallback.key, KeyCode::KEY_TAB);
+
+        let (prev, prev_fallback) = hyprland_helper(NativeAction::PreviousDesktop)
+            .expect("PreviousDesktop must have a Hyprland helper");
+        assert_eq!(prev.program, "hyprctl");
+        assert_eq!(prev.args, ["dispatch", "workspace", "e-1"]);
+        assert_eq!(
+            prev_fallback.modifiers,
+            [KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(prev_fallback.key, KeyCode::KEY_TAB);
+    }
+
+    #[test]
+    fn hyprland_mac_only_natives_stay_skipped() {
+        assert_eq!(hyprland_helper(NativeAction::MissionControl), None);
+        assert_eq!(hyprland_helper(NativeAction::AppExpose), None);
+        assert_eq!(hyprland_helper(NativeAction::ShowDesktop), None);
+        assert_eq!(hyprland_helper(NativeAction::LockScreen), None);
+        assert_eq!(hyprland_helper(NativeAction::Screenshot), None);
+    }
+
+    #[test]
+    fn hyprland_lock_uses_omarchy_helper_not_logind() {
+        let helper = hyprland_lock_helper();
+        assert_eq!(helper.program, "omarchy-system-lock");
+        assert_eq!(helper.args, [] as [&str; 0]);
+        assert_eq!(HELPER_PREFIXES, ["/usr/bin", "/usr/local/bin"]);
+    }
+
+    #[test]
+    fn hyprland_lock_fallback_is_never_super_l() {
+        let hyprland = hyprland_lock_fallback_chord();
+        assert_eq!(
+            hyprland.modifiers,
+            [KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTCTRL]
+        );
+        assert_eq!(hyprland.key, KeyCode::KEY_L);
+
+        let generic = generic_linux_lock_fallback_chord();
+        assert_eq!(generic.modifiers, [KeyCode::KEY_LEFTMETA]);
+        assert_eq!(generic.key, KeyCode::KEY_L);
+        assert_ne!(hyprland.modifiers, generic.modifiers);
+    }
+
+    #[test]
+    fn allowlisted_helpers_are_absolute_and_reject_path_escape() {
+        let dir =
+            std::env::temp_dir().join(format!("openlogi-inject-allowlist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp allowlist dir");
+        let helper = dir.join("omarchy-menu");
+        std::fs::write(&helper, []).expect("placeholder helper file");
+
+        let prefix = dir.to_str().expect("utf-8 temp path");
+        let resolved = resolve_allowlisted_under("omarchy-menu", &[prefix]);
+        assert_eq!(resolved.as_deref(), Some(helper.as_path()));
+        assert!(resolved.expect("resolved helper").is_absolute());
+        assert_eq!(
+            resolve_allowlisted_under("../omarchy-menu", &[prefix]),
+            None
+        );
+        assert_eq!(
+            resolve_allowlisted_under("omarchy-menu/../../bin/sh", &[prefix]),
+            None
+        );
+        assert_eq!(
+            resolve_allowlisted_under("omarchy-menu", &["/no/such/openlogi-prefix"]),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gnome_detection_matches_on_current_desktop_case_insensitively() {
+        for (value, expected) in [
+            ("GNOME", true),
+            ("ubuntu:GNOME", true),
+            ("gnome-classic", true),
+            ("KDE", false),
+            ("", false),
+        ] {
+            assert_eq!(
+                super::desktop_is_gnome(value),
+                expected,
+                "XDG_CURRENT_DESKTOP={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_region_mods_picks_the_desktops_chord() {
+        assert_eq!(capture_region_mods(None), vec![]);
+        assert_eq!(capture_region_mods(Some("gnome")), vec![]);
+        assert_eq!(capture_region_mods(Some("unity")), vec![]);
+        assert_eq!(
+            capture_region_mods(Some("x-cinnamon")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("mate")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("xfce")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("kde")),
+            vec![KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT]
+        );
+        // GNOME-on-Ubuntu reports "ubuntu:gnome" — the compound string must
+        // still resolve to the GNOME (no-op) branch, not fall through.
+        assert_eq!(capture_region_mods(Some("ubuntu:gnome")), vec![]);
     }
 }

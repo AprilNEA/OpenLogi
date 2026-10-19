@@ -25,11 +25,15 @@ use tracing::warn;
 
 pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
+pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
+pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiLoad, FnLockLoad, SmartShiftLoad};
+pub use load::{
+    BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ReportRateLoad, SmartShiftLoad,
+};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +65,7 @@ use crate::state::devices::{build_device_list, pick_initial_device};
 
 mod action_ring;
 mod agent;
+mod backlight;
 mod bindings;
 mod camera;
 mod config;
@@ -69,19 +74,22 @@ mod device_session;
 mod device_store;
 mod devices;
 mod dpi;
+mod easy_switch;
 mod events;
 mod fn_lock;
 mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod os_layout;
 mod pointer;
+mod report_rate;
 mod scroll;
 mod settings;
 mod smartshift;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
@@ -210,7 +218,7 @@ impl AppState {
         Self::global(cx).update(cx, update)
     }
 
-    /// Start any pending DPI/SmartShift read for the selected device. Called
+    /// Start any pending device-setting read for the selected device. Called
     /// after inventory or selection changes; render paths only consume caches.
     pub(crate) fn load_current_device_reads(cx: &mut App) {
         Self::update(cx, |state, cx| {
@@ -218,6 +226,9 @@ impl AppState {
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
             state.load_current_fn_lock(cx);
+            state.load_current_report_rate(cx);
+            state.load_current_backlight(cx);
+            state.load_current_easy_switch(cx);
         });
     }
 
@@ -281,7 +292,7 @@ impl AppState {
         // Plain `persist_config`, not `persist_and_reload` as
         // `refresh_inventories` uses for the same fold: there is no agent
         // connection to reload yet this early in startup, and the
-        // unconditional `ReloadConfig` send at the end of this constructor
+        // unconditional `LoadConfig` send at the end of this constructor
         // (below) already covers both branches once `state` is fully built —
         // sending it here too would just queue a second, redundant reload.
         if adopted {
@@ -290,7 +301,7 @@ impl AppState {
             state.persist_config("device identity");
         }
         if state.config.should_reload_agent() {
-            state.send_ipc(crate::services::ipc::ReloadConfig);
+            state.send_ipc(crate::services::ipc::LoadConfig);
         }
         state
     }
@@ -312,8 +323,23 @@ impl AppState {
     /// next reconnect or wake. A failed write restores the last persisted
     /// config and surfaces the persistence error in the GUI.
     fn persist_and_reload(&mut self, what: &str) -> bool {
+        self.persist_and_reload_choosing(what, Vec::new())
+    }
+
+    /// [`Self::persist_and_reload`] for a save in which the user set controls
+    /// of lights without a write to the light. `chosen` names them, so the
+    /// agent drops the changes made on the lights for those controls
+    /// ([`openlogi_ipc::Agent::reload_saved_config`]). The reload carries the
+    /// revision of the file this save wrote, so the agent can tell an edit
+    /// made after the save.
+    fn persist_and_reload_choosing(
+        &mut self,
+        what: &str,
+        chosen: Vec<openlogi_ipc::ChosenLight>,
+    ) -> bool {
         if self.persist_config(what) {
-            self.send_ipc(crate::services::ipc::ReloadConfig);
+            let revision = self.config.revision();
+            self.send_ipc(crate::services::ipc::ReloadConfig { chosen, revision });
             true
         } else {
             false

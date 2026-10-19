@@ -294,21 +294,44 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_fn_lock_written(&key, result));
                 });
             }
-            ipc::GuiUpdate::DeviceUnpaired {
-                record_key,
+            ipc::GuiUpdate::ReportRateWritten { key, route, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_report_rate_written(&key, &route, result)
+                    });
+                });
+            }
+            ipc::GuiUpdate::BacklightWritten {
+                key,
                 route,
-                config_key,
+                write,
                 result,
             } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| {
-                        state.apply_device_unpaired(
-                            &record_key,
-                            &route,
-                            config_key.as_deref(),
-                            result,
-                        )
+                        state.apply_backlight_written(&key, &route, write, result)
                     });
+                });
+            }
+            ipc::GuiUpdate::EasySwitchHostRenamed {
+                key,
+                route,
+                write,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_easy_switch_host_renamed(&key, &route, write, result)
+                    });
+                });
+            }
+            ipc::GuiUpdate::DeviceUnpaired {
+                route,
+                intent,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_unpaired(&route, intent, result));
                 });
             }
         }

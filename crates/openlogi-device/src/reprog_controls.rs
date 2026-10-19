@@ -6,11 +6,14 @@
 //! `getCtrlIdInfo` (walk the control table and confirm a control can divert or
 //! report raw XY), `getCidReporting` (snapshot a control before arming it) and
 //! `setCidReporting` (turn diversion on or off, and hand the control back).
-//! While a control is diverted with raw-XY reporting, the device emits two
-//! unsolicited events, decoded by [`decode_event`]:
+//! While a control is diverted, the device emits these unsolicited events,
+//! the first two decoded by [`decode_event`] and the third by
+//! [`decode_raw_wheel_event`]:
 //!
 //! - function `0` `divertedButtonsEvent` — up to four currently-pressed CIDs.
 //! - function `1` `rawXYEvent` — signed `dx`/`dy` while a raw-XY control is held.
+//! - function `4` `divertedRawWheel` — the main wheel's movement while a
+//!   control diverted with raw-wheel reporting is held, in place of scrolling.
 //!
 //! Wire formats cross-checked against Solaar's `hidpp20.py` and
 //! `notifications.py`.
@@ -25,7 +28,7 @@ use hidpp::{
 
 mod event;
 
-pub use event::{RawControlEvent, decode_event};
+pub use event::{RawControlEvent, RawWheelEvent, decode_event, decode_raw_wheel_event};
 pub use hidpp_reprog::{
     AnalyticsKeyEvent, CidFlags, CidInfo, CidReporting, CidReportingChange, CidReportingChangeEcho,
     ControlId, GroupMask, RawWheelResolution, ReprogControlsCapabilities, ReprogControlsEvent,
@@ -43,15 +46,25 @@ pub const FEATURE_ID: u16 = 0x1b04;
 /// panel is [`HAPTIC_PANEL_CID`], not this CID.
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 
+/// Control ID of the multiplatform mice's thumb gesture button
+/// (`Multiplatform gesture button`) — the M720 Triathlon's thumb button,
+/// which reports this CID instead of [`GESTURE_BUTTON_CID`].
+///
+/// Confirmed on real hardware (M720, Bluetooth): divertable with raw-XY, task
+/// `0x00ad`. Undiverted, the firmware runs its own host action, so every
+/// binding on the button was ignored until this CID was a gesture source.
+pub const MULTIPLATFORM_GESTURE_BUTTON_CID: u16 = control_ids::MULTIPLATFORM_GESTURE_BUTTON.0;
+
 /// Control ID of the MX Master 4 Haptic Sense Panel — the touch-sensitive
 /// thumb rest that replaces the dedicated gesture button on that model.
 ///
 /// Reverse-engineered on real hardware (MX Master 4, Bolt receiver); not in
 /// the published `0x1b04` control-ID lists. Press/release arrive as
 /// `divertedButtonsEvent` with this CID, and while touched the panel streams
-/// relative raw-XY at ~125 Hz exactly like the dedicated gesture button —
-/// except that the first raw-XY sample after contact is a large position jump
-/// that must be discarded before feeding a swipe accumulator.
+/// relative raw-XY at ~125 Hz exactly like the dedicated gesture button. Its
+/// first raw-XY sample after contact is a large position jump; like every
+/// gesture source's first sample, it is discarded before feeding a swipe
+/// accumulator.
 ///
 /// The typed source of truth is [`control_ids::HAPTIC_PANEL`].
 pub const HAPTIC_PANEL_CID: u16 = control_ids::HAPTIC_PANEL.0;
@@ -116,6 +129,13 @@ impl CtrlIdInfo {
     #[must_use]
     pub fn supports_raw_xy(self) -> bool {
         self.typed_flags().supports_raw_xy()
+    }
+
+    /// Whether the control can report the main wheel's movement while held,
+    /// in place of scrolling — required for a wheel-hold button.
+    #[must_use]
+    pub fn supports_raw_wheel(self) -> bool {
+        self.typed_flags().supports_raw_wheel()
     }
 
     /// Whether the control can report analytics key events.

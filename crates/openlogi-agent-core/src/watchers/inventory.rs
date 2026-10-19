@@ -3,9 +3,9 @@
 //! A dedicated thread owns the persistent enumerator and every HID++ channel
 //! it opens. OS hotplug, receiver/device lifecycle broadcasts, native/system
 //! resume, bounded repair, and settings confirmation are typed reasons to run
-//! one full authoritative reconciliation. A named half-minute recovery scan is
-//! retained because some firmware/hosts miss lifecycle events and legacy or
-//! voltage battery features have no broadcast API.
+//! one full authoritative reconciliation. A recovery scan runs inside the probe
+//! cache's freshness window because some firmware/hosts miss lifecycle events
+//! and legacy or voltage battery features have no broadcast API.
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::pending;
@@ -13,14 +13,15 @@ use std::time::{Instant, SystemTime};
 
 use futures_lite::StreamExt as _;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_hid::inventory::events::HidppEventSource;
+use openlogi_hid::inventory::events::{BacklightUpdate, HidppEventSource, LockKeyUpdate};
 use openlogi_hid::{ChannelRegistry, DeviceIoGate};
-use tokio::sync::mpsc;
+use openlogi_ipc::LockKeyChange;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use schedule::{
     DeadlinePurpose, HID_EVENT_SETTLE, HOTPLUG_SETTLE, ReconcileTrigger, SYSTEM_RESUME_SETTLE,
-    Schedule, WakeDetector,
+    ScanClock, Schedule, WakeDetector,
 };
 
 use crate::hardware::HardwareContext;
@@ -65,6 +66,24 @@ pub enum InventoryEvent {
     /// set/route/online state looks unchanged across the gap, so the agent
     /// re-applies volatile settings on the next snapshot (#189).
     SystemWake,
+    /// A keyboard firmware event carrying the latest backlight level.
+    BacklightChanged {
+        device_index: u8,
+        current_level: u8,
+        levels: u8,
+        visible: bool,
+    },
+    /// A keyboard's `LockKeyState` feature (`0x4220`) reported a lock key
+    /// turning on or off.
+    LockKeyChanged(LockKeyChange),
+    /// A device's `WirelessDeviceStatus` feature (`0x1d4b`) broadcast a
+    /// reconnection — the firmware explicitly asking the host to reconfigure
+    /// it after a nap. A nap can be too short for any reconciliation to have
+    /// observed the device offline, so the agent must not rely on an
+    /// offline→online transition in the snapshot that follows: it re-applies
+    /// volatile settings on the next snapshot, like [`Self::SystemWake`] but
+    /// with the shorter link-race confirm budget.
+    DeviceWake,
 }
 
 /// The watcher's cross-pass memory, factored out of the I/O loop so the
@@ -305,8 +324,11 @@ async fn run_watcher(
     hardware: HardwareContext,
 ) {
     // The listener is attached to each inventory-owned channel before its
-    // first probe, and its bounded queue is subscribed before every snapshot.
-    let (event_notifier, hid_events) = openlogi_hid::inventory::events::event_channel();
+    // first probe. Lifecycle hints use a bounded queue; backlight readings
+    // retain the latest value independently of slow inventory scans.
+    let (event_notifier, mut hid_events) = openlogi_hid::inventory::events::event_channel();
+    let backlight_events = hid_events.backlights();
+    let lock_key_events = hid_events.take_lock_keys();
     let mut enumerator = hardware.enumerator().with_event_notifier(event_notifier);
     if let Some(registry) = registry {
         enumerator = enumerator.with_registry(registry);
@@ -322,7 +344,12 @@ async fn run_watcher(
         }
     };
     let now = Instant::now();
-    InventoryWorker {
+    let device_io = hardware.device_io();
+    let backlight_io = device_io.clone();
+    let backlight_tx = events.clone();
+    let lock_key_io = device_io.clone();
+    let lock_key_tx = events.clone();
+    let mut worker = InventoryWorker {
         events,
         refresh_requests,
         rescans,
@@ -332,13 +359,79 @@ async fn run_watcher(
         hid_events,
         schedule: Schedule::new(now),
         wake_detector: WakeDetector::new(SystemTime::now(), now),
-        device_io: hardware.device_io(),
+        device_io,
         hardware,
         refresh_open: true,
         rescans_open: true,
+    };
+    tokio::select! {
+        () = worker.run() => {}
+        () = forward_backlights(backlight_events, backlight_tx, backlight_io) => {}
+        () = forward_lock_keys(lock_key_events, lock_key_tx, lock_key_io) => {}
     }
-    .run()
-    .await;
+}
+
+/// Forward each lock-key change in the order the keyboards reported them.
+async fn forward_lock_keys(
+    lock_keys: Option<mpsc::Receiver<LockKeyUpdate>>,
+    events: mpsc::UnboundedSender<InventoryEvent>,
+    device_io: DeviceIoGate,
+) {
+    let Some(mut lock_keys) = lock_keys else {
+        // The single reader was taken elsewhere: leave the other arms running.
+        return pending().await;
+    };
+    while let Some(update) = lock_keys.recv().await {
+        if !device_io.allows_io() {
+            continue;
+        }
+        if events
+            .send(InventoryEvent::LockKeyChanged(LockKeyChange {
+                key: update.key,
+                engaged: update.engaged,
+            }))
+            .is_err()
+        {
+            return;
+        }
+        debug!(
+            device_index = update.device_index,
+            key = ?update.key,
+            engaged = update.engaged,
+            "lock key event forwarded"
+        );
+    }
+}
+
+async fn forward_backlights(
+    mut backlights: watch::Receiver<Option<BacklightUpdate>>,
+    events: mpsc::UnboundedSender<InventoryEvent>,
+    device_io: DeviceIoGate,
+) {
+    while backlights.changed().await.is_ok() {
+        let Some(update) = *backlights.borrow_and_update() else {
+            continue;
+        };
+        if !device_io.allows_io() {
+            continue;
+        }
+        if events
+            .send(InventoryEvent::BacklightChanged {
+                device_index: update.device_index,
+                current_level: update.current_level,
+                levels: update.levels,
+                visible: update.visible,
+            })
+            .is_err()
+        {
+            return;
+        }
+        debug!(
+            device_index = update.device_index,
+            current_level = update.current_level,
+            "backlight event forwarded"
+        );
+    }
 }
 
 struct InventoryWorker {
@@ -394,7 +487,17 @@ impl InventoryWorker {
             ReconcileTrigger::HidEvent(source) => {
                 debug!(?source, "HID++ lifecycle event — reconciling inventory");
                 tokio::time::sleep(HID_EVENT_SETTLE).await;
-                while self.hid_events.try_recv().is_ok() {}
+                // The settle drain coalesces a burst into one reconciliation,
+                // but a `0x1d4b` reconnect broadcast anywhere in the burst
+                // still means a device asked to be reconfigured — that intent
+                // must survive the drain.
+                let mut device_wake = source == HidppEventSource::WirelessDeviceStatus;
+                while let Ok(drained) = self.hid_events.try_recv() {
+                    device_wake |= drained == HidppEventSource::WirelessDeviceStatus;
+                }
+                if device_wake && self.events.send(InventoryEvent::DeviceWake).is_err() {
+                    return false;
+                }
             }
             ReconcileTrigger::SystemResume => {
                 info!("system resume — replaying settings on a settled inventory");
@@ -412,6 +515,11 @@ impl InventoryWorker {
     }
 
     async fn reconcile(&mut self, trigger: ReconcileTrigger) -> bool {
+        // Recovery uses this instant: enumerate stamps `probed_at` from its own
+        // start, and the cache stays fresh through `PROBE_CACHE_FRESHNESS`.
+        // Repair retries use completion, or a pass longer than
+        // `FAST_RETRY_DELAY` would already be due when it returns (#1774).
+        let started = Instant::now();
         let (event, needs_repair) = match self.enumerator.enumerate().await {
             Ok(inventories) => {
                 let standalone = self.hardware.enumerate_standalone().await;
@@ -440,8 +548,14 @@ impl InventoryWorker {
             debug!("inventory watcher receiver dropped — exiting");
             return false;
         }
-        self.schedule
-            .scan_finished(trigger, needs_repair, Instant::now());
+        self.schedule.scan_finished(
+            trigger,
+            needs_repair,
+            ScanClock {
+                started,
+                finished: Instant::now(),
+            },
+        );
         true
     }
 
@@ -657,5 +771,99 @@ mod tests {
             state.classify(Ok((vec![], vec![]))),
             Some(InventoryEvent::Snapshot { standalone, .. }) if standalone.is_empty()
         );
+    }
+
+    mod lock_keys {
+        use std::time::Duration;
+
+        use openlogi_core::device::LockKey;
+        use openlogi_hid::device_io_channel;
+        use openlogi_hid::inventory::events::LockKeyUpdate;
+        use openlogi_ipc::LockKeyChange;
+        use tokio::sync::mpsc;
+
+        use super::super::{InventoryEvent, forward_lock_keys};
+
+        const QUEUE: usize = 8;
+
+        fn update(key: LockKey, engaged: bool) -> LockKeyUpdate {
+            LockKeyUpdate {
+                device_index: 1,
+                key,
+                engaged,
+            }
+        }
+
+        async fn next(events: &mut mpsc::UnboundedReceiver<InventoryEvent>) -> LockKeyChange {
+            match events.recv().await {
+                Some(InventoryEvent::LockKeyChanged(change)) => change,
+                other => panic!("expected a lock-key change, got {other:?}"),
+            }
+        }
+
+        /// Wait until the forwarder took every queued update. It checks the
+        /// device-I/O gate in the same poll that takes an update, and this
+        /// runtime runs one task at a time, so the update is settled too.
+        async fn drained(updates: &mpsc::Sender<LockKeyUpdate>) {
+            while updates.capacity() < QUEUE {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        #[tokio::test]
+        async fn changes_are_forwarded_in_order_except_while_device_io_is_suspended() {
+            let (updates, queue) = mpsc::channel(QUEUE);
+            let (events, mut forwarded) = mpsc::unbounded_channel();
+            let (signal, gate) = device_io_channel();
+            let forwarding = tokio::spawn(forward_lock_keys(Some(queue), events, gate));
+
+            updates.try_send(update(LockKey::CapsLock, true)).unwrap();
+            updates.try_send(update(LockKey::NumLock, false)).unwrap();
+            let expected = |key, engaged| LockKeyChange { key, engaged };
+            assert_eq!(
+                next(&mut forwarded).await,
+                expected(LockKey::CapsLock, true)
+            );
+            assert_eq!(
+                next(&mut forwarded).await,
+                expected(LockKey::NumLock, false)
+            );
+
+            // A key pressed while the host sleeps is not announced on wake.
+            assert!(signal.suspend());
+            updates.try_send(update(LockKey::ScrollLock, true)).unwrap();
+            drained(&updates).await;
+            assert!(forwarded.is_empty(), "nothing is forwarded while suspended");
+
+            assert!(signal.resume());
+            updates.try_send(update(LockKey::CapsLock, false)).unwrap();
+            assert_eq!(
+                next(&mut forwarded).await,
+                expected(LockKey::CapsLock, false)
+            );
+
+            // The keyboards' queue closing ends the forwarding.
+            drop(updates);
+            tokio::time::timeout(Duration::from_secs(1), forwarding)
+                .await
+                .expect("a closed queue ends the forwarding")
+                .expect("the forwarder does not panic");
+            assert!(forwarded.is_empty());
+        }
+
+        #[tokio::test]
+        async fn forwarding_ends_when_the_agent_stops_listening() {
+            let (updates, queue) = mpsc::channel(QUEUE);
+            let (events, forwarded) = mpsc::unbounded_channel();
+            let (_signal, gate) = device_io_channel();
+            let forwarding = tokio::spawn(forward_lock_keys(Some(queue), events, gate));
+
+            drop(forwarded);
+            updates.try_send(update(LockKey::CapsLock, true)).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), forwarding)
+                .await
+                .expect("nobody listening ends the forwarding")
+                .expect("the forwarder does not panic");
+        }
     }
 }
