@@ -168,10 +168,7 @@ impl InputDispatcher {
         plan: &DispatchPlan,
         button: ButtonId,
     ) -> bool {
-        let is_shift = plan
-            .bindings
-            .get(&button)
-            .is_some_and(|binding| binding.click_action() == Action::GShift);
+        let is_shift = plan.bindings.get(&button).is_some_and(Binding::is_gshift);
         if is_shift {
             debug!(key = session.device_key(), ?button, "G-Shift held");
             self.shift_held.press(session, button);

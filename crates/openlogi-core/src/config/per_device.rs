@@ -391,10 +391,7 @@ impl Config {
     pub fn uses_gshift(&self, device_key: &str) -> bool {
         self.devices.get(device_key).is_some_and(|device| {
             !device.gshift_bindings.is_empty()
-                || device
-                    .bindings
-                    .values()
-                    .any(|binding| binding.click_action() == Action::GShift)
+                || device.bindings.values().any(Binding::is_gshift)
                 || device
                     .per_app_bindings
                     .values()
