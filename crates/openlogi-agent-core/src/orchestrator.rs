@@ -468,7 +468,8 @@ impl SharedHandles {
     /// control — writing `host_dpi` after a switch to the host — and return
     /// the mode it reports. Ordered per device like [`Self::set_fn_lock`]:
     /// when a newer onboard-mode write is requested before this one gets its
-    /// turn, this one reads the device instead.
+    /// turn, this one reads the device instead. Waiting for the turn does not
+    /// count against the write's deadline.
     pub async fn set_onboard_profiles(
         &self,
         route: &DeviceRoute,
