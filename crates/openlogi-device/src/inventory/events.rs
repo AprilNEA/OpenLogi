@@ -468,6 +468,10 @@ struct DeviceEvents {
     /// attempt per connection: a failed read is not retried on every
     /// reconciliation, and the next broadcast records the state instead.
     lock_keys_read: bool,
+    /// How often the device came back since it was registered, so a
+    /// lock-state read started before a comeback does not record its answer
+    /// after it.
+    lock_keys_connection: u64,
 }
 
 impl DeviceEvents {
@@ -476,7 +480,17 @@ impl DeviceEvents {
     fn forget_lock_keys(&mut self) {
         self.lock_keys = None;
         self.lock_keys_read = false;
+        self.lock_keys_connection = self.lock_keys_connection.wrapping_add(1);
     }
+}
+
+/// A lock-state read in flight: which device it asks, and on which of its
+/// connections it started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LockKeyRead {
+    device_index: u8,
+    feature_index: u8,
+    connection: u64,
 }
 
 struct SubscriptionState {
@@ -637,15 +651,16 @@ impl EventSubscriptionHandle {
                 settings_revision: 0,
                 lock_keys: None,
                 lock_keys_read: false,
+                lock_keys_connection: 0,
             });
         }
     }
 
-    /// The lock-key feature index of an `online` `device_index` whose lock
-    /// state has not been read since it came online: the cue to read it once.
+    /// The read to start for an `online` `device_index` whose lock state has
+    /// not been read since it came online: the cue to read it once.
     /// An offline device has its state forgotten instead: its keys may change
     /// before it comes back, so the next connection reads them again.
-    fn lock_keys_to_read(&self, device_index: u8, online: bool) -> Option<u8> {
+    fn lock_keys_to_read(&self, device_index: u8, online: bool) -> Option<LockKeyRead> {
         let mut devices = self
             .state
             .devices
@@ -663,19 +678,25 @@ impl EventSubscriptionHandle {
             return None;
         }
         device.lock_keys_read = true;
-        Some(feature_index)
+        Some(LockKeyRead {
+            device_index,
+            feature_index,
+            connection: device.lock_keys_connection,
+        })
     }
 
-    /// Record the lock state read from `device_index`, unless a broadcast
-    /// recorded a state while the read was in flight.
-    fn record_lock_keys(&self, device_index: u8, keys: LockKeys) {
+    /// Record the lock state `read` answered, unless a broadcast recorded a
+    /// state while the read was in flight, or the device came back meanwhile:
+    /// then the answer is from the connection before.
+    fn record_lock_keys(&self, read: LockKeyRead, keys: LockKeys) {
         if let Some(device) = self
             .state
             .devices
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .iter_mut()
-            .find(|device| device.device_index == device_index)
+            .find(|device| device.device_index == read.device_index)
+            && device.lock_keys_connection == read.connection
         {
             device.lock_keys.get_or_insert(keys);
         }
@@ -690,12 +711,13 @@ impl EventSubscriptionHandle {
         device_index: u8,
         online: bool,
     ) {
-        let Some(feature_index) = self.lock_keys_to_read(device_index, online) else {
+        let Some(read) = self.lock_keys_to_read(device_index, online) else {
             return;
         };
-        let feature = LockKeyStateFeature::new(Arc::clone(channel), device_index, feature_index);
+        let feature =
+            LockKeyStateFeature::new(Arc::clone(channel), device_index, read.feature_index);
         match feature.get_lock_state().await {
-            Ok(keys) => self.record_lock_keys(device_index, keys),
+            Ok(keys) => self.record_lock_keys(read, keys),
             Err(error) => debug!(device_index, ?error, "lock-key state read failed"),
         }
     }
@@ -841,6 +863,7 @@ mod tests {
             settings_revision: 0,
             lock_keys: None,
             lock_keys_read: false,
+            lock_keys_connection: 0,
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: None,
@@ -882,6 +905,7 @@ mod tests {
             settings_revision: 0,
             lock_keys: None,
             lock_keys_read: false,
+            lock_keys_connection: 0,
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: Some(7),
@@ -952,6 +976,7 @@ mod tests {
             settings_revision: 0,
             lock_keys: None,
             lock_keys_read: false,
+            lock_keys_connection: 0,
             features: EventFeatureIndices {
                 wireless_status: None,
                 unified_battery: None,
@@ -1026,6 +1051,7 @@ mod tests {
             settings_revision: 0,
             lock_keys: None,
             lock_keys_read: false,
+            lock_keys_connection: 0,
             features: EventFeatureIndices {
                 battery_status: Some(4),
                 battery_voltage: Some(6),
@@ -1444,7 +1470,8 @@ mod tests {
     fn the_lock_state_is_read_once_per_connection() {
         let (state, handle, mut updates) = lock_keyboard();
 
-        assert_eq!(handle.lock_keys_to_read(1, true), Some(3));
+        let read = handle.lock_keys_to_read(1, true).expect("a first read");
+        assert_eq!(read.feature_index, 3);
         assert_eq!(handle.lock_keys_to_read(1, true), None);
         // A device without `0x4220`, or one never registered, has none.
         handle.register_device(3, EventFeatureIndices::default());
@@ -1452,7 +1479,7 @@ mod tests {
         assert_eq!(handle.lock_keys_to_read(4, true), None);
 
         // The state read names the key the first broadcast changes.
-        handle.record_lock_keys(1, LockKeys::CAPS_LOCK);
+        handle.record_lock_keys(read, LockKeys::CAPS_LOCK);
         assert_eq!(state.decode(lock_report(0, 0x00), false), None);
         assert_eq!(drain(&mut updates), [(LockKey::CapsLock, false)]);
 
@@ -1464,11 +1491,11 @@ mod tests {
         );
         assert_eq!(state.decode(lock_report(0, 0x02), false), None);
         assert_eq!(drain(&mut updates), []);
-        assert_eq!(handle.lock_keys_to_read(1, true), Some(3));
+        let read = handle.lock_keys_to_read(1, true).expect("read again");
 
         // That broadcast already recorded Caps Lock on, so a read answering
         // later with the older state does not replace it.
-        handle.record_lock_keys(1, LockKeys::empty());
+        handle.record_lock_keys(read, LockKeys::empty());
         assert_eq!(state.decode(lock_report(0, 0x00), false), None);
         assert_eq!(drain(&mut updates), [(LockKey::CapsLock, false)]);
     }
@@ -1476,8 +1503,8 @@ mod tests {
     #[test]
     fn a_re_registered_device_keeps_its_lock_state() {
         let (state, handle, mut updates) = lock_keyboard();
-        assert_eq!(handle.lock_keys_to_read(1, true), Some(3));
-        handle.record_lock_keys(1, LockKeys::CAPS_LOCK);
+        let read = handle.lock_keys_to_read(1, true).expect("a first read");
+        handle.record_lock_keys(read, LockKeys::CAPS_LOCK);
 
         // A re-probe of the connected device registers it again.
         handle.register_device(
@@ -1487,6 +1514,21 @@ mod tests {
         assert_eq!(handle.lock_keys_to_read(1, true), None);
         assert_eq!(state.decode(lock_report(0, 0x00), false), None);
         assert_eq!(drain(&mut updates), [(LockKey::CapsLock, false)]);
+    }
+
+    /// A `0x1d4b` reconnection broadcast from `device_index`, whose
+    /// `WirelessDeviceStatus` is at `feature_index`.
+    fn reconnection(device_index: u8, feature_index: u8) -> HidppMessage {
+        v20::Message::Long(
+            v20::MessageHeader {
+                device_index,
+                feature_index,
+                function_id: U4::from_lo(0),
+                software_id: U4::from_lo(0),
+            },
+            [0; 16],
+        )
+        .into()
     }
 
     /// A keyboard can drop and come back between two scans, which then never
@@ -1499,8 +1541,8 @@ mod tests {
             1,
             EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x4220, 0x1d4b]),
         );
-        assert_eq!(handle.lock_keys_to_read(1, true), Some(3));
-        handle.record_lock_keys(1, LockKeys::CAPS_LOCK);
+        let read = handle.lock_keys_to_read(1, true).expect("a first read");
+        handle.record_lock_keys(read, LockKeys::CAPS_LOCK);
         let connection: HidppMessage = v10::Message::Short(
             v10::MessageHeader {
                 device_index: 1,
@@ -1523,25 +1565,37 @@ mod tests {
         // The old state is gone: a broadcast names no key, it only records.
         assert_eq!(state.decode(lock_report(0, 0x00), false), None);
         assert_eq!(drain(&mut updates), []);
-        assert_eq!(handle.lock_keys_to_read(1, true), Some(3));
+        assert!(handle.lock_keys_to_read(1, true).is_some(), "read again");
 
-        let reconnection = v20::Message::Long(
-            v20::MessageHeader {
-                device_index: 1,
-                feature_index: 4,
-                function_id: U4::from_lo(0),
-                software_id: U4::from_lo(0),
-            },
-            [0; 16],
-        )
-        .into();
         assert_eq!(
-            state.decode(reconnection, false),
+            state.decode(reconnection(1, 4), false),
             Some(HidppEventSource::WirelessDeviceStatus)
         );
         assert_eq!(state.decode(lock_report(0, 0x02), false), None);
         assert_eq!(drain(&mut updates), []);
-        assert_eq!(handle.lock_keys_to_read(1, true), Some(3));
+        assert!(handle.lock_keys_to_read(1, true).is_some(), "read again");
+    }
+
+    /// A read can answer after its device came back. That answer is from the
+    /// connection before, so the new connection's own read decides.
+    #[test]
+    fn a_read_started_before_a_reconnection_is_not_recorded() {
+        let (state, handle, mut updates) = lock_keyboard();
+        handle.register_device(
+            1,
+            EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x4220, 0x1d4b]),
+        );
+        let old_read = handle.lock_keys_to_read(1, true).expect("a first read");
+        assert_eq!(
+            state.decode(reconnection(1, 4), false),
+            Some(HidppEventSource::WirelessDeviceStatus)
+        );
+        let new_read = handle.lock_keys_to_read(1, true).expect("read again");
+
+        handle.record_lock_keys(old_read, LockKeys::CAPS_LOCK);
+        handle.record_lock_keys(new_read, LockKeys::empty());
+        assert_eq!(state.decode(lock_report(0, 0x02), false), None);
+        assert_eq!(drain(&mut updates), [(LockKey::CapsLock, true)]);
     }
 
     #[test]
