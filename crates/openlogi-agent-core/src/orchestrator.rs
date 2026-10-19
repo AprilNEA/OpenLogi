@@ -64,6 +64,8 @@ use devices::reapply_targets;
 use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch, carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing, config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current, plan_disabled_keys_recovery, plan_reapply, published_inventories, reconnect_follower_cookies, same_device_lifecycle, saved_speed, settings_moved, stable_id, wheel_inverted, hidpp20_slot_targets, host_dpi, onboard_switch, reconnect_dpi,
 };
+#[cfg(test)]
+use devices::{configured_report_rate, reapply_targets};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
