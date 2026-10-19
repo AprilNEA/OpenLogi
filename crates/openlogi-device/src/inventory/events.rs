@@ -930,9 +930,12 @@ mod tests {
                 device_index: 1,
                 features: EventFeatureIndices {
                     wireless_status: Some(5),
-                    unified_battery: None,
-                    adc_measurement: None,
+                    ..Default::default()
                 },
+                settings_revision: 0,
+                lock_keys: None,
+                lock_keys_read: false,
+                lock_keys_connection: 0,
             });
             state
         };
