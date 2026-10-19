@@ -27,6 +27,23 @@ pub(in crate::inventory) fn preferred_direct_codename(
         .to_string()
 }
 
+/// The cache key for a directly connected device.
+///
+/// A serial is preferred wherever the backend reports one, because the node id
+/// lasts only as long as the connection. A Bluetooth device that switches to
+/// another host and comes back arrives under a fresh node, and keying on that
+/// makes it re-walk its entire feature table for data that could not have
+/// changed while it was away.
+pub(in crate::inventory) fn direct_cache_key(info: &NodeInfo) -> CacheKey {
+    info.serial_number
+        .as_deref()
+        .filter(|serial| !serial.is_empty())
+        .map_or_else(
+            || CacheKey::Direct(info.id.clone()),
+            |serial| CacheKey::DirectSerial(serial.to_ascii_lowercase()),
+        )
+}
+
 /// Probe a HID++ channel that doesn't host a Bolt receiver — for
 /// Bluetooth-direct, USB-C, or otherwise wired devices that present
 /// themselves as a HID++ device rather than a receiver (P2.4).
@@ -42,7 +59,7 @@ pub(super) async fn probe_direct(
     info: &NodeInfo,
     pass: PassContext<'_>,
 ) -> NodeProbe {
-    let id = CacheKey::Direct(info.id.clone());
+    let id = direct_cache_key(info);
     let cached = pass.cache.get(&id);
     // A direct device's HID node is present (it is the candidate), so probe it
     // as online: reuse the cached probe while fresh, otherwise probe. Whether
@@ -92,7 +109,7 @@ pub(super) async fn probe_direct(
         return NodeProbe {
             inventory: None,
             verdict: ProbeVerdict::Failed,
-            outcomes: vec![seen(Some(CacheKey::Direct(info.id.clone())))],
+            outcomes: vec![seen(Some(direct_cache_key(info)))],
         };
     }
     if !is_peripheral {

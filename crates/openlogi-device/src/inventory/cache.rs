@@ -31,11 +31,29 @@ pub(super) enum CacheKey {
     /// two receivers whose serials share a common prefix (e.g. "DA2699E1" and
     /// "DA2604F2" share "DA2").
     UnifyingSlot { receiver_uid: String, slot: u8 },
-    /// Direct (Bluetooth/USB): the OS-assigned HID node id (macOS registry-entry
-    /// id, Linux dev path, Windows interface path). Unique *per node*, so two
-    /// units of the same model never collide, and stable while connected so the
-    /// cache still hits across ticks.
+    /// Direct (Bluetooth/USB) with a serial the backend could read. For a
+    /// Bluetooth device that is its address, which survives both the device
+    /// leaving for another host and the machine rebooting.
+    DirectSerial(String),
+    /// Direct (Bluetooth/USB) with no readable serial: the OS-assigned HID node
+    /// id (macOS registry-entry id, Linux dev path, Windows interface path).
+    /// Unique *per node*, so two units of the same model never collide, but
+    /// only stable while connected.
     Direct(NodeId),
+}
+
+impl CacheKey {
+    /// Whether what this key memoizes stays true however long its device is
+    /// away.
+    ///
+    /// A direct device's serial can never be handed to a different physical
+    /// device, and nothing but the device's own return says it is gone for
+    /// good. A pairing slot or an OS node id can belong to something else the
+    /// moment this device leaves, and a Bolt unit id that stops being reported
+    /// means its pairing was removed, so those age out instead.
+    pub(super) fn outlives_absence(&self) -> bool {
+        matches!(self, Self::DirectSerial(_))
+    }
 }
 
 /// Enumeration ticks a device may be missing before its cache entry is evicted.

@@ -27,9 +27,9 @@ mod unifying;
 #[cfg(test)]
 pub(super) use bolt::assemble_bolt_probe;
 use bolt::probe_bolt_receiver;
-#[cfg(test)]
-pub(super) use direct::preferred_direct_codename;
 use direct::probe_direct;
+#[cfg(test)]
+pub(super) use direct::{direct_cache_key, preferred_direct_codename};
 use unifying::probe_unifying_receiver;
 #[cfg(test)]
 pub(super) use unifying::{
