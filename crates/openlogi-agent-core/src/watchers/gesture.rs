@@ -37,7 +37,9 @@ use tracing::{debug, warn};
 
 use self::dispatch::InputDispatcher;
 use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore};
-use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
+use super::capture_session::{
+    CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction, settle_capture_task,
+};
 use super::retry::RETRY_DELAY;
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::capture_plan::{
@@ -742,9 +744,11 @@ fn spawn_session(
     let slot = Arc::clone(&channels.access.channel);
     let registry = channels.access.registry.clone();
     let device_io = channels.access.device_io.clone();
-    tokio::spawn(async move {
+    // The session body runs in a task of its own so that even a panic in it
+    // still reaches the completion report below (`settle_capture_task`).
+    let session_task = tokio::spawn(async move {
         let _lease = lease;
-        let pending_restore = match run_capture_session(
+        match run_capture_session(
             session_route,
             session_spec,
             CaptureHost {
@@ -764,7 +768,10 @@ fn spawn_session(
                 debug!(%error, "capture session ended");
                 pending
             }
-        };
+        }
+    });
+    tokio::spawn(async move {
+        let pending_restore = settle_capture_task(session_task, "gesture").await;
         // Use the same channel as input so completion follows every diverted
         // report accepted before the listener was dropped.
         report_done_after_inputs(

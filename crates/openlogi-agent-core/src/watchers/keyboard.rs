@@ -23,7 +23,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore};
-use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
+use super::capture_session::{
+    CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction, settle_capture_task,
+};
 use super::retry::RETRY_DELAY;
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::hardware::DeviceAccess;
@@ -588,9 +590,11 @@ fn spawn_session(
     let route = target.route.clone();
     let wanted = target.wanted.clone();
     let device_io = channels.access.device_io.clone();
-    tokio::spawn(async move {
+    // The session body runs in a task of its own so that even a panic in it
+    // still reaches the completion report below (`settle_capture_task`).
+    let session_task = tokio::spawn(async move {
         let _receiver_lease = receiver_lease;
-        let pending_restore = match run_keyboard_capture_session(
+        match run_keyboard_capture_session(
             route,
             wanted,
             CaptureHost {
@@ -610,7 +614,10 @@ fn spawn_session(
                 debug!(%error, "keyboard capture session ended");
                 pending
             }
-        };
+        }
+    });
+    tokio::spawn(async move {
+        let pending_restore = settle_capture_task(session_task, "keyboard").await;
         // The device layer drops its listener only after restoration. Draining
         // this forwarder before Done preserves every input accepted while
         // diversion was still active ahead of the ownership boundary.
