@@ -313,7 +313,8 @@ impl SharedHandles {
     /// control — writing `host_dpi` after a switch to the host — and return
     /// the mode it reports. Ordered per device like [`Self::set_fn_lock`]:
     /// when a newer onboard-mode write is requested before this one gets its
-    /// turn, this one reads the device instead.
+    /// turn, this one reads the device instead. Waiting for the turn does not
+    /// count against the write's deadline.
     pub async fn set_onboard_profiles(
         &self,
         route: &DeviceRoute,
@@ -323,14 +324,15 @@ impl SharedHandles {
         let ticket = self.onboard_profiles_order.request(route);
         let host_dpi = host_dpi.map(|dpi| (dpi, self.dpi_order.request(route)));
         self.device(route)
-            .run(HidppOperation::WriteOnboardMode, |c| async move {
-                ticket
-                    .write_or(
-                        || crate::hardware::switch_onboard_profiles_on(&c, onboard_profiles, host_dpi),
-                        || openlogi_hid::get_onboard_profiles_on(&c),
-                    )
-                    .await
-            })
+            .run_in_turn(
+                HidppOperation::WriteOnboardMode,
+                &ticket,
+                |c| async move {
+                    crate::hardware::switch_onboard_profiles_on(&c, onboard_profiles, host_dpi)
+                        .await
+                },
+                |c| async move { openlogi_hid::get_onboard_profiles_on(&c).await },
+            )
             .await
     }
 

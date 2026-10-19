@@ -1471,6 +1471,69 @@ mod tests {
         );
     }
 
+    /// A GUI onboard-mode switch queued behind a reconnect switch for the same
+    /// mouse waits for its ticket without holding the transport turn: the
+    /// reconnect switch, which holds the ticket, still gets the turn it needs
+    /// to finish, rather than both waiting out the GUI's deadline.
+    #[tokio::test]
+    async fn a_write_waiting_for_its_ticket_leaves_the_transport_turn_free() {
+        let published = publish_direct_mouse().await;
+        let route = published.route.clone();
+        let op = device_op(
+            &std::sync::Arc::new(RwLock::new(None)),
+            &published.registry,
+            &ReceiverAccess::default(),
+            &published.device_io,
+            &route,
+        );
+        let transport = op.access.transport_turns.turn_for(&route);
+        let modes = WriteOrder::default();
+        let reconnect = modes.request(&route);
+        let (started, has_started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let reconnect_transport = Arc::clone(&transport);
+        let reconnecting = tokio::spawn(async move {
+            reconnect
+                .write_or(
+                    || async move {
+                        let _ = started.send(());
+                        let _ = released.await;
+                        after_transport_turn(&reconnect_transport, async {}).await;
+                    },
+                    || async {},
+                )
+                .await;
+        });
+        has_started
+            .await
+            .expect("the reconnect switch holds the ticket");
+
+        let gui = modes.request(&route);
+        let mut switching = std::pin::pin!(op.run_in_turn(
+            HidppOperation::WriteOnboardMode,
+            &gui,
+            |_| async { Ok::<_, WriteError>(true) },
+            |_| async { Ok::<_, WriteError>(false) },
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), switching.as_mut())
+                .await
+                .is_err(),
+            "the GUI switch waits for the reconnect switch"
+        );
+
+        release.send(()).expect("the reconnect switch is waiting");
+        tokio::time::timeout(Duration::from_secs(1), reconnecting)
+            .await
+            .expect("the reconnect switch gets the transport turn")
+            .expect("reconnect joins");
+        assert_eq!(
+            switching.await.ok(),
+            Some(true),
+            "the GUI switch, still the newest, writes"
+        );
+    }
+
     /// A reply-confirmed SmartShift or DPI write checks the device's echo inside
     /// the same response budget as the request. Slots on one receiver share a
     /// writer, so a confirmed write queued behind the other slot must not spend
