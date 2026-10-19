@@ -469,10 +469,7 @@ impl Running {
             // Devices likely power-cycled during the sleep; the next snapshot
             // re-applies their volatile settings (#189).
             InventoryEvent::SystemWake => {
-                self.orchestrator
-                    .lock()
-                    .await
-                    .reapply_volatile_on_next_refresh();
+                self.orchestrator.lock().await.reapply_after_system_resume();
             }
             InventoryEvent::BacklightChanged {
                 device_index: _,

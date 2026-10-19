@@ -314,50 +314,60 @@ fn diverted_gesture(
 }
 
 #[tokio::test]
-async fn pending_restore_follows_a_device_to_another_receiver_route() {
-    let retired_route = DeviceRoute::Bolt {
+async fn pending_restore_follows_receiver_and_direct_transport_handoffs() {
+    let bolt = DeviceRoute::Bolt {
         receiver_uid: "receiver-a".to_owned(),
         slot: 4,
     };
-    let successor_route = DeviceRoute::Bolt {
+    let other_bolt = DeviceRoute::Bolt {
         receiver_uid: "receiver-b".to_owned(),
         slot: 2,
     };
-    let (retired_raw, retired_handle) = ScriptedRawHidChannel::with_responder(|_| None);
-    let retired_channel = scripted_channel(retired_raw).await;
-    let pending = diverted_gesture(&retired_route, &retired_channel);
-    let registry = ChannelRegistry::default();
-    registry.replace_node(
-        NodeId::from("receiver-a-node".to_owned()),
-        [retired_route],
-        retired_channel,
-    );
-    let (successor_raw, successor_handle) =
-        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
-    registry.replace_node(
-        NodeId::from("receiver-b-node".to_owned()),
-        [successor_route.clone()],
-        scripted_channel(successor_raw).await,
-    );
+    let direct = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb042,
+    };
+    for (retired_route, successor_route) in [
+        (bolt.clone(), other_bolt),
+        (bolt.clone(), direct.clone()),
+        (direct, bolt),
+    ] {
+        let (retired_raw, retired_handle) = ScriptedRawHidChannel::with_responder(|_| None);
+        let retired_channel = scripted_channel(retired_raw).await;
+        let pending = diverted_gesture(&retired_route, &retired_channel);
+        let registry = ChannelRegistry::default();
+        registry.replace_node(
+            NodeId::from("receiver-a-node".to_owned()),
+            [retired_route],
+            retired_channel,
+        );
+        let (successor_raw, successor_handle) =
+            ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+        registry.replace_node(
+            NodeId::from("receiver-b-node".to_owned()),
+            [successor_route.clone()],
+            scripted_channel(successor_raw).await,
+        );
 
-    assert!(matches!(
-        restore_after_stop(
-            CaptureStop::Handoff(successor_route),
-            Some(pending),
-            &registry,
-        )
-        .await,
-        CaptureSessionOutcome::Restored
-    ));
-    assert!(
-        retired_handle.written_reports().is_empty(),
-        "handoff must not time out against the receiver the device left"
-    );
-    assert_eq!(
-        successor_handle.written_reports().len(),
-        1,
-        "native reporting must be restored before capture arms on the successor route"
-    );
+        assert!(matches!(
+            restore_after_stop(
+                CaptureStop::Handoff(successor_route),
+                Some(pending),
+                &registry,
+            )
+            .await,
+            CaptureSessionOutcome::Restored
+        ));
+        assert!(
+            retired_handle.written_reports().is_empty(),
+            "handoff must not time out against the receiver the device left"
+        );
+        assert_eq!(
+            successor_handle.written_reports().len(),
+            1,
+            "native reporting must be restored before capture arms on the successor route"
+        );
+    }
 }
 
 #[tokio::test]
@@ -586,6 +596,80 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
         pending.is_some(),
         "a failed compensating write must not discard firmware ownership"
     );
+}
+
+#[tokio::test]
+async fn an_offline_receiver_slot_restores_on_return_to_the_same_usb_channel() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".into(),
+        slot: 2,
+    };
+    let sibling = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".into(),
+        slot: 3,
+    };
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(|request| Some(request.to_vec()));
+    let channel = scripted_channel(raw).await;
+    let registry = ChannelRegistry::default();
+    let node = NodeId::from("receiver-node".to_owned());
+    registry.replace_node(
+        node.clone(),
+        [route.clone(), sibling.clone()],
+        channel.clone(),
+    );
+    let shared = SharedChannel::new(channel.clone(), route.clone());
+    let pending = PendingCaptureRestore::new(
+        &shared,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting::pointer(
+                reprog_controls::GESTURE_BUTTON_CID,
+                reporting(false, None),
+                PointerDivert::RawXy,
+            )],
+        ),
+        None,
+        None,
+    );
+    registry.replace_node(node.clone(), [sibling.clone()], channel.clone());
+    let before = handle.written_reports().len();
+    let pending = match restore_after_stop(
+        stop_for_current_publication(&registry, &shared),
+        pending,
+        &registry,
+    )
+    .await
+    {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => {
+            panic!("the inactive slot still owes native restoration")
+        }
+    };
+    assert_eq!(
+        handle.written_reports().len(),
+        before,
+        "no restoration writes on an inactive slot"
+    );
+    registry.replace_node(node.clone(), [], channel.clone());
+    assert!(
+        registry.contains_transport(&shared),
+        "an all-offline receiver still owns its USB channel"
+    );
+    let pending = match pending.retry(&registry).await {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => panic!("an offline slot cannot finish its restore"),
+    };
+    assert_eq!(handle.written_reports().len(), before);
+    registry.replace_node(node, [route, sibling], channel);
+    assert!(
+        matches!(
+            pending.retry(&registry).await,
+            CaptureSessionOutcome::Restored
+        ),
+        "the receiver never unplugged; returning to its original USB channel must release the old debt"
+    );
+    assert_eq!(handle.written_reports().len(), before + 1);
 }
 
 #[tokio::test]
