@@ -109,6 +109,27 @@ fn each_device_is_announced_on_its_own() {
     assert!(watch.observe("keyboard", &discharging(15)));
 }
 
+#[test]
+fn a_recharge_while_muted_still_ends_the_discharge() {
+    let mut watch = LowBatteryWatch::default();
+    assert!(watch.observe("mouse", &discharging(15)));
+    // The user turns the notices off; the mouse charges, then runs low again.
+    watch.observe_muted("mouse", &discharging(80));
+    watch.observe_muted("mouse", &discharging(15));
+    assert!(
+        watch.observe("mouse", &discharging(15)),
+        "turned back on, the new discharge is announced"
+    );
+}
+
+#[test]
+fn a_low_reading_while_muted_is_not_counted_as_announced() {
+    let mut watch = LowBatteryWatch::default();
+    watch.observe_muted("mouse", &discharging(15));
+    assert!(watch.observe("mouse", &discharging(15)));
+    assert!(!watch.observe("mouse", &discharging(14)));
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_posted_notice_is_observed_with_its_locale() {
     let board = NoticeBoard::default();

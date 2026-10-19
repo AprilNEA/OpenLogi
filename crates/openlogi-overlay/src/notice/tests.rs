@@ -98,9 +98,19 @@ fn only_the_newest_cards_show_when_too_many_are_current() {
 fn a_dismissed_card_makes_room_for_one_that_was_waiting() {
     let mut shelf = NoticeShelf::default();
     let list: Vec<Notice> = (1..=4).map(|id| low_battery(id, None, Some(10))).collect();
-    shelf.observe(list.clone());
-    shelf.dismiss(4);
-    assert_eq!(shelf.observe(list).as_deref().map(ids), Some(vec![1, 2, 3]));
+    assert_eq!(
+        shelf.observe(list.clone()).as_deref().map(ids),
+        Some(vec![2, 3, 4])
+    );
+    // A click brings no new list from the agent, so the dismissal itself must
+    // reveal the notice that was waiting.
+    assert_eq!(ids(&shelf.dismiss(3)), vec![1, 2, 4]);
+    assert_eq!(
+        shelf.observe(list),
+        None,
+        "the agent repeating its list must not redraw the revealed card"
+    );
+    assert_eq!(ids(&shelf.dismiss(4)), vec![1, 2]);
 }
 
 #[test]

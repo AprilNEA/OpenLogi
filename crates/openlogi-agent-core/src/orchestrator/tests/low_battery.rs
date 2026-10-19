@@ -127,3 +127,30 @@ async fn no_notice_is_posted_while_the_user_turned_them_off() {
         "a battery that ran low while they were off is announced once they are on"
     );
 }
+
+#[tokio::test]
+async fn a_recharge_while_the_notices_are_off_is_still_taken_in() {
+    let (mut orch, observable) = wired(Config::default());
+    refresh(&mut orch, discharging(10), true, "MX Master 3S");
+    let first = notices(&observable).await;
+    assert_eq!(first.len(), 1);
+
+    orch.config.app_settings.low_battery_notifications = false;
+    refresh(&mut orch, discharging(80), true, "MX Master 3S");
+    refresh(&mut orch, discharging(10), true, "MX Master 3S");
+    assert_eq!(
+        notices(&observable).await,
+        first,
+        "nothing is posted while off"
+    );
+
+    orch.config.app_settings.low_battery_notifications = true;
+    refresh(&mut orch, discharging(10), true, "MX Master 3S");
+    let posted = notices(&observable).await;
+    assert_eq!(
+        posted.len(),
+        2,
+        "the discharge after the recharge is announced once they are on"
+    );
+    assert_ne!(posted[1].id, first[0].id);
+}

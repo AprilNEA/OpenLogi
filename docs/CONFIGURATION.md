@@ -78,8 +78,9 @@ optional physical device key.
   a device that reports no percentage. Each discharge is announced once. The
   device is announced again only after it charges, reads 30% or more, or
   reports a good or full level. A notice closes after 8 seconds or when it is
-  clicked. With the setting off the agent posts no notice; one already on
-  screen still closes on its own.
+  clicked. With the setting off the agent posts no notice, but it still notes
+  when a device charges, so the next discharge is announced once the setting
+  is back on. A notice already on screen still closes on its own.
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use

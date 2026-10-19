@@ -60,11 +60,14 @@ const fn neutral(lightness: f32, alpha: f32) -> Hsla {
     }
 }
 
-/// What the overlay remembers between the agent's lists: which cards the user
-/// dismissed, and which cards are on screen.
+/// What the overlay remembers between the agent's lists: the latest list,
+/// which cards the user dismissed, and which cards are on screen.
 #[derive(Debug, Default)]
 pub(crate) struct NoticeShelf {
     dismissed: BTreeSet<u64>,
+    /// The agent's latest list, including notices beyond [`MAX_CARDS`], so a
+    /// dismissal can make room for one of them without a new list.
+    current: Vec<Notice>,
     showing: Vec<Notice>,
 }
 
@@ -76,15 +79,16 @@ impl NoticeShelf {
         // A dismissal only has to outlive the agent's own copy of the notice.
         self.dismissed
             .retain(|id| notices.iter().any(|notice| notice.id == *id));
-        let cards = visible(notices, &self.dismissed);
+        self.current = notices;
+        let cards = visible(&self.current, &self.dismissed);
         (cards != self.showing).then(|| self.show(cards))
     }
 
-    /// The user dismissed card `id`. Returns the cards left to show.
+    /// The user dismissed card `id`. Returns the cards to show now, including
+    /// a waiting notice that moves into the freed place.
     pub(crate) fn dismiss(&mut self, id: u64) -> Vec<Notice> {
         self.dismissed.insert(id);
-        let mut cards = std::mem::take(&mut self.showing);
-        cards.retain(|notice| notice.id != id);
+        let cards = visible(&self.current, &self.dismissed);
         self.show(cards)
     }
 
@@ -95,10 +99,11 @@ impl NoticeShelf {
 }
 
 /// The newest [`MAX_CARDS`] notices the user has not dismissed, oldest first.
-fn visible(notices: Vec<Notice>, dismissed: &BTreeSet<u64>) -> Vec<Notice> {
+fn visible(notices: &[Notice], dismissed: &BTreeSet<u64>) -> Vec<Notice> {
     let mut cards: Vec<Notice> = notices
-        .into_iter()
+        .iter()
         .filter(|notice| !dismissed.contains(&notice.id))
+        .cloned()
         .collect();
     let excess = cards.len().saturating_sub(MAX_CARDS);
     cards.drain(..excess);

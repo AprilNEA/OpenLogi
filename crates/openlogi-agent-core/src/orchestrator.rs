@@ -941,16 +941,20 @@ impl Orchestrator {
     /// Post a low-battery notice for each online device whose battery has just
     /// come to need attention, while the user wants these notices. An offline
     /// device's reading is only its last known one, and says nothing new.
-    /// While the notices are off, nothing is taken in: a battery that ran low
-    /// meanwhile is announced on the first reading after they are turned on.
+    /// While the notices are off, readings are still taken in, muted: a
+    /// recharge in that time ends the device's discharge, and a battery that
+    /// ran low meanwhile is announced on the first reading after they are
+    /// turned on.
     fn announce_low_batteries(&mut self, devices: &[AgentDevice]) {
-        if !self.config.app_settings.low_battery_notifications {
-            return;
-        }
+        let announcing = self.config.app_settings.low_battery_notifications;
         for device in devices.iter().filter(|device| device.online) {
             let Some(battery) = device.battery.as_ref() else {
                 continue;
             };
+            if !announcing {
+                self.low_battery.observe_muted(&device.config_key, battery);
+                continue;
+            }
             if !self.low_battery.observe(&device.config_key, battery) {
                 continue;
             }

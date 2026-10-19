@@ -137,6 +137,10 @@ impl NoticeBoard {
 /// attention ([`BatteryInfo::needs_attention`]), and again only after it has
 /// been charged. A reading that wobbles around the threshold is not a new
 /// discharge.
+///
+/// While the user has the notices off, the watch still takes in every
+/// reading with [`Self::observe_muted`], so a recharge in that time still
+/// ends the device's discharge.
 #[derive(Debug, Default)]
 pub struct LowBatteryWatch {
     announced: HashSet<String>,
@@ -149,10 +153,18 @@ impl LowBatteryWatch {
         if battery.needs_attention() {
             return self.announced.insert(device.to_owned());
         }
+        self.observe_muted(device, battery);
+        false
+    }
+
+    /// Take in `device`'s latest reading while the user has the notices off.
+    /// A recharge still ends its discharge. A low reading is not marked as
+    /// announced, so the first low reading after the notices are back on
+    /// announces it. A reading that needs attention is never a recharge.
+    pub fn observe_muted(&mut self, device: &str, battery: &BatteryInfo) {
         if recharged(battery) {
             self.announced.remove(device);
         }
-        false
     }
 }
 
