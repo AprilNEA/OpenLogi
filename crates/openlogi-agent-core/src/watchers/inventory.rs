@@ -675,13 +675,7 @@ impl InventoryWorker {
 fn lifecycle_event(trigger: ReconcileTrigger) -> Option<InventoryEvent> {
     match trigger {
         ReconcileTrigger::SystemResume => Some(InventoryEvent::SystemWake),
-        ReconcileTrigger::HidEvent(
-            HidppEventSource::ReceiverConnection
-            | HidppEventSource::WirelessDeviceStatus
-            | HidppEventSource::UnifiedBattery
-            | HidppEventSource::AdcMeasurement
-            | HidppEventSource::Hidpp20SlotReconnection,
-        )
+        ReconcileTrigger::HidEvent(_)
         | ReconcileTrigger::Initial
         | ReconcileTrigger::RepairRetry
         | ReconcileTrigger::Hotplug
@@ -721,7 +715,14 @@ mod tests {
             // the snapshot's offline→online transition re-applies.
             ReconcileTrigger::HidEvent(HidppEventSource::WirelessDeviceStatus),
             ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery),
+            ReconcileTrigger::HidEvent(HidppEventSource::BatteryStatus),
+            ReconcileTrigger::HidEvent(HidppEventSource::BatteryVoltage),
             ReconcileTrigger::HidEvent(HidppEventSource::AdcMeasurement),
+            ReconcileTrigger::HidEvent(HidppEventSource::FnInversion),
+            ReconcileTrigger::HidEvent(HidppEventSource::ExtendedDpi),
+            ReconcileTrigger::HidEvent(HidppEventSource::MultiPlatform),
+            ReconcileTrigger::HidEvent(HidppEventSource::ExtendedReportRate),
+            ReconcileTrigger::HidEvent(HidppEventSource::Backlight),
             // Read off the event receiver's latch, not off the trigger.
             ReconcileTrigger::HidEvent(HidppEventSource::Hidpp20SlotReconnection),
         ] {
