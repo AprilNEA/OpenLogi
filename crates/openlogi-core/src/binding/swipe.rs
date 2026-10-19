@@ -19,16 +19,17 @@ pub const GESTURE_SWIPE_THRESHOLD_V: i32 = 100;
 pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
 /// Net travel that keeps going the committed direction before that direction
 /// fires again, so one continuous motion steps through several desktops like
-/// Options+. Larger than [`GESTURE_SWIPE_THRESHOLD`] so the overshoot of a
+/// Options+. Far larger than either commit threshold
+/// ([`GESTURE_SWIPE_THRESHOLD_H`], [`GESTURE_SWIPE_THRESHOLD_V`]) so the overshoot of a
 /// single swipe doesn't double-fire; backtracking subtracts from it, so a
 /// wobble never accumulates into a repeat.
 ///
 /// A fast hand-width sweep on an MX Master 3 over Bluetooth is about 2000
-/// raw-XY units. At 150 (3x the threshold) such a sweep repeated every
+/// raw-XY units. At 150 (3x the old 50-unit threshold) such a sweep repeated every
 /// 30-40 ms and ran past four desktops; 600 gives about three repeats per hand
 /// width (#1652).
 // ponytail: fixed constant, make it a user setting if people want to tune it.
-pub const GESTURE_REPEAT_DISTANCE: i32 = 12 * GESTURE_SWIPE_THRESHOLD;
+pub const GESTURE_REPEAT_DISTANCE: i32 = 600;
 /// How long the pointer must rest mid-hold to end a stroke: the next swipe then
 /// starts fresh and may repeat the last direction at the normal threshold.
 pub const GESTURE_REARM_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -162,7 +163,16 @@ impl SwipeAccumulator {
     /// [`GESTURE_HOLD_FOR_SWIPE`]), then restarts travel so the same hold can
     /// commit again; `None` while still too short or not holding.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
-        self.held_since?;
+        let held_since = self.held_since?;
+        let held_long_enough = held_since.elapsed() >= GESTURE_HOLD_FOR_SWIPE;
+        if held_long_enough && !self.gate_opened {
+            // Gate just opened: discard all pre-gate drift so button-press
+            // jitter cannot commit the wrong direction. No swipe can have
+            // committed yet, so there is no stroke state to keep.
+            self.gate_opened = true;
+            self.dx = 0;
+            self.dy = 0;
+        }
         let now = Instant::now();
         if self
             .moved_at
@@ -246,18 +256,6 @@ impl SwipeAccumulator {
             Some(GestureDirection::Up) => self.dy = self.dy.max(0),
             Some(GestureDirection::Click) | None => {}
         }
-        let held_long_enough = self
-            .held_since
-            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
-        if held_long_enough && !self.gate_opened {
-            // Gate just opened: discard all pre-gate drift so button-press
-            // jitter cannot commit the wrong direction.
-            self.gate_opened = true;
-            self.dx = 0;
-            self.dy = 0;
-        }
-        self.dx = self.dx.saturating_add(dx);
-        self.dy = self.dy.saturating_add(dy);
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
             self.last = Some(dir);
@@ -442,7 +440,7 @@ mod tests {
         let mut acc = SwipeAccumulator::default();
         acc.begin();
         acc.backdate_hold_for_test();
-        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        let t = GESTURE_SWIPE_THRESHOLD_H + 10;
         // Each reversal fires at the normal threshold (issue #1634).
         assert_eq!(acc.accumulate(-t, 0), Some(GestureDirection::Left));
         assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
@@ -456,7 +454,7 @@ mod tests {
         acc.begin();
         acc.backdate_hold_for_test();
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
         // Keep going right without stopping, drifting a little upward: one more
@@ -474,7 +472,7 @@ mod tests {
         acc.begin();
         acc.backdate_hold_for_test();
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
         // Each report leans right, but together they are too diagonal to be
@@ -490,7 +488,7 @@ mod tests {
         acc.begin();
         acc.backdate_hold_for_test();
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
         // One report spanning two repeat distances: one Right now, and the
@@ -508,7 +506,7 @@ mod tests {
         acc.begin();
         acc.backdate_hold_for_test();
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
         assert_eq!(acc.accumulate(GESTURE_REPEAT_DISTANCE - 10, 0), None);
@@ -530,7 +528,7 @@ mod tests {
         acc.begin();
         acc.backdate_hold_for_test();
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
         // A repeat distance along with 40% of it as drift: too diagonal to
@@ -549,7 +547,7 @@ mod tests {
         acc.begin();
         acc.backdate_hold_for_test();
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
         // 1.2 repeat distances along: the last report's drift alone is
@@ -571,7 +569,7 @@ mod tests {
         acc.begin();
         acc.backdate_hold_for_test();
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
         assert_eq!(acc.accumulate(GESTURE_REPEAT_DISTANCE - 1, 0), None);
@@ -583,7 +581,7 @@ mod tests {
         acc.begin();
         acc.backdate_hold_for_test();
         assert_eq!(
-            acc.accumulate(-(GESTURE_SWIPE_THRESHOLD + 10), 0),
+            acc.accumulate(-(GESTURE_SWIPE_THRESHOLD_H + 10), 0),
             Some(GestureDirection::Left)
         );
         // Overshoot 100 units left, then turn: the normal threshold suffices.
@@ -591,7 +589,7 @@ mod tests {
             assert_eq!(acc.accumulate(-10, 0), None);
         }
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
     }
@@ -602,13 +600,15 @@ mod tests {
         acc.begin();
         acc.backdate_hold_for_test();
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
-        // Left 30, a one-unit rightward jitter packet, then left 30 more.
-        assert_eq!(acc.accumulate(-30, 0), None);
+        // Left 60% of the threshold, a one-unit rightward jitter packet, then
+        // left 60% more.
+        let part = GESTURE_SWIPE_THRESHOLD_H * 3 / 5;
+        assert_eq!(acc.accumulate(-part, 0), None);
         assert_eq!(acc.accumulate(1, 0), None);
-        assert_eq!(acc.accumulate(-30, 0), Some(GestureDirection::Left));
+        assert_eq!(acc.accumulate(-part, 0), Some(GestureDirection::Left));
     }
 
     #[test]
@@ -617,12 +617,13 @@ mod tests {
         acc.begin();
         acc.backdate_hold_for_test();
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
-        assert_eq!(acc.accumulate(-30, 0), None);
+        let part = GESTURE_SWIPE_THRESHOLD_H * 3 / 5;
+        assert_eq!(acc.accumulate(-part, 0), None);
         acc.rest_for_test();
-        assert_eq!(acc.accumulate(-30, 0), Some(GestureDirection::Left));
+        assert_eq!(acc.accumulate(-part, 0), Some(GestureDirection::Left));
     }
 
     #[test]
@@ -630,7 +631,7 @@ mod tests {
         let mut acc = SwipeAccumulator::default();
         acc.begin();
         acc.backdate_hold_for_test();
-        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        let t = GESTURE_SWIPE_THRESHOLD_H + 10;
         assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
         assert_eq!(acc.accumulate(t, 0), None, "still the same stroke");
         acc.rest_for_test();
@@ -642,12 +643,15 @@ mod tests {
         let mut acc = SwipeAccumulator::default();
         acc.begin();
         acc.backdate_hold_for_test();
-        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        let t = GESTURE_SWIPE_THRESHOLD_H + 10;
         assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
-        assert_eq!(acc.accumulate(-30, 0), None);
+        assert_eq!(
+            acc.accumulate(-(GESTURE_SWIPE_THRESHOLD_H * 3 / 5), 0),
+            None
+        );
         acc.rest_for_test();
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H, 0),
             Some(GestureDirection::Right)
         );
     }
@@ -657,12 +661,17 @@ mod tests {
         let mut acc = SwipeAccumulator::default();
         acc.begin();
         acc.backdate_hold_for_test();
-        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        let t = GESTURE_SWIPE_THRESHOLD_H + 10;
         assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
-        // Net Left travel is only 40.
-        assert_eq!(acc.accumulate(-30, 0), None);
-        assert_eq!(acc.accumulate(25, 0), None);
-        assert_eq!(acc.accumulate(-35, 0), None);
+        // Each leg is under the threshold, and net Left travel ends one unit
+        // short of it.
+        let leg = GESTURE_SWIPE_THRESHOLD_H * 3 / 4;
+        assert_eq!(acc.accumulate(-leg, 0), None);
+        assert_eq!(acc.accumulate(leg / 2, 0), None);
+        assert_eq!(
+            acc.accumulate(-(GESTURE_SWIPE_THRESHOLD_H - 1 - leg + leg / 2), 0),
+            None
+        );
     }
 
     #[test]
@@ -670,7 +679,7 @@ mod tests {
         let mut acc = SwipeAccumulator::default();
         acc.begin();
         acc.backdate_hold_for_test();
-        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        let t = GESTURE_SWIPE_THRESHOLD_H + 10;
         assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
         for _ in 0..20 {
             assert_eq!(acc.accumulate(-15, 0), None);
@@ -688,6 +697,18 @@ mod tests {
         // Once held long enough, the next delta commits.
         acc.backdate_hold_for_test();
         assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 100, 0).is_some());
+    }
+
+    #[test]
+    fn accumulator_counts_each_post_gate_delta_once() {
+        // Travel one unit short of the threshold, split over several reports
+        // after the gate, must not commit; the unit that reaches it must.
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(acc.accumulate(1, 0), None);
+        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD_H - 2, 0), None);
+        assert_eq!(acc.accumulate(1, 0), Some(GestureDirection::Right));
     }
 
     #[test]
