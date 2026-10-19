@@ -203,8 +203,8 @@ mod tests {
         );
         assert_bootstrap_on_display(&placement);
         let bounds = placement.bounds(192);
-        assert_eq!(bounds.origin, point(DevicePixels(1920), DevicePixels(440)));
-        assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
+        assert_eq!(bounds.origin, point(DevicePixels(1920), DevicePixels(240)));
+        assert_eq!(bounds.size, size(DevicePixels(1120), DevicePixels(1120)));
     }
 
     #[test]
@@ -226,17 +226,23 @@ mod tests {
     #[test]
     fn physical_center_is_independent_of_monitor_scale_and_global_origin() {
         for (cursor, rect, dpi, origin, edge) in [
-            ((3000, 850), (1920, 0, 4480, 1440), 192, (2640, 490), 720),
-            ((900, 600), (0, 0, 1920, 1080), 96, (720, 420), 360),
+            ((3000, 850), (1920, 0, 4480, 1440), 192, (2440, 290), 1120),
+            ((900, 600), (0, 0, 1920, 1080), 96, (620, 320), 560),
             // 150% left, 125% above, and 175% below-left with nonzero X/Y.
-            ((-1400, 450), (-2560, -200, 0, 1240), 144, (-1670, 180), 540),
-            ((-300, -700), (-640, -1440, 1920, 0), 120, (-525, -925), 450),
+            ((-1400, 450), (-2560, -200, 0, 1240), 144, (-1820, 30), 840),
+            (
+                (-300, -700),
+                (-640, -1440, 1920, 0),
+                120,
+                (-640, -1050),
+                700,
+            ),
             (
                 (-1200, 1600),
                 (-1920, 1080, 0, 2520),
                 168,
-                (-1515, 1285),
-                630,
+                (-1690, 1110),
+                980,
             ),
         ] {
             let bounds = placement(cursor, rect).bounds(dpi);
@@ -251,13 +257,13 @@ mod tests {
     #[test]
     fn monitor_seams_and_outer_edges_clamp_on_the_selected_side() {
         for (cursor, rect, dpi, origin) in [
-            ((1919, 600), (0, 0, 1920, 1080), 96, (1560, 420)),
-            ((1920, 600), (1920, 0, 4480, 1440), 192, (1920, 240)),
-            ((4479, 1439), (1920, 0, 4480, 1440), 192, (3760, 720)),
-            ((-1, 600), (-2560, -200, 0, 1240), 144, (-540, 330)),
-            ((0, 600), (0, 0, 1920, 1080), 96, (0, 420)),
-            ((600, -1), (-640, -1440, 1920, 0), 120, (375, -450)),
-            ((600, 0), (0, 0, 1920, 1080), 96, (420, 0)),
+            ((1919, 600), (0, 0, 1920, 1080), 96, (1360, 320)),
+            ((1920, 600), (1920, 0, 4480, 1440), 192, (1920, 40)),
+            ((4479, 1439), (1920, 0, 4480, 1440), 192, (3360, 320)),
+            ((-1, 600), (-2560, -200, 0, 1240), 144, (-840, 180)),
+            ((0, 600), (0, 0, 1920, 1080), 96, (0, 320)),
+            ((600, -1), (-640, -1440, 1920, 0), 120, (250, -700)),
+            ((600, 0), (0, 0, 1920, 1080), 96, (320, 0)),
             ((-640, -1440), (-640, -1440, 1920, 0), 120, (-640, -1440)),
         ] {
             let bounds = placement(cursor, rect).bounds(dpi);
@@ -272,7 +278,7 @@ mod tests {
     fn undersized_display_keeps_a_valid_clamp_range() {
         let bounds = placement((-100, -50), (-200, -100, 0, 0)).bounds(192);
         assert_eq!(bounds.origin, point(DevicePixels(-200), DevicePixels(-100)));
-        assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
+        assert_eq!(bounds.size, size(DevicePixels(1120), DevicePixels(1120)));
     }
 
     fn rect_bounds(rect: (i32, i32, i32, i32)) -> Bounds<DevicePixels> {
