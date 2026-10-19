@@ -115,3 +115,23 @@ fn config_reload_wakes_integrations_without_an_inventory_change() {
     assert!(changes.has_changed().unwrap());
     assert!(!orch.config().app_settings.macos_battery_widget);
 }
+
+#[test]
+fn saved_config_reload_wakes_integrations_without_an_inventory_change() {
+    use openlogi_core::config::ConfigRevision;
+    use openlogi_ipc::SavedConfig;
+
+    let mut orch = orchestrator(Config::default());
+    let changes = orch.subscribe_config_changes();
+    let mut config = Config::default();
+    config.app_settings.macos_battery_widget = true;
+    let saved = SavedConfig {
+        revision: ConfigRevision::of("the GUI's save"),
+        chosen: Vec::new(),
+    };
+
+    orch.reload_saved_config(config, saved.revision, &saved);
+
+    assert!(changes.has_changed().unwrap());
+    assert!(orch.config().app_settings.macos_battery_widget);
+}
