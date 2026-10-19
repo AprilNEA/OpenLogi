@@ -1,22 +1,26 @@
 //! Per-application profiles: the button overrides a device stores for one
 //! application, and how the application in front is matched to them.
 //!
-//! An override replaces a whole button with a single action. Editing addresses
-//! a profile by its exact key; matching goes through [`overlay_for`], which
+//! An override replaces a whole button with a single action or a direction map. Editing addresses
+//! a profile by its exact key; matching goes through [`overlay_pair_for`], which
 //! also falls back from a Windows executable path to that executable's
 //! `exe:<filename>` key.
 
 use std::collections::BTreeMap;
 
 use super::Config;
-use crate::app::overlay_for;
-use crate::binding::{Action, Binding, ButtonId};
+use crate::app::overlay_pair_for;
+use crate::binding::{
+    Action, Binding, ButtonId, GestureDirection, default_binding, default_binding_for,
+};
 
 impl Config {
     /// Resolve the effective binding map for `device_key`, overlaying the
     /// per-app entry for `bundle_id` (if any) on top of the global per-device
     /// `bindings`. A per-app override replaces the whole button with a
-    /// [`Binding::Single`]; everything else falls through.
+    /// single action or directional map; everything else falls through. Exact
+    /// application selectors take precedence across both storage shapes before
+    /// a single action can suspend a gesture map in that selected profile.
     ///
     /// Returns an empty map when the device has no recorded bindings yet.
     /// Callers (the GUI / hook) layer their own defaults on top.
@@ -30,11 +34,22 @@ impl Config {
             return BTreeMap::new();
         };
         let mut out = device.bindings.clone();
-        if let Some(bid) = bundle_id
-            && let Some(overlay) = overlay_for(&device.per_app_bindings, bid)
-        {
-            for (k, v) in overlay {
-                out.insert(*k, Binding::Single(v.clone()));
+        if let Some(bid) = bundle_id {
+            let (gestures, actions) = overlay_pair_for(
+                &device.per_app_gesture_bindings,
+                &device.per_app_bindings,
+                bid,
+            );
+            if let Some(overlay) = gestures {
+                for (button, directions) in overlay {
+                    out.insert(*button, Binding::Gesture(directions.clone()));
+                }
+            }
+            // A single action suspends the app's map without discarding its swipes.
+            if let Some(overlay) = actions {
+                for (button, action) in overlay {
+                    out.insert(*button, Binding::Single(action.clone()));
+                }
             }
         }
         out
@@ -42,7 +57,8 @@ impl Config {
 
     /// Records a per-app override. Creates the device + app entries as
     /// needed; passing an action of `None` removes the override and prunes
-    /// the empty app map.
+    /// the empty app map. A single action suspends a stored app direction map;
+    /// clearing the override removes both shapes and restores live inheritance.
     pub fn set_per_app_binding(
         &mut self,
         device_key: &str,
@@ -50,6 +66,15 @@ impl Config {
         button: ButtonId,
         action: Option<Action>,
     ) {
+        if action.is_none()
+            && let Some(device) = self.devices.get_mut(device_key)
+            && let Some(gestures) = device.per_app_gesture_bindings.get_mut(bundle_id)
+        {
+            gestures.remove(&button);
+            device
+                .per_app_gesture_bindings
+                .retain(|_, map| !map.is_empty());
+        }
         let entry = self
             .devices
             .entry(device_key.to_string())
@@ -68,6 +93,100 @@ impl Config {
         if let Some(d) = self.devices.get_mut(device_key) {
             d.per_app_bindings.retain(|_, m| !m.is_empty());
         }
+    }
+
+    /// Enter or leave gesture mode only in `app`'s profile, preserving the global binding.
+    pub fn set_per_app_gesture_mode(
+        &mut self,
+        device_key: &str,
+        app: &str,
+        button: ButtonId,
+        enabled: bool,
+    ) {
+        let mut binding = self.app_gesture_binding(device_key, app, button);
+        if enabled {
+            if let Some(map) = self
+                .per_app_gesture_overrides(device_key, app)
+                .and_then(|maps| maps.get(&button))
+            {
+                binding = Binding::Gesture(map.clone());
+            }
+            binding.upgrade_to_gesture();
+            binding.fill_gesture_defaults();
+            if let Binding::Gesture(map) = binding {
+                self.store_per_app_gestures(device_key, app, button, map);
+            }
+        } else {
+            let click = binding.click_action();
+            if let Binding::Gesture(map) = binding {
+                self.store_per_app_gestures(device_key, app, button, map);
+            }
+            self.set_per_app_binding(device_key, app, button, Some(click));
+        }
+    }
+
+    /// Edit one app-specific direction, snapshotting the inherited map before its first edit.
+    /// A single-action binding is not silently promoted by a stale direction edit.
+    pub fn set_per_app_gesture_direction(
+        &mut self,
+        device_key: &str,
+        app: &str,
+        button: ButtonId,
+        direction: GestureDirection,
+        action: Action,
+    ) {
+        let mut binding = self.app_gesture_binding(device_key, app, button);
+        if !binding.is_gesture() {
+            return;
+        }
+        binding.fill_gesture_defaults();
+        if let Binding::Gesture(mut map) = binding {
+            map.insert(direction, action);
+            self.store_per_app_gestures(device_key, app, button, map);
+        }
+    }
+
+    fn app_gesture_binding(&self, device_key: &str, app: &str, button: ButtonId) -> Binding {
+        let mut binding = self
+            .effective_bindings(device_key, Some(app))
+            .remove(&button)
+            .unwrap_or_else(|| default_binding_for(button));
+        if let Binding::Gesture(map) = &mut binding {
+            map.entry(GestureDirection::Click)
+                .or_insert_with(|| default_binding(button));
+        }
+        binding
+    }
+
+    fn store_per_app_gestures(
+        &mut self,
+        device_key: &str,
+        app: &str,
+        button: ButtonId,
+        map: BTreeMap<GestureDirection, Action>,
+    ) {
+        self.set_per_app_binding(device_key, app, button, None);
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .per_app_gesture_bindings
+            .entry(app.to_string())
+            .or_default()
+            .insert(button, map);
+    }
+
+    /// App-specific directional overrides for the exact editor profile key.
+    #[must_use]
+    pub fn per_app_gesture_overrides(
+        &self,
+        device_key: &str,
+        app: &str,
+    ) -> Option<&BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>> {
+        self.devices
+            .get(device_key)?
+            .per_app_gesture_bindings
+            .get(app)
+            .filter(|overrides| !overrides.is_empty())
     }
 
     /// The overrides `device_key` stores for the application key `app`,
@@ -96,7 +215,15 @@ impl Config {
         self.devices
             .get(device_key)
             .into_iter()
-            .flat_map(|device| device.per_app_bindings.keys().map(String::as_str))
+            .flat_map(|device| {
+                device
+                    .per_app_bindings
+                    .keys()
+                    .chain(device.per_app_gesture_bindings.keys())
+                    .map(String::as_str)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
     }
 
     /// Drop `device_key`'s whole profile for `app`. Nothing happens when there
@@ -104,6 +231,7 @@ impl Config {
     pub fn remove_app_profile(&mut self, device_key: &str, app: &str) {
         if let Some(device) = self.devices.get_mut(device_key) {
             device.per_app_bindings.remove(app);
+            device.per_app_gesture_bindings.remove(app);
         }
     }
 
@@ -114,7 +242,10 @@ impl Config {
     #[must_use]
     pub fn has_app_override(&self, device_key: &str, app: &str) -> bool {
         self.devices.get(device_key).is_some_and(|d| {
-            overlay_for(&d.per_app_bindings, app).is_some_and(|overlay| !overlay.is_empty())
+            let (actions, gestures) =
+                overlay_pair_for(&d.per_app_bindings, &d.per_app_gesture_bindings, app);
+            actions.is_some_and(|overlay| !overlay.is_empty())
+                || gestures.is_some_and(|overlay| !overlay.is_empty())
         })
     }
 }

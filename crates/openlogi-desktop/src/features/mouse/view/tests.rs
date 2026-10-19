@@ -223,6 +223,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 wheel_hold: &BTreeSet::new(),
                 editing_app: None,
                 overridden: None,
+                gesture_overridden: None,
             },
             ActionPickerContext {
                 open: true,
@@ -520,6 +521,22 @@ fn a_gesture_button_offers_wheel_hold_and_leaves_gestures_for_it(cx: &mut TestAp
         "the gesture inspector offers the switch too"
     );
 
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_editing_app(Some("com.apple.Safari".into()))
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(in_gesture_mode(cx, ButtonId::Back));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "an inherited app gesture map cannot edit device-wide wheel-hold"
+    );
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| state.set_editing_app(None));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
     click_picker_control(cx, "inspector-wheel-hold-row-control");
 
     assert!(holds_the_wheel(cx, ButtonId::Back));
@@ -553,6 +570,81 @@ fn a_gesture_button_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppConte
         cx.debug_bounds("inspector-wheel-hold-row").is_none(),
         "no switch where holding cannot scroll"
     );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+#[cfg(target_os = "macos")]
+fn app_gesture_inspector_reset_and_mode_roundtrip_are_scoped(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    let _receiver = cx.update(crate::qa::install_on_app).unwrap();
+    cx.update(|cx| {
+        AppState::apply(cx, |state| {
+            state.set_editing_app(Some(crate::qa::APP.into()))
+        });
+    });
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1280.), px(820.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    view.update(cx, |view, cx| {
+        view.select(MouseControlId::Button(ButtonId::HapticPanel));
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "inspector-use-default");
+    cx.update(|_, cx| {
+        assert!(
+            !AppState::try_read(cx)
+                .unwrap()
+                .gesture_bindings()
+                .contains_key(&ButtonId::HapticPanel)
+        );
+    });
+    click_picker_control(cx, "inspector-use-gestures");
+    click_picker_control(cx, "inspector-current-action");
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: gpui::point(px(1200.), px(700.)),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-650.))),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "inspector-gesture-action-Copy");
+    cx.update(|_, cx| {
+        assert_eq!(
+            AppState::try_read(cx).unwrap().gesture_bindings()[&ButtonId::HapticPanel]
+                [&GestureDirection::Click],
+            Action::Copy
+        );
+    });
+    click_picker_control(cx, "inspector-single-action");
+    cx.update(|_, cx| {
+        assert!(
+            !AppState::try_read(cx)
+                .unwrap()
+                .gesture_bindings()
+                .contains_key(&ButtonId::HapticPanel)
+        );
+    });
+    click_picker_control(cx, "inspector-use-gestures");
+    cx.update(|_, cx| {
+        let state = AppState::try_read(cx).unwrap();
+        assert_eq!(
+            state.gesture_bindings()[&ButtonId::HapticPanel][&GestureDirection::Click],
+            Action::Copy
+        );
+    });
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| state.set_editing_app(None));
+        assert_eq!(
+            AppState::try_read(cx).unwrap().button_bindings()[&ButtonId::HapticPanel],
+            Action::ShowActionsRing
+        );
+    });
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();

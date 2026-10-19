@@ -6,6 +6,7 @@
 //! the wire. That last one makes this a wire type — see
 //! `crates/openlogi-ipc/AGENTS.md`.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -61,16 +62,42 @@ impl ForegroundApp {
 /// that merely ends in `.exe` is not reinterpreted as one.
 #[must_use]
 pub fn overlay_for<'a, T>(overlays: &'a BTreeMap<String, T>, app: &str) -> Option<&'a T> {
-    overlays.get(app).or_else(|| {
-        let (_, executable_name) = app.rsplit_once(['\\', '/'])?;
-        if !Path::new(executable_name)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-        {
-            return None;
-        }
-        overlays.get(&format!("exe:{}", executable_name.to_ascii_lowercase()))
-    })
+    let key = overlay_key(app, |key| overlays.contains_key(key))?;
+    overlays.get(key.as_ref())
+}
+
+/// Resolve two storage shapes of one application profile with a shared selector.
+///
+/// An exact key in either map wins over the executable fallback in both maps.
+/// The returned entries always belong to the same selector; callers may then
+/// apply their precedence between shapes without mixing application profiles.
+#[must_use]
+pub fn overlay_pair_for<'a, T, U>(
+    first: &'a BTreeMap<String, T>,
+    second: &'a BTreeMap<String, U>,
+    app: &str,
+) -> (Option<&'a T>, Option<&'a U>) {
+    let Some(key) = overlay_key(app, |key| {
+        first.contains_key(key) || second.contains_key(key)
+    }) else {
+        return (None, None);
+    };
+    (first.get(key.as_ref()), second.get(key.as_ref()))
+}
+
+fn overlay_key(app: &str, contains: impl Fn(&str) -> bool) -> Option<Cow<'_, str>> {
+    if contains(app) {
+        return Some(Cow::Borrowed(app));
+    }
+    let (_, executable_name) = app.rsplit_once(['\\', '/'])?;
+    if !Path::new(executable_name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+    {
+        return None;
+    }
+    let fallback = format!("exe:{}", executable_name.to_ascii_lowercase());
+    contains(&fallback).then_some(Cow::Owned(fallback))
 }
 
 #[cfg(test)]

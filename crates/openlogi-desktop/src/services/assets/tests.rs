@@ -3,6 +3,23 @@ use openlogi_assets::DeviceEntry;
 use openlogi_core::device::DeviceTransports;
 use std::collections::HashMap;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn fixture_never_reads_machine_asset_roots() {
+    let resolver = AssetResolver::fixture();
+    assert!(
+        resolver.read_roots.is_empty(),
+        "fixture must not search the user's cache or app bundle"
+    );
+    assert!(!resolver.index_loaded());
+    assert!(!resolver.has_bundle_root());
+    assert!(
+        resolver
+            .resolve(&btle_3s_model(), Some("MX Master 3S"))
+            .is_none()
+    );
+}
+
 /// A resolver over `roots` — the bundle first when there are two, as in
 /// production — with `index` already in memory instead of read from them.
 fn resolver_over(roots: &[&Path], index: Option<Index>) -> AssetResolver {

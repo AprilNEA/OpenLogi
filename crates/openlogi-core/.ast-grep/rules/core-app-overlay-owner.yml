@@ -1,4 +1,4 @@
-# Owner: openlogi_core::app::overlay_for — how a per-app map is matched
+# Owner: openlogi_core::app::{overlay_for, overlay_pair_for} — how a per-app map is matched
 # against the foreground identifier: exact key first, then the Windows
 # `exe:<filename>` fallback. Every per-app map (button overrides, Actions Ring
 # layouts) resolves through it, so one selector means one thing everywhere.
@@ -7,7 +7,7 @@
 id: core-app-overlay-owner
 language: rust
 severity: error
-message: Matching a per-app key against the foreground identifier is openlogi_core::app::overlay_for's; call it instead of building an `exe:` key or indexing the ring's per_app map by the raw identifier here.
+message: Application selectors belong to openlogi_core::app. Use overlay_pair_for for the two button-profile shapes and overlay_for for a standalone map; do not rebuild selectors or mix exact and fallback button profiles.
 note: |
   action_ring.per_app looked the identifier up verbatim while
   per_app_bindings fell back to `exe:<filename>` (#643), so a Windows Store
@@ -21,5 +21,17 @@ ignores:
   - "**/tests/**"
 rule:
   any:
-    - pattern: format!("exe:$$$")
+    - kind: macro_invocation
+      regex: 'format!\s*\(\s*"exe:'
     - pattern: $MAP.per_app.get($$$)
+    - kind: call_expression
+      all:
+        - has:
+            field: function
+            regex: '(^|::)overlay_for$'
+        - has:
+            field: arguments
+            has:
+              kind: field_expression
+              regex: '\.per_app_(gesture_)?bindings$'
+              stopBy: end

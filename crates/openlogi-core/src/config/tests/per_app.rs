@@ -146,6 +146,104 @@ fn windows_exe_selector_exact_path_takes_precedence() {
 }
 
 #[test]
+fn exact_gestures_do_not_mix_with_executable_fallback_single_actions() {
+    use crate::binding::GestureDirection;
+
+    let mut config = Config::default();
+    let exact = r"c:\apps\code_1\code.exe";
+    let button = ButtonId::GestureButton;
+    config.set_binding(
+        "device",
+        ButtonId::Back,
+        Binding::Single(Action::BrowserBack),
+    );
+    config.set_per_app_binding("device", "exe:code.exe", button, Some(Action::Copy));
+    config.set_per_app_binding(
+        "device",
+        "exe:code.exe",
+        ButtonId::Back,
+        Some(Action::Paste),
+    );
+    config.set_per_app_gesture_mode("device", exact, button, true);
+    config.set_per_app_gesture_direction(
+        "device",
+        exact,
+        button,
+        GestureDirection::Up,
+        Action::Undo,
+    );
+
+    let effective = config.effective_bindings("device", Some(exact));
+    let Binding::Gesture(directions) = &effective[&button] else {
+        panic!("exact app gesture map must win over an executable fallback single action");
+    };
+    assert_eq!(directions[&GestureDirection::Up], Action::Undo);
+    assert_eq!(
+        effective[&ButtonId::Back],
+        Binding::Single(Action::BrowserBack)
+    );
+
+    // A different path has no exact profile and still uses the fallback.
+    let fallback = config.effective_bindings("device", Some(r"c:\apps\code_2\code.exe"));
+    assert_eq!(fallback[&button], Binding::Single(Action::Copy));
+    assert_eq!(fallback[&ButtonId::Back], Binding::Single(Action::Paste));
+}
+
+#[test]
+fn exact_single_actions_do_not_mix_with_executable_fallback_gestures() {
+    use crate::binding::GestureDirection;
+
+    let mut config = Config::default();
+    let exact = r"c:\apps\code_1\code.exe";
+    let button = ButtonId::GestureButton;
+    config.set_binding(
+        "device",
+        ButtonId::Back,
+        Binding::Single(Action::BrowserBack),
+    );
+    config.set_per_app_gesture_mode("device", "exe:code.exe", button, true);
+    config.set_per_app_gesture_direction(
+        "device",
+        "exe:code.exe",
+        button,
+        GestureDirection::Up,
+        Action::Undo,
+    );
+    config.set_per_app_gesture_mode("device", "exe:code.exe", ButtonId::Back, true);
+    config.set_per_app_binding("device", exact, button, Some(Action::Copy));
+
+    let effective = config.effective_bindings("device", Some(exact));
+    assert_eq!(effective[&button], Binding::Single(Action::Copy));
+    assert_eq!(
+        effective[&ButtonId::Back],
+        Binding::Single(Action::BrowserBack)
+    );
+
+    let fallback = config.effective_bindings("device", Some(r"c:\apps\code_2\code.exe"));
+    let Binding::Gesture(directions) = &fallback[&button] else {
+        panic!("a different executable path must still use its fallback gesture map");
+    };
+    assert_eq!(directions[&GestureDirection::Up], Action::Undo);
+    assert!(matches!(fallback[&ButtonId::Back], Binding::Gesture(_)));
+}
+
+#[test]
+fn empty_exact_profile_does_not_report_the_executable_fallback_as_active() {
+    let config: Config = toml::from_str(
+        r#"schema_version = 7
+[devices.device.per_app_bindings.'exe:code.exe']
+GestureButton = "Copy"
+[devices.device.per_app_gesture_bindings.'c:\apps\code_1\code.exe']
+"#,
+    )
+    .unwrap();
+    let exact = r"c:\apps\code_1\code.exe";
+    assert!(!config.has_app_override("device", exact));
+    assert!(config.effective_bindings("device", Some(exact)).is_empty());
+    assert!(config.has_app_override("device", r"c:\apps\code_2\code.exe"));
+}
+
+#[test]
 fn windows_exe_selector_ignores_non_exe_identifiers() {
     let mut cfg = Config::default();
     cfg.set_binding(
@@ -162,4 +260,90 @@ fn windows_exe_selector_ignores_non_exe_identifiers() {
         Some(&Binding::Single(Action::BrowserBack))
     );
     assert!(!cfg.has_app_override("2b042", "com.microsoft.VSCode"));
+}
+
+#[test]
+fn app_direction_maps_survive_single_mode_and_reset_without_changing_global() {
+    use crate::binding::GestureDirection;
+    let mut cfg = Config::default();
+    cfg.set_gesture_direction(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::Up,
+        Action::Copy,
+    );
+    let global = cfg.effective_bindings("2b042", None);
+    cfg.set_per_app_gesture_direction(
+        "2b042",
+        "com.example.Editor",
+        ButtonId::GestureButton,
+        GestureDirection::Click,
+        Action::Paste,
+    );
+    let custom = cfg.effective_bindings("2b042", Some("com.example.Editor"));
+    let Binding::Gesture(map) = &custom[&ButtonId::GestureButton] else {
+        panic!("app map missing")
+    };
+    assert_eq!(map[&GestureDirection::Up], Action::Copy);
+    cfg.set_per_app_gesture_mode(
+        "2b042",
+        "com.example.Editor",
+        ButtonId::GestureButton,
+        false,
+    );
+    assert_eq!(
+        cfg.effective_bindings("2b042", Some("com.example.Editor"))[&ButtonId::GestureButton],
+        Binding::Single(Action::Paste)
+    );
+    assert!(
+        cfg.per_app_gesture_overrides("2b042", "com.example.Editor")
+            .is_some()
+    );
+    cfg.set_per_app_gesture_mode("2b042", "com.example.Editor", ButtonId::GestureButton, true);
+    assert_eq!(
+        cfg.effective_bindings("2b042", Some("com.example.Editor")),
+        custom
+    );
+    assert_eq!(
+        cfg.effective_bindings("2b042", Some("com.example.Other")),
+        global
+    );
+    cfg.set_per_app_binding("2b042", "com.example.Editor", ButtonId::GestureButton, None);
+    assert_eq!(
+        cfg.effective_bindings("2b042", Some("com.example.Editor")),
+        global
+    );
+    assert!(cfg.app_profiles("2b042").next().is_none());
+}
+
+#[test]
+fn per_app_gesture_maps_roundtrip_without_changing_global_bindings() {
+    let mut config = Config::default();
+    config.set_binding(
+        "unit:12345678",
+        ButtonId::HapticPanel,
+        Binding::Single(Action::ShowActionsRing),
+    );
+    config.set_per_app_gesture_mode(
+        "unit:12345678",
+        "com.example.App",
+        ButtonId::HapticPanel,
+        true,
+    );
+    config.set_per_app_gesture_direction(
+        "unit:12345678",
+        "com.example.App",
+        ButtonId::HapticPanel,
+        GestureDirection::Up,
+        Action::Copy,
+    );
+    let reread = write_and_read(&config);
+    assert_eq!(
+        reread.devices["unit:12345678"].per_app_gesture_bindings,
+        config.devices["unit:12345678"].per_app_gesture_bindings
+    );
+    assert_eq!(
+        reread.devices["unit:12345678"].bindings,
+        config.devices["unit:12345678"].bindings
+    );
 }

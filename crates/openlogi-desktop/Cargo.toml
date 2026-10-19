@@ -15,6 +15,9 @@ publish = false
 name = "openlogi-desktop"
 path = "src/main.rs"
 
+[features]
+native-ui-qa = ["gpui/test-support", "gpui_platform/test-support"]
+
 [dependencies]
 appcatalog = "0.1.1"
 openlogi-core = { path = "../openlogi-core", features = ["logging", "worker"] }
@@ -79,6 +82,7 @@ workspace = true
 [dev-dependencies]
 openlogi-ipc = { path = "../openlogi-ipc", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
 openlogi-device = { path = "../openlogi-device" }
 openlogi-fixture = { workspace = true, features = ["fs"] }
 tempfile = "3.27.0"
