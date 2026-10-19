@@ -161,11 +161,16 @@ pub(crate) fn close_ring_windows(cx: &mut gpui::App, session_id: u64) -> bool {
 ///
 /// For when the agent names the ring that should be showing, or none: any
 /// other ring is stale. Only ring windows close, so a notice that is showing
-/// stays up while rings come and go.
+/// stays up while rings come and go. A ring already playing its exit removes
+/// itself when that ends; cutting it short would skip the animation.
 pub(crate) fn close_all_ring_windows(cx: &mut gpui::App) {
     for handle in cx.windows() {
         if let Some(ring) = handle.downcast::<RingView>() {
-            let _ = ring.update(cx, |_, window, _| window.remove_window());
+            let _ = ring.update(cx, |view, window, _| {
+                if !view.is_closing() {
+                    window.remove_window();
+                }
+            });
         }
     }
 }
