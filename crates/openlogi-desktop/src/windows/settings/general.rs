@@ -82,7 +82,9 @@ pub(super) fn general_page(
         }),
     );
 
-    let group = group.item(low_battery_notifications_item());
+    let group = group
+        .item(low_battery_notifications_item())
+        .item(lock_key_notifications_item());
 
     SettingPage::new(tr!("app.general"))
         .icon(IconName::Settings)
@@ -152,6 +154,26 @@ fn low_battery_notifications_item() -> SettingItem {
         ),
     )
     .description(tr!("app.low_battery_notifications_description"))
+}
+
+/// The switch for the overlay's lock-key indicator.
+fn lock_key_notifications_item() -> SettingItem {
+    SettingItem::new(
+        tr!("app.lock_key_notifications"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().lock_key_notifications),
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_lock_key_notifications(enabled));
+            },
+        ),
+    )
+    // macOS gives Num Lock and Scroll Lock no meaning, so the indicator shows
+    // only Caps Lock there (`LockKey::is_indicated_here`).
+    .description(if cfg!(target_os = "macos") {
+        tr!("app.lock_key_notifications_description_macos")
+    } else {
+        tr!("app.lock_key_notifications_description")
+    })
 }
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {

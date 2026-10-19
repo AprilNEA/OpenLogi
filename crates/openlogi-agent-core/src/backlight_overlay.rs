@@ -6,7 +6,8 @@ use std::time::Duration;
 use openlogi_ipc::{BacklightObservation, Generation, OBSERVE_HOLD};
 use tokio::sync::watch;
 
-const DISPLAY_LIFETIME: Duration = Duration::from_millis(1500);
+/// How long the indicator shows one level change.
+pub(crate) const DISPLAY_LIFETIME: Duration = Duration::from_millis(1500);
 
 #[derive(Clone)]
 pub struct BacklightOverlayManager {

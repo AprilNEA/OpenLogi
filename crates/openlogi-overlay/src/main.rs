@@ -1,10 +1,10 @@
-//! Lightweight GPUI host for the cursor-centred Actions Ring and the notices
-//! the agent posts.
+//! Lightweight GPUI host for the cursor-centred Actions Ring, the notices the
+//! agent posts, and its transient keyboard indicators.
 //!
 //! This process is a pure IPC client. The agent owns HID++, session validation,
 //! haptic output, and action execution; the overlay only renders the
 //! agent-snapshotted actions and reports hover/activate/cancel interactions,
-//! and draws whichever notices the agent says are current.
+//! and draws whichever notices and indicators the agent says are current.
 
 #![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
@@ -18,6 +18,7 @@ rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
 mod backlight;
 mod ipc;
+mod lock_key;
 mod notice;
 mod platform;
 mod ring;
@@ -45,7 +46,7 @@ use crate::session::{
 
 #[expect(
     clippy::too_many_lines,
-    reason = "the overlay bootstraps two independent IPC observation tasks"
+    reason = "the overlay bootstraps its independent IPC observation tasks"
 )]
 fn main() -> Result<()> {
     openlogi_core::logging::init_stderr();
@@ -57,6 +58,7 @@ fn main() -> Result<()> {
         mut invocations,
         mut backlights,
         mut notices,
+        mut lock_keys,
         commands,
     } = ipc::spawn();
 
@@ -82,6 +84,15 @@ fn main() -> Result<()> {
                     continue;
                 };
                 cx.update(|cx| notice::present(cx, &shelf, &cards));
+            }
+        })
+        .detach();
+        cx.spawn(async move |cx| {
+            // The agent's timer is the indicator's only clock: it reports
+            // nothing showing when the time is up, or when it is gone.
+            while let Some(observed) = lock_keys.recv().await {
+                openlogi_core::locale::activate(observed.language.as_deref());
+                cx.update(|cx| lock_key::present(cx, observed.shown));
             }
         })
         .detach();

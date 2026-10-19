@@ -16,7 +16,7 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::device::{
-    BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, StandaloneDevice,
+    BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
@@ -117,7 +117,9 @@ pub use succession::Identity;
 ///      overlay's transient indicator. `Agent::observe_notices`,
 ///      [`NoticeObservation`], [`Notice`] and [`NoticeKind`] appended —
 ///      the notices the overlay shows, first among them a device's low
-///      battery.
+///      battery. `Agent::observe_lock_keys`, [`LockKeyObservation`] and
+///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
+///      off over HID++ `0x4220`, for the overlay's transient indicator.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -519,6 +521,32 @@ pub struct BacklightObservation {
     pub visible: bool,
 }
 
+/// The transient lock-key indicator: the lock key a keyboard just turned on
+/// or off, or none once the indicator's time is up.
+///
+/// Its own cell, as [`BacklightObservation`] is. The agent owns how long the
+/// indicator shows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockKeyObservation {
+    /// See [`Generation`]. Pass it back to the next [`Agent::observe_lock_keys`].
+    pub generation: Generation,
+    /// The change to show, or `None` for none — which is also how the
+    /// indicator ends.
+    pub shown: Option<LockKeyChange>,
+    /// Configured UI locale, or `None` to follow the overlay host's system
+    /// locale.
+    pub language: Option<String>,
+}
+
+/// A lock key that a keyboard reported turning on or off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockKeyChange {
+    /// The key that changed.
+    pub key: LockKey,
+    /// Whether the key is now on.
+    pub engaged: bool,
+}
+
 /// What a notice tells the user.
 ///
 /// Variants are append-only because this enum crosses bincode IPC.
@@ -794,4 +822,9 @@ pub trait Agent {
     /// as they differ from generation `since`, or with the unchanged notices
     /// after [`OBSERVE_HOLD`]. Pass `0` to read the current notices at once.
     async fn observe_notices(since: Generation) -> NoticeObservation;
+
+    /// Long-poll the lock-key indicator. Answers as soon as it differs from
+    /// generation `since`, or with the unchanged indicator after
+    /// [`OBSERVE_HOLD`]. Pass `0` to read the current indicator at once.
+    async fn observe_lock_keys(since: Generation) -> LockKeyObservation;
 }

@@ -290,6 +290,12 @@ pub struct AppSettings {
     /// for what counts as low.
     #[serde(default = "default_true")]
     pub low_battery_notifications: bool,
+    /// Whether the overlay briefly shows a lock key a keyboard turned on or
+    /// off. **On by default.** Caps Lock shows on every platform; Num Lock
+    /// and Scroll Lock do not show on macOS, as in Logi Options+ (see
+    /// [`LockKey::is_indicated_here`](crate::device::LockKey::is_indicated_here)).
+    #[serde(default = "default_true")]
+    pub lock_key_notifications: bool,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -493,6 +499,7 @@ impl Default for AppSettings {
             ui_radius: None,
             mouse_profile_target: MouseProfileTarget::Pointer,
             low_battery_notifications: true,
+            lock_key_notifications: true,
         }
     }
 }

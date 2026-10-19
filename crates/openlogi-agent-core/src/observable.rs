@@ -16,7 +16,8 @@
 //!
 //! The overlay's notices ride beside the snapshot in a cell of their own,
 //! [`NoticeBoard`]: a notice comes and goes without moving the GUI's
-//! generation.
+//! generation. The lock-key indicator has its own cell for the same reason,
+//! [`LockKeyIndicator`].
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::is_openlogi_foreground_id;
@@ -28,12 +29,14 @@ use openlogi_ipc::{
 };
 use tokio::sync::watch;
 
+use crate::lock_keys::LockKeyIndicator;
 use crate::notices::NoticeBoard;
 
 /// The agent's observable state, and the notification that it changed.
 pub struct ObservableState {
     tx: watch::Sender<Observation>,
     notices: NoticeBoard,
+    lock_keys: LockKeyIndicator,
 }
 
 impl ObservableState {
@@ -73,6 +76,7 @@ impl ObservableState {
         Self {
             tx,
             notices: NoticeBoard::default(),
+            lock_keys: LockKeyIndicator::default(),
         }
     }
 
@@ -80,6 +84,12 @@ impl ObservableState {
     #[must_use]
     pub fn notices(&self) -> &NoticeBoard {
         &self.notices
+    }
+
+    /// The lock-key indicator the overlay shows.
+    #[must_use]
+    pub fn lock_keys(&self) -> &LockKeyIndicator {
+        &self.lock_keys
     }
 
     /// Clone the whole current state.

@@ -36,6 +36,7 @@ pub mod haptic_feedback;
 pub mod hires_wheel;
 pub mod hosts_info;
 pub mod illumination;
+pub mod lock_key_state;
 pub mod mode_status;
 pub mod mouse_pointer;
 pub mod multi_platform;

@@ -18,8 +18,8 @@ use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_ipc::client::{self, ConnectError, Observer, Stamped};
 use openlogi_ipc::{
-    ActionRingInvocation, AgentClient, BacklightObservation, ClientKind, NoticeObservation,
-    RingObservation,
+    ActionRingInvocation, AgentClient, BacklightObservation, ClientKind, LockKeyObservation,
+    NoticeObservation, RingObservation,
 };
 use succession::Standing;
 use tarpc::context;
@@ -60,6 +60,9 @@ pub(crate) struct Handle {
     /// The notices the agent says should be showing, each time that changes.
     /// An empty list is no notice, which is also how the last one ends.
     pub(crate) notices: mpsc::UnboundedReceiver<NoticeObservation>,
+    /// The lock-key change the agent says should be showing, each time that
+    /// changes. `None` is no indicator, which is also how one ends.
+    pub(crate) lock_keys: mpsc::UnboundedReceiver<LockKeyObservation>,
     /// Where the view reports hover, activation, and cancellation.
     pub(crate) commands: mpsc::UnboundedSender<OverlayCommand>,
 }
@@ -70,6 +73,7 @@ pub(crate) fn spawn() -> Handle {
     let (invocation_tx, invocations) = mpsc::unbounded_channel();
     let (backlight_tx, backlights) = mpsc::unbounded_channel();
     let (notice_tx, notices) = mpsc::unbounded_channel();
+    let (lock_key_tx, lock_keys) = mpsc::unbounded_channel();
     let (commands, mut command_rx) = mpsc::unbounded_channel();
     let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
         runtime.block_on(async {
@@ -83,6 +87,9 @@ pub(crate) fn spawn() -> Handle {
                 observe(connect, NOTICES, |observed| notice_tx
                     .send(observed)
                     .is_ok()),
+                observe(connect, LOCK_KEYS, |observed| lock_key_tx
+                    .send(observed)
+                    .is_ok()),
                 send_commands(&mut command_rx)
             );
         });
@@ -94,6 +101,7 @@ pub(crate) fn spawn() -> Handle {
         invocations,
         backlights,
         notices,
+        lock_keys,
         commands,
     }
 }
@@ -133,6 +141,13 @@ const NOTICES: Cell<NoticeObservation> = Cell {
     lost: Some(no_notices),
 };
 
+/// The lock-key indicator, which the agent hides when its time is up.
+const LOCK_KEYS: Cell<LockKeyObservation> = Cell {
+    open: Observer::lock_keys,
+    what: "lock-key",
+    lost: Some(no_lock_key),
+};
+
 /// The observation that closes the indicator when the agent that was driving
 /// it is gone. The generation is meaningless to the window, which only reads
 /// `visible`.
@@ -151,6 +166,16 @@ const fn no_notices() -> NoticeObservation {
     NoticeObservation {
         generation: 0,
         notices: Vec::new(),
+        language: None,
+    }
+}
+
+/// The observation that closes the lock-key indicator of an agent that is
+/// gone. The window reads only `shown`.
+const fn no_lock_key() -> LockKeyObservation {
+    LockKeyObservation {
+        generation: 0,
+        shown: None,
         language: None,
     }
 }

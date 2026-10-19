@@ -32,6 +32,8 @@ tracing = { workspace = true }
 # An in-memory agent, and a paused clock, for the observation loop's tests.
 openlogi-ipc = { path = "../openlogi-ipc", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
+# A headless app, for the windows an indicator opens and closes.
+gpui = { workspace = true, features = ["test-support"] }
 
 [build-dependencies]
 embed-resource = "3.0.9"

@@ -32,7 +32,7 @@ use openlogi_hid::{
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
-use openlogi_ipc::{InventoryHealth, NoticeKind, SavedConfig};
+use openlogi_ipc::{InventoryHealth, LockKeyChange, NoticeKind, SavedConfig};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -936,6 +936,19 @@ impl Orchestrator {
     #[must_use]
     pub fn needs_reapply_confirmation(&self) -> bool {
         !self.reapply_followup.is_empty()
+    }
+
+    /// Show a lock key a keyboard turned on or off, unless the user turned the
+    /// indicator off or this platform gives the key no meaning.
+    pub fn announce_lock_key(&self, change: LockKeyChange) {
+        let settings = &self.config.app_settings;
+        if !settings.lock_key_notifications || !change.key.is_indicated_here() {
+            return;
+        }
+        debug!(?change, "showing a lock key");
+        self.observable
+            .lock_keys()
+            .show(change, settings.language.clone());
     }
 
     /// Post a low-battery notice for each online device whose battery has just

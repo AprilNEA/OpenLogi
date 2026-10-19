@@ -4,6 +4,38 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: The lock-key indicator follows Logi Options+ 2.8, without Fn Lock
+
+Logi Options+ 2.8 shows lock-key changes in its own on-screen indicator. Its
+`0x4220` handler compares each broadcast bitmask with the last one and posts
+one indicator per changed bit. Its `osd_resources.json` shows Caps Lock on
+every platform and Num Lock and Scroll Lock on Windows only. OpenLogi follows
+both rules.
+
+- **A baseline before the first change.** The agent reads the keyboard's lock
+  state (`GetLockState`) when it learns the device, and announces only bits
+  that change after that. Num Lock is usually on under Windows, so a keyboard
+  that connects must not announce it. A keyboard that goes offline loses its
+  baseline and is read again when it returns. Options+ probably reads a
+  baseline at start too; that part of the disassembly is not verified.
+- **No change is merged.** The device layer hands changes to the agent in a
+  small queue, not a latest-value cell, so Caps Lock pressed twice in quick
+  succession shows both states in order.
+- **The agent owns the indicator.** It shows a change for 1.5 seconds, the
+  backlight indicator's time, and a newer change replaces it. The overlay
+  hides the indicator when the connection to the agent drops, as it does for
+  notices.
+- **On by default.** One global switch, `lock_key_notifications`, turns it
+  off. The Options+ default for its setting was not found in the static
+  analysis.
+- **No Fn Lock yet.** Options+ also shows "Media Keys" and "F-Keys". OpenLogi
+  writes the Fn Lock state back to a keyboard when it reconnects, and the
+  keyboard reports that write like a key press, so the indicator would show
+  on every reconnect. That needs its own decision.
+
+Verified with unit tests. Nobody has seen the indicator on screen with a real
+keyboard yet.
+
 ## 2026-10: Low-battery notices are drawn by the overlay, not sent as OS notifications
 
 Logi Options+ 2.8 shows a low battery in its own on-screen toast

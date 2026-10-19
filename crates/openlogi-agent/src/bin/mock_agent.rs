@@ -44,12 +44,13 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
+use openlogi_agent_core::lock_keys::LockKeyIndicator;
 use openlogi_agent_core::notices::NoticeBoard;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
+    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
     PairedDevice, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::single_instance::{self, InstanceError, Role};
@@ -63,9 +64,9 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation,
-    Identity, InventoryHealth, MonitorEvent, NoticeKind, NoticeObservation, OBSERVE_HOLD,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig,
+    Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind,
+    NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -707,6 +708,8 @@ struct MockAgent {
     served: Arc<Mutex<Observation>>,
     /// The notices the overlay shows, posted and ended as the agent does.
     notices: Arc<NoticeBoard>,
+    /// The lock-key indicator the overlay shows, ended as the agent ends it.
+    lock_keys: LockKeyIndicator,
 }
 
 impl MockAgent {
@@ -719,6 +722,7 @@ impl MockAgent {
             state: Arc::new(Mutex::new(state)),
             served: Arc::new(Mutex::new(served)),
             notices: Arc::new(NoticeBoard::default()),
+            lock_keys: LockKeyIndicator::default(),
         }
     }
 
@@ -1008,6 +1012,21 @@ impl Agent for MockAgent {
             self.notices.post(notice, None);
         }
         self.notices.observe(since).await
+    }
+
+    async fn observe_lock_keys(self, _: Context, since: Generation) -> LockKeyObservation {
+        // A demo turns Caps Lock on for the overlay's first look, so the
+        // indicator can be seen without a keyboard.
+        if since == 0 && self.state.lock().await.clock.is_demo() {
+            self.lock_keys.show(
+                LockKeyChange {
+                    key: LockKey::CapsLock,
+                    engaged: true,
+                },
+                None,
+            );
+        }
+        self.lock_keys.observe(since).await
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

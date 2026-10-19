@@ -61,7 +61,8 @@ async fn replay_inventory_and_authoritative_read_share_one_injected_backend() {
         InventoryEvent::Unavailable
         | InventoryEvent::SystemWake
         | InventoryEvent::DeviceWake
-        | InventoryEvent::BacklightChanged { .. } => {
+        | InventoryEvent::BacklightChanged { .. }
+        | InventoryEvent::LockKeyChanged(_) => {
             panic!("initial replay reconciliation must publish a snapshot")
         }
     };
@@ -292,7 +293,8 @@ async fn published_within(
                     InventoryEvent::Snapshot { .. }
                     | InventoryEvent::SystemWake
                     | InventoryEvent::DeviceWake
-                    | InventoryEvent::BacklightChanged { .. },
+                    | InventoryEvent::BacklightChanged { .. }
+                    | InventoryEvent::LockKeyChanged(_),
                 ) => {}
                 Some(InventoryEvent::Unavailable) => {
                     panic!("a replay backend never makes enumeration unavailable")

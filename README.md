@@ -53,6 +53,7 @@ Things OpenLogi does that Options+ won't:
 
 - Devices connected over Logi Bolt receivers, Unifying receivers, Bluetooth, or a wired connection, with battery percentage and charge state
 - Low-battery notices at the bottom of the screen, once per discharge, without an OS notification permission (on by default; Settings › General)
+- An on-screen indicator when a keyboard turns Caps Lock on or off, and Num Lock or Scroll Lock on Windows and Linux (`0x4220`, supported keyboards; on by default; Settings › General)
 - Easy-Switch channels: the name, OS, and connection of the computer paired on each channel, with a rename on devices that allow it (`0x1815`, supported devices)
 - Button remapping via the OS input hook: a built-in action catalog plus custom keyboard shortcuts authored in the TOML config, including independent short/long-press actions and hold-until-release chords for push-to-talk¹
 - Per-application profile overlays that auto-switch on app focus (macOS + Windows; Linux on X11 / XWayland only)

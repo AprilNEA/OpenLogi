@@ -482,6 +482,9 @@ impl Running {
             } => {
                 self.backlight_overlay.show(current_level, levels, visible);
             }
+            InventoryEvent::LockKeyChanged(change) => {
+                self.orchestrator.lock().await.announce_lock_key(change);
+            }
             // A device broadcast its own reconnection (`0x1d4b`): reconfigure
             // it on the next snapshot even if no reconciliation ever saw it
             // offline.

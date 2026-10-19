@@ -38,7 +38,7 @@ use openlogi_core::config::{ConfigRevision, Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
     DeviceKind, DeviceModelInfo, DeviceTransports, LightCapabilities, LightState, LightValueRange,
-    LightValueUnit, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
+    LightValueUnit, LockKey, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
@@ -51,9 +51,10 @@ use openlogi_core::hid::{
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind, ConfigReloadError,
-    ForegroundApps, FoundDevice, Identity, InventoryHealth, MonitorEvent, Notice, NoticeKind,
-    NoticeObservation, Observation, ObservedLight, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange, LockKeyObservation,
+    MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation, ObservedLight,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
+    RingObservation, SavedConfig,
 };
 use succession::{Compat, Run};
 
@@ -375,6 +376,35 @@ fn notices() {
             language: None,
         },
         "010000",
+    );
+}
+
+/// The overlay long-polls the lock-key indicator by generation; it carries
+/// the key that changed, whether it is now on, and the configured locale.
+#[test]
+fn lock_keys() {
+    assert_wire(&AgentRequest::ObserveLockKeys { since: 4 }, "2704");
+    assert_wire(
+        &LockKeyObservation {
+            generation: 2,
+            shown: Some(LockKeyChange {
+                key: LockKey::CapsLock,
+                engaged: true,
+            }),
+            language: Some("de".into()),
+        },
+        "0201010101026465",
+    );
+    assert_wire(
+        &LockKeyObservation {
+            generation: 3,
+            shown: Some(LockKeyChange {
+                key: LockKey::ScrollLock,
+                engaged: false,
+            }),
+            language: None,
+        },
+        "0301020000",
     );
 }
 

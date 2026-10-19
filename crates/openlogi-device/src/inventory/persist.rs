@@ -48,7 +48,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v11 adds the `Capabilities::easy_switch` flag (`0x1815` host slots).
 /// v12 adds the `Capabilities::virtual_thumbwheel` flag (Back/Forward
 /// raw-wheel reporting).
-const SCHEMA_VERSION: u32 = 12;
+/// v13 adds the `0x4220` lock-key event index.
+const SCHEMA_VERSION: u32 = 13;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -245,6 +246,7 @@ mod tests {
             multi_platform: Some(14),
             extended_report_rate: Some(15),
             backlight: Some(16),
+            lock_key_state: Some(17),
         };
         let mut cache = HashMap::new();
         cache.insert(

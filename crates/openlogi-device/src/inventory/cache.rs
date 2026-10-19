@@ -169,7 +169,30 @@ pub(super) fn is_stale(cached: &Cached, now: Instant) -> bool {
 /// rather than overwriting it with an empty default. An unprobed offline device
 /// with no cache yields a default probe. Returns the probe plus its cache
 /// contribution (only a *successful* probe is cached).
+///
+/// Also keeps the device's lock-key state for the on-screen indicator: an
+/// online device has it read once per connection, after its feature indexes
+/// are registered; an offline one has it forgotten (see
+/// [`EventSubscriptionHandle::sync_lock_keys`]).
 pub(super) async fn probe_or_reuse(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    id: Option<CacheKey>,
+    cached: Option<&Cached>,
+    online: bool,
+    now: Instant,
+    subscriptions: Option<&EventSubscriptionHandle>,
+) -> (ProbedFeatures, CacheOutcome) {
+    let probed =
+        probe_or_reuse_registered(channel, index, id, cached, online, now, subscriptions).await;
+    if let Some(subscriptions) = subscriptions {
+        subscriptions.sync_lock_keys(channel, index, online).await;
+    }
+    probed
+}
+
+/// [`probe_or_reuse`] without the lock-key state.
+async fn probe_or_reuse_registered(
     channel: &Arc<HidppChannel>,
     index: u8,
     id: Option<CacheKey>,

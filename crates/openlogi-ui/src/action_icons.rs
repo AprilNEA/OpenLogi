@@ -107,6 +107,9 @@ pub const RING_CANCEL_ICON: &str = "action-icons/x.svg";
 /// The glyph on the overlay's low-battery notice.
 pub const LOW_BATTERY_ICON: &str = "action-icons/battery-low.svg";
 
+/// The glyph on the overlay's lock-key indicator.
+pub const LOCK_KEY_ICON: &str = "action-icons/keyboard.svg";
+
 /// GPUI asset source for the embedded ring glyphs, and nothing else.
 pub struct ActionIcons;
 
@@ -154,6 +157,12 @@ mod tests {
             matches!(loaded, Ok(Some(_))),
             "{LOW_BATTERY_ICON} is missing"
         );
+    }
+
+    #[test]
+    fn the_lock_key_indicator_icon_is_embedded() {
+        let loaded = ActionIcons.load(LOCK_KEY_ICON);
+        assert!(matches!(loaded, Ok(Some(_))), "{LOCK_KEY_ICON} is missing");
     }
 
     #[test]

@@ -30,6 +30,7 @@ mod device_list;
 mod device_settings;
 mod light_changes;
 mod light_reload;
+mod lock_keys;
 mod low_battery;
 mod os_layout;
 mod publication;

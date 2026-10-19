@@ -232,6 +232,22 @@ pub(super) fn setting_fixture(
     }
 }
 
+/// A [`setting_fixture`] keyboard whose setting feature is the `0x4220`
+/// lock-key state at index 3. It answers one `getLockState` read with `keys`.
+pub(super) fn lock_key_fixture(
+    product_id: u16,
+    name: &str,
+    battery_reads: usize,
+    keys: u8,
+) -> HeadsetFixture {
+    let mut fixture = setting_fixture(0x4220, product_id, name, battery_reads);
+    fixture.cassette.exchanges.push(h20(
+        short(0xff, 0x03, 0x00, [0, 0, 0]),
+        short(0xff, 0x03, 0x00, [keys, 0, 0]),
+    ));
+    fixture
+}
+
 /// A linked `getAdcMeasurement` answer.
 pub(super) fn adc_reading(voltage_mv: u16, flags: u8) -> Vec<u8> {
     let [high, low] = voltage_mv.to_be_bytes();

@@ -350,6 +350,35 @@ pub fn prettify_codename(raw: &str) -> String {
         .join(" ")
 }
 
+/// A keyboard lock key whose state the on-screen indicator reports.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LockKey {
+    /// Num Lock.
+    NumLock,
+    /// Caps Lock.
+    CapsLock,
+    /// Scroll Lock.
+    ScrollLock,
+}
+
+impl LockKey {
+    /// Whether this platform shows the indicator for this key.
+    ///
+    /// Caps Lock shows everywhere. macOS gives Num Lock and Scroll Lock no
+    /// meaning, so they show only on the other platforms. Logi Options+ marks
+    /// both Windows-only; it ships for Windows and macOS only, and Linux treats
+    /// these keys as Windows does.
+    #[must_use]
+    pub const fn is_indicated_here(self) -> bool {
+        match self {
+            Self::CapsLock => true,
+            Self::NumLock | Self::ScrollLock => !cfg!(target_os = "macos"),
+        }
+    }
+}
+
 /// Identity of an enumerated receiver — no paired-device state (that lives
 /// in [`DeviceInventory::paired`]). For a direct (Bluetooth/wired) device,
 /// a synthetic entry mirroring the device's own HID identity fills this role.
@@ -612,8 +641,8 @@ pub struct DeviceInventory {
 mod tests {
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, ModelTransport,
-        PairedDevice, ReceiverInfo, prettify_codename,
+        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, LockKey,
+        ModelTransport, PairedDevice, ReceiverInfo, prettify_codename,
     };
 
     #[test]
@@ -952,5 +981,17 @@ mod tests {
             "min = 2700\nmax = 6500\nstep = 0\nunit = 'kelvin'\n",
         );
         result.expect_err("a zero step must not survive deserialization");
+    }
+
+    #[test]
+    fn caps_lock_shows_everywhere_and_num_and_scroll_lock_not_on_macos() {
+        assert!(LockKey::CapsLock.is_indicated_here());
+        for key in [LockKey::NumLock, LockKey::ScrollLock] {
+            assert_eq!(
+                key.is_indicated_here(),
+                !cfg!(target_os = "macos"),
+                "{key:?}"
+            );
+        }
     }
 }

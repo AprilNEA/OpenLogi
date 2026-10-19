@@ -33,8 +33,8 @@ use tarpc::client::{self, RpcError};
 use tarpc::context::{self, Context};
 
 use crate::{
-    AgentClient, BacklightObservation, ClientKind, Generation, NoticeObservation, OBSERVE_HOLD,
-    Observation, PROTOCOL_VERSION, RingObservation, transport,
+    AgentClient, BacklightObservation, ClientKind, Generation, LockKeyObservation,
+    NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, RingObservation, transport,
 };
 
 /// Why a client could not be established.
@@ -227,6 +227,12 @@ impl Stamped for NoticeObservation {
     }
 }
 
+impl Stamped for LockKeyObservation {
+    fn generation(&self) -> Generation {
+        self.generation
+    }
+}
+
 /// One connection's view of the agent's generation counter.
 ///
 /// Starts at 0 — "I have seen nothing" — so the first answer is the agent's
@@ -340,6 +346,17 @@ impl Observer<NoticeObservation> {
         Self::new(client, |client, since| {
             let client = client.clone();
             Box::pin(async move { client.observe_notices(observe_context(), since).await })
+        })
+    }
+}
+
+impl Observer<LockKeyObservation> {
+    /// Observe the transient lock-key indicator over `client`.
+    #[must_use]
+    pub fn lock_keys(client: AgentClient) -> Self {
+        Self::new(client, |client, since| {
+            let client = client.clone();
+            Box::pin(async move { client.observe_lock_keys(observe_context(), since).await })
         })
     }
 }
@@ -685,7 +702,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_notice_and_backlight_observers_follow_their_own_channels() {
+    async fn the_notice_backlight_and_lock_key_observers_follow_their_own_channels() {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let recorded = asked.clone();
         let client = in_memory_agent(
@@ -710,6 +727,14 @@ mod tests {
                                 visible: true,
                             })
                         }
+                        AgentRequest::ObserveLockKeys { since } => {
+                            recorded.lock().unwrap().push(("lock keys", since));
+                            AgentResponse::ObserveLockKeys(LockKeyObservation {
+                                generation: since + 1,
+                                shown: None,
+                                language: None,
+                            })
+                        }
                         other => panic!("an observer sent an unexpected request: {other:?}"),
                     };
                     Ok(answer)
@@ -718,15 +743,19 @@ mod tests {
             std::future::pending(),
         );
         let mut notices = Observer::notices(client.clone());
-        let mut backlight = Observer::backlight(client);
+        let mut backlight = Observer::backlight(client.clone());
+        let mut lock_keys = Observer::lock_keys(client);
 
         for expected in [1, 2] {
             let observed = notices.next().await.expect("the agent is up");
             assert_eq!(observed.map(|observed| observed.generation), Some(expected));
             let observed = backlight.next().await.expect("the agent is up");
             assert_eq!(observed.map(|observed| observed.generation), Some(expected));
+            let observed = lock_keys.next().await.expect("the agent is up");
+            assert_eq!(observed.map(|observed| observed.generation), Some(expected));
         }
         assert_eq!(asked_by(&asked, "notices"), [0, 1]);
         assert_eq!(asked_by(&asked, "backlight"), [0, 1]);
+        assert_eq!(asked_by(&asked, "lock keys"), [0, 1]);
     }
 }

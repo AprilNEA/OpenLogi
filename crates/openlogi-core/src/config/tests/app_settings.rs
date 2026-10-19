@@ -175,3 +175,22 @@ fn low_battery_notifications_stay_on_unless_turned_off() {
     cfg.app_settings.low_battery_notifications = false;
     assert!(!write_and_read(&cfg).app_settings.low_battery_notifications);
 }
+
+#[test]
+fn lock_key_notifications_stay_on_unless_turned_off() {
+    assert!(Config::default().app_settings.lock_key_notifications);
+
+    let predating: Config = toml::from_str(
+        r"
+            schema_version = 8
+            [app_settings]
+            low_battery_notifications = false
+        ",
+    )
+    .expect("config predating the lock-key setting loads");
+    assert!(predating.app_settings.lock_key_notifications);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.lock_key_notifications = false;
+    assert!(!write_and_read(&cfg).app_settings.lock_key_notifications);
+}
