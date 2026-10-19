@@ -48,7 +48,9 @@ use crate::hardware::{
 };
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
-use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
+use crate::pointer_speed::{
+    AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedTarget, SpeedWrite,
+};
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
@@ -870,10 +872,7 @@ impl Orchestrator {
                 .get(&dev.config_key)
                 .filter(|state| state.committed == committed);
             let current = previous.map_or(committed, |state| state.current);
-            let nearest = current.and_then(|dpi| {
-                (0..presets.len())
-                    .min_by_key(|&i| presets[i].into_inner().abs_diff(dpi.into_inner()))
-            });
+            let nearest = current.and_then(|dpi| crate::dpi::nearest_preset(&presets, dpi));
             let same_presets = previous.filter(|state| state.presets == presets);
             by_key.insert(
                 dev.config_key.clone(),
@@ -1212,6 +1211,20 @@ impl Orchestrator {
                 .and_then(|d| d.effective_smartshift(&route_key))
                 .map(openlogi_hid::SmartShiftStatus::from),
         };
+        // The saved DPI goes out with the speed write on a DPI mouse.
+        let written_dpi =
+            settings
+                .dpi
+                .or_else(|| match speed_write.as_ref().map(|write| &write.target) {
+                    Some(SpeedTarget::Dpi(openlogi_hid::DpiTarget::Value(dpi))) => Some(*dpi),
+                    _ => None,
+                });
+        if let Some(dpi) = written_dpi
+            && let Ok(mut cycles) = self.shared.dpi_cycle.write()
+            && let Some(state) = cycles.by_key.get_mut(key)
+        {
+            state.reapplied(dpi);
+        }
         if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
