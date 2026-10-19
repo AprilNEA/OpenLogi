@@ -329,6 +329,7 @@ fn an_agent_snapshot_keeps_the_changes_it_reports() {
         camera_active: false,
         pairing: None,
         foreground: ForegroundApps::default(),
+        device_selection: None,
         lights: vec![observed(
             &light,
             (true, 135, 5000),

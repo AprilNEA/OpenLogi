@@ -1092,6 +1092,6 @@ fn battery_preferences_and_device_selection() {
     assert_wire(&request, "07200207756e69743a6161");
     assert_wire(
         &AgentRequest::AcknowledgeDeviceSelection { request },
-        "2407200207756e69743a6161",
+        "2607200207756e69743a6161",
     );
 }

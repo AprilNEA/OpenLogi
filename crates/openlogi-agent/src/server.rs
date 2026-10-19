@@ -115,11 +115,9 @@ impl AgentServer {
                 let mut orchestrator = self.orchestrator.lock().await;
                 match saved {
                     None => orchestrator.reload_config(config),
-                    Some(saved) => orchestrator.reload_saved_config(
-                        config,
-                        file.revision(),
-                        &saved,
-                    ),
+                    Some(saved) => {
+                        orchestrator.reload_saved_config(config, file.revision(), &saved);
+                    }
                 }
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
