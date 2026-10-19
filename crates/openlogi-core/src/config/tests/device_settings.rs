@@ -494,3 +494,22 @@ fn gshift_layer_roundtrips_and_needs_host_mode() {
     cfg.set_gshift_binding("g502", ButtonId::G8, None);
     assert_eq!(cfg.gshift_overrides("g502"), None);
 }
+
+#[test]
+fn gshift_is_held_only_by_a_plain_binding() {
+    let mut cfg = Config::default();
+    cfg.set_binding(
+        "g502",
+        ButtonId::Forward,
+        Binding::LongPress(crate::binding::LongPressBinding::new(
+            Action::GShift,
+            Action::Copy,
+        )),
+    );
+    assert!(
+        !cfg.uses_gshift("g502"),
+        "a long press keeps its long action"
+    );
+    cfg.set_binding("g502", ButtonId::Forward, Binding::Single(Action::GShift));
+    assert!(cfg.uses_gshift("g502"));
+}
