@@ -58,8 +58,6 @@ mod lights;
 
 pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 
-#[cfg(test)]
-use devices::{configured_report_rate, reapply_targets};
 use devices::{
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
     any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_wheel_mode,
@@ -67,6 +65,8 @@ use devices::{
     main_wheel_divert, newly_kept_os_layouts, onboard_switch, os_layout_appeared, pick_current,
     plan_reapply, reconnect_mouse_settings, settings_moved, stable_id, wheel_inverted,
 };
+#[cfg(test)]
+use devices::{configured_report_rate, reapply_targets};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
@@ -1143,8 +1143,7 @@ impl Orchestrator {
         let key = &dev.config_key;
         let route_key = stable_id(dev).route_key();
         let device = self.config.devices.get(key.as_str());
-        let settings =
-            reconnect_mouse_settings(&self.config, dev, self.os_mouse_hook_available);
+        let settings = reconnect_mouse_settings(&self.config, dev, self.os_mouse_hook_available);
         if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
