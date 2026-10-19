@@ -470,6 +470,15 @@ struct DeviceEvents {
     lock_keys_read: bool,
 }
 
+impl DeviceEvents {
+    /// Forget the lock state: the device was away, and its keys may have
+    /// changed meanwhile, so the next scan reads them again.
+    fn forget_lock_keys(&mut self) {
+        self.lock_keys = None;
+        self.lock_keys_read = false;
+    }
+}
+
 struct SubscriptionState {
     protocol: Option<ReceiverProtocol>,
     devices: RwLock<Vec<DeviceEvents>>,
@@ -495,8 +504,13 @@ impl SubscriptionState {
             None => false,
         };
         if receiver_connection {
-            return (self.receiver_snapshot_depth.load(Ordering::Acquire) == 0)
-                .then_some(HidppEventSource::ReceiverConnection);
+            if self.receiver_snapshot_depth.load(Ordering::Acquire) != 0 {
+                return None;
+            }
+            // The slot connected or dropped between scans, which may never
+            // see it offline.
+            self.forget_lock_keys(v10::Message::from(raw).header().device_index);
+            return Some(HidppEventSource::ReceiverConnection);
         }
 
         let message = v20::Message::from(raw);
@@ -511,6 +525,10 @@ impl SubscriptionState {
             .iter()
             .find(|device| device.device_index == device_index)
             .and_then(|device| device.features.recognizes(&message))?;
+        if source == HidppEventSource::WirelessDeviceStatus {
+            // A reconnection, which the scans may never see as offline.
+            self.forget_lock_keys(device_index);
+        }
         if source.changes_settings() {
             // Bumped before the reconciliation request is sent, so the
             // snapshot that request produces already carries it.
@@ -575,6 +593,19 @@ impl SubscriptionState {
         }
         true
     }
+
+    /// [`DeviceEvents::forget_lock_keys`] for `device_index`, if registered.
+    fn forget_lock_keys(&self, device_index: u8) {
+        if let Some(device) = self
+            .devices
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter_mut()
+            .find(|device| device.device_index == device_index)
+        {
+            device.forget_lock_keys();
+        }
+    }
 }
 
 /// Cloneable registration handle passed through a node's probe.
@@ -624,8 +655,7 @@ impl EventSubscriptionHandle {
             .iter_mut()
             .find(|device| device.device_index == device_index)?;
         if !online {
-            device.lock_keys = None;
-            device.lock_keys_read = false;
+            device.forget_lock_keys();
             return None;
         }
         let feature_index = device.features.lock_key_state?;
@@ -1457,6 +1487,61 @@ mod tests {
         assert_eq!(handle.lock_keys_to_read(1, true), None);
         assert_eq!(state.decode(lock_report(0, 0x00), false), None);
         assert_eq!(drain(&mut updates), [(LockKey::CapsLock, false)]);
+    }
+
+    /// A keyboard can drop and come back between two scans, which then never
+    /// see it offline. Its receiver's connection notice, or its own `0x1d4b`
+    /// reconnection broadcast, still has the next scan read its keys again.
+    #[test]
+    fn a_reconnection_between_scans_has_the_lock_state_read_again() {
+        let (state, handle, mut updates) = lock_keyboard();
+        handle.register_device(
+            1,
+            EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x4220, 0x1d4b]),
+        );
+        assert_eq!(handle.lock_keys_to_read(1, true), Some(3));
+        handle.record_lock_keys(1, LockKeys::CAPS_LOCK);
+        let connection: HidppMessage = v10::Message::Short(
+            v10::MessageHeader {
+                device_index: 1,
+                sub_id: 0x41,
+            },
+            [0, 0x02, 0x34, 0x12],
+        )
+        .into();
+
+        // The receiver reporting its slots on request is no reconnection.
+        state.receiver_snapshot_depth.store(1, Ordering::Release);
+        assert_eq!(state.decode(connection, false), None);
+        assert_eq!(handle.lock_keys_to_read(1, true), None);
+        state.receiver_snapshot_depth.store(0, Ordering::Release);
+
+        assert_eq!(
+            state.decode(connection, false),
+            Some(HidppEventSource::ReceiverConnection)
+        );
+        // The old state is gone: a broadcast names no key, it only records.
+        assert_eq!(state.decode(lock_report(0, 0x00), false), None);
+        assert_eq!(drain(&mut updates), []);
+        assert_eq!(handle.lock_keys_to_read(1, true), Some(3));
+
+        let reconnection = v20::Message::Long(
+            v20::MessageHeader {
+                device_index: 1,
+                feature_index: 4,
+                function_id: U4::from_lo(0),
+                software_id: U4::from_lo(0),
+            },
+            [0; 16],
+        )
+        .into();
+        assert_eq!(
+            state.decode(reconnection, false),
+            Some(HidppEventSource::WirelessDeviceStatus)
+        );
+        assert_eq!(state.decode(lock_report(0, 0x02), false), None);
+        assert_eq!(drain(&mut updates), []);
+        assert_eq!(handle.lock_keys_to_read(1, true), Some(3));
     }
 
     #[test]

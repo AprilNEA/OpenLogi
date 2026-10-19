@@ -15,12 +15,15 @@ both rules.
 - **A baseline before the first change.** The agent reads the keyboard's lock
   state (`GetLockState`) when it learns the device, and announces only bits
   that change after that. Num Lock is usually on under Windows, so a keyboard
-  that connects must not announce it. A keyboard that goes offline loses its
-  baseline and is read again when it returns. Options+ probably reads a
-  baseline at start too; that part of the disassembly is not verified.
-- **No change is merged.** The device layer hands changes to the agent in a
-  small queue, not a latest-value cell, so Caps Lock pressed twice in quick
-  succession shows both states in order.
+  that connects must not announce it. A keyboard that goes offline, or that
+  reconnects between two scans, loses its baseline and is read again. Options+
+  probably reads a baseline at start too; that part of the disassembly is not
+  verified.
+- **The agent sees every change; the indicator shows the latest.** The device
+  layer hands changes to the agent in a small queue, not a latest-value cell,
+  so a change the platform rule drops (Num Lock on macOS) cannot hide one it
+  keeps (Caps Lock) reported with it. The indicator shows only the latest
+  change, so presses in quick succession can skip the states between them.
 - **The agent owns the indicator.** It shows a change for 1.5 seconds, the
   backlight indicator's time, and a newer change replaces it. The overlay
   hides the indicator when the connection to the agent drops, as it does for
