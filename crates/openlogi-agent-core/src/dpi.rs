@@ -136,11 +136,26 @@ impl DpiCycleState {
         (dpi, self.target.clone())
     }
 
+    /// The mouse was set back to its saved `dpi`, so a DPI shift returns
+    /// there and the presets step on from it.
+    pub fn reapplied(&mut self, dpi: Dpi) {
+        let dpi = self.normalize(dpi);
+        self.current = Some(dpi);
+        if let Some(index) = nearest_preset(&self.presets, dpi) {
+            self.index = index;
+        }
+    }
+
     fn normalize(&self, dpi: Dpi) -> Dpi {
         self.capabilities
             .as_ref()
             .map_or(dpi, |caps| caps.nearest(dpi))
     }
+}
+
+/// The position of the preset closest to `dpi`.
+pub(crate) fn nearest_preset(presets: &[Dpi], dpi: Dpi) -> Option<usize> {
+    (0..presets.len()).min_by_key(|&i| presets[i].into_inner().abs_diff(dpi.into_inner()))
 }
 
 #[cfg(test)]
@@ -164,6 +179,16 @@ mod tests {
             },
         );
         cycles
+    }
+
+    #[test]
+    fn a_reapplied_dpi_is_what_a_shift_returns_to() {
+        let mut cycles = cycles_with("a", 1);
+        let state = cycles.state_for(Some("a")).unwrap();
+        state.set(0);
+        state.reapplied(Dpi::new(1600));
+        assert_eq!(state.current, Some(Dpi::new(1600)));
+        assert_eq!(state.index, 1);
     }
 
     #[test]
