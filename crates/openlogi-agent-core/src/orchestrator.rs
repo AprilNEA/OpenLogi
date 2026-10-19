@@ -41,9 +41,7 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
-use crate::hardware::{
-    DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
-};
+use crate::hardware::{DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, WriteOrder};
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
@@ -61,14 +59,13 @@ mod lights;
 pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 
 #[cfg(test)]
-use devices::reapply_targets;
+use devices::{configured_report_rate, reapply_targets};
 use devices::{
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_report_rate,
-    configured_wheel_mode, hidpp20_slot_targets, host_dpi, host_switch_links, is_hidpp_device,
-    keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, onboard_switch, os_layout_appeared,
-    pick_current, plan_reapply, reconnect_mouse_settings, settings_moved, stable_id,
-    wheel_inverted,
+    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_wheel_mode,
+    hidpp20_slot_targets, host_dpi, host_switch_links, is_hidpp_device, keeps_os_layout,
+    main_wheel_divert, newly_kept_os_layouts, onboard_switch, os_layout_appeared, pick_current,
+    plan_reapply, reconnect_mouse_settings, settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /

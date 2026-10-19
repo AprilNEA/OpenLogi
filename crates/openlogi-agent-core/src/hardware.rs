@@ -55,6 +55,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 enum TransportKey {
     Bolt(String),
     Unifying(String),
+    Hidpp20Receiver(String),
     Direct(u16, u16),
     RawHid(u16, u16, u16, u16, String),
 }
@@ -64,6 +65,9 @@ impl From<&DeviceRoute> for TransportKey {
         match route {
             DeviceRoute::Bolt { receiver_uid, .. } => Self::Bolt(receiver_uid.clone()),
             DeviceRoute::Unifying { receiver_uid, .. } => Self::Unifying(receiver_uid.clone()),
+            DeviceRoute::Hidpp20Receiver { receiver_uid, .. } => {
+                Self::Hidpp20Receiver(receiver_uid.clone())
+            }
             DeviceRoute::Direct {
                 vendor_id,
                 product_id,

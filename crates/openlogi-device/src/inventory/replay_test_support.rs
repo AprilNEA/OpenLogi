@@ -612,6 +612,7 @@ pub(super) fn hidpp20_receiver_device(slot: u8, online: bool) -> PairedDevice {
             pointer: true,
             ..Capabilities::default()
         }),
+        settings_revision: 0,
     }
 }
 

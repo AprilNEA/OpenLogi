@@ -36,6 +36,7 @@ fn mouse_inventory(onboard_profiles: bool) -> DeviceInventory {
                 onboard_profiles,
                 ..Capabilities::presumed_from_kind(DeviceKind::Mouse)
             }),
+            settings_revision: 0,
         }],
     }
 }
