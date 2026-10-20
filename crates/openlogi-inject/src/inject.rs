@@ -19,7 +19,7 @@ use openlogi_core::binding::{Script, WorkflowStep};
 use openlogi_core::scroll::ScrollDelta;
 
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 
 #[cfg(any(target_os = "macos", test))]
 mod space_switch;

@@ -184,7 +184,12 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             capture_plans,
             receiver_requests: access.subscribe_requests(),
             access: device_access,
-            outputs: GestureOutputs::new(actions.dispatcher(), scroll.input(), Arc::default()),
+            outputs: GestureOutputs::new(
+                actions.dispatcher(),
+                scroll.input(),
+                Arc::default(),
+                Arc::new(crate::observable::ObservableState::new("test".into()))
+            ),
             shutdown,
         }));
 
@@ -805,6 +810,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         actions.dispatcher(),
         scroll.input(),
         Arc::default(),
+        Arc::new(crate::observable::ObservableState::new("test".to_owned())),
     ));
 
     let mut held = plan();
@@ -818,6 +824,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         &id,
         session.dispatch(),
         CapturedInput::ButtonDown(ButtonId::GestureButton),
+        WheelAdmission::Active,
     );
     assert!(dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
 

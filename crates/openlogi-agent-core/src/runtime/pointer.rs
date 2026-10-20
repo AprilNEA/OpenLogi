@@ -50,13 +50,20 @@ impl ActionDispatchTarget {
     }
 }
 
+/// Whether the live pointer still identifies the target that chose a binding.
+/// Shared by queued actions and continuous native zoom; unavailable targets
+/// preserve focused fallback only while they remain unavailable.
+pub(crate) fn pointer_target_matches(captured: PointerTarget, current: PointerTarget) -> bool {
+    captured == current && captured != PointerTarget::Unsupported
+}
+
 fn pointer_action_allowed(
     action: &Action,
     captured: PointerTarget,
     current: PointerTarget,
     is_focused: impl FnOnce() -> bool,
 ) -> bool {
-    if captured != current || captured == PointerTarget::Unsupported {
+    if !pointer_target_matches(captured, current) {
         return false;
     }
     // Still unidentified: the binding came from the focused profile, so it
@@ -71,6 +78,9 @@ fn pointer_action_allowed(
         | Effect::Text(_)
         | Effect::Script(_)
         | Effect::Native(NativeAction::AppExpose) => true,
+        // Control-wheel carries keyboard modifier state even though its
+        // platform output is native. macOS magnification does not.
+        Effect::Native(NativeAction::ZoomIn | NativeAction::ZoomOut) => !cfg!(target_os = "macos"),
         Effect::None
         | Effect::Click(_)
         | Effect::Scroll { .. }
@@ -120,6 +130,23 @@ mod tests {
             Action::AppExpose,
         ] {
             assert!(!pointer_action_allowed(&action, BROWSER, BROWSER, || false));
+            assert!(pointer_action_allowed(&action, BROWSER, BROWSER, || true));
+            assert!(!pointer_action_allowed(
+                &action,
+                BROWSER,
+                OTHER_WINDOW,
+                || true
+            ));
+        }
+    }
+
+    #[test]
+    fn zoom_focus_requirement_matches_its_platform_output() {
+        for action in [Action::ZoomIn, Action::ZoomOut] {
+            assert_eq!(
+                pointer_action_allowed(&action, BROWSER, BROWSER, || false),
+                cfg!(target_os = "macos")
+            );
             assert!(pointer_action_allowed(&action, BROWSER, BROWSER, || true));
             assert!(!pointer_action_allowed(
                 &action,

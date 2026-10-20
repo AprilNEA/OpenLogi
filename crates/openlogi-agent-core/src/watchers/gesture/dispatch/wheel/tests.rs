@@ -204,6 +204,36 @@ fn physical_directions_accumulate_independently() {
 }
 
 #[test]
+fn shortcut_zoom_keeps_discrete_threshold_and_cooldown() {
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+    for action in [Action::ZoomInShortcut, Action::ZoomOutShortcut] {
+        let mut wheel = WheelAccumulators::default();
+        let rotation = |magnitude| WheelRotation {
+            direction: PhysicalDirection::Up,
+            magnitude,
+        };
+        assert_eq!(
+            wheel.advance(rotation(threshold - 1), &action, scale, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            wheel.advance(rotation(1), &action, scale, now),
+            WheelOutput::FireAction(1)
+        );
+        assert_eq!(
+            wheel.advance(rotation(threshold), &action, scale, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            wheel.advance(rotation(threshold), &action, scale, now + ACTION_COOLDOWN),
+            WheelOutput::FireAction(1)
+        );
+    }
+}
+
+#[test]
 fn custom_action_fires_on_threshold_then_respects_its_cooldown() {
     let mut direction = WheelDirection::default();
     let now = Instant::now();
@@ -430,6 +460,565 @@ fn stale_custom_progress_decays() {
     );
     assert_eq!(
         direction.advance(&Action::VolumeUp, threshold - 1, scale, after_decay),
+        WheelOutput::FireAction(1)
+    );
+}
+
+fn zoom_report(
+    wheel: &mut WheelAccumulators,
+    increments: i16,
+    sensitivity: ThumbwheelSensitivity,
+    now: Instant,
+) -> WheelOutput {
+    let Some(rotation) = WheelRotation::from_increments(increments) else {
+        return WheelOutput::Idle;
+    };
+    wheel.advance_zoom(rotation, sensitivity, now)
+}
+
+#[test]
+fn zoom_recognition_discards_first_report_and_requires_strict_threshold() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    assert_eq!(
+        zoom_report(&mut wheel, 100, sensitivity, now),
+        WheelOutput::Idle
+    );
+    // Default threshold is six. Six unit reports must not fire.
+    for _ in 0..6 {
+        assert_eq!(
+            zoom_report(&mut wheel, 1, sensitivity, now),
+            WheelOutput::Idle
+        );
+    }
+    assert_eq!(
+        zoom_report(&mut wheel, 1, sensitivity, now),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_nonlinear_truncation_applies_per_report_in_each_direction() {
+    let now = Instant::now();
+    for sign in [-1, 1] {
+        let mut wheel = WheelAccumulators::default();
+        let sensitivity = ThumbwheelSensitivity::DEFAULT;
+        assert_eq!(
+            zoom_report(&mut wheel, sign, sensitivity, now),
+            WheelOutput::Idle
+        );
+        // |3|^1.4 truncates to four; |2|^1.4 truncates to two. Their
+        // six total must stay below the strict boundary, unlike grouped input.
+        assert_eq!(
+            zoom_report(&mut wheel, 3 * sign, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut wheel, 2 * sign, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut wheel, sign, sensitivity, now),
+            WheelOutput::FireAction(1)
+        );
+        let mut grouped = WheelAccumulators::default();
+        assert_eq!(
+            zoom_report(&mut grouped, sign, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut grouped, 5 * sign, sensitivity, now),
+            WheelOutput::FireAction(1)
+        );
+    }
+}
+
+#[test]
+fn zoom_large_reports_fire_once_discard_overshoot_and_have_no_cooldown() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    assert_eq!(
+        zoom_report(&mut wheel, i16::MIN, sensitivity, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, i16::MIN, sensitivity, now),
+        WheelOutput::FireAction(1)
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, -1, sensitivity, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, -100, sensitivity, now),
+        WheelOutput::FireAction(1)
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, -100, sensitivity, now),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_reversal_cancels_signed_progress_before_firing() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    assert_eq!(
+        zoom_report(&mut wheel, 1, sensitivity, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, 4, sensitivity, now),
+        WheelOutput::Idle
+    ); // +6
+    assert_eq!(
+        zoom_report(&mut wheel, -4, sensitivity, now),
+        WheelOutput::Idle
+    ); // 0
+    assert_eq!(
+        zoom_report(&mut wheel, -4, sensitivity, now),
+        WheelOutput::Idle
+    ); // -6
+    assert_eq!(
+        zoom_report(&mut wheel, -1, sensitivity, now),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_slider_normalization_preserves_default_and_endpoints() {
+    let now = Instant::now();
+    for (sensitivity, threshold) in [
+        (ThumbwheelSensitivity::MIN, 10),
+        (ThumbwheelSensitivity::DEFAULT, 6),
+        (ThumbwheelSensitivity::MAX, 2),
+        (ThumbwheelSensitivity::from_rounded(57.0), 4),
+    ] {
+        let mut wheel = WheelAccumulators::default();
+        assert_eq!(
+            zoom_report(&mut wheel, 100, sensitivity, now),
+            WheelOutput::Idle
+        );
+        for _ in 0..threshold {
+            assert_eq!(
+                zoom_report(&mut wheel, 1, sensitivity, now),
+                WheelOutput::Idle
+            );
+        }
+        assert_eq!(
+            zoom_report(&mut wheel, 1, sensitivity, now),
+            WheelOutput::FireAction(1)
+        );
+    }
+}
+
+#[test]
+fn zoom_inactivity_resets_only_beyond_five_hundred_milliseconds() {
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    for (gap, expected) in [(500, WheelOutput::FireAction(1)), (501, WheelOutput::Idle)] {
+        let mut wheel = WheelAccumulators::default();
+        assert_eq!(
+            zoom_report(&mut wheel, 1, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut wheel, 4, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut wheel, 1, sensitivity, now + Duration::from_millis(gap)),
+            expected
+        );
+    }
+}
+
+#[test]
+fn zoom_zero_progress_never_fires_or_refreshes_inactivity() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    assert_eq!(
+        zoom_report(&mut wheel, 1, sensitivity, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, 4, sensitivity, now),
+        WheelOutput::Idle
+    );
+    for offset in [100, 300, 500] {
+        assert_eq!(
+            zoom_report(
+                &mut wheel,
+                0,
+                sensitivity,
+                now + Duration::from_millis(offset)
+            ),
+            WheelOutput::Idle
+        );
+    }
+    assert_eq!(
+        zoom_report(&mut wheel, 1, sensitivity, now + Duration::from_millis(501)),
+        WheelOutput::Idle
+    );
+}
+
+#[test]
+fn zoom_sensitivity_changes_discard_recognition_and_displacement() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let default = ThumbwheelSensitivity::DEFAULT;
+    let high = ThumbwheelSensitivity::MAX;
+    assert_eq!(zoom_report(&mut wheel, 1, default, now), WheelOutput::Idle);
+    assert_eq!(zoom_report(&mut wheel, 4, default, now), WheelOutput::Idle);
+    assert_eq!(zoom_report(&mut wheel, 100, high, now), WheelOutput::Idle);
+    assert_eq!(zoom_report(&mut wheel, 2, high, now), WheelOutput::Idle);
+    assert_eq!(
+        zoom_report(&mut wheel, 1, high, now),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_lifecycle_clear_and_mixed_binding_restart_recognition() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    for interrupted_by_binding in [false, true] {
+        assert_eq!(
+            zoom_report(&mut wheel, 1, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut wheel, 4, sensitivity, now),
+            WheelOutput::Idle
+        );
+        if interrupted_by_binding {
+            assert_eq!(
+                wheel.advance(
+                    WheelRotation::from_increments(-1).unwrap(),
+                    &Action::None,
+                    unscaled(sensitivity),
+                    now,
+                ),
+                WheelOutput::Idle
+            );
+        } else {
+            wheel.clear_zoom();
+        }
+        assert_eq!(
+            zoom_report(&mut wheel, 100, sensitivity, now),
+            WheelOutput::Idle
+        );
+        wheel.clear_zoom();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn zoom_configured_actions_share_physical_progress_even_when_bindings_are_reversed() {
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    for (up_action, down_action) in [
+        (Action::ZoomIn, Action::ZoomOut),
+        (Action::ZoomOut, Action::ZoomIn),
+    ] {
+        let mut wheel = WheelAccumulators::default();
+        for (increments, expected) in [
+            (1, WheelOutput::Idle),
+            (4, WheelOutput::Idle),
+            (-4, WheelOutput::Idle),
+            (-4, WheelOutput::Idle),
+            (-1, WheelOutput::FireAction(1)),
+        ] {
+            let action = if increments > 0 {
+                &up_action
+            } else {
+                &down_action
+            };
+            assert_eq!(
+                wheel.advance(
+                    WheelRotation::from_increments(increments).unwrap(),
+                    action,
+                    scale,
+                    now
+                ),
+                expected
+            );
+        }
+    }
+}
+
+fn phased_zoom_report(
+    wheel: &mut WheelAccumulators,
+    increments: i16,
+    phase: openlogi_hid::thumbwheel::RotationStatus,
+    now: Instant,
+) -> WheelOutput {
+    if wheel.prepare_zoom_report(phase, increments, now) {
+        zoom_report(wheel, increments, ThumbwheelSensitivity::DEFAULT, now)
+    } else {
+        WheelOutput::Idle
+    }
+}
+
+#[test]
+fn zoom_start_then_recognition_are_distinct_from_action_progress() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let now = Instant::now();
+    for start_count in [0, 100] {
+        let mut wheel = WheelAccumulators::default();
+        for (count, phase) in [(start_count, Start), (100, Start), (100, Active)] {
+            assert_eq!(
+                phased_zoom_report(&mut wheel, count, phase, now),
+                WheelOutput::Idle
+            );
+        }
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 100, Active, now),
+            WheelOutput::FireAction(1)
+        );
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 100, Stop, now),
+            WheelOutput::Idle
+        );
+    }
+}
+
+#[test]
+fn zoom_missing_start_and_end_phases_are_repaired() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Inactive, Start};
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    // First Active is repaired to Start; the next report recognizes.
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 4, Active, now),
+        WheelOutput::Idle
+    );
+    // A zero Inactive report after Active is repaired to deferred End.
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 0, Inactive, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 1, Start, now + Duration::from_millis(10)),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_deferred_end_preserves_progress_only_before_its_deadline() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let now = Instant::now();
+    for (gap, expected) in [(499, WheelOutput::FireAction(1)), (500, WheelOutput::Idle)] {
+        let mut wheel = WheelAccumulators::default();
+        for (increments, phase) in [(100, Start), (100, Active), (4, Active), (0, Stop)] {
+            assert_eq!(
+                phased_zoom_report(&mut wheel, increments, phase, now),
+                WheelOutput::Idle
+            );
+        }
+        // Duplicate stop does not extend the original deferred end.
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 100, Stop, now + Duration::from_millis(100)),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 1, Start, now + Duration::from_millis(gap)),
+            expected
+        );
+    }
+}
+
+#[test]
+fn zoom_fresh_start_and_lifecycle_clear_do_not_inherit_progress() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    for (increments, phase) in [
+        (100, Start),
+        (100, Active),
+        (4, Active),
+        (1, Start),
+        (1, Active),
+        (0, Stop),
+    ] {
+        assert_eq!(
+            phased_zoom_report(&mut wheel, increments, phase, now),
+            WheelOutput::Idle
+        );
+    }
+    wheel.clear_zoom();
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Start, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, now),
+        WheelOutput::Idle
+    );
+}
+
+#[test]
+fn zoom_repaired_start_keeps_raw_active_for_the_next_comparison() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Inactive, Start};
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    // Repaired Active is still raw Active. A real Start after it is fresh,
+    // rather than a duplicate of the repaired Start.
+    for phase in [Active, Start, Active] {
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 100, phase, now),
+            WheelOutput::Idle
+        );
+    }
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 4, Active, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 0, Inactive, now),
+        WheelOutput::Idle
+    );
+    // Raw Inactive followed by Active repairs into a continuing Start.
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 1, Active, now + Duration::from_millis(1)),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_zero_start_cancels_end_without_recognizing_or_losing_progress() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    for (count, phase) in [(0, Start), (100, Active), (4, Active), (0, Stop)] {
+        assert_eq!(
+            phased_zoom_report(&mut wheel, count, phase, now),
+            WheelOutput::Idle
+        );
+    }
+    let resumed = now + Duration::from_millis(499);
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 0, Start, resumed),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Start, resumed),
+        WheelOutput::Idle
+    );
+    // The canceled end would have expired here. Exact inactivity is still valid.
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 1, Active, now + Duration::from_millis(500)),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_deferred_end_retires_progress_on_active_at_the_exact_deadline() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    for (count, phase) in [(0, Start), (100, Active), (4, Active), (100, Stop)] {
+        assert_eq!(
+            phased_zoom_report(&mut wheel, count, phase, now),
+            WheelOutput::Idle
+        );
+    }
+    let deadline = now + Duration::from_millis(500);
+    // Unlike ordinary inactivity at exactly 500 ms, deferred End retires now.
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, deadline),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, deadline),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_cancellation_clears_raw_history_and_pending_end() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let now = Instant::now();
+    for last_phase in [Start, Stop] {
+        let mut wheel = WheelAccumulators::default();
+        for phase in [Start, Active, Active, last_phase] {
+            phased_zoom_report(&mut wheel, 4, phase, now);
+        }
+        wheel.clear_zoom();
+        let resumed = now + Duration::from_millis(1);
+        // First Active repairs to Start after cancellation, regardless of the
+        // former raw phase or a pending End.
+        for _ in 0..2 {
+            assert_eq!(
+                phased_zoom_report(&mut wheel, 100, Active, resumed),
+                WheelOutput::Idle
+            );
+        }
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 4, Active, resumed),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 1, Active, now + Duration::from_millis(500)),
+            WheelOutput::FireAction(1)
+        );
+    }
+}
+
+#[test]
+fn zoom_rotation_without_phase_still_recognizes_and_fires_both_directions() {
+    use openlogi_hid::thumbwheel::RotationStatus::Inactive;
+    let now = Instant::now();
+    for sign in [-1, 1] {
+        let mut wheel = WheelAccumulators::default();
+        for expected in [
+            WheelOutput::Idle,
+            WheelOutput::Idle,
+            WheelOutput::FireAction(1),
+            WheelOutput::FireAction(1),
+        ] {
+            assert_eq!(
+                phased_zoom_report(&mut wheel, 100 * sign, Inactive, now),
+                expected
+            );
+        }
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 0, Inactive, now),
+            WheelOutput::Idle
+        );
+    }
+}
+
+#[test]
+fn zoom_unphased_movement_continues_after_a_pending_end() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Inactive, Start, Stop};
+    let now = Instant::now();
+    let mut wheel = WheelAccumulators::default();
+    for (count, phase) in [(0, Start), (100, Active), (4, Active), (0, Stop)] {
+        assert_eq!(
+            phased_zoom_report(&mut wheel, count, phase, now),
+            WheelOutput::Idle
+        );
+    }
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 1, Inactive, now + Duration::from_millis(10)),
+        WheelOutput::FireAction(1)
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Inactive, now + Duration::from_millis(20)),
         WheelOutput::FireAction(1)
     );
 }

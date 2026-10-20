@@ -120,7 +120,8 @@ pub use succession::Identity;
 ///      battery. `Agent::observe_lock_keys`, [`LockKeyObservation`] and
 ///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
 ///      off over HID++ `0x4220`, for the overlay's transient indicator.
-pub const PROTOCOL_VERSION: u32 = 37;
+/// v38: ZoomIn/ZoomOut native and shortcut actions and zoom ring icons appended.
+pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
