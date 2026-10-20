@@ -1,7 +1,7 @@
 //! Regression tests for OS-hook state and dispatch policy.
 
 use super::*;
-use crate::runtime::FocusBinding;
+use crate::runtime::{FocusBinding, test_dispatcher};
 use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
 use openlogi_core::config::KeyModifiers;
 
@@ -29,49 +29,25 @@ fn attributed_sources_still_follow_the_device_policy() {
     assert!(button_source_may_remap(Some(&logitech_mouse)));
 }
 
-fn test_dispatcher() -> (
-    ActionDispatcher,
-    super::super::button::ButtonRuntimeOwner,
-    mpsc::Receiver<super::super::button::ButtonRuntimeEvent>,
-) {
-    let (events, received) = mpsc::channel();
-    let owner = super::super::button::ButtonRuntimeOwner::spawn(move |event| {
-        events
-            .send(event)
-            .expect("test receiver should stay connected");
-    })
-    .expect("button worker should start");
-    let (action_ring, _ring_events) = tokio::sync::mpsc::unbounded_channel();
-    let dispatcher = ActionDispatcher {
-        executor: super::super::ActionExecutor {
-            dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
-            pointer_speeds: Arc::default(),
-            access: crate::hardware::DeviceAccess {
-                channel: Arc::new(RwLock::new(None)),
-                registry: openlogi_hid::ChannelRegistry::default(),
-                receiver_access: crate::receiver_access::ReceiverAccess::default(),
-                device_io: openlogi_hid::device_io_channel().1,
-                transport_turns: crate::hardware::TransportTurns::default(),
-            },
-            requests: action_ring,
-        },
-        buttons: owner.input(),
-    };
-    (dispatcher, owner, received)
-}
-
 /// A hold of `press` begun now.
 fn held(press: PressToken) -> PressPhase {
     PressPhase::HeldAsGesture {
-        hold: GestureHold::new(press, Instant::now()),
+        hold: GestureHold::new(
+            press,
+            Instant::now(),
+            BTreeMap::new(),
+            GesturePolicy::default(),
+        ),
     }
 }
 
 /// A hold of `press` already past the swipe gate, so its next long-enough
 /// motion commits.
 fn held_for_swipe(press: PressToken) -> PressPhase {
-    let mut hold = GestureHold::new(press, Instant::now());
-    hold.swipe.backdate_hold_for_test();
+    let now = Instant::now();
+    let mut hold = GestureHold::new(press, now, BTreeMap::new(), GesturePolicy::default());
+    assert_eq!(hold.swipe.accumulate_at(now, 0, 0), None);
+    assert_eq!(hold.swipe.accumulate_at(now, 49, 0), None);
     PressPhase::HeldAsGesture { hold }
 }
 
@@ -193,7 +169,12 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
     presses.press(
         ButtonId::Back,
         PressPhase::HeldAsGesture {
-            hold: GestureHold::new(token(1, ButtonId::Back), pressed_at),
+            hold: GestureHold::new(
+                token(1, ButtonId::Back),
+                pressed_at,
+                BTreeMap::new(),
+                GesturePolicy::default(),
+            ),
         },
     );
     assert!(
@@ -1175,7 +1156,6 @@ fn a_native_press_after_a_lost_hold_passes_both_edges() {
 #[test]
 fn a_re_press_ends_a_lost_hold_before_its_motion_commits_a_phantom_swipe() {
     use super::super::button::ButtonRuntimeEvent;
-    use openlogi_core::binding::GESTURE_HOLD_FOR_SWIPE;
 
     let (dispatcher, mut owner, events) = test_dispatcher();
     let hooks = Arc::new(RwLock::new(HookMaps {
@@ -1208,7 +1188,6 @@ fn a_re_press_ends_a_lost_hold_before_its_motion_commits_a_phantom_swipe() {
     assert_eq!(back(true), EventDisposition::Suppress);
     assert_stale_hold_ended(&events, &hold);
 
-    thread::sleep(GESTURE_HOLD_FOR_SWIPE);
     assert_eq!(
         handle_moved(GESTURE_SWIPE_THRESHOLD + 10, 0, &hooks, &dispatcher),
         EventDisposition::PassThrough
@@ -1218,5 +1197,187 @@ fn a_re_press_ends_a_lost_hold_before_its_motion_commits_a_phantom_swipe() {
         "no swipe fired"
     );
     assert_eq!(back(false), EventDisposition::Suppress);
+    assert!(owner.shutdown());
+}
+
+fn gesture_button_event(
+    pressed: bool,
+    hooks: &SharedHookMaps,
+    dispatcher: &ActionDispatcher,
+) -> EventDisposition {
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        ..EventDevice::default()
+    };
+    handle_button(
+        ButtonId::Back,
+        pressed,
+        Some(&mouse),
+        hooks,
+        dispatcher,
+        || None,
+    )
+}
+
+#[test]
+fn gesture_repeats_on_the_same_press_across_pointer_refresh_and_reversal() {
+    use super::super::button::ButtonRuntimeEvent;
+    use openlogi_hook::PointerTarget;
+
+    PRESSES.with_borrow_mut(|presses| presses.phases.clear());
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let directions = BTreeMap::from([
+        (GestureDirection::Up, Action::VolumeUp),
+        (GestureDirection::Down, Action::VolumeDown),
+        (GestureDirection::Click, Action::Copy),
+    ]);
+    let pointer = |target| PointerSelection::new(target, BTreeSet::from([ButtonId::Back]));
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(ButtonId::Back, directions.clone())]),
+        gesture_policies: BTreeMap::from([(
+            ButtonId::Back,
+            GesturePolicy::for_bindings(&directions),
+        )]),
+        pointer: Some(pointer(PointerTarget::Desktop)),
+        ..HookMaps::default()
+    }));
+    assert_eq!(
+        gesture_button_event(true, &hooks, &dispatcher),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Started(press) = events
+        .recv_timeout(Duration::from_secs(1))
+        .expect("physical down")
+    else {
+        panic!("started")
+    };
+    let mut at = Instant::now();
+    for (index, sign) in [-1, -1, 1, 1].into_iter().enumerate() {
+        if index == 1 {
+            let current = PointerTarget::Window {
+                process_id: 41,
+                window_id: 7,
+            };
+            hooks.write().expect("maps").pointer = Some(pointer(current));
+            dispatcher.cancel_pointer_buttons_except(current);
+        }
+        handle_moved_at(at, 0, sign * 600, &hooks, &dispatcher);
+        let ButtonRuntimeEvent::Triggered {
+            press: triggered,
+            action,
+        } = events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("directional pulse")
+        else {
+            panic!("triggered")
+        };
+        assert_eq!(triggered.token(), press.token());
+        let current = hooks
+            .read()
+            .expect("maps")
+            .pointer
+            .as_ref()
+            .expect("pointer selection")
+            .target();
+        let mut output = Vec::new();
+        if triggered
+            .target()
+            .resolve_with(&action, || current, |_| false, || None)
+            .is_some()
+        {
+            output.push(action.clone());
+        }
+        assert_eq!(
+            output,
+            [if sign < 0 {
+                Action::VolumeUp
+            } else {
+                Action::VolumeDown
+            }],
+            "fresh semantic target reaches output admission"
+        );
+        assert_eq!(
+            action,
+            if sign < 0 {
+                Action::VolumeUp
+            } else {
+                Action::VolumeDown
+            }
+        );
+        at += Duration::from_millis(400);
+    }
+    assert_eq!(
+        gesture_button_event(false, &hooks, &dispatcher),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Ended {
+        press: released, ..
+    } = events
+        .recv_timeout(Duration::from_secs(1))
+        .expect("physical release")
+    else {
+        panic!("ended")
+    };
+    assert_eq!(released.token(), press.token());
+    assert!(events.try_recv().is_err(), "no click or stationary repeat");
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn changed_gesture_binding_cancels_and_still_suppresses_the_matching_release() {
+    use super::super::button::ButtonRuntimeEvent;
+
+    PRESSES.with_borrow_mut(|presses| presses.phases.clear());
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(
+            ButtonId::Back,
+            BTreeMap::from([(GestureDirection::Up, Action::VolumeUp)]),
+        )]),
+        ..HookMaps::default()
+    }));
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        ..EventDevice::default()
+    };
+    handle_button(
+        ButtonId::Back,
+        true,
+        Some(&mouse),
+        &hooks,
+        &dispatcher,
+        || None,
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("down"),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    hooks
+        .write()
+        .expect("maps")
+        .gestures
+        .get_mut(&ButtonId::Back)
+        .unwrap()
+        .insert(GestureDirection::Up, Action::Copy);
+    handle_moved(0, -1000, &hooks, &dispatcher);
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("cancel"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&mouse),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "canceled release emits no click"
+    );
     assert!(owner.shutdown());
 }

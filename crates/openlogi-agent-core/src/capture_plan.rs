@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GamingLayout, GestureDirection, default_binding,
+    Action, Binding, ButtonId, GamingLayout, GestureDirection, GesturePolicy, default_binding,
 };
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, MomentumScrolling, OnboardMemory, ThumbwheelSensitivity};
@@ -414,6 +414,11 @@ pub fn plan_for_device(
             physical_key,
             route,
             spec: CaptureSpec {
+                gesture_policies: gesture_bindings
+                    .iter()
+                    .chain(&side_gesture_bindings)
+                    .map(|(button, actions)| (*button, GesturePolicy::for_bindings(actions)))
+                    .collect(),
                 capture_thumbwheel: thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
                     || thumbwheel_bindings_nondefault,
                 divert_gesture_sources: GESTURE_SOURCE_BUTTONS
