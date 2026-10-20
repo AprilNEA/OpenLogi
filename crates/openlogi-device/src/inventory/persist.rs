@@ -53,7 +53,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// motion scaling on a mouse without adjustable DPI).
 /// v15 adds the `0x4521` disable-keys event index.
 /// v16 adds the `0x2121` hi-res wheel event index.
-const SCHEMA_VERSION: u32 = 16;
+/// v17 records whether a legacy `0x1000` battery reports mileage.
+const SCHEMA_VERSION: u32 = 17;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
