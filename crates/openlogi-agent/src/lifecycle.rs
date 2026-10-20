@@ -226,6 +226,8 @@ impl Wanted {
         armed_session::record();
         overlay::spawn();
         prompt_missing_accessibility(capture_mouse_events);
+        #[cfg(target_os = "macos")]
+        let virtual_keyboard = openlogi_inject::VirtualKeyboard::install();
 
         let Core {
             orchestrator,
@@ -255,6 +257,8 @@ impl Wanted {
                 hook: None,
                 capture_mouse_events,
                 held_pointer: None,
+                #[cfg(target_os = "macos")]
+                virtual_keyboard,
             },
         }
     }
@@ -287,6 +291,11 @@ struct Running {
     /// it closes. The watcher publishes only transitions, so a pointer that
     /// left the ring for another unidentifiable surface sends nothing more.
     held_pointer: Option<openlogi_hook::PointerContext>,
+    /// The virtual HID keyboard synthesized keys type through, when this
+    /// build may create one; `None` leaves them on `CGEventPost`. The exit
+    /// path drops it only after the action workers that press keys stopped.
+    #[cfg(target_os = "macos")]
+    virtual_keyboard: Option<openlogi_inject::VirtualKeyboard>,
 }
 
 impl Armed {
@@ -695,7 +704,7 @@ impl Running {
         std::mem::replace(&mut self.hidpp_watchers, WatcherFleet::Inactive)
             .stop_for_exit()
             .await;
-        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, tray_guard)
+        self.release_and_exit(reason, tray_guard)
     }
 
     /// End after [`Self::complete_replacement`] resolved firmware
@@ -703,7 +712,24 @@ impl Running {
     /// like [`Self::hand_over`]: the successor finds the armed session.
     #[cfg(any(target_os = "macos", not(unix)))]
     fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
-        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None)
+        self.release_and_exit(reason, None)
+    }
+
+    /// Release the hook, the input workers and the virtual keyboard, then
+    /// end the process.
+    fn release_and_exit(
+        &mut self,
+        reason: &str,
+        tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> ! {
+        shutdown::release_hook_and_exit(
+            self.hook.take(),
+            &mut self.inputs,
+            #[cfg(target_os = "macos")]
+            self.virtual_keyboard.take(),
+            reason,
+            tray_guard,
+        )
     }
 }
 
