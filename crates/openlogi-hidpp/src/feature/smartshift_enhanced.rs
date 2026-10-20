@@ -6,7 +6,7 @@ use openlogi_hidpp_derive::Feature;
 
 use crate::{
     feature::{FeatureEndpoint, smartshift::WheelMode},
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{self, Hidpp20Error},
 };
 
 bitflags::bitflags! {
@@ -108,8 +108,16 @@ pub struct SmartShiftEnhancedFeature {
 
 impl SmartShiftEnhancedFeature {
     /// Retrieves enhanced SmartShift capabilities and defaults.
+    ///
+    /// The four fields need more bytes than a short reply holds, so the
+    /// reply must be long: a short one would zero-fill the maximum force.
+    /// Logi Options+ also refuses fewer than four bytes (reverse-engineered
+    /// from its `getCapabilities`). The status functions read three bytes,
+    /// which every reply carries.
     pub async fn get_capabilities(&self) -> Result<SmartShiftEnhancedInfo, Hidpp20Error> {
-        let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
+        let v20::Message::Long(_, payload) = self.endpoint.call(0, [0; 3]).await? else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
         Ok(SmartShiftEnhancedInfo {
             capabilities: SmartShiftEnhancedCapabilities::from_bits_retain(payload[0]),
             auto_disengage_default: payload[1],
@@ -163,8 +171,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        Hidpp20Error, SmartShiftEnhancedFeature, SmartShiftEnhancedStatus,
-        SmartShiftEnhancedStatusChange, TorquePercent, WheelMode,
+        Hidpp20Error, SmartShiftEnhancedCapabilities, SmartShiftEnhancedFeature,
+        SmartShiftEnhancedStatus, SmartShiftEnhancedStatusChange, TorquePercent, WheelMode,
     };
     use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
     use crate::feature::CreatableFeature;
@@ -262,5 +270,51 @@ mod tests {
             assert_eq!(&request[4..7], &[0, 0, byte], "torque {torque:?}");
             assert_eq!(status.unwrap().current_tunable_torque, 50);
         }
+    }
+
+    #[test]
+    fn get_capabilities_refuses_a_short_reply() {
+        let get =
+            |feature: SmartShiftEnhancedFeature| async move { feature.get_capabilities().await };
+        // Three of the four fields: zero-filled, this would read as a wheel
+        // whose maximum force is zero.
+        let (short, _) = exchange(0, get, |header| Message::Short(header, [0x01, 0x1e, 50]));
+        assert!(matches!(short, Err(Hidpp20Error::UnsupportedResponse)));
+
+        let mut long = [0; 16];
+        long[..4].copy_from_slice(&[0x01, 0x1e, 50, 0x40]);
+        let (info, _) = exchange(0, get, |header| Message::Long(header, long));
+        let info = info.unwrap();
+        assert_eq!(
+            info.capabilities,
+            SmartShiftEnhancedCapabilities::TUNABLE_TORQUE
+        );
+        assert_eq!(
+            (
+                info.auto_disengage_default,
+                info.default_tunable_torque,
+                info.max_force
+            ),
+            (0x1e, 50, 0x40)
+        );
+    }
+
+    #[test]
+    fn get_status_reads_a_short_reply() {
+        // The status is three bytes, so a short reply carries all of it.
+        let (status, _) = exchange(
+            1,
+            |feature| async move { feature.get_ratchet_control_mode().await },
+            |header| Message::Short(header, [1, 0x20, 75]),
+        );
+        let status = status.unwrap();
+        assert_eq!(
+            (
+                status.wheel_mode,
+                status.auto_disengage,
+                status.current_tunable_torque
+            ),
+            (WheelMode::Freespin, 0x20, 75)
+        );
     }
 }
