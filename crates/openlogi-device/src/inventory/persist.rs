@@ -51,7 +51,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v13 adds the `0x4220` lock-key event index.
 /// v14 adds the `Capabilities::pointer_scaling` flag (`0x2205` pointer
 /// motion scaling on a mouse without adjustable DPI).
-const SCHEMA_VERSION: u32 = 14;
+/// v15 adds the `0x4521` disable-keys event index.
+const SCHEMA_VERSION: u32 = 15;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -246,6 +247,7 @@ mod tests {
             fn_inversion_multi_host: None,
             extended_dpi: None,
             multi_platform: Some(14),
+            disable_keys: Some(18),
             extended_report_rate: Some(15),
             backlight: Some(16),
             lock_key_state: Some(17),

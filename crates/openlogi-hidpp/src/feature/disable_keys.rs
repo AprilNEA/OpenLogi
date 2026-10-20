@@ -38,6 +38,20 @@ pub struct DisableKeysFeature {
 }
 
 impl DisableKeysFeature {
+    /// Whether an unsolicited report with `function_id` announces that the
+    /// disabled-key set changed, such as software on another host replacing
+    /// it.
+    ///
+    /// Reverse-engineered, not from the spec: Logi Options+ 2.8 turns an
+    /// unsolicited function-2 report — the [`Self::set_disabled_keys`] id —
+    /// into a setting change and reads byte 0 as the new mask. No
+    /// specification or capture confirms that layout, so the payload is not
+    /// decoded: a listener re-reads the set with [`Self::get_disabled_keys`].
+    #[must_use]
+    pub const fn is_state_broadcast(function_id: u8) -> bool {
+        function_id == 2
+    }
+
     /// Retrieves the set of keys the device allows software to disable.
     pub async fn get_capabilities(&self) -> Result<DisableableKeys, Hidpp20Error> {
         let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();

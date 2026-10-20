@@ -842,6 +842,23 @@ async fn a_dpi_button_moves_the_mouses_settings_revision() {
 }
 
 #[tokio::test]
+async fn a_disabled_key_change_from_elsewhere_moves_the_keyboards_settings_revision() {
+    // 0x4521 function 2, unsolicited: software on another host replaced the
+    // disabled-key set. Byte 0 would name Caps Lock and Windows, but it is
+    // not decoded — the report only asks for the reconciliation, and the
+    // revision tells clients to re-read the set.
+    assert_eq!(
+        setting_broadcast_revisions(
+            0x4521,
+            [0x02, 0x11, 0x00, 0x00],
+            HidppEventSource::DisableKeys
+        )
+        .await,
+        (0, 1)
+    );
+}
+
+#[tokio::test]
 async fn the_first_lock_key_broadcast_names_the_key_against_the_state_read_on_connection() {
     const PRODUCT_ID: u16 = 0xb36a;
     // Caps Lock is on when the keyboard connects. One battery read rides each
