@@ -571,6 +571,36 @@ impl DeviceOp {
         F: FnOnce(DeviceOp) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Result<T, WriteError>, Elapsed>>,
     {
+        self.spawn_leased_write(label, None, f, log);
+    }
+
+    /// [`Self::spawn_timed_write`] for a write that must land after every
+    /// earlier write of the same setting and must not be skipped (see
+    /// [`WriteTicket::in_order`]). As in [`Self::run_in_order`], the write
+    /// waits for its turn before it leases the receiver.
+    fn spawn_timed_write_in_order<F, Fut, T>(
+        self,
+        label: &'static str,
+        ticket: WriteTicket,
+        f: F,
+        log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
+    ) where
+        F: FnOnce(DeviceOp) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Result<T, WriteError>, Elapsed>>,
+    {
+        self.spawn_leased_write(label, Some(ticket), f, log);
+    }
+
+    fn spawn_leased_write<F, Fut, T>(
+        self,
+        label: &'static str,
+        ticket: Option<WriteTicket>,
+        f: F,
+        log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
+    ) where
+        F: FnOnce(DeviceOp) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Result<T, WriteError>, Elapsed>>,
+    {
         match self.resolve() {
             Ok(shared) => drop(shared),
             Err(reason) => {
@@ -582,13 +612,7 @@ impl DeviceOp {
             let Some(rt) = one_shot_runtime(label) else {
                 return;
             };
-            let result = rt.block_on(async move {
-                let _lease = self.access.receiver_access.acquire_for_io().await;
-                if !self.access.device_io.allows_io() {
-                    return None;
-                }
-                Some(f(self).await)
-            });
+            let result = rt.block_on(leased_after_turn(self, ticket, f));
             if let Some(result) = result {
                 log(result);
             } else {
@@ -861,6 +885,36 @@ impl<F: FnOnce(Vec<LeadCookie>)> Drop for UnconfirmedReleases<F> {
     }
 }
 
+/// Wait for `ticket`'s turn, when there is one, then lease the receiver and
+/// run `f`. Returns `None`, without running `f`, when host device I/O was
+/// suspended by then.
+///
+/// The wait comes before the lease. The lease is a fair `RwLock`, so a write
+/// that waited while it held the lease would block a queued pairing session,
+/// and the pairing session would block the earlier write that this one waits
+/// for.
+async fn leased_after_turn<F, Fut>(
+    op: DeviceOp,
+    ticket: Option<WriteTicket>,
+    f: F,
+) -> Option<Fut::Output>
+where
+    F: FnOnce(DeviceOp) -> Fut,
+    Fut: Future,
+{
+    let leased = || async move {
+        let _lease = op.access.receiver_access.acquire_for_io().await;
+        if !op.access.device_io.allows_io() {
+            return None;
+        }
+        Some(f(op).await)
+    };
+    match ticket {
+        Some(ticket) => ticket.in_order(leased).await,
+        None => leased().await,
+    }
+}
+
 /// Spawn one write that clears the bytes in `release` from `op`'s pointing
 /// device and then writes the bytes in `link`, as Logi Options+ does (see
 /// [`openlogi_hid::link_follower_cookies_on`]). The writes for one device run
@@ -880,32 +934,28 @@ pub(crate) fn write_follower_cookies_in_background(
     let index = op.route.device_index();
     let mut unconfirmed = UnconfirmedReleases::new(release.clone(), requeue);
     let turn = op.access.transport_turns.turn_for(&op.route);
-    op.spawn_timed_write(
+    op.spawn_timed_write_in_order(
         "linked device cookie write",
+        ticket,
         move |op| async move {
-            ticket
-                .in_order(|| async {
-                    after_transport_turn(&turn, async {
-                        tokio::time::timeout(WRITE_TIMEOUT, async {
-                            let shared = op.resolve()?;
-                            let mut outcomes = Vec::with_capacity(release.len() + link.len());
-                            for lead in release {
-                                let outcome =
-                                    openlogi_hid::release_follower_cookies_on(&shared, lead).await;
-                                outcomes.push(CookieOutcome::Released(lead, outcome));
-                            }
-                            for lead in link {
-                                let outcome =
-                                    openlogi_hid::link_follower_cookies_on(&shared, lead).await;
-                                outcomes.push(CookieOutcome::Linked(lead, outcome));
-                            }
-                            Ok(outcomes)
-                        })
-                        .await
-                    })
-                    .await
+            after_transport_turn(&turn, async {
+                tokio::time::timeout(WRITE_TIMEOUT, async {
+                    let shared = op.resolve()?;
+                    let mut outcomes = Vec::with_capacity(release.len() + link.len());
+                    for lead in release {
+                        let outcome =
+                            openlogi_hid::release_follower_cookies_on(&shared, lead).await;
+                        outcomes.push(CookieOutcome::Released(lead, outcome));
+                    }
+                    for lead in link {
+                        let outcome = openlogi_hid::link_follower_cookies_on(&shared, lead).await;
+                        outcomes.push(CookieOutcome::Linked(lead, outcome));
+                    }
+                    Ok(outcomes)
                 })
                 .await
+            })
+            .await
         },
         move |result| {
             log_outcome(index, "linked device cookie write", result, |outcomes| {
@@ -1583,6 +1633,39 @@ mod tests {
         let ran =
             tokio::time::timeout(Duration::from_secs(1), next.in_order(|| async { true })).await;
         assert_eq!(ran.ok(), Some(true), "the next change gets its turn");
+    }
+
+    /// A background write that waits behind the device's earlier write does
+    /// not hold the receiver lease meanwhile: a pairing session queued then
+    /// still gets the receiver, and the waiting write runs once the earlier
+    /// one finishes.
+    #[tokio::test]
+    async fn an_ordered_background_write_waits_for_its_turn_before_the_lease() {
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let (_device_io_signal, device_io) = device_io_channel();
+        let route = unresolvable_route();
+        let cookies = WriteOrder::default();
+        let earlier = cookies.request(&route);
+        let later = cookies.request(&route);
+        let op = device_op(&capture, &registry, &receiver_access, &device_io, &route);
+        let waiting = tokio::spawn(leased_after_turn(op, Some(later), |_| async { "written" }));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let pairing = tokio::time::timeout(
+            Duration::from_secs(1),
+            receiver_access
+                .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing),
+        )
+        .await
+        .expect("pairing is not blocked by a write that waits for its turn");
+        drop(pairing);
+        drop(earlier);
+        let ran = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("the waiting write runs after the earlier one")
+            .expect("the waiting write did not panic");
+        assert_eq!(ran, Some("written"));
     }
 
     /// A reconnect write to a mouse that stopped answering holds the turn
