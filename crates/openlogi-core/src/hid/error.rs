@@ -225,6 +225,16 @@ pub enum WriteError {
     /// back something else. The profile it held before was written back.
     #[error("the mouse did not keep the onboard profile that was written")]
     OnboardProfileNotApplied,
+    /// The directory lists an onboard profile sector whose bytes do not
+    /// decode, so a save cannot edit it without replacing what it holds.
+    ///
+    /// Nothing was written: the profile may hold button bindings and macros
+    /// the user saved.
+    #[error("onboard profile {profile} is listed but does not decode")]
+    OnboardProfileUnreadable {
+        /// The profile number of the listed sector.
+        profile: u8,
+    },
 }
 
 /// Why an onboard profile change was refused before anything was written.

@@ -123,20 +123,6 @@ fn profile_lighting(lighting: OnboardLighting) -> Option<ProfileLighting> {
     })
 }
 
-/// The report interval a profile stores for `rate`, if it can store one.
-fn report_interval_ms(rate: ReportRate) -> Option<u8> {
-    (1..=8u8).find(|&ms| report_rate(ms) == Some(rate))
-}
-
-/// The rate of a stored report interval, rounded to the nearest hertz as
-/// `0x8060` rates are; `None` for a byte that is no interval.
-fn report_rate(interval_ms: u8) -> Option<ReportRate> {
-    (1..=8).contains(&interval_ms).then(|| {
-        let ms = u16::from(interval_ms);
-        ReportRate::new((1000 + ms / 2) / ms)
-    })
-}
-
 /// The decoded view of a profile sector.
 fn describe(sector: SectorAddress, profile: &ProfileSector) -> Result<OnboardProfile, WriteError> {
     let lighting = (0..profile.led_zones())
@@ -147,11 +133,15 @@ fn describe(sector: SectorAddress, profile: &ProfileSector) -> Result<OnboardPro
                 .map_err(|_| unsupported(HidppOperation::ReadOnboardMemory))
         })
         .collect::<Result<_, _>>()?;
+    let interval_ms = profile.report_interval_ms();
+    let rate = ReportRate::from_interval_ms(interval_ms);
     Ok(OnboardProfile {
         number: sector.profile_number(),
         name: profile.name(),
         factory: sector.is_rom(),
-        report_rate: report_rate(profile.report_interval_ms()),
+        // A rate the profile's interval does not express (a malformed or
+        // out-of-range field) is unknown rather than rounded from nothing.
+        report_rate: (rate.interval_ms() == Some(interval_ms)).then_some(rate),
         dpi_slots: profile
             .dpi_slots()
             .into_iter()
@@ -167,6 +157,47 @@ fn unsupported(operation: HidppOperation) -> WriteError {
         operation,
         feature_hex: FEATURE,
     }
+}
+
+/// The profile onboard mode runs. In host mode the firmware answers
+/// `getCurrentProfile` with the directory sector, which runs nothing, so the
+/// profile it returns to — the saved one — stands in for it.
+pub(crate) async fn running_profile(
+    feature: &OnboardProfilesFeature,
+    sector_size: u16,
+    operation: HidppOperation,
+) -> Result<SectorAddress, WriteError> {
+    let current = feature
+        .get_current_profile()
+        .await
+        .map_err(classify(operation))?;
+    if current == SectorAddress::DIRECTORY {
+        saved_profile(feature, sector_size, operation).await
+    } else {
+        Ok(current)
+    }
+}
+
+/// The profile the user keeps in memory: the first enabled one the directory
+/// lists, else the first listed, else factory profile 1 for a mouse whose
+/// user memory holds none.
+pub(crate) async fn saved_profile(
+    feature: &OnboardProfilesFeature,
+    sector_size: u16,
+    operation: HidppOperation,
+) -> Result<SectorAddress, WriteError> {
+    let directory = feature
+        .read_sector(SectorAddress::DIRECTORY, sector_size)
+        .await
+        .map_err(classify(operation))?;
+    let entries = ProfileDirectory::decode(&directory)
+        .map(|directory| directory.entries().to_vec())
+        .unwrap_or_default();
+    Ok(entries
+        .iter()
+        .find(|entry| entry.enabled)
+        .or_else(|| entries.first())
+        .map_or(FACTORY_PROFILE, |entry| entry.sector))
 }
 
 /// The onboard memory of one device, opened for one operation.
@@ -231,7 +262,7 @@ impl OnboardMemoryAccess {
         layout: &EditableLayout,
         operation: HidppOperation,
     ) -> Result<(SectorAddress, ProfileSector), WriteError> {
-        let sector = self.running_profile(layout, operation).await?;
+        let sector = running_profile(&self.feature, layout.sector_size, operation).await?;
         let bytes = self
             .feature
             .read_sector(sector, layout.sector_size)
@@ -249,56 +280,15 @@ impl OnboardMemoryAccess {
         Ok((sector, profile))
     }
 
-    /// The profile onboard mode runs. In host mode the firmware answers
-    /// `getCurrentProfile` with the directory sector, which runs nothing, so
-    /// the profile it returns to — the saved one — stands in for it.
-    async fn running_profile(
-        &self,
-        layout: &EditableLayout,
-        operation: HidppOperation,
-    ) -> Result<SectorAddress, WriteError> {
-        let current = self
-            .feature
-            .get_current_profile()
-            .await
-            .map_err(classify(operation))?;
-        if current == SectorAddress::DIRECTORY {
-            self.saved_profile(layout, operation).await
-        } else {
-            Ok(current)
-        }
-    }
-
-    /// The profile the user keeps in memory: the first enabled one the
-    /// directory lists, else the first listed, else factory profile 1 for a
-    /// mouse whose user memory holds none.
-    async fn saved_profile(
-        &self,
-        layout: &EditableLayout,
-        operation: HidppOperation,
-    ) -> Result<SectorAddress, WriteError> {
-        let directory = self
-            .feature
-            .read_sector(SectorAddress::DIRECTORY, layout.sector_size)
-            .await
-            .map_err(classify(operation))?;
-        let entries = ProfileDirectory::decode(&directory)
-            .map(|directory| directory.entries().to_vec())
-            .unwrap_or_default();
-        Ok(entries
-            .iter()
-            .find(|entry| entry.enabled)
-            .or_else(|| entries.first())
-            .map_or(FACTORY_PROFILE, |entry| entry.sector))
-    }
-
     /// Put the mouse back on its saved profile when it runs a factory one or
     /// none. The firmware falls back to its factory profile when it leaves
     /// host mode, and that profile's lighting and DPI are not what the user
     /// saved; a user profile the mouse runs is left alone.
     async fn select_saved_profile(&self, operation: HidppOperation) -> Result<(), WriteError> {
-        let Ok(layout) = self.layout(operation).await else {
-            return Ok(());
+        let layout = match self.layout(operation).await {
+            Ok(layout) => layout,
+            Err(WriteError::OnboardLayoutUnsupported { .. }) => return Ok(()),
+            Err(error) => return Err(error),
         };
         let current = self
             .feature
@@ -308,7 +298,7 @@ impl OnboardMemoryAccess {
         if !(current.is_rom() || current == SectorAddress::DIRECTORY) {
             return Ok(());
         }
-        let saved = self.saved_profile(&layout, operation).await?;
+        let saved = saved_profile(&self.feature, layout.sector_size, operation).await?;
         if saved == current {
             return Ok(());
         }
@@ -416,12 +406,57 @@ impl OnboardMemoryAccess {
                 .map_err(classify(operation))?;
             debug!(index = self.index, ?mode, "onboard mode written");
         }
-        if mode == MemoryMode::Onboard
-            && let Err(error) = self.select_saved_profile(operation).await
-        {
-            warn!(index = self.index, %error, "saved onboard profile not selected");
+        if mode == MemoryMode::Onboard {
+            self.select_saved_profile(operation).await?;
         }
         self.read().await
+    }
+
+    /// The stored user profile matching factory profile `number`, when the
+    /// mouse holds one.
+    ///
+    /// A listed sector that does not decode is refused rather than replaced:
+    /// it may hold the button bindings and macros of a profile the user saved.
+    /// A sector the directory omits but that still decodes is recovered — the
+    /// save's directory write lists it again. An undecodable unlisted sector
+    /// is empty user memory, which the first save fills from the factory
+    /// profile.
+    async fn stored_user_profile(
+        &self,
+        number: u8,
+        layout: &EditableLayout,
+        operation: HidppOperation,
+    ) -> Result<Option<ProfileSector>, WriteError> {
+        let sector = SectorAddress::user_profile(number);
+        let directory = self
+            .feature
+            .read_sector(SectorAddress::DIRECTORY, layout.sector_size)
+            .await
+            .map_err(classify(operation))?;
+        let listed = ProfileDirectory::decode(&directory).is_some_and(|directory| {
+            directory
+                .entries()
+                .iter()
+                .any(|entry| entry.sector == sector)
+        });
+        let bytes = self
+            .feature
+            .read_sector(sector, layout.sector_size)
+            .await
+            .map_err(classify(operation))?;
+        match ProfileSector::decode(layout.format, bytes) {
+            Ok(profile) => Ok(Some(profile)),
+            Err(error) if listed => {
+                warn!(
+                    index = self.index,
+                    ?sector,
+                    %error,
+                    "listed onboard profile does not decode"
+                );
+                Err(WriteError::OnboardProfileUnreadable { profile: number })
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     /// Refuse `change` unless the profile and the sensor can take all of it.
@@ -463,7 +498,7 @@ impl OnboardMemoryAccess {
             return reject(OnboardChangeProblem::DpiUnsupported { dpi: *dpi });
         }
         let rates = get_report_rate_info_on_channel(&self.channel, self.index).await?;
-        if !rates.supports(change.report_rate) || report_interval_ms(change.report_rate).is_none() {
+        if !rates.supports(change.report_rate) || change.report_rate.interval_ms().is_none() {
             return reject(OnboardChangeProblem::ReportRateUnsupported {
                 rate: change.report_rate,
             });
@@ -474,7 +509,22 @@ impl OnboardMemoryAccess {
     async fn write(&self, change: &OnboardProfileChange) -> Result<OnboardMemory, WriteError> {
         let operation = HidppOperation::WriteOnboardProfile;
         let layout = self.layout(operation).await?;
-        let (active, original) = self.active_profile(&layout, operation).await?;
+        let (active, running) = self.active_profile(&layout, operation).await?;
+        // A factory profile cannot be written: its edit lands in the user
+        // profile of the same number. A mouse that fell back to factory
+        // profile 1 (after host mode, or because selecting the saved profile
+        // failed) may still have that user profile stored, bindings and all;
+        // its bytes are the base of the edit, not the factory ones. Only a
+        // user sector that holds no profile is copied from the factory one.
+        let (target, original) = if active.is_rom() {
+            let number = active.profile_number();
+            match self.stored_user_profile(number, &layout, operation).await? {
+                Some(stored) => (SectorAddress::user_profile(number), stored),
+                None => (SectorAddress::user_profile(number), running),
+            }
+        } else {
+            (active, running)
+        };
         self.validate(&original, change).await?;
 
         // Each field is written only when the change asks for something else
@@ -500,11 +550,15 @@ impl OnboardMemoryAccess {
                 .set_default_dpi_slot(change.default_dpi_slot)
                 .map_err(rejected)?;
         }
-        let interval = report_interval_ms(change.report_rate).ok_or(
-            WriteError::OnboardChangeRejected(OnboardChangeProblem::ReportRateUnsupported {
-                rate: change.report_rate,
-            }),
-        )?;
+        let interval =
+            change
+                .report_rate
+                .interval_ms()
+                .ok_or(WriteError::OnboardChangeRejected(
+                    OnboardChangeProblem::ReportRateUnsupported {
+                        rate: change.report_rate,
+                    },
+                ))?;
         if interval != original.report_interval_ms() {
             edited.set_report_interval_ms(interval).map_err(rejected)?;
         }
@@ -517,13 +571,6 @@ impl OnboardMemoryAccess {
             }
         }
 
-        // A factory profile cannot be written: its edit lands in the user
-        // profile of the same number, which the directory then lists.
-        let target = if active.is_rom() {
-            SectorAddress::user_profile(active.profile_number())
-        } else {
-            active
-        };
         let bytes = edited.encode();
         if !active.is_rom() && bytes == original.encode() {
             debug!(
@@ -554,9 +601,10 @@ impl OnboardMemoryAccess {
         self.read().await
     }
 
-    /// Write `bytes` to `sector` and read them back. A sector that reads
-    /// back otherwise is restored to what it held, when that was a profile
-    /// the firmware could run.
+    /// Write `bytes` to `sector` and read them back. A write or read-back
+    /// that fails, or bytes that read back otherwise, leaves the sector
+    /// restored to what it held when that was a profile the firmware could
+    /// run; the original error is returned either way.
     async fn write_verified(
         &self,
         sector: SectorAddress,
@@ -569,19 +617,28 @@ impl OnboardMemoryAccess {
             .read_sector(sector, size)
             .await
             .map_err(classify(operation))?;
-        self.feature
-            .write_sector(sector, bytes)
-            .await
-            .map_err(classify(operation))?;
-        let after = self
-            .feature
-            .read_sector(sector, size)
-            .await
-            .map_err(classify(operation))?;
-        if after == bytes {
-            return Ok(());
+        // From here the sector may hold part of `bytes`: a write the device
+        // rejects halfway, or one that reads back wrong, would otherwise leave
+        // the mouse on a torn profile.
+        let written = async {
+            self.feature
+                .write_sector(sector, bytes)
+                .await
+                .map_err(classify(operation))?;
+            let after = self
+                .feature
+                .read_sector(sector, size)
+                .await
+                .map_err(classify(operation))?;
+            if after == bytes {
+                Ok(())
+            } else {
+                Err(WriteError::OnboardProfileNotApplied)
+            }
         }
-        if is_sealed(&before)
+        .await;
+        if written.is_err()
+            && is_sealed(&before)
             && let Err(error) = self.feature.write_sector(sector, &before).await
         {
             warn!(
@@ -591,7 +648,7 @@ impl OnboardMemoryAccess {
                 "onboard sector restore failed"
             );
         }
-        Err(WriteError::OnboardProfileNotApplied)
+        written
     }
 
     /// Make the directory list `sector`, enabled, keeping what it lists, and
@@ -715,18 +772,6 @@ pub async fn write_onboard_profile_on(
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::hid::ReportRate;
-
-    use super::{report_interval_ms, report_rate};
-
-    #[test]
-    fn stored_intervals_map_onto_whole_hertz() {
-        assert_eq!(report_rate(1), Some(ReportRate::new(1000)));
-        assert_eq!(report_rate(3), Some(ReportRate::new(333)));
-        assert_eq!(report_rate(8), Some(ReportRate::new(125)));
-        assert_eq!(report_rate(0), None);
-        assert_eq!(report_rate(9), None);
-        assert_eq!(report_interval_ms(ReportRate::new(500)), Some(2));
-        assert_eq!(report_interval_ms(ReportRate::new(2000)), None);
-    }
+    // The report-interval conversions this module uses live on
+    // `openlogi_core::hid::ReportRate` and are tested there.
 }

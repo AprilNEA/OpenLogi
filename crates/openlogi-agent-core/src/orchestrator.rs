@@ -1114,11 +1114,20 @@ impl Orchestrator {
                 &self.shared.device(&route),
                 settings,
                 &self.shared.report_rate_order,
+                &self.shared.onboard_order,
                 &self.shared.capture_plans,
             );
         }
         if let Some(lighting) = lighting {
-            crate::hardware::set_lighting_in_background(self.shared.device(&route), &lighting);
+            // Numbered after the mouse reapply: an onboard transaction it runs
+            // reloads the profile the mouse runs, whose stored lighting would
+            // overwrite a lighting write that went first.
+            let ticket = self.shared.onboard_order.request(&route);
+            crate::hardware::set_lighting_in_background(
+                self.shared.device(&route),
+                &lighting,
+                Some(ticket),
+            );
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);

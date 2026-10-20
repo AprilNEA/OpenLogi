@@ -20,6 +20,8 @@ use crate::channel::route::DeviceRoute;
 use crate::reprog_controls::{self, CidFlags, CidInfo, ReprogControlsV4};
 use crate::write::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
+use super::onboard::running_profile;
+
 /// Snapshot of one HID++ feature exposed by a device: protocol ID +
 /// version. Returned by [`dump_features`] for diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,7 +402,9 @@ pub async fn dump_onboard_memory(
         let feature = open_feature::<OnboardProfilesFeature>(&mut device).await?;
         let info = feature.get_info().await.map_err(classify)?;
         let mode = feature.get_mode().await.map_err(classify)?;
-        let active = feature.get_current_profile().await.map_err(classify)?;
+        // Host mode reports the directory sector, which runs no profile; the
+        // saved one stands in for it, as it does for a read.
+        let active = running_profile(&feature, info.sector_size, operation).await?;
         let directory = feature
             .read_sector(SectorAddress::DIRECTORY, info.sector_size)
             .await

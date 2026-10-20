@@ -1078,14 +1078,14 @@ fn onboard_memory_dtos_requests_and_errors() {
         &AgentRequest::ReadOnboardMemory {
             route: route.clone(),
         },
-        "2602fb6d04fb83c0",
+        "2802fb6d04fb83c0",
     );
     assert_wire(
         &AgentRequest::SetMemoryMode {
             route: route.clone(),
             mode: MemoryMode::Software,
         },
-        "2702fb6d04fb83c001",
+        "2902fb6d04fb83c001",
     );
     assert_wire(
         &AgentRequest::WriteOnboardProfile {
@@ -1097,7 +1097,7 @@ fn onboard_memory_dtos_requests_and_errors() {
                 lighting: vec![OnboardLighting::Off],
             },
         },
-        "2802fb6d04fb83c00201fb20030000fbf4010100",
+        "2a02fb6d04fb83c00201fb20030000fbf4010100",
     );
     assert_wire(
         &WriteError::OnboardLayoutUnsupported {
@@ -1113,5 +1113,6 @@ fn onboard_memory_dtos_requests_and_errors() {
         "1b02fb3930",
     );
     assert_wire(&WriteError::OnboardProfileNotApplied, "1c");
+    assert_wire(&WriteError::OnboardProfileUnreadable { profile: 3 }, "1d03");
     assert_wire(&HidppOperation::WriteMemoryMode, "19");
 }

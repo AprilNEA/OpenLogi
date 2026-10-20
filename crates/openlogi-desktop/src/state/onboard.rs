@@ -192,9 +192,16 @@ impl AppState {
         if let Err(error) = &result {
             warn!(%error, key = %key, ?write, "onboard write did not land");
         }
+        let landed = result.is_ok();
         if !self.pointer.reads.finish_onboard_write(key, route, result) {
             debug!(key = %key, "onboard answer for a connection no read is on — dropping it");
             return StateEvents::none();
+        }
+        if landed {
+            // A mode switch lands the saved software settings (DPI, report
+            // rate) on the mouse; a read cached before it still shows what
+            // the onboard profile ran.
+            self.pointer.reads.revalidate_device_settings(key);
         }
         StateEvent::OnboardChanged(key.clone()).into()
     }

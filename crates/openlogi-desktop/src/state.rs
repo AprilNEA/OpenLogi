@@ -379,6 +379,12 @@ impl AppState {
         &mut self,
         result: Result<(), openlogi_ipc::ConfigReloadError>,
     ) -> StateEvents {
+        let applied = result.is_ok();
+        if applied && let Some(key) = self.current_record().map(devices::DeviceRecord::device_key) {
+            // The agent pushes the saved software settings on this reload;
+            // reads cached before it still show the previous mode's values.
+            self.pointer.reads.revalidate_device_settings(&key);
+        }
         if self.config.apply_reload_result(result) {
             StateEvent::SettingsChanged.into()
         } else {

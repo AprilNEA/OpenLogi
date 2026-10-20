@@ -124,9 +124,9 @@ pub use succession::Identity;
 ///      write_onboard_profile}`, `Capabilities::onboard_profiles`,
 ///      `HidppOperation::{ReadOnboardMemory, WriteOnboardProfile,
 ///      WriteMemoryMode}` and `WriteError::{OnboardLayoutUnsupported,
-///      OnboardChangeRejected, OnboardProfileNotApplied}` appended — a gaming
-///      mouse's `0x8100` onboard memory, its mode switch and edits to its
-///      active profile.
+///      OnboardChangeRejected, OnboardProfileNotApplied,
+///      OnboardProfileUnreadable}` appended — a gaming mouse's `0x8100`
+///      onboard memory, its mode switch and edits to its active profile.
 pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the

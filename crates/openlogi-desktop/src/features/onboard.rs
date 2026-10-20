@@ -126,7 +126,15 @@ impl Facts {
         let record = state.current_record()?;
         let key = record.device_key();
         let rates = match state.current_report_rate_load() {
-            ReportRateLoad::Ready(info) => info.supported.clone(),
+            // The profile stores intervals of 1–8 ms, so a live rate above
+            // 1 kHz (2, 4 or 8 kHz) has no stored form and would always fail
+            // to save.
+            ReportRateLoad::Ready(info) => info
+                .supported
+                .iter()
+                .copied()
+                .filter(|rate| rate.interval_ms().is_some())
+                .collect(),
             _ => FALLBACK_RATES.into_iter().map(ReportRate::new).collect(),
         };
         let sensor = match state.dpi_load_for(&key) {
@@ -273,56 +281,72 @@ impl OnboardPanel {
         self.invalid = None;
     }
 
-    /// The change to save, or why it cannot be saved.
+    /// The change to save, or why it cannot be saved. `latest` is the newest
+    /// reading: the fields this card did not edit come from it, so an edit
+    /// left in the other card's draft cannot undo a save made there since.
     fn change(
         &self,
+        latest: &OnboardProfile,
         sensor: Option<&DpiCapabilities>,
         cx: &App,
     ) -> Result<OnboardProfileChange, SharedString> {
         let draft = self.draft.as_ref().ok_or_else(SharedString::default)?;
-        if self.section == OnboardSection::Lighting {
-            // Everything but the lighting is written back as it is stored.
-            let base = &draft.base;
-            return Ok(OnboardProfileChange {
-                dpi_slots: base.dpi_slots.clone(),
-                default_dpi_slot: base.default_dpi_slot,
-                report_rate: base
-                    .report_rate
-                    .ok_or_else(|| tr!("onboard.choose_report_rate"))?,
-                lighting: draft.lighting.clone(),
-            });
-        }
-        let mut dpi_slots = Vec::with_capacity(STAGES);
-        for (stage, field) in self.stage_values(cx).into_iter().enumerate() {
-            let dpi = field.map_err(|()| stage_error(stage, sensor))?;
-            if let (Some(dpi), Some(sensor)) = (dpi, sensor)
-                && !sensor.contains(dpi)
-            {
-                return Err(stage_error(stage, Some(sensor)));
+        let base = &draft.base;
+        let mut dpi_slots = latest.dpi_slots.clone();
+        if self.section == OnboardSection::Pointer {
+            for (stage, field) in self.stage_values(cx).into_iter().enumerate() {
+                let dpi = field.map_err(|()| stage_error(stage, sensor))?;
+                if let (Some(dpi), Some(sensor)) = (dpi, sensor)
+                    && !sensor.contains(dpi)
+                {
+                    return Err(stage_error(stage, Some(sensor)));
+                }
+                if dpi != base.dpi_slots.get(stage).copied().flatten()
+                    && let Some(slot) = dpi_slots.get_mut(stage)
+                {
+                    *slot = dpi;
+                }
             }
-            dpi_slots.push(dpi);
         }
+        let default_dpi_slot = if draft.default_slot == base.default_dpi_slot {
+            latest.default_dpi_slot
+        } else {
+            draft.default_slot
+        };
         if dpi_slots
-            .get(usize::from(draft.default_slot))
+            .get(usize::from(default_dpi_slot))
             .copied()
             .flatten()
             .is_none()
         {
             return Err(tr!("onboard.default_stage_empty"));
         }
-        let report_rate = draft
-            .report_rate
-            .ok_or_else(|| tr!("onboard.choose_report_rate"))?;
+        let report_rate = if draft.report_rate == base.report_rate {
+            latest.report_rate.or(draft.report_rate)
+        } else {
+            draft.report_rate
+        }
+        .ok_or_else(|| tr!("onboard.choose_report_rate"))?;
+        let lighting = if draft.lighting == base.lighting {
+            latest.lighting.clone()
+        } else {
+            draft.lighting.clone()
+        };
         Ok(OnboardProfileChange {
             dpi_slots,
-            default_dpi_slot: draft.default_slot,
+            default_dpi_slot,
             report_rate,
-            lighting: draft.base.lighting.clone(),
+            lighting,
         })
     }
 
-    fn save(&mut self, sensor: Option<&DpiCapabilities>, cx: &mut Context<Self>) {
-        match self.change(sensor, cx) {
+    fn save(
+        &mut self,
+        latest: &OnboardProfile,
+        sensor: Option<&DpiCapabilities>,
+        cx: &mut Context<Self>,
+    ) {
+        match self.change(latest, sensor, cx) {
             Ok(change) => {
                 self.invalid = None;
                 AppState::apply(cx, |state| state.commit_onboard_profile(change));
@@ -512,7 +536,7 @@ impl OnboardPanel {
             .when(self.section == OnboardSection::Lighting, |this| {
                 this.child(Self::lighting_section(draft, facts.writing, pal, cx))
             })
-            .child(self.footer(facts, dirty, pal, cx))
+            .child(self.footer(facts, profile, dirty, pal, cx))
             .into_any_element()
     }
 
@@ -723,6 +747,7 @@ impl OnboardPanel {
     fn footer(
         &self,
         facts: &Facts,
+        profile: &OnboardProfile,
         dirty: bool,
         pal: Palette,
         cx: &mut Context<Self>,
@@ -742,6 +767,7 @@ impl OnboardPanel {
             None
         };
         let sensor = facts.sensor.clone();
+        let latest = profile.clone();
         h_flex()
             .gap_2()
             .items_center()
@@ -777,7 +803,7 @@ impl OnboardPanel {
                     .label(tr!("onboard.save_to_mouse"))
                     .disabled(!dirty || facts.writing)
                     .on_click(cx.listener(move |panel, _, _, cx| {
-                        panel.save(sensor.as_ref(), cx);
+                        panel.save(&latest, sensor.as_ref(), cx);
                     })),
             )
     }
