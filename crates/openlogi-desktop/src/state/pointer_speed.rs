@@ -12,7 +12,9 @@
 //! request. Its answer is the mouse's read-back, and the write ends precision
 //! mode on that mouse. A refusal sends the query back to the mouse and marks
 //! the mouse refused, because the slider keeps showing the saved setting. The
-//! mark stands until the next write lands or a reading matches the setting.
+//! mark stands until the next write lands, a reading matches the setting, or
+//! the mouse reconnects: the agent then writes the saved setting again, and
+//! the reading is asked again.
 
 use openlogi_core::hid::{PointerSpeed, WriteError};
 use tracing::{debug, warn};
@@ -156,6 +158,14 @@ impl AppState {
     pub(crate) fn retry_pointer_speed_read(&mut self, key: &DeviceKey) -> StateEvents {
         self.pointer.reads.retry_pointer_speed(key);
         StateEvent::PointerSpeedChanged(key.clone()).into()
+    }
+
+    /// `key`'s mouse came back online. The agent writes the saved speed
+    /// again when a mouse connects, so a refused write no longer stands, and
+    /// the mouse is read again so the slider follows it.
+    pub(super) fn pointer_speed_reconnected(&mut self, key: &DeviceKey) {
+        self.pointer.refused_pointer_speeds.remove(key);
+        self.pointer.reads.refresh_pointer_speed(key);
     }
 
     pub(super) fn load_current_pointer_speed(&mut self, cx: &mut gpui::Context<Self>) {

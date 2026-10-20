@@ -261,3 +261,67 @@ fn a_refusal_is_not_marked_when_nothing_is_saved(cx: &mut gpui::TestAppContext) 
 
     assert!(!refused(cx));
 }
+
+/// The scaling mouse on a Bolt receiver, online or asleep.
+fn mouse_on_receiver(online: bool) -> DeviceInventory {
+    let mut inventory = mouse_inventory(true);
+    inventory.receiver = ReceiverInfo {
+        name: "Bolt Receiver".to_string(),
+        vendor_id: 0x046d,
+        product_id: 0xc548,
+        unique_id: Some("82839805".to_string()),
+    };
+    inventory.paired[0].slot = 1;
+    inventory.paired[0].online = online;
+    inventory
+}
+
+/// Deliver an inventory snapshot to the installed state.
+fn refresh(cx: &mut gpui::TestAppContext, inventory: DeviceInventory) {
+    cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            let resolver = AssetResolver::new();
+            let _ = state.refresh_inventories(&[inventory], &[], &resolver, &[]);
+        });
+    });
+    cx.run_until_parked();
+}
+
+/// The agent writes the saved speed again when the mouse reconnects on the
+/// same slot. The refusal then no longer stands, and the mouse is read
+/// again.
+#[gpui::test]
+fn a_reconnect_clears_a_refusal_and_reads_the_mouse_again(cx: &mut gpui::TestAppContext) {
+    let mut config = Config::ephemeral();
+    config.set_pointer_speed(KNOWN_MOUSE_KEY, speed(0x0180));
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories: &[mouse_on_receiver(true)],
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+    let key = state.current_record().expect("mouse").device_key();
+    install(state, cx);
+    let route = answer_speed_read(&mut receiver, speed(0x0180));
+    cx.run_until_parked();
+    answer_write(cx, &key, Err(WriteError::AgentUnavailable));
+    answer_speed_read(&mut receiver, speed(0x0100));
+    cx.run_until_parked();
+    assert!(refused(cx));
+
+    refresh(cx, mouse_on_receiver(false));
+    assert!(refused(cx), "the mouse slept at the other speed");
+
+    refresh(cx, mouse_on_receiver(true));
+    assert!(
+        !refused(cx),
+        "the agent writes the saved speed on reconnect"
+    );
+    assert_eq!(
+        answer_speed_read(&mut receiver, speed(0x0180)),
+        route,
+        "the reconnect reads the mouse again"
+    );
+    cx.run_until_parked();
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(speed(0x0180))));
+}
