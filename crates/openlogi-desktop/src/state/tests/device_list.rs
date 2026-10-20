@@ -55,6 +55,7 @@ pub(crate) fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
             agent_version: "synthetic-profile-test".to_string(),
             input_monitoring_granted: true,
             hid_open_failures: false,
+            secure_input: openlogi_ipc::SecureInput::Off,
         },
         inventory: profile.inventories.clone(),
         standalone: profile.standalone.clone(),

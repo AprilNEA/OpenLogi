@@ -54,7 +54,7 @@ use openlogi_ipc::{
     ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange, LockKeyObservation,
     MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation, ObservedLight,
     PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig,
+    RingObservation, SavedConfig, SecureInput,
 };
 use succession::{Compat, Run};
 
@@ -110,7 +110,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 37);
+    assert_eq!(PROTOCOL_VERSION, 38);
 }
 
 #[test]
@@ -515,12 +515,19 @@ fn agent_status() {
         agent_version: "0.6.6".into(),
         input_monitoring_granted: true,
         hid_open_failures: false,
+        secure_input: SecureInput::On(Some(ForegroundApp {
+            id: "a".into(),
+            display_name: "A".into(),
+        })),
     };
-    assert_wire(&status, "010001010705302e362e360100");
+    assert_wire(&status, "010001010705302e362e360100010101610141");
 
     assert_wire(&InventoryHealth::Scanning, "00");
     assert_wire(&InventoryHealth::Ready, "01");
     assert_wire(&InventoryHealth::Unavailable, "02");
+
+    assert_wire(&SecureInput::Off, "00");
+    assert_wire(&SecureInput::On(None), "0100");
 }
 
 #[test]
@@ -535,6 +542,7 @@ fn agent_snapshot() {
             agent_version: "0.6.6".into(),
             input_monitoring_granted: true,
             hid_open_failures: false,
+            secure_input: SecureInput::Off,
         },
         inventory: Vec::new(),
         standalone: Vec::new(),
@@ -546,14 +554,14 @@ fn agent_snapshot() {
         // Pinned populated in `observed_light` below.
         lights: Vec::new(),
     };
-    assert_wire(&snapshot, "010001010705302e362e36010000000000000000");
+    assert_wire(&snapshot, "010001010705302e362e3601000000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e36010000000000000000");
+    assert_wire(&observed, "03010001010705302e362e3601000000000000000000");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:

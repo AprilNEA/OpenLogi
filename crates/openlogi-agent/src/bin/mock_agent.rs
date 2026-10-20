@@ -696,6 +696,7 @@ fn agent_status() -> AgentStatus {
         agent_version: concat!(env!("CARGO_PKG_VERSION"), "-mock").to_string(),
         input_monitoring_granted: true,
         hid_open_failures: false,
+        secure_input: openlogi_ipc::SecureInput::Off,
     }
 }
 

@@ -701,9 +701,14 @@ impl AppView {
             )
         };
 
+        let has_key_bindings =
+            AppState::try_read(cx).is_some_and(|state| !state.keyboard_bindings().is_empty());
+        let attention = status::Attention::for_status(&status, has_key_bindings);
         root.child(header_el)
             .child(content_el)
-            .when(!granted, |this| this.child(status::attention_footer(cx)))
+            .when_some(attention, |this, attention| {
+                this.child(status::attention_footer(attention, cx))
+            })
             .into_any_element()
     }
 }

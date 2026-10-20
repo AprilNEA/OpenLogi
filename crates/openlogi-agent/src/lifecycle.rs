@@ -427,6 +427,7 @@ impl Running {
             WatcherEvent::Pointer(context) => self.apply_pointer_context(context).await,
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(state) => self.apply_input_monitoring(state).await,
+            WatcherEvent::SecureInput(state) => self.observable.set_secure_input(state),
             WatcherEvent::Light(LightEvent::Read { route, state }) => {
                 self.orchestrator.lock().await.light_read(&route, state);
             }
@@ -442,6 +443,14 @@ impl Running {
             WatcherEvent::Lost(Watcher::Camera) => {
                 #[cfg(target_os = "macos")]
                 warn!("camera watcher channel closed — disabling camera automation updates");
+            }
+            // Off macOS the channel closes at once and this changes nothing. On
+            // macOS a dead watcher must not leave a stale notice up.
+            WatcherEvent::Lost(Watcher::SecureInput) => {
+                #[cfg(target_os = "macos")]
+                warn!("secure-input watcher channel closed — reporting Secure Event Input as off");
+                self.observable
+                    .set_secure_input(openlogi_ipc::SecureInput::Off);
             }
             WatcherEvent::Lost(Watcher::Pointer) if openlogi_hook::pointer_context_supported() => {
                 warn!("pointer watcher channel closed — using an unidentified pointer context");

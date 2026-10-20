@@ -31,6 +31,7 @@ fn snapshot() -> AgentSnapshot {
             agent_version: "test-agent".into(),
             input_monitoring_granted: true,
             hid_open_failures: false,
+            secure_input: openlogi_ipc::SecureInput::Off,
         },
         inventory: vec![DeviceInventory {
             receiver: ReceiverInfo {

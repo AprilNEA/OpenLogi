@@ -461,6 +461,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             agent_version: "/private/Agent.app".to_string(),
             input_monitoring_granted: false,
             hid_open_failures: true,
+            secure_input: openlogi_ipc::SecureInput::Off,
         },
         inventory: profile.inventories.clone(),
         standalone: profile.standalone.clone(),

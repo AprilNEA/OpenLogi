@@ -26,6 +26,7 @@ use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
     OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
+    SecureInput,
 };
 use tokio::sync::watch;
 
@@ -64,6 +65,7 @@ impl ObservableState {
                     agent_version,
                     input_monitoring_granted: openlogi_hid::permissions::has_access(),
                     hid_open_failures: false,
+                    secure_input: SecureInput::Off,
                 },
                 inventory: Vec::new(),
                 standalone: Vec::new(),
@@ -230,6 +232,18 @@ impl ObservableState {
                 return false;
             }
             snapshot.status.input_monitoring_granted = granted;
+            true
+        });
+    }
+
+    /// Publish a Secure Event Input change, as observed by
+    /// [`watchers::secure_input`](crate::watchers::secure_input).
+    pub fn set_secure_input(&self, secure_input: SecureInput) {
+        self.update(|snapshot| {
+            if snapshot.status.secure_input == secure_input {
+                return false;
+            }
+            snapshot.status.secure_input = secure_input;
             true
         });
     }

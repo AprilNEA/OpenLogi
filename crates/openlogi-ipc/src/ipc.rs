@@ -120,7 +120,10 @@ pub use succession::Identity;
 ///      battery. `Agent::observe_lock_keys`, [`LockKeyObservation`] and
 ///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
 ///      off over HID++ `0x4220`, for the overlay's transient indicator.
-pub const PROTOCOL_VERSION: u32 = 37;
+/// v38: `AgentStatus::secure_input` and [`SecureInput`] appended — whether
+///      macOS Secure Event Input is hiding key presses from the hook, and
+///      the app macOS attributes it to.
+pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -156,6 +159,25 @@ pub enum InventoryHealth {
     Unavailable,
 }
 
+/// macOS Secure Event Input, as the agent last read it. While it is on,
+/// macOS delivers no key presses to any event tap, so key bindings made
+/// through the OS hook do not fire; mouse buttons, scrolling, gestures and
+/// HID++-diverted controls keep working. Always [`Self::Off`] on Linux and
+/// Windows.
+///
+/// The agent reports `On` only once it has stayed on for two consecutive
+/// reads (about 2 s), so focusing a password field for a moment does not
+/// flash a notice. Variants are append-only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SecureInput {
+    #[default]
+    Off,
+    /// On, attributed to this app — or `None` when macOS names no running
+    /// app. The attribution is the window server's: a background process
+    /// that turns it on is attributed to the frontmost app.
+    On(Option<ForegroundApp>),
+}
+
 /// Agent health the GUI surfaces: the Accessibility gate, whether the hook is
 /// live, the autostart toggle state, and enumeration progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +199,8 @@ pub struct AgentStatus {
     /// node. Paired with [`Self::input_monitoring_granted`] it distinguishes
     /// a missing grant from an exclusive open or a stale permission session.
     pub hid_open_failures: bool,
+    /// See [`SecureInput`].
+    pub secure_input: SecureInput,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never

@@ -7,6 +7,7 @@
 mod foreground;
 mod grant;
 pub(crate) mod pointer;
+mod secure_input;
 mod sender;
 mod translate;
 mod watchdog;
@@ -37,6 +38,7 @@ pub use foreground::ForegroundApplicationObserver;
 use foreground::observe_frontmost_application;
 pub(crate) use foreground::{frontmost_safari_pid, watch_frontmost_application_activations};
 use grant::{ProbeCue, can_filter_events};
+pub(crate) use secure_input::{secure_input_app, secure_input_enabled};
 use translate::{VERTICAL, translate, translate_key};
 use watchdog::{
     CALLBACK_POLL_INTERVAL, CallbackActivity, CallbackWatchdog, LIFECYCLE_POLL_INTERVAL,

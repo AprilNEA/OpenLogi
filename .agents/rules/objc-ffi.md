@@ -38,6 +38,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the Accessibility-trust check/prompt, the off-tap `NSWorkspace` frontmost-app read, and the `CGGetEventTapList` enumeration |
 | `openlogi-hook/src/macos/foreground.rs` | the `NSWorkspace` activation observer, the `NSRunningApplication` conversion behind every frontmost-app read, and the Safari PID snapshot |
+| `openlogi-hook/src/macos/secure_input.rs` | the Secure Event Input read: `IsSecureEventInputEnabled` (hand-declared, see below) and the `kCGSSessionSecureInputPID` entry of `CGSessionCopyCurrentDictionary`, named through `foreground.rs`'s `NSRunningApplication` conversion |
 | `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent key and click synthesis, media-key `NSEvent`s |
 | `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields |
@@ -213,6 +214,9 @@ its single user. The current set, all deliberate:
 
 - `openlogi-hook`: `CGEventCopyIOHIDEvent` / `IOHIDEventGetSenderID` —
   undocumented, no bindings anywhere.
+- `openlogi-hook/src/macos/secure_input.rs`: `IsSecureEventInputEnabled` —
+  Carbon HIToolbox, which `objc2-carbon` skips. It takes no arguments and has
+  no precondition, so the block declares it `safe fn`.
 - `openlogi-agent/src/activity_macos.rs`: the `IOPMConnection` SPI
   (`IOPMConnectionCreate` / `SetNotification` / `SetDispatchQueue` /
   `AcknowledgeEvent` / `Release` / `GetSystemCapabilities`) — exported by IOKit
@@ -261,11 +265,12 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   `AXIsProcessTrusted[WithOptions]` with the two extern statics they need
   (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and the `kern.sleeptime` /
   `kern.waketime` `sysctlbyname` reads the lifecycle watchdog gates its gap
-  discount on. Its module-wide `#![expect(unsafe_code)]` covers the two files
+  discount on. Its module-wide `#![expect(unsafe_code)]` covers the three files
   below as well.
 - `hook/macos/foreground.rs` — the `NSWorkspace` activation-observer
   registration and typed notification payload, and `NSString::to_str(pool)`
   (the borrow is tied to the pool).
+- `hook/macos/secure_input.rs` — the `CGSession` dictionary cast.
 - `hook/macos/sender.rs` — the sender-id `extern` calls and the IOKit registry
   walk, including the Create-rule `CFString` / `CFNumber` wraps.
 - `inject/macos/ax.rs` — AX attribute-copy out-pointers and the unchecked
@@ -322,7 +327,9 @@ temporaries. The call sites that keep an explicit
   watcher and notification callback may run on threads with no run loop, and
   `to_str` borrows its UTF-8 view from the pool (both the bundle id and the
   localized name). Registration and removal use the same boundary so AppKit's
-  internal autoreleased temporaries are drained as well.
+  internal autoreleased temporaries are drained as well. The Secure Event
+  Input app read names its app through the same conversion, on the
+  secure-input watcher thread, under its own pool.
 - `openlogi-inject`'s `post_media_key` — the hook/gesture dispatch threads, where
   both the `NSEvent` creation and the `CGEvent` getter autorelease temporaries.
 - `openlogi-inject`'s `ax_browser_navigate` — the action worker, where `to_str`

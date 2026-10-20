@@ -801,6 +801,7 @@ mod tests {
                 agent_version: "observe-loop-test".to_owned(),
                 input_monitoring_granted: true,
                 hid_open_failures: false,
+                secure_input: openlogi_ipc::SecureInput::Off,
             },
             inventory: Vec::new(),
             standalone: Vec::new(),
