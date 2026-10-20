@@ -313,7 +313,7 @@ macro_rules! for_each_unit_action {
             NextDesktop "Next Desktop" "actions.next_desktop" Navigation NextDesktop,
             ShowDesktop "Show Desktop" "actions.show_desktop" Navigation Monitor,
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
-            CloseWindow "Close Window" "actions.close_window" Navigation CloseTab,
+            CloseWindow "Close Window" "common.close_window" Navigation CloseTab,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,
