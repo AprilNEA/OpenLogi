@@ -33,6 +33,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
+use openlogi_agent_core::watchers::input_monitoring::InputMonitoring;
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
 use openlogi_agent_core::watchers::light::LightEvent;
 use openlogi_core::config::Config;
@@ -416,9 +417,7 @@ impl Running {
             }
             WatcherEvent::Pointer(context) => self.apply_pointer_context(context).await,
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
-            WatcherEvent::InputMonitoring(granted) => {
-                self.observable.set_input_monitoring_granted(granted);
-            }
+            WatcherEvent::InputMonitoring(state) => self.apply_input_monitoring(state).await,
             WatcherEvent::Light(LightEvent::Read { route, state }) => {
                 self.orchestrator.lock().await.light_read(&route, state);
             }
@@ -575,6 +574,27 @@ impl Running {
             .set_os_mouse_hook_available(self.hook.is_some());
         self.observable
             .set_accessibility_and_hook(granted, self.hook.is_some());
+    }
+
+    /// Publish whether this process holds Input Monitoring, and relaunch when
+    /// the grant arrived after this process asked for it: macOS applies it
+    /// only to a process started after it.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            clippy::unused_async,
+            reason = "only the macOS relaunch awaits the handover"
+        )
+    )]
+    async fn apply_input_monitoring(&mut self, state: InputMonitoring) {
+        self.observable.set_input_monitoring_granted(state.held());
+        #[cfg(target_os = "macos")]
+        if state == InputMonitoring::NeedsRelaunch
+            && crate::input_monitoring::schedule_relaunch_for_late_grant()
+        {
+            self.hand_over("Input Monitoring granted after launch")
+                .await;
+        }
     }
 
     /// Install the OS mouse hook, or say why it stays off.

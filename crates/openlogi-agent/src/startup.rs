@@ -239,8 +239,8 @@ pub(crate) enum WatcherEvent {
     Pointer(openlogi_hook::PointerContext),
     /// The Accessibility grant flipped.
     Accessibility(bool),
-    /// The Input Monitoring grant flipped.
-    InputMonitoring(bool),
+    /// Where the agent stands with Input Monitoring changed.
+    InputMonitoring(watchers::input_monitoring::InputMonitoring),
     /// A standalone light was read, or announced a change.
     Light(watchers::light::LightEvent),
     /// A watcher's channel closed (its thread died). Emitted once; the
@@ -329,7 +329,13 @@ pub(crate) fn spawn_state_watchers(
             WatcherEvent::Accessibility,
         ),
         tagged(
-            watchers::input_monitoring::spawn(GRANT_HEARTBEAT),
+            watchers::input_monitoring::spawn(
+                GRANT_HEARTBEAT,
+                std::cfg_select! {
+                    target_os = "macos" => { crate::input_monitoring::fresh_grant }
+                    _ => { || None }
+                },
+            ),
             Watcher::InputMonitoring,
             WatcherEvent::InputMonitoring,
         ),
