@@ -100,6 +100,7 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
         Shortcut::Save => "Ctrl+S",
         Shortcut::NewTab => "Ctrl+T",
         Shortcut::CloseTab => "Ctrl+W",
+        Shortcut::CloseWindow => "Alt+F4",
         Shortcut::ReopenTab => "Ctrl+Shift+T",
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",

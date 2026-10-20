@@ -76,6 +76,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::BrowserForward => "action-icons/arrow-right.svg",
         Action::NewTab => "action-icons/square-plus.svg",
         Action::CloseTab => "action-icons/square-x.svg",
+        Action::CloseWindow => "action-icons/x.svg",
         Action::ReopenTab => "action-icons/rotate-ccw.svg",
         Action::NextTab => "action-icons/chevron-right.svg",
         Action::PrevTab => "action-icons/chevron-left.svg",

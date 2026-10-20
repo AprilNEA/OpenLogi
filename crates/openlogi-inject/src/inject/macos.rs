@@ -237,6 +237,7 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::BrowserForward => "Cmd+]",
         Shortcut::NewTab => "Cmd+T",
         Shortcut::CloseTab => "Cmd+W",
+        Shortcut::CloseWindow => "Cmd+W",
         Shortcut::ReopenTab => "Cmd+Shift+T",
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",

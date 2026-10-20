@@ -127,6 +127,8 @@ pub enum Shortcut {
     NewTab,
     /// Close the current tab.
     CloseTab,
+    /// Close the focused window.
+    CloseWindow,
     /// Reopen the last closed tab.
     ReopenTab,
     /// Switch to the next tab.
@@ -242,6 +244,7 @@ impl Action {
             Action::BrowserForward => Effect::Shortcut(Shortcut::BrowserForward),
             Action::NewTab => Effect::Shortcut(Shortcut::NewTab),
             Action::CloseTab => Effect::Shortcut(Shortcut::CloseTab),
+            Action::CloseWindow => Effect::Shortcut(Shortcut::CloseWindow),
             Action::ReopenTab => Effect::Shortcut(Shortcut::ReopenTab),
             Action::NextTab => Effect::Shortcut(Shortcut::NextTab),
             Action::PrevTab => Effect::Shortcut(Shortcut::PrevTab),

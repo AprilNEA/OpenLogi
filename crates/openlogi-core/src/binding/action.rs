@@ -206,6 +206,11 @@ pub enum Action {
     /// this to a balanced tap of the whole chord, exactly as they do for
     /// [`Action::HoldShortcut`].
     TapKeyHoldingModifiers(KeyCombo),
+    /// Close the focused window (⌘W on macOS, Alt+F4 on Linux and Windows).
+    ///
+    /// Declared last because the variant index is part of the IPC wire
+    /// format; it is listed with the other window actions in the catalog.
+    CloseWindow,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -297,6 +302,7 @@ macro_rules! for_each_unit_action {
             NextDesktop "Next Desktop" "actions.next_desktop" Navigation NextDesktop,
             ShowDesktop "Show Desktop" "actions.show_desktop" Navigation Monitor,
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
+            CloseWindow "Close Window" "actions.close_window" Navigation CloseTab,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,
