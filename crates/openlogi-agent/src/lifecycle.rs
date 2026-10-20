@@ -322,7 +322,7 @@ impl Armed {
                     running.handle_shutdown_request(request).await;
                 }
                 (request, stopped) = running.hidpp_watchers.replacement_ready() => {
-                    running.complete_replacement(request, stopped);
+                    running.complete_replacement(request, stopped).await;
                 }
                 Some(event) = watchers.next() => {
                     running.apply_watcher(event, &inventory_refresh).await;
@@ -623,14 +623,14 @@ impl Running {
 
     /// Called only after the old fleet has acknowledged teardown. Failed
     /// teardown resumes the current image instead of replacing it.
-    fn complete_replacement(&mut self, request: Replacement, stopped: bool) {
+    async fn complete_replacement(&mut self, request: Replacement, stopped: bool) {
         if !stopped {
             warn!("HID++ teardown was unclean — refusing replacement and retrying");
             self.restart_hidpp_watchers();
             let _ = request.retry.send(());
             return;
         }
-        self.restart(request);
+        self.restart(request).await;
     }
 
     fn restart_hidpp_watchers(&mut self) {
@@ -639,7 +639,11 @@ impl Running {
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
-    fn restart(&mut self, Replacement { path, retry }: Replacement) {
+    #[expect(
+        clippy::unused_async,
+        reason = "matches the macOS/Windows restart contract; Unix exec replaces the process synchronously"
+    )]
+    async fn restart(&mut self, Replacement { path, retry }: Replacement) {
         let error = crate::binary_watch::replace_process(&path);
         warn!(%error, path = %path.display(), "exec of the updated agent failed — restoring the current image and retrying");
         self.restart_hidpp_watchers();
@@ -647,19 +651,19 @@ impl Running {
     }
 
     #[cfg(target_os = "macos")]
-    fn restart(&mut self, Replacement { path, retry }: Replacement) {
+    async fn restart(&mut self, Replacement { path, retry }: Replacement) {
         if let Err(error) = crate::binary_watch::schedule(&path) {
             warn!(%error, "could not schedule updated agent relaunch — keeping the current image and retrying");
             self.restart_hidpp_watchers();
             let _ = retry.send(());
             return;
         }
-        self.exit_after_replacement_teardown("binary update");
+        self.exit_after_replacement_teardown("binary update").await;
     }
 
     #[cfg(not(unix))]
-    fn restart(&mut self, _request: Replacement) {
-        self.exit_after_replacement_teardown("binary update");
+    async fn restart(&mut self, _request: Replacement) {
+        self.exit_after_replacement_teardown("binary update").await;
     }
 
     /// Leave for good: nobody wants the agent until asked again, so the next
@@ -675,6 +679,7 @@ impl Running {
     ) -> ! {
         #[cfg(target_os = "macos")]
         armed_session::clear();
+        self.inputs.stop_receiver_work().await;
         self.shared.release_rgb_control().await;
         self.leave(reason, tray_guard).await
     }
@@ -692,18 +697,20 @@ impl Running {
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> ! {
+        self.inputs.stop_receiver_work().await;
         std::mem::replace(&mut self.hidpp_watchers, WatcherFleet::Inactive)
             .stop_for_exit()
             .await;
         shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, tray_guard)
+            .await
     }
 
     /// End after [`Self::complete_replacement`] resolved firmware
     /// ownership, so a successor starts from native device state. A handover
     /// like [`Self::hand_over`]: the successor finds the armed session.
     #[cfg(any(target_os = "macos", not(unix)))]
-    fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
-        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None)
+    async fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
+        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None).await
     }
 }
 

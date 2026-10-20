@@ -278,11 +278,11 @@ impl HeldDpiShifts {
         let before = self.before.entry(device.clone()).or_default().clone();
         // Native DPI buttons and onboard profiles can change the sensor
         // without an agent event. A new hold must read it, not trust a cached
-        // preset. Keep an unrestored prior hold's snapshot: a quick re-press
-        // may supersede its restore while the sensor is still shifted.
+        // preset. Keep an unrestored prior hold's snapshot until its ordered
+        // restore succeeds; a failed restore can leave the sensor shifted.
         if let Ok(mut cycles) = executor.dpi_cycle.write() {
             // A preset picked during the previous hold (or while its restore
-            // is pending) is still owed if this press supersedes that restore.
+            // is pending) is still owed if that restore fails.
             if before.get().is_some()
                 && let Some(current) = cycles.current(&key)
             {
@@ -459,6 +459,7 @@ pub struct ActionDispatcher {
 pub struct ActionRuntime {
     dispatcher: ActionDispatcher,
     buttons: ButtonRuntimeOwner,
+    stopped: bool,
 }
 
 impl ActionRuntime {
@@ -483,6 +484,7 @@ impl ActionRuntime {
                 buttons: input,
             },
             buttons,
+            stopped: false,
         })
     }
 
@@ -493,10 +495,23 @@ impl ActionRuntime {
     }
 
     /// Reject new button input, emit terminal cancellation, join the worker,
-    /// then finish its pending DPI writes before the process can exit.
+    /// then allow pending DPI writes a bounded grace period before process exit.
     pub fn shutdown(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
         let _ = self.buttons.shutdown();
-        futures_lite::future::block_on(self.dispatcher.executor.dpi_order.drain());
+        // A hold (read + low write) and its restore each have a five-second
+        // I/O budget. Bound the entire drain, including receiver/queue waits.
+        if !self
+            .dispatcher
+            .executor
+            .dpi_order
+            .drain_timeout(Duration::from_secs(12))
+        {
+            warn!("DPI writes did not finish before the shutdown deadline");
+        }
     }
 }
 

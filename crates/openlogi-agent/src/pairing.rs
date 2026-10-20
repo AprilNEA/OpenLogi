@@ -43,6 +43,7 @@ type SharedSessionOwner = Arc<StdMutex<SessionOwner>>;
 /// The one owner of pairing admission, live-session resources, and discovery.
 struct SessionOwner {
     next_id: u64,
+    stopping: bool,
     state: SessionState,
 }
 
@@ -69,6 +70,7 @@ impl Default for SessionOwner {
     fn default() -> Self {
         Self {
             next_id: 0,
+            stopping: false,
             state: SessionState::Idle,
         }
     }
@@ -76,6 +78,9 @@ impl Default for SessionOwner {
 
 impl SessionOwner {
     fn begin_admission(&mut self) -> Result<PairingSessionId, PairingCommandError> {
+        if self.stopping {
+            return Err(PairingCommandError::WatcherUnavailable);
+        }
         if !matches!(self.state, SessionState::Idle) {
             return Err(PairingCommandError::AlreadyActive);
         }
@@ -86,7 +91,9 @@ impl SessionOwner {
     }
 
     fn activate(&mut self, id: PairingSessionId, receiver_lease: ExclusiveReceiverLease) -> bool {
-        if !matches!(self.state, SessionState::Admitting(admitted) if admitted == id) {
+        if self.stopping
+            || !matches!(self.state, SessionState::Admitting(admitted) if admitted == id)
+        {
             return false;
         }
         self.state = SessionState::Active(ActiveSession {
@@ -132,6 +139,7 @@ impl SessionOwner {
 /// Owns the pairing watcher and translates its event stream for the IPC layer.
 pub struct PairingManager {
     ctrl: mpsc::UnboundedSender<PairingControl>,
+    stopping: tokio::sync::watch::Sender<bool>,
     updates: Mutex<mpsc::UnboundedReceiver<PairingUpdate>>,
     session: SharedSessionOwner,
     shared: SharedHandles,
@@ -157,6 +165,7 @@ impl PairingManager {
         ));
         Self {
             ctrl,
+            stopping: tokio::sync::watch::channel(false).0,
             updates: Mutex::new(upd_rx),
             session,
             shared,
@@ -172,19 +181,23 @@ impl PairingManager {
         let admission = match SessionAdmission::new(Arc::clone(&self.session)) {
             Ok(admission) => admission,
             Err(error) => {
-                debug_assert_eq!(error, PairingCommandError::AlreadyActive);
-                warn!("pairing start requested while a session is already active");
+                warn!(?error, "pairing admission refused");
                 return Err(error);
             }
         };
-        let Ok(receiver_lease) = tokio::time::timeout(
+        let mut stopping = self.stopping.subscribe();
+        let lease = tokio::time::timeout(
             RECEIVER_LEASE_TIMEOUT,
             self.shared
                 .receiver_access
                 .acquire_exclusive(ExclusiveAccessReason::Pairing),
-        )
-        .await
-        else {
+        );
+        let result = tokio::select! {
+            biased;
+            _ = stopping.wait_for(|stopping| *stopping) => return Err(PairingCommandError::WatcherUnavailable),
+            result = lease => result,
+        };
+        let Ok(receiver_lease) = result else {
             warn!("timed out waiting for receiver capture to stop; pairing not started");
             return Err(PairingCommandError::ReceiverBusy);
         };
@@ -196,7 +209,7 @@ impl PairingManager {
     /// way a pairing session does, so it waits out capture and is refused
     /// while a session holds the receiver.
     pub async fn unpair(&self, route: &DeviceRoute) -> Result<(), PairingFailure> {
-        if !self.shared.device_io.allows_io() {
+        if *self.stopping.borrow() || !self.shared.device_io.allows_io() {
             return Err(PairingFailure::ReceiverBusy);
         }
         let Ok(receiver_lease) = tokio::time::timeout(
@@ -210,6 +223,9 @@ impl PairingManager {
             warn!(%route, "timed out waiting for the receiver; device not unpaired");
             return Err(PairingFailure::ReceiverBusy);
         };
+        if *self.stopping.borrow() {
+            return Err(PairingFailure::ReceiverBusy);
+        }
         let result = self.shared.hardware().unpair(route).await;
         drop(receiver_lease);
         match result {
@@ -267,6 +283,36 @@ impl PairingManager {
                 })
                 .map_err(|_| PairingCommandError::WatcherUnavailable)
         })
+    }
+
+    /// Close admission and request normal firmware cleanup before exit waits
+    /// for device writes. Keep the receiver lease until the watcher confirms
+    /// cleanup; the translator must remain runnable during this async wait.
+    pub(crate) async fn shutdown(&self) {
+        if !with_session_owner(&self.session, |owner| {
+            if owner.stopping {
+                return false;
+            }
+            owner.stopping = true;
+            if let Some(session) = owner.active() {
+                let _ = self.ctrl.send(PairingControl::Cancel {
+                    session: session.id,
+                });
+            }
+            true
+        }) {
+            return;
+        }
+        self.stopping.send_replace(true);
+        if tokio::time::timeout(
+            RECEIVER_LEASE_TIMEOUT,
+            self.shared.receiver_access.acquire_for_io(),
+        )
+        .await
+        .is_err()
+        {
+            warn!("receiver cleanup did not finish before the shutdown deadline");
+        }
     }
 
     /// Long-poll the next pairing step; `None` when the hold window elapses.

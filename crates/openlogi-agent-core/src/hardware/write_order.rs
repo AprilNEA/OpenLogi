@@ -21,7 +21,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+
+use std::time::{Duration, Instant};
 
 use openlogi_hid::DeviceRoute;
 use tokio::sync::{MutexGuard, Notify};
@@ -38,6 +40,7 @@ struct Queue {
     finished: Mutex<Finished>,
     /// Woken whenever a ticket finishes.
     advanced: Notify,
+    drained: Condvar,
 }
 
 /// Every ticket up to `through` is done, as are the later `early` ones,
@@ -68,6 +71,7 @@ impl Queue {
             }
         }
         self.advanced.notify_waiters();
+        self.drained.notify_all();
     }
 
     async fn wait_through(&self, number: u64) {
@@ -101,6 +105,7 @@ impl WriteOrder {
     /// Wait for every already requested write, including superseded or failed
     /// writes. Stop producers first. Unlike requesting a new ticket, this
     /// barrier never supersedes the final restore it is meant to drain.
+    #[cfg(test)]
     pub(crate) async fn drain(&self) {
         let pending: Vec<_> = self
             .0
@@ -112,6 +117,37 @@ impl WriteOrder {
         for (queue, through) in pending {
             queue.wait_through(through).await;
         }
+    }
+
+    /// Blocking exit barrier with one total deadline across all routes. No
+    /// async runtime is required, and a stuck receiver cannot strand exit.
+    pub(crate) fn drain_timeout(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let pending: Vec<_> = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .map(|queue| (Arc::clone(queue), queue.latest.load(Ordering::Acquire)))
+            .collect();
+        for (queue, through) in pending {
+            let finished = queue
+                .finished
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let (finished, _) = queue
+                .drained
+                .wait_timeout_while(
+                    finished,
+                    deadline.saturating_duration_since(Instant::now()),
+                    |finished| finished.through < through,
+                )
+                .unwrap_or_else(PoisonError::into_inner);
+            if finished.through < through {
+                return false;
+            }
+        }
+        true
     }
 
     /// Number a new write for `route`. Call it when the write is requested,

@@ -369,3 +369,81 @@ async fn disconnected_mouse_does_not_leave_shutdown_waiting_for_a_restore() {
     .unwrap();
     mouse.backend.require_complete().unwrap();
 }
+
+#[tokio::test]
+async fn pending_preset_is_applied_before_a_fresh_hold_snapshot() {
+    let mut script = SensorScript::default();
+    script.write(1600);
+    script.read(1600);
+    script.write(400);
+    script.write(1600);
+    let mut mouse = Mouse::new(script).await;
+    let access = mouse
+        .runtime
+        .dispatcher
+        .executor
+        .access
+        .receiver_access
+        .clone();
+    let pairing = access
+        .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing)
+        .await;
+    mouse
+        .runtime
+        .dispatcher()
+        .dispatch(&Action::SetDpiPreset(1), Some("mouse"));
+    // Run the same hold handler synchronously so both requests are definitely
+    // queued behind pairing before the receiver becomes available.
+    let mut held = HeldDpiShifts::default();
+    let press = PressToken::hook_for_test(1, ButtonId::Back);
+    held.start(&mouse.runtime.dispatcher.executor, &press, Some("mouse"));
+    let low = mouse.hold_response(3, &[0, 1, 0x90]);
+    drop(pairing);
+    written(&low).await;
+    low.release();
+    held.end(&mouse.runtime.dispatcher.executor, &press);
+    let mouse = tokio::task::spawn_blocking(move || {
+        mouse.runtime.shutdown();
+        mouse
+    })
+    .await
+    .unwrap();
+    mouse.backend.require_complete().unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_has_a_deadline_while_pairing_retains_the_receiver() {
+    let mut script = SensorScript::default();
+    script.write(1600);
+    let mouse = Mouse::new(script).await;
+    let access = mouse
+        .runtime
+        .dispatcher
+        .executor
+        .access
+        .receiver_access
+        .clone();
+    let pairing = access
+        .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing)
+        .await;
+    mouse
+        .runtime
+        .dispatcher()
+        .dispatch(&Action::SetDpiPreset(1), Some("mouse"));
+    let mut exiting = tokio::task::spawn_blocking(move || {
+        let mut mouse = mouse;
+        mouse.runtime.shutdown();
+        mouse
+    });
+    let result = tokio::time::timeout(Duration::from_secs(13), &mut exiting).await;
+    // Always unblock the old implementation before asserting, including Drop.
+    drop(pairing);
+    let returned = result.is_ok();
+    if result.is_err() {
+        let _ = exiting.await.unwrap();
+    }
+    assert!(
+        returned,
+        "shutdown waited indefinitely for pairing receiver access"
+    );
+}

@@ -1012,118 +1012,64 @@ fn log_wheel_result(
     });
 }
 
-/// Spawn an OS thread that writes `dpi` to `op`'s device once its earlier
-/// DPI writes have finished, unless a newer one was requested by then.
-/// Failures are logged.
-pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dpi) {
+/// DPI presets, hold snapshots, and restores form a transaction history:
+/// dropping an earlier preset would change what a later hold must restore.
+/// Wait for order before leasing the receiver (never hold a shared lease while
+/// waiting behind a writer that may itself be queued behind pairing).
+fn spawn_dpi_write<F, Fut>(op: DeviceOp, ticket: WriteTicket, label: &'static str, write: F)
+where
+    F: FnOnce(SharedChannel) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), WriteError>>,
+{
     let index = op.route.device_index();
-    let turn = op.access.transport_turns.turn_for(&op.route);
-    op.spawn_timed_write(
-        "DPI write",
-        move |op| async move {
-            within_turn(
-                &ticket,
-                &turn,
-                || async {
-                    let shared = op.resolve()?;
-                    openlogi_hid::set_dpi_on(&shared, dpi).await.map(|()| true)
-                },
-                || async { Ok(false) },
-            )
-            .await
-        },
-        move |result| {
-            log_outcome(index, "DPI write", result, |written| {
-                if written {
-                    debug!(index, %dpi, "DPI written to device");
-                } else {
-                    debug!(index, %dpi, "DPI write superseded by a newer one");
-                }
-            });
-        },
-    );
+    std::thread::spawn(move || {
+        let Some(rt) = one_shot_runtime(label) else {
+            return;
+        };
+        let result = rt.block_on(op.run_in_order(HidppOperation::WriteDpi, ticket, write));
+        log_outcome(index, label, Ok(result), |()| {
+            debug!(index, label, "DPI operation completed");
+        });
+    });
 }
 
-/// [`write_dpi_in_background`] for a held DPI shift. Each new hold reads the
-/// sensor and retains its restore value in `before`. Overlapping holds and
-/// re-presses before restoration share that snapshot.
-/// Check it again inside the ordered write: an earlier restore may have
-/// completed and cleared it after this hold was requested. Read the sensor
-/// when empty; a failed read must never be followed by a low-DPI write.
+/// Write every requested preset before a subsequent hold reads its snapshot.
+pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dpi) {
+    spawn_dpi_write(op, ticket, "DPI write", move |shared| async move {
+        openlogi_hid::set_dpi_on(&shared, dpi).await
+    });
+}
+
+/// Read the sensor inside the ordered hold transaction. A preceding restore
+/// may have cleared the shared snapshot since this hold was requested.
 pub(crate) fn hold_dpi_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
     dpi: Dpi,
     before: DpiBeforeShift,
 ) {
-    let index = op.route.device_index();
-    let turn = op.access.transport_turns.turn_for(&op.route);
-    op.spawn_timed_write(
-        "DPI shift",
-        move |op| async move {
-            within_turn(
-                &ticket,
-                &turn,
-                || async move {
-                    let shared = op.resolve()?;
-                    if before.get().is_none() {
-                        before.set(openlogi_hid::get_dpi_info_on(&shared).await?.current);
-                    }
-                    openlogi_hid::set_dpi_on(&shared, dpi).await.map(|()| true)
-                },
-                || async { Ok(false) },
-            )
-            .await
-        },
-        move |result| {
-            log_outcome(index, "DPI shift", result, |written| {
-                if written {
-                    debug!(index, %dpi, "DPI shift written to device");
-                } else {
-                    debug!(index, %dpi, "DPI shift superseded by a newer write");
-                }
-            });
-        },
-    );
+    spawn_dpi_write(op, ticket, "DPI shift", move |shared| async move {
+        if before.get().is_none() {
+            before.set(openlogi_hid::get_dpi_info_on(&shared).await?.current);
+        }
+        openlogi_hid::set_dpi_on(&shared, dpi).await
+    });
 }
 
-/// Write the DPI `restore` yields once this write's turn comes, if any, and
-/// forget `before` once it is written.
+/// Restore after earlier DPI transactions finish; retain the snapshot on error.
 pub(crate) fn restore_dpi_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
     before: DpiBeforeShift,
     restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
 ) {
-    let index = op.route.device_index();
-    let turn = op.access.transport_turns.turn_for(&op.route);
-    op.spawn_timed_write(
-        "DPI restore",
-        move |op| async move {
-            within_turn(
-                &ticket,
-                &turn,
-                || async move {
-                    let Some(dpi) = restore() else {
-                        return Ok(Some(None));
-                    };
-                    let shared = op.resolve()?;
-                    openlogi_hid::set_dpi_on(&shared, dpi).await?;
-                    before.clear();
-                    Ok(Some(Some(dpi)))
-                },
-                || async { Ok(None) },
-            )
-            .await
-        },
-        move |result| {
-            log_outcome(index, "DPI restore", result, |restored| match restored {
-                Some(Some(dpi)) => debug!(index, %dpi, "DPI restored"),
-                Some(None) => debug!(index, "no DPI to restore"),
-                None => debug!(index, "DPI restore superseded by a newer write"),
-            });
-        },
-    );
+    spawn_dpi_write(op, ticket, "DPI restore", move |shared| async move {
+        if let Some(dpi) = restore() {
+            openlogi_hid::set_dpi_on(&shared, dpi).await?;
+            before.clear();
+        }
+        Ok(())
+    });
 }
 
 /// Spawn an OS thread that reconciles the configured native HiResWheel mode
