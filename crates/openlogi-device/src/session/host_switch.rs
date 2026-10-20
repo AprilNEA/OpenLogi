@@ -171,17 +171,35 @@ pub async fn run_host_switch_session(
         Device::new(Arc::clone(&channel), keyboard_index),
     )
     .await?;
-    let position = KeyboardPosition::read(&mut device).await?;
+    let change_host = ChangeHostOnKeyboard::locate(&mut device).await?;
+    let followers = Followers {
+        targets,
+        registry,
+        channel_pool,
+        device_io: &device_io,
+    };
 
     let (trigger_tx, mut triggers) = mpsc::unbounded_channel();
-    // Installed before the slower reads below, so that an announcement made
-    // while the session arms is not lost.
+    // Installed before every read of the keyboard's state, so that an
+    // announcement made while the session starts is not lost.
     let announcement_listener = listen_for_announcements(
         &channel,
         keyboard_index,
-        position.feature_index,
+        change_host.index,
         trigger_tx.clone(),
     );
+    let position = match KeyboardPosition::read(&change_host).await {
+        Ok(position) => position,
+        Err(error) => {
+            // A keyboard that is leaving stops answering, so the read can
+            // fail because of the switch itself.
+            let Some(host) = announced_host(&mut triggers) else {
+                return Err(error.into());
+            };
+            debug!(route = %keyboard, %error, "host read failed during an announced switch");
+            return Ok(depart(Departure::new(&shared, None, host), None, followers).await);
+        }
+    };
     let mut hosts = KeyboardHosts::locate(&mut device).await;
     // Installed before the table is read, so that no rename is missed.
     let rename_listener = hosts
@@ -202,15 +220,7 @@ pub async fn run_host_switch_session(
                 {
                     debug!(route = %keyboard, %error, "host keys failed to arm during a departure");
                     let departure = Departure::new(&shared, hosts.table(), host);
-                    return Ok(depart(
-                        departure,
-                        pending,
-                        targets,
-                        registry,
-                        channel_pool,
-                        &device_io,
-                    )
-                    .await);
+                    return Ok(depart(departure, pending, followers).await);
                 }
                 return Err(rollback_host_switch_start(error, pending, registry, &device_io).await);
             }
@@ -253,15 +263,7 @@ pub async fn run_host_switch_session(
         controls_index.and_then(|index| PendingHostSwitchRestore::new(&shared, index, armed));
     if let HostSwitchStop::Departed(host) = stop {
         let departure = Departure::new(&shared, hosts.table(), host);
-        return Ok(depart(
-            departure,
-            pending,
-            targets,
-            registry,
-            channel_pool,
-            &device_io,
-        )
-        .await);
+        return Ok(depart(departure, pending, followers).await);
     }
 
     Ok(restore_after(stop, pending, &shared, registry, &device_io).await)
@@ -310,17 +312,30 @@ async fn arm_host_keys(
     }
 }
 
-/// Move `targets` after a keyboard that is leaving this host, and return the
-/// restoration of its host keys, which the owner finishes once the keyboard
-/// is back.
+/// The devices that a session moves after its keyboard, and what moving them
+/// needs.
+#[derive(Clone, Copy)]
+struct Followers<'a> {
+    targets: &'a [DeviceRoute],
+    registry: &'a ChannelRegistry,
+    channel_pool: &'a ChannelPool,
+    device_io: &'a DeviceIoGate,
+}
+
+/// Move the `followers` after a keyboard that is leaving this host, and
+/// return the restoration of its host keys, which the owner finishes once the
+/// keyboard is back.
 async fn depart(
     departure: Departure<'_>,
     pending: Option<PendingHostSwitchRestore>,
-    targets: &[DeviceRoute],
-    registry: &ChannelRegistry,
-    channel_pool: &ChannelPool,
-    device_io: &DeviceIoGate,
+    followers: Followers<'_>,
 ) -> HostSwitchSessionOutcome {
+    let Followers {
+        targets,
+        registry,
+        channel_pool,
+        device_io,
+    } = followers;
     let shared = departure.keyboard;
     info!(
         route = %shared.route(),
@@ -467,17 +482,34 @@ struct KeyboardPosition {
     announces: bool,
 }
 
-impl KeyboardPosition {
-    async fn read(device: &mut Device) -> Result<Self, HostSwitchError> {
+/// `ChangeHost` on the keyboard, located before its state is read.
+struct ChangeHostOnKeyboard {
+    index: u8,
+    version: u8,
+    feature: Arc<ChangeHostFeature>,
+}
+
+impl ChangeHostOnKeyboard {
+    async fn locate(device: &mut Device) -> Result<Self, HostSwitchError> {
         let info = timed_hidpp(
             "locating host-change feature",
             device.root().get_feature(ChangeHostFeature::ID),
         )
         .await?
         .ok_or(HostSwitchError::UnsupportedKeyboard)?;
-        let feature = device.add_feature::<ChangeHostFeature>(info.index);
+        Ok(Self {
+            index: info.index,
+            version: info.version,
+            feature: device.add_feature::<ChangeHostFeature>(info.index),
+        })
+    }
+}
+
+impl KeyboardPosition {
+    async fn read(change_host: &ChangeHostOnKeyboard) -> Result<Self, HostSwitchError> {
+        let feature = &change_host.feature;
         let state = timed_hidpp("reading current host", feature.get_host_info()).await?;
-        let announces = info.version >= ANNOUNCEMENT_MIN_VERSION
+        let announces = change_host.version >= ANNOUNCEMENT_MIN_VERSION
             && match timed_hidpp(
                 "reading host-change capabilities",
                 feature.get_capabilities(),
@@ -493,8 +525,8 @@ impl KeyboardPosition {
                 }
             };
         Ok(Self {
-            feature_index: info.index,
-            version: info.version,
+            feature_index: change_host.index,
+            version: change_host.version,
             host_count: state.host_count,
             current_host: state.current_host,
             announces,
@@ -596,6 +628,21 @@ fn queued_departure(
         }
         if let Some(stop @ HostSwitchStop::Departed(_)) = position.stop_for(trigger) {
             return Some(stop);
+        }
+    }
+    None
+}
+
+/// The host that a queued announcement names, for a session that could not
+/// read the keyboard's position. Only a change to another host is checked
+/// here. Each linked device checks the host against its own host count and
+/// empty slots before it moves.
+fn announced_host(triggers: &mut mpsc::UnboundedReceiver<HostTrigger>) -> Option<u8> {
+    while let Ok(trigger) = triggers.try_recv() {
+        if let HostTrigger::Announced(HostChangeRequest { from, to }) = trigger
+            && from != to
+        {
+            return Some(to);
         }
     }
     None

@@ -8,9 +8,10 @@ use tokio::sync::{mpsc, oneshot};
 use super::{
     ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionOutcome,
     HostSwitchStop, HostTable, HostTrigger, KeyboardHosts, KeyboardPosition,
-    PendingHostSwitchRestore, PreparedHostChange, ReportingMode, host_change_required,
-    host_channel, key_trigger, prepare_host_change_with, queued_departure, restoration_change,
-    rollback_host_switch_start, run_host_switch_session, shares_channel, timed_hidpp,
+    PendingHostSwitchRestore, PreparedHostChange, ReportingMode, announced_host,
+    host_change_required, host_channel, key_trigger, prepare_host_change_with, queued_departure,
+    restoration_change, rollback_host_switch_start, run_host_switch_session, shares_channel,
+    timed_hidpp,
 };
 use crate::ChannelPool;
 use crate::backend::NodeId;
@@ -822,6 +823,84 @@ async fn a_departure_announced_while_the_host_keys_arm_still_moves_the_mouse() {
     );
 }
 
+/// Start a session whose keyboard announces a switch from host 0 to host 1
+/// while the session reads its current host. `host_read` answers that read.
+async fn announce_during_host_read(
+    host_read: impl Fn(&[u8], PairedKeyboard) -> Option<Vec<u8>> + Send + Sync + 'static,
+) -> (SessionResult, Vec<Vec<u8>>) {
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: true,
+        hosts_info: false,
+        analytics_host_key: false,
+    };
+    let incoming = Arc::new(OnceLock::<mpsc::UnboundedSender<Vec<u8>>>::new());
+    let announce = Arc::clone(&incoming);
+    let session = RunningSession::start(move |request| {
+        if is_request(request, KEYBOARD_SLOT, CHANGE_HOST_INDEX, 0) {
+            if let Some(incoming) = announce.get() {
+                let _ = incoming.send(announcement(0, 1));
+            }
+            return host_read(request, keyboard);
+        }
+        bolt_pair(request, keyboard)
+    })
+    .await;
+    incoming
+        .set(session.incoming.clone())
+        .expect("the sender is set once");
+    session.outcome().await
+}
+
+fn moves_mouse_to_host_1(writes: &[Vec<u8>]) -> bool {
+    writes
+        .iter()
+        .any(|report| is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1) && report[4] == 1)
+}
+
+#[tokio::test]
+async fn an_announcement_while_the_session_reads_the_host_still_moves_the_mouse() {
+    // The announcement comes before the reply to the host read.
+    let (outcome, writes) = announce_during_host_read(bolt_pair).await;
+    assert!(
+        matches!(outcome, Ok(HostSwitchSessionOutcome::Departed { .. })),
+        "the session hears the switch"
+    );
+    assert!(
+        moves_mouse_to_host_1(&writes),
+        "the mouse follows to host 1"
+    );
+}
+
+#[tokio::test]
+async fn an_announcement_before_a_failed_host_read_still_moves_the_mouse() {
+    // The keyboard leaves before it answers the host read.
+    let (outcome, writes) =
+        announce_during_host_read(|request, _| Some(feature_error(request, HW_ERROR))).await;
+    assert!(
+        matches!(
+            outcome,
+            Ok(HostSwitchSessionOutcome::Departed { restore: None })
+        ),
+        "nothing was armed, so nothing is restored"
+    );
+    let failed_at = writes
+        .iter()
+        .position(|report| is_request(report, KEYBOARD_SLOT, CHANGE_HOST_INDEX, 0))
+        .expect("the session reads the keyboard's host");
+    let after_failure = &writes[failed_at + 1..];
+    assert!(
+        after_failure
+            .iter()
+            .all(|report| report[1] != KEYBOARD_SLOT),
+        "nothing more is written to the keyboard that is leaving"
+    );
+    assert!(
+        moves_mouse_to_host_1(after_failure),
+        "the mouse follows to host 1"
+    );
+}
+
 #[tokio::test]
 async fn a_rename_makes_the_session_read_the_keyboard_slots_again() {
     // A departure maps the slots by name. After a rename through this agent,
@@ -1003,6 +1082,25 @@ fn a_departure_queued_before_the_channel_changed_still_moves_the_linked_devices(
         queued_departure(&mut triggers, position, &mut KeyboardHosts::default()),
         None,
         "a press needs the keyboard's channel"
+    );
+}
+
+#[test]
+fn a_failed_host_read_follows_only_an_announcement_to_another_host() {
+    let (triggers_tx, mut triggers) = tokio::sync::mpsc::unbounded_channel();
+    assert_eq!(announced_host(&mut triggers), None);
+    triggers_tx.send(HostTrigger::Renamed).unwrap();
+    triggers_tx.send(HostTrigger::Reported(2)).unwrap();
+    triggers_tx
+        .send(HostTrigger::Announced(HostChangeRequest { from: 1, to: 1 }))
+        .unwrap();
+    triggers_tx
+        .send(HostTrigger::Announced(HostChangeRequest { from: 0, to: 2 }))
+        .unwrap();
+    assert_eq!(
+        announced_host(&mut triggers),
+        Some(2),
+        "a report and a change to the same host are skipped"
     );
 }
 
