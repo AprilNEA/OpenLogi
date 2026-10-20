@@ -146,9 +146,9 @@ impl WheelResolution {
 
     /// Native scroll units one diverted increment is worth.
     ///
-    /// `1.0` when either resolution is missing — a wheel that did not answer
-    /// `getThumbwheelInfo` keeps the raw increment-per-unit behavior rather
-    /// than having its scroll silently scaled by a guess.
+    /// `1.0` when either resolution is zero — a wheel that reports no
+    /// resolution keeps the raw increment-per-unit behavior rather than
+    /// having its scroll silently scaled by a guess.
     #[must_use]
     pub fn native_per_increment(self) -> f64 {
         if self.native_res == 0 || self.diverted_res == 0 {
