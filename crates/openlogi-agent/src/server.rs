@@ -28,7 +28,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, Generation, Identity, LockKeyObservation,
     MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate, RingObservation, SavedConfig,
+    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SwitchHostError,
 };
 use succession::Compat;
 
@@ -273,6 +273,15 @@ impl Agent for AgentServer {
         fn_lock: bool,
     ) -> Result<FnLockState, WriteError> {
         self.shared.set_fn_lock(&route, fn_lock).await
+    }
+
+    async fn switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        host: u8,
+    ) -> Result<(), SwitchHostError> {
+        self.shared.device(&route).switch_host(host).await
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

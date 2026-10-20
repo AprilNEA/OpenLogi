@@ -15,6 +15,8 @@ members = [
     "crates/openlogi-assets",
     "crates/openlogi-cli",
     "crates/openlogi-ipc",
+    "crates/openlogi-flow",
+    "crates/openlogi-clipboard",
     "crates/openlogi-agent-core",
     "crates/openlogi-agent",
     "crates/openlogi-desktop",
@@ -61,6 +63,7 @@ serde_json = "1"
 toml = "0.8"
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
 sha2 = "0.10"
+rand = "0.9"
 atomic-write-file = "0.3.0"
 backon = { version = "1.6", default-features = false, features = ["std", "std-blocking-sleep"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -69,6 +72,14 @@ thiserror = "2"
 num_enum = "0.7.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+buffa = "0.9"
+hkdf = "0.12"
+mdns-sd = "0.21"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+subtle = "2"
+x509-parser = { version = "0.18", default-features = false }
 core-graphics = { version = "0.25", default-features = false, features = ["link"] }
 core-foundation = { version = "0.10", default-features = false, features = ["link"] }
 opener = "0.8.5"

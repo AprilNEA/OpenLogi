@@ -89,6 +89,9 @@ pub enum HostSwitchError {
     /// A required HID++ operation failed.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+    /// The device does not expose the ChangeHost feature.
+    #[error("device does not expose HID++ ChangeHost feature 0x1814")]
+    FeatureUnsupported,
     /// A required HID++ operation did not complete within its budget.
     #[error("HID++ operation timed out while {operation}")]
     TimedOut {
@@ -104,6 +107,14 @@ pub enum HostSwitchError {
     HostSlotEmpty {
         /// The zero-based host slot that has no pairing.
         host: u8,
+    },
+    /// The requested host does not exist on this device.
+    #[error("host {host} is outside device host count {host_count}")]
+    HostOutOfRange {
+        /// The zero-based host slot that was requested.
+        host: u8,
+        /// Number of host slots reported by the device.
+        host_count: u8,
     },
 }
 
@@ -332,6 +343,109 @@ pub async fn switch_linked_hosts(
     Ok(changed)
 }
 
+/// Validate and switch several devices to independently configured host slots.
+///
+/// Every target is prepared before the first write, so an invalid or explicitly
+/// empty destination cannot strand an earlier device. Callers choose the apply
+/// order; Flow places pointing devices first and keyboards last because a
+/// keyboard leaving a shared receiver can remove the command path used by the
+/// other devices. A successful write remains fire-and-forget — destination
+/// arrival requires receiver-side connection evidence.
+pub async fn switch_hosts(
+    targets: &[(DeviceRoute, u8)],
+    channel_pool: &ChannelPool,
+) -> Result<(), HostSwitchError> {
+    let mut prepared = Vec::with_capacity(targets.len());
+    for (route, host) in targets {
+        let channel = open_channel(channel_pool, route, "opening Flow device channel")
+            .await?
+            .ok_or(HostSwitchError::TargetNotFound)?;
+        prepared.push(prepare_host_change_on(&channel, route.device_index(), *host).await?);
+    }
+    for change in prepared {
+        apply_host_change(change).await?;
+    }
+    Ok(())
+}
+
+/// A device whose ChangeHost feature is already located and whose destination
+/// slots are already validated, so moving it costs one HID++ write.
+///
+/// Locating the feature and checking slots takes several round trips per
+/// device — a few hundred milliseconds over a receiver. Flow prepares this
+/// while the device is idle so the move at the screen edge is only the write.
+/// The handle addresses one connection: drop it when the device goes offline.
+pub struct HostSwitchTarget {
+    feature: Arc<ChangeHostFeature>,
+}
+
+impl HostSwitchTarget {
+    /// Move the device to the zero-based `host`. Fire-and-forget like every
+    /// ChangeHost write: success means the write was issued.
+    pub async fn switch_to(&self, host: u8) -> Result<(), HostSwitchError> {
+        timed_hidpp("writing current host", self.feature.set_current_host(host)).await
+    }
+
+    /// Whether the device still answers on this connection.
+    ///
+    /// The switch write is never acknowledged, so after one an answer is the
+    /// only sign it did not take: the device never left. A device that left,
+    /// or is asleep, does not answer within `limit`.
+    pub async fn answers(&self, limit: Duration) -> bool {
+        timeout(limit, self.feature.get_host_info())
+            .await
+            .is_ok_and(|reply| reply.is_ok())
+    }
+}
+
+/// Prepare `route` for one-write moves to any of the zero-based `hosts`.
+///
+/// Each host must be within the device's channel count and not reported as an
+/// empty slot, under the same rules as [`switch_hosts`].
+pub async fn prepare_host_switch_target(
+    route: &DeviceRoute,
+    hosts: &[u8],
+    channel_pool: &ChannelPool,
+) -> Result<HostSwitchTarget, HostSwitchError> {
+    let channel = open_channel(channel_pool, route, "opening host-switch target channel")
+        .await?
+        .ok_or(HostSwitchError::TargetNotFound)?;
+    let mut device = timed_hidpp(
+        "opening host-change device",
+        Device::new(Arc::clone(&channel), route.device_index()),
+    )
+    .await?;
+    let info = timed_hidpp(
+        "locating host-change feature",
+        device.root().get_feature(ChangeHostFeature::ID),
+    )
+    .await?
+    .ok_or(HostSwitchError::FeatureUnsupported)?;
+    let feature = device.add_feature::<ChangeHostFeature>(info.index);
+    let state = timed_hidpp("reading current host", feature.get_host_info()).await?;
+    for &host in hosts {
+        if host_change_required(state.current_host, state.host_count, host)?
+            && host_slot_is_empty(&mut device, host).await
+        {
+            return Err(HostSwitchError::HostSlotEmpty { host });
+        }
+    }
+    Ok(HostSwitchTarget { feature })
+}
+
+/// Switch one device on an already-open shared channel to the zero-based `host`.
+///
+/// The device's reported host count is validated before writing, and an
+/// explicitly empty slot is refused when the optional HostsInfo feature can
+/// report one. A `true` result means the fire-and-forget write was issued; it
+/// cannot confirm that the device arrived at the destination because the
+/// device leaves this channel as soon as the write takes effect. `false`
+/// means the device already reported `host` as current, so no write was needed.
+pub async fn switch_host_on(shared: &SharedChannel, host: u8) -> Result<bool, HostSwitchError> {
+    let change = prepare_host_change_on(shared.channel(), shared.device_index(), host).await?;
+    apply_host_change(change).await
+}
+
 async fn arm_host_controls_inner(
     controls: &ReprogControlsV4,
     armed: &mut Vec<ArmedControl>,
@@ -483,7 +597,7 @@ async fn prepare_host_change_on(
         device.root().get_feature(ChangeHostFeature::ID),
     )
     .await?
-    .ok_or_else(|| HostSwitchError::Hidpp("ChangeHost is unsupported".into()))?;
+    .ok_or(HostSwitchError::FeatureUnsupported)?;
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
     let state = timed_hidpp("reading current host", change_host.get_host_info()).await?;
     let required = host_change_required(state.current_host, state.host_count, host)?;
@@ -596,9 +710,10 @@ fn host_change_required(
     requested_host: u8,
 ) -> Result<bool, HostSwitchError> {
     if requested_host >= host_count {
-        return Err(HostSwitchError::Hidpp(format!(
-            "host {requested_host} is outside device host count {host_count}"
-        )));
+        return Err(HostSwitchError::HostOutOfRange {
+            host: requested_host,
+            host_count,
+        });
     }
     Ok(current_host != requested_host)
 }

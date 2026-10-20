@@ -473,6 +473,41 @@ pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     }
 }
 
+/// Move the system pointer to a global logical-pixel coordinate.
+///
+/// Returns `false` when the platform cannot provide global pointer control,
+/// notably on native Wayland. Invalid coordinates are rejected.
+#[must_use]
+pub fn warp_cursor(x: f64, y: f64) -> bool {
+    if !x.is_finite() || !y.is_finite() {
+        return false;
+    }
+    cfg_select! {
+        target_os = "macos" => { macos::warp_cursor(x, y) }
+        target_os = "linux" => { linux::warp_cursor(x, y) }
+        target_os = "windows" => { windows::warp_cursor(x, y) }
+        _ => {
+            let _ = (x, y);
+            false
+        }
+    }
+}
+
+/// Release the modifier keys (Shift, Ctrl, Alt, Windows) the system still
+/// believes are held, and return how many there were.
+///
+/// A keyboard that switches to another computer while a modifier is down —
+/// Ctrl held to cross a screen edge, say — never sends its release here, which
+/// leaves the modifier stuck on this computer. Windows only for now; elsewhere
+/// this releases nothing.
+#[must_use]
+pub fn release_stuck_modifiers() -> usize {
+    cfg_select! {
+        target_os = "windows" => { windows::release_stuck_modifiers() }
+        _ => { 0 }
+    }
+}
+
 /// Integer scroll units ready for a platform API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct QuantizedScroll {

@@ -39,6 +39,8 @@ pub use openlogi_core::binding::ButtonId;
 pub use openlogi_core::config::KeyModifiers;
 pub use openlogi_core::scroll::ScrollDelta;
 
+pub mod edge;
+
 mod pointer;
 pub use pointer::{
     PointerContext, PointerTarget, pointer_context, pointer_context_supported,
@@ -110,6 +112,26 @@ impl EventDevice {
 /// stored under, so a second Logitech mouse would follow the first. Documented
 /// rather than silently per-device.
 static INVERT_SCROLL: AtomicBool = AtomicBool::new(false);
+
+/// Whether a consumer reads the modifiers of [`MouseEvent::Moved`]; see
+/// [`set_movement_modifiers_wanted`].
+static MOVEMENT_MODIFIERS: AtomicBool = AtomicBool::new(false);
+
+/// Say whether anything reads the modifiers of [`MouseEvent::Moved`].
+///
+/// Where reading them costs a round trip on the capture thread — Linux asks
+/// the X server for every pointer report — the hook skips the read while
+/// nothing wants them and reports no modifiers held. Takes effect on the next
+/// movement.
+pub fn set_movement_modifiers_wanted(wanted: bool) {
+    MOVEMENT_MODIFIERS.store(wanted, Ordering::Relaxed);
+}
+
+/// Whether [`set_movement_modifiers_wanted`] is currently on.
+#[cfg(target_os = "linux")]
+pub(crate) fn movement_modifiers_wanted() -> bool {
+    MOVEMENT_MODIFIERS.load(Ordering::Relaxed)
+}
 
 /// Whether this platform can invert the wheel in software.
 ///
@@ -257,6 +279,13 @@ pub enum HookEvent {
     Mouse(MouseEvent),
     /// Keyboard event (function-key remapper path).
     Key(KeyEvent),
+    /// A physical typing key outside the remapper's set went down. Carries no
+    /// key: only that one was pressed, for consumers that track keyboard
+    /// activity (a keyboard that stayed behind after a Flow handoff).
+    /// Auto-repeats of a held key and the Shift, Ctrl, Alt and Windows keys
+    /// are not typing and are not reported. Reported where the platform hook
+    /// does not already turn every key into [`Self::Key`].
+    KeyPressed,
 }
 
 /// An event captured at the OS layer.
@@ -299,6 +328,8 @@ pub enum MouseEvent {
         delta_x: i32,
         /// Positive = down, negative = up.
         delta_y: i32,
+        /// Which modifiers were held during this movement sample.
+        modifiers: KeyModifiers,
     },
     /// The OS interrupted event capture (on macOS, the tap was disabled by a
     /// timeout or by competing user input). Any in-progress gesture hold must be
@@ -491,6 +522,19 @@ trait HookBackend {
     fn cursor_position() -> Option<CursorPosition> {
         None
     }
+
+    /// See [`crate::display_rects`].
+    fn display_rects() -> Vec<edge::DisplayRect> {
+        Vec::new()
+    }
+
+    /// See [`crate::edge_cursor_position`].
+    fn edge_cursor_position() -> Option<CursorPosition> {
+        Self::cursor_position()
+    }
+
+    /// See [`crate::reseed_motion_baseline`].
+    fn reseed_motion_baseline(_position: CursorPosition) {}
 }
 
 /// The backend for a platform with no hook: every default, and a
@@ -784,6 +828,39 @@ pub fn watch_frontmost_application_activations(
 #[must_use]
 pub fn cursor_position() -> Option<CursorPosition> {
     Backend::cursor_position()
+}
+
+/// Return active display bounds in the same global coordinate space as
+/// [`edge_cursor_position`] and `openlogi_inject::warp_cursor`.
+///
+/// Returns an empty vector when enumeration is unavailable. Native Wayland
+/// deliberately has no global display coordinate space, so it is unsupported
+/// unless an X11/XWayland display is reachable.
+#[must_use]
+pub fn display_rects() -> Vec<edge::DisplayRect> {
+    Backend::display_rects()
+}
+
+/// The cursor position in the coordinate space of [`display_rects`] and of
+/// `openlogi_inject::warp_cursor`, for edge geometry.
+///
+/// On Windows that is physical pixels, where [`cursor_position`] reports DIPs
+/// for the overlay; on a scaled monitor the two differ by the scale factor.
+/// Elsewhere it is [`cursor_position`].
+#[must_use]
+pub fn edge_cursor_position() -> Option<CursorPosition> {
+    Backend::edge_cursor_position()
+}
+
+/// Tell the hook the cursor was just moved programmatically to `position`, in
+/// [`edge_cursor_position`]'s space, so the next real movement is measured
+/// from there.
+///
+/// Windows derives motion from consecutive hook positions and never sees a
+/// `SetCursorPos`, so without this the first move after a warp carries the
+/// warp itself. Elsewhere motion is reported directly and this does nothing.
+pub fn reseed_motion_baseline(position: CursorPosition) {
+    Backend::reseed_motion_baseline(position);
 }
 
 #[cfg(target_os = "macos")]

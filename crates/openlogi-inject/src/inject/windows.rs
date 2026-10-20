@@ -5,11 +5,12 @@ use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos;
 
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
@@ -23,6 +24,17 @@ const WHEEL_DELTA_F64: f64 = 120.0;
 
 static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Win32 cursor coordinates are i32; values are clamped before conversion"
+)]
+pub(super) fn warp_cursor(x: f64, y: f64) -> bool {
+    let x = x.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+    let y = y.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+    // SAFETY: SetCursorPos takes two integer coordinates by value.
+    unsafe { SetCursorPos(x, y) != 0 }
+}
 
 const VK_D: u16 = 0x44;
 const VK_L: u16 = 0x4C;
@@ -321,6 +333,32 @@ fn send_inputs(inputs: &[INPUT]) {
             "SendInput accepted fewer events than requested"
         );
     }
+}
+
+/// Left and right Shift, Ctrl, Alt and Windows keys.
+const MODIFIER_KEYS: [u16; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C];
+/// An unassigned virtual key, pressed before a lone Windows-key release so the
+/// release does not open the Start menu.
+const VK_MASK: u16 = 0xE8;
+
+pub(super) fn release_stuck_modifiers() -> usize {
+    let stuck: Vec<u16> = MODIFIER_KEYS
+        .into_iter()
+        // SAFETY: GetAsyncKeyState takes a virtual-key code by value; a set
+        // high bit (a negative i16) means the system believes the key is down.
+        .filter(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0)
+        .collect();
+    if stuck.is_empty() {
+        return 0;
+    }
+    let mut inputs = Vec::with_capacity(stuck.len() + 2);
+    if stuck.iter().any(|&vk| vk == 0x5B || vk == 0x5C) {
+        inputs.push(key_input(VK_MASK, false));
+        inputs.push(key_input(VK_MASK, true));
+    }
+    inputs.extend(stuck.iter().map(|&vk| key_input(vk, true)));
+    send_inputs(&inputs);
+    stuck.len()
 }
 
 fn key_input(vk: u16, key_up: bool) -> INPUT {

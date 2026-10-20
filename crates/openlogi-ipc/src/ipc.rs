@@ -120,7 +120,11 @@ pub use succession::Identity;
 ///      battery. `Agent::observe_lock_keys`, [`LockKeyObservation`] and
 ///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
 ///      off over HID++ `0x4220`, for the overlay's transient indicator.
-pub const PROTOCOL_VERSION: u32 = 37;
+/// v38: `Agent::switch_host` + [`SwitchHostError`] appended — software-initiated
+///      multi-host device switching. `AgentSnapshot::flow` appended — configured
+///      Flow peers and their coarse connection state, and this machine's own
+///      Flow public key.
+pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -201,6 +205,8 @@ pub struct AgentSnapshot {
     /// light reached only through its raw report reads nothing back and is
     /// not listed.
     pub lights: Vec<ObservedLight>,
+    /// Cross-machine Flow availability and coarse peer connection state.
+    pub flow: FlowStatus,
 }
 
 /// A standalone light as it reported itself to the agent.
@@ -241,6 +247,47 @@ pub struct SavedConfig {
     pub revision: ConfigRevision,
     /// The controls of lights the user set in the save without a write.
     pub chosen: Vec<ChosenLight>,
+}
+
+/// Cross-machine Flow state suitable for the low-frequency agent snapshot.
+///
+/// Ping sequence numbers, RTT, and last-seen timestamps deliberately stay out
+/// of IPC: they would churn the observable generation without changing a UI
+/// decision.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowStatus {
+    /// Whether the loaded config enables Flow.
+    pub enabled: bool,
+    /// Configured peers in config order.
+    pub peers: Vec<FlowPeerStatus>,
+    /// This machine's Flow identity, `ed25519:<64 lowercase hex>`: the key a
+    /// peer pins in its `[[flow.peers]]`. `None` until the agent has armed and
+    /// loaded it.
+    pub local_public_key: Option<String>,
+}
+
+/// One configured Flow peer's display identity and coarse link state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowPeerStatus {
+    /// User-visible name from `[flow].peers`.
+    pub name: String,
+    /// Canonical `ed25519:<64 lowercase hex>` pinned identity.
+    pub public_key: String,
+    /// Current application-level session state.
+    pub state: FlowLinkState,
+}
+
+/// Churn-safe state of one configured Flow peer session.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowLinkState {
+    /// QUIC and Flow Hello are established and application liveness is healthy.
+    Connected,
+    /// QUIC remains established, but application Pong liveness is stale.
+    Degraded,
+    /// No established Flow connection exists.
+    Lost,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -604,6 +651,55 @@ pub enum ActionRingCommandError {
     SlotEmpty,
 }
 
+/// Why [`Agent::switch_host`] could not issue a device host switch.
+///
+/// A successful call means either the device was already on the requested
+/// host or its fire-and-forget ChangeHost write was issued. It cannot confirm
+/// arrival because a switching device leaves the sender's radio channel.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+pub enum SwitchHostError {
+    /// No currently connected device matched the requested route.
+    #[error("no connected device matched the route")]
+    DeviceNotFound,
+    /// The device does not expose the HID++ ChangeHost feature.
+    #[error("device does not expose HID++ ChangeHost feature 0x1814")]
+    FeatureUnsupported,
+    /// The requested zero-based host index is outside the device's host count.
+    #[error("host {host} is outside device host count {host_count}")]
+    HostOutOfRange {
+        /// The zero-based host slot that was requested.
+        host: u8,
+        /// Number of host slots reported by the device.
+        host_count: u8,
+    },
+    /// The device explicitly reports that the requested host slot is unpaired.
+    #[error("host {host} is not paired on this device")]
+    HostSlotEmpty {
+        /// The zero-based host slot that has no pairing.
+        host: u8,
+    },
+    /// HID transport-level failure serialized as text.
+    #[error("HID transport error: {message}")]
+    Hid {
+        /// Transport error detail.
+        message: String,
+    },
+    /// HID++ protocol failure serialized as text.
+    #[error("HID++ protocol error: {message}")]
+    Hidpp {
+        /// Protocol error detail, including the failed operation.
+        message: String,
+    },
+    /// A required HID++ operation exceeded its time budget.
+    #[error("HID++ operation timed out while {operation}")]
+    TimedOut {
+        /// Description of the operation that exceeded its budget.
+        operation: String,
+    },
+}
+
 /// What kind of client a connection is, declared through
 /// [`Agent::declare_client`] right after the version handshake.
 ///
@@ -827,4 +923,13 @@ pub trait Agent {
     /// generation `since`, or with the unchanged indicator after
     /// [`OBSERVE_HOLD`]. Pass `0` to read the current indicator at once.
     async fn observe_lock_keys(since: Generation) -> LockKeyObservation;
+
+    /// Switch `route` to the zero-based host slot `host` through HID++
+    /// ChangeHost (`0x1814`). The agent validates the device-reported host
+    /// count and, when available, rejects a slot reported as unpaired.
+    ///
+    /// A successful fire-and-forget write means the command was issued, not
+    /// that the device arrived: once it takes effect, this host is blind to the
+    /// device because its radio link has moved.
+    async fn switch_host(route: DeviceRoute, host: u8) -> Result<(), SwitchHostError>;
 }

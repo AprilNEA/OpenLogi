@@ -25,12 +25,13 @@ use crate::support::manifest::workspace_package;
 /// A crate missing here is a crate whose Windows paths nothing checks until CI
 /// — which is how three `chunks_exact` sites in `openlogi-camera` survived a
 /// whole lint sweep.
-const WINDOWS_LINT_CRATES: [&str; 8] = [
+const WINDOWS_LINT_CRATES: [&str; 9] = [
     "openlogi-core",
     "openlogi-hidpp",
     "openlogi-hid",
     "openlogi-hook",
     "openlogi-inject",
+    "openlogi-clipboard",
     "openlogi-camera",
     "openlogi-agent",
     "openlogi-agent-core",

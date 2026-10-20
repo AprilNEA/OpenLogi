@@ -26,14 +26,15 @@ use std::time::Duration;
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
     CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation, HostOs,
-    OsLayoutOutcome, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus,
-    WeakSharedChannel, WriteError,
+    HostSwitchError, OsLayoutOutcome, ReportRate, ScrollResolution, SharedChannel,
+    SmartShiftStatus, WeakSharedChannel, WriteError,
 };
+use openlogi_ipc::SwitchHostError;
 use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
 
 use crate::capture_plan::SharedCapturePlans;
-use crate::receiver_access::ReceiverAccess;
+use crate::receiver_access::{ExclusiveAccessReason, ReceiverAccess};
 
 mod context;
 mod light;
@@ -503,6 +504,38 @@ impl DeviceOp {
         })
     }
 
+    /// Switch this device to a zero-based host slot through its authoritative
+    /// shared channel.
+    ///
+    /// The ChangeHost write is fire-and-forget because the device leaves this
+    /// radio channel when it takes effect. Success therefore means the write
+    /// was issued (or the device was already on that host), not that arrival at
+    /// the destination was confirmed.
+    pub async fn switch_host(self, host: u8) -> Result<(), SwitchHostError> {
+        if !self.access.device_io.allows_io() {
+            return Err(SwitchHostError::DeviceNotFound);
+        }
+        let turn = self.access.transport_turns.turn_for(&self.route);
+        let _lease = self
+            .access
+            .receiver_access
+            .acquire_exclusive(ExclusiveAccessReason::HostTransition)
+            .await;
+        after_transport_turn(&turn, async {
+            let shared = self
+                .resolve()
+                .map_err(|_| SwitchHostError::DeviceNotFound)?;
+            tokio::time::timeout(WRITE_TIMEOUT, openlogi_hid::switch_host_on(&shared, host))
+                .await
+                .map_err(|_| SwitchHostError::TimedOut {
+                    operation: "switching host".into(),
+                })?
+                .map(|_changed| ())
+                .map_err(map_host_switch_error)
+        })
+        .await
+    }
+
     /// Fire-and-forget `f` on its own OS thread and one-shot runtime, with the
     /// standard three-arm outcome logging: a completed write and a failed
     /// write both log at their own level, keyed by `label`; a device that
@@ -649,6 +682,29 @@ where
             },
         )
         .await
+}
+
+fn map_host_switch_error(error: HostSwitchError) -> SwitchHostError {
+    match error {
+        HostSwitchError::Hid(error) => SwitchHostError::Hid {
+            message: error.to_string(),
+        },
+        HostSwitchError::KeyboardNotFound | HostSwitchError::TargetNotFound => {
+            SwitchHostError::DeviceNotFound
+        }
+        HostSwitchError::Hidpp(message) => SwitchHostError::Hidpp { message },
+        HostSwitchError::FeatureUnsupported => SwitchHostError::FeatureUnsupported,
+        HostSwitchError::TimedOut { operation } => SwitchHostError::TimedOut {
+            operation: operation.into(),
+        },
+        HostSwitchError::UnsupportedKeyboard => SwitchHostError::Hidpp {
+            message: error.to_string(),
+        },
+        HostSwitchError::HostSlotEmpty { host } => SwitchHostError::HostSlotEmpty { host },
+        HostSwitchError::HostOutOfRange { host, host_count } => {
+            SwitchHostError::HostOutOfRange { host, host_count }
+        }
+    }
 }
 
 /// Build the one-shot current-thread runtime every background write spawns
@@ -1266,6 +1322,21 @@ mod tests {
                 inverted: true,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn switch_host_on_a_registry_miss_returns_device_not_found() {
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let (_device_io_signal, device_io) = device_io_channel();
+        let route = unresolvable_route();
+
+        let result = device_op(&capture, &registry, &receiver_access, &device_io, &route)
+            .switch_host(1)
+            .await;
+
+        assert!(matches!(result, Err(SwitchHostError::DeviceNotFound)));
     }
 
     /// `DeviceOp::detach` resolves before spawning, so a registry miss must

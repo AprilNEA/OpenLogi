@@ -5,7 +5,7 @@ use hidpp::channel::HidppChannel;
 use super::{
     ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, PendingHostSwitchRestore,
     ReportingMode, event_host, host_change_required, host_channel, prepare_host_change_on,
-    restoration_change, rollback_host_switch_start, shares_channel,
+    restoration_change, rollback_host_switch_start, shares_channel, switch_host_on,
 };
 use crate::backend::NodeId;
 use crate::channel::scripted::{
@@ -172,6 +172,28 @@ async fn switching_to_a_paired_slot_proceeds() {
         .expect("a paired slot must be switchable");
 
     assert!(change.required, "host 1 differs from the current host 0");
+}
+
+#[tokio::test]
+async fn switching_one_device_issues_the_fire_and_forget_write() {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(keyboard_with_an_empty_third_slot);
+    let channel = raw_scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Bolt {
+            receiver_uid: "AABB".into(),
+            slot: 1,
+        },
+    );
+
+    let changed = switch_host_on(&shared, 1)
+        .await
+        .expect("a paired slot must be switchable");
+
+    assert!(changed);
+    assert!(handle.written_reports().iter().any(|report| {
+        report.len() >= 5 && report[2] == CHANGE_HOST_INDEX && report[3] >> 4 == 1 && report[4] == 1
+    }));
 }
 
 #[tokio::test]
@@ -398,10 +420,15 @@ fn different_valid_host_requires_a_change() {
 
 #[test]
 fn host_outside_device_range_is_rejected() {
-    assert!(
-        host_change_required(0, 2, 2).is_err(),
-        "host 2 is outside a device that reports 2 hosts and must be rejected"
-    );
+    let error = host_change_required(0, 2, 2).expect_err("host 2 must be rejected");
+
+    assert!(matches!(
+        error,
+        HostSwitchError::HostOutOfRange {
+            host: 2,
+            host_count: 2
+        }
+    ));
 }
 
 #[test]

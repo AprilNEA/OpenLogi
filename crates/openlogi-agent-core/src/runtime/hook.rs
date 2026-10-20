@@ -445,6 +445,7 @@ pub fn start(
     dispatcher: ActionDispatcher,
     scroll: ScrollInputHandle,
     monitor: SharedEventMonitor,
+    flow: crate::flow::FlowInputHandle,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -475,8 +476,18 @@ pub fn start(
                     &dispatcher,
                     openlogi_hook::frontmost_safari_pid,
                 ),
-                MouseEvent::Moved { delta_x, delta_y } => {
-                    handle_moved(delta_x, delta_y, &hooks, &dispatcher)
+                MouseEvent::Moved {
+                    delta_x,
+                    delta_y,
+                    modifiers,
+                } => {
+                    if flow.try_moved(modifiers.control, delta_x, delta_y) {
+                        // A Flow handoff holds the pointer on the edge it
+                        // crossed, or glides an arrival burst in instead.
+                        EventDisposition::Suppress
+                    } else {
+                        handle_moved(delta_x, delta_y, &hooks, &dispatcher)
+                    }
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
@@ -519,6 +530,10 @@ pub fn start(
         // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
         // button. The active set pairs key-up even if modifier state or config
         // changes while the key is down.
+        // A press here after Flow sent the devices away means the keyboard
+        // stayed behind: Flow sends it on and the press lands nowhere rather
+        // than on the wrong machine. Releases always pass.
+        HookEvent::Key(event) if event.pressed && flow.key_pressed() => EventDisposition::Suppress,
         HookEvent::Key(event) => handle_key(
             event,
             &keyboard_bindings,
@@ -526,6 +541,14 @@ pub fn start(
             &dispatcher,
             ActionDispatchTarget::capture,
         ),
+        // Any other key going down: only Flow's keyboard-activity tracking.
+        HookEvent::KeyPressed => {
+            if flow.key_pressed() {
+                EventDisposition::Suppress
+            } else {
+                EventDisposition::PassThrough
+            }
+        }
     });
 
     match result {

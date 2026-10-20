@@ -6,18 +6,23 @@
 )]
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT, POINT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
+use windows_sys::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromPoint,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_F1, VK_LWIN, VK_MENU, VK_RWIN,
-    VK_SHIFT,
+    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_F1, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
+    VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
@@ -33,6 +38,7 @@ use openlogi_core::config::FunctionKey;
 
 use super::cursor::{MonitorDpi, PhysicalCursorPosition};
 use super::worker::{WorkerEvent, WorkerPhase, WorkerStatus};
+use crate::edge::DisplayRect;
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
     KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
@@ -76,6 +82,87 @@ thread_local! {
     /// construction and needs no synchronization on the freeze-sensitive
     /// callback path.
     static LAST_POINT: Cell<Option<POINT>> = const { Cell::new(None) };
+}
+
+/// A baseline handed in from outside the hook thread after a programmatic
+/// cursor warp, consumed by the next mouse message in place of
+/// [`LAST_POINT`]. The hook never sees `SetCursorPos`, so without it the first
+/// real move after a warp is differenced against where the cursor was before
+/// the warp — a phantom jump the size of the warp.
+static RESEED: Reseed = Reseed::new();
+
+/// One pending baseline: a packed `POINT` plus whether it awaits consumption.
+struct Reseed {
+    packed: AtomicU64,
+    pending: AtomicBool,
+}
+
+impl Reseed {
+    const fn new() -> Self {
+        Self {
+            packed: AtomicU64::new(0),
+            pending: AtomicBool::new(false),
+        }
+    }
+
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "the coordinates are stored bit-for-bit and unpacked with the reverse casts"
+    )]
+    fn set(&self, point: POINT) {
+        let packed = (u64::from(point.x as u32) << 32) | u64::from(point.y as u32);
+        self.packed.store(packed, Ordering::Relaxed);
+        self.pending.store(true, Ordering::Release);
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "reverses the bit-for-bit packing in `set`"
+    )]
+    fn take(&self) -> Option<POINT> {
+        if !self.pending.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        let packed = self.packed.load(Ordering::Relaxed);
+        Some(POINT {
+            x: (packed >> 32) as u32 as i32,
+            y: packed as u32 as i32,
+        })
+    }
+}
+
+/// Physical keys currently down, by virtual-key code. `WH_KEYBOARD_LL` reports
+/// a held key's auto-repeat as another key-down, and a keyboard that switched
+/// to another computer with a key held can keep repeating it here: only a key
+/// that was up makes a new press.
+static KEYS_DOWN: KeysDown = KeysDown::new();
+
+/// A 256-bit set of virtual-key codes.
+struct KeysDown([AtomicU64; 4]);
+
+impl KeysDown {
+    const fn new() -> Self {
+        Self([const { AtomicU64::new(0) }; 4])
+    }
+
+    /// Mark `vk` down; whether it was up, i.e. this is a press and not a
+    /// repeat. A code outside the set always counts as a press.
+    fn press(&self, vk: u32) -> bool {
+        Self::slot(vk)
+            .is_none_or(|(word, bit)| self.0[word].fetch_or(bit, Ordering::Relaxed) & bit == 0)
+    }
+
+    fn release(&self, vk: u32) {
+        if let Some((word, bit)) = Self::slot(vk) {
+            self.0[word].fetch_and(!bit, Ordering::Relaxed);
+        }
+    }
+
+    fn slot(vk: u32) -> Option<(usize, u64)> {
+        let vk = usize::try_from(vk).ok().filter(|vk| *vk < 256)?;
+        Some((vk / 64, 1 << (vk % 64)))
+    }
 }
 
 type HookCallback = Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync + 'static>;
@@ -204,6 +291,72 @@ impl HookBackend for Backend {
         };
         Some(physical.into_logical(dpi))
     }
+
+    /// Physical pixels, like [`Self::display_rects`] and `SetCursorPos` in this
+    /// per-monitor-DPI-aware process — unlike [`Self::cursor_position`],
+    /// which reports DIPs for the overlay. On a scaled monitor, mixing the two
+    /// put the right and bottom edges out of the cursor's reach.
+    fn edge_cursor_position() -> Option<CursorPosition> {
+        let mut point = POINT { x: 0, y: 0 };
+        // SAFETY: `point` is a valid writable POINT for the duration of the call.
+        if unsafe { GetCursorPos(&raw mut point) } == 0 {
+            return None;
+        }
+        Some(CursorPosition {
+            x: f64::from(point.x),
+            y: f64::from(point.y),
+        })
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "rounded screen coordinates fit i32 by construction"
+    )]
+    fn reseed_motion_baseline(position: CursorPosition) {
+        RESEED.set(POINT {
+            x: position.x.round() as i32,
+            y: position.y.round() as i32,
+        });
+    }
+
+    fn display_rects() -> Vec<DisplayRect> {
+        let mut displays = Vec::new();
+        // SAFETY: null HDC/clip asks for every monitor; `displays` remains live
+        // and exclusively borrowed through dwData until this synchronous call
+        // returns, and the callback validates the RECT pointer before reading.
+        let result = unsafe {
+            EnumDisplayMonitors(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                Some(collect_display_rect),
+                std::ptr::from_mut(&mut displays).addr().cast_signed(),
+            )
+        };
+        if result == 0 { Vec::new() } else { displays }
+    }
+}
+
+unsafe extern "system" fn collect_display_rect(
+    _monitor: HMONITOR,
+    _device_context: HDC,
+    rect: *mut RECT,
+    displays: LPARAM,
+) -> i32 {
+    if rect.is_null() || displays == 0 {
+        return 0;
+    }
+    // SAFETY: EnumDisplayMonitors supplies a live RECT and the dwData pointer
+    // created from the exclusively borrowed Vec in `display_rects`.
+    let (rect, displays) = unsafe { (&*rect, &mut *(displays as *mut Vec<DisplayRect>)) };
+    if let Some(display) = DisplayRect::new(
+        f64::from(rect.left),
+        f64::from(rect.top),
+        f64::from(rect.right - rect.left),
+        f64::from(rect.bottom - rect.top),
+    ) {
+        displays.push(display);
+    }
+    1
 }
 
 #[expect(
@@ -425,6 +578,7 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
     // all of them: injected motion is dropped below but still moves the cursor,
     // and a gesture's button-down seeds the baseline for its own first move.
     let previous = LAST_POINT.replace(Some(data.pt));
+    let previous = RESEED.take().or(previous);
 
     if data.flags & LLMHF_INJECTED != 0 {
         return None;
@@ -484,7 +638,11 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
         }),
         WM_MOUSEMOVE => {
             let (delta_x, delta_y) = motion_delta(previous?, data.pt)?;
-            Some(MouseEvent::Moved { delta_x, delta_y })
+            Some(MouseEvent::Moved {
+                delta_x,
+                delta_y,
+                modifiers: current_modifiers(),
+            })
         }
         _ => None,
     }
@@ -524,20 +682,66 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     let Some(data) = (unsafe { key_hook_data(lparam) }) else {
         return call_next(code, wparam, lparam);
     };
-    let Some(event) = translate_key(wparam, data, current_modifiers()) else {
-        return call_next(code, wparam, lparam);
+    let new_press = track_key(wparam, data);
+    let event = match translate_key(wparam, data, current_modifiers()) {
+        Some(event) => HookEvent::Key(event),
+        // Every other new press of a typing key still counts as keyboard
+        // activity; which key it was is never passed on.
+        None if new_press && !is_modifier(data.vkCode) => HookEvent::KeyPressed,
+        None => return call_next(code, wparam, lparam),
     };
 
     let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
     let disposition = callback
         .as_ref()
-        .map_or(EventDisposition::PassThrough, |cb| {
-            cb(HookEvent::Key(event))
-        });
+        .map_or(EventDisposition::PassThrough, |cb| cb(event));
     match disposition {
         EventDisposition::PassThrough => call_next(code, wparam, lparam),
         EventDisposition::Suppress => 1,
     }
+}
+
+/// Keep [`KEYS_DOWN`] current and return whether this `WH_KEYBOARD_LL`
+/// message is a new press on a real keyboard: a key that was up going down,
+/// not an auto-repeat and not one OpenLogi or another program synthesized.
+/// Every release marks its key up, synthesized ones too, so a modifier that
+/// OpenLogi releases for a departed keyboard is up again here.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "WPARAM carries a 32-bit window message by ABI"
+)]
+fn track_key(wparam: WPARAM, data: KBDLLHOOKSTRUCT) -> bool {
+    match wparam as u32 {
+        WM_KEYUP | WM_SYSKEYUP => {
+            KEYS_DOWN.release(data.vkCode);
+            false
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN if data.flags & LLKHF_INJECTED == 0 => {
+            KEYS_DOWN.press(data.vkCode)
+        }
+        _ => false,
+    }
+}
+
+/// Shift, Ctrl, Alt and Windows: held for a shortcut, a pointer gesture or
+/// Flow's edge modifier, never typing on their own.
+fn is_modifier(vk: u32) -> bool {
+    u16::try_from(vk).is_ok_and(|vk| {
+        matches!(
+            vk,
+            VK_SHIFT
+                | VK_LSHIFT
+                | VK_RSHIFT
+                | VK_CONTROL
+                | VK_LCONTROL
+                | VK_RCONTROL
+                | VK_MENU
+                | VK_LMENU
+                | VK_RMENU
+                | VK_LWIN
+                | VK_RWIN
+        )
+    })
 }
 
 /// Copy the `KBDLLHOOKSTRUCT` the OS passed in `lparam`, or `None` if `lparam`
@@ -653,7 +857,8 @@ mod tests {
             translate_event(WM_MOUSEMOVE as WPARAM, at(560, 395)),
             Some(MouseEvent::Moved {
                 delta_x: 60,
-                delta_y: -5
+                delta_y: -5,
+                ..
             })
         ));
         assert!(
@@ -763,6 +968,30 @@ mod tests {
         assert!(translate_key(WM_KEYDOWN as WPARAM, key(0x41), mods).is_none());
         // VK_F20, one past the modeled range.
         assert!(translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 19), mods).is_none());
+    }
+
+    /// A held key's auto-repeat arrives as more key-downs, and a keyboard
+    /// that left for another computer with a key held keeps repeating it:
+    /// neither is a new press.
+    #[test]
+    fn a_held_key_is_one_press_until_released() {
+        let keys = KeysDown::new();
+        assert!(keys.press(0x41), "the key goes down");
+        assert!(!keys.press(0x41), "its auto-repeat");
+        assert!(keys.press(0x42), "another key is its own press");
+
+        keys.release(0x41);
+        assert!(keys.press(0x41), "pressed again after its release");
+        assert!(keys.press(0x1_0000), "a code outside the set counts");
+    }
+
+    #[test]
+    fn modifiers_are_not_typing() {
+        for vk in [VK_LSHIFT, VK_RCONTROL, VK_CONTROL, VK_LMENU, VK_RWIN] {
+            assert!(is_modifier(u32::from(vk)), "VK {vk:#x}");
+        }
+        assert!(!is_modifier(0x41), "'A'");
+        assert!(!is_modifier(u32::from(VK_ESCAPE)));
     }
 
     /// Wheel-forward (away from the user) must produce a positive `delta_y`, the

@@ -63,10 +63,11 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    BacklightObservation, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation,
-    Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind,
-    NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    BacklightObservation, ClientKind, ConfigReloadError, FlowStatus, ForegroundApps, FoundDevice,
+    Generation, Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent,
+    NoticeKind, NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SwitchHostError,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -749,6 +750,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         pairing: state.phase.clone(),
         foreground: state.foreground(),
         lights: Vec::new(),
+        flow: FlowStatus::default(),
     }
 }
 
@@ -1027,6 +1029,21 @@ impl Agent for MockAgent {
             );
         }
         self.lock_keys.observe(since).await
+    }
+
+    async fn switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        host: u8,
+    ) -> Result<(), SwitchHostError> {
+        self.state
+            .lock()
+            .await
+            .settings_for(&route)
+            .map_err(|_error| SwitchHostError::DeviceNotFound)?;
+        info!(%route, host, "switch_host (no-op in the mock)");
+        Ok(())
     }
 
     async fn request_accessibility_prompt(self, _: Context) {
