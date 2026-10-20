@@ -47,6 +47,40 @@ pub struct SmartShiftEnhancedStatus {
     pub current_tunable_torque: u8,
 }
 
+/// A tunable-torque level to write, in percent of the wheel's maximum force.
+///
+/// Only `1..=100` is a level. Zero is the write-only "do not change"
+/// sentinel, which [`SmartShiftEnhancedStatusChange`] spells as `None`, and a
+/// byte above `100` is not a percentage. Solaar bounds its torque setting to
+/// the same range, and Logi Options+ clamps the level to it before a write
+/// (reverse-engineered).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TorquePercent(u8);
+
+impl TorquePercent {
+    /// The lowest level, `1`.
+    pub const MIN: Self = Self(1);
+    /// The highest level, `100`.
+    pub const MAX: Self = Self(100);
+
+    /// Validates a level, or `None` outside `1..=100`.
+    #[must_use]
+    pub const fn new(value: u8) -> Option<Self> {
+        if value >= Self::MIN.0 && value <= Self::MAX.0 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    /// The level sent on the wire.
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
 /// Enhanced SmartShift status update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -59,8 +93,9 @@ pub struct SmartShiftEnhancedStatusChange {
     pub auto_disengage: Option<NonZeroU8>,
     /// Tunable torque, or `None` to leave unchanged.
     ///
-    /// HID++ encodes `0` as “do not change”, so writable values must be non-zero.
-    pub tunable_torque: Option<NonZeroU8>,
+    /// HID++ encodes `0` as “do not change”, so a written level is a
+    /// [`TorquePercent`].
+    pub tunable_torque: Option<TorquePercent>,
 }
 
 /// Implements the `SmartShiftWheelEnhanced` / `0x2111` feature.
@@ -103,7 +138,7 @@ impl SmartShiftEnhancedFeature {
                 [
                     change.wheel_mode.map_or(0, u8::from),
                     change.auto_disengage.map_or(0, NonZeroU8::get),
-                    change.tunable_torque.map_or(0, NonZeroU8::get),
+                    change.tunable_torque.map_or(0, TorquePercent::get),
                 ],
             )
             .await?
@@ -125,7 +160,45 @@ impl SmartShiftEnhancedStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{Hidpp20Error, SmartShiftEnhancedStatus, WheelMode};
+    use std::sync::Arc;
+
+    use super::{
+        Hidpp20Error, SmartShiftEnhancedFeature, SmartShiftEnhancedStatus,
+        SmartShiftEnhancedStatusChange, TorquePercent, WheelMode,
+    };
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::nibble::U4;
+    use crate::protocol::v20::{Message, MessageHeader};
+
+    /// Runs `call` on a feature at device 3, index 6 whose device answers
+    /// `function` with `reply`, and returns the result and the request sent.
+    fn exchange<T, F>(
+        function: u8,
+        call: impl FnOnce(SmartShiftEnhancedFeature) -> F,
+        reply: impl FnOnce(MessageHeader) -> Message,
+    ) -> (Result<T, Hidpp20Error>, Vec<u8>)
+    where
+        F: Future<Output = Result<T, Hidpp20Error>>,
+    {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let mut pending = Box::pin(call(SmartShiftEnhancedFeature::new(channel, 3, 6)));
+            assert!(futures::poll!(pending.as_mut()).is_pending());
+            let header = MessageHeader {
+                device_index: 3,
+                feature_index: 6,
+                function_id: U4::from_lo(function),
+                software_id: U4::from_lo(1),
+            };
+            handle.send_incoming(reply(header).into()).await;
+            let result = pending.await;
+            let written = handle.written_reports();
+            let request = written.last().expect("the request was sent").clone();
+            (result, request)
+        })
+    }
 
     #[test]
     fn parses_status() {
@@ -149,5 +222,45 @@ mod tests {
         let err = SmartShiftEnhancedStatus::from_payload(payload).unwrap_err();
 
         assert!(matches!(err, Hidpp20Error::UnsupportedResponse));
+    }
+
+    #[test]
+    fn a_torque_percent_is_exactly_one_to_one_hundred() {
+        // Zero is the "do not change" sentinel and 101 the first byte that
+        // is not a percentage: neither is a level a caller can write.
+        assert_eq!(TorquePercent::new(0), None);
+        assert_eq!(TorquePercent::new(101), None);
+        for value in 0..=u8::MAX {
+            assert_eq!(
+                TorquePercent::new(value).map(TorquePercent::get),
+                (1..=100).contains(&value).then_some(value),
+                "torque byte {value}"
+            );
+        }
+        assert_eq!(
+            (TorquePercent::MIN.get(), TorquePercent::MAX.get()),
+            (1, 100)
+        );
+    }
+
+    #[test]
+    fn set_writes_the_torque_level_or_the_do_not_change_sentinel() {
+        for (torque, byte) in [
+            (None, 0),
+            (Some(TorquePercent::MIN), 1),
+            (Some(TorquePercent::MAX), 100),
+        ] {
+            let change = SmartShiftEnhancedStatusChange {
+                tunable_torque: torque,
+                ..SmartShiftEnhancedStatusChange::default()
+            };
+            let (status, request) = exchange(
+                2,
+                |feature| async move { feature.set_ratchet_control_mode(change).await },
+                |header| Message::Short(header, [2, 0xff, 50]),
+            );
+            assert_eq!(&request[4..7], &[0, 0, byte], "torque {torque:?}");
+            assert_eq!(status.unwrap().current_tunable_torque, 50);
+        }
     }
 }
