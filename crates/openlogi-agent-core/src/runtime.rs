@@ -5,6 +5,9 @@
 //! without owning worker shutdown. Source-specific hook interpretation lives
 //! in [`hook`]; the button state machine remains an internal implementation.
 
+// A hold and its restore each have a five-second I/O budget.
+const DPI_DRAIN_TIMEOUT: Duration = Duration::from_secs(12);
+
 mod button;
 #[cfg(test)]
 mod dpi_tests;
@@ -448,6 +451,7 @@ impl ButtonEventHandler {
 /// controls, keyboard capture, and Actions Ring slot activation.
 #[derive(Clone)]
 pub struct ActionDispatcher {
+    accepting: Arc<RwLock<bool>>,
     executor: ActionExecutor,
     buttons: ButtonInputHandle,
 }
@@ -480,6 +484,7 @@ impl ActionRuntime {
         let input = buttons.input();
         Ok(Self {
             dispatcher: ActionDispatcher {
+                accepting: Arc::new(RwLock::new(true)),
                 executor,
                 buttons: input,
             },
@@ -492,6 +497,32 @@ impl ActionRuntime {
     #[must_use]
     pub fn dispatcher(&self) -> ActionDispatcher {
         self.dispatcher.clone()
+    }
+
+    /// Quiesce actions before replacing this process; false refuses replacement.
+    pub fn prepare_replacement(&mut self) -> bool {
+        self.prepare_replacement_with_timeout(DPI_DRAIN_TIMEOUT)
+    }
+
+    fn prepare_replacement_with_timeout(&mut self, timeout: Duration) -> bool {
+        *self
+            .dispatcher
+            .accepting
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = false;
+        self.buttons.suspend() && self.dispatcher.executor.dpi_order.drain_timeout(timeout)
+    }
+
+    /// Resume the existing dispatchers when process replacement failed.
+    pub fn resume_after_replacement_failure(&mut self) {
+        if !self.stopped {
+            self.buttons.resume();
+            *self
+                .dispatcher
+                .accepting
+                .write()
+                .unwrap_or_else(PoisonError::into_inner) = true;
+        }
     }
 
     /// Reject new button input, emit terminal cancellation, join the worker,
@@ -508,7 +539,7 @@ impl ActionRuntime {
             .dispatcher
             .executor
             .dpi_order
-            .drain_timeout(Duration::from_secs(12))
+            .drain_timeout(DPI_DRAIN_TIMEOUT)
         {
             warn!("DPI writes did not finish before the shutdown deadline");
         }
@@ -524,7 +555,13 @@ impl Drop for ActionRuntime {
 impl ActionDispatcher {
     /// Route one action without blocking the input callback.
     pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
-        self.executor.dispatch(action, device_key);
+        let accepting = self
+            .accepting
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *accepting {
+            self.executor.dispatch(action, device_key);
+        }
     }
 
     pub(crate) fn dispatch_pointer_action(
@@ -533,6 +570,12 @@ impl ActionDispatcher {
         device_key: Option<&str>,
         target: Option<openlogi_hook::PointerTarget>,
     ) {
+        let Ok(accepting) = self.accepting.try_read() else {
+            return;
+        };
+        if !*accepting {
+            return;
+        }
         self.executor.dispatch_to(
             action,
             device_key,

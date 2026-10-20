@@ -170,6 +170,37 @@ impl InputServices {
         self.pairing.shutdown().await;
     }
 
+    /// Keep the runtime alive so a failed Unix exec can reuse every dispatcher.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(crate) async fn prepare_replacement(&mut self) -> bool {
+        self.ring.dismiss_active();
+        let Some(mut actions) = self.action_runtime.take() else {
+            return false;
+        };
+        match tokio::task::spawn_blocking(move || {
+            let ready = actions.prepare_replacement();
+            (actions, ready)
+        })
+        .await
+        {
+            Ok((actions, ready)) => {
+                self.action_runtime = Some(actions);
+                ready
+            }
+            Err(error) => {
+                warn!(%error, "action runtime replacement cleanup failed");
+                false
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(crate) fn resume_after_replacement_failure(&mut self) {
+        if let Some(actions) = &mut self.action_runtime {
+            actions.resume_after_replacement_failure();
+        }
+    }
+
     pub(crate) async fn shutdown(&mut self) {
         self.stop_receiver_work().await;
         self.scroll_runtime.shutdown();

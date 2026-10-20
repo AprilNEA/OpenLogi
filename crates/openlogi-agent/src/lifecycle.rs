@@ -639,13 +639,27 @@ impl Running {
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
-    #[expect(
-        clippy::unused_async,
-        reason = "matches the macOS/Windows restart contract; Unix exec replaces the process synchronously"
-    )]
     async fn restart(&mut self, Replacement { path, retry }: Replacement) {
-        let error = crate::binary_watch::replace_process(&path);
-        warn!(%error, path = %path.display(), "exec of the updated agent failed — restoring the current image and retrying");
+        // The HID++ fleet is already stopped. Drop the remaining producer
+        // before canceling holds and waiting for their device writes.
+        let had_hook = self.hook.is_some();
+        self.stop_hook();
+        if self.inputs.prepare_replacement().await {
+            let error = crate::binary_watch::replace_process(&path);
+            warn!(%error, path = %path.display(), "exec of the updated agent failed — restoring the current image and retrying");
+        } else {
+            warn!("action cleanup was incomplete — refusing replacement and retrying");
+        }
+        self.inputs.resume_after_replacement_failure();
+        if had_hook {
+            self.hook = self.start_hook();
+        }
+        self.orchestrator
+            .lock()
+            .await
+            .set_os_mouse_hook_available(self.hook.is_some());
+        self.observable
+            .set_accessibility_and_hook(Hook::has_accessibility(), self.hook.is_some());
         self.restart_hidpp_watchers();
         let _ = retry.send(());
     }

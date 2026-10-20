@@ -42,6 +42,7 @@ fn test_dispatcher() -> (
     .expect("button worker should start");
     let (action_ring, _ring_events) = tokio::sync::mpsc::unbounded_channel();
     let dispatcher = ActionDispatcher {
+        accepting: Arc::new(RwLock::new(true)),
         executor: super::super::ActionExecutor {
             dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
             access: crate::hardware::DeviceAccess {

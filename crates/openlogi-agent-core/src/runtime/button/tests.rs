@@ -946,7 +946,10 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
     producer.join().expect("producer should stop");
     let (done, wait) = mpsc::sync_channel(0);
     shutdown_tx
-        .send(ShutdownRequest { done })
+        .send(QuiesceRequest {
+            done,
+            terminate: true,
+        })
         .expect("worker should accept shutdown");
     wait.recv_timeout(Duration::from_secs(1))
         .expect("worker should finish shutdown");

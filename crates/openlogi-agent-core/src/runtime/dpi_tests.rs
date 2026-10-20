@@ -447,3 +447,98 @@ async fn shutdown_has_a_deadline_while_pairing_retains_the_receiver() {
         "shutdown waited indefinitely for pairing receiver access"
     );
 }
+
+#[tokio::test]
+async fn replacement_restores_held_dpi_and_failed_exec_can_accept_new_presses() {
+    let mut script = SensorScript::default();
+    script.read(1200);
+    script.write(400);
+    script.write(1200);
+    script.read(1200);
+    script.write(400);
+    script.write(1200);
+    let mut mouse = Mouse::new(script).await;
+    let dispatcher = mouse.runtime.dispatcher();
+    let low = mouse.hold_response(3, &[0, 1, 0x90]);
+    mouse.press(ButtonId::Back);
+    written(&low).await;
+    low.release();
+    mouse.runtime.dispatcher.executor.dpi_order.drain().await;
+    let restored = mouse.hold_response(3, &[0, 4, 0xb0]);
+    let preparing = tokio::task::spawn_blocking(move || {
+        assert!(mouse.runtime.prepare_replacement());
+        mouse
+    });
+    written(&restored).await;
+    assert!(!preparing.is_finished(), "exec must wait for restoration");
+    assert!(
+        dispatcher
+            .try_hook_button_down(
+                ButtonId::Forward,
+                Some(&Binding::Single(Action::DpiShift)),
+                ActionDispatchTarget::Keyboard
+            )
+            .is_none()
+    );
+    restored.release();
+    let mut mouse = preparing.await.unwrap();
+    dispatcher.dispatch(&Action::SetDpiPreset(1), Some("mouse"));
+    // Failed exec resumes the SAME dispatcher retained by hooks and IPC.
+    mouse.runtime.resume_after_replacement_failure();
+    let low = mouse.hold_response(3, &[0, 1, 0x90]);
+    assert!(
+        dispatcher
+            .try_hook_button_down(
+                ButtonId::Forward,
+                Some(&Binding::Single(Action::DpiShift)),
+                ActionDispatchTarget::Keyboard
+            )
+            .is_some()
+    );
+    written(&low).await;
+    low.release();
+    let restored = mouse.hold_response(3, &[0, 4, 0xb0]);
+    assert!(dispatcher.try_hook_button_up(ButtonId::Forward));
+    written(&restored).await;
+    restored.release();
+    tokio::task::spawn_blocking(move || {
+        mouse.runtime.shutdown();
+        mouse.backend.require_complete().unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn replacement_refuses_exec_when_dpi_restore_is_still_pending() {
+    let mut script = SensorScript::default();
+    script.read(1200);
+    script.write(400);
+    script.write(1200);
+    let mut mouse = Mouse::new(script).await;
+    let low = mouse.hold_response(3, &[0, 1, 0x90]);
+    mouse.press(ButtonId::Back);
+    written(&low).await;
+    low.release();
+    mouse.runtime.dispatcher.executor.dpi_order.drain().await;
+    let restored = mouse.hold_response(3, &[0, 4, 0xb0]);
+    let mut mouse = tokio::task::spawn_blocking(move || {
+        assert!(
+            !mouse
+                .runtime
+                .prepare_replacement_with_timeout(Duration::ZERO)
+        );
+        mouse
+    })
+    .await
+    .unwrap();
+    written(&restored).await;
+    mouse.runtime.resume_after_replacement_failure();
+    restored.release();
+    tokio::task::spawn_blocking(move || {
+        mouse.runtime.shutdown();
+        mouse.backend.require_complete().unwrap();
+    })
+    .await
+    .unwrap();
+}
