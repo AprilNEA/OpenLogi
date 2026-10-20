@@ -63,9 +63,18 @@ creates one at arming and sends shortcut keys through it.
   restricted `com.apple.developer.hid.virtual.device` entitlement. Apple grants
   it only through a provisioning profile, and AMFI kills a process that claims
   it without one (an ad-hoc signed probe exited with `SIGKILL` on macOS 26.7).
-  No OpenLogi build carries the profile yet, so creation fails and every key
-  stays on `CGEventPost`. Shipping the profile is a signing change, not a code
-  change.
+  Release builds embed a Developer ID profile for `org.openlogi.agent` that
+  grants it. Local and dev builds carry none, so there creation fails and
+  every key stays on `CGEventPost`.
+- **The claim and its profile ship together, or neither does.**
+  `xtask/src/commands/macos/bundle/provisioning.rs` embeds the profile and
+  writes the agent's entitlements from it, so no entitlements file can claim
+  the grant alone. Before the build starts, it rejects a profile that would get
+  the agent killed on a user's Mac: one limited to registered devices, one for
+  another App ID, one without the grant, or an expired one. After signing, it
+  checks that the profile includes the signing certificate. The release
+  workflow requires the profile, so a signed release cannot fall back to
+  `CGEventPost` without anyone noticing.
 - **Logi Options+ creates the same kind of device, but sends nothing through
   it.** Its 2.8.981479 agent holds the entitlement and a Developer ID profile.
   `gestures::create_virtual_hid_keyboard` passes only a `ReportDescriptor` (a

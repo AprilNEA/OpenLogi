@@ -2,6 +2,8 @@ pub(crate) mod bundle;
 pub(crate) mod dev_bundle;
 pub(crate) mod dmg;
 
+use std::path::PathBuf;
+
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
@@ -51,9 +53,34 @@ pub(crate) struct PackageArgs {
     /// `--sparkle-public-key`.
     #[arg(long, env = update_feed::BASE_URL_ENV)]
     update_base_url: Option<String>,
+    /// Developer ID provisioning profile that grants `org.openlogi.agent` the
+    /// HID virtual-device entitlement. Given one, the signed agent embeds it
+    /// and types shortcut keys through a virtual HID keyboard; without one,
+    /// the agent types through `CGEventPost`. Requires `--sign-identity`.
+    #[arg(long, env = bundle::AGENT_PROFILE_ENV)]
+    agent_provisioning_profile: Option<PathBuf>,
 }
 
 impl PackageArgs {
+    /// The agent's provisioning profile, checked before the build starts so a
+    /// bad one fails in seconds rather than after the release compile. An
+    /// empty value counts as none, like the Sparkle key.
+    fn agent_profile(&self) -> Result<Option<bundle::AgentProfile>> {
+        let Some(path) = self
+            .agent_provisioning_profile
+            .as_deref()
+            .filter(|path| !path.as_os_str().is_empty())
+        else {
+            return Ok(None);
+        };
+        if self.dmg.sign_identity.is_none() {
+            bail!(
+                "--agent-provisioning-profile needs --sign-identity: the profile only backs a Developer ID signature"
+            );
+        }
+        bundle::AgentProfile::load(path).map(Some)
+    }
+
     /// The Sparkle feed to embed, or `None` without a public key. An empty
     /// value counts as none: CI passes unset secrets as empty strings.
     fn sparkle_feed(&self) -> Result<Option<bundle::sparkle::Feed>> {
@@ -88,8 +115,10 @@ pub(crate) fn run(command: Command) -> Result<()> {
         Command::Dmg(args) => dmg::run(&args),
         Command::Package(args) => {
             let feed = args.sparkle_feed()?;
+            let agent_profile = args.agent_profile()?;
             bundle::run_for_distribution(
                 args.dmg.sign_identity.as_deref(),
+                agent_profile.as_ref(),
                 args.target,
                 feed.as_ref(),
             )?;

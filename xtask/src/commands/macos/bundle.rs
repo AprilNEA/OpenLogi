@@ -2,6 +2,7 @@
 
 mod embed;
 pub(crate) mod identity;
+mod provisioning;
 mod signing;
 pub(crate) mod sparkle;
 
@@ -24,6 +25,7 @@ use identity::{Channel, Component};
 // The rest of the macOS domain reaches these through `bundle::`, which is the
 // module that owns them conceptually even now that the code sits deeper.
 pub(super) use embed::{EmbeddedHelper, HELPERS, agent_service_label, write_agent_launch_plist};
+pub(super) use provisioning::{AGENT_PROFILE_ENV, AgentProfile};
 pub(super) use signing::{SIGN_IDENTITY_ENV, quoted_identity};
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -56,23 +58,32 @@ impl DistributionTarget {
 /// Build `OpenLogi.app` wearing `channel`'s identity, signing it with whatever
 /// local identity is available (dev) or leaving it unsigned (production).
 pub(crate) fn run(channel: Channel) -> Result<()> {
-    build_bundle(channel, None, None, None)
+    build_bundle(channel, None, None, None, None)
 }
 
 /// Build the bundle that ships: always the production identity, signed with the
 /// Developer ID identity when one is given, and updating through Sparkle when
-/// given its `feed`.
+/// given its `feed`. The agent embeds `agent_profile` when one is given; the
+/// caller checks that a signing identity comes with it.
 pub(crate) fn run_for_distribution(
     sign_identity: Option<&str>,
+    agent_profile: Option<&AgentProfile>,
     target: Option<DistributionTarget>,
     feed: Option<&sparkle::Feed>,
 ) -> Result<()> {
-    build_bundle(Channel::Production, sign_identity, target, feed)
+    build_bundle(
+        Channel::Production,
+        sign_identity,
+        agent_profile,
+        target,
+        feed,
+    )
 }
 
 fn build_bundle(
     channel: Channel,
     sign_identity: Option<&str>,
+    agent_profile: Option<&AgentProfile>,
     target: Option<DistributionTarget>,
     feed: Option<&sparkle::Feed>,
 ) -> Result<()> {
@@ -153,7 +164,17 @@ fn build_bundle(
     AppBundle.verify(&app)?;
     match (channel, sign_identity) {
         (Channel::Production, Some(identity)) => {
-            signing::sign_app_with_timestamp(identity, signing::TimestampMode::Secure, channel)?;
+            if agent_profile.is_none() {
+                println!(
+                    "==> agent provisioning profile: none (set {AGENT_PROFILE_ENV}; the agent types through CGEventPost)"
+                );
+            }
+            signing::sign_app_with_timestamp(
+                identity,
+                signing::TimestampMode::Secure,
+                channel,
+                agent_profile,
+            )?;
         }
         (Channel::Production, None) => {
             println!("==> codesign: skipped (unsigned — set {SIGN_IDENTITY_ENV} to sign)");

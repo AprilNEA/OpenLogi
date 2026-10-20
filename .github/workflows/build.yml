@@ -182,6 +182,9 @@ jobs:
           APPLE_ID: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_ID
           APPLE_PASSWORD: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_PASSWORD
           APPLE_TEAM_ID: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_TEAM_ID
+          # Base64 of the agent's Developer ID provisioning profile, which grants
+          # the HID virtual-device entitlement (the virtual HID keyboard).
+          APPLE_AGENT_PROVISIONING_PROFILE: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_AGENT_PROVISIONING_PROFILE
           GITHUB_APP_ID: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_ID
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_PRIVATE_KEY
           OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
@@ -214,6 +217,7 @@ jobs:
           APPLE_ID: ${{ steps.load_secrets.outputs.APPLE_ID }}
           APPLE_PASSWORD: ${{ steps.load_secrets.outputs.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ steps.load_secrets.outputs.APPLE_TEAM_ID }}
+          APPLE_AGENT_PROVISIONING_PROFILE: ${{ steps.load_secrets.outputs.APPLE_AGENT_PROVISIONING_PROFILE }}
           GITHUB_APP_ID: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
           GITHUB_APP_PRIVATE_KEY: ${{ steps.load_secrets.outputs.GITHUB_APP_PRIVATE_KEY }}
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
@@ -227,6 +231,7 @@ jobs:
           : "${APPLE_ID:?Configure APPLE_ID in 1Password}"
           : "${APPLE_PASSWORD:?Configure APPLE_PASSWORD in 1Password}"
           : "${APPLE_TEAM_ID:?Configure APPLE_TEAM_ID in 1Password}"
+          : "${APPLE_AGENT_PROVISIONING_PROFILE:?Configure APPLE_AGENT_PROVISIONING_PROFILE in 1Password}"
           : "${GITHUB_APP_ID:?Configure GITHUB_APP_ID in 1Password}"
           : "${GITHUB_APP_PRIVATE_KEY:?Configure GITHUB_APP_PRIVATE_KEY in 1Password}"
           : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in 1Password}"
@@ -243,6 +248,7 @@ jobs:
       - name: Build and package OpenLogi
         env:
           APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
+          APPLE_AGENT_PROVISIONING_PROFILE: ${{ steps.load_secrets.outputs.APPLE_AGENT_PROVISIONING_PROFILE }}
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
           # With the key, the bundle embeds Sparkle.framework and reads its
@@ -253,7 +259,13 @@ jobs:
           set -euo pipefail
           export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
           if [ "${{ inputs.sign }}" = "true" ]; then
-            cargo run -p xtask -- macos package --target ${{ matrix.target }} --sign-identity "$APPLE_SIGNING_IDENTITY"
+            # xtask checks the profile before it builds, and the signed agent
+            # against it after signing.
+            profile="$RUNNER_TEMP/openlogi-agent.provisionprofile"
+            printf '%s' "$APPLE_AGENT_PROVISIONING_PROFILE" | base64 --decode > "$profile"
+            cargo run -p xtask -- macos package --target ${{ matrix.target }} \
+              --sign-identity "$APPLE_SIGNING_IDENTITY" \
+              --agent-provisioning-profile "$profile"
           else
             cargo run -p xtask -- macos package --target ${{ matrix.target }}
           fi
@@ -350,6 +362,12 @@ jobs:
           # Fail the release if camera access would still be blocked at runtime.
           codesign -d --entitlements - "$app" 2>/dev/null \
             | grep -q 'com.apple.security.device.camera'
+          # Fail the release if the agent would type through CGEventPost instead
+          # of its virtual HID keyboard. The claim and the profile ship together:
+          # AMFI kills an agent that claims the entitlement without its profile.
+          [ -f "$helper/Contents/embedded.provisionprofile" ]
+          codesign -d --entitlements - "$helper" 2>/dev/null \
+            | grep -q 'com.apple.developer.hid.virtual.device'
 
       - name: Notarize DMG
         if: ${{ inputs.sign }}

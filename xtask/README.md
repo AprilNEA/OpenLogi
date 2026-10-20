@@ -59,6 +59,17 @@ package anything but a production bundle once it is given a signing identity, so
 a dev build cannot reach users. That check is what releases 0.6.24–0.6.26 lacked
 when the release workflow shipped `.dev` identifiers.
 
+`macos package --agent-provisioning-profile` (`OPENLOGI_AGENT_PROVISIONING_PROFILE`)
+takes the agent's Developer ID provisioning profile, which grants
+`com.apple.developer.hid.virtual.device` to `org.openlogi.agent`. It needs
+`--sign-identity`. `bundle/provisioning.rs` checks the profile before the
+build, embeds it as the agent's `Contents/embedded.provisionprofile`, signs the
+agent with exactly the entitlements the virtual HID keyboard needs, and then
+checks that the profile includes the signing certificate. Without a profile,
+the agent claims no entitlements: AMFI kills a process that claims a
+restricted entitlement without its profile. The release workflow reads the
+profile from 1Password (`APPLE_AGENT_PROVISIONING_PROFILE`, base64).
+
 `macos bundle` asks `cargo-bundle` for the base `.app` only, then embeds and signs
 the helpers. Use `macos package` when you need the final DMG. The package command
 also accepts `--target aarch64-apple-darwin` or `--target x86_64-apple-darwin` so
@@ -126,6 +137,8 @@ xtask/
           embed/tests.rs
           identity.rs          # bundle ids, names, icons per channel
           identity/tests.rs
+          provisioning.rs      # the agent's profile and the HID entitlement it backs
+          provisioning/tests.rs
           signing.rs           # codesign, inside out
           signing/tests.rs
           sparkle.rs           # Sparkle.framework: fetch, embed, Info.plist keys
