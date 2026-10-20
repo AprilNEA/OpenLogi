@@ -319,18 +319,26 @@ impl AppView {
         let is_current =
             |key| AppState::try_read(cx).is_some_and(|state| state.is_current_device(key));
         let on_home = matches!(self.route, Route::Home);
+        // The Secure Input bar shows only while a key binding exists, and the
+        // Keys tab's own view repaints only itself.
+        let footer_tracks_bindings = || {
+            AppState::try_read(cx)
+                .and_then(AppState::agent_status)
+                .is_some_and(status::Attention::depends_on_key_bindings)
+        };
         match event {
             StateEvent::AgentChanged
             | StateEvent::InventoryChanged
             | StateEvent::DeviceSelected(_) => true,
             StateEvent::ForegroundChanged => !on_home,
             StateEvent::BindingsChanged(key) => {
-                !on_home
-                    && matches!(
-                        self.active_tab,
-                        DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
-                    )
-                    && is_current(key)
+                footer_tracks_bindings()
+                    || (!on_home
+                        && matches!(
+                            self.active_tab,
+                            DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
+                        )
+                        && is_current(key))
             }
             StateEvent::DpiChanged(key)
             | StateEvent::FnLockChanged(key)

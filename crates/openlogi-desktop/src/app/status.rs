@@ -157,6 +157,13 @@ impl Attention {
             SecureInput::On(_) | SecureInput::Off => None,
         }
     }
+
+    /// Whether adding the first key binding or removing the last one shows
+    /// or hides the bar for `status`. Only the root view draws the bar, so it
+    /// repaints on binding edits while this holds.
+    pub(super) fn depends_on_key_bindings(status: &AgentStatus) -> bool {
+        Self::for_status(status, true) != Self::for_status(status, false)
+    }
 }
 
 /// Contextual attention bar. Normal operation has no footer; this row appears
