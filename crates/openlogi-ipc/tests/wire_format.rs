@@ -36,9 +36,10 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
 use openlogi_core::config::{ConfigRevision, Lighting, ScrollResolution};
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, BatteryWidgetStatus, Capabilities, ChangedOnLight, DeviceInventory,
-    DeviceKind, DeviceModelInfo, DeviceTransports, LightCapabilities, LightState, LightValueRange,
-    LightValueUnit, LockKey, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
+    BatteryInfo, BatteryLevel, BatteryStatus, BatteryWidgetStatus, Capabilities, ChangedOnLight,
+    DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, LightCapabilities, LightState,
+    LightValueRange, LightValueUnit, LockKey, PairedDevice, RawDeviceAddress, ReceiverInfo,
+    StandaloneDevice,
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
@@ -110,7 +111,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 38);
+    assert_eq!(PROTOCOL_VERSION, 39);
 }
 
 #[test]

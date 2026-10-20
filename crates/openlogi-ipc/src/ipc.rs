@@ -16,7 +16,8 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::device::{
-    BatteryInfo, BatteryWidgetStatus, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
+    BatteryInfo, BatteryWidgetStatus, ChangedOnLight, DeviceInventory, DeviceKind, LightState,
+    LockKey, StandaloneDevice,
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,

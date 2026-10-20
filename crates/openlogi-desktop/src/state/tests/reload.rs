@@ -234,7 +234,6 @@ fn lock_key_notifications_persist_and_reload_only_when_changed() {
     }
 }
 
-
 #[cfg(target_os = "macos")]
 #[test]
 fn battery_widget_toggle_reloads_once_per_change() {
