@@ -283,28 +283,67 @@ pub(super) struct FollowerCookieWrite {
     pub(super) link: Vec<LeadCookie>,
 }
 
-/// The keyboard bytes that removed links left on devices that were offline,
-/// or that a clear did not remove, by the config key of each device. A clear
-/// runs when its device is next online.
+/// What the agent keeps between cookie plans.
 ///
-/// This list is kept in memory only. After an agent restart, a byte that it
-/// held stays on the device until the user links and unlinks the pair again.
+/// - The held clears: the keyboard bytes that removed links left on devices
+///   that were offline, or that a clear did not remove, by the config key of
+///   each device. A clear runs when its device is next online.
+/// - The known bytes: the last byte seen for each keyboard, by config key. A
+///   keyboard that is asleep reports no unit ID, and a keyboard whose
+///   receiver is unplugged is not in the inventory. A link to it is still
+///   cleared or written with its known byte.
+///
+/// Both are kept in memory only. After an agent restart, a byte that was held
+/// stays on the device until the user links and unlinks the pair again, and a
+/// keyboard's byte is known again once the keyboard reports its unit ID.
 #[derive(Debug, Default)]
-pub(super) struct PendingCookieReleases(BTreeMap<String, Vec<LeadCookie>>);
+pub(super) struct FollowerCookieState {
+    held: BTreeMap<String, Vec<LeadCookie>>,
+    known: BTreeMap<String, LeadCookie>,
+}
 
-impl PendingCookieReleases {
+impl FollowerCookieState {
+    /// Remember the byte of each device in `devices` that reports its unit ID.
+    pub(super) fn remember_leads(&mut self, devices: &[AgentDevice]) {
+        for device in devices {
+            if let Some(lead) = LeadCookie::for_unit_id(device.unit_id) {
+                self.known.insert(device.config_key.clone(), lead);
+            }
+        }
+    }
+
+    /// The byte that names `keyboard`: from its unit ID in `devices`, or else
+    /// the last byte seen for it.
+    fn lead(&self, devices: &[AgentDevice], keyboard: &str) -> Option<LeadCookie> {
+        lead_cookie(devices, keyboard).or_else(|| self.known.get(keyboard).copied())
+    }
+
+    /// The bytes of the keyboards that `pairs` links to `follower`.
+    fn linked_leads(
+        &self,
+        pairs: &BTreeSet<(&str, &str)>,
+        devices: &[AgentDevice],
+        follower: &str,
+    ) -> Vec<LeadCookie> {
+        pairs
+            .iter()
+            .filter(|&&(_, linked)| linked == follower)
+            .filter_map(|&(keyboard, _)| self.lead(devices, keyboard))
+            .collect()
+    }
+
     fn add(&mut self, follower: &str, lead: LeadCookie) {
-        let leads = self.0.entry(follower.to_owned()).or_default();
+        let leads = self.held.entry(follower.to_owned()).or_default();
         if !leads.contains(&lead) {
             leads.push(lead);
         }
     }
 
     fn forget(&mut self, follower: &str, lead: LeadCookie) {
-        if let Some(leads) = self.0.get_mut(follower) {
-            leads.retain(|pending| *pending != lead);
+        if let Some(leads) = self.held.get_mut(follower) {
+            leads.retain(|held| *held != lead);
             if leads.is_empty() {
-                self.0.remove(follower);
+                self.held.remove(follower);
             }
         }
     }
@@ -318,7 +357,13 @@ impl PendingCookieReleases {
     }
 
     fn take(&mut self, follower: &str) -> Vec<LeadCookie> {
-        self.0.remove(follower).unwrap_or_default()
+        self.held.remove(follower).unwrap_or_default()
+    }
+
+    /// The clears held for `follower`.
+    #[cfg(test)]
+    pub(super) fn held_for(&self, follower: &str) -> &[LeadCookie] {
+        self.held.get(follower).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -353,7 +398,7 @@ impl CookiePlan {
     }
 
     /// The writes for `follower` when OpenLogi can write to it again: the
-    /// clears that `pending` holds for it, then a link for each keyboard that
+    /// clears that `state` holds for it, then a link for each keyboard that
     /// `pairs` links to it. A held clear for a keyboard that is linked again
     /// is dropped.
     fn follower_online(
@@ -362,10 +407,10 @@ impl CookiePlan {
         devices: &[AgentDevice],
         follower: &str,
         route: &DeviceRoute,
-        pending: &mut PendingCookieReleases,
+        state: &mut FollowerCookieState,
     ) {
-        let linked = linked_leads(pairs, devices, follower);
-        for lead in pending.take(follower) {
+        let linked = state.linked_leads(pairs, devices, follower);
+        for lead in state.take(follower) {
             if !linked.contains(&lead) {
                 self.release(follower, route.clone(), lead);
             }
@@ -395,8 +440,8 @@ fn host_switch_pairs(config: &Config) -> BTreeSet<(&str, &str)> {
         .collect()
 }
 
-/// The byte that names `keyboard`, when its unit ID is known. The keyboard
-/// itself may be offline.
+/// The byte that names `keyboard`, when `devices` holds its unit ID. A
+/// keyboard that is asleep reports no unit ID.
 fn lead_cookie(devices: &[AgentDevice], keyboard: &str) -> Option<LeadCookie> {
     devices
         .iter()
@@ -421,23 +466,10 @@ fn writable_follower(
         .clone()
 }
 
-/// The bytes of the keyboards that `pairs` links to `follower`.
-fn linked_leads(
-    pairs: &BTreeSet<(&str, &str)>,
-    devices: &[AgentDevice],
-    follower: &str,
-) -> Vec<LeadCookie> {
-    pairs
-        .iter()
-        .filter(|&&(_, linked)| linked == follower)
-        .filter_map(|&(keyboard, _)| lead_cookie(devices, keyboard))
-        .collect()
-}
-
 /// The cookie writes that a config change asks for: clear each pair that
 /// `config` removes, and link each pair that it adds.
 ///
-/// A removed pair whose device is offline or disabled goes to `pending`. A
+/// A removed pair whose device is offline or disabled is held in `state`. A
 /// byte that another keyboard still linked to the device shares is not
 /// cleared. A device that `config` enables again gets the writes of a
 /// reconnect, because the changes made while it was disabled were not
@@ -446,28 +478,31 @@ pub(super) fn changed_follower_cookies(
     previous: &Config,
     config: &Config,
     devices: &[AgentDevice],
-    pending: &mut PendingCookieReleases,
+    state: &mut FollowerCookieState,
 ) -> Vec<FollowerCookieWrite> {
     let before = host_switch_pairs(previous);
     let after = host_switch_pairs(config);
     let mut plan = CookiePlan::default();
     for &(keyboard, follower) in before.difference(&after) {
-        let Some(lead) = lead_cookie(devices, keyboard) else {
+        let Some(lead) = state.lead(devices, keyboard) else {
             continue;
         };
-        if linked_leads(&after, devices, follower).contains(&lead) {
+        if state
+            .linked_leads(&after, devices, follower)
+            .contains(&lead)
+        {
             continue;
         }
         match writable_follower(config, devices, follower) {
             Some(route) => plan.release(follower, route, lead),
-            None => pending.add(follower, lead),
+            None => state.add(follower, lead),
         }
     }
     for &(keyboard, follower) in after.difference(&before) {
-        let Some(lead) = lead_cookie(devices, keyboard) else {
+        let Some(lead) = state.lead(devices, keyboard) else {
             continue;
         };
-        pending.forget(follower, lead);
+        state.forget(follower, lead);
         if let Some(route) = writable_follower(config, devices, follower) {
             plan.link(follower, route, lead);
         }
@@ -478,26 +513,26 @@ pub(super) fn changed_follower_cookies(
             continue;
         }
         if let Some(route) = writable_follower(config, devices, key) {
-            plan.follower_online(&after, devices, key, &route, pending);
+            plan.follower_online(&after, devices, key, &route, state);
         }
     }
     plan.into_writes()
 }
 
 /// The cookie writes that `dev` coming online asks for. The clears that
-/// `pending` holds for `dev` run first. Then each pair that `dev` is part of
+/// `state` holds for `dev` run first. Then each pair that `dev` is part of
 /// is linked, which fills a cookie that the firmware cleared when a slot was
 /// paired again, as Options+ does when a linked device connects.
 pub(super) fn reconnect_follower_cookies(
     config: &Config,
     devices: &[AgentDevice],
     dev: &AgentDevice,
-    pending: &mut PendingCookieReleases,
+    state: &mut FollowerCookieState,
 ) -> Vec<FollowerCookieWrite> {
     let pairs = host_switch_pairs(config);
     let mut plan = CookiePlan::default();
     if let Some(route) = writable_follower(config, devices, &dev.config_key) {
-        plan.follower_online(&pairs, devices, &dev.config_key, &route, pending);
+        plan.follower_online(&pairs, devices, &dev.config_key, &route, state);
     }
     // A keyboard that comes online fills the cookies of the devices it links.
     for &(keyboard, follower) in &pairs {
@@ -505,7 +540,7 @@ pub(super) fn reconnect_follower_cookies(
             continue;
         }
         if let (Some(lead), Some(route)) = (
-            lead_cookie(devices, keyboard),
+            state.lead(devices, keyboard),
             writable_follower(config, devices, follower),
         ) {
             plan.link(follower, route, lead);

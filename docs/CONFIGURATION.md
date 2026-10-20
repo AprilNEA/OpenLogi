@@ -183,7 +183,10 @@ Common device fields are:
   a link clears the keyboard's cookie. When the device is offline or the clear
   fails, the agent clears it when the device is next online, unless the agent
   restarts first. A disabled device gets no cookie writes. When it is enabled
-  again, the agent writes the cookie changes that it skipped
+  again, the agent writes the cookie changes that it skipped. The agent
+  remembers each keyboard's cookie while it runs, so it can also write or
+  clear a link when the keyboard is asleep or its receiver is unplugged. After
+  a restart, the agent knows the cookie again once the keyboard reports it
 - `fn_lock` for compatible keyboards
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+

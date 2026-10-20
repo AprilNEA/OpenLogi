@@ -1,7 +1,7 @@
 //! Orchestrator tests: the shared fixtures, and one module per area.
 
 use super::{
-    AgentDevice, FollowerCookieWrite, InventoryHealth, Orchestrator, PendingCookieReleases,
+    AgentDevice, FollowerCookieState, FollowerCookieWrite, InventoryHealth, Orchestrator,
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
     any_device_needs_capture_rearm, build_devices, changed_follower_cookies,
     configured_report_rate, configured_wheel_mode, desktop_switch, host_switch_links,
