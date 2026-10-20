@@ -124,15 +124,30 @@ pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
 /// MPRIS targets the running media player; XF86 volume keys go to the
 /// system mixer (PulseAudio/PipeWire) which is what users expect.
 fn dispatch_media(key: MediaKey) {
+    match media_route(key) {
+        MediaRoute::Mpris(command) => mpris_command(command),
+        MediaRoute::Key(code) => press_key(&[], code),
+    }
+}
+
+/// How a [`MediaKey`] reaches the desktop on Linux.
+enum MediaRoute {
+    /// An MPRIS method on the running media player.
+    Mpris(&'static str),
+    /// An XF86 key; must be declared in [`KEY_CAPABILITIES`].
+    Key(KeyCode),
+}
+
+fn media_route(key: MediaKey) -> MediaRoute {
     match key {
-        MediaKey::PlayPause => mpris_command("PlayPause"),
-        MediaKey::NextTrack => mpris_command("Next"),
-        MediaKey::PrevTrack => mpris_command("Previous"),
-        MediaKey::VolumeUp => press_key(&[], KeyCode::KEY_VOLUMEUP),
-        MediaKey::VolumeDown => press_key(&[], KeyCode::KEY_VOLUMEDOWN),
-        MediaKey::Mute => press_key(&[], KeyCode::KEY_MUTE),
-        MediaKey::BrightnessUp => press_key(&[], KeyCode::KEY_BRIGHTNESSUP),
-        MediaKey::BrightnessDown => press_key(&[], KeyCode::KEY_BRIGHTNESSDOWN),
+        MediaKey::PlayPause => MediaRoute::Mpris("PlayPause"),
+        MediaKey::NextTrack => MediaRoute::Mpris("Next"),
+        MediaKey::PrevTrack => MediaRoute::Mpris("Previous"),
+        MediaKey::VolumeUp => MediaRoute::Key(KeyCode::KEY_VOLUMEUP),
+        MediaKey::VolumeDown => MediaRoute::Key(KeyCode::KEY_VOLUMEDOWN),
+        MediaKey::Mute => MediaRoute::Key(KeyCode::KEY_MUTE),
+        MediaKey::BrightnessUp => MediaRoute::Key(KeyCode::KEY_BRIGHTNESSUP),
+        MediaKey::BrightnessDown => MediaRoute::Key(KeyCode::KEY_BRIGHTNESSDOWN),
     }
 }
 
@@ -537,6 +552,7 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     // Multimedia
     KeyCode::KEY_PLAYPAUSE, KeyCode::KEY_NEXTSONG, KeyCode::KEY_PREVIOUSSONG,
     KeyCode::KEY_VOLUMEUP,  KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_MUTE,
+    KeyCode::KEY_BRIGHTNESSUP, KeyCode::KEY_BRIGHTNESSDOWN,
     // Mouse buttons (injected as EV_KEY with BTN_* codes). The side pair
     // must be registered here or the kernel silently drops their events.
     KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE,
@@ -1143,16 +1159,30 @@ fn try_mpris_command(command: &str) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use evdev::{KeyCode, RelativeAxisCode};
-    use openlogi_core::binding::{KeyCombo, NativeAction, Shortcut};
+    use openlogi_core::binding::{KeyCombo, MediaKey, NativeAction, Shortcut};
 
     use super::{
-        HELPER_PREFIXES, ScrollOutput, action_scroll, capture_region_mods, combo,
-        generic_linux_lock_fallback_chord, hid_usage_to_linux, hyprland_helper,
-        hyprland_lock_fallback_chord, hyprland_lock_helper, hyprland_session_from_signature,
-        key_ev, key_phase_events, modifiers_to_keycodes, rel_ev, resolve_allowlisted_under,
-        scroll_events, syn,
+        HELPER_PREFIXES, KEY_CAPABILITIES, MediaRoute, ScrollOutput, action_scroll,
+        capture_region_mods, combo, generic_linux_lock_fallback_chord, hid_usage_to_linux,
+        hyprland_helper, hyprland_lock_fallback_chord, hyprland_lock_helper,
+        hyprland_session_from_signature, key_ev, key_phase_events, media_route,
+        modifiers_to_keycodes, rel_ev, resolve_allowlisted_under, scroll_events, syn,
     };
     use crate::inject::KeyPhase;
+
+    /// The kernel silently drops a uinput key the device did not declare,
+    /// so a media key missing from the capability list is a silent no-op.
+    #[test]
+    fn media_keycodes_are_declared_capabilities() {
+        for &key in MediaKey::ALL {
+            if let MediaRoute::Key(code) = media_route(key) {
+                assert!(
+                    KEY_CAPABILITIES.contains(&code),
+                    "{key:?} presses {code:?}, which the uinput device does not declare"
+                );
+            }
+        }
+    }
 
     #[test]
     fn held_chord_edges_use_inverse_key_order() {

@@ -155,7 +155,7 @@ impl Shortcut {
 /// Every backend reaches these through a dedicated OS mechanism — NX
 /// system-defined keys on macOS, MPRIS/XF86 keys on Linux, dedicated media
 /// virtual keys on Windows — rather than an ordinary keyboard chord.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::VariantArray)]
 pub enum MediaKey {
     /// Toggle play/pause.
     PlayPause,
@@ -173,6 +173,15 @@ pub enum MediaKey {
     BrightnessUp,
     /// Decrease display brightness.
     BrightnessDown,
+}
+
+impl MediaKey {
+    /// Every media key, in declaration order.
+    ///
+    /// Generated from the enum's variant list by `strum::VariantArray`, like
+    /// [`Shortcut::ALL`], so it cannot drift from the enum. The shared
+    /// iteration source for each backend's media-key completeness test.
+    pub const ALL: &'static [MediaKey] = <MediaKey as strum::VariantArray>::VARIANTS;
 }
 
 /// A window-manager or power action with no shared cross-platform chord.
