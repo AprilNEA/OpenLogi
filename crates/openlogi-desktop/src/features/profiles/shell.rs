@@ -84,7 +84,7 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
                 format!("{}:app:{}", shell.id_base, profile.app),
                 profile.name.clone(),
                 Some(application_mark(
-                    shell.icons.state(&profile.app),
+                    shell.icons.state(&profile.icon),
                     &profile.name,
                     TAB_ICON_EDGE,
                     pal,

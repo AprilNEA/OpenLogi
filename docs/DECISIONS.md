@@ -4,6 +4,46 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: One application on every platform is an `[apps]` alias
+
+A per-app profile was keyed by the identifier one platform reports: a macOS
+bundle id, a Linux application id, or a Windows executable path. The same
+application has a different identifier on each platform, so a profile written
+on one did not apply on another. Logi Options+ 2.8 solves this with one
+`applicationId` and a list of detection rules per platform
+(`applications.json`). OpenLogi adds the same layer as a table in
+`config.toml`, and accepts the config format change (schema 9).
+
+- **A separate table, referenced by key.** `[apps.<alias>]` lists the
+  identifiers of one application per platform. A profile references it as
+  `app:<alias>`, the same way the existing `exe:<filename>` key names an
+  executable. Profiles keyed by a platform identifier keep working unchanged,
+  so no existing file needs to move. Later features that select an
+  application, such as scene templates, can take the same `app:` key.
+- **The most specific key wins.** The matcher tries the exact identifier, then
+  `exe:<filename>`, then the alias that lists the exact identifier, then the
+  alias that lists `exe:<filename>`. A profile keyed by the platform's own
+  identifier therefore wins over an alias profile. That lets one platform
+  differ from a shared profile.
+- **One alias per identifier.** Two aliases that list the same identifier for
+  one platform stop the load, because the matcher could not choose between
+  them. An identifier can repeat across platforms.
+- **An undefined alias stops the load.** A misspelled `app:` key would match
+  nothing and silently do nothing, so loading rejects it, as the strict schema
+  rejects other mistakes. Windows identifiers must be lower-case for the same
+  reason: Windows reports lower-case paths.
+- **One matcher.** `openlogi_core::app` owns both the `exe:` fallback and the
+  alias lookup for button profiles and Actions Ring layouts, and an ast-grep
+  rule keeps a second copy out.
+- **The desktop app reads aliases but does not write them yet.** It shows an
+  alias profile under the alias name and stops offering an application that
+  already runs under a profile. Sharing a profile across platforms from the
+  GUI, and a hint for an alias with no identifier on this platform, need new
+  strings in every locale. A later change adds them.
+
+Verified with unit tests, which CI runs on macOS, Linux, and Windows. Nobody
+has used one config on two platforms with a real application yet.
+
 ## 2026-10: On Wayland, the ring opens a layer-shell surface on each display
 
 A Wayland client cannot read the global cursor position or place its own

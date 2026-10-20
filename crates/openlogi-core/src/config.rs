@@ -51,12 +51,18 @@ pub use settings::{
     WheelMode,
 };
 
+use crate::app::AppAliases;
 use crate::binding::Action;
 #[cfg(all(test, feature = "fs"))]
 use crate::binding::{Binding, ButtonId, GestureDirection};
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v9 adds the `[apps]` alias table and `app:<alias>` per-app profile keys
+/// (see [`Config::apps`]). Nothing older needs migrating; the bump makes a v8
+/// build refuse a file that may hold either at the version check, instead of
+/// failing on the unknown table or keeping `app:` profiles that never match.
 ///
 /// v8 adds `{ click = ..., wheel = "HorizontalScroll" }` wheel-hold button
 /// bindings and the per-device `smooth_wheel` switch. Nothing older needs
@@ -106,7 +112,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +153,12 @@ pub struct Config {
     /// `[keyboard]` section loading unchanged.
     #[serde(default)]
     pub keyboard: KeyboardConfig,
+    /// Application aliases: one name for an application across the
+    /// identifiers each platform reports, so a per-app profile keyed
+    /// `app:<alias>` applies on every platform the alias lists. Loading
+    /// rejects an `app:` profile key that names no alias here.
+    #[serde(default, skip_serializing_if = "AppAliases::is_empty")]
+    pub apps: AppAliases,
 }
 
 impl Default for Config {
@@ -158,6 +170,7 @@ impl Default for Config {
             devices: BTreeMap::new(),
             ephemeral: false,
             keyboard: KeyboardConfig::default(),
+            apps: AppAliases::default(),
         }
     }
 }

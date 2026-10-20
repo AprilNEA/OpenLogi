@@ -89,6 +89,19 @@ pub enum ConfigError {
         /// The schema version the file declared.
         found: u32,
     },
+    /// A per-app profile key names an alias that `[apps]` does not define, so
+    /// the profile could never apply.
+    #[error(
+        "config at {path}: device {device} has a per-app profile for {key}, but [apps] defines no such alias"
+    )]
+    UndefinedAppAlias {
+        /// The config file containing the profile.
+        path: PathBuf,
+        /// The device whose profile it is.
+        device: String,
+        /// The `app:<alias>` profile key.
+        key: String,
+    },
 }
 
 /// A loaded config file plus the exact source revision it came from.
@@ -318,6 +331,13 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
         config.migrate_thumbwheel_native_direction();
     }
     config.repair_duplicate_routes();
+    if let Some((device, key)) = config.undefined_app_alias() {
+        return Err(ConfigError::UndefinedAppAlias {
+            path: path.to_path_buf(),
+            device: device.to_string(),
+            key: key.to_string(),
+        });
+    }
     config.schema_version = SCHEMA_VERSION;
     Ok((config, header.schema_version))
 }

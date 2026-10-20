@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use gpui::{App, Context, Entity, Global};
-use openlogi_core::app::ForegroundApp;
+use openlogi_core::app::{AppAliases, ForegroundApp, profile_applies_to};
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{Dpi, SmartShiftStatus};
@@ -452,16 +452,25 @@ impl AppState {
             .map(|app| (app.id.as_str(), app.display_name.as_str()))
     }
 
-    /// The name the agent last reported for `app`, or `None` for one it has not
-    /// seen this session — a hand-written profile, or one carried in from
+    /// The name the agent last reported for an application the profile keyed
+    /// `key` applies to — the application itself, one whose executable an
+    /// `exe:` key names, or one an `app:` alias lists — or `None` when it has
+    /// seen none this session: a hand-written profile, or one carried in from
     /// another machine.
     #[must_use]
-    pub fn recent_app_name(&self, app: &str) -> Option<&str> {
+    pub fn recent_app_name(&self, key: &str) -> Option<&str> {
         self.foreground()
             .recent
             .iter()
-            .find(|seen| seen.id == app)
+            .find(|seen| profile_applies_to(key, &self.config.apps, &seen.id))
             .map(|seen| seen.display_name.as_str())
+    }
+
+    /// The `[apps]` alias table, which names the application an `app:<alias>`
+    /// profile key stands for.
+    #[must_use]
+    pub fn app_aliases(&self) -> &AppAliases {
+        &self.config.apps
     }
 
     /// The application whose profile the user is asking about.

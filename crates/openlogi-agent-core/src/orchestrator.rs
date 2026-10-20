@@ -1226,7 +1226,7 @@ impl Orchestrator {
         if !ring.enabled {
             return None;
         }
-        let layout = ring.effective_layout(self.current_app.as_deref());
+        let layout = ring.effective_layout(&self.config.apps, self.current_app.as_deref());
         if layout.slots.is_empty() {
             return None;
         }

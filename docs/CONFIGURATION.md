@@ -37,11 +37,12 @@ The v3 physical-device-key transition cannot safely assign older model-scoped
 device settings when two identical devices exist, so v2 model-key entries must
 be copied manually to the generated physical keys. Pre-v7 thumb-wheel scroll
 pairs on the old defaults are migrated in both device and per-application
-profiles so they keep their native direction.
+profiles so they keep their native direction. v9 adds the `[apps]` alias table;
+v8 files load unchanged.
 
 ## Shape
 
-`schema_version` is required and currently `8`. `selected_device` is an
+`schema_version` is required and currently `9`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -134,12 +135,14 @@ Common device fields are:
   paths retain their original spelling and case. The Buttons panel edits these
   under its Profile selector. After bringing an application to the foreground,
   choose it from Recent applications to use the identifier the agent observed.
-  Identifiers differ between platforms, so a profile authored under one
-  namespace will not match under another. An overlay holds one action per
-  button; gesture-direction maps live in `bindings`
+  Identifiers differ between platforms, so a profile keyed by one of them does
+  not match on another. Key the profile `app:<alias>` instead to share it
+  across platforms (see [Application aliases](#application-aliases)). An
+  overlay holds one action per button; gesture-direction maps live in
+  `bindings`
 - `action_ring`: default and complete per-application eight-slot layouts;
   `action_ring.per_app` takes the same selectors as `per_app_bindings`,
-  including the Windows `exe:<filename>` fallback
+  including the Windows `exe:<filename>` fallback and `app:<alias>` keys
 - `lighting`, `smartshift`, and camera controls / profiles
 - standalone `light`: the agent writes it when the light connects, when a save
   changes it, and, with `auto_camera` on, when camera use starts or stops.
@@ -174,6 +177,55 @@ Common device fields are:
 `[keyboard.bindings]` contains global key triggers such as `f1` or
 `shift+command+f5`. Supported trigger modifiers are `shift`, `control`,
 `option`, and `command`; aliases such as `ctrl`, `alt`, and `cmd` are accepted.
+
+### Application aliases
+
+`[apps.<alias>]` names one application on every platform, so one per-app
+profile can follow it from macOS to Linux and Windows. An alias name uses only
+ASCII letters, digits, `-`, and `_`. Its fields are:
+
+- `name` (optional): what the GUI calls the application. Without it, the GUI
+  uses the name the agent reports for the application, then the alias name.
+- `macos`, `linux`, and `windows` (each optional): the identifiers that
+  platform reports for the application, as one string or an array. They take
+  the same forms as `per_app_bindings` keys. Windows identifiers are
+  lower-case, and `exe:<filename>.exe` matches every install path.
+
+```toml
+[apps.chrome]
+name = "Google Chrome"
+macos = "com.google.Chrome"
+linux = ["google-chrome", "Google-chrome"]
+windows = "exe:chrome.exe"
+
+[devices."<physical-key>".per_app_bindings."app:chrome"]
+Back = "PrevTab"
+```
+
+A profile keyed `app:<alias>` in `per_app_bindings` or `action_ring.per_app`
+applies when the application in front has one of the alias's identifiers for
+the running platform. On a platform the alias lists no identifier for, the
+profile stays in the file and does not apply.
+
+The most specific key wins, in this order:
+
+1. the exact identifier
+2. the Windows `exe:<filename>` key
+3. the alias that lists the exact identifier
+4. the alias that lists `exe:<filename>`
+
+A key in the platform's own namespace therefore wins over an alias profile for
+the same application.
+
+The config stops loading when an `app:` key names an alias that `[apps]` does
+not define. It also stops loading when two aliases list the same identifier
+for one platform, or when an identifier is empty, starts with `app:`, or is a
+Windows identifier with an upper-case letter.
+
+The desktop app shows an alias profile under the alias's name and the icon of
+its first identifier on this platform. It does not offer an application in
+Recent applications or All applications when that application already runs
+under a profile. The desktop app does not create aliases; write them here.
 
 ## Actions
 

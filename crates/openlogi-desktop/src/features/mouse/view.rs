@@ -25,7 +25,7 @@ use super::inspector::{
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::profiles::{friendly_app_name, profile_canvas_status};
+use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE};
@@ -101,11 +101,7 @@ impl<'a> MouseWorkspaceData<'a> {
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.virtual_thumbwheel),
             wheel_hold: state.wheel_hold_buttons(),
-            editing_app: state.editing_app().map(|app| {
-                state
-                    .recent_app_name(app)
-                    .map_or_else(|| friendly_app_name(app), str::to_string)
-            }),
+            editing_app: state.editing_app().map(|app| profile_name(state, app)),
             overridden: state.editing_app_overrides(),
         })
     }

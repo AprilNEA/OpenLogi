@@ -40,7 +40,7 @@ use crate::features::binding_editor::{
     editor_section,
 };
 use crate::features::mouse::geometry::asset_dimensions_for_png;
-use crate::features::profiles::friendly_app_name;
+use crate::features::profiles::profile_name;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
@@ -800,11 +800,9 @@ impl FunctionRowView {
         let current = state.and_then(|state| bound_action(state, &target));
         // A control binds inside the open app profile, like a mouse button.
         let app = match target {
-            KeyTarget::Control(_) => state.and_then(AppState::editing_app).map(|app| {
-                state
-                    .and_then(|state| state.recent_app_name(app))
-                    .map_or_else(|| friendly_app_name(app), str::to_string)
-            }),
+            KeyTarget::Control(_) => {
+                state.and_then(|state| state.editing_app().map(|app| profile_name(state, app)))
+            }
             KeyTarget::FunctionKey(_) => None,
         };
 
