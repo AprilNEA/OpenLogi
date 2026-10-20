@@ -122,7 +122,11 @@ impl DetailTab {
         if matches!(record.kind, DeviceKind::Camera) {
             tabs.push(Self::Camera);
         }
-        if caps.buttons && can_show_mouse_model {
+        // A G-series mouse has no ReprogControls, but the OS hook still remaps
+        // its middle/back/forward, so it gets the panel too. The model draws
+        // only what such a mouse can deliver (#392, #730, #877).
+        let buttons = caps.buttons || caps.no_button_diversion();
+        if buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
         // The Keys tab needs something to bind: HID++ controls (measured, or
@@ -147,7 +151,7 @@ impl DetailTab {
         // mouse model), so any keyboard that gets a Keys tab needs the ring
         // editor too — otherwise the ring opens but has nothing configured
         // in it and no way to configure it (#1833).
-        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) || shows_keys_tab {
+        if caps.haptic_panel || (buttons && can_show_mouse_model) || shows_keys_tab {
             tabs.push(Self::ActionsRing);
         }
         if caps.pointer || caps.scroll_inversion || caps.hires_wheel {
