@@ -235,6 +235,18 @@ fn linking(links: &[(&str, &[&str])]) -> Config {
     config
 }
 
+fn cookie_write(
+    follower: DeviceRoute,
+    release: &[openlogi_hid::LeadCookie],
+    link: &[openlogi_hid::LeadCookie],
+) -> FollowerCookieWrite {
+    FollowerCookieWrite {
+        follower,
+        release: release.to_vec(),
+        link: link.to_vec(),
+    }
+}
+
 #[test]
 fn a_config_change_links_new_pairs_and_unlinks_removed_ones() {
     let devices = [
@@ -247,22 +259,101 @@ fn a_config_change_links_new_pairs_and_unlinks_removed_ones() {
         &linking(&[("keyboard", &["mouse", "asleep"])]),
         &linking(&[("keyboard", &["trackball", "asleep"])]),
         &devices,
+        &mut PendingCookieReleases::default(),
     );
     assert_eq!(
         writes,
         vec![
-            FollowerCookieWrite {
-                follower: bolt(3),
-                lead: lead(1),
-                link: true,
-            },
-            FollowerCookieWrite {
-                follower: bolt(2),
-                lead: lead(1),
-                link: false,
-            },
+            cookie_write(bolt(2), &[lead(1)], &[]),
+            cookie_write(bolt(3), &[], &[lead(1)]),
         ],
         "an offline keyboard still names its byte; an unchanged pair is not written"
+    );
+}
+
+#[test]
+fn a_link_moved_to_another_keyboard_clears_the_old_byte_first() {
+    // Two writes for one mouse could run in either order. The new link would
+    // then be refused while the old byte is there.
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        keyboard_with_unit("other", 4, 2, true),
+        dev("mouse", 2, true),
+    ];
+    let writes = changed_follower_cookies(
+        &linking(&[("keyboard", &["mouse"])]),
+        &linking(&[("other", &["mouse"])]),
+        &devices,
+        &mut PendingCookieReleases::default(),
+    );
+    assert_eq!(writes, vec![cookie_write(bolt(2), &[lead(1)], &[lead(2)])]);
+}
+
+#[test]
+fn a_link_removed_while_the_device_is_offline_is_cleared_when_it_returns() {
+    let linked = linking(&[("keyboard", &["mouse"])]);
+    let unlinked = Config::default();
+    let mut pending = PendingCookieReleases::default();
+    let offline = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, false),
+    ];
+    assert!(changed_follower_cookies(&linked, &unlinked, &offline, &mut pending).is_empty());
+
+    let online = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, true),
+    ];
+    assert_eq!(
+        reconnect_follower_cookies(&unlinked, &online, &online[1], &mut pending),
+        vec![cookie_write(bolt(2), &[lead(1)], &[])]
+    );
+    assert!(
+        reconnect_follower_cookies(&unlinked, &online, &online[1], &mut pending).is_empty(),
+        "a clear runs once"
+    );
+}
+
+#[test]
+fn a_pending_clear_is_dropped_when_the_link_comes_back() {
+    let linked = linking(&[("keyboard", &["mouse"])]);
+    let unlinked = Config::default();
+    let mut pending = PendingCookieReleases::default();
+    let offline = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, false),
+    ];
+    changed_follower_cookies(&linked, &unlinked, &offline, &mut pending);
+    changed_follower_cookies(&unlinked, &linked, &offline, &mut pending);
+
+    let online = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, true),
+    ];
+    assert_eq!(
+        reconnect_follower_cookies(&linked, &online, &online[1], &mut pending),
+        vec![cookie_write(bolt(2), &[], &[lead(1)])]
+    );
+}
+
+#[test]
+fn a_byte_that_another_linked_keyboard_shares_is_not_cleared() {
+    // Unit IDs 28 and 30 hash to the same byte, 0x4d.
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 28, true),
+        keyboard_with_unit("other", 4, 30, true),
+        dev("mouse", 2, true),
+    ];
+    assert_eq!(lead(28), lead(30));
+    let writes = changed_follower_cookies(
+        &linking(&[("keyboard", &["mouse"]), ("other", &["mouse"])]),
+        &linking(&[("other", &["mouse"])]),
+        &devices,
+        &mut PendingCookieReleases::default(),
+    );
+    assert!(
+        writes.is_empty(),
+        "the mouse still follows the other keyboard"
     );
 }
 
@@ -275,20 +366,21 @@ fn cookie_writes_skip_an_unknown_keyboard_and_a_disabled_device() {
         dev("mouse", 2, true),
         dev("disabled", 3, true),
     ];
+    let mut pending = PendingCookieReleases::default();
     assert!(
-        changed_follower_cookies(&Config::default(), &config, &devices).is_empty(),
+        changed_follower_cookies(&Config::default(), &config, &devices, &mut pending).is_empty(),
         "a keyboard without a unit ID has no byte"
     );
-
     let devices = [
         keyboard_with_unit("keyboard", 1, 1, true),
         dev("mouse", 2, true),
         dev("disabled", 3, true),
     ];
-    let followers: Vec<_> = changed_follower_cookies(&Config::default(), &config, &devices)
-        .into_iter()
-        .map(|write| write.follower)
-        .collect();
+    let followers: Vec<_> =
+        changed_follower_cookies(&Config::default(), &config, &devices, &mut pending)
+            .into_iter()
+            .map(|write| write.follower)
+            .collect();
     assert_eq!(followers, vec![bolt(2)], "a disabled device is left native");
 }
 
@@ -301,23 +393,18 @@ fn a_reconnect_links_each_pair_that_the_device_is_part_of() {
         dev("mouse", 2, true),
         dev("trackball", 3, true),
     ];
-
-    let for_mouse = reconnect_follower_cookies(&config, &devices, &devices[2]);
+    let mut pending = PendingCookieReleases::default();
     assert_eq!(
-        for_mouse
-            .iter()
-            .map(|write| (write.follower.clone(), write.lead, write.link))
-            .collect::<Vec<_>>(),
-        vec![(bolt(2), lead(1), true), (bolt(2), lead(2), true)],
+        reconnect_follower_cookies(&config, &devices, &devices[2], &mut pending),
+        vec![cookie_write(bolt(2), &[], &[lead(1), lead(2)])],
         "the first keyboard to write keeps the mouse; the second is refused on the device"
     );
-    let for_keyboard = reconnect_follower_cookies(&config, &devices, &devices[0]);
     assert_eq!(
-        for_keyboard
-            .into_iter()
-            .map(|write| write.follower)
-            .collect::<Vec<_>>(),
-        vec![bolt(2), bolt(3)]
+        reconnect_follower_cookies(&config, &devices, &devices[0], &mut pending),
+        vec![
+            cookie_write(bolt(2), &[], &[lead(1)]),
+            cookie_write(bolt(3), &[], &[lead(1)]),
+        ]
     );
 }
 

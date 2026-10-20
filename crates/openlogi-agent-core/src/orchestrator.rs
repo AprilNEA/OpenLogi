@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Binding, ButtonId};
@@ -65,12 +65,13 @@ pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 #[cfg(test)]
 use devices::reapply_targets;
 use devices::{
-    FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, assignments_changed, build_devices, changed_follower_cookies,
-    config_keeps_os_layout, configured_pointer_speed, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply,
-    reconnect_follower_cookies, scales_pointer, settings_moved, stable_id, wheel_inverted,
+    FollowerCookieWrite, PendingCookieReleases, RECONNECT_REAPPLY_CONFIRM_RETRIES,
+    VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, assignments_changed,
+    build_devices, changed_follower_cookies, config_keeps_os_layout, configured_pointer_speed,
+    configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
+    keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
+    plan_reapply, reconnect_follower_cookies, scales_pointer, settings_moved, stable_id,
+    wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -167,6 +168,8 @@ pub struct SharedHandles {
     backlight_order: WriteOrder,
     /// Orders host renames per device.
     host_name_order: WriteOrder,
+    /// Orders the `ChangeHost` cookie writes per linked device.
+    follower_cookie_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -420,6 +423,8 @@ pub struct Orchestrator {
     /// layout writes queued for them so a write withdraws itself once a
     /// reload turns the setting off or disables the device.
     kept_os_layouts: Arc<KeptOsLayouts>,
+    /// The cookie clears that wait for their linked device to be online.
+    pending_cookie_releases: Mutex<PendingCookieReleases>,
     /// Whether the OS mouse hook is currently installed. Back/Forward gesture
     /// motion comes from HID++, but diversion is published only while the
     /// broader mouse-remapping path is available so losing the hook leaves the
@@ -507,6 +512,7 @@ impl Orchestrator {
             pointer_speeds: Arc::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
+            follower_cookie_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
@@ -529,6 +535,7 @@ impl Orchestrator {
             light_writes: BTreeMap::new(),
             next_light_write: 0,
             kept_os_layouts: Arc::default(),
+            pending_cookie_releases: Mutex::default(),
             os_mouse_hook_available: false,
             capture_plans_tx,
             keyboard_spec_tx,
@@ -1138,7 +1145,13 @@ impl Orchestrator {
                 .hardware
                 .set_light_in_background(Some(route), &light, capabilities);
         }
-        self.write_follower_cookies(reconnect_follower_cookies(&self.config, &self.devices, dev));
+        let writes = reconnect_follower_cookies(
+            &self.config,
+            &self.devices,
+            dev,
+            &mut self.pending_cookie_releases(),
+        );
+        self.write_follower_cookies(writes);
     }
 
     /// Write the `ChangeHost` cookies of linked pointing devices, so that Logi
@@ -1147,10 +1160,19 @@ impl Orchestrator {
         for write in writes {
             crate::hardware::write_follower_cookies_in_background(
                 self.shared.device(&write.follower),
-                write.lead,
+                self.shared.follower_cookie_order.request(&write.follower),
+                write.release,
                 write.link,
             );
         }
+    }
+
+    /// The cookie clears that wait for their device. A panic while the list
+    /// was held leaves at worst a clear too many or too few.
+    fn pending_cookie_releases(&self) -> MutexGuard<'_, PendingCookieReleases> {
+        self.pending_cookie_releases
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Put `dev`'s keyboard on the host OS's key layout when the config keeps
@@ -1515,11 +1537,13 @@ impl Orchestrator {
         self.apply_changed_fn_locks(&previous);
         self.apply_changed_pointer_speeds(&previous);
         self.apply_enabled_os_layouts(&previous);
-        self.write_follower_cookies(changed_follower_cookies(
+        let writes = changed_follower_cookies(
             &previous,
             &self.config,
             &self.devices,
-        ));
+            &mut self.pending_cookie_releases(),
+        );
+        self.write_follower_cookies(writes);
         self.changed_lights(&previous_lights)
     }
 

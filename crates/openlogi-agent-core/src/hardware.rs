@@ -26,8 +26,9 @@ use std::time::Duration;
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
     CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, FollowerLink,
-    FollowerRelease, HidppOperation, HostOs, LeadCookie, OsLayoutOutcome, PointerSpeed, ReportRate,
-    ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel, WriteError,
+    FollowerRelease, HidppOperation, HostOs, HostSwitchError, LeadCookie, OsLayoutOutcome,
+    PointerSpeed, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel,
+    WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
@@ -820,75 +821,106 @@ pub(crate) fn keep_os_layout_in_background(
     );
 }
 
-/// Spawn a write that links (`link`) or unlinks `op`'s pointing device and
-/// the keyboard of `lead` in the device's `ChangeHost` cookies, as Logi
-/// Options+ does (see [`openlogi_hid::link_follower_cookies_on`]). Returns
-/// immediately; the outcome is logged.
-pub(crate) fn write_follower_cookies_in_background(op: DeviceOp, lead: LeadCookie, link: bool) {
+/// What one cookie write did for one keyboard.
+#[derive(Debug)]
+enum CookieOutcome {
+    Released(LeadCookie, Result<FollowerRelease, HostSwitchError>),
+    Linked(LeadCookie, Result<FollowerLink, HostSwitchError>),
+}
+
+/// Spawn one write that clears the bytes in `release` from `op`'s pointing
+/// device and then writes the bytes in `link`, as Logi Options+ does (see
+/// [`openlogi_hid::link_follower_cookies_on`]). The writes for one device run
+/// in the order of their `ticket`, and none is skipped. Returns immediately;
+/// the outcome is logged.
+pub(crate) fn write_follower_cookies_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    release: Vec<LeadCookie>,
+    link: Vec<LeadCookie>,
+) {
     let index = op.route.device_index();
-    let cookie = lead.get();
-    if link {
-        op.spawn_write(
-            "linked device cookie write",
-            move |c| async move { Ok(openlogi_hid::link_follower_cookies_on(&c, lead).await) },
-            move |result| {
-                log_outcome(
-                    index,
-                    "linked device cookie write",
-                    result,
-                    |outcome| match outcome {
-                        Ok(FollowerLink::Linked { slots }) => {
-                            info!(
-                                index,
-                                cookie, slots, "linked device cookies now name the keyboard"
-                            );
-                        }
-                        Ok(FollowerLink::LinkedToAnotherKeyboard { cookie: other }) => {
-                            info!(
-                                index,
-                                cookie,
-                                other,
-                                "linked device cookies name another keyboard; left as they are"
-                            );
-                        }
-                        Ok(outcome) => debug!(
-                            index,
-                            cookie,
-                            ?outcome,
-                            "linked device cookies left as they are"
-                        ),
-                        Err(error) => warn!(index, %error, "linked device cookie write failed"),
-                    },
-                );
-            },
-        );
-    } else {
-        op.spawn_write(
-            "linked device cookie clear",
-            move |c| async move { Ok(openlogi_hid::release_follower_cookies_on(&c, lead).await) },
-            move |result| {
-                log_outcome(
-                    index,
-                    "linked device cookie clear",
-                    result,
-                    |outcome| match outcome {
-                        Ok(FollowerRelease::Released { slots }) => {
-                            info!(
-                                index,
-                                cookie, slots, "linked device cookies no longer name the keyboard"
-                            );
-                        }
-                        Ok(outcome) => debug!(
-                            index,
-                            cookie,
-                            ?outcome,
-                            "linked device cookies left as they are"
-                        ),
-                        Err(error) => warn!(index, %error, "linked device cookie clear failed"),
-                    },
-                );
-            },
-        );
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "linked device cookie write",
+        move |op| async move {
+            ticket
+                .in_order(|| async {
+                    after_transport_turn(&turn, async {
+                        tokio::time::timeout(WRITE_TIMEOUT, async {
+                            let shared = op.resolve()?;
+                            let mut outcomes = Vec::with_capacity(release.len() + link.len());
+                            for lead in release {
+                                let outcome =
+                                    openlogi_hid::release_follower_cookies_on(&shared, lead).await;
+                                outcomes.push(CookieOutcome::Released(lead, outcome));
+                            }
+                            for lead in link {
+                                let outcome =
+                                    openlogi_hid::link_follower_cookies_on(&shared, lead).await;
+                                outcomes.push(CookieOutcome::Linked(lead, outcome));
+                            }
+                            Ok(outcomes)
+                        })
+                        .await
+                    })
+                    .await
+                })
+                .await
+        },
+        move |result| {
+            log_outcome(index, "linked device cookie write", result, |outcomes| {
+                for outcome in outcomes {
+                    log_cookie_outcome(index, outcome);
+                }
+            });
+        },
+    );
+}
+
+fn log_cookie_outcome(index: u8, outcome: CookieOutcome) {
+    match outcome {
+        CookieOutcome::Released(lead, Ok(FollowerRelease::Released { slots })) => info!(
+            index,
+            cookie = lead.get(),
+            slots,
+            "linked device cookies no longer name the keyboard"
+        ),
+        CookieOutcome::Linked(lead, Ok(FollowerLink::Linked { slots })) => info!(
+            index,
+            cookie = lead.get(),
+            slots,
+            "linked device cookies now name the keyboard"
+        ),
+        CookieOutcome::Linked(
+            lead,
+            Ok(FollowerLink::LinkedToAnotherKeyboard { cookie: other }),
+        ) => {
+            info!(
+                index,
+                cookie = lead.get(),
+                other,
+                "linked device cookies name another keyboard; left as they are"
+            );
+        }
+        CookieOutcome::Released(lead, Ok(outcome)) => debug!(
+            index,
+            cookie = lead.get(),
+            ?outcome,
+            "linked device cookies left as they are"
+        ),
+        CookieOutcome::Linked(lead, Ok(outcome)) => debug!(
+            index,
+            cookie = lead.get(),
+            ?outcome,
+            "linked device cookies left as they are"
+        ),
+        CookieOutcome::Released(lead, Err(error)) => {
+            warn!(index, cookie = lead.get(), %error, "linked device cookie clear failed");
+        }
+        CookieOutcome::Linked(lead, Err(error)) => {
+            warn!(index, cookie = lead.get(), %error, "linked device cookie write failed");
+        }
     }
 }
 

@@ -179,7 +179,9 @@ Common device fields are:
   (HID++ `0x1815`) matches the keyboard's new slot, and otherwise to the slot
   with the same number. The agent also writes the linked device's `0x1814`
   cookies, so that Logi Options+ on the keyboard's other hosts moves the same
-  devices. It does not replace a cookie that names another keyboard
+  devices. It does not replace a cookie that names another keyboard. Removing
+  a link clears the keyboard's cookie. For a device that is offline, the agent
+  clears it when the device is next online, unless the agent restarts first
 - `fn_lock` for compatible keyboards
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+

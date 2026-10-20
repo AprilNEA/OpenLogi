@@ -2,7 +2,7 @@
 //! way the GUI carousel is, then diffed across ticks into the volatile-settings
 //! re-apply plan, the host-switch links, and the follower cookie writes.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
@@ -261,20 +261,88 @@ pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec
         .collect()
 }
 
-/// One write of the `ChangeHost` cookies of a linked pointing device.
+/// The `ChangeHost` cookie writes for one linked pointing device.
 ///
 /// Logi Options+ moves a pointing device after a keyboard only when the
 /// device's cookies name that keyboard. OpenLogi writes them for the links in
 /// its config, so that Options+ on the keyboard's other hosts moves the same
 /// devices. OpenLogi itself follows its config and never reads the cookies.
+///
+/// The clears run first. A link that moves from one keyboard to another is
+/// therefore not refused because the old keyboard's byte is still there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FollowerCookieWrite {
     /// The linked pointing device.
     pub(super) follower: DeviceRoute,
-    /// The byte that names the keyboard.
-    pub(super) lead: LeadCookie,
-    /// `true` writes the keyboard's byte; `false` clears it.
-    pub(super) link: bool,
+    /// The keyboard bytes to clear.
+    pub(super) release: Vec<LeadCookie>,
+    /// The keyboard bytes to write after the clears.
+    pub(super) link: Vec<LeadCookie>,
+}
+
+/// The keyboard bytes that removed links left on devices that were offline,
+/// by the config key of each device. A clear runs when its device is next
+/// online.
+///
+/// This list is kept in memory only. After an agent restart, a byte that it
+/// held stays on the device until the user links and unlinks the pair again.
+#[derive(Debug, Default)]
+pub(super) struct PendingCookieReleases(BTreeMap<String, Vec<LeadCookie>>);
+
+impl PendingCookieReleases {
+    fn add(&mut self, follower: &str, lead: LeadCookie) {
+        let leads = self.0.entry(follower.to_owned()).or_default();
+        if !leads.contains(&lead) {
+            leads.push(lead);
+        }
+    }
+
+    fn forget(&mut self, follower: &str, lead: LeadCookie) {
+        if let Some(leads) = self.0.get_mut(follower) {
+            leads.retain(|pending| *pending != lead);
+            if leads.is_empty() {
+                self.0.remove(follower);
+            }
+        }
+    }
+
+    fn take(&mut self, follower: &str) -> Vec<LeadCookie> {
+        self.0.remove(follower).unwrap_or_default()
+    }
+}
+
+/// The cookie writes of one plan, one [`FollowerCookieWrite`] per device.
+#[derive(Default)]
+struct CookiePlan(BTreeMap<String, FollowerCookieWrite>);
+
+impl CookiePlan {
+    fn entry(&mut self, follower: &str, route: DeviceRoute) -> &mut FollowerCookieWrite {
+        self.0
+            .entry(follower.to_owned())
+            .or_insert_with(|| FollowerCookieWrite {
+                follower: route,
+                release: Vec::new(),
+                link: Vec::new(),
+            })
+    }
+
+    fn release(&mut self, follower: &str, route: DeviceRoute, lead: LeadCookie) {
+        let write = self.entry(follower, route);
+        if !write.release.contains(&lead) {
+            write.release.push(lead);
+        }
+    }
+
+    fn link(&mut self, follower: &str, route: DeviceRoute, lead: LeadCookie) {
+        let write = self.entry(follower, route);
+        if !write.link.contains(&lead) {
+            write.link.push(lead);
+        }
+    }
+
+    fn into_writes(self) -> Vec<FollowerCookieWrite> {
+        self.0.into_values().collect()
+    }
 }
 
 /// Each keyboard → linked device pair that `config` names, by config key.
@@ -292,69 +360,115 @@ fn host_switch_pairs(config: &Config) -> BTreeSet<(&str, &str)> {
         .collect()
 }
 
-/// The cookie writes that a config change asks for: link each pair that
-/// `config` adds, and unlink each pair that it removes.
+/// The byte that names `keyboard`, when its unit ID is known. The keyboard
+/// itself may be offline.
+fn lead_cookie(devices: &[AgentDevice], keyboard: &str) -> Option<LeadCookie> {
+    devices
+        .iter()
+        .find(|device| device.config_key == keyboard)
+        .and_then(|device| LeadCookie::for_unit_id(device.unit_id))
+}
+
+/// The route of `follower` when OpenLogi can write to it now: it is enabled,
+/// online, and has a route.
+fn writable_follower(
+    config: &Config,
+    devices: &[AgentDevice],
+    follower: &str,
+) -> Option<DeviceRoute> {
+    if !config.device_enabled(follower) {
+        return None;
+    }
+    devices
+        .iter()
+        .find(|device| device.config_key == follower && device.online)?
+        .route
+        .clone()
+}
+
+/// The bytes of the keyboards that `pairs` links to `follower`.
+fn linked_leads(
+    pairs: &BTreeSet<(&str, &str)>,
+    devices: &[AgentDevice],
+    follower: &str,
+) -> Vec<LeadCookie> {
+    pairs
+        .iter()
+        .filter(|&&(_, linked)| linked == follower)
+        .filter_map(|&(keyboard, _)| lead_cookie(devices, keyboard))
+        .collect()
+}
+
+/// The cookie writes that a config change asks for: clear each pair that
+/// `config` removes, and link each pair that it adds.
+///
+/// A removed pair whose device is offline goes to `pending`. A byte that
+/// another keyboard still linked to the device shares is not cleared.
 pub(super) fn changed_follower_cookies(
     previous: &Config,
     config: &Config,
     devices: &[AgentDevice],
+    pending: &mut PendingCookieReleases,
 ) -> Vec<FollowerCookieWrite> {
     let before = host_switch_pairs(previous);
     let after = host_switch_pairs(config);
-    let linked = after.difference(&before).map(|&pair| (pair, true));
-    let unlinked = before.difference(&after).map(|&pair| (pair, false));
-    linked
-        .chain(unlinked)
-        .filter_map(|((keyboard, follower), link)| {
-            follower_cookie_write(config, devices, keyboard, follower, link)
-        })
-        .collect()
+    let mut plan = CookiePlan::default();
+    for &(keyboard, follower) in before.difference(&after) {
+        let Some(lead) = lead_cookie(devices, keyboard) else {
+            continue;
+        };
+        if linked_leads(&after, devices, follower).contains(&lead) {
+            continue;
+        }
+        match writable_follower(config, devices, follower) {
+            Some(route) => plan.release(follower, route, lead),
+            None => pending.add(follower, lead),
+        }
+    }
+    for &(keyboard, follower) in after.difference(&before) {
+        let Some(lead) = lead_cookie(devices, keyboard) else {
+            continue;
+        };
+        pending.forget(follower, lead);
+        if let Some(route) = writable_follower(config, devices, follower) {
+            plan.link(follower, route, lead);
+        }
+    }
+    plan.into_writes()
 }
 
-/// The cookie writes that `dev` coming online asks for: link each pair that
-/// it is part of. The write fills a cookie that the firmware cleared when a
-/// slot was paired again, as Options+ does when a linked device connects.
+/// The cookie writes that `dev` coming online asks for. The clears that
+/// `pending` holds for `dev` run first. Then each pair that `dev` is part of
+/// is linked, which fills a cookie that the firmware cleared when a slot was
+/// paired again, as Options+ does when a linked device connects.
 pub(super) fn reconnect_follower_cookies(
     config: &Config,
     devices: &[AgentDevice],
     dev: &AgentDevice,
+    pending: &mut PendingCookieReleases,
 ) -> Vec<FollowerCookieWrite> {
-    host_switch_pairs(config)
-        .into_iter()
-        .filter(|&(keyboard, follower)| keyboard == dev.config_key || follower == dev.config_key)
-        .filter_map(|(keyboard, follower)| {
-            follower_cookie_write(config, devices, keyboard, follower, true)
-        })
-        .collect()
-}
-
-/// The write for one pair. Skipped when the linked device is disabled,
-/// offline, or has no route, or when the keyboard's unit ID is unknown. The
-/// keyboard itself may be offline.
-fn follower_cookie_write(
-    config: &Config,
-    devices: &[AgentDevice],
-    keyboard: &str,
-    follower: &str,
-    link: bool,
-) -> Option<FollowerCookieWrite> {
-    if !config.device_enabled(follower) {
-        return None;
+    let pairs = host_switch_pairs(config);
+    let mut plan = CookiePlan::default();
+    if let Some(route) = writable_follower(config, devices, &dev.config_key) {
+        let linked = linked_leads(&pairs, devices, &dev.config_key);
+        for lead in pending.take(&dev.config_key) {
+            if !linked.contains(&lead) {
+                plan.release(&dev.config_key, route.clone(), lead);
+            }
+        }
     }
-    let lead = devices
-        .iter()
-        .find(|device| device.config_key == keyboard)
-        .and_then(|device| LeadCookie::for_unit_id(device.unit_id))?;
-    let follower = devices
-        .iter()
-        .find(|device| device.config_key == follower && device.online)?
-        .route
-        .clone()?;
-    Some(FollowerCookieWrite {
-        follower,
-        lead,
-        link,
-    })
+    for &(keyboard, follower) in &pairs {
+        if keyboard != dev.config_key && follower != dev.config_key {
+            continue;
+        }
+        if let (Some(lead), Some(route)) = (
+            lead_cookie(devices, keyboard),
+            writable_follower(config, devices, follower),
+        ) {
+            plan.link(follower, route, lead);
+        }
+    }
+    plan.into_writes()
 }
 
 /// The canonical identity of one device: what the GUI carousel orders by, what
