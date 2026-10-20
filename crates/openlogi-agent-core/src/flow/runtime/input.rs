@@ -175,12 +175,24 @@ impl FlowInput {
         self.now_ms() < self.hold_until_ms.load(Ordering::Acquire)
     }
 
-    /// This machine switched the devices to a peer.
-    pub(crate) fn departed(&self) {
+    /// This machine switched the devices to a peer. `keyboards_can_follow`:
+    /// a keyboard configured for that peer could still be here, so a
+    /// keystroke before local movement is taken as proof it stayed behind.
+    pub(crate) fn departed(&self, keyboards_can_follow: bool) {
         self.arrival.open.store(false, Ordering::Release);
         self.keyboard.attempts.store(0, Ordering::Relaxed);
         self.keyboard.last_attempt_ms.store(0, Ordering::Relaxed);
-        self.keyboard.handed_off.store(true, Ordering::Release);
+        self.keyboard.suppress_until_ms.store(0, Ordering::Release);
+        self.keyboard
+            .handed_off
+            .store(keyboards_can_follow, Ordering::Release);
+    }
+
+    /// Flow stopped: no keyboard is followed any more, so typing here must
+    /// not be swallowed waiting for one.
+    pub(crate) fn stopped(&self) {
+        self.keyboard.handed_off.store(false, Ordering::Release);
+        self.keyboard.suppress_until_ms.store(0, Ordering::Release);
     }
 
     /// A handoff just placed the pointer here.
@@ -369,6 +381,31 @@ mod tests {
     }
 
     #[test]
+    fn a_mouse_only_departure_never_swallows_typing() {
+        let input = FlowInput::new();
+        input.departed(false);
+
+        assert!(
+            !input.key_pressed(),
+            "no keyboard can follow, so none is chased"
+        );
+    }
+
+    #[test]
+    fn stopping_flow_gives_typing_back() {
+        let input = FlowInput::new();
+        input.departed(true);
+        assert!(
+            input.key_pressed(),
+            "a keystroke here sends the keyboard on"
+        );
+
+        input.stopped();
+
+        assert!(!input.key_pressed(), "a stopped Flow follows no keyboard");
+    }
+
+    #[test]
     fn a_hold_swallows_movement_until_released() {
         let input = FlowInput::new();
         assert!(
@@ -425,7 +462,7 @@ mod tests {
         let input = FlowInput::new();
         assert!(!input.key_pressed(), "before any handoff, keys are local");
 
-        input.departed();
+        input.departed(true);
         assert!(
             input.key_pressed(),
             "the keyboard stayed: swallow and send it on"
@@ -436,7 +473,7 @@ mod tests {
     #[test]
     fn local_pointer_movement_makes_keys_local_again() {
         let input = FlowInput::new();
-        input.departed();
+        input.departed(true);
 
         assert!(!input.pointer_moved(2, 2));
 
@@ -446,7 +483,7 @@ mod tests {
     #[test]
     fn an_arrival_ends_keyboard_following() {
         let input = FlowInput::new();
-        input.departed();
+        input.departed(true);
 
         input.arrived();
 

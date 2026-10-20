@@ -184,6 +184,7 @@ impl FlowGeneration {
             self.state.active.store(false, Ordering::Release);
         }
         self.keyboard_follower.abort();
+        self.state.input.stopped();
         self.sessions.shutdown().await;
         for task in self.tasks.drain(..) {
             let _ = task.await;
@@ -638,7 +639,7 @@ impl GenerationState {
         if let Ok(mut handed_off_to) = self.handed_off_to.lock() {
             *handed_off_to = Some(peer.to_owned());
         }
-        self.input.departed();
+        self.input.departed(!self.keyboards_for(peer).is_empty());
         if devices.iter().all(|device| device.pointing) {
             // Every keyboard stayed: a modifier down now is held on purpose.
             return;
@@ -1134,6 +1135,14 @@ fn load_machine_identity_at(path: &Path) -> Result<MachineIdentity, FlowRuntimeE
         fs::create_dir_all(parent)?;
     }
     let identity = MachineIdentity::generate()?;
+    // Written in full under a private name, then linked into place: a
+    // concurrent loader sees no file or the whole key, never a partial one,
+    // and a key another loader linked first is kept.
+    let staging = path.with_extension(format!(
+        "{}.{}.tmp",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1141,12 +1150,14 @@ fn load_machine_identity_at(path: &Path) -> Result<MachineIdentity, FlowRuntimeE
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    match options.open(path) {
-        Ok(mut file) => {
-            file.write_all(identity.private_key_pkcs8())?;
-            file.sync_all()?;
-            Ok(identity)
-        }
+    let staged = options.open(&staging).and_then(|mut file| {
+        file.write_all(identity.private_key_pkcs8())?;
+        file.sync_all()
+    });
+    let linked = staged.and_then(|()| fs::hard_link(&staging, path));
+    let _ = fs::remove_file(&staging);
+    match linked {
+        Ok(()) => Ok(identity),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             MachineIdentity::from_pkcs8(fs::read(path)?).map_err(FlowRuntimeError::from)
         }
@@ -1255,6 +1266,33 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn concurrent_first_loads_agree_on_one_complete_identity() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join(FLOW_IDENTITY_FILE);
+        let keys: Vec<_> = std::thread::scope(|scope| {
+            let loaders: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| load_machine_identity_at(&path)))
+                .collect();
+            loaders
+                .into_iter()
+                .map(|loader| {
+                    loader
+                        .join()
+                        .expect("loader thread")
+                        .expect("load identity")
+                        .public_key()
+                })
+                .collect()
+        });
+
+        assert!(keys.iter().all(|key| *key == keys[0]));
+        let leftovers = fs::read_dir(directory.path())
+            .expect("list identity directory")
+            .count();
+        assert_eq!(leftovers, 1, "only the identity remains, no staging file");
     }
 
     #[test]
