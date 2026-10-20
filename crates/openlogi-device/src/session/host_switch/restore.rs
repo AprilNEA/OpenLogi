@@ -160,8 +160,8 @@ pub(super) async fn rollback_host_switch_start(
 #[cfg(test)]
 mod tests {
     use super::super::{
-        HostSwitchStop, HostSwitchStopReason, HostTrigger, KeyboardPosition, monitor_host_switch,
-        run_host_switch_session,
+        HostSwitchStop, HostSwitchStopReason, HostTrigger, KeyboardHosts, KeyboardPosition,
+        monitor_host_switch, run_host_switch_session,
     };
     use super::*;
     use crate::backend::NodeId;
@@ -328,7 +328,15 @@ mod tests {
         let (_signal, gate) = crate::device_io_channel();
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(100),
-            monitor_host_switch(stopped, &mut presses, POSITION, &registry, &retired, gate),
+            monitor_host_switch(
+                stopped,
+                &mut presses,
+                POSITION,
+                &registry,
+                &retired,
+                gate,
+                &mut KeyboardHosts::default(),
+            ),
         )
         .await
         .expect("a retired publication needs no further notification");
@@ -357,7 +365,15 @@ mod tests {
                 let (_signal, gate) = crate::device_io_channel();
                 tokio::time::timeout(
                     std::time::Duration::from_millis(100),
-                    monitor_host_switch(stopped, &mut presses, POSITION, &registry, &current, gate),
+                    monitor_host_switch(
+                        stopped,
+                        &mut presses,
+                        POSITION,
+                        &registry,
+                        &current,
+                        gate,
+                        &mut KeyboardHosts::default(),
+                    ),
                 )
                 .await
                 .expect("a ready stop source needs no further event")

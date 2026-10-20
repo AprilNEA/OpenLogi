@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use hidpp::channel::HidppChannel;
 
 use hidpp::feature::change_host::HostChangeRequest;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{
     ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionOutcome,
@@ -42,6 +42,9 @@ const HOSTS_INFO_INDEX: u8 = 0x05;
 
 /// `ErrorType::Busy`, the failure a scripted device answers with.
 const BUSY: u8 = 0x08;
+
+/// `ErrorType::HwError`, the failure of a keyboard that is leaving.
+const HW_ERROR: u8 = 0x04;
 
 /// What the scripted keyboard's firmware does when asked about `0x1815`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -673,51 +676,187 @@ async fn trigger_session(
     keyboard: PairedKeyboard,
     ready: (u8, u8),
     report: Vec<u8>,
-) -> (
-    Result<HostSwitchSessionOutcome, super::HostSwitchSessionFailure>,
-    Vec<Vec<u8>>,
-) {
-    let (raw, handle) =
-        ScriptedRawHidChannel::with_dynamic_responder(move |request| bolt_pair(request, keyboard));
-    let incoming = raw.incoming_sender();
-    let registry = ChannelRegistry::default();
-    registry.replace_node(
-        NodeId::from("bolt-receiver".to_owned()),
-        [bolt_route(KEYBOARD_SLOT), bolt_route(MOUSE_SLOT)],
-        raw_scripted_channel(raw).await,
-    );
-    let (_stop, stopped) = oneshot::channel();
-    let (_signal, gate) = device_io_channel();
-    let session = tokio::spawn(async move {
-        let pool = ChannelPool::with_backend(ScriptedBackend::new(Vec::new()));
-        run_host_switch_session(
-            bolt_route(KEYBOARD_SLOT),
-            &[bolt_route(MOUSE_SLOT)],
-            stopped,
-            &registry,
-            &pool,
-            gate,
-        )
-        .await
-    });
+) -> (SessionResult, Vec<Vec<u8>>) {
+    let session = RunningSession::start(move |request| bolt_pair(request, keyboard)).await;
     let (ready_index, ready_function) = ready;
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !handle
-            .written_reports()
-            .iter()
-            .any(|written| is_request(written, KEYBOARD_SLOT, ready_index, ready_function))
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    session.written(ready_index, ready_function, 1).await;
+    session.send(report);
+    session.outcome().await
+}
+
+type SessionResult = Result<HostSwitchSessionOutcome, super::HostSwitchSessionFailure>;
+
+/// A session for the keyboard in [`KEYBOARD_SLOT`] with the mouse in
+/// [`MOUSE_SLOT`] linked, on a channel that a responder answers.
+struct RunningSession {
+    task: tokio::task::JoinHandle<SessionResult>,
+    incoming: mpsc::UnboundedSender<Vec<u8>>,
+    handle: crate::replay::ReplayChannelHandle,
+}
+
+impl RunningSession {
+    /// Spawn the session. It runs once the test yields.
+    async fn start(responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static) -> Self {
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(responder);
+        let incoming = raw.incoming_sender();
+        let registry = ChannelRegistry::default();
+        registry.replace_node(
+            NodeId::from("bolt-receiver".to_owned()),
+            [bolt_route(KEYBOARD_SLOT), bolt_route(MOUSE_SLOT)],
+            raw_scripted_channel(raw).await,
+        );
+        let task = tokio::spawn(async move {
+            let (_stop, stopped) = oneshot::channel();
+            let (_signal, gate) = device_io_channel();
+            let pool = ChannelPool::with_backend(ScriptedBackend::new(Vec::new()));
+            run_host_switch_session(
+                bolt_route(KEYBOARD_SLOT),
+                &[bolt_route(MOUSE_SLOT)],
+                stopped,
+                &registry,
+                &pool,
+                gate,
+            )
+            .await
+        });
+        Self {
+            task,
+            incoming,
+            handle,
         }
-    })
-    .await
-    .expect("the session reaches the ready request");
-    incoming.send(report).expect("the channel is open");
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), session)
+    }
+
+    /// Wait until the session has written `count` requests for function
+    /// `function` of feature index `feature_index` to the keyboard.
+    async fn written(&self, feature_index: u8, function: u8, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while self
+                .handle
+                .written_reports()
+                .iter()
+                .filter(|written| is_request(written, KEYBOARD_SLOT, feature_index, function))
+                .count()
+                < count
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
         .await
-        .expect("the report ends the session")
-        .expect("the session task does not panic");
-    (outcome, handle.written_reports())
+        .unwrap_or_else(|_| {
+            panic!("the session writes {count} of function {function} of feature {feature_index}")
+        });
+    }
+
+    /// Send `report` from the keyboard.
+    fn send(&self, report: Vec<u8>) {
+        self.incoming.send(report).expect("the channel is open");
+    }
+
+    /// The outcome of the session, and every report written.
+    async fn outcome(self) -> (SessionResult, Vec<Vec<u8>>) {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), self.task)
+            .await
+            .expect("the session ends")
+            .expect("the session task does not panic");
+        (outcome, self.handle.written_reports())
+    }
+}
+
+/// The keyboard's reply to `setHostFriendlyName` (`0x1815` function 4).
+fn rename_reply() -> Vec<u8> {
+    let mut report = vec![0u8; 20];
+    report[..5].copy_from_slice(&[0x11, KEYBOARD_SLOT, HOSTS_INFO_INDEX, 0x41, 0x01]);
+    report
+}
+
+#[tokio::test]
+async fn a_departure_announced_while_the_host_keys_arm_still_moves_the_mouse() {
+    // The keyboard announces its switch while the session arms its host
+    // keys. Then it leaves, and the arm fails (#1623).
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: false,
+        hosts_info: false,
+        analytics_host_key: true,
+    };
+    let incoming = Arc::new(OnceLock::<mpsc::UnboundedSender<Vec<u8>>>::new());
+    let announce = Arc::clone(&incoming);
+    let session = RunningSession::start(move |request| {
+        if is_request(request, KEYBOARD_SLOT, REPROG_INDEX, 3) {
+            if let Some(incoming) = announce.get() {
+                let _ = incoming.send(announcement(0, 1));
+            }
+            return Some(feature_error(request, HW_ERROR));
+        }
+        bolt_pair(request, keyboard)
+    })
+    .await;
+    incoming
+        .set(session.incoming.clone())
+        .expect("the sender is set once");
+    let (outcome, writes) = session.outcome().await;
+
+    assert!(
+        matches!(
+            outcome,
+            Ok(HostSwitchSessionOutcome::Departed { restore: Some(_) })
+        ),
+        "the failed write is restored after the keyboard is back"
+    );
+    let failed_at = writes
+        .iter()
+        .position(|report| is_request(report, KEYBOARD_SLOT, REPROG_INDEX, 3))
+        .expect("the session enables analytics reporting");
+    let after_failure = &writes[failed_at + 1..];
+    assert!(
+        after_failure
+            .iter()
+            .all(|report| report[1] != KEYBOARD_SLOT),
+        "no rollback write waits for the keyboard that is leaving"
+    );
+    assert!(
+        after_failure.iter().any(|report| {
+            is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1) && report[4] == 1
+        }),
+        "the mouse follows to host 1"
+    );
+}
+
+#[tokio::test]
+async fn a_rename_makes_the_session_read_the_keyboard_slots_again() {
+    // A departure maps the slots by name. After a rename through this agent,
+    // the names that the session read when it armed are old.
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: true,
+        hosts_info: true,
+        analytics_host_key: false,
+    };
+    let session = RunningSession::start(move |request| bolt_pair(request, keyboard)).await;
+    session.written(HOSTS_INFO_INDEX, 1, 3).await;
+    session.send(rename_reply());
+    session.written(HOSTS_INFO_INDEX, 1, 6).await;
+    session.send(announcement(0, 1));
+    let (outcome, writes) = session.outcome().await;
+
+    assert!(matches!(
+        outcome,
+        Ok(HostSwitchSessionOutcome::Departed { restore: None })
+    ));
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|report| is_request(report, KEYBOARD_SLOT, HOSTS_INFO_INDEX, 1))
+            .count(),
+        6,
+        "the three slots are read when the session arms and once after the rename"
+    );
+    assert!(
+        writes.iter().any(|report| {
+            is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1) && report[4] == 1
+        }),
+        "the mouse follows to host 1"
+    );
 }
 
 #[tokio::test]

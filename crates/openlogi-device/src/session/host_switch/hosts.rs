@@ -6,13 +6,15 @@
 //! cannot be read, has no table, and the session then keeps the slot numbers
 //! as they are.
 
+use std::sync::Arc;
+
 use hidpp::{
     device::Device,
     feature::{
         CreatableFeature,
         hosts_info::{HostIndex, HostSlotStatus, HostsInfoFeature},
     },
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{self, Hidpp20Error},
 };
 use tokio::time::timeout;
 use tracing::debug;
@@ -61,25 +63,41 @@ impl HostTable {
     }
 }
 
-/// Read the slot table of `device`. Returns `None` when the device has no
-/// `HostsInfo`, or when a read fails or takes longer than one operation
-/// budget.
-pub(super) async fn read_host_table(device: &mut Device) -> Option<HostTable> {
-    let index = match timed_hidpp(
+/// `setHostFriendlyName`, the `HostsInfo` function that renames a slot.
+const SET_HOST_FRIENDLY_NAME: u8 = 4;
+
+/// The `HostsInfo` feature of `device` and its index. Returns `None` when the
+/// device has no `HostsInfo`, or when the lookup fails or takes longer than
+/// one operation budget.
+async fn locate_hosts_info(device: &mut Device) -> Option<(u8, Arc<HostsInfoFeature>)> {
+    match timed_hidpp(
         "locating hosts-info feature",
         device.root().get_feature(HostsInfoFeature::ID),
     )
     .await
     {
-        Ok(Some(info)) => info.index,
-        Ok(None) => return None,
+        Ok(Some(info)) => Some((
+            info.index,
+            device.add_feature::<HostsInfoFeature>(info.index),
+        )),
+        Ok(None) => None,
         Err(error) => {
             debug!(%error, "hosts-info lookup failed; slot names are unknown");
-            return None;
+            None
         }
-    };
-    let feature = device.add_feature::<HostsInfoFeature>(index);
-    match timeout(HIDPP_OPERATION_TIMEOUT, read_slots(&feature)).await {
+    }
+}
+
+/// Read the slot table of `device`. Returns `None` when the device has no
+/// `HostsInfo`, or when a read fails or takes longer than one operation
+/// budget.
+pub(super) async fn read_host_table(device: &mut Device) -> Option<HostTable> {
+    let (_, feature) = locate_hosts_info(device).await?;
+    read_table(&feature).await
+}
+
+async fn read_table(feature: &HostsInfoFeature) -> Option<HostTable> {
+    match timeout(HIDPP_OPERATION_TIMEOUT, read_slots(feature)).await {
         Ok(Ok(table)) => Some(table),
         Ok(Err(error)) => {
             debug!(?error, "hosts-info read failed; slot names are unknown");
@@ -90,6 +108,62 @@ pub(super) async fn read_host_table(device: &mut Device) -> Option<HostTable> {
             None
         }
     }
+}
+
+/// The slot table of the keyboard while a session watches it.
+///
+/// A rename through this agent changes a name that the table holds. The
+/// session therefore reads the table again after each rename, while the
+/// keyboard is still on this host.
+#[derive(Default)]
+pub(super) struct KeyboardHosts {
+    feature: Option<(u8, Arc<HostsInfoFeature>)>,
+    table: Option<HostTable>,
+}
+
+impl KeyboardHosts {
+    /// Locate `HostsInfo` on the keyboard. The table is not read yet.
+    pub(super) async fn locate(device: &mut Device) -> Self {
+        Self {
+            feature: locate_hosts_info(device).await,
+            table: None,
+        }
+    }
+
+    /// The `HostsInfo` index, when the keyboard has the feature.
+    pub(super) fn feature_index(&self) -> Option<u8> {
+        self.feature.as_ref().map(|(index, _)| *index)
+    }
+
+    /// The table from the last read.
+    pub(super) fn table(&self) -> Option<&HostTable> {
+        self.table.as_ref()
+    }
+
+    /// Read the table again. A failed read leaves no table, so that a
+    /// departure keeps the slot numbers and does not use an old name.
+    pub(super) async fn read(&mut self) {
+        self.table = match &self.feature {
+            Some((_, feature)) => read_table(feature).await,
+            None => None,
+        };
+    }
+
+    /// Drop the table without a read, when the keyboard must not be read.
+    pub(super) fn forget(&mut self) {
+        self.table = None;
+    }
+}
+
+/// Whether `message` is a `setHostFriendlyName` report of the `HostsInfo`
+/// feature at `feature_index` of the device at `device_index`: the reply to a
+/// rename of one of its slots. An error reply uses feature index `0xff` and
+/// does not match.
+pub(super) fn renames_host(message: &v20::Message, device_index: u8, feature_index: u8) -> bool {
+    let header = message.header();
+    header.device_index == device_index
+        && header.feature_index == feature_index
+        && header.function_id.to_lo() == SET_HOST_FRIENDLY_NAME
 }
 
 async fn read_slots(feature: &HostsInfoFeature) -> Result<HostTable, Hidpp20Error> {

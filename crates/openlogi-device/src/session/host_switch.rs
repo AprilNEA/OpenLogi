@@ -55,7 +55,7 @@ pub use cookies::{
     FollowerLink, FollowerRelease, LeadCookie, link_follower_cookies_on,
     release_follower_cookies_on,
 };
-use hosts::{HostTable, follower_host, read_host_table};
+use hosts::{HostTable, KeyboardHosts, follower_host, read_host_table, renames_host};
 use restore::rollback_host_switch_start;
 pub use restore::{
     HostSwitchFollowUp, HostSwitchRestoreOutcome, HostSwitchSessionFailure,
@@ -182,37 +182,49 @@ pub async fn run_host_switch_session(
         position.feature_index,
         trigger_tx.clone(),
     );
-    let hosts = read_host_table(&mut device).await;
+    let mut hosts = KeyboardHosts::locate(&mut device).await;
+    // Installed before the table is read, so that no rename is missed.
+    let rename_listener = hosts
+        .feature_index()
+        .map(|index| listen_for_renames(&channel, keyboard_index, index, trigger_tx.clone()));
+    hosts.read().await;
 
-    let mut armed = Vec::new();
-    let mut controls_index = None;
-    if !position.announces
-        && let Some(feature) = timed_hidpp(
-            "locating host controls",
-            device.root().get_feature(reprog_controls::FEATURE_ID),
-        )
-        .await?
+    let (armed, controls_index) = match arm_host_keys(&mut device, &shared, position.announces)
+        .await
     {
-        let controls = ReprogControlsV4::new(Arc::clone(&channel), keyboard_index, feature.index);
-        if let Err(error) = arm_host_controls_inner(&controls, &mut armed).await {
-            let pending = PendingHostSwitchRestore::new(&shared, feature.index, armed);
+        Ok(armed) => armed,
+        Err(failure) => {
+            let (error, pending) = *failure;
+            // A keyboard that is leaving stops answering, so the arm can
+            // fail because of the switch itself. The linked devices still
+            // follow a departure that the keyboard queued.
+            if let Some(HostSwitchStop::Departed(host)) = queued_departure(&mut triggers, position)
+            {
+                debug!(route = %keyboard, %error, "host keys failed to arm during a departure");
+                let departure = Departure::new(&shared, hosts.table(), host);
+                return Ok(depart(
+                    departure,
+                    pending,
+                    targets,
+                    registry,
+                    channel_pool,
+                    &device_io,
+                )
+                .await);
+            }
             return Err(rollback_host_switch_start(error, pending, registry, &device_io).await);
         }
-        controls_index = Some(feature.index);
-    }
+    };
 
-    let key_listener = controls_index
-        .filter(|_| !armed.is_empty())
-        .map(|feature_index| {
-            let controls = armed.clone();
-            listen_for_host_keys(
-                &channel,
-                keyboard_index,
-                feature_index,
-                controls,
-                trigger_tx.clone(),
-            )
-        });
+    let key_listener = controls_index.filter(|_| !armed.is_empty()).map(|index| {
+        listen_for_host_keys(
+            &channel,
+            keyboard_index,
+            index,
+            armed.clone(),
+            trigger_tx.clone(),
+        )
+    });
     drop(trigger_tx);
 
     info!(
@@ -230,34 +242,102 @@ pub async fn run_host_switch_session(
         registry,
         &shared,
         device_io.clone(),
+        &mut hosts,
     )
     .await;
     drop(key_listener);
+    drop(rename_listener);
     drop(announcement_listener);
 
     let pending =
         controls_index.and_then(|index| PendingHostSwitchRestore::new(&shared, index, armed));
     if let HostSwitchStop::Departed(host) = stop {
-        info!(route = %keyboard, host, "keyboard is switching hosts; moving linked devices");
-        let departure = Departure {
-            keyboard: &shared,
-            hosts: hosts.as_ref(),
-            host,
-        };
-        follow_departure(departure, targets, registry, channel_pool, &device_io).await;
-        // A restore write now would wait for a keyboard that is leaving. The
-        // owner retries it once inventory publishes the keyboard again.
-        let restore = pending.map(|pending| {
-            if registry.is_current(&shared) {
-                pending.allow_current_channel()
-            } else {
-                pending
-            }
-        });
-        return Ok(HostSwitchSessionOutcome::Departed { restore });
+        let departure = Departure::new(&shared, hosts.table(), host);
+        return Ok(depart(
+            departure,
+            pending,
+            targets,
+            registry,
+            channel_pool,
+            &device_io,
+        )
+        .await);
     }
 
     Ok(restore_after(stop, pending, &shared, registry, &device_io).await)
+}
+
+/// The host keys that a session armed, and the `ReprogControlsV4` index
+/// they were armed through.
+type ArmedHostKeys = (Vec<ArmedControl>, Option<u8>);
+
+/// Why the host keys could not be armed, and the restoration that a partial
+/// arm left.
+type ArmFailure = (HostSwitchError, Option<PendingHostSwitchRestore>);
+
+/// Arm the host keys of the keyboard on `shared`, unless it `announces` its
+/// host changes. A keyboard without `ReprogControlsV4` arms nothing.
+async fn arm_host_keys(
+    device: &mut Device,
+    shared: &SharedChannel,
+    announces: bool,
+) -> Result<ArmedHostKeys, Box<ArmFailure>> {
+    let mut armed = Vec::new();
+    if announces {
+        return Ok((armed, None));
+    }
+    let feature = match timed_hidpp(
+        "locating host controls",
+        device.root().get_feature(reprog_controls::FEATURE_ID),
+    )
+    .await
+    {
+        Ok(Some(feature)) => feature,
+        Ok(None) => return Ok((armed, None)),
+        Err(error) => return Err(Box::new((error, None))),
+    };
+    let controls = ReprogControlsV4::new(
+        Arc::clone(shared.channel()),
+        shared.device_index(),
+        feature.index,
+    );
+    match arm_host_controls_inner(&controls, &mut armed).await {
+        Ok(()) => Ok((armed, Some(feature.index))),
+        Err(error) => {
+            let pending = PendingHostSwitchRestore::new(shared, feature.index, armed);
+            Err(Box::new((error, pending)))
+        }
+    }
+}
+
+/// Move `targets` after a keyboard that is leaving this host, and return the
+/// restoration of its host keys, which the owner finishes once the keyboard
+/// is back.
+async fn depart(
+    departure: Departure<'_>,
+    pending: Option<PendingHostSwitchRestore>,
+    targets: &[DeviceRoute],
+    registry: &ChannelRegistry,
+    channel_pool: &ChannelPool,
+    device_io: &DeviceIoGate,
+) -> HostSwitchSessionOutcome {
+    let shared = departure.keyboard;
+    info!(
+        route = %shared.route(),
+        host = departure.host,
+        "keyboard is switching hosts; moving linked devices"
+    );
+    follow_departure(departure, targets, registry, channel_pool, device_io).await;
+    // A restore write now would wait for a keyboard that is leaving. The
+    // owner retries it once inventory publishes the keyboard again.
+    let restore = pending.map(|pending| {
+        if registry.is_current(shared) {
+            pending.allow_current_channel()
+        } else {
+            pending
+        }
+    });
+    HostSwitchSessionOutcome::Departed { restore }
 }
 
 /// Listen on `channel` for the `ChangeHost` announcements of the keyboard at
@@ -300,6 +380,22 @@ fn listen_for_host_keys(
         };
         if let Some(trigger) = key_trigger(&controls, event) {
             let _ = triggers.send(trigger);
+        }
+    })
+}
+
+/// Listen on `channel` for the replies to renames of the slots of the
+/// keyboard at `keyboard_index`, and send a [`HostTrigger::Renamed`] for each.
+fn listen_for_renames(
+    channel: &HidppChannel,
+    keyboard_index: u8,
+    feature_index: u8,
+    triggers: mpsc::UnboundedSender<HostTrigger>,
+) -> MessageListenerGuard {
+    channel.add_msg_listener_guarded(move |raw, _| {
+        let message = v20::Message::from(raw);
+        if renames_host(&message, keyboard_index, feature_index) {
+            let _ = triggers.send(HostTrigger::Renamed);
         }
     })
 }
@@ -355,6 +451,8 @@ enum HostTrigger {
     Reported(u8),
     /// The keyboard announced a host change.
     Announced(HostChangeRequest),
+    /// A slot of the keyboard was renamed. The keyboard stays on this host.
+    Renamed,
 }
 
 /// The keyboard's `ChangeHost` state when the session armed.
@@ -417,6 +515,7 @@ impl KeyboardPosition {
             HostTrigger::Announced(HostChangeRequest { from, to }) => (from == self.current_host
                 && leaves_for(to))
             .then_some(HostSwitchStop::Departed(to)),
+            HostTrigger::Renamed => None,
         }
     }
 }
@@ -463,8 +562,12 @@ async fn monitor_host_switch(
     registry: &ChannelRegistry,
     shared: &SharedChannel,
     device_io: DeviceIoGate,
+    hosts: &mut KeyboardHosts,
 ) -> HostSwitchStop {
-    let stop = watch_host_switch(shutdown, triggers, position, registry, shared, device_io).await;
+    let stop = watch_host_switch(
+        shutdown, triggers, position, registry, shared, device_io, hosts,
+    )
+    .await;
     if stop == HostSwitchStop::ChannelChanged {
         queued_departure(triggers, position).unwrap_or(stop)
     } else {
@@ -496,6 +599,7 @@ async fn watch_host_switch(
     registry: &ChannelRegistry,
     shared: &SharedChannel,
     mut device_io: DeviceIoGate,
+    hosts: &mut KeyboardHosts,
 ) -> HostSwitchStop {
     let mut registry_changes = registry.subscribe();
     loop {
@@ -523,6 +627,15 @@ async fn watch_host_switch(
                 let Some(trigger) = trigger else {
                     return HostSwitchStop::for_current_publication(registry, shared);
                 };
+                if trigger == HostTrigger::Renamed {
+                    // The table names the slots that a departure maps by name.
+                    if device_io.allows_io() {
+                        hosts.read().await;
+                    } else {
+                        hosts.forget();
+                    }
+                    continue;
+                }
                 if let Some(stop) = position.stop_for(trigger) {
                     return stop;
                 }
@@ -546,9 +659,20 @@ async fn watch_host_switch(
 #[derive(Clone, Copy)]
 struct Departure<'a> {
     keyboard: &'a SharedChannel,
-    /// The keyboard's slot table, read when the session armed.
+    /// The keyboard's slot table, read when the session armed and again
+    /// after each rename.
     hosts: Option<&'a HostTable>,
     host: u8,
+}
+
+impl<'a> Departure<'a> {
+    fn new(keyboard: &'a SharedChannel, hosts: Option<&'a HostTable>, host: u8) -> Self {
+        Self {
+            keyboard,
+            hosts,
+            host,
+        }
+    }
 }
 
 /// Move every reachable linked device after a keyboard that is leaving.
