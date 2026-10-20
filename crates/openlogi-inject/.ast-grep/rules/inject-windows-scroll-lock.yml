@@ -1,0 +1,16 @@
+id: inject-windows-scroll-lock
+language: Rust
+severity: error
+message: Ordinary Windows scroll output must hold HELD_OUTPUT so it cannot interleave with a zoom pulse.
+files:
+  - crates/openlogi-inject/src/inject/windows.rs
+rule:
+  all:
+    - kind: function_item
+    - has:
+        field: name
+        regex: ^(dispatch_scroll|post_scroll)$
+    - not:
+        has:
+          pattern: let $GUARD = super::HELD_OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+          stopBy: end

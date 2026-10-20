@@ -252,6 +252,10 @@ fn post_key(vk: u16, modifiers: &[u16]) {
 /// (-1/0/1) scaled by `WHEEL_DELTA`, the fixed magnitude the four
 /// `Scroll*`/`HorizontalScroll*` actions have always used.
 fn dispatch_scroll(dx: i8, dy: i8) {
+    // Serialize wheel output with the complete Control-wheel zoom pulse.
+    let _output = super::HELD_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut inputs = Vec::with_capacity(2);
     if dy != 0 {
         inputs.push(mouse_input(MOUSEEVENTF_WHEEL, i32::from(dy) * WHEEL_DELTA));
@@ -265,6 +269,10 @@ fn dispatch_scroll(dx: i8, dy: i8) {
 }
 
 pub(super) fn post_scroll(delta: ScrollDelta) {
+    // Serialize wheel output with the complete Control-wheel zoom pulse.
+    let _output = super::HELD_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let ScrollDelta::WheelTicks { .. } = delta else {
         tracing::debug!("pixel scroll output is unsupported on Windows");
         return;
