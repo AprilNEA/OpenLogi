@@ -120,12 +120,12 @@ pub use succession::Identity;
 ///      battery. `Agent::observe_lock_keys`, [`LockKeyObservation`] and
 ///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
 ///      off over HID++ `0x4220`, for the overlay's transient indicator.
-///      Also appends `Capabilities::{onboard_profiles,
+/// v38: `Capabilities::{onboard_profiles,
 ///      button_spy}`, the `NextDpiPreset`, `PreviousDpiPreset`, `DpiShift`
 ///      and `GShift` actions, `Agent::read_onboard`,
 ///      `HidppOperation::ReadOnboard` and `PairingFailure::ReceiverFull`
 ///      appended — G-series onboard memory, host mode and G-Shift.
-pub const PROTOCOL_VERSION: u32 = 37;
+pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

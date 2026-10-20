@@ -110,7 +110,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 37);
+    assert_eq!(PROTOCOL_VERSION, 38);
 }
 
 #[test]
@@ -129,6 +129,15 @@ fn config_reload_result() {
 #[test]
 fn request_variant_order() {
     assert_wire(&AgentRequest::ProtocolVersion {}, "00");
+    assert_wire(
+        &AgentRequest::ReadOnboard {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "280008463030444341464501",
+    );
     assert_wire(
         &AgentRequest::SetDpi {
             route: DeviceRoute::Bolt {
