@@ -1,6 +1,8 @@
 //! The capture accumulator: presses, taps, swipes and raw XY across the gesture sources.
 
 use super::*;
+use openlogi_core::binding::GesturePolicy;
+use std::collections::BTreeMap;
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 
@@ -19,7 +21,6 @@ fn alternate_gesture_control_delivers_click_and_swipe() {
             &tx,
         );
         if swipe {
-            acc.backdate_hold_for_test();
             stale_report(&mut acc, &tx);
             handle_reprog(
                 &mut acc,
@@ -122,7 +123,6 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
         "the released holder still clicks"
     );
 
-    acc.backdate_hold_for_test();
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -156,7 +156,6 @@ fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
-    acc.backdate_hold_for_test();
     handle_reprog(&mut acc, both_press(), BOTH, &[], &[], &tx);
     handle_reprog(
         &mut acc,
@@ -173,7 +172,6 @@ fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
 
     // The panel lifts; the surviving hold accumulates again.
     handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
-    acc.backdate_hold_for_test();
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -211,7 +209,6 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
         "the swapped-out holder still clicks"
     );
 
-    acc.backdate_hold_for_test();
     // The contact jump — leftward, far past every threshold — must be dropped.
     handle_reprog(
         &mut acc,
@@ -243,17 +240,16 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
 }
 
 #[test]
-fn quick_tap_is_a_click_even_while_the_cursor_moves() {
+fn sub_threshold_tap_is_a_click_even_while_the_cursor_moves() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
-    // Past the stale report, so the travel below reaches the accumulator and
-    // only the hold-time gate stands between it and a swipe.
+    // Stale travel is discarded; real sub-threshold drift remains a click.
     stale_report(&mut acc, &tx);
     handle_reprog(
         &mut acc,
-        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        RawControlEvent::RawXy { dx: 49, dy: 5 },
         GESTURE,
         &[],
         &[],
@@ -275,6 +271,37 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
 }
 
 #[test]
+fn deliberate_fast_swipe_is_not_a_click() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    // Stale travel is discarded; real sub-threshold drift remains a click.
+    stale_report(&mut acc, &tx);
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 50, dy: 5 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        ))
+    );
+    assert!(
+        next_gesture(&mut rx).is_err(),
+        "a deliberate swipe emits exactly one direction"
+    );
+}
+
+#[test]
 fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
@@ -282,7 +309,6 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     stale_report(&mut acc, &tx);
     // Pretend the button has been held well past the swipe gate.
-    acc.backdate_hold_for_test();
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -316,7 +342,6 @@ fn the_haptic_panel_gestures_when_diverted_for_gestures() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, panel_press(), PANEL, &[], &[], &tx);
-    acc.backdate_hold_for_test();
     // The panel's contact jump, discarded before the accumulator sees it.
     handle_reprog(
         &mut acc,
@@ -381,7 +406,6 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, panel_press(), PANEL, &[], &[], &tx);
-    acc.backdate_hold_for_test();
     // The contact jump — leftward, far past every threshold.
     handle_reprog(
         &mut acc,
@@ -425,7 +449,6 @@ fn the_dedicated_buttons_first_sample_is_discarded_as_stale() {
     let xy = |dx, dy| RawControlEvent::RawXy { dx, dy };
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
-    acc.backdate_hold_for_test();
     handle_reprog(&mut acc, xy(-2717, -105), GESTURE, &[], &[], &tx);
     assert!(
         next_gesture(&mut rx).is_err(),
@@ -446,7 +469,6 @@ fn the_dedicated_buttons_first_sample_is_discarded_as_stale() {
     // Every press opens with its own stale report, not just the first.
     handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
-    acc.backdate_hold_for_test();
     handle_reprog(&mut acc, xy(633, -1234), GESTURE, &[], &[], &tx);
     handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
     assert_eq!(
@@ -468,7 +490,6 @@ fn an_undiverted_gesture_source_does_not_gesture() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), PANEL, &[], &[], &tx);
-    acc.backdate_hold_for_test();
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -617,7 +638,6 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
 
     acc.on_event(down, &[], &[], &buttons, &[], &tx);
     stale_report(&mut acc, &tx);
-    acc.backdate_hold_for_test();
     acc.on_event(
         RawControlEvent::RawXy { dx: -120, dy: 5 },
         &[],
@@ -688,7 +708,6 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
 
     acc.on_event(down, &[], &[], &buttons, &[], &tx);
     stale_report(&mut acc, &tx);
-    acc.backdate_hold_for_test();
     acc.on_event(
         RawControlEvent::RawXy { dx: 5, dy: -120 },
         &[],
@@ -902,4 +921,201 @@ fn raw_wheel_that_cannot_be_attributed_or_scaled_is_dropped() {
         &tx,
     );
     assert_eq!(held_wheel(&mut rx), []);
+}
+
+#[test]
+fn reconnect_reset_preserves_gesture_timing_and_retires_old_edges() {
+    use openlogi_core::binding::Action;
+    use std::time::{Duration, Instant};
+    for (direction, action, dx, dy) in [
+        (GestureDirection::Up, Action::VolumeUp, 0, -100),
+        (GestureDirection::Right, Action::NextDesktop, 100, 0),
+    ] {
+        let policy = GesturePolicy::for_bindings(&BTreeMap::from([(direction, action)]));
+        let mut acc =
+            CaptureAccum::with_policies(BTreeMap::from([(ButtonId::GestureButton, policy)]));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let now = Instant::now();
+        acc.on_event_at(now, press(), GESTURE, &[], &[], &[], &tx);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
+        );
+        acc.reset_input_state();
+        acc.on_event_at(now, press(), GESTURE, &[], &[], &[], &tx);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonDown(ButtonId::GestureButton)),
+            "a reconnected hold has a fresh edge"
+        );
+        for _ in 0..3 {
+            acc.on_event_at(
+                now,
+                RawControlEvent::RawXy { dx, dy },
+                GESTURE,
+                &[],
+                &[],
+                &[],
+                &tx,
+            );
+        }
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::Gesture(ButtonId::GestureButton, direction))
+        );
+        for _ in 0..2 {
+            acc.on_event_at(
+                now + Duration::from_millis(1),
+                RawControlEvent::RawXy { dx, dy },
+                GESTURE,
+                &[],
+                &[],
+                &[],
+                &tx,
+            );
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "reconnect must retain the configured post-action delay"
+        );
+    }
+}
+
+#[test]
+fn stale_return_travel_never_decides_the_next_held_gesture() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    for (stale_dx, stale_dy) in [(-2717, -105), (633, -1234)] {
+        handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy {
+                dx: stale_dx,
+                dy: stale_dy,
+            },
+            GESTURE,
+            &[],
+            &[],
+            &tx,
+        );
+        assert!(
+            next_gesture(&mut rx).is_err(),
+            "pre-press travel is discarded"
+        );
+        for dx in [115, 49, 76, 66] {
+            handle_reprog(
+                &mut acc,
+                RawControlEvent::RawXy { dx, dy: 2 },
+                GESTURE,
+                &[],
+                &[],
+                &tx,
+            );
+        }
+        assert_eq!(
+            next_gesture(&mut rx),
+            Ok(CapturedInput::Gesture(
+                ButtonId::GestureButton,
+                GestureDirection::Right
+            ))
+        );
+        handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+        assert!(
+            next_gesture(&mut rx).is_err(),
+            "recognized release has no click"
+        );
+    }
+}
+
+#[test]
+fn volume_motion_repeats_and_reverses_with_one_pair_of_physical_edges() {
+    use openlogi_core::binding::Action;
+    use std::time::{Duration, Instant};
+    let actions = BTreeMap::from([
+        (GestureDirection::Up, Action::VolumeUp),
+        (GestureDirection::Down, Action::VolumeDown),
+    ]);
+    let mut acc = CaptureAccum::with_policies(BTreeMap::from([(
+        ButtonId::GestureButton,
+        GesturePolicy::for_bindings(&actions),
+    )]));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let start = Instant::now();
+    acc.on_event_at(start, press(), GESTURE, &[], &[], &[], &tx);
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
+    );
+    acc.on_event_at(
+        start,
+        RawControlEvent::RawXy { dx: 0, dy: -5000 },
+        GESTURE,
+        &[],
+        &[],
+        &[],
+        &tx,
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "one stale HID++ report is discarded"
+    );
+    let mut at = start;
+    for dy in [-50, -50, 50, 50] {
+        acc.on_event_at(
+            at,
+            RawControlEvent::RawXy { dx: 0, dy },
+            GESTURE,
+            &[],
+            &[],
+            &[],
+            &tx,
+        );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::Gesture(
+                ButtonId::GestureButton,
+                if dy < 0 {
+                    GestureDirection::Up
+                } else {
+                    GestureDirection::Down
+                }
+            ))
+        );
+        acc.on_event_at(
+            at,
+            RawControlEvent::RawXy {
+                dx: 0,
+                dy: dy * 100,
+            },
+            GESTURE,
+            &[],
+            &[],
+            &[],
+            &tx,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "same-direction continuation is paced"
+        );
+        at += Duration::from_millis(20);
+        acc.on_event_at(
+            at,
+            RawControlEvent::RawXy { dx: 0, dy: 0 },
+            GESTURE,
+            &[],
+            &[],
+            &[],
+            &tx,
+        );
+        assert!(rx.try_recv().is_err(), "pause never drains pending volume");
+    }
+    acc.on_event_at(at, release(), GESTURE, &[], &[], &[], &tx);
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::GestureButton))
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "release never clicks after a gesture"
+    );
 }

@@ -33,6 +33,10 @@ fn plan() -> DeviceCapturePlan {
     )
 }
 
+fn plan_with_config(config: &openlogi_core::config::Config) -> DeviceCapturePlan {
+    crate::capture_plan::plan_for_device(config, physical_key(), "mouse-a", route(), None, 0, true)
+}
+
 fn live_session_from_plan(epoch: u64, plan: DeviceCapturePlan) -> RunningSession {
     let (stop, _rx) = oneshot::channel();
     CaptureSession::active(session_id(epoch), plan.target, plan.dispatch, stop)
@@ -818,6 +822,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         &id,
         session.dispatch(),
         CapturedInput::ButtonDown(ButtonId::GestureButton),
+        GestureAdmission::Active,
     );
     assert!(dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
 
@@ -850,4 +855,364 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
 
     scroll.shutdown();
     actions.shutdown();
+}
+
+fn gesture_dispatcher() -> (
+    InputDispatcher,
+    crate::runtime::ButtonRuntimeOwner,
+    std::sync::mpsc::Receiver<crate::runtime::ButtonRuntimeEvent>,
+    crate::runtime::scroll::ScrollRuntime,
+) {
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use crate::runtime::test_dispatcher;
+    let (actions, owner, events) = test_dispatcher();
+    let scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let outputs = GestureOutputs::new(actions, scroll.input(), Arc::default());
+    let dispatcher = InputDispatcher::new(outputs);
+    (dispatcher, owner, events, scroll)
+}
+
+#[test]
+fn hidpp_gesture_token_survives_pointer_refresh_and_cancels_on_binding_change() {
+    use crate::runtime::ButtonRuntimeEvent;
+    use openlogi_hid::CapturedInput;
+
+    let (mut dispatcher, mut owner, events, mut scroll) = gesture_dispatcher();
+    let mut initial = plan();
+    initial.dispatch.pointer_target = Some(openlogi_hook::PointerTarget::Desktop);
+    initial.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [
+            (GestureDirection::Up, Action::VolumeUp),
+            (GestureDirection::Down, Action::VolumeDown),
+        ]
+        .into(),
+    );
+    let mut session = live_session_from_plan(7, initial.clone());
+    dispatcher.dispatch(
+        session.id(),
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+        GestureAdmission::Active,
+    );
+    let ButtonRuntimeEvent::Started(press) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started")
+    };
+    for (index, direction) in [
+        GestureDirection::Up,
+        GestureDirection::Up,
+        GestureDirection::Down,
+        GestureDirection::Down,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index == 1 {
+            initial.dispatch.pointer_target = Some(openlogi_hook::PointerTarget::Window {
+                process_id: 41,
+                window_id: 7,
+            });
+            reconcile_session(
+                &mut session,
+                Some((&initial.target, &initial.dispatch)),
+                &mut dispatcher,
+            );
+        }
+        dispatcher.dispatch(
+            session.id(),
+            session.dispatch(),
+            CapturedInput::Gesture(ButtonId::GestureButton, direction),
+            GestureAdmission::Active,
+        );
+        let ButtonRuntimeEvent::Triggered {
+            press: triggered,
+            action,
+        } = events.recv_timeout(Duration::from_secs(1)).expect("pulse")
+        else {
+            panic!("triggered")
+        };
+        assert_eq!(triggered.token(), press.token());
+        let current = session.dispatch().pointer_target.unwrap();
+        assert!(
+            triggered
+                .target()
+                .resolve_with(&action, || current, |_| false, || None)
+                .is_some(),
+            "fresh HID++ semantic target reaches output admission"
+        );
+        assert_eq!(
+            action,
+            session.dispatch().gesture_bindings[&ButtonId::GestureButton][&direction]
+        );
+    }
+    initial
+        .dispatch
+        .gesture_bindings
+        .get_mut(&ButtonId::GestureButton)
+        .unwrap()
+        .insert(GestureDirection::Up, Action::Copy);
+    reconcile_session(
+        &mut session,
+        Some((&initial.target, &initial.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("cancel"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    dispatcher.dispatch(
+        session.id(),
+        session.dispatch(),
+        CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Up),
+        GestureAdmission::Active,
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "no gesture or click after cancellation"
+    );
+    scroll.shutdown();
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn real_gesture_policy_change_cancels_before_drained_reports() {
+    use crate::runtime::ButtonRuntimeEvent;
+    use openlogi_hid::CapturedInput;
+
+    let (mut dispatcher, mut owner, events, mut scroll) = gesture_dispatcher();
+    let mut config = openlogi_core::config::Config::default();
+    config.set_gesture_direction(
+        "mouse-a",
+        ButtonId::GestureButton,
+        GestureDirection::Up,
+        Action::None,
+    );
+    let original = plan_with_config(&config);
+    let mut session = live_session_from_plan(7, original);
+    dispatcher.dispatch(
+        session.id(),
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+        GestureAdmission::Active,
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("down"),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    config.set_gesture_direction(
+        "mouse-a",
+        ButtonId::GestureButton,
+        GestureDirection::Up,
+        Action::Copy,
+    );
+    let replacement = plan_with_config(&config);
+    assert_ne!(
+        session.target(),
+        &replacement.target,
+        "the enabled-direction policy changes capture identity"
+    );
+    reconcile_session(
+        &mut session,
+        Some((&replacement.target, &replacement.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(!session.is_active());
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("cancel"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    for input in [
+        CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Up),
+        CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Click),
+        CapturedInput::ButtonUp(ButtonId::GestureButton),
+    ] {
+        dispatcher.dispatch(
+            session.id(),
+            session.dispatch(),
+            input,
+            GestureAdmission::Restoring,
+        );
+    }
+    assert!(
+        events.try_recv().is_err(),
+        "old action and click stay canceled during firmware restoration"
+    );
+    // Physical edges still drain without creating semantic owners.
+    for input in [
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+        CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Up),
+        CapturedInput::ButtonUp(ButtonId::GestureButton),
+    ] {
+        dispatcher.dispatch(
+            session.id(),
+            session.dispatch(),
+            input,
+            GestureAdmission::Restoring,
+        );
+    }
+    assert!(matches!(
+        events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("drained down"),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    assert!(matches!(
+        events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("drained up"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    assert!(
+        events.try_recv().is_err(),
+        "drained lifecycle has no action"
+    );
+    scroll.shutdown();
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn retiring_gestures_preserves_an_independent_wheel_hold() {
+    use crate::runtime::ButtonRuntimeEvent;
+    use openlogi_core::binding::WheelHoldBinding;
+    use openlogi_hid::CapturedInput;
+    let (mut dispatcher, mut owner, events, mut scroll) = gesture_dispatcher();
+    let mut initial = plan();
+    initial.dispatch.bindings.insert(
+        ButtonId::Back,
+        Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::None)),
+    );
+    initial.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [(GestureDirection::Up, Action::VolumeUp)].into(),
+    );
+    let session = live_session_from_plan(11, initial);
+    for button in [ButtonId::Back, ButtonId::GestureButton] {
+        dispatcher.dispatch(
+            session.id(),
+            session.dispatch(),
+            CapturedInput::ButtonDown(button),
+            GestureAdmission::Active,
+        );
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)).expect("down"),
+            ButtonRuntimeEvent::Started(_)
+        ));
+    }
+    dispatcher.cancel_gesture_session(session.id(), session.dispatch());
+    assert!(dispatcher.holds_gesture_press(session.id(), ButtonId::Back));
+    assert!(!dispatcher.holds_gesture_press(session.id(), ButtonId::GestureButton));
+    assert!(matches!(
+        events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("gesture canceled"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    assert!(
+        events.try_recv().is_err(),
+        "wheel hold stays live until its own terminal edge"
+    );
+    scroll.shutdown();
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn real_gesture_duration_change_cancels_before_drained_reports() {
+    use crate::runtime::ButtonRuntimeEvent;
+    use openlogi_hid::CapturedInput;
+
+    let (mut dispatcher, mut owner, events, mut scroll) = gesture_dispatcher();
+    let mut config = openlogi_core::config::Config::default();
+    config.set_gesture_direction(
+        "mouse-a",
+        ButtonId::GestureButton,
+        GestureDirection::Up,
+        Action::VolumeUp,
+    );
+    let original = plan_with_config(&config);
+    let mut session = live_session_from_plan(7, original);
+    dispatcher.dispatch(
+        session.id(),
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+        GestureAdmission::Active,
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("down"),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    config.set_gesture_direction(
+        "mouse-a",
+        ButtonId::GestureButton,
+        GestureDirection::Up,
+        Action::Copy,
+    );
+    let replacement = plan_with_config(&config);
+    assert_ne!(
+        session.target(),
+        &replacement.target,
+        "the volume response policy changes capture identity"
+    );
+    reconcile_session(
+        &mut session,
+        Some((&replacement.target, &replacement.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(!session.is_active());
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("cancel"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    for input in [
+        CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Up),
+        CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Click),
+        CapturedInput::ButtonUp(ButtonId::GestureButton),
+    ] {
+        dispatcher.dispatch(
+            session.id(),
+            session.dispatch(),
+            input,
+            GestureAdmission::Restoring,
+        );
+    }
+    assert!(
+        events.try_recv().is_err(),
+        "old action and click stay canceled during firmware restoration"
+    );
+    // Physical edges still drain without creating semantic owners.
+    for input in [
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+        CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Up),
+        CapturedInput::ButtonUp(ButtonId::GestureButton),
+    ] {
+        dispatcher.dispatch(
+            session.id(),
+            session.dispatch(),
+            input,
+            GestureAdmission::Restoring,
+        );
+    }
+    assert!(matches!(
+        events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("drained down"),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    assert!(matches!(
+        events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("drained up"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    assert!(
+        events.try_recv().is_err(),
+        "drained lifecycle has no action"
+    );
+    scroll.shutdown();
+    assert!(owner.shutdown());
 }
