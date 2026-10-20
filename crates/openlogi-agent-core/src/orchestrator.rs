@@ -1104,11 +1104,18 @@ impl Orchestrator {
                 .map(openlogi_hid::SmartShiftStatus::from),
         };
         if !settings.is_empty() {
+            let cycles = Arc::clone(&self.shared.dpi_cycle);
+            let dpi_route = route.clone();
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
                 settings,
                 &self.shared.report_rate_order,
                 &self.shared.capture_plans,
+                move || {
+                    if let Ok(mut cycles) = cycles.write() {
+                        cycles.invalidate_current(&dpi_route);
+                    }
+                },
             );
         }
         // A disabled entry is re-applied too: it writes black, and a device

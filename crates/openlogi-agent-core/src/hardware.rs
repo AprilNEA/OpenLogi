@@ -830,7 +830,11 @@ pub(crate) fn reapply_mouse_volatile_in_background(
     settings: VolatileMouseSettings,
     report_rate_order: &WriteOrder,
     capture_plans: &SharedCapturePlans,
+    invalidate_dpi: impl Fn() + Send + 'static,
 ) {
+    if settings.dpi.is_some() {
+        invalidate_dpi();
+    }
     match op.resolve() {
         Ok(shared) => drop(shared),
         Err(reason) => {
@@ -879,6 +883,9 @@ pub(crate) fn reapply_mouse_volatile_in_background(
                     openlogi_hid::set_dpi_on(&shared, dpi).await
                 })
                 .await;
+                // A timeout can still have changed the sensor. Forget any
+                // cached action value acquired while this write was in flight.
+                invalidate_dpi();
                 log_outcome(index, "DPI write", result, |()| {
                     debug!(index, %dpi, "DPI written to device");
                 });

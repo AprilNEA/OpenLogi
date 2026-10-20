@@ -41,6 +41,16 @@ impl DpiCycles {
         self.by_key.get(key)?.current
     }
 
+    /// A reconnect write makes cached action values unreliable. The next shift
+    /// must read the sensor, including when the write failed or timed out.
+    pub(crate) fn invalidate_current(&mut self, route: &DeviceRoute) {
+        for state in self.by_key.values_mut() {
+            if state.target.as_ref() == Some(route) {
+                state.current = None;
+            }
+        }
+    }
+
     /// The write target for `key` (same fallback as [`Self::state_for`])
     /// without a mutable borrow — for dispatch that only needs the route, like
     /// the SmartShift toggle.
@@ -186,6 +196,25 @@ mod tests {
         assert_eq!((key, low), ("a", Dpi::new(800)));
         cycles.state_for(Some("a")).unwrap().step(true);
         assert_eq!(cycles.current("a"), Some(Dpi::new(1600)));
+    }
+
+    #[test]
+    fn reconnect_invalidation_only_forgets_the_written_route() {
+        let mut cycles = cycles_with("a", 1);
+        cycles.by_key.extend(cycles_with("b", 2).by_key);
+        for state in cycles.by_key.values_mut() {
+            state.set(1);
+        }
+        let route = cycles.target_for(Some("a")).unwrap();
+        cycles.invalidate_current(&route);
+        assert_eq!(cycles.current("a"), None);
+        assert_eq!(cycles.current("b"), Some(Dpi::new(1600)));
+        // A preset chosen during the reapply must also be forgotten when the
+        // hardware write completes, so a future hold reads the actual DPI.
+        cycles.state_for(Some("a")).unwrap().set(1);
+        cycles.invalidate_current(&route);
+        assert_eq!(cycles.current("a"), None);
+        assert_eq!(cycles.current("b"), Some(Dpi::new(1600)));
     }
 
     #[test]
