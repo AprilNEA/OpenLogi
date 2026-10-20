@@ -21,10 +21,11 @@ pub(crate) const EDITOR_LIST_MAX_H: f32 = 360.;
 pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 
 /// The action catalog grouped by [`Category`], preserving catalog order within
-/// each group and first-seen order across groups.
+/// each group and first-seen order across groups. Actions this platform cannot
+/// carry out ([`Action::fires_here`]) are left out.
 pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
     let mut sections: Vec<(Category, Vec<Action>)> = Vec::new();
-    for action in Action::catalog() {
+    for action in Action::catalog().into_iter().filter(Action::fires_here) {
         let category = action.category();
         if let Some(section) = sections
             .iter_mut()
@@ -76,6 +77,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::BrowserForward => "action-icons/arrow-right.svg",
         Action::NewTab => "action-icons/square-plus.svg",
         Action::CloseTab => "action-icons/square-x.svg",
+        Action::CloseWindow => "action-icons/x.svg",
         Action::ReopenTab => "action-icons/rotate-ccw.svg",
         Action::NextTab => "action-icons/chevron-right.svg",
         Action::PrevTab => "action-icons/chevron-left.svg",
@@ -89,12 +91,14 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::LockScreen => "action-icons/lock.svg",
         Action::Screenshot | Action::CaptureRegion => "action-icons/camera.svg",
         Action::Sleep => "action-icons/moon.svg",
+        Action::ShutDown => "action-icons/power.svg",
         Action::PlayPause => "action-icons/play.svg",
         Action::NextTrack => "action-icons/skip-forward.svg",
         Action::PrevTrack => "action-icons/skip-back.svg",
         Action::VolumeUp => "action-icons/volume-2.svg",
         Action::VolumeDown => "action-icons/volume-1.svg",
         Action::MuteVolume => "action-icons/volume-x.svg",
+        Action::MuteMicrophone => "action-icons/mic-off.svg",
         Action::CycleDpiPresets | Action::SetDpiPreset(_) => "action-icons/gauge.svg",
         Action::ToggleSmartShift => "action-icons/refresh-cw.svg",
         Action::ScrollUp => "action-icons/chevrons-up.svg",

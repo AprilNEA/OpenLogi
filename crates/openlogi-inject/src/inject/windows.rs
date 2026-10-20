@@ -100,6 +100,7 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
         Shortcut::Save => "Ctrl+S",
         Shortcut::NewTab => "Ctrl+T",
         Shortcut::CloseTab => "Ctrl+W",
+        Shortcut::CloseWindow => "Alt+F4",
         Shortcut::ReopenTab => "Ctrl+Shift+T",
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
@@ -139,6 +140,36 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::Sleep => {
             tracing::debug!("Sleep has no Windows synthesis yet — action skipped");
         }
+        // Windows has no virtual key for the microphone mute.
+        NativeAction::MicMute => {
+            tracing::debug!("MicMute has no Windows synthesis yet — action skipped");
+        }
+        NativeAction::PowerOff => power_off_system(),
+    }
+}
+
+/// `CREATE_NO_WINDOW` (`winbase.h`): the agent has no console, so a console
+/// program it starts would otherwise get a window of its own.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// `shutdown /s /t 0`: the standard shutdown of the signed-in user, which
+/// needs no elevation. Started without a console window and reaped on a
+/// detached thread, which logs a refusal.
+fn power_off_system() {
+    use std::os::windows::process::CommandExt as _;
+
+    match std::process::Command::new("shutdown")
+        .args(["/s", "/t", "0"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => {
+            tracing::debug!("Shut Down via shutdown /s");
+            std::thread::spawn(move || super::log_failed_child("shutdown /s", child));
+        }
+        Err(e) => tracing::warn!(error = %e, "shutdown spawn failed"),
     }
 }
 

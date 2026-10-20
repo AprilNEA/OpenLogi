@@ -382,6 +382,10 @@ fn all_catalog_variants_roundtrip_toml() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one literal row per persisted Action variant; splitting the list would hide a missing name"
+)]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
     actions.extend([
@@ -429,6 +433,7 @@ fn persisted_action_variant_names_are_stable() {
         "BrowserForward",
         "CaptureRegion",
         "CloseTab",
+        "CloseWindow",
         "Copy",
         "CustomShortcut",
         "Cut",
@@ -444,6 +449,7 @@ fn persisted_action_variant_names_are_stable() {
         "MissionControl",
         "MouseBack",
         "MouseForward",
+        "MuteMicrophone",
         "MuteVolume",
         "NewTab",
         "NextDesktop",
@@ -470,6 +476,7 @@ fn persisted_action_variant_names_are_stable() {
         "SetDpiPreset",
         "ShowActionsRing",
         "ShowDesktop",
+        "ShutDown",
         "Sleep",
         "TapKeyHoldingModifiers",
         "ToggleSmartShift",
@@ -481,6 +488,22 @@ fn persisted_action_variant_names_are_stable() {
     ];
     expected.sort_unstable();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn only_mute_microphone_depends_on_the_platform() {
+    assert_eq!(
+        Action::MuteMicrophone.fires_here(),
+        cfg!(target_os = "linux")
+    );
+    for action in Action::catalog() {
+        if action != Action::MuteMicrophone {
+            assert!(
+                action.fires_here(),
+                "{action:?} should fire on every platform"
+            );
+        }
+    }
 }
 
 #[test]

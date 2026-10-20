@@ -92,6 +92,7 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::BrowserForward => "Alt+Right",
         Shortcut::NewTab => "Ctrl+T",
         Shortcut::CloseTab => "Ctrl+W",
+        Shortcut::CloseWindow => "Alt+F4",
         Shortcut::ReopenTab => "Ctrl+Shift+T",
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
@@ -219,6 +220,9 @@ fn dispatch_generic_linux_native(action: &Action, native: NativeAction) {
         }
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
+        NativeAction::MicMute => press_mic_mute(),
+        // logind PowerOff() via the system bus.
+        NativeAction::PowerOff => power_off_system(),
     }
 }
 
@@ -237,7 +241,16 @@ fn dispatch_hyprland_native(action: &Action, native: NativeAction) {
             press_key(&[], KeyCode::KEY_SYSRQ);
         }
         NativeAction::Sleep => sleep_system(),
+        NativeAction::MicMute => press_mic_mute(),
+        NativeAction::PowerOff => power_off_system(),
     }
+}
+
+/// `KEY_MICMUTE` (XF86AudioMicMute): GNOME, KDE and most compositors bind it
+/// to the default source's mute toggle and show their own indicator, so the
+/// desktop's audio stack does the work, as `KEY_MUTE` does for the output.
+fn press_mic_mute() {
+    press_key(&[], KeyCode::KEY_MICMUTE);
 }
 
 fn skip_unsupported_native(action: &Action) {
@@ -535,6 +548,7 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     // Multimedia
     KeyCode::KEY_PLAYPAUSE, KeyCode::KEY_NEXTSONG, KeyCode::KEY_PREVIOUSSONG,
     KeyCode::KEY_VOLUMEUP,  KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_MUTE,
+    KeyCode::KEY_MICMUTE,
     // Mouse buttons (injected as EV_KEY with BTN_* codes). The side pair
     // must be registered here or the kernel silently drops their events.
     KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE,
@@ -962,6 +976,27 @@ fn sleep_system() {
     ) {
         Ok(_) => tracing::debug!("Sleep via logind Suspend"),
         Err(e) => tracing::warn!("logind Suspend failed: {e}"),
+    }
+}
+
+/// Power the system off via logind's `PowerOff()` on the system bus. As for
+/// [`sleep_system`], `false` declines the interactive polkit prompt: a session
+/// that may not power off gets a logged failure, not an authentication dialog
+/// from a background agent.
+fn power_off_system() {
+    let Some(conn) = SYSTEM_BUS.as_ref() else {
+        tracing::warn!("no system bus — Shut Down skipped");
+        return;
+    };
+    match conn.call_method(
+        Some("org.freedesktop.login1"),
+        "/org/freedesktop/login1",
+        Some("org.freedesktop.login1.Manager"),
+        "PowerOff",
+        &(false,),
+    ) {
+        Ok(_) => tracing::debug!("Shut Down via logind PowerOff"),
+        Err(e) => tracing::warn!("logind PowerOff failed: {e}"),
     }
 }
 

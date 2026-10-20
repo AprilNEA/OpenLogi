@@ -206,6 +206,22 @@ pub enum Action {
     /// this to a balanced tap of the whole chord, exactly as they do for
     /// [`Action::HoldShortcut`].
     TapKeyHoldingModifiers(KeyCombo),
+    /// Close the focused window: Alt+F4 on Linux and Windows; on macOS the
+    /// window's close button through Accessibility, since ⌘W closes only a tab.
+    ///
+    /// Declared last because the variant index is part of the IPC wire
+    /// format; it is listed with the other window actions in the catalog.
+    CloseWindow,
+    /// Toggle the system microphone mute.
+    ///
+    /// Declared last because the variant index is part of the IPC wire
+    /// format; it is listed with the other media actions in the catalog.
+    MuteMicrophone,
+    /// Shut the computer down.
+    ///
+    /// Declared last because the variant index is part of the IPC wire
+    /// format; it is listed with the other system actions in the catalog.
+    ShutDown,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -297,12 +313,14 @@ macro_rules! for_each_unit_action {
             NextDesktop "Next Desktop" "actions.next_desktop" Navigation NextDesktop,
             ShowDesktop "Show Desktop" "actions.show_desktop" Navigation Monitor,
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
+            CloseWindow "Close Window" "common.close_window" Navigation CloseTab,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,
             Screenshot "Screenshot" "actions.screenshot" System Camera,
             CaptureRegion "Capture Region" "actions.capture_region" System Camera,
             Sleep "Sleep" "actions.sleep" System Monitor,
+            ShutDown "Shut Down" "actions.shut_down" System Monitor,
             ShowActionsRing "Actions Ring" "action_ring.actions_ring" System Grid,
             // Media
             PlayPause "Play / Pause" "actions.play_pause" Media Play,
@@ -311,6 +329,7 @@ macro_rules! for_each_unit_action {
             VolumeUp "Volume Up" "actions.volume_up" Media Volume,
             VolumeDown "Volume Down" "actions.volume_down" Media VolumeDown,
             MuteVolume "Mute" "actions.mute" Media Mute,
+            MuteMicrophone "Mute Microphone" "actions.mute_microphone" Media Mute,
             // DPI
             CycleDpiPresets "Cycle DPI Presets" "pointer.cycle_dpi_presets" Dpi Gauge,
             ToggleSmartShift "Toggle SmartShift" "pointer.toggle_smartshift" Dpi Refresh,
@@ -445,5 +464,15 @@ impl Action {
             Self::TapKeyHoldingModifiers(combo) => Some((combo, HeldKeys::ModifiersOnly)),
             _ => None,
         }
+    }
+
+    /// Whether this platform's injection backend can carry the action out, so
+    /// a picker offers only bindings that fire.
+    ///
+    /// Mute Microphone presses `KEY_MICMUTE` on Linux; macOS and Windows have
+    /// no system-wide microphone mute key, and their backends only log.
+    #[must_use]
+    pub const fn fires_here(&self) -> bool {
+        cfg!(target_os = "linux") || !matches!(self, Self::MuteMicrophone)
     }
 }

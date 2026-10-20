@@ -127,6 +127,8 @@ pub enum Shortcut {
     NewTab,
     /// Close the current tab.
     CloseTab,
+    /// Close the focused window.
+    CloseWindow,
     /// Reopen the last closed tab.
     ReopenTab,
     /// Switch to the next tab.
@@ -197,6 +199,10 @@ pub enum NativeAction {
     CaptureRegion,
     /// Put the computer to sleep.
     Sleep,
+    /// Toggle the system microphone mute.
+    MicMute,
+    /// Shut the computer down.
+    PowerOff,
 }
 
 /// A power-user scripting escape hatch, borrowed from the originating
@@ -242,6 +248,7 @@ impl Action {
             Action::BrowserForward => Effect::Shortcut(Shortcut::BrowserForward),
             Action::NewTab => Effect::Shortcut(Shortcut::NewTab),
             Action::CloseTab => Effect::Shortcut(Shortcut::CloseTab),
+            Action::CloseWindow => Effect::Shortcut(Shortcut::CloseWindow),
             Action::ReopenTab => Effect::Shortcut(Shortcut::ReopenTab),
             Action::NextTab => Effect::Shortcut(Shortcut::NextTab),
             Action::PrevTab => Effect::Shortcut(Shortcut::PrevTab),
@@ -258,6 +265,7 @@ impl Action {
             Action::Screenshot => Effect::Native(NativeAction::Screenshot),
             Action::CaptureRegion => Effect::Native(NativeAction::CaptureRegion),
             Action::Sleep => Effect::Native(NativeAction::Sleep),
+            Action::ShutDown => Effect::Native(NativeAction::PowerOff),
 
             Action::PlayPause => Effect::Media(MediaKey::PlayPause),
             Action::NextTrack => Effect::Media(MediaKey::NextTrack),
@@ -265,6 +273,7 @@ impl Action {
             Action::VolumeUp => Effect::Media(MediaKey::VolumeUp),
             Action::VolumeDown => Effect::Media(MediaKey::VolumeDown),
             Action::MuteVolume => Effect::Media(MediaKey::Mute),
+            Action::MuteMicrophone => Effect::Native(NativeAction::MicMute),
 
             // DPI/SmartShift/the Actions Ring/OpenApplication are all handled
             // above (or beside) the injector — see `Effect::AgentSide`.

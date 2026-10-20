@@ -75,6 +75,7 @@ mod spaces;
 mod symbolic_hotkey;
 #[cfg(test)]
 mod tests;
+mod window;
 
 use app_services::symbol as app_services_symbol;
 pub(super) use browser::ax_browser_navigate;
@@ -86,6 +87,7 @@ pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
 pub(super) use spaces::natural_scrolling;
 use spaces::{next_desktop, previous_desktop};
 use symbolic_hotkey::{capture_region, screenshot};
+use window::WindowClose;
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -108,6 +110,7 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) if MENU_SHORTCUTS.contains(&shortcut) => {
             press_menu_shortcut(&combo(shortcut));
         }
+        Effect::Shortcut(Shortcut::CloseWindow) => close_focused_window(),
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
@@ -139,6 +142,24 @@ fn dispatch_click(button: MouseButton) {
         // "button 5").
         MouseButton::Back => post_other_button(3),
         MouseButton::Forward => post_other_button(4),
+    }
+}
+
+/// ⌘W closes only the current tab in a tabbed window (Safari, Chrome,
+/// Finder), so press the focused window's own close button. Windows the
+/// Accessibility tree gives no close button keep ⌘W.
+fn close_focused_window() {
+    match window::ax_close_focused_window() {
+        WindowClose::Pressed => {
+            tracing::debug!("Close Window via the focused window's AXCloseButton");
+        }
+        WindowClose::TargetChanged => {
+            tracing::debug!("frontmost app changed before the close button press — dropped");
+        }
+        WindowClose::NotPressed => {
+            tracing::debug!("no AX close button on the focused window — pressing ⌘W");
+            press_combo(&combo(Shortcut::CloseWindow));
+        }
     }
 }
 
@@ -236,7 +257,9 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::BrowserBack => "Cmd+[",
         Shortcut::BrowserForward => "Cmd+]",
         Shortcut::NewTab => "Cmd+T",
-        Shortcut::CloseTab => "Cmd+W",
+        // `CloseWindow` presses the window's close button through AX first
+        // (`close_focused_window`); ⌘W is its fallback.
+        Shortcut::CloseTab | Shortcut::CloseWindow => "Cmd+W",
         Shortcut::ReopenTab => "Cmd+Shift+T",
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
@@ -270,6 +293,11 @@ fn dispatch_native(native: NativeAction) {
         // synthesised power key), so ask powermanagement directly. `pmset
         // sleepnow` works for the console user without privileges.
         NativeAction::Sleep => sleep_system(),
+        // macOS has no system-wide microphone mute key or event to post.
+        NativeAction::MicMute => {
+            tracing::debug!("MicMute has no macOS synthesis yet — action skipped");
+        }
+        NativeAction::PowerOff => power_off_system(),
     }
 }
 
@@ -638,6 +666,25 @@ fn post_media_key(nx_key: i32) {
             CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&cg_event));
         }
     });
+}
+
+/// Ask loginwindow to shut down (the `aevtrsdn` Apple event behind the Apple
+/// menu's Shut Down…), so macOS shows its own confirmation with the usual
+/// countdown and apps get the chance to save. Spawned like [`sleep_system`];
+/// the reaper thread logs a refusal.
+fn power_off_system() {
+    match std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", "tell application \"loginwindow\" to «event aevtrsdn»"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => {
+            tracing::debug!("Shut Down via loginwindow aevtrsdn");
+            std::thread::spawn(move || super::log_failed_child("osascript shut down", child));
+        }
+        Err(e) => tracing::warn!(error = %e, "osascript shut down spawn failed"),
+    }
 }
 
 /// Put the system to sleep via `pmset sleepnow` — sleep has no CGEvent
