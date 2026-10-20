@@ -1336,7 +1336,8 @@ async fn color_led_effects_shared(
 async fn a_fixed_colour_targets_each_zones_own_fixed_effect() -> Result<(), WriteError> {
     // Zone 0 lists the fixed colour third; zone 1 after an effect id this
     // crate does not model; zone 2 has none, so it is left alone; zone 3 has a
-    // location the parser rejects, so it keeps the legacy index 1.
+    // location the parser rejects, so its list cannot be read and it is left
+    // alone too, although its index 0 holds the fixed colour.
     const ZONES: ScriptedZones = &[
         (0x0001, &[0x0000, 0x0004, 0x0001]),
         (0x0006, &[0x0063, 0x0004, 0x0001]),
@@ -1347,7 +1348,7 @@ async fn a_fixed_colour_targets_each_zones_own_fixed_effect() -> Result<(), Writ
 
     set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await?;
 
-    assert_eq!(zone_effect_writes(&handle), [(0, 2), (1, 2), (3, 1)]);
+    assert_eq!(zone_effect_writes(&handle), [(0, 2), (1, 2)]);
     Ok(())
 }
 
@@ -1390,6 +1391,44 @@ async fn a_keyboard_whose_zones_offer_no_fixed_colour_is_not_written() {
             feature_hex: 0x8070
         }),
         "Auto falls through to the next path on this error"
+    );
+    assert!(zone_effect_writes(&handle).is_empty());
+}
+
+#[tokio::test]
+async fn a_keyboard_reporting_no_zones_is_not_written() {
+    // The writer used to guess effect index 1 on zones 0..4 here.
+    let (shared, handle) = color_led_effects_shared(&[]).await;
+
+    let result =
+        set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8070
+        }),
+        "no zone offers a fixed colour, so Auto falls through"
+    );
+    assert!(zone_effect_writes(&handle).is_empty());
+}
+
+#[tokio::test]
+async fn a_zone_whose_info_is_rejected_is_not_written_with_a_guessed_index() {
+    // The location is one the parser rejects, so the zone's effect list
+    // cannot be read. The writer used to write effect index 1 to it, which
+    // here is a colour wave that would take the RGB bytes as its parameters.
+    const ZONES: ScriptedZones = &[(0x0042, &[0x0003, 0x0004])];
+    let (shared, handle) = color_led_effects_shared(ZONES).await;
+
+    let result =
+        set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8070
+        })
     );
     assert!(zone_effect_writes(&handle).is_empty());
 }

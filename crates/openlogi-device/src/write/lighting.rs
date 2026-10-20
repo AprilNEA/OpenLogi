@@ -61,11 +61,9 @@ const KEYS_PER_FRAME: u8 = 0x0e;
 // avoiding flash wear on every colour pick.
 //
 // Each zone lists its own effects, so the fixed colour's index is read from
-// that list. Index 0x01 is only the legacy guess, kept where no list can be
-// read: a device reporting zero zones, and a zone whose info is rejected.
-const LEGACY_FIXED_EFFECT_INDEX: u8 = 0x01;
-// The zones the legacy guess covers on a device that reports zero zones.
-const LEGACY_FALLBACK_ZONES: u8 = 4;
+// that list. A zone whose list cannot be read is left alone, because no index
+// there is known to be the fixed colour.
+//
 // Zones are paced apart because the controller can drop closely-spaced reports.
 const FRAME_GAP: Duration = Duration::from_millis(8);
 
@@ -347,7 +345,7 @@ async fn resolve_feature_index(
 /// Set a solid colour via `ColorLedEffects` (`0x8070`): a fixed effect per zone,
 /// stored in RAM only (overrides the running onboard profile without touching
 /// flash). `FeatureUnsupported` when the device exposes no `0x8070` or none of
-/// its zones offers a fixed colour.
+/// its zones offers a fixed colour, including a device that reports no zones.
 ///
 /// Uses the typed [`ColorLedEffectsFeature`] wrapper: the real zone count is read
 /// first so only existing zones are driven (a typed `set_zone_effect` awaits the
@@ -378,17 +376,7 @@ async fn set_color_effects(
     params[0] = r;
     params[1] = g;
     params[2] = b;
-    let targets: Vec<(u8, u8)> = if zone_count == 0 {
-        debug!(
-            index,
-            "0x8070 reported zero zones; applying legacy 4-zone fallback"
-        );
-        (0..LEGACY_FALLBACK_ZONES)
-            .map(|zone| (zone, LEGACY_FIXED_EFFECT_INDEX))
-            .collect()
-    } else {
-        fixed_color_targets(&feature, index, zone_count).await?
-    };
+    let targets = fixed_color_targets(&feature, index, zone_count).await?;
     if targets.is_empty() {
         debug!(index, zone_count, "no 0x8070 zone offers a fixed colour");
         return Err(WriteError::FeatureUnsupported {
@@ -420,8 +408,9 @@ async fn set_color_effects(
 /// effect sits there with RGB bytes as its parameters.
 ///
 /// An effect id this crate does not model is not the fixed colour, so it is
-/// passed over. A zone whose info is rejected (an unmodelled location) keeps
-/// the legacy index rather than going dark.
+/// passed over. A zone whose info is rejected (an unmodelled location) is
+/// skipped too: its effect list cannot be read, so no index is known to be
+/// the fixed colour.
 async fn fixed_color_targets(
     feature: &ColorLedEffectsFeature,
     index: u8,
@@ -434,9 +423,8 @@ async fn fixed_color_targets(
             Err(Hidpp20Error::UnsupportedResponse) => {
                 debug!(
                     index,
-                    zone, "0x8070 zone info rejected; using the legacy fixed-colour index"
+                    zone, "0x8070 zone info rejected; leaving the zone unwritten"
                 );
-                targets.push((zone, LEGACY_FIXED_EFFECT_INDEX));
                 continue;
             }
             Err(error) => return Err(classify_lighting_error(error)),
