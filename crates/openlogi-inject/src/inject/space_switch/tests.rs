@@ -376,3 +376,93 @@ fn slide_eases_out() {
         assert!((pair[1] / pair[0] - 0.85).abs() < 1e-9, "{steps:?}");
     }
 }
+
+/// A clock that moves only when the slide sleeps. One sleep can end late.
+struct FakePace {
+    now: Duration,
+    /// The index of the sleep that ends late, and by how much.
+    late: Option<(usize, Duration)>,
+    sleeps: usize,
+    /// Each posted frame with the clock time it went out.
+    posted: Vec<(Duration, usize)>,
+}
+
+impl FakePace {
+    fn starting_at(now: Duration) -> Self {
+        Self {
+            now,
+            late: None,
+            sleeps: 0,
+            posted: vec![],
+        }
+    }
+}
+
+impl Pace<usize> for FakePace {
+    fn now(&self) -> Duration {
+        self.now
+    }
+    fn sleep(&mut self, duration: Duration) {
+        self.now += duration;
+        if let Some((index, by)) = self.late
+            && index == self.sleeps
+        {
+            self.now += by;
+        }
+        self.sleeps += 1;
+    }
+    fn post(&mut self, frame: &usize) {
+        self.posted.push((self.now, *frame));
+    }
+}
+
+/// The slide's frame times, each with its index as the frame.
+fn indexed_slide() -> Vec<(Duration, usize)> {
+    slide(Direction::Next)
+        .iter()
+        .enumerate()
+        .map(|(index, frame)| (frame.at, index))
+        .collect()
+}
+
+#[test]
+fn pace_posts_every_frame_at_its_time_from_the_start() {
+    let frames = indexed_slide();
+    let start = Duration::from_secs(5);
+    let mut out = FakePace::starting_at(start);
+    pace(&frames, &mut out);
+    let expected: Vec<_> = frames
+        .iter()
+        .map(|(at, index)| (start + *at, *index))
+        .collect();
+    assert_eq!(out.posted, expected);
+    // The first frame is due at once; every later one waits one period.
+    assert_eq!(out.sleeps, frames.len() - 1);
+}
+
+#[test]
+fn a_late_wakeup_delays_only_the_frames_already_due() {
+    let frames = indexed_slide();
+    let start = Duration::from_secs(5);
+    let mut out = FakePace::starting_at(start);
+    // The sleep before frame 3 (due at 49.8 ms) ends 40 ms late, so the
+    // clock reads 89.8 ms when it wakes.
+    out.late = Some((2, Duration::from_millis(40)));
+    pace(&frames, &mut out);
+    let woke = start + Duration::from_micros(89_800);
+    let posted_at: Vec<_> = out.posted.iter().map(|(at, _)| *at).collect();
+    for (index, (at, _)) in frames.iter().enumerate() {
+        let expected = match index {
+            // Frames 3, 4 (66.4 ms) and 5 (83.0 ms) are due by the late
+            // wakeup and go out at once, with no sleep between them.
+            3..=5 => woke,
+            // Every other frame keeps its time from the start, so the
+            // slide still ends on time.
+            _ => start + *at,
+        };
+        assert_eq!(posted_at[index], expected, "frame {index}: {posted_at:?}");
+    }
+    let order: Vec<_> = out.posted.iter().map(|(_, index)| *index).collect();
+    assert_eq!(order, (0..frames.len()).collect::<Vec<_>>());
+    assert_eq!(out.sleeps, frames.len() - 3);
+}

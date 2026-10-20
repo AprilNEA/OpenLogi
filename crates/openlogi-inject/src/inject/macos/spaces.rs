@@ -31,7 +31,7 @@ use objc2_foundation::{
 
 use super::super::DesktopSwitch;
 use super::super::space_switch::{
-    self, Backend, Direction, Failure, Lease, PostGate, SlideFrame, SlidePhase, SpaceState,
+    self, Backend, Direction, Failure, Lease, Pace, PostGate, SlideFrame, SlidePhase, SpaceState,
 };
 use super::{app_services, app_services_symbol};
 
@@ -239,17 +239,32 @@ impl Output {
                     CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
                 }
             }
-            Self::Slide(frames) => {
-                let start = Instant::now();
-                for (at, event) in frames {
-                    // Wait until the frame's time from the start, not from
-                    // the frame before, so a late wakeup does not delay the
-                    // rest. A late frame goes out at once.
-                    std::thread::sleep((start + *at).saturating_duration_since(Instant::now()));
-                    CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
-                }
-            }
+            Self::Slide(frames) => space_switch::pace(
+                frames,
+                &mut SessionTap {
+                    origin: Instant::now(),
+                },
+            ),
         }
+    }
+}
+
+/// Posts a slide's frames to the session event tap on the real clock.
+struct SessionTap {
+    origin: Instant,
+}
+
+impl Pace<CFRetained<CGEvent>> for SessionTap {
+    fn now(&self) -> Duration {
+        self.origin.elapsed()
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+
+    fn post(&mut self, event: &CFRetained<CGEvent>) {
+        CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
     }
 }
 

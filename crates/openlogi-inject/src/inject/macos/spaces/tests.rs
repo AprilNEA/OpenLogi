@@ -234,7 +234,8 @@ fn an_instant_switch_keeps_its_two_frames() {
 }
 
 #[test]
-fn an_animated_switch_posts_every_slide_frame_at_its_time() {
+fn an_animated_switch_prepares_every_slide_frame_with_its_time() {
+    // Posting at those times is `space_switch::pace`, tested with a fake clock.
     for direction in [Direction::Previous, Direction::Next] {
         let output =
             Output::prepare(DesktopSwitch::Animated, direction).expect("CGEvent allocation");

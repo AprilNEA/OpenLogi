@@ -85,6 +85,32 @@ pub(super) fn slide(direction: Direction) -> Vec<SlideFrame> {
     frames
 }
 
+/// The clock a slide is paced by and the sink its frames go to.
+pub(super) trait Pace<T> {
+    /// Time since a fixed point of this clock.
+    fn now(&self) -> Duration;
+    /// Block for `duration`. A sleep can end late.
+    fn sleep(&mut self, duration: Duration);
+    /// Post one frame.
+    fn post(&mut self, frame: &T);
+}
+
+/// Post `frames` in order, each at its time from the start of the call.
+///
+/// The wait targets a frame's time from the start, not from the frame
+/// before, so a late wakeup does not delay the frames after it. A frame
+/// that is already due goes out at once.
+pub(super) fn pace<T>(frames: &[(Duration, T)], out: &mut impl Pace<T>) {
+    let start = out.now();
+    for (at, frame) in frames {
+        let wait = start.saturating_add(*at).saturating_sub(out.now());
+        if !wait.is_zero() {
+            out.sleep(wait);
+        }
+        out.post(frame);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SpaceState {
     pub display: String,
