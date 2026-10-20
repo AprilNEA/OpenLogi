@@ -48,7 +48,7 @@
       [196, 157, 1329],
       [215, 180, 928]
     ],
-    "raw_battery": "0x1004 UnifiedBattery: percentage=75 level=Full status=Discharging"
+    "raw_battery": "0x1004 UnifiedBattery: version=3 percentage=75 level=Full status=Discharging external_power=0x00"
   },
   "mx-ergo-001": {
     "cases": ["backlight-state", "dpi-info", "feature-table", "raw-battery", "reprogrammable-controls", "smartshift-status", "wheel-mode"],
@@ -153,7 +153,7 @@
       [196, 157, 1329],
       [215, 180, 928]
     ],
-    "raw_battery": "0x1004 UnifiedBattery: percentage=45 level=Good status=Discharging"
+    "raw_battery": "0x1004 UnifiedBattery: version=3 percentage=45 level=Good status=Discharging external_power=0x00"
   },
   "mx-master-4-001": {
     "cases": ["backlight-state", "dpi-info", "feature-table", "raw-battery", "reprogrammable-controls", "smartshift-status", "wheel-mode"],
@@ -216,6 +216,6 @@
       [416, 265, 1329],
       [215, 180, 928]
     ],
-    "raw_battery": "0x1004 UnifiedBattery: percentage=40 level=Good status=Discharging"
+    "raw_battery": "0x1004 UnifiedBattery: version=5 percentage=40 level=Good status=Discharging external_power=0x00 fast_charging=0x00 removable_battery=0x00"
   }
 }

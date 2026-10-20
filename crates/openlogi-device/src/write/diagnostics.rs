@@ -11,7 +11,7 @@ use hidpp::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
     feature::feature_set::FeatureSetFeature,
-    feature::unified_battery::UnifiedBatteryFeature,
+    feature::unified_battery::{BatteryInfo as UnifiedBatteryInfo, UnifiedBatteryFeature},
     protocol::v20::Hidpp20Error,
 };
 
@@ -159,16 +159,13 @@ pub async fn read_battery_raw(
             .await
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
 
-        match open_feature::<UnifiedBatteryFeature>(&mut device).await {
-            Ok(feature) => {
+        match super::open_feature_with_version::<UnifiedBatteryFeature>(&mut device).await {
+            Ok((feature, version)) => {
                 let info = feature
                     .get_battery_info()
                     .await
                     .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-                return Ok(format!(
-                    "0x1004 UnifiedBattery: percentage={} level={:?} status={:?}",
-                    info.charging_percentage, info.level, info.status
-                ));
+                return Ok(unified_battery_line(version, info));
             }
             Err(WriteError::FeatureUnsupported { .. }) => {}
             Err(e) => return Err(e),
@@ -208,6 +205,31 @@ pub async fn read_battery_raw(
         })
     })
     .await
+}
+
+/// The [`read_battery_raw`] line for a `0x1004` status at feature `version`.
+/// The fields after the charging status print as raw bytes; a field that the
+/// version or a short reply leaves out is not printed.
+fn unified_battery_line(version: u8, info: UnifiedBatteryInfo) -> String {
+    let extended = info.extended(version);
+    let fields: String = [
+        extended
+            .external_power
+            .map(|value| format!(" external_power={:#04x}", value.raw())),
+        extended
+            .fast_charging
+            .map(|value| format!(" fast_charging={:#04x}", value.raw())),
+        extended
+            .removable_battery
+            .map(|value| format!(" removable_battery={:#04x}", value.raw())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    format!(
+        "0x1004 UnifiedBattery: version={version} percentage={} level={:?} status={:?}{fields}",
+        info.charging_percentage, info.level, info.status
+    )
 }
 
 /// Firmware fields for one entity whose record the device answered and this
