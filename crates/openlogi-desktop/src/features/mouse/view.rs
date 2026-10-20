@@ -331,6 +331,28 @@ impl MouseModelView {
     }
 }
 
+fn visible_gesture_buttons(
+    maps: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    editing_app: Option<&str>,
+    overridden: Option<&BTreeMap<ButtonId, Action>>,
+) -> Vec<ButtonId> {
+    maps.keys()
+        .copied()
+        .filter(|button| {
+            editing_app.is_none()
+                || !overridden.is_some_and(|overrides| overrides.contains_key(button))
+        })
+        .collect()
+}
+
+fn native_gestures_for(selected: Option<MouseControlId>, cx: &App) -> bool {
+    selected.is_some_and(|selected| match selected {
+        MouseControlId::Button(button) => AppState::try_read(cx)
+            .is_some_and(|state| state.current_native_gesture_supported(button)),
+        MouseControlId::ThumbwheelRotation => false,
+    })
+}
+
 impl Render for MouseModelView {
     #[expect(
         clippy::too_many_lines,
@@ -357,17 +379,10 @@ impl Render for MouseModelView {
 
         self.reset_for_device(device_key);
 
-        let gesture_buttons: Vec<ButtonId> = gesture_maps
-            .keys()
-            .copied()
-            .filter(|button| {
-                editing_app.is_none()
-                    || !overridden.is_some_and(|overrides| overrides.contains_key(button))
-            })
-            .collect();
+        let gesture_buttons =
+            visible_gesture_buttons(gesture_maps, editing_app.as_deref(), overridden);
 
-        let viewport_h = f32::from(window.viewport_size().height);
-        let viewport_w = f32::from(window.viewport_size().width);
+        let viewport = window.viewport_size();
         let ModelLayout {
             canvas_w,
             mouse_left,
@@ -375,7 +390,13 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset, layout, viewport_w, viewport_h, thumbwheel);
+        } = model_layout(
+            asset,
+            layout,
+            viewport.width.into(),
+            viewport.height.into(),
+            thumbwheel,
+        );
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active).or(self.selected);
@@ -429,6 +450,7 @@ impl Render for MouseModelView {
                 dpi_gestures,
                 virtual_thumbwheel,
                 wheel_hold,
+                native_gestures: native_gestures_for(self.selected, cx),
                 editing_app: editing_app.as_deref(),
                 overridden,
                 extra_actions,

@@ -94,6 +94,18 @@ pub struct DeviceCapturePlan {
 impl DeviceCapturePlan {
     #[must_use]
     pub fn with_onboard(mut self, config: &Config, layout: Option<&GamingLayout>) -> Self {
+        if let Some(layout) = layout {
+            self.dispatch
+                .side_gesture_bindings
+                .retain(|button, _| !layout.needs_host_mode(*button));
+            self.dispatch
+                .gesture_bindings
+                .retain(|button, _| !layout.needs_host_mode(*button));
+            self.target
+                .spec
+                .divert_gesture_buttons
+                .retain(|(_, button)| !layout.needs_host_mode(*button));
+        }
         let key = &self.dispatch.config_key;
         let shift = config.uses_gshift(key);
         // Spy reports carry no motion, so gesture buttons stay with the OS hook.
@@ -117,6 +129,9 @@ impl DeviceCapturePlan {
                                 || (shift
                                     && may_capture(button)
                                     && !keeps_gestures(button)
+                                    && (config.app_settings.capture_mouse_events
+                                        || !button.is_os_hook_button())
+                                    && self.dispatch.shift_bindings.contains_key(&button)
                                     && layout.remappable().any(|b| b == button))
                                 || diverted.iter().any(|&(_, b)| b == button);
                             (button, captured)
@@ -548,14 +563,22 @@ mod tests {
     }
 
     #[test]
-    fn gshift_captures_every_remappable_button() {
+    fn gshift_only_captures_buttons_with_shifted_overrides() {
         let layout = Some(&openlogi_core::binding::G502_LIGHTSPEED);
         let mut cfg = Config::default();
         cfg.set_binding("g502", ButtonId::Forward, Binding::Single(Action::GShift));
         let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
         let slots = host_slots(&plan).expect("host mode");
-        assert!(slots.contains(&(ButtonId::MiddleClick, true)));
-        assert!(slots.contains(&(ButtonId::Back, true)));
+        assert!(slots.contains(&(ButtonId::MiddleClick, false)));
+        assert!(slots.contains(&(ButtonId::Back, false)));
+        cfg.set_gshift_binding("g502", ButtonId::MiddleClick, Some(Action::Copy));
+        let shifted =
+            plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
+        assert!(
+            host_slots(&shifted)
+                .unwrap()
+                .contains(&(ButtonId::MiddleClick, true))
+        );
         assert!(slots.contains(&(ButtonId::LeftClick, false)));
 
         cfg.set_gesture_mode("g502", ButtonId::Back, true);

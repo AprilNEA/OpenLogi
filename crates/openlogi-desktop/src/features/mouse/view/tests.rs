@@ -221,6 +221,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 dpi_gestures: false,
                 virtual_thumbwheel: false,
                 wheel_hold: &BTreeSet::new(),
+                native_gestures: true,
                 editing_app: None,
                 overridden: None,
                 extra_actions: &[],
