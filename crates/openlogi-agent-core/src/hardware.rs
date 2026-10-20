@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
@@ -33,6 +33,7 @@ use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
 
 use crate::capture_plan::SharedCapturePlans;
+use crate::dpi::DpiBeforeShift;
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
@@ -1037,13 +1038,14 @@ pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dp
 }
 
 /// [`write_dpi_in_background`] for a held DPI shift. With `before`, the sensor
-/// DPI is read into it first. If that read fails nothing is written: the
-/// release would have nothing to return to.
+/// DPI is read into it first unless an earlier hold's reading is still owed a
+/// restore. If that read fails nothing is written: the release would have
+/// nothing to return to.
 pub(crate) fn hold_dpi_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
     dpi: Dpi,
-    before: Option<Arc<OnceLock<Dpi>>>,
+    before: Option<DpiBeforeShift>,
 ) {
     let index = op.route.device_index();
     let turn = op.access.transport_turns.turn_for(&op.route);
@@ -1055,9 +1057,10 @@ pub(crate) fn hold_dpi_in_background(
                 &turn,
                 || async move {
                     let shared = op.resolve()?;
-                    if let Some(before) = before {
-                        let read = openlogi_hid::get_dpi_info_on(&shared).await?.current;
-                        let _ = before.set(read);
+                    if let Some(before) = before
+                        && before.get().is_none()
+                    {
+                        before.set(openlogi_hid::get_dpi_info_on(&shared).await?.current);
                     }
                     openlogi_hid::set_dpi_on(&shared, dpi).await.map(|()| true)
                 },
@@ -1077,10 +1080,12 @@ pub(crate) fn hold_dpi_in_background(
     );
 }
 
-/// Write the DPI `restore` yields once this write's turn comes, if any.
+/// Write the DPI `restore` yields once this write's turn comes, if any, and
+/// forget `before` once it is written.
 pub(crate) fn restore_dpi_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
+    before: DpiBeforeShift,
     restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
 ) {
     let index = op.route.device_index();
@@ -1097,6 +1102,7 @@ pub(crate) fn restore_dpi_in_background(
                     };
                     let shared = op.resolve()?;
                     openlogi_hid::set_dpi_on(&shared, dpi).await?;
+                    before.clear();
                     Ok(Some(Some(dpi)))
                 },
                 || async { Ok(None) },
