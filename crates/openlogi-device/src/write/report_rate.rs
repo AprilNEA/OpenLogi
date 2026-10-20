@@ -54,7 +54,7 @@ fn legacy_rate(interval_ms: u8) -> ReportRate {
 }
 
 /// The `0x8060` interval whose rate is `rate`, if there is one.
-fn legacy_interval(rate: ReportRate) -> Option<u8> {
+pub(crate) fn legacy_interval(rate: ReportRate) -> Option<u8> {
     legacy_intervals_ms().find(|&interval_ms| legacy_rate(interval_ms) == rate)
 }
 

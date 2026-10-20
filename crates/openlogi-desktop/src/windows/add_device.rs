@@ -144,6 +144,7 @@ pub(crate) fn pairing_failure_text(failure: &PairingFailure) -> String {
             tr!("pairing.pairing_device_no_longer_available").to_string()
         }
         PairingFailure::NoActiveSession => tr!("pairing.no_pairing_session_is_active").to_string(),
+        PairingFailure::ReceiverFull => tr!("pairing.receiver_full").to_string(),
     }
 }
 

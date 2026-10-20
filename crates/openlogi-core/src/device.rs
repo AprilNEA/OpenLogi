@@ -189,6 +189,12 @@ pub struct Capabilities {
     /// persisted identity.
     #[serde(default)]
     pub virtual_thumbwheel: bool,
+    /// HID++ `0x8100` onboard profiles.
+    #[serde(default)]
+    pub onboard_profiles: bool,
+    /// HID++ `0x8110` button spy.
+    #[serde(default)]
+    pub button_spy: bool,
 }
 
 impl Capabilities {
@@ -196,7 +202,7 @@ impl Capabilities {
     /// Membership of a driving feature ID flips the corresponding flag.
     #[must_use]
     pub fn from_feature_ids(ids: &[u16]) -> Self {
-        const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
+        const BUTTONS: [u16; 6] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04, 0x8110];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
         // Every family here is driven by `set_keyboard_color`, which tries
         // effect engines before per-zone paths. The 0x198x backlight is not
@@ -223,6 +229,8 @@ impl Capabilities {
             // Set by the `0x1b04` control walk; the feature table alone
             // cannot say which controls report raw wheel.
             virtual_thumbwheel: false,
+            onboard_profiles: ids.contains(&0x8100),
+            button_spy: ids.contains(&0x8110),
         }
     }
 
@@ -737,6 +745,8 @@ mod tests {
                     backlight: false,
                     easy_switch: false,
                     virtual_thumbwheel: false,
+                    onboard_profiles: false,
+                    button_spy: false,
                 }),
                 settings_revision: 0,
             }],
@@ -855,6 +865,8 @@ mod tests {
                 backlight: false,
                 easy_switch: false,
                 virtual_thumbwheel: false,
+                onboard_profiles: false,
+                button_spy: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -878,6 +890,8 @@ mod tests {
                 backlight: false,
                 easy_switch: false,
                 virtual_thumbwheel: false,
+                onboard_profiles: false,
+                button_spy: false,
             }
         );
         // No driving features → nothing offered.

@@ -381,6 +381,19 @@ fn all_catalog_variants_roundtrip_toml() {
     }
 }
 
+/// The variant name `action` is stored under in `config.toml`.
+fn persisted_name(action: Action) -> String {
+    match toml::Value::try_from(action).expect("serialize action") {
+        toml::Value::String(name) => name,
+        toml::Value::Table(table) if table.len() == 1 => table
+            .into_iter()
+            .next()
+            .map(|(key, _)| key)
+            .expect("one variant key"),
+        value => panic!("unexpected action shape: {value:?}"),
+    }
+}
+
 #[test]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
@@ -408,20 +421,7 @@ fn persisted_action_variant_names_are_stable() {
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
     ]);
-    let mut actual: Vec<String> = actions
-        .into_iter()
-        .map(
-            |action| match toml::Value::try_from(action).expect("serialize action") {
-                toml::Value::String(name) => name,
-                toml::Value::Table(table) if table.len() == 1 => table
-                    .into_iter()
-                    .next()
-                    .map(|(key, _)| key)
-                    .expect("one variant key"),
-                value => panic!("unexpected action shape: {value:?}"),
-            },
-        )
-        .collect();
+    let mut actual: Vec<String> = actions.into_iter().map(persisted_name).collect();
     actual.sort();
     let mut expected = [
         "AppExpose",
@@ -433,6 +433,7 @@ fn persisted_action_variant_names_are_stable() {
         "CustomShortcut",
         "Cut",
         "CycleDpiPresets",
+        "DpiShift",
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
@@ -447,6 +448,7 @@ fn persisted_action_variant_names_are_stable() {
         "MuteVolume",
         "NewTab",
         "NextDesktop",
+        "NextDpiPreset",
         "NextTab",
         "NextTrack",
         "None",
@@ -456,6 +458,7 @@ fn persisted_action_variant_names_are_stable() {
         "PrevTab",
         "PrevTrack",
         "PreviousDesktop",
+        "PreviousDpiPreset",
         "Redo",
         "ReloadPage",
         "ReopenTab",

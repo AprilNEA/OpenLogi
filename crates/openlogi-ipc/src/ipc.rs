@@ -20,8 +20,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PairingError, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    LightCommand, OnboardState, PairingError, PasskeyMethod, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -120,6 +120,11 @@ pub use succession::Identity;
 ///      battery. `Agent::observe_lock_keys`, [`LockKeyObservation`] and
 ///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
 ///      off over HID++ `0x4220`, for the overlay's transient indicator.
+///      Also appends `Capabilities::{onboard_profiles,
+///      button_spy}`, the `NextDpiPreset`, `PreviousDpiPreset`, `DpiShift`
+///      and `GShift` actions, `Agent::read_onboard`,
+///      `HidppOperation::ReadOnboard` and `PairingFailure::ReceiverFull`
+///      appended — G-series onboard memory, host mode and G-Shift.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -374,6 +379,8 @@ pub enum PairingFailure {
     UnknownDevice,
     /// There is no pairing session to receive this command.
     NoActiveSession,
+    /// The receiver has no free slot.
+    ReceiverFull,
 }
 
 /// Immediate command-acceptance failure for pairing RPCs.
@@ -429,6 +436,7 @@ impl From<PairingError> for PairingFailure {
             PairingError::MalformedNotification(what) => Self::Hid {
                 message: format!("malformed pairing notification ({what})"),
             },
+            PairingError::ReceiverFull => Self::ReceiverFull,
         }
     }
 }
@@ -827,4 +835,6 @@ pub trait Agent {
     /// generation `since`, or with the unchanged indicator after
     /// [`OBSERVE_HOLD`]. Pass `0` to read the current indicator at once.
     async fn observe_lock_keys(since: Generation) -> LockKeyObservation;
+    /// Read a G-series mouse's onboard memory.
+    async fn read_onboard(route: DeviceRoute) -> Result<OnboardState, WriteError>;
 }
