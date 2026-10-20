@@ -296,6 +296,11 @@ pub struct AppSettings {
     /// [`LockKey::is_indicated_here`](crate::device::LockKey::is_indicated_here)).
     #[serde(default = "default_true")]
     pub lock_key_notifications: bool,
+    /// Whether Previous Desktop and Next Desktop slide to the neighbouring
+    /// desktop the way a three-finger swipe does. **On by default**, as in
+    /// Logi Options+; off switches instantly. Only macOS reads it.
+    #[serde(default = "default_true")]
+    pub animate_desktop_switch: bool,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -500,6 +505,7 @@ impl Default for AppSettings {
             mouse_profile_target: MouseProfileTarget::Pointer,
             low_battery_notifications: true,
             lock_key_notifications: true,
+            animate_desktop_switch: true,
         }
     }
 }
@@ -507,8 +513,9 @@ impl Default for AppSettings {
 /// serde default for the on-by-default [`AppSettings`] toggles
 /// ([`AppSettings::show_in_menu_bar`], [`AppSettings::capture_mouse_events`],
 /// [`AppSettings::auto_download_assets`],
-/// [`AppSettings::low_battery_notifications`]), so configs predating a field
-/// keep the out-of-the-box behavior.
+/// [`AppSettings::low_battery_notifications`],
+/// [`AppSettings::animate_desktop_switch`]), so configs predating a field keep
+/// the out-of-the-box behavior.
 fn default_true() -> bool {
     true
 }

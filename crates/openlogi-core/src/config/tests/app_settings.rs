@@ -194,3 +194,22 @@ fn lock_key_notifications_stay_on_unless_turned_off() {
     cfg.app_settings.lock_key_notifications = false;
     assert!(!write_and_read(&cfg).app_settings.lock_key_notifications);
 }
+
+#[test]
+fn desktop_switches_slide_unless_turned_off() {
+    assert!(Config::default().app_settings.animate_desktop_switch);
+
+    let predating: Config = toml::from_str(
+        r"
+            schema_version = 9
+            [app_settings]
+            lock_key_notifications = false
+        ",
+    )
+    .expect("config predating the desktop-switch setting loads");
+    assert!(predating.app_settings.animate_desktop_switch);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.animate_desktop_switch = false;
+    assert!(!write_and_read(&cfg).app_settings.animate_desktop_switch);
+}

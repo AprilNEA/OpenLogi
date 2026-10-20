@@ -4,6 +4,52 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: Desktop switches slide like an Options+ three-finger swipe, and can switch at once
+
+Previous Desktop and Next Desktop on macOS posted a DockSwipe of two frames,
+Began and Ended, so the Dock changed Space with no slide (#1673). Two pull
+requests proposed a slide. #1847 posts the user's "Move left a space" and
+"Move right a space" shortcuts (symbolic hotkeys 79 and 81) and falls back to
+the DockSwipe when they are off. #1672 posts DockSwipe frames that follow a
+live drag. OpenLogi posts timed DockSwipe frames, as Logi Options+ does for
+its three-finger swipe, and keeps the two-frame switch as an option.
+
+- **The Options+ timing.** Logi Options+ 2.8 posts one DockSwipe frame per
+  tick of a 16.6 ms timer (`injectionPeriodInMs` in
+  `gesture_handler_3_finger_horz_swipe`), and each tick consumes 15% of the
+  motion still pending. OpenLogi has no hand to follow, so it starts with one
+  desktop width pending. It posts 19 moving frames, 16.6 ms apart, until less
+  than 5% remains (progress 0.954). An Ended frame with an exit velocity then
+  lets the Dock finish. The progress is past the Options+ completion threshold
+  (0.3), so the Dock completes the switch. These values come from static
+  analysis of the Options+ binary, not from a trace of its events.
+- **Not the shortcut.** Options+ also has a Ctrl+Arrow keystroke for a
+  one-shot move (`+[injector InjectMoveToLeftSpace]`), which is close to
+  #1847. The static analysis did not find which actions call it. The shortcut
+  can be off or rebound, and then #1847 switches with no slide again. The
+  DockSwipe needs no user setting, and the Space confirmation per display
+  stays as it is.
+- **Frame fields from #1672.** Up to macOS 26 a slide frame carries the
+  fields #1672 found, with the progress in field 124. macOS 27 reads an
+  attached `IOHIDEvent` instead (#1703). There each frame carries the same
+  progress in its DockSwipe progress field, and the Ended frame adds the
+  velocity child, as Mac Mouse Fix posts its swipes on macOS 27. One
+  `LazyLock` owns the choice of layout, and an ast-grep rule keeps it the
+  only one.
+- **On by default, with an off switch.** `animate_desktop_switch` is on,
+  because the Options+ swipe animates. Off restores the two-frame switch for
+  users who prefer no slide. Only macOS reads it, and the settings page shows
+  it only on macOS.
+- **The action waits for the slide to be posted.** The action worker posts
+  every frame before it takes the next action, about 315 ms, so two switches
+  in a row do not mix their frames. A switch that starts while another is
+  under way is skipped, as before.
+
+Verified on macOS 26.7 with a screen recording: the slide shows about eight
+intermediate frames at 30 fps, and the two-frame switch jumps in one frame.
+The macOS 27 slide is verified only as event construction in unit tests;
+nobody has run it on macOS 27 yet.
+
 ## 2026-10: macOS key synthesis types through a virtual HID keyboard when entitled
 
 A key that `CGEventPost` injects enters the window server as software input.

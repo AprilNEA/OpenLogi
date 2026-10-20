@@ -18,7 +18,7 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
-    Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
+    AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
@@ -446,6 +446,7 @@ impl Orchestrator {
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
+        openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
         let shared = SharedHandles {
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),
@@ -1410,6 +1411,7 @@ impl Orchestrator {
             self.config.app_settings.smooth_scroll,
             self.config.app_settings.vertical_scroll_sensitivity,
         );
+        openlogi_inject::set_desktop_switch(desktop_switch(&self.config.app_settings));
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self
@@ -1517,6 +1519,15 @@ struct LightWrite {
     route: DeviceRoute,
     light: LightSettings,
     capabilities: LightCapabilities,
+}
+
+/// How Previous and Next Desktop switch under `settings`.
+fn desktop_switch(settings: &AppSettings) -> openlogi_inject::DesktopSwitch {
+    if settings.animate_desktop_switch {
+        openlogi_inject::DesktopSwitch::Animated
+    } else {
+        openlogi_inject::DesktopSwitch::Instant
+    }
 }
 
 /// Replace the value behind an `RwLock`, logging (not panicking) on poison so a

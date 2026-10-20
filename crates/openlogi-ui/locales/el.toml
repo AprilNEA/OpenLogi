@@ -81,6 +81,8 @@ low_battery_notifications_description = "Εμφάνιση ειδοποίησης
 lock_key_notifications = "Ειδοποιήσεις πλήκτρων κλειδώματος"
 lock_key_notifications_description = "Σύντομη εμφάνιση στην οθόνη όταν ένα πληκτρολόγιο ενεργοποιεί ή απενεργοποιεί το Caps Lock, το Num Lock ή το Scroll Lock."
 lock_key_notifications_description_macos = "Σύντομη εμφάνιση στην οθόνη όταν ένα πληκτρολόγιο ενεργοποιεί ή απενεργοποιεί το Caps Lock."
+animate_desktop_switch = "Κίνηση στην εναλλαγή γραφείων εργασίας"
+animate_desktop_switch_description = "Οι ενέργειες «Προηγούμενο γραφείο εργασίας» και «Επόμενο γραφείο εργασίας» ολισθαίνουν στο διπλανό γραφείο εργασίας, όπως η σάρωση με τρία δάχτυλα. Απενεργοποιήστε για άμεση εναλλαγή."
 openlogi = "OpenLogi"
 
 [device]

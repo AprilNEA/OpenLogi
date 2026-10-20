@@ -81,6 +81,8 @@ low_battery_notifications_description = "Mostrar un aviso en la parte inferior d
 lock_key_notifications = "Avisos de teclas de bloqueo"
 lock_key_notifications_description = "Mostrar brevemente en pantalla cuando un teclado activa o desactiva Bloq Mayús, Bloq Num o Bloq Despl."
 lock_key_notifications_description_macos = "Mostrar brevemente en pantalla cuando un teclado activa o desactiva Bloq Mayús."
+animate_desktop_switch = "Animar el cambio de escritorio"
+animate_desktop_switch_description = "Escritorio anterior y Escritorio siguiente se deslizan al escritorio contiguo, como al deslizar tres dedos. Desactívalo para cambiar al instante."
 openlogi = "OpenLogi"
 
 [device]

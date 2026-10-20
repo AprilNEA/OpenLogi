@@ -81,6 +81,8 @@ low_battery_notifications_description = "Einen Hinweis am unteren Bildschirmrand
 lock_key_notifications = "Hinweise zu Sperrtasten"
 lock_key_notifications_description = "Kurz auf dem Bildschirm anzeigen, wenn eine Tastatur die Feststelltaste, Numlock oder Scroll Lock ein- oder ausschaltet."
 lock_key_notifications_description_macos = "Kurz auf dem Bildschirm anzeigen, wenn eine Tastatur die Feststelltaste ein- oder ausschaltet."
+animate_desktop_switch = "Schreibtischwechsel animieren"
+animate_desktop_switch_description = "Vorheriger Schreibtisch und Nächster Schreibtisch gleiten wie beim Streichen mit drei Fingern zum benachbarten Schreibtisch. Ausschalten, um sofort zu wechseln."
 openlogi = "OpenLogi"
 
 [device]

@@ -81,6 +81,8 @@ low_battery_notifications_description = "Visa en avisering längst ned på skär
 lock_key_notifications = "Aviseringar om låstangenter"
 lock_key_notifications_description = "Visa kort på skärmen när ett tangentbord slår på eller av Caps Lock, Num Lock eller Scroll Lock."
 lock_key_notifications_description_macos = "Visa kort på skärmen när ett tangentbord slår på eller av Caps Lock."
+animate_desktop_switch = "Animera byte av skrivbord"
+animate_desktop_switch_description = "Föregående skrivbord och Nästa skrivbord glider till skrivbordet bredvid, som ett svep med tre fingrar. Stäng av för att byta direkt."
 openlogi = "OpenLogi"
 
 [device]

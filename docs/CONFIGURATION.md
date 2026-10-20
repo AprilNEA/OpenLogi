@@ -90,6 +90,14 @@ optional physical device key.
   one on screen. The state a keyboard reports when it connects is not
   announced. With the setting off the agent shows nothing, and an indicator
   already on screen still closes on its own. Fn Lock is not shown.
+- `animate_desktop_switch` (default `true`, macOS only): Previous Desktop and
+  Next Desktop slide to the neighbouring Space the way a three-finger swipe
+  does. The agent posts the swipe as 20 frames, one every 16.6 ms, and each
+  moving frame covers 15% of the distance left; the Dock finishes the slide.
+  The action returns when the last frame is posted, about 315 ms later. With
+  the setting off, the agent posts two frames and the Dock changes Space at
+  once. A change applies from the next switch. Windows and Linux ignore the
+  setting.
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use

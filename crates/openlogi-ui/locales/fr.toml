@@ -81,6 +81,8 @@ low_battery_notifications_description = "Afficher une alerte en bas de l'écran 
 lock_key_notifications = "Alertes des touches de verrouillage"
 lock_key_notifications_description = "Afficher brièvement à l'écran lorsqu'un clavier active ou désactive Verr. Maj, Verr. Num ou Arrêt défil."
 lock_key_notifications_description_macos = "Afficher brièvement à l'écran lorsqu'un clavier active ou désactive Verr. Maj."
+animate_desktop_switch = "Animer le changement de bureau"
+animate_desktop_switch_description = "Bureau précédent et Bureau suivant glissent vers le bureau voisin, comme un balayage à trois doigts. Désactivez pour changer instantanément."
 openlogi = "OpenLogi"
 
 [device]

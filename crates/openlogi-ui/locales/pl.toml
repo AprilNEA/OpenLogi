@@ -81,6 +81,8 @@ low_battery_notifications_description = "Pokazuj powiadomienie u dołu ekranu, g
 lock_key_notifications = "Powiadomienia o klawiszach blokady"
 lock_key_notifications_description = "Krótko pokazuj na ekranie, gdy klawiatura włącza lub wyłącza Caps Lock, Num Lock albo Scroll Lock."
 lock_key_notifications_description_macos = "Krótko pokazuj na ekranie, gdy klawiatura włącza lub wyłącza Caps Lock."
+animate_desktop_switch = "Animuj przełączanie pulpitów"
+animate_desktop_switch_description = "Poprzedni pulpit i Następny pulpit przesuwają się na sąsiedni pulpit jak przy przesunięciu trzema palcami. Wyłącz, aby przełączać natychmiast."
 openlogi = "OpenLogi"
 
 [device]

@@ -81,6 +81,8 @@ low_battery_notifications_description = "Zobrazit upozornění v dolní části 
 lock_key_notifications = "Upozornění na zámkové klávesy"
 lock_key_notifications_description = "Krátce zobrazit na obrazovce, když klávesnice zapne nebo vypne Caps Lock, Num Lock nebo Scroll Lock."
 lock_key_notifications_description_macos = "Krátce zobrazit na obrazovce, když klávesnice zapne nebo vypne Caps Lock."
+animate_desktop_switch = "Animovat přepínání ploch"
+animate_desktop_switch_description = "Předchozí plocha a Další plocha se na sousední plochu přesunou posunem, jako při přejetí třemi prsty. Po vypnutí se plochy přepínají okamžitě."
 openlogi = "OpenLogi"
 
 [device]

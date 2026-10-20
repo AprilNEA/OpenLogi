@@ -81,6 +81,8 @@ low_battery_notifications_description = "デバイスのバッテリー残量が
 lock_key_notifications = "ロックキーの通知"
 lock_key_notifications_description = "キーボードで Caps Lock、Num Lock、Scroll Lock がオンまたはオフになったときに、画面に短く表示します。"
 lock_key_notifications_description_macos = "キーボードで Caps Lock がオンまたはオフになったときに、画面に短く表示します。"
+animate_desktop_switch = "デスクトップ切り替えのアニメーション"
+animate_desktop_switch_description = "「前のデスクトップ」と「次のデスクトップ」で、3本指スワイプのように隣のデスクトップへスライドします。オフにするとすぐに切り替わります。"
 openlogi = "OpenLogi"
 
 [device]

@@ -7,6 +7,16 @@ use std::time::{Duration, Instant};
 const PREPARATION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Logi Options+ 2.8 drives its three-finger horizontal swipe from a timer of
+/// this period (`injectionPeriodInMs`, 16.6 ms), one frame per tick.
+const SLIDE_PERIOD: Duration = Duration::from_micros(16_600);
+/// Each frame travels this share of the distance still to go, so the slide
+/// eases out the way Options+ consumes its pending swipe motion per tick.
+const SLIDE_STEP: f64 = 0.15;
+/// The slide lets go once less than this share of a desktop width remains;
+/// the Dock finishes the switch from there.
+const SLIDE_RELEASE: f64 = 0.05;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Direction {
     Previous,
@@ -20,6 +30,59 @@ impl Direction {
             Self::Next => 1.0,
         }
     }
+}
+
+/// The phase one frame of a slide reports to the Dock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SlidePhase {
+    /// The first frame: the Dock starts moving the neighbouring Space in.
+    Began,
+    /// A later frame: the Dock follows to its progress.
+    Changed,
+    /// The release: the Dock finishes the switch.
+    Ended,
+}
+
+/// One frame of a slide to the neighbouring Space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct SlideFrame {
+    pub phase: SlidePhase,
+    /// Travel since the slide began, in desktop widths, signed like
+    /// [`Direction::sign`].
+    pub progress: f64,
+    /// When to post the frame, counted from the first one.
+    pub at: Duration,
+}
+
+/// The frames that slide one Space over in `direction`, in posting order.
+///
+/// One frame per [`SLIDE_PERIOD`], each covering [`SLIDE_STEP`] of the
+/// distance left, until less than [`SLIDE_RELEASE`] of it remains. The
+/// release then follows one period later at the same progress.
+pub(super) fn slide(direction: Direction) -> Vec<SlideFrame> {
+    let mut frames = Vec::new();
+    let mut remaining = 1.0;
+    let mut at = Duration::ZERO;
+    while remaining >= SLIDE_RELEASE {
+        remaining *= 1.0 - SLIDE_STEP;
+        let phase = if frames.is_empty() {
+            SlidePhase::Began
+        } else {
+            SlidePhase::Changed
+        };
+        frames.push(SlideFrame {
+            phase,
+            progress: direction.sign() * (1.0 - remaining),
+            at,
+        });
+        at += SLIDE_PERIOD;
+    }
+    frames.push(SlideFrame {
+        phase: SlidePhase::Ended,
+        progress: direction.sign() * (1.0 - remaining),
+        at,
+    });
+    frames
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,8 +189,9 @@ impl PostControl {
     }
 }
 
-/// Sole authority to emit both phases. Cancellation and commitment arbitrate
-/// atomically, so a timed-out native query cannot later produce stale output.
+/// Sole authority to emit a switch's frames. Cancellation and commitment
+/// arbitrate atomically, so a timed-out native query cannot later produce
+/// stale output.
 pub(super) struct PostGate {
     control: Arc<PostControl>,
     posted: mpsc::Sender<()>,
@@ -159,8 +223,10 @@ impl PostGate {
         )
     }
 
-    /// Only the two post calls belong in `emit`: no allocation, state queries,
-    /// retries, or cancellation checks between the balanced phases.
+    /// Only the post calls belong in `emit`, plus the fixed wait between a
+    /// slide's frames: no allocation, state queries, retries, or cancellation
+    /// checks between the balanced phases. The caller waits until `emit`
+    /// returns, so no later action is posted in the middle of a slide.
     pub(super) fn commit(self, emit: impl FnOnce()) -> Result<(), Failure> {
         if Instant::now() >= self.control.deadline {
             self.control.cancel();

@@ -21,6 +21,9 @@ ui_scale = "normal"
 device_view_mode = "grid"
 # macOS only: "openlogi" (the signed icon) or "prism".
 app_icon = "openlogi"
+# macOS only: Previous / Next Desktop slide like a three-finger swipe (default
+# true); false switches at once.
+animate_desktop_switch = true
 
 [devices."receiver:aabbccdd:slot:1"]
 custom_name = "Office mouse"

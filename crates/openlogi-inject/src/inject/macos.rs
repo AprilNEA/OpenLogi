@@ -57,7 +57,8 @@ mod main_thread;
 )]
 mod menu_shortcut;
 mod scroll;
-/// DockSwipe events with read-only, per-display Space confirmation.
+/// DockSwipe events, instant or a timed slide, with read-only, per-display
+/// Space confirmation.
 #[expect(
     unsafe_code,
     reason = "read-only SkyLight SPI and AppKit notification registration require FFI"
@@ -85,7 +86,7 @@ use keycode::hid_usage_to_macos;
 use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
-pub(super) use spaces::natural_scrolling;
+pub(super) use spaces::{natural_scrolling, set_desktop_switch};
 use spaces::{next_desktop, previous_desktop};
 use symbolic_hotkey::{capture_region, screenshot};
 pub use virtual_keyboard::{VirtualKeyboard, is_virtual_keyboard_product};

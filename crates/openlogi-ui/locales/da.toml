@@ -81,6 +81,8 @@ low_battery_notifications_description = "Vis en meddelelse nederst på skærmen,
 lock_key_notifications = "Meddelelser om låsetaster"
 lock_key_notifications_description = "Vis kort på skærmen, når et tastatur slår Caps Lock, Num Lock eller Scroll Lock til eller fra."
 lock_key_notifications_description_macos = "Vis kort på skærmen, når et tastatur slår Caps Lock til eller fra."
+animate_desktop_switch = "Animer skift af skrivebord"
+animate_desktop_switch_description = "Forrige skrivebord og Næste skrivebord glider over til skrivebordet ved siden af, som et stryg med tre fingre. Slå fra for at skifte med det samme."
 openlogi = "OpenLogi"
 
 [device]

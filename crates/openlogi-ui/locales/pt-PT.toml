@@ -81,6 +81,8 @@ low_battery_notifications_description = "Mostrar um aviso na parte inferior do e
 lock_key_notifications = "Avisos das teclas de bloqueio"
 lock_key_notifications_description = "Mostrar brevemente no ecrã quando um teclado liga ou desliga Caps Lock, Num Lock ou Scroll Lock."
 lock_key_notifications_description_macos = "Mostrar brevemente no ecrã quando um teclado liga ou desliga Caps Lock."
+animate_desktop_switch = "Animar a mudança de secretária"
+animate_desktop_switch_description = "Secretária anterior e Secretária seguinte deslizam para a secretária vizinha, como ao deslizar três dedos. Desative para mudar instantaneamente."
 openlogi = "OpenLogi"
 
 [device]

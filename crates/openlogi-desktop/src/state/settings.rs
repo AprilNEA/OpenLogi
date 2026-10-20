@@ -331,6 +331,19 @@ impl AppState {
         self.persist_and_reload("lock-key notifications setting");
         StateEvent::SettingsChanged.into()
     }
+    /// Toggle the Previous/Next Desktop slide and persist it. The agent
+    /// switches desktops, so it reads the new value on config reload; the
+    /// next switch uses it. An already-set value writes nothing and is still
+    /// reported; disk failures restore the persisted value.
+    pub fn commit_animate_desktop_switch(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.animate_desktop_switch == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.animate_desktop_switch = enabled);
+        self.persist_and_reload("desktop switch animation setting");
+        StateEvent::SettingsChanged.into()
+    }
     /// Set traditional vertical mouse-wheel sensitivity and persist it. The
     /// agent publishes the value to its scroll worker on config reload. An
     /// already-set value writes nothing and is still reported; disk failures

@@ -81,6 +81,8 @@ low_battery_notifications_description = "设备电池电量低时，在屏幕底
 lock_key_notifications = "锁定键提示"
 lock_key_notifications_description = "键盘开启或关闭 Caps Lock、Num Lock 或 Scroll Lock 时，在屏幕上短暂显示。"
 lock_key_notifications_description_macos = "键盘开启或关闭 Caps Lock 时，在屏幕上短暂显示。"
+animate_desktop_switch = "切换桌面动画"
+animate_desktop_switch_description = "「上一个桌面」和「下一个桌面」会像三指轻扫一样滑到相邻桌面。关闭后立即切换。"
 openlogi = "OpenLogi"
 
 [device]

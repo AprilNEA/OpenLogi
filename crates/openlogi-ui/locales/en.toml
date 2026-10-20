@@ -81,6 +81,8 @@ low_battery_notifications_description = "Show a notice at the bottom of the scre
 lock_key_notifications = "Lock key notifications"
 lock_key_notifications_description = "Briefly show on screen when a keyboard turns Caps Lock, Num Lock or Scroll Lock on or off."
 lock_key_notifications_description_macos = "Briefly show on screen when a keyboard turns Caps Lock on or off."
+animate_desktop_switch = "Animate desktop switches"
+animate_desktop_switch_description = "Previous Desktop and Next Desktop slide to the neighboring desktop, like a three-finger swipe. Turn off to switch instantly."
 openlogi = "OpenLogi"
 
 [device]

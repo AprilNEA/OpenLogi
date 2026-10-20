@@ -305,3 +305,74 @@ fn dropped_or_panicking_worker_releases_waiter_without_false_acknowledgement() {
     );
     assert_eq!(wait.wait(Instant::now()), Ok(()));
 }
+
+const BOTH_DIRECTIONS: [Direction; 2] = [Direction::Previous, Direction::Next];
+
+#[test]
+fn slide_posts_one_frame_per_options_plus_period() {
+    for direction in BOTH_DIRECTIONS {
+        let frames = slide(direction);
+        assert_eq!(frames[0].at, Duration::ZERO);
+        for pair in frames.windows(2) {
+            assert_eq!(
+                pair[1].at.checked_sub(pair[0].at),
+                Some(Duration::from_micros(16_600)),
+                "frames are posted in time order, one period apart"
+            );
+        }
+        // 19 moving frames, then the release one period after the last.
+        assert_eq!(frames.len(), 20);
+        assert_eq!(
+            frames.last().map(|frame| frame.at),
+            Some(Duration::from_micros(315_400))
+        );
+    }
+}
+
+#[test]
+fn slide_begins_once_then_changes_then_ends_once() {
+    for direction in BOTH_DIRECTIONS {
+        let phases: Vec<_> = slide(direction).iter().map(|frame| frame.phase).collect();
+        let (first, rest) = phases.split_first().expect("a slide has frames");
+        let (last, middle) = rest.split_last().expect("a slide has a release");
+        assert_eq!(*first, SlidePhase::Began);
+        assert!(middle.iter().all(|phase| *phase == SlidePhase::Changed));
+        assert_eq!(*last, SlidePhase::Ended);
+    }
+}
+
+#[test]
+fn slide_progress_moves_monotonically_toward_the_neighbour() {
+    for direction in BOTH_DIRECTIONS {
+        let frames = slide(direction);
+        let travel: Vec<f64> = frames
+            .iter()
+            .map(|frame| frame.progress * direction.sign())
+            .collect();
+        // The first frame already moves: a Began at zero would not tell the
+        // Dock which way to go.
+        assert!((travel[0] - 0.15).abs() < 1e-12, "{travel:?}");
+        let moving = &travel[..travel.len() - 1];
+        for pair in moving.windows(2) {
+            assert!(pair[1] > pair[0], "travel must grow: {travel:?}");
+        }
+        assert!(moving.iter().all(|t| *t > 0.0 && *t < 1.0), "{travel:?}");
+        // The release lets go where the last frame left off, past 95%.
+        assert_eq!(travel.last(), moving.last());
+        assert!(travel.last().is_some_and(|t| *t > 0.95), "{travel:?}");
+    }
+}
+
+#[test]
+fn slide_eases_out() {
+    let frames = slide(Direction::Next);
+    let steps: Vec<f64> = frames[..frames.len() - 1]
+        .windows(2)
+        .map(|pair| pair[1].progress - pair[0].progress)
+        .collect();
+    for pair in steps.windows(2) {
+        // Each frame covers 15% of what is left, so every step is 85% of
+        // the one before it.
+        assert!((pair[1] / pair[0] - 0.85).abs() < 1e-9, "{steps:?}");
+    }
+}
