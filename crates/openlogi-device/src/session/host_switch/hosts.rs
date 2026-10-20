@@ -153,6 +153,15 @@ impl KeyboardHosts {
     pub(super) fn forget(&mut self) {
         self.table = None;
     }
+
+    /// Hosts with `table` already read, and no `HostsInfo` to read it again.
+    #[cfg(test)]
+    pub(super) fn with_table(table: HostTable) -> Self {
+        Self {
+            feature: None,
+            table: Some(table),
+        }
+    }
 }
 
 /// Whether `message` is a `setHostFriendlyName` report of the `HostsInfo`

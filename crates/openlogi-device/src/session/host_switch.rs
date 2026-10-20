@@ -189,32 +189,32 @@ pub async fn run_host_switch_session(
         .map(|index| listen_for_renames(&channel, keyboard_index, index, trigger_tx.clone()));
     hosts.read().await;
 
-    let (armed, controls_index) = match arm_host_keys(&mut device, &shared, position.announces)
-        .await
-    {
-        Ok(armed) => armed,
-        Err(failure) => {
-            let (error, pending) = *failure;
-            // A keyboard that is leaving stops answering, so the arm can
-            // fail because of the switch itself. The linked devices still
-            // follow a departure that the keyboard queued.
-            if let Some(HostSwitchStop::Departed(host)) = queued_departure(&mut triggers, position)
-            {
-                debug!(route = %keyboard, %error, "host keys failed to arm during a departure");
-                let departure = Departure::new(&shared, hosts.table(), host);
-                return Ok(depart(
-                    departure,
-                    pending,
-                    targets,
-                    registry,
-                    channel_pool,
-                    &device_io,
-                )
-                .await);
+    let (armed, controls_index) =
+        match arm_host_keys(&mut device, &shared, position.announces).await {
+            Ok(armed) => armed,
+            Err(failure) => {
+                let (error, pending) = *failure;
+                // A keyboard that is leaving stops answering, so the arm can
+                // fail because of the switch itself. The linked devices still
+                // follow a departure that the keyboard queued.
+                if let Some(HostSwitchStop::Departed(host)) =
+                    queued_departure(&mut triggers, position, &mut hosts)
+                {
+                    debug!(route = %keyboard, %error, "host keys failed to arm during a departure");
+                    let departure = Departure::new(&shared, hosts.table(), host);
+                    return Ok(depart(
+                        departure,
+                        pending,
+                        targets,
+                        registry,
+                        channel_pool,
+                        &device_io,
+                    )
+                    .await);
+                }
+                return Err(rollback_host_switch_start(error, pending, registry, &device_io).await);
             }
-            return Err(rollback_host_switch_start(error, pending, registry, &device_io).await);
-        }
-    };
+        };
 
     let key_listener = controls_index.filter(|_| !armed.is_empty()).map(|index| {
         listen_for_host_keys(
@@ -569,7 +569,7 @@ async fn monitor_host_switch(
     )
     .await;
     if stop == HostSwitchStop::ChannelChanged {
-        queued_departure(triggers, position).unwrap_or(stop)
+        queued_departure(triggers, position, hosts).unwrap_or(stop)
     } else {
         stop
     }
@@ -580,11 +580,20 @@ async fn monitor_host_switch(
 /// retire its channel before the session reads the trigger. The linked
 /// devices still follow; a press is dropped, because only the keyboard's
 /// channel could move the keyboard.
+///
+/// A rename queued before the departure makes `hosts` old. The keyboard is
+/// leaving and cannot be read again, so the table is dropped, and the linked
+/// devices keep their slot numbers.
 fn queued_departure(
     triggers: &mut mpsc::UnboundedReceiver<HostTrigger>,
     position: KeyboardPosition,
+    hosts: &mut KeyboardHosts,
 ) -> Option<HostSwitchStop> {
     while let Ok(trigger) = triggers.try_recv() {
+        if trigger == HostTrigger::Renamed {
+            hosts.forget();
+            continue;
+        }
         if let Some(stop @ HostSwitchStop::Departed(_)) = position.stop_for(trigger) {
             return Some(stop);
         }

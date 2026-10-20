@@ -7,10 +7,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionOutcome,
-    HostSwitchStop, HostTrigger, KeyboardPosition, PendingHostSwitchRestore, PreparedHostChange,
-    ReportingMode, host_change_required, host_channel, key_trigger, prepare_host_change_with,
-    queued_departure, restoration_change, rollback_host_switch_start, run_host_switch_session,
-    shares_channel, timed_hidpp,
+    HostSwitchStop, HostTable, HostTrigger, KeyboardHosts, KeyboardPosition,
+    PendingHostSwitchRestore, PreparedHostChange, ReportingMode, host_change_required,
+    host_channel, key_trigger, prepare_host_change_with, queued_departure, restoration_change,
+    rollback_host_switch_start, run_host_switch_session, shares_channel, timed_hidpp,
 };
 use crate::ChannelPool;
 use crate::backend::NodeId;
@@ -993,15 +993,41 @@ fn a_departure_queued_before_the_channel_changed_still_moves_the_linked_devices(
     triggers_tx.send(HostTrigger::Reported(0)).unwrap();
     triggers_tx.send(HostTrigger::Reported(1)).unwrap();
     assert_eq!(
-        queued_departure(&mut triggers, position),
+        queued_departure(&mut triggers, position, &mut KeyboardHosts::default()),
         Some(HostSwitchStop::Departed(1)),
         "a press and a report for this host are skipped"
     );
 
     triggers_tx.send(HostTrigger::Pressed(1)).unwrap();
     assert_eq!(
-        queued_departure(&mut triggers, position),
+        queued_departure(&mut triggers, position, &mut KeyboardHosts::default()),
         None,
         "a press needs the keyboard's channel"
+    );
+}
+
+#[test]
+fn a_rename_queued_before_a_departure_drops_the_old_slot_names() {
+    // The keyboard is leaving, so the session cannot read the names again.
+    let position = KeyboardPosition {
+        feature_index: 3,
+        version: 2,
+        host_count: 3,
+        current_host: 0,
+        announces: true,
+    };
+    let (triggers_tx, mut triggers) = tokio::sync::mpsc::unbounded_channel();
+    triggers_tx.send(HostTrigger::Renamed).unwrap();
+    triggers_tx
+        .send(HostTrigger::Announced(HostChangeRequest { from: 0, to: 1 }))
+        .unwrap();
+    let mut hosts = KeyboardHosts::with_table(HostTable(Vec::new()));
+    assert_eq!(
+        queued_departure(&mut triggers, position, &mut hosts),
+        Some(HostSwitchStop::Departed(1))
+    );
+    assert!(
+        hosts.table().is_none(),
+        "the linked devices keep their slot numbers"
     );
 }
