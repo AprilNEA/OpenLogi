@@ -83,6 +83,10 @@ impl AppState {
                 return events;
             }
         }
+        // Saved only: the mouse runs its onboard profile's rate.
+        if !self.applies_live() {
+            return events;
+        }
         let Some(route) = route else {
             return events;
         };

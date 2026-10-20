@@ -21,6 +21,7 @@ use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
+use crate::features::onboard::{OnboardPanel, OnboardSection};
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
@@ -194,6 +195,8 @@ pub struct AppView {
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
+    onboard_pointer: Entity<OnboardPanel>,
+    onboard_lighting: Entity<OnboardPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
@@ -276,6 +279,8 @@ impl AppView {
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
+        let onboard_pointer = cx.new(|cx| OnboardPanel::new(OnboardSection::Pointer, window, cx));
+        let onboard_lighting = cx.new(|cx| OnboardPanel::new(OnboardSection::Lighting, window, cx));
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
@@ -297,6 +302,8 @@ impl AppView {
             dpi_panel,
             smartshift_panel,
             lighting_panel,
+            onboard_pointer,
+            onboard_lighting,
             camera_preview,
             camera_controls,
             light_panel,
@@ -343,8 +350,10 @@ impl AppView {
             }
             StateEvent::DeviceConfigChanged(key) => {
                 on_home
-                    || (matches!(self.active_tab, DetailTab::Pointer | DetailTab::Device)
-                        && is_current(key))
+                    || (matches!(
+                        self.active_tab,
+                        DetailTab::Pointer | DetailTab::Lighting | DetailTab::Device
+                    ) && is_current(key))
             }
             StateEvent::CameraChanged => on_home || self.active_tab == DetailTab::Light,
             // Child entities own these surfaces and subscribe directly. A
@@ -353,6 +362,7 @@ impl AppView {
             // opened through `removal_obs`.
             StateEvent::SmartShiftChanged(_)
             | StateEvent::ReportRateChanged(_)
+            | StateEvent::OnboardChanged(_)
             | StateEvent::DeviceRemovalFailed { .. }
             | StateEvent::StalePairingRemovalFailed { .. }
             | StateEvent::CameraPermissionChanged
@@ -671,6 +681,8 @@ impl AppView {
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
                         lighting_panel: &self.lighting_panel,
+                        onboard_pointer: &self.onboard_pointer,
+                        onboard_lighting: &self.onboard_lighting,
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,

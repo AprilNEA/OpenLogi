@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use openlogi_core::config::{Config, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
+use openlogi_core::hid::MemoryMode;
 use openlogi_hid::session::gesture::MainWheelDivert;
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, ReportRate};
 
@@ -107,6 +108,14 @@ pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Opti
         .is_some_and(|caps| caps.report_rate)
         .then(|| config.report_rate(&dev.config_key))
         .flatten()
+}
+
+/// The onboard-memory mode to keep `dev` in: only a mouse with `0x8100`
+/// has one, and it is onboard unless the user chose software control.
+pub(super) fn configured_memory_mode(config: &Config, dev: &AgentDevice) -> Option<MemoryMode> {
+    dev.capabilities
+        .is_some_and(|caps| caps.onboard_profiles)
+        .then(|| config.memory_mode(&dev.config_key))
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's

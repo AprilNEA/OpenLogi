@@ -56,6 +56,7 @@ mod easy_switch;
 mod fn_lock;
 mod light_adoption;
 mod lighting;
+mod onboard;
 mod os_layout;
 mod profile_scope;
 mod reload;

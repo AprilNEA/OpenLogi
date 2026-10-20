@@ -20,6 +20,9 @@ pub(super) struct ReportRateFacts {
     key: DeviceKey,
     load: ReportRateLoad,
     reachable: bool,
+    /// The rate shown as chosen in place of the mouse's reading: OpenLogi's
+    /// saved rate while the mouse runs its onboard profile's.
+    saved: Option<ReportRate>,
 }
 
 impl ReportRateFacts {
@@ -35,6 +38,9 @@ impl ReportRateFacts {
             key: record.device_key(),
             load: state.current_report_rate_load(),
             reachable: record.route.is_some(),
+            saved: (!state.applies_live())
+                .then(|| state.current_software_settings().report_rate)
+                .flatten(),
         })
     }
 }
@@ -50,6 +56,7 @@ pub(super) fn report_rate_section(
         key,
         load,
         reachable,
+        saved,
     } = facts?;
     let body: AnyElement = match load {
         ReportRateLoad::Ready(info) => h_flex()
@@ -58,7 +65,7 @@ pub(super) fn report_rate_section(
             .children(
                 info.supported
                     .iter()
-                    .map(|&rate| rate_pill(rate, rate == info.current)),
+                    .map(|&rate| rate_pill(rate, rate == saved.unwrap_or(info.current))),
             )
             .into_any_element(),
         ReportRateLoad::Unknown | ReportRateLoad::Loading if !reachable => return None,

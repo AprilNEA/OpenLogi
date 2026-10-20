@@ -32,7 +32,7 @@ pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
-    BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ReportRateLoad, SmartShiftLoad,
+    BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, OnboardLoad, ReportRateLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -81,6 +81,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod onboard;
 mod os_layout;
 mod pointer;
 mod report_rate;
@@ -229,6 +230,7 @@ impl AppState {
             state.load_current_report_rate(cx);
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);
+            state.load_current_onboard(cx);
         });
     }
 
@@ -377,6 +379,12 @@ impl AppState {
         &mut self,
         result: Result<(), openlogi_ipc::ConfigReloadError>,
     ) -> StateEvents {
+        let applied = result.is_ok();
+        if applied && let Some(key) = self.current_record().map(devices::DeviceRecord::device_key) {
+            // The agent pushes the saved software settings on this reload;
+            // reads cached before it still show the previous mode's values.
+            self.pointer.reads.revalidate_device_settings(&key);
+        }
         if self.config.apply_reload_result(result) {
             StateEvent::SettingsChanged.into()
         } else {

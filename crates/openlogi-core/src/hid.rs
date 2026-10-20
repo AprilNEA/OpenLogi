@@ -14,6 +14,7 @@ pub mod easy_switch;
 pub mod error;
 pub mod fn_lock;
 pub mod light;
+pub mod onboard;
 pub mod pairing;
 pub mod report_rate;
 pub mod route;
@@ -25,9 +26,12 @@ pub use backlight::{
 };
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use easy_switch::{EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind};
-pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
+pub use error::{HidppFeatureErrorKind, HidppOperation, OnboardChangeProblem, WriteError};
 pub use fn_lock::FnLockState;
 pub use light::{LightCommand, commands_for_light_settings};
+pub use onboard::{
+    MemoryMode, OnboardLighting, OnboardMemory, OnboardProfile, OnboardProfileChange,
+};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use report_rate::{ReportRate, ReportRateInfo};
 pub use route::{

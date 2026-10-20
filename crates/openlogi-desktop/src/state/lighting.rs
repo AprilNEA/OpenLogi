@@ -60,7 +60,7 @@ impl AppState {
         } else {
             debug!("transient device lighting applied without persistence");
         }
-        if let Some(route) = target {
+        if let Some(route) = target.filter(|_| self.applies_live()) {
             self.send_ipc(crate::services::ipc::SetLighting { route, lighting });
         }
         events

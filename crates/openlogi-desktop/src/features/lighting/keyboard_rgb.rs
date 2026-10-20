@@ -6,7 +6,7 @@
 //! (the agent, over IPC — the GUI has no device I/O of its own).
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render, Role,
     StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
 };
 use gpui_base::Button as BaseButton;
@@ -23,7 +23,7 @@ const SWATCH: f32 = 28.;
 
 /// Preset colors. Deliberately small — covering the common keyboard accent
 /// colors.
-const PALETTE: &[Rgb] = &[
+pub(crate) const PALETTE: &[Rgb] = &[
     Rgb::new(0xff, 0x3b, 0x30),
     Rgb::new(0xff, 0x95, 0x00),
     Rgb::new(0xff, 0xcc, 0x00),
@@ -133,8 +133,32 @@ impl Render for LightingPanel {
 
 /// One color swatch. Clicking it turns lighting on and sets that color.
 fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
-    let selected = current.enabled && current.color == color;
-    BaseButton::new(("light-swatch", color.packed()))
+    color_swatch(
+        ("light-swatch", color.packed()),
+        color,
+        current.enabled && current.color == color,
+        pal,
+        move |cx| {
+            AppState::apply(cx, |state| {
+                let mut next = state.lighting();
+                next.enabled = true;
+                next.color = color;
+                state.commit_lighting(next)
+            });
+        },
+    )
+}
+
+/// A selectable color swatch: a radio button filled with `color`, accented
+/// when `selected`. Shared by every picker that offers [`PALETTE`].
+pub(crate) fn color_swatch(
+    id: impl Into<ElementId>,
+    color: Rgb,
+    selected: bool,
+    pal: Palette,
+    on_pick: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    BaseButton::new(id)
         .role(Role::RadioButton)
         .selected(selected)
         .accessibility_label(format!(
@@ -159,12 +183,5 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
         .bg(rgb(color.packed()))
         .cursor_pointer()
         .focus_visible(|style| style.border_color(theme::accent()))
-        .on_click(move |_event, _window, cx| {
-            AppState::apply(cx, |state| {
-                let mut next = state.lighting();
-                next.enabled = true;
-                next.color = color;
-                state.commit_lighting(next)
-            });
-        })
+        .on_click(move |_event, _window, cx| on_pick(cx))
 }

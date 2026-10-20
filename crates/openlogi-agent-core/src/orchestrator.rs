@@ -18,13 +18,14 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
-    Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
+    Config, ConfigRevision, LightSettings, Lighting, MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
     LightState, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
+use openlogi_core::hid::{MemoryMode, OnboardMemory, OnboardProfileChange};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, ReportRate,
@@ -63,10 +64,10 @@ pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 use devices::reapply_targets;
 use devices::{
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply, settings_moved,
-    stable_id, wheel_inverted,
+    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_memory_mode,
+    configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
+    keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
+    plan_reapply, settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -160,6 +161,10 @@ pub struct SharedHandles {
     backlight_order: WriteOrder,
     /// Orders host renames per device.
     host_name_order: WriteOrder,
+    /// Orders onboard mode switches and onboard profile writes per mouse:
+    /// both rewrite state the other reads, and a profile write must never
+    /// interleave with another one.
+    onboard_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -280,6 +285,44 @@ impl SharedHandles {
                 HidppOperation::WriteBacklight,
                 ticket,
                 move |c| async move { openlogi_hid::update_backlight_on(&c, change).await },
+            )
+            .await
+    }
+
+    /// Switch the mouse at `route` between its onboard memory and software
+    /// control and return where it stands. Mode switches and profile writes
+    /// run one at a time in request order.
+    pub async fn set_memory_mode(
+        &self,
+        route: &DeviceRoute,
+        mode: MemoryMode,
+    ) -> Result<OnboardMemory, WriteError> {
+        let ticket = self.onboard_order.request(route);
+        self.device(route)
+            .run_in_order(
+                HidppOperation::WriteMemoryMode,
+                ticket,
+                move |c| async move { openlogi_hid::set_memory_mode_on(&c, mode).await },
+            )
+            .await
+    }
+
+    /// Write `change` into the active onboard profile of the mouse at
+    /// `route` and return what it reads back. The write gets the longer
+    /// onboard budget, so a slow mouse is not cut off half way through a
+    /// sector.
+    pub async fn write_onboard_profile(
+        &self,
+        route: &DeviceRoute,
+        change: OnboardProfileChange,
+    ) -> Result<OnboardMemory, WriteError> {
+        let ticket = self.onboard_order.request(route);
+        self.device(route)
+            .run_in_order_within(
+                HidppOperation::WriteOnboardProfile,
+                ticket,
+                crate::hardware::ONBOARD_WRITE_TIMEOUT,
+                move |c| async move { openlogi_hid::write_onboard_profile_on(&c, &change).await },
             )
             .await
     }
@@ -471,6 +514,7 @@ impl Orchestrator {
             report_rate_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
+            onboard_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
@@ -1018,6 +1062,38 @@ impl Orchestrator {
             Some(self.forced_reapply_budget.unwrap_or(0).max(confirm_retries));
     }
 
+    /// The persisted volatile settings a reapply pushes to `dev`: the mouse
+    /// settings, and the lighting written on its own path.
+    ///
+    /// A mouse kept in onboard memory runs the DPI, report rate and lighting
+    /// of its stored profile; writing the saved values over them would only
+    /// last until its next power cycle, so only its mode is pushed for them.
+    /// A disabled lighting entry is still pushed: it writes black, and a
+    /// device whose firmware powers its lighting back on would otherwise
+    /// ignore the user's "off" after every reconnect.
+    fn volatile_settings(&self, dev: &AgentDevice) -> (VolatileMouseSettings, Option<Lighting>) {
+        let route_key = stable_id(dev).route_key();
+        let device = self.config.devices.get(dev.config_key.as_str());
+        let memory_mode = configured_memory_mode(&self.config, dev);
+        let software = memory_mode != Some(MemoryMode::Onboard);
+        let settings = VolatileMouseSettings {
+            memory_mode,
+            wheel: self.wheel_mode_change(dev),
+            dpi: device
+                .and_then(|d| d.effective_dpi(&route_key))
+                .filter(|_| software),
+            report_rate: configured_report_rate(&self.config, dev).filter(|_| software),
+            smartshift: device
+                .and_then(|d| d.effective_smartshift(&route_key))
+                .map(openlogi_hid::SmartShiftStatus::from),
+        };
+        let lighting = device
+            .and_then(|d| d.effective_lighting(&route_key))
+            .filter(|_| software)
+            .cloned();
+        (settings, lighting)
+    }
+
     /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
     /// native wheel mode) to one device. Mouse settings run on one background
     /// thread and one HID++ channel so concurrent multi-open of the same
@@ -1032,29 +1108,26 @@ impl Orchestrator {
             return;
         };
         let key = &dev.config_key;
-        let route_key = stable_id(dev).route_key();
-        let device = self.config.devices.get(key.as_str());
-        let settings = VolatileMouseSettings {
-            wheel: self.wheel_mode_change(dev),
-            dpi: device.and_then(|d| d.effective_dpi(&route_key)),
-            report_rate: configured_report_rate(&self.config, dev),
-            smartshift: device
-                .and_then(|d| d.effective_smartshift(&route_key))
-                .map(openlogi_hid::SmartShiftStatus::from),
-        };
+        let (settings, lighting) = self.volatile_settings(dev);
         if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
                 settings,
                 &self.shared.report_rate_order,
+                &self.shared.onboard_order,
                 &self.shared.capture_plans,
             );
         }
-        // A disabled entry is re-applied too: it writes black, and a device
-        // whose firmware powers its lighting back on would otherwise ignore the
-        // user's "off" after every reconnect.
-        if let Some(lighting) = device.and_then(|d| d.effective_lighting(&route_key)) {
-            crate::hardware::set_lighting_in_background(self.shared.device(&route), lighting);
+        if let Some(lighting) = lighting {
+            // Numbered after the mouse reapply: an onboard transaction it runs
+            // reloads the profile the mouse runs, whose stored lighting would
+            // overwrite a lighting write that went first.
+            let ticket = self.shared.onboard_order.request(&route);
+            crate::hardware::set_lighting_in_background(
+                self.shared.device(&route),
+                &lighting,
+                Some(ticket),
+            );
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
@@ -1428,6 +1501,7 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_changed_memory_modes(&previous);
         self.apply_enabled_os_layouts(&previous);
         self.changed_lights(&previous_lights)
     }
@@ -1441,6 +1515,21 @@ impl Orchestrator {
             .retain(|key| config_keeps_os_layout(&self.config, key));
         for dev in newly_kept_os_layouts(previous, &self.config, &self.devices) {
             self.keep_os_layout(dev);
+        }
+    }
+
+    /// Re-apply the volatile settings of each online onboard-memory mouse
+    /// whose memory mode changed: the reapply switches the mouse's mode
+    /// first, and in software mode pushes the saved DPI, report rate and
+    /// lighting the onboard profile had been running in their place. The
+    /// settings app also switches the mode directly through
+    /// [`SharedHandles::set_memory_mode`]; the writes are idempotent.
+    fn apply_changed_memory_modes(&self, previous: &Config) {
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let mode = configured_memory_mode(&self.config, dev);
+            if mode.is_some() && mode != configured_memory_mode(previous, dev) {
+                self.reapply_volatile_settings(dev);
+            }
         }
     }
 

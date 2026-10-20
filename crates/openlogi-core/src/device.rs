@@ -189,6 +189,12 @@ pub struct Capabilities {
     /// persisted identity.
     #[serde(default)]
     pub virtual_thumbwheel: bool,
+    /// The mouse keeps profiles in its own memory and can switch between
+    /// running them and being driven by software — HID++ `0x8100
+    /// OnboardProfiles`. Appended: crosses the IPC and the persisted
+    /// identity.
+    #[serde(default)]
+    pub onboard_profiles: bool,
 }
 
 impl Capabilities {
@@ -223,6 +229,7 @@ impl Capabilities {
             // Set by the `0x1b04` control walk; the feature table alone
             // cannot say which controls report raw wheel.
             virtual_thumbwheel: false,
+            onboard_profiles: ids.contains(&0x8100),
         }
     }
 
@@ -737,6 +744,7 @@ mod tests {
                     backlight: false,
                     easy_switch: false,
                     virtual_thumbwheel: false,
+                    onboard_profiles: false,
                 }),
                 settings_revision: 0,
             }],
@@ -855,6 +863,7 @@ mod tests {
                 backlight: false,
                 easy_switch: false,
                 virtual_thumbwheel: false,
+                onboard_profiles: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -878,6 +887,7 @@ mod tests {
                 backlight: false,
                 easy_switch: false,
                 virtual_thumbwheel: false,
+                onboard_profiles: false,
             }
         );
         // No driving features → nothing offered.

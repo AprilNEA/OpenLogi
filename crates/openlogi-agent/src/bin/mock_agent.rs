@@ -53,6 +53,10 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
     PairedDevice, StandaloneDevice, prettify_codename,
 };
+use openlogi_core::hid::{
+    MemoryMode, OnboardChangeProblem, OnboardLighting, OnboardMemory, OnboardProfile,
+    OnboardProfileChange,
+};
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
@@ -331,6 +335,9 @@ struct State {
     /// Id handed to the next pairing session; only ever increases.
     next_pairing_id: u64,
     clock: MockClock,
+    /// Scripted onboard memory of each mouse whose capabilities report
+    /// `0x8100`, seeded on first use; edits and mode switches persist here.
+    onboard: Vec<(DeviceRoute, OnboardMemory)>,
 }
 
 impl State {
@@ -353,6 +360,7 @@ impl State {
             phase: None,
             next_pairing_id: 0,
             clock,
+            onboard: Vec::new(),
         })
     }
 
@@ -550,6 +558,35 @@ impl State {
         }
     }
 
+    /// The scripted onboard memory of the mouse on `route`, seeded with a
+    /// G HUB-style default profile the first time it is asked for.
+    fn onboard_for(&mut self, route: &DeviceRoute) -> Result<&mut OnboardMemory, WriteError> {
+        self.require_online(route)?;
+        let supported = self.profile.inventories.iter().any(|inventory| {
+            inventory.paired.iter().any(|device| {
+                DeviceRoute::for_slot(inventory, device.slot).as_ref() == Some(route)
+                    && device
+                        .capabilities
+                        .is_some_and(|caps| caps.onboard_profiles)
+            })
+        });
+        if !supported {
+            return Err(WriteError::FeatureUnsupported {
+                feature_hex: 0x8100,
+            });
+        }
+        let at = self
+            .onboard
+            .iter()
+            .position(|(r, _)| r == route)
+            .unwrap_or_else(|| {
+                self.onboard
+                    .push((route.clone(), scripted_onboard_memory()));
+                self.onboard.len() - 1
+            });
+        Ok(&mut self.onboard[at].1)
+    }
+
     fn route_online(&self, route: &DeviceRoute) -> Option<bool> {
         self.profile
             .inventories
@@ -633,6 +670,100 @@ impl State {
             }));
         slot
     }
+}
+
+/// The onboard memory a scripted gaming mouse starts with: onboard mode,
+/// running a user profile with four DPI slots and both LED zones lit.
+fn scripted_onboard_memory() -> OnboardMemory {
+    OnboardMemory {
+        mode: MemoryMode::Onboard,
+        profile: Some(OnboardProfile {
+            number: 1,
+            name: None,
+            factory: false,
+            report_rate: Some(ReportRate::new(1000)),
+            dpi_slots: vec![
+                Some(Dpi::new(400)),
+                Some(Dpi::new(800)),
+                Some(Dpi::new(1600)),
+                Some(Dpi::new(3200)),
+                None,
+            ],
+            default_dpi_slot: 2,
+            lighting: vec![
+                OnboardLighting::Cycle {
+                    period_ms: 10_000,
+                    brightness: 100,
+                },
+                OnboardLighting::Fixed(openlogi_core::color::Rgb::new(0x00, 0xb4, 0xff)),
+            ],
+        }),
+    }
+}
+
+/// Apply `change` the way the device layer validates it, against the
+/// mock's 100–12000 DPI sensor and its 125–1000 Hz report rates.
+fn apply_onboard_change(
+    memory: &mut OnboardMemory,
+    change: OnboardProfileChange,
+) -> Result<(), WriteError> {
+    let reject = |problem| Err(WriteError::OnboardChangeRejected(problem));
+    let Some(profile) = memory.profile.as_mut() else {
+        return Err(WriteError::OnboardLayoutUnsupported {
+            memory_model: 0,
+            profile_format: 0,
+        });
+    };
+    if change.profile != profile.number {
+        return reject(OnboardChangeProblem::ProfileChanged {
+            expected: change.profile,
+            active: profile.number,
+        });
+    }
+    if change.dpi_slots.len() > 5 {
+        return reject(OnboardChangeProblem::TooManyDpiSlots { max: 5 });
+    }
+    if change
+        .dpi_slots
+        .get(usize::from(change.default_dpi_slot))
+        .copied()
+        .flatten()
+        .is_none()
+    {
+        return reject(OnboardChangeProblem::DefaultSlotEmpty {
+            slot: change.default_dpi_slot,
+        });
+    }
+    if let Some(&dpi) = change
+        .dpi_slots
+        .iter()
+        .flatten()
+        .find(|dpi| !(100..=12_000).contains(&dpi.into_inner()))
+    {
+        return reject(OnboardChangeProblem::DpiUnsupported { dpi });
+    }
+    if ![125, 250, 500, 1000].contains(&u16::from(change.report_rate)) {
+        return reject(OnboardChangeProblem::ReportRateUnsupported {
+            rate: change.report_rate,
+        });
+    }
+    if change.lighting.len() != profile.lighting.len() {
+        return reject(OnboardChangeProblem::LightingZones {
+            zones: u8::try_from(profile.lighting.len()).unwrap_or(u8::MAX),
+        });
+    }
+    let mut dpi_slots = change.dpi_slots;
+    dpi_slots.resize(5, None);
+    profile.dpi_slots = dpi_slots;
+    profile.default_dpi_slot = change.default_dpi_slot;
+    profile.report_rate = Some(change.report_rate);
+    for (stored, lighting) in profile.lighting.iter_mut().zip(change.lighting) {
+        if lighting != OnboardLighting::Unsupported {
+            *stored = lighting;
+        }
+    }
+    profile.factory = false;
+    Ok(())
 }
 
 fn profile_value<'a, T>(
@@ -928,6 +1059,38 @@ impl Agent for MockAgent {
         let result = self.state.lock().await.unpair(&route);
         info!(%route, ok = result.is_ok(), "unpair_device");
         result
+    }
+    async fn read_onboard_memory(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardMemory, WriteError> {
+        let mut state = self.state.lock().await;
+        state.onboard_for(&route).cloned()
+    }
+    async fn set_memory_mode(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        mode: MemoryMode,
+    ) -> Result<OnboardMemory, WriteError> {
+        let mut state = self.state.lock().await;
+        let memory = state.onboard_for(&route)?;
+        memory.mode = mode;
+        info!(%route, ?mode, "set_memory_mode");
+        Ok(memory.clone())
+    }
+    async fn write_onboard_profile(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        change: OnboardProfileChange,
+    ) -> Result<OnboardMemory, WriteError> {
+        let mut state = self.state.lock().await;
+        let memory = state.onboard_for(&route)?;
+        apply_onboard_change(memory, change)?;
+        info!(%route, "write_onboard_profile");
+        Ok(memory.clone())
     }
     async fn read_report_rate(
         self,

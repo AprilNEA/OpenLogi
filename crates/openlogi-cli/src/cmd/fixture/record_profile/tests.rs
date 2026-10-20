@@ -125,6 +125,32 @@ impl Agent for TestAgent {
         unreachable!("profile capture must use one snapshot")
     }
 
+    async fn read_onboard_memory(
+        self,
+        _: TarpcContext,
+        _: DeviceRoute,
+    ) -> Result<openlogi_core::hid::OnboardMemory, WriteError> {
+        unreachable!("profile capture does not record onboard memory")
+    }
+
+    async fn set_memory_mode(
+        self,
+        _: TarpcContext,
+        _: DeviceRoute,
+        _: openlogi_core::hid::MemoryMode,
+    ) -> Result<openlogi_core::hid::OnboardMemory, WriteError> {
+        unreachable!("profile capture is read-only")
+    }
+
+    async fn write_onboard_profile(
+        self,
+        _: TarpcContext,
+        _: DeviceRoute,
+        _: openlogi_core::hid::OnboardProfileChange,
+    ) -> Result<openlogi_core::hid::OnboardMemory, WriteError> {
+        unreachable!("profile capture is read-only")
+    }
+
     async fn reload_config(self, _: TarpcContext) -> Result<(), ConfigReloadError> {
         unreachable!("profile capture is read-only")
     }

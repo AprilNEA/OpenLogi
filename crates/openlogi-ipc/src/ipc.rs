@@ -20,8 +20,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PairingError, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    LightCommand, MemoryMode, OnboardMemory, OnboardProfileChange, PairingError, PasskeyMethod,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -120,7 +120,15 @@ pub use succession::Identity;
 ///      battery. `Agent::observe_lock_keys`, [`LockKeyObservation`] and
 ///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
 ///      off over HID++ `0x4220`, for the overlay's transient indicator.
-pub const PROTOCOL_VERSION: u32 = 37;
+/// v38: `Agent::{read_onboard_memory, set_memory_mode,
+///      write_onboard_profile}`, `Capabilities::onboard_profiles`,
+///      `HidppOperation::{ReadOnboardMemory, WriteOnboardProfile,
+///      WriteMemoryMode}` and `WriteError::{OnboardLayoutUnsupported,
+///      OnboardChangeRejected, OnboardProfileNotApplied,
+///      OnboardProfileUnreadable}` appended — a gaming mouse's `0x8100`
+///      onboard memory, its mode switch and edits to its active profile;
+///      a change names the profile it was made against.
+pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -817,14 +825,33 @@ pub trait Agent {
     async fn reload_saved_config(saved: SavedConfig) -> Result<(), ConfigReloadError>;
     /// Block until the transient keyboard-backlight indicator changes.
     async fn observe_backlight(since: Generation) -> BacklightObservation;
-
     /// Long-poll the notices the overlay should be showing. Answers as soon
     /// as they differ from generation `since`, or with the unchanged notices
     /// after [`OBSERVE_HOLD`]. Pass `0` to read the current notices at once.
     async fn observe_notices(since: Generation) -> NoticeObservation;
-
     /// Long-poll the lock-key indicator. Answers as soon as it differs from
     /// generation `since`, or with the unchanged indicator after
     /// [`OBSERVE_HOLD`]. Pass `0` to read the current indicator at once.
     async fn observe_lock_keys(since: Generation) -> LockKeyObservation;
+    /// Read the onboard mode of the mouse on `route` and the profile it
+    /// runs from its memory (`0x8100 OnboardProfiles`).
+    async fn read_onboard_memory(route: DeviceRoute) -> Result<OnboardMemory, WriteError>;
+    /// Switch the mouse on `route` between its onboard memory and software
+    /// control now, and answer with where it stands. The choice the agent
+    /// keeps across reconnects is the device's `memory_mode` in the config;
+    /// the settings app saves that alongside this call.
+    async fn set_memory_mode(
+        route: DeviceRoute,
+        mode: MemoryMode,
+    ) -> Result<OnboardMemory, WriteError>;
+    /// Write `change` into the profile the mouse on `route` runs from its
+    /// memory, keeping everything else the profile holds, and answer with
+    /// what it reads back. A change the profile or sensor cannot take is
+    /// refused with [`WriteError::OnboardChangeRejected`] before anything is
+    /// written. The mouse stores the result itself, so nothing is persisted
+    /// or replayed.
+    async fn write_onboard_profile(
+        route: DeviceRoute,
+        change: OnboardProfileChange,
+    ) -> Result<OnboardMemory, WriteError>;
 }

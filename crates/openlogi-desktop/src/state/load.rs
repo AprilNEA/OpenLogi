@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use openlogi_core::hid::{
-    BacklightState, DpiInfo, EasySwitchHosts, FnLockState, ReportRateInfo, SmartShiftStatus,
+    BacklightState, DpiInfo, EasySwitchHosts, FnLockState, OnboardMemory, ReportRateInfo,
+    SmartShiftStatus,
 };
 
 /// State projected from an swr-backed device query: unqueried, in flight,
@@ -54,3 +55,8 @@ pub type BacklightLoad = Load<Arc<BacklightState>>;
 /// stores each slot's host name and OS itself — the computer on the slot
 /// writes them — so the read is the only record.
 pub type EasySwitchLoad = Load<Arc<EasySwitchHosts>>;
+
+/// Per-mouse onboard memory (`0x8100`) load state. See [`Load`]. The mouse
+/// stores its profile and powers up in onboard mode by itself, so the read is
+/// the only record of either.
+pub type OnboardLoad = Load<Arc<OnboardMemory>>;

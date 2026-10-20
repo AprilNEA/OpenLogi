@@ -208,6 +208,79 @@ pub enum WriteError {
         /// The name the device reports afterwards, if any.
         actual: Option<String>,
     },
+    /// The mouse declares an onboard memory layout OpenLogi cannot decode,
+    /// so its profiles can be neither shown nor edited. Its mode still
+    /// switches.
+    #[error("onboard memory layout {memory_model}/{profile_format} is not one OpenLogi can edit")]
+    OnboardLayoutUnsupported {
+        /// The declared memory-model id.
+        memory_model: u8,
+        /// The declared profile-format id.
+        profile_format: u8,
+    },
+    /// An onboard profile change the mouse cannot take. Nothing was written.
+    #[error("the onboard profile change was refused: {0}")]
+    OnboardChangeRejected(OnboardChangeProblem),
+    /// The mouse acknowledged an onboard profile write but its memory reads
+    /// back something else. The profile it held before was written back.
+    #[error("the mouse did not keep the onboard profile that was written")]
+    OnboardProfileNotApplied,
+    /// The directory lists an onboard profile sector whose bytes do not
+    /// decode, so a save cannot edit it without replacing what it holds.
+    ///
+    /// Nothing was written: the profile may hold button bindings and macros
+    /// the user saved.
+    #[error("onboard profile {profile} is listed but does not decode")]
+    OnboardProfileUnreadable {
+        /// The profile number of the listed sector.
+        profile: u8,
+    },
+}
+
+/// Why an onboard profile change was refused before anything was written.
+///
+/// Variant order is wire format because this travels inside [`WriteError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum OnboardChangeProblem {
+    /// More DPI slots than the profile holds.
+    #[error("the profile holds {max} DPI slots")]
+    TooManyDpiSlots {
+        /// How many it holds.
+        max: u8,
+    },
+    /// The default slot is empty or does not exist.
+    #[error("DPI slot {slot} cannot be the default: it holds no DPI")]
+    DefaultSlotEmpty {
+        /// The zero-based slot.
+        slot: u8,
+    },
+    /// A DPI the sensor does not support.
+    #[error("the sensor does not support {dpi} DPI")]
+    DpiUnsupported {
+        /// The rejected DPI.
+        dpi: Dpi,
+    },
+    /// A report rate the mouse does not list.
+    #[error("the mouse does not support {rate} Hz")]
+    ReportRateUnsupported {
+        /// The rejected rate.
+        rate: ReportRate,
+    },
+    /// A lighting list that does not name every LED zone the profile holds.
+    #[error("the profile has {zones} LED zones")]
+    LightingZones {
+        /// How many zones the profile holds.
+        zones: u8,
+    },
+    /// The mouse runs another profile than the one the change was made
+    /// against (its profile button was pressed since it was read).
+    #[error("the mouse switched to profile {active} since profile {expected} was read")]
+    ProfileChanged {
+        /// The profile the change was made against.
+        expected: u8,
+        /// The profile the mouse runs now.
+        active: u8,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -270,6 +343,15 @@ pub enum HidppOperation {
     /// Write an Easy-Switch slot's `0x1815` host name. Appended last —
     /// variant order is wire format.
     RenameHost,
+    /// Read the `0x8100` onboard mode and the active onboard profile.
+    /// Appended last — variant order is wire format.
+    ReadOnboardMemory,
+    /// Write the active `0x8100` onboard profile. Appended last — variant
+    /// order is wire format.
+    WriteOnboardProfile,
+    /// Switch the `0x8100` onboard mode. Appended last — variant order is
+    /// wire format.
+    WriteMemoryMode,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

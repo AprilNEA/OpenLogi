@@ -44,9 +44,10 @@ use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
     DeviceRoute, Dpi, DpiCapabilities, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
     HidppFeatureErrorKind, HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand,
-    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget,
-    ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
-    SmartShiftThreshold, TunableTorque, WriteError,
+    MemoryMode, OnboardChangeProblem, OnboardLighting, OnboardMemory, OnboardProfile,
+    OnboardProfileChange, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
+    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -110,7 +111,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 37);
+    assert_eq!(PROTOCOL_VERSION, 38);
 }
 
 #[test]
@@ -657,13 +658,14 @@ fn device_inventory() {
                 backlight: true,
                 easy_switch: true,
                 virtual_thumbwheel: true,
+                onboard_profiles: false,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010007",
     );
 }
 
@@ -1034,4 +1036,91 @@ fn report_rate_dtos_and_errors() {
         },
         "fbe803037dfbf401fbe803",
     );
+}
+
+#[test]
+fn onboard_memory_dtos_requests_and_errors() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc083,
+    };
+    assert_wire(&MemoryMode::Onboard, "00");
+    assert_wire(&MemoryMode::Software, "01");
+    assert_wire(
+        &OnboardMemory {
+            mode: MemoryMode::Onboard,
+            profile: Some(OnboardProfile {
+                number: 1,
+                name: None,
+                factory: false,
+                report_rate: Some(ReportRate::new(1000)),
+                dpi_slots: vec![Some(Dpi::new(400)), Some(Dpi::new(1600)), None],
+                default_dpi_slot: 1,
+                lighting: vec![
+                    OnboardLighting::Off,
+                    OnboardLighting::Fixed(openlogi_core::color::Rgb::new(0xff, 0x00, 0x80)),
+                    OnboardLighting::Breathing {
+                        color: openlogi_core::color::Rgb::WHITE,
+                        period_ms: 4000,
+                        brightness: 50,
+                    },
+                    OnboardLighting::Cycle {
+                        period_ms: 10_000,
+                        brightness: 100,
+                    },
+                    OnboardLighting::Unsupported,
+                ],
+            }),
+        },
+        "000101000001fbe8030301fb900101fb40060001050001066666303038300306666666666666fba00f3202fb10276404",
+    );
+    assert_wire(
+        &AgentRequest::ReadOnboardMemory {
+            route: route.clone(),
+        },
+        "2802fb6d04fb83c0",
+    );
+    assert_wire(
+        &AgentRequest::SetMemoryMode {
+            route: route.clone(),
+            mode: MemoryMode::Software,
+        },
+        "2902fb6d04fb83c001",
+    );
+    assert_wire(
+        &AgentRequest::WriteOnboardProfile {
+            route,
+            change: OnboardProfileChange {
+                profile: 1,
+                dpi_slots: vec![Some(Dpi::new(800)), None],
+                default_dpi_slot: 0,
+                report_rate: ReportRate::new(500),
+                lighting: vec![OnboardLighting::Off],
+            },
+        },
+        "2a02fb6d04fb83c0010201fb20030000fbf4010100",
+    );
+    assert_wire(
+        &WriteError::OnboardLayoutUnsupported {
+            memory_model: 1,
+            profile_format: 9,
+        },
+        "1a0109",
+    );
+    assert_wire(
+        &WriteError::OnboardChangeRejected(OnboardChangeProblem::DpiUnsupported {
+            dpi: Dpi::new(12_345),
+        }),
+        "1b02fb3930",
+    );
+    assert_wire(
+        &WriteError::OnboardChangeRejected(OnboardChangeProblem::ProfileChanged {
+            expected: 1,
+            active: 2,
+        }),
+        "1b050102",
+    );
+    assert_wire(&WriteError::OnboardProfileNotApplied, "1c");
+    assert_wire(&WriteError::OnboardProfileUnreadable { profile: 3 }, "1d03");
+    assert_wire(&HidppOperation::WriteMemoryMode, "19");
 }

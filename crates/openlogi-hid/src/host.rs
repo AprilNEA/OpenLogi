@@ -12,7 +12,10 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, LightState, StandaloneDevice};
-use openlogi_core::hid::{FnLockState, LightCommand, PairingError, WriteError};
+use openlogi_core::hid::{
+    FnLockState, LightCommand, MemoryMode, OnboardMemory, OnboardProfileChange, PairingError,
+    WriteError,
+};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
@@ -67,6 +70,37 @@ pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
 /// Write a new sensor DPI to the device `route` reaches.
 pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
     device::set_dpi(&*native_backend(), route, dpi).await
+}
+
+/// Read the raw onboard memory state of the device `route` reaches.
+pub async fn dump_onboard_memory(
+    route: &DeviceRoute,
+) -> Result<openlogi_device::OnboardMemoryDump, WriteError> {
+    device::dump_onboard_memory(&*native_backend(), route).await
+}
+
+/// Read the onboard mode and active onboard profile of the device `route`
+/// reaches.
+pub async fn read_onboard_memory(route: &DeviceRoute) -> Result<OnboardMemory, WriteError> {
+    device::read_onboard_memory(&*native_backend(), route).await
+}
+
+/// Switch the device `route` reaches between onboard memory and software
+/// control.
+pub async fn set_memory_mode(
+    route: &DeviceRoute,
+    mode: MemoryMode,
+) -> Result<OnboardMemory, WriteError> {
+    device::set_memory_mode(&*native_backend(), route, mode).await
+}
+
+/// Write `change` into the active onboard profile of the device `route`
+/// reaches.
+pub async fn write_onboard_profile(
+    route: &DeviceRoute,
+    change: OnboardProfileChange,
+) -> Result<OnboardMemory, WriteError> {
+    device::write_onboard_profile(&*native_backend(), route, change).await
 }
 
 /// Read the pointer-motion scaling of the device `route` reaches.

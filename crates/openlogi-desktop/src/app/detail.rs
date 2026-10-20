@@ -2,7 +2,7 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
+    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::Button as BaseButton;
@@ -17,6 +17,7 @@ use gpui_component::{
 };
 use openlogi_core::config::ScrollResolution;
 use openlogi_core::device::DeviceKind;
+use openlogi_core::hid::MemoryMode;
 
 use super::widgets::{back_button, connection_summary, kind_label, sidebar_action, status_badge};
 use super::{AppView, DetailTab};
@@ -29,6 +30,7 @@ use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
+use crate::features::onboard::OnboardPanel;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
@@ -97,6 +99,8 @@ pub(super) struct DetailPanels<'a> {
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
+    pub onboard_pointer: &'a gpui::Entity<OnboardPanel>,
+    pub onboard_lighting: &'a gpui::Entity<OnboardPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
     pub light_panel: &'a gpui::Entity<LightPanel>,
@@ -125,10 +129,16 @@ pub(super) fn detail_content(
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
-        DetailTab::Pointer => {
-            pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
+        DetailTab::Pointer => pointer_tab(
+            panels.dpi_panel,
+            panels.onboard_pointer,
+            panels.smartshift_panel,
+            cx,
+        )
+        .into_any_element(),
+        DetailTab::Lighting => {
+            lighting_tab(panels.lighting_panel, panels.onboard_lighting, cx).into_any_element()
         }
-        DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
@@ -310,40 +320,57 @@ fn action_ring_tab(
 /// controls don't force a vertical scroll.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
+    onboard_pointer: &gpui::Entity<OnboardPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
     tab_body(
         ContentWidth::Large,
-        h_flex()
-            .w_full()
-            .items_stretch()
-            .gap_4()
-            .flex_wrap()
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("device.pointer_tuning"),
-                    Icon::empty().path("action-icons/gauge.svg"),
-                    dpi_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("pointer.smartshift"),
-                    Icon::empty().path("action-icons/refresh-cw.svg"),
-                    smartshift_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
-            .child(
-                div()
-                    .min_w(POINTER_CARD_MIN_W)
-                    .flex_1()
-                    .child(scrolling_card(pal, cx)),
-            ),
+        pointer_grid(dpi_panel, onboard_pointer, smartshift_panel, pal, cx),
     )
+}
+
+fn pointer_grid(
+    dpi_panel: &gpui::Entity<DpiPanel>,
+    onboard_pointer: &gpui::Entity<OnboardPanel>,
+    smartshift_panel: &gpui::Entity<SmartShiftPanel>,
+    pal: Palette,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let tuning = if on_mouse(cx) {
+        onboard_pointer.clone().into_any_element()
+    } else {
+        dpi_panel.clone().into_any_element()
+    };
+    let tuning = with_memory_toggle(tuning, cx);
+    h_flex()
+        .w_full()
+        .items_stretch()
+        .gap_4()
+        .flex_wrap()
+        .child(pointer_grid_card(
+            PanelCard::new(
+                tr!("device.pointer_tuning"),
+                Icon::empty().path("action-icons/gauge.svg"),
+                tuning,
+            )
+            .fill(),
+        ))
+        .child(pointer_grid_card(
+            PanelCard::new(
+                tr!("pointer.smartshift"),
+                Icon::empty().path("action-icons/refresh-cw.svg"),
+                smartshift_panel.clone().into_any_element(),
+            )
+            .fill(),
+        ))
+        .child(
+            div()
+                .min_w(POINTER_CARD_MIN_W)
+                .flex_1()
+                .child(scrolling_card(pal, cx)),
+        )
 }
 
 fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
@@ -570,15 +597,78 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
 /// card. Shown when the device reports a lighting capability — see
 /// [`DetailTab::tabs_for`].
-fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
+fn lighting_tab(
+    lighting_panel: &gpui::Entity<LightingPanel>,
+    onboard_lighting: &gpui::Entity<OnboardPanel>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let content = if on_mouse(cx) {
+        onboard_lighting.clone().into_any_element()
+    } else {
+        lighting_panel.clone().into_any_element()
+    };
     tab_body(
         ContentWidth::Small,
         PanelCard::new(
             tr!("device.lighting"),
             Icon::new(IconName::Palette),
-            lighting_panel.clone().into_any_element(),
+            with_memory_toggle(content, cx),
         ),
     )
+}
+
+/// Whether the selected mouse runs from its onboard memory, so its cards
+/// edit the stored profile.
+fn on_mouse(cx: &App) -> bool {
+    AppState::try_read(cx).is_some_and(AppState::current_settings_on_mouse)
+}
+
+/// `content` under the onboard-memory toggle, for a mouse that has onboard
+/// memory; `content` alone otherwise. One setting, shown on each card it
+/// changes, as G HUB's on-board memory mode: on, the card edits the profile
+/// stored on the mouse; off, OpenLogi's live settings.
+fn with_memory_toggle(content: AnyElement, cx: &mut Context<AppView>) -> AnyElement {
+    let Some(on) = AppState::try_read(cx)
+        .filter(|state| state.current_onboard_supported())
+        .map(|state| state.current_memory_mode() == MemoryMode::Onboard)
+    else {
+        return content;
+    };
+    let pal = theme::palette(cx);
+    v_flex()
+        .gap_4()
+        .child(
+            v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .items_center()
+                        .child(div().text_body().child(tr!("onboard.onboard_memory")))
+                        .child(Toggle::new("onboard-memory-toggle").selected(on).on_change(
+                            |on, _window, cx| {
+                                let mode = if *on {
+                                    MemoryMode::Onboard
+                                } else {
+                                    MemoryMode::Software
+                                };
+                                AppState::apply(cx, |state| state.commit_memory_mode(mode));
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(if on {
+                            tr!("onboard.onboard_memory_description")
+                        } else {
+                            tr!("onboard.openlogi_description")
+                        }),
+                ),
+        )
+        .child(content)
+        .into_any_element()
 }
 
 /// Camera tab: the live webcam preview beside the device-level image controls,

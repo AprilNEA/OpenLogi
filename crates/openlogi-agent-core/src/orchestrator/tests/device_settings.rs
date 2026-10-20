@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use openlogi_hid::reprog_controls::BACK_CIDS;
 use openlogi_hid::session::gesture::MainWheelDivert;
 
+use openlogi_core::hid::MemoryMode;
+
 use super::*;
 
 /// A wheel-hold button scrolls sideways the way its main wheel scrolls: with
@@ -201,6 +203,66 @@ fn configured_report_rate_needs_the_feature_and_a_saved_rate() {
     assert_eq!(configured_report_rate(&config, &device), None);
     device.capabilities = None;
     assert_eq!(configured_report_rate(&config, &device), None);
+}
+
+/// A mouse with onboard memory and every replayable setting saved.
+fn onboard_mouse_with_saved_settings(config: &mut Config) -> AgentDevice {
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        report_rate: true,
+        onboard_profiles: true,
+        ..Capabilities::default()
+    });
+    config.set_report_rate("a", ReportRate::new(500));
+    let entry = config.devices.entry("a".to_string()).or_default();
+    entry.dpi = Some(Dpi::new(1600));
+    entry.lighting = Some(openlogi_core::config::Lighting::default());
+    device
+}
+
+#[test]
+fn an_onboard_mouse_keeps_its_profile_across_a_reconnect() {
+    let mut config = Config::default();
+    let device = onboard_mouse_with_saved_settings(&mut config);
+    let orch = orchestrator(config);
+
+    // Never chosen is onboard: the mode is kept and nothing saved is
+    // written over the stored profile.
+    let (settings, lighting) = orch.volatile_settings(&device);
+    assert_eq!(settings.memory_mode, Some(MemoryMode::Onboard));
+    assert_eq!(settings.dpi, None);
+    assert_eq!(settings.report_rate, None);
+    assert_eq!(lighting, None);
+}
+
+#[test]
+fn a_software_mouse_is_put_in_host_mode_and_given_its_saved_settings() {
+    let mut config = Config::default();
+    let device = onboard_mouse_with_saved_settings(&mut config);
+    config.set_memory_mode("a", MemoryMode::Software);
+    let orch = orchestrator(config);
+
+    let (settings, lighting) = orch.volatile_settings(&device);
+    assert_eq!(settings.memory_mode, Some(MemoryMode::Software));
+    assert_eq!(settings.dpi, Some(Dpi::new(1600)));
+    assert_eq!(settings.report_rate, Some(ReportRate::new(500)));
+    assert!(lighting.is_some());
+}
+
+#[test]
+fn a_mouse_without_onboard_memory_has_no_mode_to_keep() {
+    let mut config = Config::default();
+    let mut device = onboard_mouse_with_saved_settings(&mut config);
+    device.capabilities = Some(Capabilities {
+        report_rate: true,
+        ..Capabilities::default()
+    });
+    let orch = orchestrator(config);
+
+    let (settings, lighting) = orch.volatile_settings(&device);
+    assert_eq!(settings.memory_mode, None);
+    assert_eq!(settings.dpi, Some(Dpi::new(1600)));
+    assert!(lighting.is_some());
 }
 
 #[test]

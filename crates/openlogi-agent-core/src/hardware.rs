@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
+use openlogi_core::hid::MemoryMode;
 use openlogi_hid::{
     CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation, HostOs,
     OsLayoutOutcome, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus,
@@ -48,6 +49,11 @@ pub(crate) use write_order::{WriteOrder, WriteTicket};
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Response budget for an onboard memory write: reading, writing and reading
+/// back a sector is some fifty requests, and cutting it off part way leaves
+/// the sector half written.
+pub(crate) const ONBOARD_WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Physical transport behind a route. Slots on one receiver share a HID writer,
 /// so they share one turnstile even though their device indices differ.
@@ -394,23 +400,64 @@ impl DeviceOp {
         write: W,
     ) -> Result<T, WriteError>
     where
-        W: FnOnce(SharedChannel) -> WriteFut,
-        WriteFut: Future<Output = Result<T, WriteError>>,
+        W: FnOnce(SharedChannel) -> WriteFut + Send + 'static,
+        WriteFut: Future<Output = Result<T, WriteError>> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.run_in_order_within(op, ticket, WRITE_TIMEOUT, write)
+            .await
+    }
+
+    /// [`Self::run_in_order`] with `budget` in place of `WRITE_TIMEOUT`, for
+    /// a write made of many requests — an onboard memory transaction — that
+    /// must not be cut off part way.
+    ///
+    /// The transaction runs on its own task, as lighting does: the caller's
+    /// deadline bounds only how long it waits for the result, so a request
+    /// that gives up (or is cancelled) leaves the sector write to finish and
+    /// restore itself instead of dropping it between two chunks. Waiting for
+    /// the earlier writes, the receiver lease and the transport turn is not
+    /// part of `budget`; it starts when the transaction owns the device.
+    pub(crate) async fn run_in_order_within<W, WriteFut, T>(
+        self,
+        op: HidppOperation,
+        ticket: WriteTicket,
+        budget: Duration,
+        write: W,
+    ) -> Result<T, WriteError>
+    where
+        W: FnOnce(SharedChannel) -> WriteFut + Send + 'static,
+        WriteFut: Future<Output = Result<T, WriteError>> + Send + 'static,
+        T: Send + 'static,
     {
         if !self.access.device_io.allows_io() {
             return Err(WriteError::DeviceNotFound);
         }
         let turn = self.access.transport_turns.turn_for(&self.route);
-        ticket
-            .in_order(|| async {
-                let _lease = self.access.receiver_access.acquire_for_io().await;
-                after_transport_turn(&turn, async {
-                    let shared = self.resolve()?;
-                    timed(op, write(shared)).await
+        let (started, has_started) = tokio::sync::oneshot::channel();
+        let (result, has_result) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let written = ticket
+                .in_order(|| async move {
+                    let _lease = self.access.receiver_access.acquire_for_io().await;
+                    after_transport_turn(&turn, async move {
+                        let shared = self.resolve()?;
+                        let _ = started.send(());
+                        write(shared).await
+                    })
+                    .await
                 })
-                .await
-            })
-            .await
+                .await;
+            let _ = result.send(written);
+        });
+        let _ = has_started.await;
+        match tokio::time::timeout(budget, has_result).await {
+            Ok(Ok(written)) => written,
+            Ok(Err(_)) => Err(WriteError::Hid(
+                "background onboard write ended unexpectedly".to_owned(),
+            )),
+            Err(_) => Err(WriteError::RequestTimedOut { operation: op }),
+        }
     }
 
     /// Own the whole lighting transaction outside the requester runtime. The
@@ -425,7 +472,19 @@ impl DeviceOp {
         self,
         lighting: &Lighting,
     ) -> Result<openlogi_hid::lighting::LightingJob, WriteError> {
-        let ticket = rgb_control::SESSION
+        self.lighting_after(lighting, None)
+    }
+
+    /// [`Self::lighting`] after `ticket`'s turn. The reconnect reapply numbers
+    /// its lighting write behind its onboard transaction with this: that
+    /// transaction reloads the profile the mouse runs, whose stored lighting
+    /// would overwrite a write that went first.
+    pub(crate) fn lighting_after(
+        self,
+        lighting: &Lighting,
+        ticket: Option<WriteTicket>,
+    ) -> Result<openlogi_hid::lighting::LightingJob, WriteError> {
+        let session_ticket = rgb_control::SESSION
             .admit()
             .ok_or(WriteError::DeviceNotFound)?;
         let DeviceAccess {
@@ -442,26 +501,35 @@ impl DeviceOp {
             color: openlogi_core::color::Rgb::new(r, g, b),
         };
         openlogi_hid::lighting::LightingJob::spawn(&self.route, move |cancel| async move {
-            let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
-                .await
-                .map_err(|_| WriteError::RequestTimedOut {
-                    operation: HidppOperation::Lighting,
-                })?;
-            if !device_io.allows_io() {
-                return Err(WriteError::DeviceNotFound);
+            let write = || async {
+                let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
+                    .await
+                    .map_err(|_| WriteError::RequestTimedOut {
+                        operation: HidppOperation::Lighting,
+                    })?;
+                if !device_io.allows_io() {
+                    return Err(WriteError::DeviceNotFound);
+                }
+                let channel = authoritative_channel(Some(&capture), &registry, &route)?;
+                let lease = write
+                    .apply_on(
+                        &channel,
+                        || cancel.is_cancelled(),
+                        || device_io.allows_io() && registry.is_current(&channel),
+                    )
+                    .await?;
+                if let Some(lease) = lease {
+                    session_ticket.record(&route, channel.downgrade(), lease);
+                }
+                Ok(())
+            };
+            match ticket {
+                // Wait before leasing, as every ordered write does: the lease
+                // is fair, so holding it while waiting on an earlier write
+                // would deadlock against that write.
+                Some(ticket) => ticket.in_order(write).await,
+                None => write().await,
             }
-            let channel = authoritative_channel(Some(&capture), &registry, &route)?;
-            let lease = write
-                .apply_on(
-                    &channel,
-                    || cancel.is_cancelled(),
-                    || device_io.allows_io() && registry.is_current(&channel),
-                )
-                .await?;
-            if let Some(lease) = lease {
-                ticket.record(&route, channel.downgrade(), lease);
-            }
-            Ok(())
         })
     }
 
@@ -783,6 +851,10 @@ pub(crate) fn keep_os_layout_in_background(
 /// them. `None` leaves that setting alone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VolatileMouseSettings {
+    /// The onboard-memory mode a mouse with `0x8100` is kept in. Written
+    /// first, so a software-mode mouse is in host mode before the DPI and
+    /// report rate below reach it.
+    pub memory_mode: Option<MemoryMode>,
     /// Native HiResWheel resolution and inversion.
     pub wheel: Option<WheelModeChange>,
     /// Sensor DPI.
@@ -824,10 +896,17 @@ impl VolatileMouseSettings {
 /// scheduled: a pick the user makes before the reapply reaches the mouse is
 /// newer, and the reapply then leaves the rate to it rather than writing the
 /// configured one over it.
+///
+/// A mode switch reloads the profile the mouse runs, and the writes after it
+/// set what that profile does not own. When there is a mode to write, the
+/// whole sequence is numbered in `onboard_order` at schedule time, so an
+/// onboard profile write or mode switch requested later lands after all of it
+/// rather than between two of its writes.
 pub(crate) fn reapply_mouse_volatile_in_background(
     op: &DeviceOp,
     settings: VolatileMouseSettings,
     report_rate_order: &WriteOrder,
+    onboard_order: &WriteOrder,
     capture_plans: &SharedCapturePlans,
 ) {
     match op.resolve() {
@@ -838,6 +917,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
         }
     }
     let VolatileMouseSettings {
+        memory_mode,
         wheel,
         dpi,
         report_rate,
@@ -846,6 +926,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
     // Numbered only once the reapply will run: a ticket that never writes
     // would still supersede a pick already waiting for its turn.
     let report_rate = report_rate.map(|rate| (rate, report_rate_order.request(&op.route)));
+    let onboard = memory_mode.map(|_| onboard_order.request(&op.route));
     let access = op.access.clone();
     let route = op.route.clone();
     let index = route.device_index();
@@ -855,62 +936,80 @@ pub(crate) fn reapply_mouse_volatile_in_background(
             return;
         };
         rt.block_on(async move {
-            let _lease = access.receiver_access.acquire_for_io().await;
-            if !access.device_io.allows_io() {
-                debug!(
-                    index,
-                    "host device I/O suspended — volatile reapply skipped"
-                );
-                return;
-            }
-            let op = DeviceOp { access, route };
-            let turn = op.access.transport_turns.turn_for(&op.route);
-            if let Some(change) = wheel {
-                let (plans, route) = (&capture_plans, &op.route);
-                let result = timed_on_current_channel(&op, &turn, |shared| async move {
-                    write_native_wheel_mode(change, &shared, plans, route).await
-                })
-                .await;
-                log_wheel_result(index, change, result);
-            }
-            if let Some(dpi) = dpi {
-                let result = timed_on_current_channel(&op, &turn, |shared| async move {
-                    openlogi_hid::set_dpi_on(&shared, dpi).await
-                })
-                .await;
-                log_outcome(index, "DPI write", result, |()| {
-                    debug!(index, %dpi, "DPI written to device");
-                });
-            }
-            if let Some((rate, ticket)) = report_rate {
-                let result = within_turn(
-                    &ticket,
-                    &turn,
-                    || async {
-                        let shared = op.resolve()?;
-                        openlogi_hid::set_report_rate_on(&shared, rate)
-                            .await
-                            .map(Some)
-                    },
-                    || async { Ok(None) },
-                )
-                .await;
-                log_outcome(index, "report-rate write", result, |info| {
-                    if let Some(info) = info {
-                        debug!(index, rate = %info.current, "report rate written to device");
-                    } else {
-                        debug!(index, %rate, "report-rate reapply superseded by a newer write");
-                    }
-                });
-            }
-            if let Some(ss) = smartshift {
-                let result = timed_on_current_channel(&op, &turn, |shared| async move {
-                    openlogi_hid::set_smartshift_on(&shared, ss).await
-                })
-                .await;
-                log_outcome(index, "SmartShift write", result, |()| {
-                    debug!(index, status = ?ss, "SmartShift config written");
-                });
+            let reapply = || async {
+                let _lease = access.receiver_access.acquire_for_io().await;
+                if !access.device_io.allows_io() {
+                    debug!(
+                        index,
+                        "host device I/O suspended — volatile reapply skipped"
+                    );
+                    return;
+                }
+                let op = DeviceOp { access, route };
+                let turn = op.access.transport_turns.turn_for(&op.route);
+                if let Some(mode) = memory_mode {
+                    let result = timed_on_current_channel(&op, &turn, |shared| async move {
+                        openlogi_hid::set_memory_mode_on(&shared, mode).await
+                    })
+                    .await;
+                    log_outcome(index, "onboard mode write", result, |memory| {
+                        debug!(index, mode = ?memory.mode, "onboard mode kept");
+                    });
+                }
+                if let Some(change) = wheel {
+                    let (plans, route) = (&capture_plans, &op.route);
+                    let result = timed_on_current_channel(&op, &turn, |shared| async move {
+                        write_native_wheel_mode(change, &shared, plans, route).await
+                    })
+                    .await;
+                    log_wheel_result(index, change, result);
+                }
+                if let Some(dpi) = dpi {
+                    let result = timed_on_current_channel(&op, &turn, |shared| async move {
+                        openlogi_hid::set_dpi_on(&shared, dpi).await
+                    })
+                    .await;
+                    log_outcome(index, "DPI write", result, |()| {
+                        debug!(index, %dpi, "DPI written to device");
+                    });
+                }
+                if let Some((rate, ticket)) = report_rate {
+                    let result = within_turn(
+                        &ticket,
+                        &turn,
+                        || async {
+                            let shared = op.resolve()?;
+                            openlogi_hid::set_report_rate_on(&shared, rate)
+                                .await
+                                .map(Some)
+                        },
+                        || async { Ok(None) },
+                    )
+                    .await;
+                    log_outcome(index, "report-rate write", result, |info| {
+                        if let Some(info) = info {
+                            debug!(index, rate = %info.current, "report rate written to device");
+                        } else {
+                            debug!(index, %rate, "report-rate reapply superseded by a newer write");
+                        }
+                    });
+                }
+                if let Some(ss) = smartshift {
+                    let result = timed_on_current_channel(&op, &turn, |shared| async move {
+                        openlogi_hid::set_smartshift_on(&shared, ss).await
+                    })
+                    .await;
+                    log_outcome(index, "SmartShift write", result, |()| {
+                        debug!(index, status = ?ss, "SmartShift config written");
+                    });
+                }
+            };
+            match onboard {
+                // Wait for the earlier onboard writes before leasing, as
+                // every ordered write does: the lease is fair, so holding it
+                // while an earlier write waits for it would deadlock.
+                Some(ticket) => ticket.in_order(reapply).await,
+                None => reapply().await,
             }
         });
     });
@@ -1079,14 +1178,19 @@ async fn write_native_wheel_mode(
     Ok(NativeWheelWrite::Written)
 }
 
-/// Apply `lighting` to the keyboard at `op`'s device on a background thread.
+/// Apply `lighting` to the keyboard at `op`'s device on a background thread,
+/// after `ticket`'s turn when one is given.
 ///
 /// Resolves the configured colour (scaled by brightness, or black when the
 /// lighting is off) and writes every key over HID++ via
 /// [`openlogi_hid::set_keyboard_color_on`]. A registry miss and write
 /// failures are logged, not surfaced.
-pub fn set_lighting_in_background(op: DeviceOp, lighting: &Lighting) {
-    match op.lighting(lighting) {
+pub(crate) fn set_lighting_in_background(
+    op: DeviceOp,
+    lighting: &Lighting,
+    ticket: Option<WriteTicket>,
+) {
+    match op.lighting_after(lighting, ticket) {
         Ok(job) => job.detach(),
         Err(error) => warn!(?error, "could not start background lighting"),
     }
@@ -1111,7 +1215,15 @@ async fn timed<T>(
     operation: HidppOperation,
     fut: impl Future<Output = Result<T, WriteError>>,
 ) -> Result<T, WriteError> {
-    tokio::time::timeout(WRITE_TIMEOUT, fut)
+    timed_within(WRITE_TIMEOUT, operation, fut).await
+}
+
+async fn timed_within<T>(
+    budget: Duration,
+    operation: HidppOperation,
+    fut: impl Future<Output = Result<T, WriteError>>,
+) -> Result<T, WriteError> {
+    tokio::time::timeout(budget, fut)
         .await
         .map_err(|_| WriteError::RequestTimedOut { operation })?
 }
@@ -1314,6 +1426,7 @@ mod tests {
                 ..VolatileMouseSettings::default()
             },
             &rates,
+            &WriteOrder::default(),
             &no_capture_plans(),
         );
 
@@ -1344,6 +1457,55 @@ mod tests {
         let ran =
             tokio::time::timeout(Duration::from_secs(1), next.in_order(|| async { true })).await;
         assert_eq!(ran.ok(), Some(true), "the next change gets its turn");
+    }
+
+    /// A caller that gives up on an onboard transaction does not drop it: the
+    /// write keeps the device and its turn until it finishes, so the next
+    /// write requested after it still lands after.
+    #[tokio::test]
+    async fn an_abandoned_onboard_write_finishes_before_the_next_turn() {
+        let published = publish_direct_mouse().await;
+        let access = DeviceAccess {
+            channel: std::sync::Arc::new(RwLock::new(None)),
+            registry: published.registry.clone(),
+            receiver_access: ReceiverAccess::default(),
+            device_io: published.device_io.clone(),
+            transport_turns: TransportTurns::default(),
+        };
+        let order = WriteOrder::default();
+        let first = order.request(&published.route);
+        let (started, has_started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let abandoned = tokio::spawn(access.op(&published.route).run_in_order_within(
+            HidppOperation::WriteOnboardProfile,
+            first,
+            Duration::from_millis(20),
+            move |_| async move {
+                let _ = started.send(());
+                let _ = released.await;
+                Ok::<(), WriteError>(())
+            },
+        ));
+        has_started.await.expect("the transaction starts");
+        assert!(matches!(
+            abandoned.await.expect("the caller joins"),
+            Err(WriteError::RequestTimedOut {
+                operation: HidppOperation::WriteOnboardProfile
+            })
+        ));
+
+        let next = order.request(&published.route);
+        let following = tokio::spawn(next.in_order(|| async {}));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !following.is_finished(),
+            "the next write waits for the abandoned transaction"
+        );
+        release.send(()).expect("the transaction is still running");
+        tokio::time::timeout(Duration::from_secs(1), following)
+            .await
+            .expect("the transaction's turn passes on")
+            .expect("the next write joins");
     }
 
     /// A reconnect write to a mouse that stopped answering holds the turn
@@ -1564,6 +1726,7 @@ mod tests {
                 ..VolatileMouseSettings::default()
             },
             &WriteOrder::default(),
+            &WriteOrder::default(),
             &no_capture_plans(),
         );
         wait_until_a_worker_holds_the_receiver(&receiver_access).await;
@@ -1653,6 +1816,7 @@ mod tests {
                     wheel: Some(change),
                     ..VolatileMouseSettings::default()
                 },
+                &WriteOrder::default(),
                 &WriteOrder::default(),
                 &plans,
             ),

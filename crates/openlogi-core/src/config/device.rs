@@ -13,7 +13,7 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::{Dpi, ReportRate};
+use crate::hid::{Dpi, MemoryMode, ReportRate};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -305,6 +305,14 @@ pub struct DeviceConfig {
     /// leave the device's rate alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_rate: Option<ReportRate>,
+    /// Where a mouse with onboard memory (HID++ `0x8100`) takes its
+    /// settings from. In [`MemoryMode::Onboard`] the agent leaves DPI,
+    /// report rate and lighting to the profile stored on the mouse; in
+    /// [`MemoryMode::Software`] it switches the mouse to host mode on every
+    /// connect and re-applies this entry's values. `None` means "never
+    /// set", which is onboard, the mode the mouse powers up in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mode: Option<MemoryMode>,
 }
 
 impl DeviceConfig {
@@ -408,6 +416,7 @@ impl Default for DeviceConfig {
             fn_lock: None,
             keep_os_layout: None,
             report_rate: None,
+            memory_mode: None,
         }
     }
 }
@@ -534,6 +543,8 @@ struct RawDeviceConfig {
     keep_os_layout: Option<bool>,
     #[serde(default)]
     report_rate: Option<ReportRate>,
+    #[serde(default)]
+    memory_mode: Option<MemoryMode>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -597,6 +608,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
             report_rate: raw.report_rate,
+            memory_mode: raw.memory_mode,
         }
     }
 }

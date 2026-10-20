@@ -49,13 +49,12 @@ fn legacy_intervals_ms() -> RangeInclusive<u8> {
 
 /// The rate of a `0x8060` report interval, rounded to the nearest hertz.
 fn legacy_rate(interval_ms: u8) -> ReportRate {
-    let interval_ms = u16::from(interval_ms.max(1));
-    ReportRate::new((1000 + interval_ms / 2) / interval_ms)
+    ReportRate::from_interval_ms(interval_ms)
 }
 
 /// The `0x8060` interval whose rate is `rate`, if there is one.
 fn legacy_interval(rate: ReportRate) -> Option<u8> {
-    legacy_intervals_ms().find(|&interval_ms| legacy_rate(interval_ms) == rate)
+    rate.interval_ms()
 }
 
 /// The rates in a `0x8060` interval list, ascending: bit `n` is an interval
@@ -240,7 +239,7 @@ pub async fn get_report_rate_info_on(shared: &SharedChannel) -> Result<ReportRat
     get_report_rate_info_on_channel(shared.channel(), shared.device_index()).await
 }
 
-async fn get_report_rate_info_on_channel(
+pub(super) async fn get_report_rate_info_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
 ) -> Result<ReportRateInfo, WriteError> {

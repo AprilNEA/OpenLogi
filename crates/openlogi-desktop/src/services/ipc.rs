@@ -41,8 +41,8 @@
 use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, EasySwitchHosts, FnLockState, LightCommand, ReportRateInfo,
-    WriteError,
+    BacklightState, DeviceRoute, EasySwitchHosts, FnLockState, LightCommand, OnboardMemory,
+    ReportRateInfo, WriteError,
 };
 use openlogi_ipc::SavedConfig;
 use openlogi_ipc::client::{self, ConnectError};
@@ -67,9 +67,10 @@ use request::LinkLost;
 pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts,
-    ReadFnLock, ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost,
-    RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight, SetLightManualPower,
-    SetLighting, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
+    ReadFnLock, ReadOnboardMemory, ReadReportRate, ReadSmartShift, ReloadConfig,
+    RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight,
+    SetLightManualPower, SetLighting, SetMemoryMode, SetReportRate, SetSmartShift, StartPairing,
+    UnpairDevice, WriteOnboardProfile,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -151,6 +152,20 @@ pub enum GuiUpdate {
         /// The read-back, or why the rename did not land.
         result: Result<EasySwitchHosts, WriteError>,
     },
+    /// What a mouse reports after a memory-mode switch or onboard profile
+    /// save the GUI asked for: its onboard memory read back, or the typed
+    /// refusal. Answers [`SetMemoryMode`] and [`WriteOnboardProfile`].
+    OnboardWritten {
+        /// The mouse that was written.
+        key: DeviceKey,
+        /// The connection the write went out on; an answer is stale once the
+        /// mouse moves, like [`Self::ReportRateWritten`]'s.
+        route: DeviceRoute,
+        /// What was written.
+        write: OnboardWrite,
+        /// The read-back, or why the write did not land.
+        result: Result<OnboardMemory, WriteError>,
+    },
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
@@ -163,6 +178,15 @@ pub enum GuiUpdate {
         intent: UnpairIntent,
         result: Result<(), UnpairFailure>,
     },
+}
+
+/// Which onboard write an [`GuiUpdate::OnboardWritten`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnboardWrite {
+    /// A memory-mode switch.
+    Mode,
+    /// A save to the active onboard profile.
+    Profile,
 }
 
 /// Why the GUI asked a receiver to drop a pairing, which decides what the
