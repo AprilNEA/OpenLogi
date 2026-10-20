@@ -483,6 +483,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_change_writes_the_unmodelled_option_bits_back_as_read() -> Result<(), WriteError>
+    {
+        // Bits 5..=7 of the options byte have no flag. Logi Options+ 2.8
+        // reads bit 5 as a third mode bit; Solaar and OpenLogi read two. The
+        // keyboard's value goes back as read either way.
+        const UNMODELLED: u8 = 0b1110_0000;
+        let saving = BacklightOptions::PWR_SAVE.bits().to_le_bytes()[0];
+        let keyboard =
+            Keyboard::v3().options_low(BacklightOptions::from_bits_retain(UNMODELLED.into()));
+        for (change, expected) in [
+            (
+                BacklightChange::Enabled(false),
+                written(0, UNMODELLED | AUTOMATIC, 4),
+            ),
+            (
+                BacklightChange::PowerSave(true),
+                written(1, UNMODELLED | AUTOMATIC | saving, 4),
+            ),
+            // A mode change rewrites bits 3..=4 only.
+            (
+                BacklightChange::Level(2),
+                written(1, UNMODELLED | PERMANENT, 2),
+            ),
+        ] {
+            let (state, writes) = update(keyboard, change).await;
+            state?;
+            assert_eq!(writes, vec![expected], "{change}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_short_config_reply_is_never_written_back() {
         // A three-byte reply would zero-fill the level and every duration.
         let keyboard = Keyboard {
