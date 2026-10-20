@@ -984,6 +984,7 @@ fn easy_switch_hosts_and_errors() {
     );
     assert_wire(&HidppOperation::ReadHosts, "15");
     assert_wire(&HidppOperation::RenameHost, "16");
+    assert_wire(&HidppOperation::WriteLed, "17");
     assert_wire(&WriteError::HostRenameUnsupported, "16");
     assert_wire(&WriteError::HostSlotEmpty { slot: 2 }, "1702");
     assert_wire(&WriteError::HostNameRejected { max_len: 24 }, "1818");

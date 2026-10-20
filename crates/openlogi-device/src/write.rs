@@ -18,6 +18,7 @@ use crate::channel::route::{DeviceRoute, open_route_channel};
 mod backlight;
 mod diagnostics;
 mod dpi;
+mod dpi_led;
 mod easy_switch;
 mod error;
 mod fn_lock;
@@ -39,6 +40,7 @@ pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, DpiTarget, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi,
     set_dpi_on, set_dpi_target_on,
 };
+pub use dpi_led::{DpiLed, set_dpi_led_on};
 pub(crate) use easy_switch::read_name as read_host_friendly_name;
 pub use easy_switch::{
     get_easy_switch_hosts, get_easy_switch_hosts_on, rename_easy_switch_host,

@@ -273,6 +273,12 @@ that mouse has no adjustable DPI; DPI presets saved for it are ignored. This
 makes the MX Ergo's precision button work with its default binding. On a mouse
 with adjustable DPI, `CycleDpiPresets` keeps cycling the DPI presets.
 
+A mouse with a DPI LED (HID++ `0x1300`), such as the MX Ergo, shows the mode
+on that LED, as in Logi Options+. The LED lights when precision mode starts
+and goes dark when it ends. OpenLogi takes control of the LED from the
+firmware the first time precision mode starts, and keeps it. A mouse that
+never uses precision mode keeps the LED behavior of its firmware.
+
 Precision mode stays on when the mouse reconnects. It ends at the next press,
 at a speed or DPI change from the desktop app or `config.toml`, and at a
 binding change for that mouse. On a mouse with adjustable DPI, a DPI preset

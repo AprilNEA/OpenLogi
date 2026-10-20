@@ -270,6 +270,9 @@ pub enum HidppOperation {
     /// Write an Easy-Switch slot's `0x1815` host name. Appended last —
     /// variant order is wire format.
     RenameHost,
+    /// Light or darken the `0x1300` DPI LED. Appended last — variant order
+    /// is wire format.
+    WriteLed,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

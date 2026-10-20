@@ -43,11 +43,11 @@ use crate::capture_plan::{
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
-    write_pointer_speed_in_background,
+    show_precision_led, write_pointer_speed_in_background,
 };
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
-use crate::pointer_speed::{ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
+use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
@@ -281,7 +281,8 @@ impl SharedHandles {
 
     /// Write `speed` to the mouse at `route` and return what it reads back.
     /// The write ends the mouse's precision mode, so the pointer moves at the
-    /// speed the settings app shows. It is ordered with the precision button
+    /// speed the settings app shows, and darkens the DPI LED when the
+    /// precision speed ends with it. It is ordered with the precision button
     /// and the reconnect reapply as [`Self::set_report_rate`] is ordered:
     /// a write superseded before its turn reads the mouse instead.
     pub async fn set_pointer_speed(
@@ -289,14 +290,23 @@ impl SharedHandles {
         route: &DeviceRoute,
         speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError> {
-        let ticket = self
+        let AppWrite {
+            ticket,
+            ends_precision,
+        } = self
             .pointer_speeds
             .app_write(route, SavedSpeed::Scaled(Some(speed)));
         self.device(route)
             .run_in_turn(
                 HidppOperation::WritePointerScaling,
                 &ticket,
-                |c| async move { openlogi_hid::set_pointer_speed_on(&c, speed).await },
+                |c| async move {
+                    let applied = openlogi_hid::set_pointer_speed_on(&c, speed).await?;
+                    if ends_precision {
+                        show_precision_led(&c, false).await;
+                    }
+                    Ok(applied)
+                },
                 |c| async move { openlogi_hid::get_pointer_speed_on(&c).await },
             )
             .await
@@ -304,18 +314,28 @@ impl SharedHandles {
 
     /// Write `dpi` to the mouse at `route`. On a DPI mouse the write ends
     /// precision mode, so the pointer moves at the DPI the settings app
-    /// shows, and it is ordered with the precision button, the DPI preset
-    /// actions and the reconnect reapply. A write superseded before its turn
-    /// writes nothing.
+    /// shows, and darkens the DPI LED when the precision speed ends with it.
+    /// It is ordered with the precision button, the DPI preset actions and
+    /// the reconnect reapply. A write superseded before its turn writes
+    /// nothing.
     pub async fn set_dpi(&self, route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
-        let ticket = self
+        let AppWrite {
+            ticket,
+            ends_precision,
+        } = self
             .pointer_speeds
             .app_write(route, SavedSpeed::Dpi(Some(dpi)));
         self.device(route)
             .run_in_turn(
                 HidppOperation::WriteDpi,
                 &ticket,
-                |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
+                |c| async move {
+                    openlogi_hid::set_dpi_on(&c, dpi).await?;
+                    if ends_precision {
+                        show_precision_led(&c, false).await;
+                    }
+                    Ok(())
+                },
                 |_| async { Ok(()) },
             )
             .await
@@ -1646,13 +1666,20 @@ impl Orchestrator {
             target,
             ticket,
             restore,
+            led,
         } = write;
         let speeds = Arc::clone(&self.shared.pointer_speeds);
-        write_pointer_speed_in_background(self.shared.device(&route), ticket, target, move || {
-            if let Some(restore) = restore {
-                speeds.restored(&restore);
-            }
-        });
+        write_pointer_speed_in_background(
+            self.shared.device(&route),
+            ticket,
+            target,
+            led,
+            move || {
+                if let Some(restore) = restore {
+                    speeds.restored(&restore);
+                }
+            },
+        );
     }
 
     /// The effective settings of every online standalone light, keyed by its

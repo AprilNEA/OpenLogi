@@ -752,10 +752,14 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on:
 /// for the mouse was requested after `ticket`. Returns immediately; failures
 /// are logged. `on_applied` runs only when the mouse took the write, or when
 /// it reports no default DPI to write.
+///
+/// When `led` is set, the same turn then lights (`true`) or darkens the DPI
+/// LED with [`show_precision_led`]. The LED never fails the speed write.
 pub(crate) fn write_pointer_speed_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
     target: SpeedTarget,
+    led: Option<bool>,
     on_applied: impl FnOnce() + Send + 'static,
 ) {
     let index = op.route.device_index();
@@ -776,6 +780,9 @@ pub(crate) fn write_pointer_speed_in_background(
                             .await?
                             .map_or(Landed::NoDefaultDpi, Landed::Dpi),
                     };
+                    if let Some(on) = led {
+                        show_precision_led(&shared, on).await;
+                    }
                     Ok(Some(landed))
                 },
                 || async { Ok(None) },
@@ -805,6 +812,18 @@ pub(crate) fn write_pointer_speed_in_background(
             });
         },
     );
+}
+
+/// Light (`on`) or darken the DPI LED of the mouse on `shared` for
+/// precision mode. A mouse without one gets no write. A failure is logged
+/// only: the LED is a hint, and the speed write it follows has landed.
+pub(crate) async fn show_precision_led(shared: &openlogi_hid::SharedChannel, on: bool) {
+    let index = shared.route().device_index();
+    match openlogi_hid::set_dpi_led_on(shared, on).await {
+        Ok(openlogi_hid::DpiLed::Set) => {}
+        Ok(openlogi_hid::DpiLed::Missing) => debug!(index, "no DPI LED to show precision mode"),
+        Err(error) => debug!(index, on, %error, "DPI LED write failed"),
+    }
 }
 
 /// What a pointer-speed write that reached the mouse did.

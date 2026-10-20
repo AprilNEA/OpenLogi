@@ -127,7 +127,8 @@ pub use succession::Identity;
 ///      scales; `Agent::{read_pointer_speed, set_pointer_speed}` appended —
 ///      that speed read and set from the settings app;
 ///      `Action::TogglePrecisionMode` appended — precision mode bound to a
-///      button.
+///      button; `HidppOperation::WriteLed` appended — the `0x1300` DPI LED
+///      that precision mode lights.
 pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the

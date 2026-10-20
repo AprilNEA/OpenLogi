@@ -132,8 +132,9 @@ impl ActionExecutor {
             target,
             ticket,
             restore,
+            led,
         } = write;
-        write_pointer_speed_in_background(self.access.op(&route), ticket, target, move || {
+        write_pointer_speed_in_background(self.access.op(&route), ticket, target, led, move || {
             if let Some(restore) = restore {
                 speeds.restored(&restore);
             }

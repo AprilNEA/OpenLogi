@@ -216,7 +216,8 @@ pub enum Action {
     /// mouse returns to 1×. On a mouse with adjustable DPI
     /// ([`Capabilities::pointer`](crate::device::Capabilities::pointer)) it
     /// is the lowest DPI the sensor lists, and with none saved the mouse
-    /// returns to the sensor's default DPI. Does nothing on other devices.
+    /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
+    /// lit while the mode is on. Does nothing on other devices.
     TogglePrecisionMode,
 }
 

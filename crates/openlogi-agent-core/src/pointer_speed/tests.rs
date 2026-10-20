@@ -613,3 +613,111 @@ fn a_reload_with_a_new_dpi_writes_only_a_dpi_mouse_that_is_owed_a_restore() {
     assert!(!speeds.precision("m"));
     assert_eq!(written(&writes), [dpi(DpiTarget::Value(Dpi::new(1600)))]);
 }
+
+/// What `writes` show on the DPI LED, in order.
+fn leds(writes: &[SpeedWrite]) -> Vec<Option<bool>> {
+    writes.iter().map(|write| write.led).collect()
+}
+
+#[test]
+fn a_press_lights_the_led_and_the_next_darkens_it() {
+    let speeds = one_mouse();
+
+    let (_, on) = speeds
+        .toggle_precision(Some("a"), PrecisionPress::Assigned)
+        .expect("an online mouse");
+    let (_, off) = speeds
+        .toggle_precision(Some("a"), PrecisionPress::Assigned)
+        .expect("an online mouse");
+
+    assert_eq!(leds(&[on, off]), [Some(true), Some(false)]);
+}
+
+#[test]
+fn a_reconnect_shows_the_mode_on_the_led_and_leaves_it_otherwise() {
+    let speeds = one_mouse();
+    let saved = SavedSpeed::Scaled(Some(speed(0x0180)));
+    let plain = speeds
+        .reapply("a", &route(1), saved)
+        .expect("a saved speed");
+    assert_eq!(plain.led, None, "a mouse that never used precision mode");
+
+    speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
+    let on = speeds
+        .reapply("a", &route(1), saved)
+        .expect("precision mode");
+    assert_eq!(on.led, Some(true));
+
+    // The restore write of this press has not landed yet.
+    let _off = speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
+    let owed = speeds
+        .reapply("a", &route(1), saved)
+        .expect("a restore is owed");
+    assert_eq!(
+        owed.led,
+        Some(false),
+        "the write that ends the precision speed"
+    );
+}
+
+#[test]
+fn an_app_write_ends_the_precision_speed_only_once() {
+    let speeds = one_mouse();
+    speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
+
+    let first = speeds.app_write(&route(1), SavedSpeed::Scaled(Some(speed(0x0200))));
+    let second = speeds.app_write(&route(1), SavedSpeed::Scaled(Some(speed(0x0220))));
+
+    assert!(first.ends_precision);
+    assert!(!second.ends_precision);
+}
+
+#[test]
+fn an_app_write_after_a_press_that_ended_the_mode_still_darkens_the_led() {
+    let speeds = one_mouse();
+    speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
+    // The restore write of this press has not landed yet.
+    let _off = speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
+
+    let write = speeds.app_write(&route(1), SavedSpeed::Scaled(Some(speed(0x0200))));
+
+    assert!(write.ends_precision);
+}
+
+#[test]
+fn a_preset_darkens_the_led_only_when_it_ends_the_precision_speed() {
+    let speeds = PointerSpeeds::default();
+    speeds.publish(None, [dpi_mouse("a", 1, Some(Dpi::new(1600)))]);
+    let plain = speeds.preset_write(&route(1), Dpi::new(800));
+    assert_eq!(plain.led, None);
+
+    speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
+    let ending = speeds.preset_write(&route(1), Dpi::new(800));
+    assert_eq!(ending.led, Some(false));
+}
+
+#[test]
+fn a_reload_darkens_the_led_of_the_mice_whose_mode_it_ends() {
+    let speeds = PointerSpeeds::default();
+    speeds.publish(
+        None,
+        [
+            mouse("a", 1, Some(speed(0x0180))),
+            mouse("b", 2, Some(speed(0x0200))),
+        ],
+    );
+    speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
+
+    let writes = speeds.reload(
+        every_key(ReloadChange {
+            speed: true,
+            assignments: false,
+        }),
+        [
+            mouse("a", 1, Some(speed(0x0180))),
+            mouse("b", 2, Some(speed(0x0220))),
+        ],
+    );
+
+    assert_eq!(leds(&writes), [Some(false), None]);
+}
