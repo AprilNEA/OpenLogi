@@ -114,6 +114,25 @@ fn an_unrelated_reload_keeps_precision_mode() {
 }
 
 #[test]
+fn a_reload_ends_precision_mode_on_a_mouse_that_is_offline() {
+    let config = Config::default();
+    let mut orch = orchestrator_in_precision(config.clone());
+    orch.devices[0].online = false;
+    orch.publish_device_runtime();
+
+    let mut rebound = config;
+    rebound.set_binding(
+        "a",
+        ButtonId::Back,
+        Binding::Single(Action::PreviousDesktop),
+    );
+    orch.replace_config(rebound);
+
+    // The reconnect then writes the saved speed, not the precision speed.
+    assert!(!orch.shared.pointer_speeds.precision("a"));
+}
+
+#[test]
 fn a_reload_with_a_new_speed_ends_precision_mode() {
     let config = Config::default();
     let mut orch = orchestrator_in_precision(config.clone());

@@ -802,8 +802,15 @@ impl Orchestrator {
     /// Publish every online, enabled mouse whose speed `0x2205` scales, for
     /// the precision button. The precision mode of each mouse is kept.
     fn publish_pointer_speeds(&self, selected: Option<&str>) {
-        let mice = self
-            .devices
+        self.shared
+            .pointer_speeds
+            .publish(selected, self.scaled_mice());
+    }
+
+    /// Every online, enabled mouse whose speed `0x2205` scales, with its
+    /// saved speed.
+    fn scaled_mice(&self) -> impl Iterator<Item = ScaledMouse> + '_ {
+        self.devices
             .iter()
             .filter(|dev| {
                 dev.online && scales_pointer(dev) && self.config.device_enabled(&dev.config_key)
@@ -814,8 +821,7 @@ impl Orchestrator {
                     route: dev.route.clone()?,
                     saved: configured_pointer_speed(&self.config, dev),
                 })
-            });
-        self.shared.pointer_speeds.publish(selected, mice);
+            })
     }
 
     /// Capture plans for enabled devices, and a route for every online device.
@@ -1532,29 +1538,21 @@ impl Orchestrator {
         }
     }
 
-    /// Push a changed pointer speed to the online mouse it belongs to, and
-    /// end precision mode on a mouse whose speed or button assignments the
-    /// reload changed (see [`crate::pointer_speed`]). An unrelated save
+    /// End precision mode on every mouse whose speed or button assignments
+    /// the reload changed, online or not, and push the resulting speed to
+    /// the online ones (see [`crate::pointer_speed`]). An unrelated save
     /// writes nothing, as for [`Self::apply_changed_fn_locks`].
     fn apply_changed_pointer_speeds(&self, previous: &Config) {
-        for dev in self
-            .devices
-            .iter()
-            .filter(|dev| dev.online && scales_pointer(dev))
-            .filter(|dev| self.config.device_enabled(&dev.config_key))
+        let change = |key: &str| ReloadChange {
+            speed: self.config.pointer_speed(key) != previous.pointer_speed(key),
+            assignments: assignments_changed(previous, &self.config, key),
+        };
+        for write in self
+            .shared
+            .pointer_speeds
+            .reload(change, self.scaled_mice())
         {
-            let Some(route) = dev.route.as_ref() else {
-                continue;
-            };
-            let key = &dev.config_key;
-            let change = ReloadChange {
-                speed: self.config.pointer_speed(key) != previous.pointer_speed(key),
-                assignments: assignments_changed(previous, &self.config, key),
-            };
-            let saved = configured_pointer_speed(&self.config, dev);
-            if let Some(write) = self.shared.pointer_speeds.reload(key, route, saved, change) {
-                self.write_pointer_speed(write);
-            }
+            self.write_pointer_speed(write);
         }
     }
 

@@ -83,6 +83,13 @@ pub(crate) struct ReloadChange {
     pub(crate) assignments: bool,
 }
 
+impl ReloadChange {
+    /// Whether the change ends precision mode, as in Logi Options+.
+    fn ends_precision(self) -> bool {
+        self.speed || self.assignments
+    }
+}
+
 impl PointerSpeeds {
     /// Replace the online mice and the selected device. The precision mode
     /// of every mouse is kept, online or not, so a mouse that reconnects
@@ -155,28 +162,38 @@ impl PointerSpeeds {
         self.order.request(route)
     }
 
-    /// The write a config reload owes the mouse `key` names, at `route`.
-    /// A changed speed or changed assignments end precision mode, as in Logi
-    /// Options+; the mouse then returns to `saved`, or to 1× when no speed is
-    /// saved. A changed speed alone writes `saved`. `None` when there is
-    /// nothing to write.
+    /// The writes a config reload owes. `change` tells what the reload
+    /// changed for a config key, and `mice` are the online mice.
+    ///
+    /// A changed speed or changed assignments end precision mode on every
+    /// mouse, online or not, as in Logi Options+. An offline mouse therefore
+    /// gets its saved speed when it reconnects. An online mouse whose mode
+    /// ended returns to its saved speed, or to 1× when no speed is saved. An
+    /// online mouse whose speed alone changed gets the new speed. The other
+    /// mice get no write.
     pub(crate) fn reload(
         &self,
-        key: &str,
-        route: &DeviceRoute,
-        saved: Option<PointerSpeed>,
-        change: ReloadChange,
-    ) -> Option<SpeedWrite> {
+        change: impl Fn(&str) -> ReloadChange,
+        mice: impl IntoIterator<Item = ScaledMouse>,
+    ) -> Vec<SpeedWrite> {
         let mut state = self.lock();
-        let ended = (change.speed || change.assignments) && state.precision.remove(key);
-        let speed = if ended {
-            saved.unwrap_or_default()
-        } else if change.speed {
-            saved?
-        } else {
-            return None;
-        };
-        Some(self.write(route.clone(), speed))
+        let ended: HashSet<String> = state
+            .precision
+            .extract_if(|key| change(key).ends_precision())
+            .collect();
+        // The writes are numbered while the lock is held, as every write is.
+        mice.into_iter()
+            .filter_map(|ScaledMouse { key, route, saved }| {
+                let speed = if ended.contains(&key) {
+                    saved.unwrap_or_default()
+                } else if change(&key).speed {
+                    saved?
+                } else {
+                    return None;
+                };
+                Some(self.write(route, speed))
+            })
+            .collect()
     }
 
     /// Whether precision mode is on for the mouse `key` names.

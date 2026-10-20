@@ -10,7 +10,9 @@
 //!
 //! A release of the slider persists the setting and writes the mouse in one
 //! request. Its answer is the mouse's read-back, and the write ends precision
-//! mode on that mouse. A refusal sends the query back to the mouse.
+//! mode on that mouse. A refusal sends the query back to the mouse and marks
+//! the mouse refused, because the slider keeps showing the saved setting. The
+//! mark stands until the next write lands or a reading matches the setting.
 
 use openlogi_core::hid::{PointerSpeed, WriteError};
 use tracing::{debug, warn};
@@ -57,6 +59,38 @@ impl AppState {
             })
     }
 
+    /// Whether the active mouse refused its last pointer-speed write and does
+    /// not read the saved speed yet. The slider then shows a speed the mouse
+    /// does not move at. The agent writes the saved speed again when the
+    /// mouse reconnects.
+    #[must_use]
+    pub fn current_pointer_speed_refused(&self) -> bool {
+        let Some(record) = self.current_record() else {
+            return false;
+        };
+        if !self
+            .pointer
+            .refused_pointer_speeds
+            .contains(&record.device_key())
+        {
+            return false;
+        }
+        let Some(saved) = record
+            .persistent_config_key()
+            .and_then(|key| self.config.pointer_speed(key))
+        else {
+            // With nothing saved the slider shows the reading itself.
+            return false;
+        };
+        match self.current_pointer_speed_load() {
+            PointerSpeedLoad::Ready(reading) => *reading != saved,
+            PointerSpeedLoad::Unknown
+            | PointerSpeedLoad::Loading
+            | PointerSpeedLoad::Failed(_)
+            | PointerSpeedLoad::Unsupported(_) => true,
+        }
+    }
+
     /// Persist `speed` for the active mouse and write it through the agent.
     /// The slider shows `speed` at once; the mouse's read-back arrives as
     /// [`Self::apply_pointer_speed_written`]. No-op when no device is
@@ -82,6 +116,7 @@ impl AppState {
         let Some(route) = route else {
             return events;
         };
+        self.pointer.refused_pointer_speeds.remove(&device_key);
         self.pointer
             .reads
             .set_pointer_speed_ready(&device_key, speed);
@@ -95,16 +130,21 @@ impl AppState {
 
     /// The mouse's answer to a [`Self::commit_pointer_speed`] write: show the
     /// read-back, or — when the mouse refused or could not be reached — ask
-    /// it again so the optimistic value does not stand in for its own.
+    /// it again so the optimistic value does not stand in for its own, and
+    /// mark the mouse refused for [`Self::current_pointer_speed_refused`].
     pub fn apply_pointer_speed_written(
         &mut self,
         key: &DeviceKey,
         result: Result<PointerSpeed, WriteError>,
     ) -> StateEvents {
         match result {
-            Ok(speed) => self.pointer.reads.set_pointer_speed_ready(key, speed),
+            Ok(speed) => {
+                self.pointer.refused_pointer_speeds.remove(key);
+                self.pointer.reads.set_pointer_speed_ready(key, speed);
+            }
             Err(error) => {
                 warn!(%error, key = %key, "pointer-speed write did not land — re-reading the mouse");
+                self.pointer.refused_pointer_speeds.insert(key.clone());
                 self.pointer.reads.refresh_pointer_speed(key);
             }
         }

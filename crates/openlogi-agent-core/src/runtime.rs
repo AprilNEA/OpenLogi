@@ -147,22 +147,24 @@ impl ActionExecutor {
 
         let next = match action {
             Action::CycleDpiPresets => {
-                let next = match self.dpi_cycle.write() {
+                // A mouse that scales its pointer with `0x2205` has no
+                // adjustable DPI. Its DPI button is the precision-mode button
+                // (MX Ergo CID 0xED), which Logi Options+ binds to precision
+                // mode, so the default binding switches between the saved
+                // speed and the precision speed (#1372). This check comes
+                // before the presets: such a mouse can still have presets
+                // saved by an older panel or by hand, and the mouse would
+                // refuse those DPI writes.
+                if self.toggle_precision_mode(device_key) {
+                    return;
+                }
+                match self.dpi_cycle.write() {
                     Ok(mut guard) => guard.state_for(device_key).and_then(DpiCycleState::cycle),
                     Err(e) => {
                         warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
                         None
                     }
-                };
-                // A mouse that scales its pointer with `0x2205` has no DPI
-                // presets to cycle. Its DPI button is the precision-mode
-                // button (MX Ergo CID 0xED), which Logi Options+ binds to
-                // precision mode, so the default binding switches between
-                // the saved speed and the precision speed (#1372).
-                if next.is_none() && self.toggle_precision_mode(device_key) {
-                    return;
                 }
-                next
             }
             Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
                 Ok(mut guard) => guard
@@ -624,6 +626,46 @@ mod tests {
 
         executor.dispatch(&Action::CycleDpiPresets, Some("master"));
         assert!(!pointer_speeds.precision("master"));
+    }
+
+    /// Presets saved for a scaled mouse, by an older panel or by hand, do not
+    /// take the press: the mouse has no DPI to write them to.
+    #[test]
+    fn cycle_dpi_presets_prefers_precision_mode_over_saved_presets() {
+        let route = openlogi_core::hid::DeviceRoute::Unifying {
+            receiver_uid: "UNIFYING".to_string(),
+            slot: 1,
+        };
+        let pointer_speeds = Arc::new(PointerSpeeds::default());
+        pointer_speeds.publish(
+            None,
+            [crate::pointer_speed::ScaledMouse {
+                key: "ergo".to_string(),
+                route: route.clone(),
+                saved: None,
+            }],
+        );
+        let mut executor = executor_with(pointer_speeds.clone());
+        let mut cycles = DpiCycles::default();
+        cycles.by_key.insert(
+            "ergo".to_string(),
+            DpiCycleState {
+                presets: vec![
+                    openlogi_core::hid::Dpi::new(800),
+                    openlogi_core::hid::Dpi::new(1600),
+                ],
+                index: 0,
+                target: Some(route),
+                capabilities: None,
+            },
+        );
+        executor.dpi_cycle = Arc::new(RwLock::new(cycles));
+
+        executor.dispatch(&Action::CycleDpiPresets, Some("ergo"));
+
+        assert!(pointer_speeds.precision("ergo"));
+        let cycles = executor.dpi_cycle.read().expect("dpi_cycle lock");
+        assert_eq!(cycles.by_key["ergo"].index, 0, "the presets did not cycle");
     }
 
     #[test]

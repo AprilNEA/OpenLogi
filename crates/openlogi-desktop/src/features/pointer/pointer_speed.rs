@@ -6,9 +6,12 @@
 //! in Logi Options+: 50 % is 1×, the ends are 0.125× and 3×, and equal steps
 //! change the speed by equal ratios. A release goes through
 //! [`AppState::commit_pointer_speed`], which persists the speed and writes
-//! the mouse.
+//! the mouse. When the mouse refuses the write, a note under the slider says
+//! so, because the slider keeps showing the saved speed.
 
-use gpui::{AnyElement, App, Context, IntoElement, ParentElement, Styled, Window, div};
+use gpui::{
+    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
+};
 use gpui_component::{h_flex, slider::Slider, v_flex};
 use openlogi_core::hid::PointerSpeed;
 
@@ -24,6 +27,8 @@ pub(super) struct PointerSpeedFacts {
     /// The speed the slider shows: the saved one, else the reading.
     speed: Option<PointerSpeed>,
     reachable: bool,
+    /// The mouse refused the last write and does not read the saved speed.
+    refused: bool,
 }
 
 impl PointerSpeedFacts {
@@ -40,6 +45,7 @@ impl PointerSpeedFacts {
             load: state.current_pointer_speed_load(),
             speed: state.current_pointer_speed(),
             reachable: record.route.is_some(),
+            refused: state.current_pointer_speed_refused(),
         })
     }
 
@@ -108,6 +114,7 @@ pub(super) fn pointer_speed_section(
         key,
         load,
         reachable,
+        refused,
         ..
     } = facts;
     let body: AnyElement = match (load, slider) {
@@ -157,6 +164,13 @@ pub(super) fn pointer_speed_section(
                 })),
         )
         .child(body)
+        .children((refused && reachable).then(|| {
+            div()
+                .debug_selector(|| "pointer-speed-refusal".into())
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!("pointer.pointer_speed_not_applied"))
+        }))
         .child(
             div()
                 .text_caption()

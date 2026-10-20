@@ -2,7 +2,7 @@
 
 use openlogi_core::hid::{DeviceRoute, PointerSpeed};
 
-use super::{PointerSpeeds, ReloadChange, ScaledMouse};
+use super::{PointerSpeeds, ReloadChange, ScaledMouse, SpeedWrite};
 
 fn route(slot: u8) -> DeviceRoute {
     DeviceRoute::Unifying {
@@ -28,6 +28,16 @@ fn one_mouse() -> PointerSpeeds {
     let speeds = PointerSpeeds::default();
     speeds.publish(None, [mouse("a", 1, Some(speed(0x0180)))]);
     speeds
+}
+
+/// A reload that changed `change` for every config key.
+fn every_key(change: ReloadChange) -> impl Fn(&str) -> ReloadChange {
+    move |_| change
+}
+
+/// The speeds `writes` put on the mice, in order.
+fn written(writes: &[SpeedWrite]) -> Vec<PointerSpeed> {
+    writes.iter().map(|write| write.speed).collect()
 }
 
 #[test]
@@ -126,40 +136,78 @@ fn a_reload_that_changes_assignments_ends_precision() {
     // Precision off: nothing to undo.
     assert!(
         speeds
-            .reload("a", &route(1), Some(speed(0x0180)), assignments)
-            .is_none()
+            .reload(every_key(assignments), [mouse("a", 1, Some(speed(0x0180)))])
+            .is_empty()
     );
 
     speeds.toggle_precision(Some("a"));
-    let write = speeds
-        .reload("a", &route(1), None, assignments)
-        .expect("precision ended");
+    let writes = speeds.reload(every_key(assignments), [mouse("a", 1, None)]);
 
     assert!(!speeds.precision("a"));
-    assert_eq!(write.speed, PointerSpeed::DEFAULT);
+    assert_eq!(written(&writes), [PointerSpeed::DEFAULT]);
 }
 
 #[test]
 fn a_reload_that_changes_the_speed_writes_it_and_ends_precision() {
     let speeds = one_mouse();
-    let changed = ReloadChange {
+    let changed = every_key(ReloadChange {
         speed: true,
+        ..ReloadChange::default()
+    });
+
+    let writes = speeds.reload(&changed, [mouse("a", 1, Some(speed(0x0080)))]);
+    assert_eq!(written(&writes), [speed(0x0080)]);
+    // A removed speed leaves the mouse alone.
+    assert!(speeds.reload(&changed, [mouse("a", 1, None)]).is_empty());
+
+    speeds.toggle_precision(Some("a"));
+    let writes = speeds.reload(&changed, [mouse("a", 1, Some(speed(0x0080)))]);
+    assert!(!speeds.precision("a"));
+    assert_eq!(written(&writes), [speed(0x0080)]);
+}
+
+#[test]
+fn a_reload_ends_precision_on_an_offline_mouse() {
+    let speeds = one_mouse();
+    speeds.toggle_precision(Some("a"));
+    // `a` disconnects, and its buttons are rebound while it is away.
+    speeds.publish(None, []);
+    let assignments = ReloadChange {
+        assignments: true,
         ..ReloadChange::default()
     };
 
-    let write = speeds
-        .reload("a", &route(1), Some(speed(0x0080)), changed)
-        .expect("a new speed");
-    assert_eq!(write.speed, speed(0x0080));
-    // A removed speed leaves the mouse alone.
-    assert!(speeds.reload("a", &route(1), None, changed).is_none());
+    let writes = speeds.reload(every_key(assignments), []);
 
-    speeds.toggle_precision(Some("a"));
-    let write = speeds
-        .reload("a", &route(1), Some(speed(0x0080)), changed)
-        .expect("precision ended");
+    assert!(writes.is_empty(), "an offline mouse gets no write");
     assert!(!speeds.precision("a"));
-    assert_eq!(write.speed, speed(0x0080));
+    // It reconnects at its saved speed, not at the precision speed.
+    let write = speeds
+        .reapply("a", &route(1), Some(speed(0x0180)))
+        .expect("a saved speed");
+    assert_eq!(write.speed, speed(0x0180));
+}
+
+#[test]
+fn a_reload_keeps_precision_on_the_mice_it_did_not_change() {
+    let speeds = PointerSpeeds::default();
+    speeds.publish(None, [mouse("a", 1, None), mouse("b", 2, None)]);
+    speeds.toggle_precision(Some("a"));
+    speeds.toggle_precision(Some("b"));
+    // `a` disconnects. The reload rebinds only `b`.
+    speeds.publish(None, [mouse("b", 2, None)]);
+    let only_b = |key: &str| ReloadChange {
+        assignments: key == "b",
+        ..ReloadChange::default()
+    };
+
+    let writes = speeds.reload(only_b, [mouse("b", 2, None)]);
+
+    assert!(speeds.precision("a"));
+    assert!(!speeds.precision("b"));
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].route, route(2));
+    assert_eq!(writes[0].speed, PointerSpeed::DEFAULT);
 }
 
 #[tokio::test]

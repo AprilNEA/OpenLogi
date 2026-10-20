@@ -131,6 +131,29 @@ fn current_load(cx: &gpui::TestAppContext) -> PointerSpeedLoad {
     })
 }
 
+fn refused(cx: &gpui::TestAppContext) -> bool {
+    cx.read(|cx| {
+        AppState::try_read(cx)
+            .expect("state installed")
+            .current_pointer_speed_refused()
+    })
+}
+
+/// Deliver the agent's answer to a pointer-speed write for `key`.
+fn answer_write(
+    cx: &mut gpui::TestAppContext,
+    key: &DeviceKey,
+    result: Result<PointerSpeed, WriteError>,
+) {
+    let events = cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            state.apply_pointer_speed_written(key, result)
+        })
+    });
+    assert_eq!(events, [StateEvent::PointerSpeedChanged(key.clone())]);
+    cx.run_until_parked();
+}
+
 #[gpui::test]
 fn a_mouse_with_no_saved_speed_shows_its_reading(cx: &mut gpui::TestAppContext) {
     let (state, mut receiver) = mouse_state(true, Config::ephemeral());
@@ -187,4 +210,54 @@ fn the_mouses_answer_lands_and_a_refusal_reads_it_again(cx: &mut gpui::TestAppCo
         route,
         "the refusal sends the read back to the mouse"
     );
+}
+
+/// The slider keeps the saved speed after a refusal, so the state marks the
+/// mouse while it reads another speed. Until the re-read lands, the last
+/// reading stands, as for every swr read.
+#[gpui::test]
+fn a_refused_write_is_marked_while_the_mouse_reads_another_speed(cx: &mut gpui::TestAppContext) {
+    let mut config = Config::ephemeral();
+    config.set_pointer_speed(KNOWN_MOUSE_KEY, speed(0x0180));
+    let (state, mut receiver) = mouse_state(true, config);
+    let key = state.current_record().expect("mouse").device_key();
+    install(state, cx);
+    answer_speed_read(&mut receiver, speed(0x0180));
+    cx.run_until_parked();
+    assert!(!refused(cx));
+
+    answer_write(cx, &key, Err(WriteError::AgentUnavailable));
+    answer_speed_read(&mut receiver, speed(0x0100));
+    cx.run_until_parked();
+    assert!(refused(cx), "the mouse moves at another speed");
+    assert_eq!(shown(cx), Some(speed(0x0180)));
+
+    // A reading of the saved speed hides the mark.
+    answer_write(cx, &key, Err(WriteError::AgentUnavailable));
+    answer_speed_read(&mut receiver, speed(0x0180));
+    cx.run_until_parked();
+    assert!(!refused(cx));
+
+    // A write that lands clears it.
+    answer_write(cx, &key, Err(WriteError::AgentUnavailable));
+    answer_speed_read(&mut receiver, speed(0x0100));
+    cx.run_until_parked();
+    assert!(refused(cx));
+    answer_write(cx, &key, Ok(speed(0x0180)));
+    assert!(!refused(cx));
+}
+
+/// With nothing saved the slider shows the reading, so a refusal needs no
+/// mark: the slider moves back to the mouse's own speed.
+#[gpui::test]
+fn a_refusal_is_not_marked_when_nothing_is_saved(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = mouse_state(true, Config::ephemeral());
+    let key = state.current_record().expect("mouse").device_key();
+    install(state, cx);
+    answer_speed_read(&mut receiver, PointerSpeed::DEFAULT);
+    cx.run_until_parked();
+
+    answer_write(cx, &key, Err(WriteError::AgentUnavailable));
+
+    assert!(!refused(cx));
 }

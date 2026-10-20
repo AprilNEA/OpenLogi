@@ -301,6 +301,7 @@ reading_pointer_speed = "Чытанне хуткасці ўказальніка�
 couldnt_read_pointer_speed_click_to_retry = "Не ўдалося прачытаць хуткасць указальніка. Націсніце, каб паўтарыць."
 device_offline_pointer_speed_is_unavailable = "Прылада па-за сеткай. Хуткасць указальніка недаступная."
 pointer_speed_unsupported = "Прылада не паведамляе пра падтрымку рэгулявання хуткасці ўказальніка."
+pointer_speed_not_applied = "Мыш не прыняла гэтую хуткасць. OpenLogi ўжыве яе, калі мыш падключыцца зноў."
 scrolling = "Прагортка"
 invert_scroll_direction = "Інвертаваць кірунак прагорткі"
 scroll_direction_description = "Змяняе кірунак пракруткі гэтай мышы, не змяняючы пракрутку сэнсарнай панэлі."
