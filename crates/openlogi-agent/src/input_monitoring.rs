@@ -17,7 +17,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracing::{debug, warn};
@@ -33,6 +33,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How often the result file is checked while a probe runs.
 const PROBE_POLL: Duration = Duration::from_millis(50);
+
+/// The name prefix of every probe answer file in the runtime dir, staged
+/// copies included.
+const ANSWER_PREFIX: &str = "input-monitoring-probe.";
 
 /// The shortest time between two relaunches for a late grant. A relaunched
 /// agent that still lacks the grant its probe saw would otherwise relaunch
@@ -92,9 +96,18 @@ fn probe_result_path(mut args: impl Iterator<Item = OsString>) -> Option<PathBuf
 /// Written beside `path` and renamed into place, so the agent never reads a
 /// partial answer.
 fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
-    let staged = path.with_extension("tmp");
+    let staged = staged_path(path);
     std::fs::write(&staged, contents)?;
     std::fs::rename(&staged, path)
+}
+
+/// `path` with `.tmp` appended. Appended, not swapped for the extension:
+/// answer names end in an attempt number, and two attempts must not share a
+/// staged file.
+fn staged_path(path: &Path) -> PathBuf {
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(".tmp");
+    PathBuf::from(staged)
 }
 
 /// Read the Input Monitoring grant from a newly started probe: `Some(granted)`,
@@ -123,16 +136,47 @@ fn probe() -> io::Result<Answer> {
     let exe = std::env::current_exe()?;
     let dir = openlogi_core::paths::runtime_dir().map_err(io::Error::other)?;
     std::fs::create_dir_all(&dir)?;
-    // One name per agent: the singleton lock makes this process the only
-    // asker, and the answer is removed before each launch.
-    let result = dir.join(format!("input-monitoring-probe.{}", std::process::id()));
-    remove_if_present(&result)?;
+    // A packaged probe runs under LaunchServices, out of reach of `reap`, so
+    // one that misses its deadline can still answer later. Each attempt
+    // therefore gets its own file, so a late answer is never read as a later
+    // attempt's, and the sweep removes such leftovers.
+    sweep_answers(&dir);
+    let result = dir.join(answer_name(std::process::id(), next_attempt()));
     let deadline = Instant::now() + PROBE_TIMEOUT;
     let child = probe_command(&exe, &result).spawn()?;
     let answer = wait_for_answer(&result, deadline);
     reap(child, deadline);
     let _ = remove_if_present(&result);
     answer
+}
+
+/// The answer file of one probe attempt.
+fn answer_name(pid: u32, attempt: u64) -> String {
+    format!("{ANSWER_PREFIX}{pid}.{attempt}")
+}
+
+/// A number no earlier attempt in this process used.
+fn next_attempt() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Remove every answer file left in `dir`, from this agent or an earlier
+/// one. The singleton lock leaves no other asker whose answer this could
+/// take; a failure only leaves a stray file for the next sweep.
+fn sweep_answers(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(ANSWER_PREFIX))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// The probe launch, mirroring [`crate::binary_watch::schedule`]'s successor.
@@ -343,11 +387,45 @@ mod tests {
         let result = dir.path().join("answer");
         write_atomically(&result, Answer::Granted.encode()).unwrap();
         assert!(
-            !result.with_extension("tmp").exists(),
+            !staged_path(&result).exists(),
             "the staged file is renamed away"
         );
         let answer = wait_for_answer(&result, Instant::now()).unwrap();
         assert_eq!(answer, Answer::Granted);
+    }
+
+    #[test]
+    fn every_attempt_has_its_own_answer_and_staged_file() {
+        let first = next_attempt();
+        let second = next_attempt();
+        assert!(second > first, "attempt numbers never repeat");
+        let dir = Path::new("/run");
+        let early = dir.join(answer_name(7, first));
+        let late = dir.join(answer_name(7, second));
+        assert_ne!(early, late);
+        assert_ne!(staged_path(&early), staged_path(&late));
+        assert_eq!(
+            staged_path(Path::new("/run/input-monitoring-probe.7.3")),
+            Path::new("/run/input-monitoring-probe.7.3.tmp")
+        );
+    }
+
+    #[test]
+    fn the_sweep_removes_late_answers_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let late = dir.path().join(answer_name(7, 0));
+        write_atomically(&late, Answer::Granted.encode()).unwrap();
+        std::fs::write(staged_path(&dir.path().join(answer_name(7, 1))), "gran").unwrap();
+        let marker = dir.path().join("input-monitoring-relaunch");
+        std::fs::write(&marker, encode_time(UNIX_EPOCH)).unwrap();
+
+        sweep_answers(dir.path());
+
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(left, [marker], "only the relaunch record survives");
     }
 
     #[test]
