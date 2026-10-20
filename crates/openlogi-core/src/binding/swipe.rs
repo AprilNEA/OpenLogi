@@ -250,6 +250,10 @@ impl SwipeAccumulator {
                 let index = direction_index(dir)?;
                 let distance = self.policy.repeat_distances[index];
                 if self.repeat >= distance && straight {
+                    // Continuing beyond a full repeat also undoes any partial
+                    // reversal, even when output is still waiting for pacing.
+                    self.dx = 0;
+                    self.dy = 0;
                     if !self.ready(dir, now) {
                         self.repeat = distance;
                         return None;
@@ -506,6 +510,18 @@ mod tests {
         acc.begin_at(now, configured());
         assert!(acc.end_at(now + Duration::from_secs(10)));
         assert_eq!(acc.accumulate_at(now, 50, 0), None);
+    }
+
+    #[test]
+    fn paced_continuation_clears_an_abandoned_partial_reversal() {
+        let now = Instant::now();
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_at(now, configured());
+        assert_eq!(acc.accumulate_at(now, 50, 0), Some(GestureDirection::Right));
+        assert_eq!(acc.accumulate_at(now, -20, 0), None);
+        assert_eq!(acc.accumulate_at(now, 600, 0), None);
+        assert_eq!(acc.accumulate_at(now, -30, 0), None);
+        assert_eq!(acc.accumulate_at(now, -20, 0), Some(GestureDirection::Left));
     }
 
     // ── Gesture classification ────────────────────────────────────────────────
