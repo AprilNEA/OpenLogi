@@ -5774,7 +5774,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-clipboard"
-version = "0.8.14"
+version = "0.8.15"
 dependencies = [
  "thiserror 2.0.18",
  "windows-sys 0.61.2",
@@ -5889,7 +5889,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-flow"
-version = "0.8.14"
+version = "0.8.15"
 dependencies = [
  "buffa",
  "buffa-build",
