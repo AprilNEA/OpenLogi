@@ -36,7 +36,7 @@ edition = "2024"
 # so a floor below stable buys nobody compatibility and only costs us APIs.
 # Raise this freely the day a release lands something worth using; the `msrv`
 # CI matrix keeps the number honest for `cargo install`.
-rust-version = "1.98"
+rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/AprilNEA/OpenLogi"
 authors = ["AprilNEA <dev@aprilnea.me>"]
