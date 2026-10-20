@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn highest_reported_level_fills_the_bar() {
-        assert_eq!(relative_level(7, max_backlight_level(8)), 1.0);
-        assert_eq!(relative_level(0, max_backlight_level(8)), 0.0);
+        assert!((relative_level(7, max_backlight_level(8)) - 1.0).abs() < f32::EPSILON);
+        assert!(relative_level(0, max_backlight_level(8)).abs() < f32::EPSILON);
     }
 }
