@@ -382,6 +382,10 @@ fn all_catalog_variants_roundtrip_toml() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one literal row per persisted Action variant; splitting the list would hide a missing name"
+)]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
     actions.extend([
@@ -472,6 +476,7 @@ fn persisted_action_variant_names_are_stable() {
         "SetDpiPreset",
         "ShowActionsRing",
         "ShowDesktop",
+        "ShutDown",
         "Sleep",
         "TapKeyHoldingModifiers",
         "ToggleSmartShift",

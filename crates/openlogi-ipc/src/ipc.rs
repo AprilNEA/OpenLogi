@@ -122,6 +122,7 @@ pub use succession::Identity;
 ///      off over HID++ `0x4220`, for the overlay's transient indicator.
 /// v38: `Action::CloseWindow` appended — close the focused window.
 ///      `Action::MuteMicrophone` appended — toggle the microphone mute.
+///      `Action::ShutDown` appended — shut the computer down.
 pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the

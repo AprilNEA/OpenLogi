@@ -221,6 +221,8 @@ fn dispatch_generic_linux_native(action: &Action, native: NativeAction) {
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
         NativeAction::MicMute => press_mic_mute(),
+        // logind PowerOff() via the system bus.
+        NativeAction::PowerOff => power_off_system(),
     }
 }
 
@@ -240,6 +242,7 @@ fn dispatch_hyprland_native(action: &Action, native: NativeAction) {
         }
         NativeAction::Sleep => sleep_system(),
         NativeAction::MicMute => press_mic_mute(),
+        NativeAction::PowerOff => power_off_system(),
     }
 }
 
@@ -973,6 +976,27 @@ fn sleep_system() {
     ) {
         Ok(_) => tracing::debug!("Sleep via logind Suspend"),
         Err(e) => tracing::warn!("logind Suspend failed: {e}"),
+    }
+}
+
+/// Power the system off via logind's `PowerOff()` on the system bus. As for
+/// [`sleep_system`], `false` declines the interactive polkit prompt: a session
+/// that may not power off gets a logged failure, not an authentication dialog
+/// from a background agent.
+fn power_off_system() {
+    let Some(conn) = SYSTEM_BUS.as_ref() else {
+        tracing::warn!("no system bus — Shut Down skipped");
+        return;
+    };
+    match conn.call_method(
+        Some("org.freedesktop.login1"),
+        "/org/freedesktop/login1",
+        Some("org.freedesktop.login1.Manager"),
+        "PowerOff",
+        &(false,),
+    ) {
+        Ok(_) => tracing::debug!("Shut Down via logind PowerOff"),
+        Err(e) => tracing::warn!("logind PowerOff failed: {e}"),
     }
 }
 

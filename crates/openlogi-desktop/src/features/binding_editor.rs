@@ -90,6 +90,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::LockScreen => "action-icons/lock.svg",
         Action::Screenshot | Action::CaptureRegion => "action-icons/camera.svg",
         Action::Sleep => "action-icons/moon.svg",
+        Action::ShutDown => "action-icons/power.svg",
         Action::PlayPause => "action-icons/play.svg",
         Action::NextTrack => "action-icons/skip-forward.svg",
         Action::PrevTrack => "action-icons/skip-back.svg",

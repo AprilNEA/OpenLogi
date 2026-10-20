@@ -275,6 +275,7 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::MicMute => {
             tracing::debug!("MicMute has no macOS synthesis yet — action skipped");
         }
+        NativeAction::PowerOff => power_off_system(),
     }
 }
 
@@ -650,6 +651,25 @@ fn post_media_key(nx_key: i32) {
 /// without privileges. Fire-and-forget; a spawn failure is logged. The
 /// child is reaped on a detached thread so it can't linger as a zombie
 /// in this long-running agent.
+/// Ask loginwindow to shut down (the `aevtrsdn` Apple event behind the Apple
+/// menu's Shut Down…), so macOS shows its own confirmation with the usual
+/// countdown and apps get the chance to save. Spawned and reaped like
+/// [`sleep_system`].
+fn power_off_system() {
+    match std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", "tell application \"loginwindow\" to «event aevtrsdn»"])
+        .spawn()
+    {
+        Ok(mut child) => {
+            tracing::debug!("Shut Down via loginwindow aevtrsdn");
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => tracing::warn!(error = %e, "osascript shut down spawn failed"),
+    }
+}
+
 fn sleep_system() {
     match std::process::Command::new("/usr/bin/pmset")
         .arg("sleepnow")

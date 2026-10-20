@@ -216,6 +216,11 @@ pub enum Action {
     /// Declared last because the variant index is part of the IPC wire
     /// format; it is listed with the other media actions in the catalog.
     MuteMicrophone,
+    /// Shut the computer down.
+    ///
+    /// Declared last because the variant index is part of the IPC wire
+    /// format; it is listed with the other system actions in the catalog.
+    ShutDown,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -314,6 +319,7 @@ macro_rules! for_each_unit_action {
             Screenshot "Screenshot" "actions.screenshot" System Camera,
             CaptureRegion "Capture Region" "actions.capture_region" System Camera,
             Sleep "Sleep" "actions.sleep" System Monitor,
+            ShutDown "Shut Down" "actions.shut_down" System Monitor,
             ShowActionsRing "Actions Ring" "action_ring.actions_ring" System Grid,
             // Media
             PlayPause "Play / Pause" "actions.play_pause" Media Play,

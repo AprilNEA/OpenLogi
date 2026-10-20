@@ -201,6 +201,8 @@ pub enum NativeAction {
     Sleep,
     /// Toggle the system microphone mute.
     MicMute,
+    /// Shut the computer down.
+    PowerOff,
 }
 
 /// A power-user scripting escape hatch, borrowed from the originating
@@ -263,6 +265,7 @@ impl Action {
             Action::Screenshot => Effect::Native(NativeAction::Screenshot),
             Action::CaptureRegion => Effect::Native(NativeAction::CaptureRegion),
             Action::Sleep => Effect::Native(NativeAction::Sleep),
+            Action::ShutDown => Effect::Native(NativeAction::PowerOff),
 
             Action::PlayPause => Effect::Media(MediaKey::PlayPause),
             Action::NextTrack => Effect::Media(MediaKey::NextTrack),

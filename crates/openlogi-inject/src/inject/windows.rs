@@ -144,6 +144,25 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::MicMute => {
             tracing::debug!("MicMute has no Windows synthesis yet — action skipped");
         }
+        NativeAction::PowerOff => power_off_system(),
+    }
+}
+
+/// `shutdown /s /t 0`: the standard shutdown of the signed-in user, which
+/// needs no elevation. Reaped on a detached thread so the long-running agent
+/// keeps no zombie handle.
+fn power_off_system() {
+    match std::process::Command::new("shutdown")
+        .args(["/s", "/t", "0"])
+        .spawn()
+    {
+        Ok(mut child) => {
+            tracing::debug!("Shut Down via shutdown /s");
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => tracing::warn!(error = %e, "shutdown spawn failed"),
     }
 }
 
