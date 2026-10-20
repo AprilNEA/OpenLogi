@@ -263,6 +263,8 @@ impl Action {
             Action::LaunchpadShow => Effect::Native(NativeAction::LaunchpadShow),
             Action::ZoomIn => Effect::Native(NativeAction::ZoomIn),
             Action::ZoomOut => Effect::Native(NativeAction::ZoomOut),
+            Action::ZoomInShortcut => Effect::Shortcut(Shortcut::ZoomIn),
+            Action::ZoomOutShortcut => Effect::Shortcut(Shortcut::ZoomOut),
 
             Action::LockScreen => Effect::Native(NativeAction::LockScreen),
             Action::Screenshot => Effect::Native(NativeAction::Screenshot),
@@ -305,6 +307,18 @@ impl Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_zoom_is_distinct_from_native_magnification() {
+        assert_eq!(
+            Action::ZoomInShortcut.effect(),
+            Effect::Shortcut(Shortcut::ZoomIn)
+        );
+        assert_eq!(
+            Action::ZoomOutShortcut.effect(),
+            Effect::Shortcut(Shortcut::ZoomOut)
+        );
+    }
 
     #[test]
     fn zoom_actions_select_native_output_in_the_shared_ir() {

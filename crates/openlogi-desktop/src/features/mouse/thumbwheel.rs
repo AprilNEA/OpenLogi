@@ -28,6 +28,8 @@ pub(crate) enum ThumbwheelPreset {
     CycleDpi,
     Zoom,
     ZoomReversed,
+    ZoomShortcut,
+    ZoomShortcutReversed,
     VerticalScroll,
     VerticalScrollReversed,
     HorizontalScroll,
@@ -35,7 +37,7 @@ pub(crate) enum ThumbwheelPreset {
 }
 
 impl ThumbwheelPreset {
-    pub(crate) const ALL: [Self; 16] = [
+    pub(crate) const ALL: [Self; 18] = [
         Self::BackForward,
         Self::UndoRedo,
         Self::BrowserHistory,
@@ -48,6 +50,8 @@ impl ThumbwheelPreset {
         Self::CycleDpi,
         Self::Zoom,
         Self::ZoomReversed,
+        Self::ZoomShortcut,
+        Self::ZoomShortcutReversed,
         Self::VerticalScroll,
         Self::VerticalScrollReversed,
         Self::HorizontalScroll,
@@ -68,6 +72,8 @@ impl ThumbwheelPreset {
             Self::VolumeReversed => (Action::VolumeUp, Action::VolumeDown),
             Self::Zoom => (Action::ZoomOut, Action::ZoomIn),
             Self::ZoomReversed => (Action::ZoomIn, Action::ZoomOut),
+            Self::ZoomShortcut => (Action::ZoomOutShortcut, Action::ZoomInShortcut),
+            Self::ZoomShortcutReversed => (Action::ZoomInShortcut, Action::ZoomOutShortcut),
             Self::CycleDpi => (Action::CycleDpiPresets, Action::CycleDpiPresets),
             Self::VerticalScroll => (Action::ScrollDown, Action::ScrollUp),
             Self::VerticalScrollReversed => (Action::ScrollUp, Action::ScrollDown),
@@ -111,6 +117,8 @@ impl ThumbwheelPreset {
             Self::VolumeReversed => "pointer.volume_down_up",
             Self::Zoom => "pointer.zoom_out_in",
             Self::ZoomReversed => "pointer.zoom_in_out",
+            Self::ZoomShortcut => "pointer.zoom_out_in_shortcut",
+            Self::ZoomShortcutReversed => "pointer.zoom_in_out_shortcut",
             Self::CycleDpi => "pointer.cycle_dpi_presets",
             Self::VerticalScroll => "pointer.vertical_scroll",
             Self::VerticalScrollReversed => "pointer.vertical_scroll_reversed",
@@ -129,7 +137,9 @@ impl ThumbwheelPreset {
             Self::Desktops | Self::DesktopsReversed => "action-icons/square-arrow-right.svg",
             Self::Tracks => "action-icons/skip-forward.svg",
             Self::Volume | Self::VolumeReversed => "action-icons/volume-2.svg",
-            Self::Zoom | Self::ZoomReversed => "action-icons/zoom-in.svg",
+            Self::Zoom | Self::ZoomReversed | Self::ZoomShortcut | Self::ZoomShortcutReversed => {
+                "action-icons/zoom-in.svg"
+            }
             Self::CycleDpi => "action-icons/gauge.svg",
             Self::VerticalScroll | Self::VerticalScrollReversed => "action-icons/chevrons-up.svg",
             Self::HorizontalScroll | Self::HorizontalScrollReversed => {
@@ -160,6 +170,8 @@ mod tests {
             (Action::CycleDpiPresets, Action::CycleDpiPresets),
             (Action::ZoomOut, Action::ZoomIn),
             (Action::ZoomIn, Action::ZoomOut),
+            (Action::ZoomOutShortcut, Action::ZoomInShortcut),
+            (Action::ZoomInShortcut, Action::ZoomOutShortcut),
             (Action::ScrollDown, Action::ScrollUp),
             (Action::ScrollUp, Action::ScrollDown),
             (Action::HorizontalScrollRight, Action::HorizontalScrollLeft),

@@ -204,6 +204,36 @@ fn physical_directions_accumulate_independently() {
 }
 
 #[test]
+fn shortcut_zoom_keeps_discrete_threshold_and_cooldown() {
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+    for action in [Action::ZoomInShortcut, Action::ZoomOutShortcut] {
+        let mut wheel = WheelAccumulators::default();
+        let rotation = |magnitude| WheelRotation {
+            direction: PhysicalDirection::Up,
+            magnitude,
+        };
+        assert_eq!(
+            wheel.advance(rotation(threshold - 1), &action, scale, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            wheel.advance(rotation(1), &action, scale, now),
+            WheelOutput::FireAction(1)
+        );
+        assert_eq!(
+            wheel.advance(rotation(threshold), &action, scale, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            wheel.advance(rotation(threshold), &action, scale, now + ACTION_COOLDOWN),
+            WheelOutput::FireAction(1)
+        );
+    }
+}
+
+#[test]
 fn custom_action_fires_on_threshold_then_respects_its_cooldown() {
     let mut direction = WheelDirection::default();
     let now = Instant::now();

@@ -1045,6 +1045,8 @@ fn appended_zoom_actions_and_icons() {
     );
     assert_wire(&Action::ZoomIn, "36");
     assert_wire(&Action::ZoomOut, "37");
+    assert_wire(&Action::ZoomInShortcut, "38");
+    assert_wire(&Action::ZoomOutShortcut, "39");
     assert_wire(&ActionRingIcon::ZoomIn, "36");
     assert_wire(&ActionRingIcon::ZoomOut, "37");
 }

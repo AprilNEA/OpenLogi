@@ -480,6 +480,8 @@ fn persisted_action_variant_names_are_stable() {
         "Workflow",
         "ZoomIn",
         "ZoomOut",
+        "ZoomInShortcut",
+        "ZoomOutShortcut",
     ];
     expected.sort_unstable();
     assert_eq!(actual, expected);
