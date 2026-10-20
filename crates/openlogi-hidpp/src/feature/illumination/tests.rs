@@ -4,8 +4,8 @@ use std::assert_matches;
 
 use super::event::{IlluminationEvent, decode_event};
 use super::types::{
-    BrightnessClampedSource, ControlCapabilities, ControlInfo, IlluminationState, LevelConfig,
-    SetLevels,
+    BrightnessClampedSource, BrightnessEffectiveMax, ControlCapabilities, ControlInfo,
+    IlluminationState, LevelConfig, SetLevels,
 };
 use crate::protocol::v20::{ErrorType, Hidpp20Error};
 
@@ -389,4 +389,82 @@ fn info_and_level_reads_refuse_a_short_reply() {
         .unwrap(),
         300
     );
+}
+
+/// `getBrightnessEffectiveMax` goes out only from feature version 1, and only
+/// when the brightness control flags a dynamic maximum. Any other light gets
+/// `Unsupported` without a request.
+#[test]
+fn the_effective_maximum_needs_version_one_and_the_dynamic_maximum_flag() {
+    use std::num::NonZeroU16;
+    use std::sync::Arc;
+
+    use super::{FN_GET_BRIGHTNESS_EFFECTIVE_MAX, IlluminationFeature};
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::nibble::U4;
+    use crate::protocol::v20::{Message, MessageHeader};
+
+    let linear = ControlCapabilities::HAS_EVENTS | ControlCapabilities::HAS_LINEAR_LEVELS;
+    let dynamic = linear | ControlCapabilities::HAS_DYNAMIC_MAXIMUM;
+    let limit = |lumens| BrightnessEffectiveMax::Limit(NonZeroU16::new(lumens).unwrap());
+    let cases = [
+        // (version, brightness capabilities, device answer, expected)
+        (0, dynamic, None, BrightnessEffectiveMax::Unsupported),
+        (0, linear, None, BrightnessEffectiveMax::Unsupported),
+        (1, linear, None, BrightnessEffectiveMax::Unsupported),
+        (
+            2,
+            ControlCapabilities::all() - ControlCapabilities::HAS_DYNAMIC_MAXIMUM,
+            None,
+            BrightnessEffectiveMax::Unsupported,
+        ),
+        (1, dynamic, Some(0), BrightnessEffectiveMax::NoLimit),
+        (1, dynamic, Some(150), limit(150)),
+        (2, dynamic, Some(400), limit(400)),
+    ];
+
+    for (case, (version, capabilities, answer, expected)) in cases.into_iter().enumerate() {
+        let mut info = [0; 16];
+        info[0] = capabilities.bits();
+        info[1..3].copy_from_slice(&20u16.to_be_bytes());
+        info[3..5].copy_from_slice(&250u16.to_be_bytes());
+        let brightness = ControlInfo::from_payload(&info);
+
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let feature = IlluminationFeature::new(channel, 3, 8);
+            if let Some(lumens) = answer {
+                let header = MessageHeader {
+                    device_index: 3,
+                    feature_index: 8,
+                    function_id: U4::from_lo(FN_GET_BRIGHTNESS_EFFECTIVE_MAX),
+                    software_id: U4::from_lo(1),
+                };
+                let mut payload = [0; 16];
+                payload[..2].copy_from_slice(&u16::to_be_bytes(lumens));
+                handle.queue_response(Message::Long(header, payload).into());
+            }
+
+            let read = feature
+                .get_brightness_effective_max(version, brightness)
+                .await
+                .unwrap();
+            assert_eq!(read, expected, "case {case}");
+
+            // Report: [id, device, feature, function|swid, payload...].
+            let functions: Vec<u8> = handle
+                .written_reports()
+                .iter()
+                .map(|report| report[3] >> 4)
+                .collect();
+            let sent: &[u8] = if answer.is_some() {
+                &[FN_GET_BRIGHTNESS_EFFECTIVE_MAX]
+            } else {
+                &[]
+            };
+            assert_eq!(functions, sent, "case {case}");
+        });
+    }
 }
