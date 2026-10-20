@@ -16,7 +16,9 @@
 //! rollover has room. Otherwise, and for an up edge whose down edge the
 //! device did not carry, the caller posts the `CGEvent` as before, so a key
 //! is always released on the path that pressed it. A report the device
-//! rejects removes the device for the rest of the process.
+//! rejects removes the device for the rest of the process. The removal
+//! reports every key released, so the keys held chords still own go down
+//! again as `CGEvent`s, where their release will go.
 //!
 //! The device holds a key down only while a held chord owns it: a tap
 //! reports the key's release before it returns, and removal reports every
@@ -36,7 +38,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use core_graphics::event::CGEventFlags;
 
 use super::KeyPhase;
-use super::keycode::macos_to_hid_usage;
+use super::keycode::{hid_usage_to_macos, macos_to_hid_usage};
 use device::Device;
 
 /// The device's `Product` property. The hook reads it to recognise the
@@ -86,6 +88,14 @@ const LEFT_CONTROL: u8 = 1 << 0;
 const LEFT_SHIFT: u8 = 1 << 1;
 const LEFT_OPTION: u8 = 1 << 2;
 const LEFT_COMMAND: u8 = 1 << 3;
+
+/// Each `CGEvent` modifier flag and the modifier bitmap bit of its left key.
+const MODIFIER_FLAGS: [(CGEventFlags, u8); 4] = [
+    (CGEventFlags::CGEventFlagControl, LEFT_CONTROL),
+    (CGEventFlags::CGEventFlagShift, LEFT_SHIFT),
+    (CGEventFlags::CGEventFlagAlternate, LEFT_OPTION),
+    (CGEventFlags::CGEventFlagCommand, LEFT_COMMAND),
+];
 
 /// Whether a keyboard whose HID `Product` property is `product` is
 /// OpenLogi's virtual keyboard. Its keys are OpenLogi's own output, which
@@ -163,7 +173,9 @@ pub(super) fn edge(vk: u16, phase: KeyPhase) -> bool {
     let Some(usage) = macos_to_hid_usage(vk) else {
         return false;
     };
-    offer(&mut lock_slot(), |keyboard| keyboard.edge(usage, phase))
+    let mut slot = lock_slot();
+    let offered = offer(&mut slot, |keyboard| keyboard.edge(usage, phase));
+    settle(offered, slot)
 }
 
 /// Offer a press and release of `vk` with `flags`' modifiers to the
@@ -174,7 +186,38 @@ pub(super) fn tap(vk: u16, flags: CGEventFlags) -> bool {
         return false;
     };
     let modifiers = modifier_bits(flags);
-    offer(&mut lock_slot(), |keyboard| keyboard.tap(usage, modifiers))
+    let mut slot = lock_slot();
+    let offered = offer(&mut slot, |keyboard| keyboard.tap(usage, modifiers));
+    settle(offered, slot)
+}
+
+/// Press the keys `offered` stranded again as `CGEvent`s, then release the
+/// slot. Holding the slot until then keeps every other edge, including the
+/// release of a stranded key, behind the press it must follow.
+fn settle(offered: Offer, slot: MutexGuard<'_, Option<Installed<Device>>>) -> bool {
+    for (vk, flags) in repress_edges(offered.stranded) {
+        super::post_cg_key_phase(vk, flags, KeyPhase::Down);
+    }
+    drop(slot);
+    offered.carried
+}
+
+/// The `CGEvent` down edges that press `stranded` again, as a keyboard
+/// would: each modifier with the flags of those down so far, then each key
+/// with all of them.
+fn repress_edges(stranded: Pressed) -> Vec<(u16, CGEventFlags)> {
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    let mut edges = Vec::new();
+    for usage in stranded.usages() {
+        let Some(vk) = hid_usage_to_macos(usage) else {
+            continue;
+        };
+        if let Some(bit) = modifier_bit(usage) {
+            flags |= modifier_flags(bit);
+        }
+        edges.push((vk, flags));
+    }
+    edges
 }
 
 /// The process's device, while one is installed.
@@ -195,20 +238,43 @@ struct Installed<S: Sink> {
     keyboard: Keyboard<S>,
 }
 
+/// What became of an input offered to the slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+struct Offer {
+    /// Whether the device carried the input. If not, the caller posts it as
+    /// a `CGEvent`.
+    carried: bool,
+    /// Keys that other inputs hold and that the removal of a failed device
+    /// released. They must go down again as `CGEvent`s, because their
+    /// release now goes there.
+    stranded: Pressed,
+}
+
+impl Offer {
+    const fn routed(carried: bool) -> Self {
+        Self {
+            carried,
+            stranded: Pressed::EMPTY,
+        }
+    }
+}
+
 /// Run `apply` against the installed keyboard. A keyboard whose device
 /// rejected a report is removed, which reports its keys released.
 fn offer<S: Sink>(
     slot: &mut Option<Installed<S>>,
     apply: impl FnOnce(&mut Keyboard<S>) -> Routed,
-) -> bool {
+) -> Offer {
     let Some(installed) = slot.as_mut() else {
-        return false;
+        return Offer::routed(false);
     };
     match apply(&mut installed.keyboard) {
-        Routed::Sent => true,
-        Routed::Declined => false,
+        Routed::Sent => Offer::routed(true),
+        Routed::Declined => Offer::routed(false),
         Routed::Failed {
             delivered,
+            stranded,
             error: SendError(status),
         } => {
             tracing::warn!(
@@ -217,22 +283,31 @@ fn offer<S: Sink>(
                  CGEventPost again"
             );
             drop(slot.take());
-            delivered
+            Offer {
+                carried: delivered,
+                stranded,
+            }
         }
     }
 }
 
 /// The modifier bitmap bits for `flags`' Command, Shift, Control and Option.
 fn modifier_bits(flags: CGEventFlags) -> u8 {
-    [
-        (CGEventFlags::CGEventFlagControl, LEFT_CONTROL),
-        (CGEventFlags::CGEventFlagShift, LEFT_SHIFT),
-        (CGEventFlags::CGEventFlagAlternate, LEFT_OPTION),
-        (CGEventFlags::CGEventFlagCommand, LEFT_COMMAND),
-    ]
-    .into_iter()
-    .filter(|&(flag, _)| flags.contains(flag))
-    .fold(0, |bits, (_, bit)| bits | bit)
+    MODIFIER_FLAGS
+        .into_iter()
+        .filter(|&(flag, _)| flags.contains(flag))
+        .fold(0, |bits, (_, bit)| bits | bit)
+}
+
+/// The `CGEvent` flags of the modifier bitmap `bits`, the inverse of
+/// [`modifier_bits`].
+fn modifier_flags(bits: u8) -> CGEventFlags {
+    MODIFIER_FLAGS
+        .into_iter()
+        .filter(|&(_, bit)| bits & bit != 0)
+        .fold(CGEventFlags::CGEventFlagNull, |flags, (flag, _)| {
+            flags | flag
+        })
 }
 
 /// One input report, laid out as [`REPORT_DESCRIPTOR`] declares it.
@@ -246,7 +321,7 @@ impl Report {
 }
 
 /// The keys the device reports as down.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Pressed {
     modifiers: u8,
     /// Key usages in press order; `0` marks a free slot, and free slots
@@ -255,6 +330,12 @@ struct Pressed {
 }
 
 impl Pressed {
+    /// No key down.
+    const EMPTY: Self = Self {
+        modifiers: 0,
+        keys: [0; KEY_SLOTS],
+    };
+
     fn holds(self, usage: u8) -> bool {
         match modifier_bit(usage) {
             Some(bit) => self.modifiers & bit != 0,
@@ -299,7 +380,15 @@ impl Pressed {
     }
 
     fn is_empty(self) -> bool {
-        self == Self::default()
+        self == Self::EMPTY
+    }
+
+    /// The usages down: the modifiers in bitmap order, then the keys in
+    /// press order.
+    fn usages(self) -> impl Iterator<Item = u8> {
+        MODIFIER_USAGES
+            .filter(move |&usage| self.holds(usage))
+            .chain(self.keys.into_iter().filter(|&key| key != 0))
     }
 
     fn report(self) -> Report {
@@ -336,8 +425,13 @@ enum Routed {
     /// A report failed, so the keyboard must be removed. `delivered` is
     /// whether the offered input still took effect: removal releases every
     /// key, which completes an up edge, but a down edge that never reached
-    /// the device must go out as a `CGEvent`.
-    Failed { delivered: bool, error: SendError },
+    /// the device must go out as a `CGEvent`. `stranded` is the keys other
+    /// inputs held before this one, which the removal releases under them.
+    Failed {
+        delivered: bool,
+        stranded: Pressed,
+        error: SendError,
+    },
 }
 
 /// A device and the keys it reports as down.
@@ -356,13 +450,15 @@ impl<S: Sink> Keyboard<S> {
     fn new(sink: S) -> Self {
         Self {
             sink,
-            pressed: Pressed::default(),
+            pressed: Pressed::EMPTY,
             synced: true,
         }
     }
 
     /// One edge of a held key.
     fn edge(&mut self, usage: u8, phase: KeyPhase) -> Routed {
+        let mut stranded = self.pressed;
+        stranded.release(usage);
         let mut next = self.pressed;
         match phase {
             KeyPhase::Down => {
@@ -381,6 +477,7 @@ impl<S: Sink> Keyboard<S> {
             Ok(()) => Routed::Sent,
             Err(error) => Routed::Failed {
                 delivered: phase == KeyPhase::Up,
+                stranded,
                 error,
             },
         }
@@ -406,12 +503,14 @@ impl<S: Sink> Keyboard<S> {
         if let Err(error) = self.report(modified).and_then(|()| self.report(down)) {
             return Routed::Failed {
                 delivered: false,
+                stranded: before,
                 error,
             };
         }
         if let Err(error) = self.report(modified).and_then(|()| self.report(before)) {
             return Routed::Failed {
                 delivered: true,
+                stranded: before,
                 error,
             };
         }
@@ -436,7 +535,7 @@ impl<S: Sink> Drop for Keyboard<S> {
         if self.synced && self.pressed.is_empty() {
             return;
         }
-        if let Err(SendError(status)) = self.report(Pressed::default()) {
+        if let Err(SendError(status)) = self.report(Pressed::EMPTY) {
             tracing::warn!(
                 status = format_args!("{status:#010x}"),
                 "virtual HID keyboard could not report its keys released before removal"

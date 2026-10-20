@@ -4,9 +4,9 @@ use std::rc::Rc;
 use core_graphics::event::CGEventFlags;
 
 use super::{
-    Installed, KEY_SLOTS, Keyboard, LEFT_COMMAND, LEFT_CONTROL, LEFT_OPTION, LEFT_SHIFT, PRODUCT,
-    Pressed, REPORT_DESCRIPTOR, REPORT_LEN, Report, Routed, SendError, Sink,
-    is_virtual_keyboard_product, modifier_bits, offer,
+    Installed, KEY_SLOTS, Keyboard, LEFT_COMMAND, LEFT_CONTROL, LEFT_OPTION, LEFT_SHIFT, Offer,
+    PRODUCT, Pressed, REPORT_DESCRIPTOR, REPORT_LEN, Report, Routed, SendError, Sink,
+    is_virtual_keyboard_product, modifier_bits, modifier_flags, offer, repress_edges,
 };
 use crate::inject::KeyPhase;
 
@@ -57,6 +57,13 @@ fn report(modifiers: u8, keys: &[u8]) -> Report {
     bytes[0] = modifiers;
     bytes[2..2 + keys.len()].copy_from_slice(keys);
     Report(bytes)
+}
+
+fn pressed(modifiers: u8, keys: &[u8]) -> Pressed {
+    let mut pressed = Pressed::EMPTY;
+    pressed.modifiers = modifiers;
+    pressed.keys[..keys.len()].copy_from_slice(keys);
+    pressed
 }
 
 fn installed(recorder: &Recorder) -> Installed<Recorder> {
@@ -181,7 +188,7 @@ fn a_press_past_the_rollover_is_declined_and_so_is_its_release() {
 
 #[test]
 fn releasing_a_key_keeps_the_others_in_press_order() {
-    let mut pressed = Pressed::default();
+    let mut pressed = Pressed::EMPTY;
     for key in [0x04, 0x05, 0x06] {
         assert!(pressed.press(key));
     }
@@ -211,14 +218,20 @@ fn dropping_an_idle_keyboard_sends_nothing() {
 #[test]
 fn an_empty_slot_leaves_every_edge_to_the_cgevent_path() {
     let mut slot: Option<Installed<Recorder>> = None;
-    assert!(!offer(&mut slot, |keyboard| keyboard.tap(KEY_C, 0)));
+    assert_eq!(
+        offer(&mut slot, |keyboard| keyboard.tap(KEY_C, 0)),
+        Offer::routed(false)
+    );
 }
 
 #[test]
 fn a_failed_down_edge_removes_the_device_and_falls_back() {
     let recorder = Recorder::failing_from(0);
     let mut slot = Some(installed(&recorder));
-    assert!(!offer(&mut slot, |keyboard| keyboard.edge(KEY_C, KeyPhase::Down)));
+    assert_eq!(
+        offer(&mut slot, |keyboard| keyboard.edge(KEY_C, KeyPhase::Down)),
+        Offer::routed(false)
+    );
     assert!(slot.is_none(), "a failed device must be removed");
     // Removal still tried to report the key released.
     assert_eq!(recorder.attempts.get(), 2);
@@ -228,9 +241,73 @@ fn a_failed_down_edge_removes_the_device_and_falls_back() {
 fn a_failed_up_edge_counts_as_released_by_the_removal() {
     let recorder = Recorder::failing_from(1);
     let mut slot = Some(installed(&recorder));
-    assert!(offer(&mut slot, |keyboard| keyboard.edge(KEY_C, KeyPhase::Down)));
-    assert!(offer(&mut slot, |keyboard| keyboard.edge(KEY_C, KeyPhase::Up)));
+    assert!(offer(&mut slot, |keyboard| keyboard.edge(KEY_C, KeyPhase::Down)).carried);
+    assert_eq!(
+        offer(&mut slot, |keyboard| keyboard.edge(KEY_C, KeyPhase::Up)),
+        Offer::routed(true)
+    );
     assert!(slot.is_none());
+}
+
+/// Holds Command and Left Arrow as a held chord does, through a device that
+/// rejects every report after those two.
+fn holding_command_and_left_arrow() -> Option<Installed<Recorder>> {
+    let recorder = Recorder::failing_from(2);
+    let mut slot = Some(installed(&recorder));
+    for usage in [COMMAND_USAGE, LEFT_ARROW] {
+        assert!(offer(&mut slot, |keyboard| keyboard.edge(usage, KeyPhase::Down)).carried);
+    }
+    slot
+}
+
+/// The removal releases keys that other chords still hold; they must go
+/// down again as `CGEvent`s, or their chords' releases would find them up.
+#[test]
+fn a_failure_during_a_hold_strands_the_keys_other_chords_hold() {
+    let held = pressed(LEFT_COMMAND, &[LEFT_ARROW]);
+
+    let mut slot = holding_command_and_left_arrow();
+    assert_eq!(
+        offer(&mut slot, |keyboard| keyboard.edge(KEY_C, KeyPhase::Down)),
+        Offer {
+            carried: false,
+            stranded: held,
+        },
+        "a failed down edge"
+    );
+    assert!(slot.is_none());
+
+    let mut slot = holding_command_and_left_arrow();
+    assert_eq!(
+        offer(&mut slot, |keyboard| keyboard.tap(KEY_V, LEFT_SHIFT)),
+        Offer {
+            carried: false,
+            stranded: held,
+        },
+        "a failed tap leaves out its own modifiers"
+    );
+
+    let mut slot = holding_command_and_left_arrow();
+    assert_eq!(
+        offer(&mut slot, |keyboard| keyboard
+            .edge(LEFT_ARROW, KeyPhase::Up)),
+        Offer {
+            carried: true,
+            stranded: pressed(LEFT_COMMAND, &[]),
+        },
+        "a failed up edge leaves out its own key"
+    );
+}
+
+#[test]
+fn stranded_keys_go_down_modifiers_first_with_the_flags_so_far() {
+    let control = CGEventFlags::CGEventFlagControl;
+    let both = control | CGEventFlags::CGEventFlagCommand;
+    assert_eq!(
+        repress_edges(pressed(LEFT_COMMAND | LEFT_CONTROL, &[LEFT_ARROW, KEY_C])),
+        [(0x3b, control), (0x37, both), (0x7b, both), (0x08, both)]
+    );
+    assert!(repress_edges(Pressed::EMPTY).is_empty());
 }
 
 /// A tap whose key-down never reached the device must still happen, as a
@@ -244,13 +321,14 @@ fn a_failed_tap_falls_back_only_when_its_key_never_went_down() {
             keyboard.tap(KEY_C, LEFT_COMMAND),
             Routed::Failed {
                 delivered,
+                stranded: Pressed::EMPTY,
                 error: DEVICE_GONE
             },
             "failing from send {fail_from}"
         );
         let mut slot = Some(Installed { id: 0, keyboard });
         assert!(
-            !offer(&mut slot, |keyboard| keyboard.tap(KEY_V, 0)),
+            !offer(&mut slot, |keyboard| keyboard.tap(KEY_V, 0)).carried,
             "the device is still failing"
         );
         assert!(slot.is_none());
@@ -268,6 +346,9 @@ fn flags_map_to_the_left_modifier_bits() {
         modifier_bits(CGEventFlags::CGEventFlagControl | CGEventFlags::CGEventFlagAlternate),
         LEFT_CONTROL | LEFT_OPTION
     );
+    for bits in 0..=0x0f {
+        assert_eq!(modifier_bits(modifier_flags(bits)), bits, "{bits:#06b}");
+    }
 }
 
 /// The descriptor must declare exactly the input report [`Report`] lays

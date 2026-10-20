@@ -38,7 +38,8 @@ creates one at arming and sends shortcut keys through it.
   carry all go out as `CGEvent`s. A tap reports its release before it returns,
   so the device holds keys only for held chords. A rejected report removes the
   device and reports every key released; key synthesis then posts `CGEvent`s
-  for the rest of the process.
+  for the rest of the process. The keys that held chords still own go down
+  again as `CGEvent`s, so each chord's release finds its keys down.
 - **The hook recognises the device by name.** Its key events carry no
   `SYNTHETIC_EVENT_USER_DATA`, because the HID event system creates them. The
   hook resolves each key event's sender to the device's `Product` and skips
