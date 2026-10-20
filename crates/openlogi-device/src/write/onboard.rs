@@ -524,14 +524,14 @@ impl OnboardMemoryAccess {
         // failed) may still have that user profile stored, bindings and all;
         // its bytes are the base of the edit, not the factory ones. Only a
         // user sector that holds no profile is copied from the factory one.
-        let (target, original) = if active.is_rom() {
+        let (target, original, create) = if active.is_rom() {
             let number = active.profile_number();
             match self.stored_user_profile(number, &layout, operation).await? {
-                Some(stored) => (SectorAddress::user_profile(number), stored),
-                None => (SectorAddress::user_profile(number), running),
+                Some(stored) => (SectorAddress::user_profile(number), stored, false),
+                None => (SectorAddress::user_profile(number), running, true),
             }
         } else {
-            (active, running)
+            (active, running, false)
         };
         self.validate(&original, change).await?;
 
@@ -580,22 +580,30 @@ impl OnboardMemoryAccess {
         }
 
         let bytes = edited.encode();
-        if !active.is_rom() && bytes == original.encode() {
+        let changed = bytes != original.encode();
+        if !changed && !create {
             debug!(
                 index = self.index,
                 "onboard profile already holds the change"
             );
-            return self.read().await;
         }
-        self.write_verified(target, &bytes, operation)
-            .await
-            .inspect_err(|_| {
-                warn!(
-                    index = self.index,
-                    ?target,
-                    "onboard profile write not kept"
-                );
-            })?;
+        // A save that reads back the same bytes still has to finish: an
+        // earlier attempt may have written the sector and then failed to
+        // commit the directory, leaving the mouse on the old settings. The
+        // directory write and reload below are therefore outside this check.
+        // An empty user sector is written even for an unchanged factory
+        // profile, so the first save creates it.
+        if changed || create {
+            self.write_verified(target, &bytes, operation)
+                .await
+                .inspect_err(|_| {
+                    warn!(
+                        index = self.index,
+                        ?target,
+                        "onboard profile write not kept"
+                    );
+                })?;
+        }
         // The directory goes last, as G HUB and libratbag commit: writing it
         // is what makes the firmware take the user profiles it lists.
         self.list_in_directory(target, layout.sector_size, operation)
