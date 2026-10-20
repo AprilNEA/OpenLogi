@@ -88,6 +88,9 @@ pub struct OnboardMemory {
 /// else the profile holds — buttons, macros, name — is kept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnboardProfileChange {
+    /// The number of the profile the change was made against: a mouse that
+    /// runs another one by now refuses it rather than overwrite that one.
+    pub profile: u8,
     /// The DPI slots, in order; `None` clears a slot. At most as many as the
     /// profile holds.
     pub dpi_slots: Vec<Option<Dpi>>,

@@ -1091,13 +1091,14 @@ fn onboard_memory_dtos_requests_and_errors() {
         &AgentRequest::WriteOnboardProfile {
             route,
             change: OnboardProfileChange {
+                profile: 1,
                 dpi_slots: vec![Some(Dpi::new(800)), None],
                 default_dpi_slot: 0,
                 report_rate: ReportRate::new(500),
                 lighting: vec![OnboardLighting::Off],
             },
         },
-        "2a02fb6d04fb83c00201fb20030000fbf4010100",
+        "2a02fb6d04fb83c0010201fb20030000fbf4010100",
     );
     assert_wire(
         &WriteError::OnboardLayoutUnsupported {
@@ -1111,6 +1112,13 @@ fn onboard_memory_dtos_requests_and_errors() {
             dpi: Dpi::new(12_345),
         }),
         "1b02fb3930",
+    );
+    assert_wire(
+        &WriteError::OnboardChangeRejected(OnboardChangeProblem::ProfileChanged {
+            expected: 1,
+            active: 2,
+        }),
+        "1b050102",
     );
     assert_wire(&WriteError::OnboardProfileNotApplied, "1c");
     assert_wire(&WriteError::OnboardProfileUnreadable { profile: 3 }, "1d03");

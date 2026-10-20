@@ -272,6 +272,15 @@ pub enum OnboardChangeProblem {
         /// How many zones the profile holds.
         zones: u8,
     },
+    /// The mouse runs another profile than the one the change was made
+    /// against (its profile button was pressed since it was read).
+    #[error("the mouse switched to profile {active} since profile {expected} was read")]
+    ProfileChanged {
+        /// The profile the change was made against.
+        expected: u8,
+        /// The profile the mouse runs now.
+        active: u8,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.

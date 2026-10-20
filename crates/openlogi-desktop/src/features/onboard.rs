@@ -242,6 +242,10 @@ impl OnboardPanel {
         let follows = match &self.draft {
             None => true,
             Some(draft) if draft.key != *key => true,
+            // The mouse runs another profile (its profile button, or the
+            // re-read after a refused save): edits made for the old one
+            // would land on the wrong profile.
+            Some(draft) if draft.base.number != profile.number => true,
             Some(draft) if draft.base == *profile => return,
             Some(draft) => !self.dirty(cx) || self.holds(draft, profile, cx),
         };
@@ -333,6 +337,9 @@ impl OnboardPanel {
             draft.lighting.clone()
         };
         Ok(OnboardProfileChange {
+            // The profile the user edited: a mouse switched to another one
+            // since refuses the save, and the refusal re-reads it.
+            profile: draft.base.number,
             dpi_slots,
             default_dpi_slot,
             report_rate,

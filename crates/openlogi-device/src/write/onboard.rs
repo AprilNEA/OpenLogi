@@ -510,6 +510,14 @@ impl OnboardMemoryAccess {
         let operation = HidppOperation::WriteOnboardProfile;
         let layout = self.layout(operation).await?;
         let (active, running) = self.active_profile(&layout, operation).await?;
+        if active.profile_number() != change.profile {
+            return Err(WriteError::OnboardChangeRejected(
+                OnboardChangeProblem::ProfileChanged {
+                    expected: change.profile,
+                    active: active.profile_number(),
+                },
+            ));
+        }
         // A factory profile cannot be written: its edit lands in the user
         // profile of the same number. A mouse that fell back to factory
         // profile 1 (after host mode, or because selecting the saved profile

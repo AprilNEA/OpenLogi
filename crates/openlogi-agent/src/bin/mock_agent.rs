@@ -714,6 +714,12 @@ fn apply_onboard_change(
             profile_format: 0,
         });
     };
+    if change.profile != profile.number {
+        return reject(OnboardChangeProblem::ProfileChanged {
+            expected: change.profile,
+            active: profile.number,
+        });
+    }
     if change.dpi_slots.len() > 5 {
         return reject(OnboardChangeProblem::TooManyDpiSlots { max: 5 });
     }

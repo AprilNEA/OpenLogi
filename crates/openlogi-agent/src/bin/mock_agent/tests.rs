@@ -720,3 +720,45 @@ async fn easy_switch_names_are_kept_and_rejected_renames_change_nothing() {
         })
     );
 }
+
+fn change_for(profile: &OnboardProfile) -> OnboardProfileChange {
+    OnboardProfileChange {
+        profile: profile.number,
+        dpi_slots: profile.dpi_slots.clone(),
+        default_dpi_slot: profile.default_dpi_slot,
+        report_rate: ReportRate::new(500),
+        lighting: profile.lighting.clone(),
+    }
+}
+
+#[test]
+fn an_onboard_save_lands_on_the_profile_it_was_made_against() {
+    let mut memory = scripted_onboard_memory();
+    let change = change_for(memory.profile.as_ref().expect("scripted profile"));
+
+    apply_onboard_change(&mut memory, change).expect("same profile");
+
+    let profile = memory.profile.expect("scripted profile");
+    assert_eq!(profile.report_rate, Some(ReportRate::new(500)));
+}
+
+#[test]
+fn an_onboard_save_is_refused_once_the_mouse_runs_another_profile() {
+    let mut memory = scripted_onboard_memory();
+    let mut change = change_for(memory.profile.as_ref().expect("scripted profile"));
+    change.profile += 1;
+    let before = memory.clone();
+
+    let refused = apply_onboard_change(&mut memory, change.clone());
+
+    assert_eq!(
+        refused,
+        Err(WriteError::OnboardChangeRejected(
+            OnboardChangeProblem::ProfileChanged {
+                expected: change.profile,
+                active: change.profile - 1,
+            }
+        ))
+    );
+    assert_eq!(memory, before, "nothing was written");
+}

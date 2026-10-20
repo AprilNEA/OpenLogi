@@ -126,7 +126,8 @@ pub use succession::Identity;
 ///      WriteMemoryMode}` and `WriteError::{OnboardLayoutUnsupported,
 ///      OnboardChangeRejected, OnboardProfileNotApplied,
 ///      OnboardProfileUnreadable}` appended — a gaming mouse's `0x8100`
-///      onboard memory, its mode switch and edits to its active profile.
+///      onboard memory, its mode switch and edits to its active profile;
+///      a change names the profile it was made against.
 pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the

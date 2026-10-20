@@ -136,10 +136,19 @@ async fn round_trip(route: &openlogi_hid::DeviceRoute, original: &[u8]) -> Resul
     let profile = memory
         .profile
         .context("the mouse's profile layout is not decoded")?;
+    // The test's restore writes only the modeled settings: on a factory
+    // profile the first write would create and select a user profile that
+    // the restore cannot take back.
+    anyhow::ensure!(
+        !profile.factory,
+        "the mouse runs factory profile {}: save a profile to it first, then run the round trip",
+        profile.number
+    );
     let rate = profile
         .report_rate
         .context("the profile stores no report rate")?;
     let restore = OnboardProfileChange {
+        profile: profile.number,
         dpi_slots: profile.dpi_slots.clone(),
         default_dpi_slot: profile.default_dpi_slot,
         report_rate: rate,
