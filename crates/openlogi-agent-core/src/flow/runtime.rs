@@ -1119,6 +1119,12 @@ fn load_machine_identity() -> Result<MachineIdentity, FlowRuntimeError> {
 }
 
 fn load_machine_identity_at(path: &Path) -> Result<MachineIdentity, FlowRuntimeError> {
+    // The controller and the identity publisher both load at startup: one
+    // at a time, so only one of them creates the key and the other reads it.
+    static LOADING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _loading = LOADING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match fs::read(path) {
         Ok(bytes) => {
             #[cfg(unix)]
@@ -1135,34 +1141,29 @@ fn load_machine_identity_at(path: &Path) -> Result<MachineIdentity, FlowRuntimeE
         fs::create_dir_all(parent)?;
     }
     let identity = MachineIdentity::generate()?;
-    // Written in full under a private name, then linked into place: a
-    // concurrent loader sees no file or the whole key, never a partial one,
-    // and a key another loader linked first is kept.
-    let staging = path.with_extension(format!(
-        "{}.{}.tmp",
-        std::process::id(),
-        rand::random::<u64>()
-    ));
+    // Written in full under a private name, then renamed into place: a
+    // reader sees no key or the whole key, never a partial one, on any
+    // filesystem that can rename.
+    let staging = path.with_extension(format!("{}.tmp", std::process::id()));
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let staged = options.open(&staging).and_then(|mut file| {
-        file.write_all(identity.private_key_pkcs8())?;
-        file.sync_all()
-    });
-    let linked = staged.and_then(|()| fs::hard_link(&staging, path));
-    let _ = fs::remove_file(&staging);
-    match linked {
-        Ok(()) => Ok(identity),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            MachineIdentity::from_pkcs8(fs::read(path)?).map_err(FlowRuntimeError::from)
-        }
-        Err(error) => Err(error.into()),
+    let published = options
+        .open(&staging)
+        .and_then(|mut file| {
+            file.write_all(identity.private_key_pkcs8())?;
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&staging, path));
+    if let Err(error) = published {
+        let _ = fs::remove_file(&staging);
+        return Err(error.into());
     }
+    Ok(identity)
 }
 
 #[derive(Debug, Error)]
