@@ -26,7 +26,7 @@ use std::time::Duration;
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
     CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation, HostOs,
-    OsLayoutOutcome, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus,
+    OsLayoutOutcome, PointerSpeed, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus,
     WeakSharedChannel, WriteError,
 };
 use tokio::time::error::Elapsed;
@@ -714,6 +714,45 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on:
                     );
                 } else {
                     debug!(index, on, "Fn-lock write superseded by a newer one");
+                }
+            });
+        },
+    );
+}
+
+/// Spawn an OS thread that writes a pointer speed to `op`'s mouse via
+/// [`openlogi_hid::set_pointer_speed_on`], unless a newer pointer-speed write
+/// for the mouse was requested after `ticket`. Returns immediately; failures
+/// are logged.
+pub(crate) fn write_pointer_speed_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    speed: PointerSpeed,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "pointer-speed write",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_pointer_speed_on(&shared, speed)
+                        .await
+                        .map(Some)
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "pointer-speed write", result, |applied| {
+                if let Some(applied) = applied {
+                    debug!(index, %speed, %applied, "pointer speed written");
+                } else {
+                    debug!(index, %speed, "pointer-speed write superseded by a newer one");
                 }
             });
         },

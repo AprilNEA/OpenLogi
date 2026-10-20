@@ -13,7 +13,7 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::{Dpi, ReportRate};
+use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -305,6 +305,14 @@ pub struct DeviceConfig {
     /// leave the device's rate alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_rate: Option<ReportRate>,
+    /// Pointer speed of a mouse that scales its own motion (HID++ `0x2205`;
+    /// see [`PointerSpeed`]). The agent writes it when the mouse reconnects
+    /// and when a reload changes it, like [`Self::fn_lock`]. While precision
+    /// mode is on, the mouse moves at [`PointerSpeed::MIN`] instead, and this
+    /// is the speed precision mode returns to. `None` means "never set —
+    /// leave the mouse's speed alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer_speed: Option<PointerSpeed>,
 }
 
 impl DeviceConfig {
@@ -408,6 +416,7 @@ impl Default for DeviceConfig {
             fn_lock: None,
             keep_os_layout: None,
             report_rate: None,
+            pointer_speed: None,
         }
     }
 }
@@ -534,6 +543,8 @@ struct RawDeviceConfig {
     keep_os_layout: Option<bool>,
     #[serde(default)]
     report_rate: Option<ReportRate>,
+    #[serde(default)]
+    pointer_speed: Option<PointerSpeed>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -597,6 +608,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
             report_rate: raw.report_rate,
+            pointer_speed: raw.pointer_speed,
         }
     }
 }

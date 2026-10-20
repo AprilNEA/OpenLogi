@@ -44,6 +44,7 @@ fn test_dispatcher() -> (
     let dispatcher = ActionDispatcher {
         executor: super::super::ActionExecutor {
             dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
+            pointer_speeds: Arc::default(),
             access: crate::hardware::DeviceAccess {
                 channel: Arc::new(RwLock::new(None)),
                 registry: openlogi_hid::ChannelRegistry::default(),

@@ -665,13 +665,14 @@ fn device_inventory() {
                 backlight: true,
                 easy_switch: true,
                 virtual_thumbwheel: true,
+                pointer_scaling: true,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010107",
     );
 }
 
@@ -1042,4 +1043,19 @@ fn report_rate_dtos_and_errors() {
         },
         "fbe803037dfbf401fbe803",
     );
+}
+
+#[test]
+fn pointer_speed_and_precision_mode() {
+    use openlogi_core::binding::Action;
+    use openlogi_core::hid::PointerSpeed;
+    // The 1/256 factor as a varint: 0.125× fits one byte, 3× takes three.
+    assert_wire(&PointerSpeed::MIN, "20");
+    assert_wire(&PointerSpeed::MAX, "fb0003");
+    assert_wire(
+        &Ok::<PointerSpeed, WriteError>(PointerSpeed::DEFAULT),
+        "00fb0001",
+    );
+    // Appended at the end of `Action`, so every earlier index is unchanged.
+    assert_wire(&Action::TogglePrecisionMode, "36");
 }

@@ -137,14 +137,18 @@ impl InputServices {
     fn start(shared: &SharedHandles) -> Option<Self> {
         let ring = Arc::new(ActionRingManager::default());
         let (sender, triggers) = tokio::sync::mpsc::unbounded_channel();
-        let action_runtime =
-            match ActionRuntime::new(shared.dpi_cycle.clone(), shared.device_access(), sender) {
-                Ok(runtime) => runtime,
-                Err(e) => {
-                    warn!(error = %e, "could not start button lifecycle worker — agent exiting");
-                    return None;
-                }
-            };
+        let action_runtime = match ActionRuntime::new(
+            shared.dpi_cycle.clone(),
+            shared.pointer_speeds(),
+            shared.device_access(),
+            sender,
+        ) {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                warn!(error = %e, "could not start button lifecycle worker — agent exiting");
+                return None;
+            }
+        };
         let scroll_runtime = match ScrollRuntime::spawn(Arc::clone(&shared.scroll_preferences)) {
             Ok(runtime) => runtime,
             Err(e) => {

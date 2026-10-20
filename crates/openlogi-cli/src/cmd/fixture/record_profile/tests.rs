@@ -10,7 +10,8 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Dpi,
     DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, HostConnection, LightCommand,
-    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -43,6 +44,7 @@ enum ReadFamily {
     FnLock,
     ReportRate,
     EasySwitch,
+    PointerSpeed,
 }
 
 #[derive(Clone)]
@@ -191,6 +193,26 @@ impl Agent for TestAgent {
         _rate: ReportRate,
     ) -> Result<ReportRateInfo, WriteError> {
         unreachable!("profile capture must never write the report rate")
+    }
+    async fn read_pointer_speed(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<PointerSpeed, WriteError> {
+        self.read(
+            ReadFamily::PointerSpeed,
+            &route,
+            |settings| &settings.pointer_speed,
+            0x2205,
+        )
+    }
+    async fn set_pointer_speed(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _speed: PointerSpeed,
+    ) -> Result<PointerSpeed, WriteError> {
+        unreachable!("profile capture must never write the pointer speed")
     }
     async fn set_backlight(
         self,

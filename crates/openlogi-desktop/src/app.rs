@@ -150,7 +150,7 @@ impl DetailTab {
         if caps.haptic_panel || (caps.buttons && can_show_mouse_model) || shows_keys_tab {
             tabs.push(Self::ActionsRing);
         }
-        if caps.pointer || caps.scroll_inversion || caps.hires_wheel {
+        if caps.pointer || caps.pointer_scaling || caps.scroll_inversion || caps.hires_wheel {
             tabs.push(Self::Pointer);
         }
         if caps.lighting {
@@ -361,6 +361,7 @@ impl AppView {
             // opened through `removal_obs`.
             StateEvent::SmartShiftChanged(_)
             | StateEvent::ReportRateChanged(_)
+            | StateEvent::PointerSpeedChanged(_)
             | StateEvent::DeviceRemovalFailed { .. }
             | StateEvent::StalePairingRemovalFailed { .. }
             | StateEvent::CameraPermissionChanged

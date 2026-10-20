@@ -323,9 +323,10 @@ impl DiagnosticsReport {
             );
             let caps = match d.capabilities {
                 Some(c) => format!(
-                    "buttons={}, pointer={}, lighting={}",
+                    "buttons={}, pointer={}, pointer_scaling={}, lighting={}",
                     yes_no(c.buttons),
                     yes_no(c.pointer),
+                    yes_no(c.pointer_scaling),
                     yes_no(c.lighting),
                 ),
                 None => "not probed".to_string(),
@@ -606,6 +607,7 @@ mod tests {
                         backlight: false,
                         easy_switch: false,
                         virtual_thumbwheel: false,
+                        pointer_scaling: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),
@@ -650,7 +652,9 @@ mod tests {
         assert!(md.contains(
             "Connection: Logi Bolt receiver · Online: yes · Battery: 80% (discharging, good)"
         ));
-        assert!(md.contains("Capabilities: buttons=no, pointer=no, lighting=no"));
+        assert!(
+            md.contains("Capabilities: buttons=no, pointer=no, pointer_scaling=no, lighting=no")
+        );
         assert!(md.contains("Model: 2b35a (wpid: 4093, model-ids: b35a/0000/0000, ext-model: 02)"));
         assert!(md.contains("Transports: eQuad"));
         assert!(md.contains("Render: ⚠️ none (silhouette) · Slot 2"));

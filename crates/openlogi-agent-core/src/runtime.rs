@@ -22,8 +22,11 @@ use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
-use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
-use crate::{DpiCycleState, DpiCycles};
+use crate::hardware::{
+    DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background,
+    write_pointer_speed_in_background,
+};
+use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 /// Application identity captured with a physical press and retained through
 /// asynchronous button dispatch.
@@ -98,6 +101,7 @@ impl HeldShortcuts {
 #[derive(Clone)]
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
+    pointer_speeds: Arc<PointerSpeeds>,
     access: DeviceAccess,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
 }
@@ -105,6 +109,19 @@ struct ActionExecutor {
 impl ActionExecutor {
     fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.dispatch_to(action, device_key, ActionDispatchTarget::capture());
+    }
+
+    /// Turn precision mode on or off for the mouse `device_key` names, or
+    /// the selected device, and write the speed that follows. Returns
+    /// `false` when that device is not an online mouse that scales its
+    /// pointer with `0x2205`.
+    fn toggle_precision_mode(&self, device_key: Option<&str>) -> bool {
+        let Some((on, write)) = self.pointer_speeds.toggle_precision(device_key) else {
+            return false;
+        };
+        info!(on, speed = %write.speed, "precision mode toggled → writing pointer speed");
+        write_pointer_speed_in_background(self.access.op(&write.route), write.ticket, write.speed);
+        true
     }
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
@@ -129,13 +146,24 @@ impl ActionExecutor {
         };
 
         let next = match action {
-            Action::CycleDpiPresets => match self.dpi_cycle.write() {
-                Ok(mut guard) => guard.state_for(device_key).and_then(DpiCycleState::cycle),
-                Err(e) => {
-                    warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
-                    None
+            Action::CycleDpiPresets => {
+                let next = match self.dpi_cycle.write() {
+                    Ok(mut guard) => guard.state_for(device_key).and_then(DpiCycleState::cycle),
+                    Err(e) => {
+                        warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
+                        None
+                    }
+                };
+                // A mouse that scales its pointer with `0x2205` has no DPI
+                // presets to cycle. Its DPI button is the precision-mode
+                // button (MX Ergo CID 0xED), which Logi Options+ binds to
+                // precision mode, so the default binding switches between
+                // the saved speed and the precision speed (#1372).
+                if next.is_none() && self.toggle_precision_mode(device_key) {
+                    return;
                 }
-            },
+                next
+            }
             Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
                 Ok(mut guard) => guard
                     .state_for(device_key)
@@ -156,6 +184,12 @@ impl ActionExecutor {
                     toggle_smartshift_in_background(self.access.op(&target));
                 } else {
                     debug!("no target device — SmartShift toggle skipped");
+                }
+                return;
+            }
+            Action::TogglePrecisionMode => {
+                if !self.toggle_precision_mode(device_key) {
+                    debug!("no online mouse with pointer scaling — precision toggle skipped");
                 }
                 return;
             }
@@ -279,11 +313,13 @@ impl ActionRuntime {
     /// Build the action executor and its source-independent button worker.
     pub fn new(
         dpi_cycle: Arc<RwLock<DpiCycles>>,
+        pointer_speeds: Arc<PointerSpeeds>,
         access: DeviceAccess,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
+            pointer_speeds,
             access,
             action_ring,
         };
@@ -544,6 +580,52 @@ mod tests {
 
     static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    fn executor_with(pointer_speeds: Arc<PointerSpeeds>) -> ActionExecutor {
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (action_ring, _ring_rx) = tokio::sync::mpsc::unbounded_channel();
+        ActionExecutor {
+            dpi_cycle: Arc::default(),
+            pointer_speeds,
+            access: DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
+            },
+            action_ring,
+        }
+    }
+
+    /// The MX Ergo's precision button keeps its default Cycle DPI Presets
+    /// binding. The mouse has no DPI presets and scales its pointer with
+    /// `0x2205`, so each press switches precision mode instead of being
+    /// dropped (#1372). A mouse that is not scaled still drops the press.
+    #[test]
+    fn cycle_dpi_presets_toggles_precision_mode_on_a_scaled_mouse() {
+        let pointer_speeds = Arc::new(PointerSpeeds::default());
+        pointer_speeds.publish(
+            None,
+            [crate::pointer_speed::ScaledMouse {
+                key: "ergo".to_string(),
+                route: openlogi_core::hid::DeviceRoute::Unifying {
+                    receiver_uid: "UNIFYING".to_string(),
+                    slot: 1,
+                },
+                saved: None,
+            }],
+        );
+        let executor = executor_with(pointer_speeds.clone());
+
+        executor.dispatch(&Action::CycleDpiPresets, Some("ergo"));
+        assert!(pointer_speeds.precision("ergo"));
+        executor.dispatch(&Action::CycleDpiPresets, Some("ergo"));
+        assert!(!pointer_speeds.precision("ergo"));
+
+        executor.dispatch(&Action::CycleDpiPresets, Some("master"));
+        assert!(!pointer_speeds.precision("master"));
+    }
+
     #[test]
     fn ring_trigger_reaches_the_ring_over_an_unavailable_pointer_target() {
         // The second press that toggles the ring closed lands on the ring's
@@ -553,6 +635,7 @@ mod tests {
         let (action_ring, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
         let executor = ActionExecutor {
             dpi_cycle: Arc::default(),
+            pointer_speeds: Arc::default(),
             access: DeviceAccess {
                 channel: openlogi_hid::CaptureChannelSlot::default(),
                 registry: openlogi_hid::ChannelRegistry::default(),

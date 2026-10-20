@@ -33,6 +33,7 @@ mod light_reload;
 mod lock_keys;
 mod low_battery;
 mod os_layout;
+mod pointer_speed;
 mod publication;
 mod reapply;
 

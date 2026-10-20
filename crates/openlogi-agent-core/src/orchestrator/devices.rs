@@ -4,11 +4,11 @@
 
 use std::collections::HashMap;
 
-use openlogi_core::config::{Config, ScrollResolution};
+use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_hid::session::gesture::MainWheelDivert;
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, ReportRate};
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, PointerSpeed, ReportRate};
 
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
@@ -107,6 +107,33 @@ pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Opti
         .is_some_and(|caps| caps.report_rate)
         .then(|| config.report_rate(&dev.config_key))
         .flatten()
+}
+
+/// Whether `dev` is a mouse whose speed HID++ `0x2205` scales.
+pub(super) fn scales_pointer(dev: &AgentDevice) -> bool {
+    dev.capabilities.is_some_and(|caps| caps.pointer_scaling)
+}
+
+/// The saved pointer speed to push to `dev`: only to a mouse whose speed
+/// `0x2205` scales, as for [`configured_report_rate`].
+pub(super) fn configured_pointer_speed(config: &Config, dev: &AgentDevice) -> Option<PointerSpeed> {
+    scales_pointer(dev)
+        .then(|| config.pointer_speed(&dev.config_key))
+        .flatten()
+}
+
+/// Whether the button assignments of the device `key` names differ between
+/// `previous` and `config`: its bindings, its per-app bindings, or its
+/// Actions Ring. Logi Options+ ends precision mode on such a change.
+pub(super) fn assignments_changed(previous: &Config, config: &Config, key: &str) -> bool {
+    // A device with no entry has the default assignments, so a reload that
+    // only creates its entry (a first DPI preset, say) changes nothing.
+    let empty = DeviceConfig::default();
+    let before = previous.devices.get(key).unwrap_or(&empty);
+    let after = config.devices.get(key).unwrap_or(&empty);
+    before.bindings != after.bindings
+        || before.per_app_bindings != after.per_app_bindings
+        || before.action_ring != after.action_ring
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's

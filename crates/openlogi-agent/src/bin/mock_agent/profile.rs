@@ -32,6 +32,7 @@ pub(super) fn unsupported_settings(route: DeviceRoute) -> ProfileDeviceSettings 
         fn_lock: ProfileSetting::Unsupported,
         report_rate: ProfileSetting::Unsupported,
         easy_switch: ProfileSetting::Unsupported,
+        pointer_speed: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: ProfileSupport::Unsupported,
     }

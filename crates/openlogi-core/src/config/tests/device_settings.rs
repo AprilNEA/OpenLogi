@@ -309,6 +309,45 @@ fn unset_report_rate_is_omitted_from_toml() {
 }
 
 #[test]
+fn pointer_speed_roundtrips_as_the_raw_factor() {
+    use crate::hid::PointerSpeed;
+    let mut cfg = Config::default();
+    let speed = PointerSpeed::try_new(0x0180).expect("in range");
+    cfg.set_pointer_speed("2b042", speed);
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(
+        toml.contains("pointer_speed = 384"),
+        "the speed is stored as its 1/256 factor: {toml}"
+    );
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.pointer_speed("2b042"), Some(speed));
+    assert_eq!(restored.pointer_speed("absent"), None);
+}
+
+#[test]
+fn a_pointer_speed_outside_the_safe_range_does_not_load() {
+    // The firmware takes any 16-bit factor and a tiny one stops the pointer
+    // (#1372), so a hand-edited value outside 32..=768 is refused rather
+    // than written to the mouse.
+    toml::from_str::<Config>("[devices.2b042]\npointer_speed = 1\n")
+        .expect_err("a pointer speed below 32 is refused");
+}
+
+#[test]
+fn a_saved_pointer_speed_survives_route_adoption() {
+    use crate::hid::PointerSpeed;
+    let route = "receiver:82839805:slot:2";
+    let mut config = Config::default();
+    config.set_pointer_speed(route, PointerSpeed::MAX);
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:a393cae0").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert_eq!(
+        config.pointer_speed("unit:a393cae0"),
+        Some(PointerSpeed::MAX)
+    );
+}
+
+#[test]
 fn a_saved_report_rate_survives_route_adoption() {
     // The CLI can save to a route-keyed entry; the app later adopts that
     // route into the mouse's identity-keyed entry. The rate must come along,

@@ -20,8 +20,8 @@ use openlogi_core::config::{ConfigFile, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    HapticWaveform, HidppOperation, LightCommand, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    HapticWaveform, HidppOperation, LightCommand, PointerSpeed, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -317,6 +317,26 @@ impl Agent for AgentServer {
         rate: ReportRate,
     ) -> Result<ReportRateInfo, WriteError> {
         self.shared.set_report_rate(&route, rate).await
+    }
+    async fn read_pointer_speed(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<PointerSpeed, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadPointerScaling, |c| async move {
+                openlogi_hid::get_pointer_speed_on(&c).await
+            })
+            .await
+    }
+    async fn set_pointer_speed(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        speed: PointerSpeed,
+    ) -> Result<PointerSpeed, WriteError> {
+        self.shared.set_pointer_speed(&route, speed).await
     }
     async fn set_backlight(
         self,

@@ -180,6 +180,12 @@ Common device fields are:
 - `report_rate` for mice with an adjustable report rate (HID++ `0x8060` or
   `0x8061`), in hertz. The agent writes it when the mouse reconnects over a
   connection that offers that rate; absent leaves the mouse's own rate
+- `pointer_speed` for mice that scale their own pointer motion instead of
+  adjustable DPI (HID++ `0x2205`, for example the MX Ergo and the M590), in
+  1/256 steps: `256` is 1×, and the value must be in `32..=768` (0.125× to
+  3×), the range Logi Options+ writes. The agent writes it when the mouse
+  connects; absent leaves the mouse's own speed. The desktop app sets it with
+  the Pointer speed slider, where 50 % is 1×
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or
@@ -239,6 +245,17 @@ under a profile. The desktop app does not create aliases; write them here.
 
 Action names are the serialized Rust variant names, including `Copy`,
 `BrowserBack`, `PlayPause`, `CycleDpiPresets`, and `ShowActionsRing`.
+
+`TogglePrecisionMode` switches a mouse that has `0x2205` between its
+`pointer_speed` (1× when none is saved) and the slowest speed, 0.125×.
+`CycleDpiPresets` does the same on such a mouse, because the mouse has no DPI
+presets to cycle; this makes the MX Ergo's precision button work with its
+default binding, as in Logi Options+. Precision mode stays on when the mouse
+reconnects. It ends at the next press, at a speed change from the desktop app
+or `config.toml`, and at a binding change for that mouse. After an agent
+restart, precision mode is off. A mouse with a saved `pointer_speed` gets that
+speed when the agent connects to it. A mouse without one keeps the slowest
+speed until precision mode is switched on and off again.
 Payload actions use a one-key inline table:
 
 ```toml

@@ -1023,6 +1023,7 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         backlight: false,
         easy_switch: false,
         virtual_thumbwheel: false,
+        pointer_scaling: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1056,6 +1057,7 @@ fn tabs_follow_capabilities_not_kind() {
         backlight: false,
         easy_switch: false,
         virtual_thumbwheel: false,
+        pointer_scaling: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1083,6 +1085,19 @@ fn wheel_controls_show_pointer_tab_without_adjustable_dpi() {
     }
 }
 
+/// The MX Ergo has no adjustable DPI and no high-resolution wheel; its
+/// pointer speed (`0x2205`) alone still earns the Pointer tab (#1838).
+#[test]
+fn pointer_scaling_shows_pointer_tab_without_adjustable_dpi() {
+    let caps = Capabilities {
+        pointer_scaling: true,
+        ..Capabilities::default()
+    };
+    assert!(
+        DetailTab::tabs_for(&record(DeviceKind::Mouse, Some(caps))).contains(&DetailTab::Pointer)
+    );
+}
+
 /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved
 /// asset should not get the mouse-model Buttons panel — the generic mouse
 /// hotspot layout (Middle Click, DPI Toggle, …) is wrong for a keyboard.
@@ -1104,6 +1119,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
         backlight: false,
         easy_switch: false,
         virtual_thumbwheel: false,
+        pointer_scaling: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1131,6 +1147,7 @@ fn keyboard_with_buttons_shows_keys_tab() {
         backlight: false,
         easy_switch: false,
         virtual_thumbwheel: false,
+        pointer_scaling: false,
     });
     let keyboard = record(DeviceKind::Keyboard, caps);
     let tabs = DetailTab::tabs_for(&keyboard);

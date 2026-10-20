@@ -189,6 +189,13 @@ pub struct Capabilities {
     /// persisted identity.
     #[serde(default)]
     pub virtual_thumbwheel: bool,
+    /// The pointer speed is set by scaling the sensor's motion — HID++
+    /// `0x2205 PointerMotionScaling` — because the device has no adjustable
+    /// DPI. A device that also reports [`Self::pointer`] keeps it `false`:
+    /// the DPI control already sets its speed, and Logi Options+ uses DPI
+    /// there too. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub pointer_scaling: bool,
 }
 
 impl Capabilities {
@@ -203,9 +210,10 @@ impl Capabilities {
         // lighting: `backlight` below covers 0x1982.
         const LIGHTING: [u16; 4] = [0x8070, 0x8071, 0x8081, 0x8080];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
+        let pointer = has(&POINTER);
         Self {
             buttons: has(&BUTTONS),
-            pointer: has(&POINTER),
+            pointer,
             lighting: has(&LIGHTING),
             scroll_inversion: false,
             hires_wheel: ids.contains(&0x2121),
@@ -223,6 +231,7 @@ impl Capabilities {
             // Set by the `0x1b04` control walk; the feature table alone
             // cannot say which controls report raw wheel.
             virtual_thumbwheel: false,
+            pointer_scaling: !pointer && ids.contains(&0x2205),
         }
     }
 
@@ -737,6 +746,7 @@ mod tests {
                     backlight: false,
                     easy_switch: false,
                     virtual_thumbwheel: false,
+                    pointer_scaling: false,
                 }),
                 settings_revision: 0,
             }],
@@ -855,6 +865,7 @@ mod tests {
                 backlight: false,
                 easy_switch: false,
                 virtual_thumbwheel: false,
+                pointer_scaling: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -878,6 +889,7 @@ mod tests {
                 backlight: false,
                 easy_switch: false,
                 virtual_thumbwheel: false,
+                pointer_scaling: false,
             }
         );
         // No driving features → nothing offered.
@@ -899,6 +911,12 @@ mod tests {
         // alone switches channels but cannot name them.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x1815]).easy_switch);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1814]).easy_switch);
+        // 0x2205 sets the speed only where no DPI feature does (M590, MX
+        // Ergo); a mouse with both keeps its DPI control.
+        let scaled = Capabilities::from_feature_ids(&[0x0001, 0x2205]);
+        assert!(scaled.pointer_scaling && !scaled.pointer);
+        let both = Capabilities::from_feature_ids(&[0x0001, 0x2201, 0x2205]);
+        assert!(both.pointer && !both.pointer_scaling);
     }
 
     #[test]

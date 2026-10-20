@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, EasySwitchHosts,
-    FnLockState, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    FnLockState, PointerSpeed, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -197,6 +197,10 @@ pub struct ProfileDeviceSettings {
     /// recorded before it existed keep loading.
     #[serde(default = "ProfileSetting::unsupported")]
     pub easy_switch: ProfileSetting<EasySwitchHosts>,
+    /// Pointer-speed (`0x2205`) read state. Defaults to unsupported so
+    /// profiles recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub pointer_speed: ProfileSetting<PointerSpeed>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -641,6 +645,7 @@ fn validate_setting_support(
             || settings.backlight.supports_feature()
             || settings.report_rate.supports_feature()
             || settings.easy_switch.supports_feature()
+            || settings.pointer_speed.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -708,6 +713,12 @@ fn validate_setting_support(
                 "Easy-Switch",
                 settings.easy_switch.supports_feature(),
                 capabilities.easy_switch,
+            )?;
+            validate_capability_support(
+                settings,
+                "pointer speed",
+                settings.pointer_speed.supports_feature(),
+                capabilities.pointer_scaling,
             )?;
         }
     }

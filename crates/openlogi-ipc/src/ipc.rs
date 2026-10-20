@@ -20,8 +20,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PairingError, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    LightCommand, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -122,7 +122,12 @@ pub use succession::Identity;
 ///      off over HID++ `0x4220`, for the overlay's transient indicator.
 /// v38: `AgentStatus::secure_input` and [`SecureInput`] appended — whether
 ///      macOS Secure Event Input is hiding key presses from the hook, and
-///      the app macOS attributes it to.
+///      the app macOS attributes it to. `Capabilities::pointer_scaling`
+///      appended — a mouse without adjustable DPI whose speed HID++ `0x2205`
+///      scales; `Agent::{read_pointer_speed, set_pointer_speed}` appended —
+///      that speed read and set from the settings app;
+///      `Action::TogglePrecisionMode` appended — precision mode bound to a
+///      button.
 pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -851,4 +856,15 @@ pub trait Agent {
     /// generation `since`, or with the unchanged indicator after
     /// [`OBSERVE_HOLD`]. Pass `0` to read the current indicator at once.
     async fn observe_lock_keys(since: Generation) -> LockKeyObservation;
+
+    /// Read the pointer speed of the mouse on `route` (HID++ `0x2205`). A
+    /// reading outside [`PointerSpeed`]'s range comes back clamped into it.
+    async fn read_pointer_speed(route: DeviceRoute) -> Result<PointerSpeed, WriteError>;
+    /// Write the pointer speed of the mouse on `route` now and answer with
+    /// what it reads back. The write ends precision mode on that mouse, so
+    /// the pointer moves at the speed the settings app shows.
+    async fn set_pointer_speed(
+        route: DeviceRoute,
+        speed: PointerSpeed,
+    ) -> Result<PointerSpeed, WriteError>;
 }

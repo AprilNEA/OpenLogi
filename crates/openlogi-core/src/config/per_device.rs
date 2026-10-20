@@ -15,7 +15,7 @@ use super::{
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
 };
-use crate::hid::{Dpi, ReportRate};
+use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
 impl Config {
     /// The bindings stored for `device_key` as they were committed, or an
@@ -326,6 +326,22 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .report_rate = Some(rate);
+    }
+
+    /// The persisted pointer speed for `device_key`, or `None` when the user
+    /// never chose one (the mouse keeps its own speed).
+    #[must_use]
+    pub fn pointer_speed(&self, device_key: &str) -> Option<PointerSpeed> {
+        self.devices.get(device_key).and_then(|d| d.pointer_speed)
+    }
+
+    /// Record the pointer speed for `device_key`; the agent re-applies it
+    /// when the mouse reconnects.
+    pub fn set_pointer_speed(&mut self, device_key: &str, speed: PointerSpeed) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .pointer_speed = Some(speed);
     }
     /// Record the SmartShift wheel config for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).

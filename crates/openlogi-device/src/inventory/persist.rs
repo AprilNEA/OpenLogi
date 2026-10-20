@@ -49,7 +49,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v12 adds the `Capabilities::virtual_thumbwheel` flag (Back/Forward
 /// raw-wheel reporting).
 /// v13 adds the `0x4220` lock-key event index.
-const SCHEMA_VERSION: u32 = 13;
+/// v14 adds the `Capabilities::pointer_scaling` flag (`0x2205` pointer
+/// motion scaling on a mouse without adjustable DPI).
+const SCHEMA_VERSION: u32 = 14;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.

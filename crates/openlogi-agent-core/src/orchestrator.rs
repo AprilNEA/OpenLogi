@@ -27,8 +27,9 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, ReportRate,
-    ReportRateInfo, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
+    DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, PointerSpeed,
+    ReportRate, ReportRateInfo, WriteError, commands_for_light_settings,
+    is_reserved_keyboard_control,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -42,9 +43,11 @@ use crate::capture_plan::{
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
+    write_pointer_speed_in_background,
 };
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
+use crate::pointer_speed::{ReloadChange, ScaledMouse, SpeedWrite};
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
@@ -52,7 +55,7 @@ use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::watchers::light::{WatchedLight, WatchedLights};
-use crate::{DpiCycleState, DpiCycles};
+use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 mod devices;
 mod lights;
@@ -63,10 +66,10 @@ pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 use devices::reapply_targets;
 use devices::{
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply, settings_moved,
-    stable_id, wheel_inverted,
+    any_device_needs_capture_rearm, assignments_changed, build_devices, config_keeps_os_layout,
+    configured_pointer_speed, configured_report_rate, configured_wheel_mode, host_switch_links,
+    is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared,
+    pick_current, plan_reapply, scales_pointer, settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -156,6 +159,9 @@ pub struct SharedHandles {
     /// Orders the GUI's report-rate writes and the reconnect reapply's per
     /// mouse.
     report_rate_order: WriteOrder,
+    /// Precision mode of the mice whose speed `0x2205` scales, and the order
+    /// of every path's pointer-speed writes.
+    pointer_speeds: Arc<PointerSpeeds>,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
@@ -259,6 +265,33 @@ impl SharedHandles {
                 &ticket,
                 |c| async move { openlogi_hid::set_report_rate_on(&c, rate).await },
                 |c| async move { openlogi_hid::get_report_rate_info_on(&c).await },
+            )
+            .await
+    }
+
+    /// The precision-mode state the action runtime toggles.
+    #[must_use]
+    pub fn pointer_speeds(&self) -> Arc<PointerSpeeds> {
+        Arc::clone(&self.pointer_speeds)
+    }
+
+    /// Write `speed` to the mouse at `route` and return what it reads back.
+    /// The write ends the mouse's precision mode, so the pointer moves at the
+    /// speed the settings app shows. It is ordered with the precision button
+    /// and the reconnect reapply as [`Self::set_report_rate`] is ordered:
+    /// a write superseded before its turn reads the mouse instead.
+    pub async fn set_pointer_speed(
+        &self,
+        route: &DeviceRoute,
+        speed: PointerSpeed,
+    ) -> Result<PointerSpeed, WriteError> {
+        let ticket = self.pointer_speeds.app_write(route, speed);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WritePointerScaling,
+                &ticket,
+                |c| async move { openlogi_hid::set_pointer_speed_on(&c, speed).await },
+                |c| async move { openlogi_hid::get_pointer_speed_on(&c).await },
             )
             .await
     }
@@ -470,6 +503,7 @@ impl Orchestrator {
             watched_lights,
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
+            pointer_speeds: Arc::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
@@ -705,6 +739,7 @@ impl Orchestrator {
     fn publish_device_runtime(&self) {
         self.publish_capture_plans();
         self.rebuild_dpi_cycles(self.current_key());
+        self.publish_pointer_speeds(self.current_key());
         // Keyboard F-key bindings are global (not per-device), so they key off
         // the top-level config map rather than the selected device. Published
         // here so `reload_config` (GUI commit) takes effect live, not only on
@@ -762,6 +797,25 @@ impl Orchestrator {
         }
         guard.selected = selected.map(str::to_owned);
         guard.by_key = by_key;
+    }
+
+    /// Publish every online, enabled mouse whose speed `0x2205` scales, for
+    /// the precision button. The precision mode of each mouse is kept.
+    fn publish_pointer_speeds(&self, selected: Option<&str>) {
+        let mice = self
+            .devices
+            .iter()
+            .filter(|dev| {
+                dev.online && scales_pointer(dev) && self.config.device_enabled(&dev.config_key)
+            })
+            .filter_map(|dev| {
+                Some(ScaledMouse {
+                    key: dev.config_key.clone(),
+                    route: dev.route.clone()?,
+                    saved: configured_pointer_speed(&self.config, dev),
+                })
+            });
+        self.shared.pointer_speeds.publish(selected, mice);
     }
 
     /// Capture plans for enabled devices, and a route for every online device.
@@ -1059,6 +1113,15 @@ impl Orchestrator {
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
+        }
+        if scales_pointer(dev)
+            && let Some(write) = self.shared.pointer_speeds.reapply(
+                key,
+                &route,
+                configured_pointer_speed(&self.config, dev),
+            )
+        {
+            self.write_pointer_speed(write);
         }
         self.keep_os_layout(dev);
         if let Some(capabilities) = dev.light_capabilities
@@ -1430,6 +1493,7 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_changed_pointer_speeds(&previous);
         self.apply_enabled_os_layouts(&previous);
         self.changed_lights(&previous_lights)
     }
@@ -1466,6 +1530,41 @@ impl Orchestrator {
                 self.shared.write_fn_lock_in_background(&route, fn_lock);
             }
         }
+    }
+
+    /// Push a changed pointer speed to the online mouse it belongs to, and
+    /// end precision mode on a mouse whose speed or button assignments the
+    /// reload changed (see [`crate::pointer_speed`]). An unrelated save
+    /// writes nothing, as for [`Self::apply_changed_fn_locks`].
+    fn apply_changed_pointer_speeds(&self, previous: &Config) {
+        for dev in self
+            .devices
+            .iter()
+            .filter(|dev| dev.online && scales_pointer(dev))
+            .filter(|dev| self.config.device_enabled(&dev.config_key))
+        {
+            let Some(route) = dev.route.as_ref() else {
+                continue;
+            };
+            let key = &dev.config_key;
+            let change = ReloadChange {
+                speed: self.config.pointer_speed(key) != previous.pointer_speed(key),
+                assignments: assignments_changed(previous, &self.config, key),
+            };
+            let saved = configured_pointer_speed(&self.config, dev);
+            if let Some(write) = self.shared.pointer_speeds.reload(key, route, saved, change) {
+                self.write_pointer_speed(write);
+            }
+        }
+    }
+
+    fn write_pointer_speed(&self, write: SpeedWrite) {
+        let SpeedWrite {
+            route,
+            speed,
+            ticket,
+        } = write;
+        write_pointer_speed_in_background(self.shared.device(&route), ticket, speed);
     }
 
     /// The effective settings of every online standalone light, keyed by its
