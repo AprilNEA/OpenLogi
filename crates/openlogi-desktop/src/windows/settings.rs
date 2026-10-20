@@ -39,7 +39,7 @@ pub(super) use openlogi_core::config::{
 
 pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
-pub(super) use crate::state::{AppState, StateEvent};
+pub(super) use crate::state::{AppState, RemovalOrigin, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 pub(super) use crate::ui::theme::{self, Palette};
 #[cfg(target_os = "macos")]
@@ -167,30 +167,7 @@ impl SettingsView {
         let updater_obs = cx.observe(&updater, |_, _, cx| cx.notify());
         let installation_obs =
             cx.observe_global::<crate::platform::installation::Installation>(|_, cx| cx.notify());
-        let state_obs = cx.subscribe(&AppState::global(cx), |this, _, event: &StateEvent, cx| {
-            if matches!(event, StateEvent::LanguageChanged) {
-                // The cache-size line is localized text cached in view state
-                // (it interpolates an IO-derived size); rebuild it in the new
-                // locale.
-                this.asset_cache_desc = assets::cache_size_description();
-            }
-            if matches!(
-                event,
-                StateEvent::AgentChanged
-                    | StateEvent::DiagnosticsChanged
-                    | StateEvent::InventoryChanged
-                    | StateEvent::CameraPermissionChanged
-                    | StateEvent::SettingsChanged
-                    | StateEvent::LanguageChanged
-            ) {
-                // A settings change may have run the opportunistic
-                // registration ensure, so re-read the status snapshot.
-                if matches!(event, StateEvent::SettingsChanged) {
-                    this.refresh_registration_status(cx);
-                }
-                cx.notify();
-            }
-        });
+        let state_obs = Self::observe_state(window, cx);
         let activation_obs = Self::observe_registration_status(window, cx);
 
         let theme_search =
@@ -280,6 +257,49 @@ impl SettingsView {
             self.registration_status = status;
             cx.notify();
         }
+    }
+
+    fn observe_state(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe_in(
+            &AppState::global(cx),
+            window,
+            |this, _, event: &StateEvent, window, cx| {
+                if let StateEvent::StalePairingRemovalFailed {
+                    name,
+                    failure,
+                    origin: RemovalOrigin::Settings,
+                } = event
+                {
+                    // This window sent the request, so this window explains
+                    // the failure even when the main window is closed.
+                    crate::windows::unpair_failed::open_stale_pairing_removal_failed(
+                        window, cx, name, failure,
+                    );
+                }
+                if matches!(event, StateEvent::LanguageChanged) {
+                    // The cache-size line is localized text cached in view
+                    // state (it interpolates an IO-derived size); rebuild it
+                    // in the new locale.
+                    this.asset_cache_desc = assets::cache_size_description();
+                }
+                if matches!(
+                    event,
+                    StateEvent::AgentChanged
+                        | StateEvent::DiagnosticsChanged
+                        | StateEvent::InventoryChanged
+                        | StateEvent::CameraPermissionChanged
+                        | StateEvent::SettingsChanged
+                        | StateEvent::LanguageChanged
+                ) {
+                    // A settings change may have run the opportunistic
+                    // registration ensure, so re-read the status snapshot.
+                    if matches!(event, StateEvent::SettingsChanged) {
+                        this.refresh_registration_status(cx);
+                    }
+                    cx.notify();
+                }
+            },
+        )
     }
 
     fn observe_registration_status(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
@@ -507,5 +527,86 @@ impl Render for SettingsView {
                 )
             })
             .child(settings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{TestAppContext, VisualTestContext};
+    use openlogi_core::config::Config;
+    use openlogi_core::hid::DeviceRoute;
+    use openlogi_ipc::PairingFailure;
+
+    use super::*;
+    use crate::services::assets::AssetResolver;
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::services::ipc::{UnpairFailure, UnpairIntent};
+    use crate::state::Sources;
+
+    /// A refused unpair is explained by the window that sent it: Settings
+    /// shows its own failure even though the main window owns the card
+    /// dialog, and stays silent about the main window's.
+    #[gpui::test]
+    fn a_refused_unpair_is_explained_in_the_settings_window_that_sent_it(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::ui::theme::register_builtin_themes(cx);
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let state = cx.new(|_| {
+                AppState::new(Sources::in_memory(
+                    Config::ephemeral(),
+                    &AssetResolver::new(),
+                    commands,
+                ))
+            });
+            AppState::set_global(state, cx);
+        });
+
+        let handle = cx.open_window(gpui::size(px(920.), px(640.)), |window, cx| {
+            let settings = cx.new(|cx| SettingsView::new(SettingsPage::General, window, cx));
+            gpui_component::Root::new(settings, window, cx)
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "TEST-UID".to_string(),
+            slot: 2,
+        };
+        let failure = UnpairFailure::Refused(PairingFailure::ReceiverBusy);
+        let intent = |origin| UnpairIntent::StalePairing {
+            name: "MX Mechanical".to_string(),
+            origin,
+        };
+
+        visual.update(|_window, cx| {
+            AppState::apply(cx, |state| {
+                state.apply_unpaired(
+                    &route,
+                    intent(RemovalOrigin::MainWindow),
+                    Err(failure.clone()),
+                )
+            });
+        });
+        assert!(
+            !visual.update(gpui_component::WindowExt::has_active_dialog),
+            "a failure sent from the main window belongs there, not in Settings"
+        );
+
+        visual.update(|_window, cx| {
+            AppState::apply(cx, |state| {
+                state.apply_unpaired(
+                    &route,
+                    intent(RemovalOrigin::Settings),
+                    Err(failure.clone()),
+                )
+            });
+        });
+        assert!(
+            visual.update(gpui_component::WindowExt::has_active_dialog),
+            "Settings must explain an unpair it sent"
+        );
     }
 }

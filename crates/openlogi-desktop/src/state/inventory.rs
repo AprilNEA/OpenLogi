@@ -18,7 +18,7 @@ use crate::state::devices::{
 
 use super::device_key::DeviceKey;
 use super::device_session::DeviceSession;
-use super::events::StateEvents;
+use super::events::{RemovalOrigin, StateEvents};
 use super::load::Load;
 use super::{AppState, INVENTORY_MISS_GRACE, StateEvent};
 
@@ -526,7 +526,7 @@ impl super::AppState {
         let name = record.display_name.clone();
         let routes = record.stale_pairings.clone();
         for route in routes {
-            let events = self.remove_stale_pairing(route, &name);
+            let events = self.remove_stale_pairing(route, &name, RemovalOrigin::MainWindow);
             if !events.is_empty() {
                 return events;
             }
@@ -536,12 +536,19 @@ impl super::AppState {
 
     /// Ask the receiver to drop one leftover slot of the device named `name`
     /// — the Receivers page's per-slot action. Nothing local changes; the
-    /// agent's next inventory stops listing the slot.
-    pub(crate) fn remove_stale_pairing(&mut self, route: DeviceRoute, name: &str) -> StateEvents {
+    /// agent's next inventory stops listing the slot. `origin` names the
+    /// window that asked, so its own failure dialog answers.
+    pub(crate) fn remove_stale_pairing(
+        &mut self,
+        route: DeviceRoute,
+        name: &str,
+        origin: RemovalOrigin,
+    ) -> StateEvents {
         let sent = self.send_ipc(UnpairDevice {
             route,
             intent: UnpairIntent::StalePairing {
                 name: name.to_string(),
+                origin,
             },
         });
         if sent {
@@ -550,6 +557,7 @@ impl super::AppState {
             StateEvent::StalePairingRemovalFailed {
                 name: name.to_string(),
                 failure: UnpairFailure::AgentUnreachable,
+                origin,
             }
             .into()
         }
@@ -576,9 +584,14 @@ impl super::AppState {
                 config_key,
                 ..
             } => self.apply_device_unpaired(&record_key, route, config_key.as_deref(), result),
-            UnpairIntent::StalePairing { name } => match result {
+            UnpairIntent::StalePairing { name, origin } => match result {
                 Ok(()) => StateEvents::none(),
-                Err(failure) => StateEvent::StalePairingRemovalFailed { name, failure }.into(),
+                Err(failure) => StateEvent::StalePairingRemovalFailed {
+                    name,
+                    failure,
+                    origin,
+                }
+                .into(),
             },
         }
     }

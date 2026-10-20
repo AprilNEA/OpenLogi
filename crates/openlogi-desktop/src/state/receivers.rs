@@ -33,15 +33,65 @@ pub(crate) struct ReceiverSlot {
 }
 
 /// What a slot holds.
+///
+/// Occupants name the device by the card that represents it rather than a
+/// copy of its display name, so a rename reaches this page without waiting
+/// for the next inventory snapshot. The receiver-reported name stays as the
+/// fallback for a slot the device list has no card for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SlotOccupant {
     /// Nothing is paired here.
     Empty,
     /// The slot a device's card is reached through.
-    Device { name: String, online: bool },
+    Device {
+        /// The card that represents this slot, when the list has one.
+        record_key: Option<String>,
+        /// What the receiver reported, for a slot with no card.
+        reported_name: String,
+        online: bool,
+    },
     /// An offline leftover pairing of the device named, folded into that
     /// device's card and removable on its own.
-    OldPairing { name: String, route: DeviceRoute },
+    OldPairing {
+        /// The card the leftover was folded into.
+        record_key: String,
+        /// What the receiver reported, if that card is gone.
+        reported_name: String,
+        route: DeviceRoute,
+    },
+}
+
+impl SlotOccupant {
+    /// What the receiver reported for this slot, for when no card exists.
+    pub(crate) fn reported_name(&self) -> &str {
+        match self {
+            Self::Empty => "",
+            Self::Device { reported_name, .. } | Self::OldPairing { reported_name, .. } => {
+                reported_name
+            }
+        }
+    }
+
+    /// The name this slot's device currently shows on its card, falling back
+    /// to what the receiver reported when the list has no card for it.
+    pub(crate) fn display_name<'a>(&'a self, records: &'a [DeviceRecord]) -> &'a str {
+        let (record_key, reported_name) = match self {
+            Self::Empty => return "",
+            Self::Device {
+                record_key,
+                reported_name,
+                ..
+            } => (record_key.as_deref(), reported_name.as_str()),
+            Self::OldPairing {
+                record_key,
+                reported_name,
+                ..
+            } => (Some(record_key.as_str()), reported_name.as_str()),
+        };
+        record_key
+            .and_then(|key| records.iter().find(|record| record.record_key() == key))
+            .map_or(reported_name, |record| record.display_name.as_str())
+    }
 }
 
 impl ReceiverSlots {
@@ -114,7 +164,8 @@ fn occupant(
     records: &[DeviceRecord],
 ) -> SlotOccupant {
     let reported = || SlotOccupant::Device {
-        name: codename.unwrap_or_default().to_string(),
+        record_key: None,
+        reported_name: codename.unwrap_or_default().to_string(),
         online,
     };
     let Some(route) = route else {
@@ -125,7 +176,8 @@ fn occupant(
         .find(|record| record.route.as_ref() == Some(&route))
     {
         return SlotOccupant::Device {
-            name: record.display_name.clone(),
+            record_key: Some(record.record_key()),
+            reported_name: codename.unwrap_or_default().to_string(),
             online,
         };
     }
@@ -133,7 +185,8 @@ fn occupant(
         .iter()
         .find(|record| record.stale_pairings.contains(&route))
         .map_or_else(reported, |record| SlotOccupant::OldPairing {
-            name: record.display_name.clone(),
+            record_key: record.record_key(),
+            reported_name: codename.unwrap_or_default().to_string(),
             route,
         })
 }

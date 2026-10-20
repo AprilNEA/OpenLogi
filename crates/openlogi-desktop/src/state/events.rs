@@ -15,6 +15,16 @@ use super::device_key::DeviceKey;
 use super::devices::DeviceRecord;
 use crate::services::ipc::UnpairFailure;
 
+/// The window a receiver removal was requested from, so a failure dialog
+/// opens where the user clicked instead of in another window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemovalOrigin {
+    /// The main window's device card.
+    MainWindow,
+    /// Settings' Receivers page.
+    Settings,
+}
+
 /// Semantic changes emitted by the shared application-state entity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StateEvent {
@@ -42,6 +52,8 @@ pub(crate) enum StateEvent {
         /// The device's display name.
         name: String,
         failure: UnpairFailure,
+        /// The window that sent the request; only it explains the failure.
+        origin: RemovalOrigin,
     },
     /// The active device changed.
     DeviceSelected(DeviceKey),

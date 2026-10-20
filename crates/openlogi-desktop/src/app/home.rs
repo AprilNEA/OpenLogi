@@ -29,7 +29,6 @@ use gpui_component::{
 use openlogi_core::config::{DeviceViewMode, LightSettings};
 use openlogi_core::device::{DeviceKind, DeviceModelInfo, ModelTransport};
 use openlogi_core::hid::{DeviceRoute, ReceiverProtocol};
-use openlogi_ipc::PairingFailure;
 
 use super::AppView;
 use super::status::{loading_body, notice_body};
@@ -39,12 +38,10 @@ use super::widgets::{
 };
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
-use crate::services::ipc::UnpairFailure;
 use crate::state::{AppState, DeviceRecord, ObservedConnection};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
 use crate::ui::components::{control_input, save_cancel_footer};
 use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
-use crate::windows::add_device::pairing_failure_text;
 
 /// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
 /// and Add Device.
@@ -493,50 +490,6 @@ fn open_stale_pairings_confirmation(
                     true
                 }
             })
-    });
-}
-
-/// Say why a device the user asked to forget is still here: its receiver kept
-/// the pairing, so deleting only its settings would bring the card back.
-pub(super) fn open_removal_failed(
-    window: &mut Window,
-    cx: &mut App,
-    name: &str,
-    failure: &UnpairFailure,
-) {
-    let title = tr!("device.delete_device_failed", name => name.to_string());
-    open_unpair_failed(window, cx, title, failure);
-}
-
-/// Say why a leftover slot the user asked to remove is still paired.
-pub(super) fn open_stale_pairing_removal_failed(
-    window: &mut Window,
-    cx: &mut App,
-    name: &str,
-    failure: &UnpairFailure,
-) {
-    let title = tr!("device.remove_old_pairings_failed", name => name.to_string());
-    open_unpair_failed(window, cx, title, failure);
-}
-
-fn open_unpair_failed(
-    window: &mut Window,
-    cx: &mut App,
-    title: SharedString,
-    failure: &UnpairFailure,
-) {
-    let description = match failure {
-        UnpairFailure::AgentUnreachable => tr!("agent.cant_reach_the_background_service"),
-        UnpairFailure::Refused(PairingFailure::ReceiverBusy) => {
-            tr!("device.delete_device_receiver_busy")
-        }
-        UnpairFailure::Refused(PairingFailure::ReceiverNotFound) => {
-            tr!("device.delete_device_receiver_missing")
-        }
-        UnpairFailure::Refused(other) => pairing_failure_text(other).into(),
-    };
-    window.open_alert_dialog(cx, move |alert, _, _| {
-        alert.title(title.clone()).description(description.clone())
     });
 }
 

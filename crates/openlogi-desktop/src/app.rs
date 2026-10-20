@@ -25,7 +25,7 @@ use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::user_cache_root;
-use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent, StateEvents};
+use crate::state::{AgentLink, AppState, DeviceRecord, RemovalOrigin, StateEvent, StateEvents};
 use crate::ui::theme::{self, ContentWidth, Typography as _};
 
 pub(crate) mod deeplink;
@@ -229,10 +229,16 @@ fn explain_refused_removals(
         window,
         |_, _, event: &StateEvent, window, cx| match event {
             StateEvent::DeviceRemovalFailed { name, failure } => {
-                home::open_removal_failed(window, cx, name, failure);
+                crate::windows::unpair_failed::open_removal_failed(window, cx, name, failure);
             }
-            StateEvent::StalePairingRemovalFailed { name, failure } => {
-                home::open_stale_pairing_removal_failed(window, cx, name, failure);
+            StateEvent::StalePairingRemovalFailed {
+                name,
+                failure,
+                origin: RemovalOrigin::MainWindow,
+            } => {
+                crate::windows::unpair_failed::open_stale_pairing_removal_failed(
+                    window, cx, name, failure,
+                );
             }
             _ => {}
         },

@@ -12,6 +12,7 @@
 pub mod add_device;
 pub mod main_window;
 pub mod settings;
+pub mod unpair_failed;
 pub mod update_consent;
 
 use crate::ui::theme::Typography as _;

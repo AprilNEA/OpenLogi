@@ -51,7 +51,7 @@ use tarpc::client::RpcError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::state::DeviceKey;
+use crate::state::{DeviceKey, RemovalOrigin};
 
 mod launch;
 mod link;
@@ -185,6 +185,8 @@ pub enum UnpairIntent {
     StalePairing {
         /// The device's display name, for a failure message.
         name: String,
+        /// The window that asked, so only it opens the failure dialog.
+        origin: RemovalOrigin,
     },
 }
 

@@ -835,7 +835,13 @@ fn removing_leftover_pairings_unpairs_only_the_leftover_slots() {
         let Command::UnpairDevice(UnpairDevice { route, intent }) = command else {
             continue;
         };
-        assert_eq!(intent, UnpairIntent::StalePairing { name: name.clone() });
+        assert_eq!(
+            intent,
+            UnpairIntent::StalePairing {
+                name: name.clone(),
+                origin: RemovalOrigin::MainWindow
+            }
+        );
         sent.push(route);
     }
     assert_eq!(sent, [bolt_slot(2), bolt_slot(3)]);
@@ -845,7 +851,10 @@ fn removing_leftover_pairings_unpairs_only_the_leftover_slots() {
         state
             .apply_unpaired(
                 &bolt_slot(2),
-                UnpairIntent::StalePairing { name: name.clone() },
+                UnpairIntent::StalePairing {
+                    name: name.clone(),
+                    origin: RemovalOrigin::MainWindow
+                },
                 Ok(())
             )
             .is_empty()
@@ -867,10 +876,17 @@ fn a_refused_leftover_removal_says_why() {
     assert_eq!(
         state.apply_unpaired(
             &bolt_slot(2),
-            UnpairIntent::StalePairing { name: name.clone() },
+            UnpairIntent::StalePairing {
+                name: name.clone(),
+                origin: RemovalOrigin::MainWindow
+            },
             Err(failure.clone())
         ),
-        [StateEvent::StalePairingRemovalFailed { name, failure }]
+        [StateEvent::StalePairingRemovalFailed {
+            name,
+            failure,
+            origin: RemovalOrigin::MainWindow
+        }]
     );
     assert_eq!(state.devices().len(), 1);
 }
@@ -1009,6 +1025,8 @@ fn a_bolt_receiver_lists_every_slot_with_its_leftovers_marked() {
 
     let (state, _commands) = state_with(&[keyboard_pairings(&[2, 3, 4], Some(4))]);
     let name = state.devices()[0].display_name.clone();
+    let record_key = state.devices()[0].record_key();
+    let reported_name = "MX MCHNCL".to_string();
 
     let [receiver] = state.receivers() else {
         panic!("one receiver: {:?}", state.receivers());
@@ -1021,7 +1039,8 @@ fn a_bolt_receiver_lists_every_slot_with_its_leftovers_marked() {
         .map(|slot| (slot.slot, slot.occupant.clone()))
         .collect();
     let old = |slot| SlotOccupant::OldPairing {
-        name: name.clone(),
+        record_key: record_key.clone(),
+        reported_name: reported_name.clone(),
         route: bolt_slot(slot),
     };
     assert_eq!(
@@ -1033,7 +1052,8 @@ fn a_bolt_receiver_lists_every_slot_with_its_leftovers_marked() {
             (
                 4,
                 SlotOccupant::Device {
-                    name: name.clone(),
+                    record_key: Some(record_key.clone()),
+                    reported_name: reported_name.clone(),
                     online: true
                 }
             ),
@@ -1041,6 +1061,30 @@ fn a_bolt_receiver_lists_every_slot_with_its_leftovers_marked() {
             (6, SlotOccupant::Empty),
         ]
     );
+    // Every occupied slot names the device by its card, not by a snapshot
+    // taken when the receiver was listed.
+    for slot in &receiver.slots[1..4] {
+        assert_eq!(slot.occupant.display_name(state.devices()), name);
+    }
+}
+
+/// A rename changes the name the Receivers page reads, without waiting for
+/// another inventory snapshot to rebuild the receiver list.
+#[test]
+fn renaming_a_device_renames_its_receiver_slots() {
+    let (mut state, _commands) = state_with(&[keyboard_pairings(&[2, 3, 4], Some(4))]);
+    let record_key = state.devices()[0].record_key();
+
+    let _ = state.commit_device_custom_name(&record_key, "Desk keyboard");
+
+    let [receiver] = state.receivers() else {
+        panic!("one receiver: {:?}", state.receivers());
+    };
+    let names: Vec<_> = receiver.slots[1..4]
+        .iter()
+        .map(|slot| slot.occupant.display_name(state.devices()))
+        .collect();
+    assert_eq!(names, ["Desk keyboard"; 3]);
 }
 
 /// A direct device's inventory has no receiver behind it and no slots.
@@ -1105,7 +1149,7 @@ fn removing_one_leftover_slot_unpairs_only_that_slot() {
 
     assert!(
         state
-            .remove_stale_pairing(bolt_slot(3), "MX Mechanical")
+            .remove_stale_pairing(bolt_slot(3), "MX Mechanical", RemovalOrigin::Settings)
             .is_empty()
     );
 
@@ -1120,7 +1164,8 @@ fn removing_one_leftover_slot_unpairs_only_that_slot() {
         [(
             bolt_slot(3),
             UnpairIntent::StalePairing {
-                name: "MX Mechanical".to_string()
+                name: "MX Mechanical".to_string(),
+                origin: RemovalOrigin::Settings
             }
         )]
     );

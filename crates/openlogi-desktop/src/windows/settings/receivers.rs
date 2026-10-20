@@ -2,6 +2,7 @@
 //! which device sits in it, whether it is connected, and which slots are
 //! empty or hold a leftover pairing that can be removed on its own.
 
+use gpui::App;
 use openlogi_core::hid::ReceiverBrand;
 
 use super::assets::action_button;
@@ -9,7 +10,7 @@ use super::{
     AppState, Icon, ParentElement, SettingField, SettingGroup, SettingItem, SettingPage,
     SharedString, Styled, div, h_flex,
 };
-use crate::state::{ReceiverSlot, ReceiverSlots, SlotOccupant};
+use crate::state::{ReceiverSlot, ReceiverSlots, RemovalOrigin, SlotOccupant};
 use crate::ui::theme::{Palette, Typography as _};
 
 /// The Receivers page for the receivers `AppState` currently lists.
@@ -74,8 +75,18 @@ fn slot_item(receiver_index: usize, slot: ReceiverSlot) -> SettingItem {
         title,
         SettingField::render(move |_, _, cx| {
             let pal = crate::ui::theme::palette(cx);
-            occupant_field(receiver_index, slot.slot, &slot.occupant, pal)
+            let name = slot_name(cx, &slot.occupant);
+            occupant_field(receiver_index, slot.slot, &slot.occupant, &name, pal)
         }),
+    )
+}
+
+/// The name the device's card currently shows, so a rename reaches this page
+/// without waiting for another inventory snapshot.
+fn slot_name(cx: &App, occupant: &SlotOccupant) -> SharedString {
+    AppState::try_read(cx).map_or_else(
+        || occupant.reported_name().into(),
+        |state| occupant.display_name(state.devices()).into(),
     )
 }
 
@@ -83,6 +94,7 @@ fn occupant_field(
     receiver_index: usize,
     slot: u8,
     occupant: &SlotOccupant,
+    name: &str,
     pal: Palette,
 ) -> gpui::Div {
     let row = h_flex().items_center().gap_2().text_body();
@@ -90,8 +102,8 @@ fn occupant_field(
         SlotOccupant::Empty => row
             .text_color(pal.text_muted)
             .child(tr!("receivers.empty_slot")),
-        SlotOccupant::Device { name, online } => row
-            .child(div().text_color(pal.text_primary).child(name.clone()))
+        SlotOccupant::Device { online, .. } => row
+            .child(div().text_color(pal.text_primary).child(name.to_string()))
             .child(
                 div()
                     .text_caption()
@@ -102,19 +114,23 @@ fn occupant_field(
                         tr!("device.offline")
                     }),
             ),
-        SlotOccupant::OldPairing { name, route } => {
-            let (name, route) = (name.clone(), route.clone());
+        SlotOccupant::OldPairing { route, .. } => {
+            let occupant = occupant.clone();
+            let route = route.clone();
             row.child(
                 div()
                     .text_color(pal.text_muted)
-                    .child(tr!("receivers.old_pairing_of", name => name.clone())),
+                    .child(tr!("receivers.old_pairing_of", name => name.to_string())),
             )
             .child(action_button(
                 SharedString::from(format!("receiver-{receiver_index}-unpair-{slot}")),
                 tr!("receivers.unpair"),
                 pal,
                 move |cx| {
-                    AppState::apply(cx, |state| state.remove_stale_pairing(route.clone(), &name));
+                    let name = slot_name(cx, &occupant);
+                    AppState::apply(cx, |state| {
+                        state.remove_stale_pairing(route.clone(), &name, RemovalOrigin::Settings)
+                    });
                 },
             ))
         }

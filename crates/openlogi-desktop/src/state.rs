@@ -28,7 +28,7 @@ pub(crate) use device_key::DeviceKey;
 pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
 pub(crate) use easy_switch::HostRenameRefusal;
-pub(crate) use events::{StateEvent, StateEvents};
+pub(crate) use events::{RemovalOrigin, StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
