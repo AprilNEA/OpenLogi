@@ -734,11 +734,15 @@ async fn thumbwheel_restore_keeps_the_native_inversion_found_before_capture() {
 }
 
 #[tokio::test]
-async fn thumbwheel_left_diverted_is_restored_native_without_its_diverted_sign() {
-    // Already diverted (a session that never tore down): its invert byte is
-    // that owner's sign normalisation, so it must not become native inversion.
+async fn thumbwheel_found_diverted_is_handed_back_diverted() {
+    // Diverted before capture, e.g. by another HID++ client: teardown returns
+    // that mode and that sign rather than switching the wheel to native.
     assert_eq!(
         arm_then_restore_thumbwheel([0x01, 0x01]).await,
-        vec![[0x01, 0x00], [0x00, 0x00]]
+        vec![[0x01, 0x00], [0x01, 0x01]]
+    );
+    assert_eq!(
+        arm_then_restore_thumbwheel([0x01, 0x00]).await,
+        vec![[0x01, 0x00], [0x01, 0x00]]
     );
 }

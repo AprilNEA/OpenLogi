@@ -16,7 +16,7 @@ use super::gesture::main_wheel;
 use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
 use crate::reprog_controls::{self, ReprogControlsV4};
-use crate::thumbwheel::{self, Thumbwheel, ThumbwheelStatus, WheelDirection};
+use crate::thumbwheel::{self, Thumbwheel, ThumbwheelStatus};
 use crate::{ChannelRegistry, DeviceRoute, IoSuspended, SharedChannel};
 
 /// Why a capture manager is stopping an active session.
@@ -157,22 +157,22 @@ impl ReprogRestore {
     }
 }
 
-/// The thumb wheel a capture session diverted, and the native rotation sign
-/// to hand back with native reporting.
+/// The thumb wheel a capture session diverted, and the reporting state to
+/// hand back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ThumbwheelRestore {
     feature_index: u8,
-    native_direction: WheelDirection,
+    status: ThumbwheelStatus,
 }
 
 impl ThumbwheelRestore {
-    /// Teardown always selects native reporting, with the sign
-    /// [`thumbwheel::native_direction_to_restore`] derives from the status read
-    /// before arming.
+    /// Teardown writes the reporting mode and rotation sign
+    /// [`thumbwheel::status_to_restore`] derives from the status read before
+    /// arming.
     pub(crate) fn new(feature_index: u8, original: Option<ThumbwheelStatus>) -> Self {
         Self {
             feature_index,
-            native_direction: thumbwheel::native_direction_to_restore(original),
+            status: thumbwheel::status_to_restore(original),
         }
     }
 }
@@ -248,10 +248,7 @@ impl RestorePlan for CaptureRestorePlan {
         }
         if let Some(thumb) = self.thumb {
             let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
-            restored &= restore_result(
-                thumbwheel.undivert(thumb.native_direction).await,
-                "thumb wheel",
-            );
+            restored &= restore_result(thumbwheel.restore(thumb.status).await, "thumb wheel");
         }
         restored
     }

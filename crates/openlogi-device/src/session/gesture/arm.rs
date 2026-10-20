@@ -276,17 +276,17 @@ pub(super) async fn arm_controls_into(
         if wheel_info.is_some_and(|info| !info.supports_single_tap) {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
-        // Read before the first divert: teardown hands back the native
-        // inversion found here (see `ThumbwheelRestore::new`).
+        // Read before the first divert: teardown hands back the reporting
+        // state found here (see `ThumbwheelRestore::new`).
         let original = match tw.get_status().await {
             Ok(status) => Some(status),
             Err(e) => {
-                warn!(error = ?e, "thumb wheel getStatus failed; restore will use the default sign");
+                warn!(error = ?e, "thumb wheel getStatus failed; restore will select native reporting");
                 None
             }
         };
         if original.is_some_and(|status| status.mode == ReportingMode::Diverted) {
-            debug!("thumb wheel was already diverted before arming");
+            debug!("thumb wheel was already diverted before arming; restore will keep it diverted");
         }
         // Store ownership before the write: a transport error cannot prove
         // whether firmware applied diversion, so rollback must cover it too.

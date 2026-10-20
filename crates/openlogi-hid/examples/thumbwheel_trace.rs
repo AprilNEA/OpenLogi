@@ -110,10 +110,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     drop(listener);
-    let native = thumbwheel::native_direction_to_restore(original);
-    if let Err(e) = tw.undivert(native).await {
-        println!("could not restore native reporting: {e:?}");
+    let restore = thumbwheel::status_to_restore(original);
+    if let Err(e) = tw.restore(restore).await {
+        println!("could not restore reporting: {e:?}");
     }
-    println!("\n<<< native reporting restored");
+    println!("\n<<< reporting restored: {restore:?}");
     Ok(())
 }

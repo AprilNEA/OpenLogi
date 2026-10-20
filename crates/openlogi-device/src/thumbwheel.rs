@@ -189,6 +189,16 @@ pub enum ReportingMode {
     Diverted,
 }
 
+impl ReportingMode {
+    /// The `setThumbwheelReporting` byte 0 value for this mode.
+    fn to_byte(self) -> u8 {
+        match self {
+            Self::Native => MODE_NATIVE,
+            Self::Diverted => MODE_DIVERTED,
+        }
+    }
+}
+
 /// The reporting state returned by `getThumbwheelStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThumbwheelStatus {
@@ -212,27 +222,23 @@ impl ThumbwheelStatus {
     }
 }
 
-/// The native rotation sign to hand back when undiverting a wheel whose
-/// status before diversion was `original`.
+/// The reporting state to hand back when undiverting a wheel whose status
+/// before diversion was `original`.
 ///
-/// A diverter owns only the reporting mode, so it keeps the native inversion
-/// found before diverting. A wheel already diverted then is left over from an
-/// owner that never tore down: its sign is that owner's diverted
-/// normalisation, not the user's native preference. With no readable status
-/// there is no evidence of native inversion either; both get the default sign.
+/// A diverter borrows the reporting state, so it returns the mode and the
+/// rotation sign it found. That includes a wheel found diverted: another
+/// HID++ client that diverted it keeps receiving its reports. Nothing on the
+/// wire tells such a client apart from a session that never tore down, so a
+/// diversion left over that way is handed back too, until the device
+/// reconnects and its firmware drops it. With no readable status there is
+/// nothing to return, and the wheel gets native reporting with the default
+/// sign.
 #[must_use]
-pub fn native_direction_to_restore(original: Option<ThumbwheelStatus>) -> WheelDirection {
-    match original {
-        Some(ThumbwheelStatus {
-            mode: ReportingMode::Native,
-            direction,
-        }) => direction,
-        Some(ThumbwheelStatus {
-            mode: ReportingMode::Diverted,
-            ..
-        })
-        | None => WheelDirection::Default,
-    }
+pub fn status_to_restore(original: Option<ThumbwheelStatus>) -> ThumbwheelStatus {
+    original.unwrap_or(ThumbwheelStatus {
+        mode: ReportingMode::Native,
+        direction: WheelDirection::Default,
+    })
 }
 
 /// A decoded `thumbwheelEvent`.
@@ -348,19 +354,24 @@ impl Thumbwheel {
     /// Enter diverted reporting; wheel events then arrive on this feature
     /// index instead of moving the native scroll.
     pub async fn divert(&self, direction: WheelDirection) -> Result<(), Hidpp20Error> {
-        self.set_reporting(MODE_DIVERTED, direction).await
+        self.set_reporting(ReportingMode::Diverted, direction).await
     }
 
-    /// Hand native scrolling back to the firmware with `direction` as the
-    /// native rotation sign. `setThumbwheelReporting` always writes both, so
-    /// the caller supplies the native inversion it means to keep.
-    pub async fn undivert(&self, direction: WheelDirection) -> Result<(), Hidpp20Error> {
-        self.set_reporting(MODE_NATIVE, direction).await
+    /// Hand the wheel's reporting state back: write `status`, normally
+    /// [`status_to_restore`] of the status read before diverting.
+    /// `setThumbwheelReporting` always writes the mode and the rotation sign
+    /// together, so both come from `status`.
+    pub async fn restore(&self, status: ThumbwheelStatus) -> Result<(), Hidpp20Error> {
+        self.set_reporting(status.mode, status.direction).await
     }
 
-    async fn set_reporting(&self, mode: u8, direction: WheelDirection) -> Result<(), Hidpp20Error> {
+    async fn set_reporting(
+        &self,
+        mode: ReportingMode,
+        direction: WheelDirection,
+    ) -> Result<(), Hidpp20Error> {
         let mut params = [0u8; 16];
-        params[0] = mode;
+        params[0] = mode.to_byte();
         params[1] = u8::from(direction == WheelDirection::Inverted);
         self.call(FN_SET_REPORTING, params).await?;
         Ok(())
@@ -498,5 +509,23 @@ mod tests {
             status(2, 0),
             Err(Hidpp20Error::UnsupportedResponse)
         ));
+    }
+
+    #[test]
+    fn restore_returns_the_status_found_before_diverting() {
+        for mode in [ReportingMode::Native, ReportingMode::Diverted] {
+            for direction in [WheelDirection::Default, WheelDirection::Inverted] {
+                let original = ThumbwheelStatus { mode, direction };
+                assert_eq!(status_to_restore(Some(original)), original);
+            }
+        }
+        // Nothing was read, so nothing claims the wheel: native, default sign.
+        assert_eq!(
+            status_to_restore(None),
+            ThumbwheelStatus {
+                mode: ReportingMode::Native,
+                direction: WheelDirection::Default,
+            }
+        );
     }
 }
