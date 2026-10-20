@@ -236,28 +236,27 @@ pub struct FirmwareEntityInfo {
     pub build: u16,
     /// Whether this is the entity currently running.
     pub active: bool,
-    /// USB or wireless product ID the entity runs under. A bootloader entity
-    /// reports the PID the device enumerates as while in DFU mode; only the
-    /// active entity is required to report a real value, so an inactive one
-    /// may be zero.
-    pub transport_pid: u16,
-    /// Optional extra versioning bytes. Device-specific and usually all zero,
-    /// carried verbatim because a device that does populate them is exactly
-    /// the device a report is being collected for.
-    pub extra_version: [u8; 5],
+    /// Product ID of the device on the link the request used, as
+    /// [`DeviceEntityFirmwareInfo::transport_pid`] decides it. `None` for every
+    /// entity whose transport-specific bytes are not known to hold a PID.
+    pub transport_pid: Option<u16>,
+    /// Reply bytes 9 to 15, the transport-specific region, verbatim. Their
+    /// meaning depends on the entity and the link, and a device that fills
+    /// them in is exactly the device a report is being collected for.
+    pub transport_specific_info: [u8; 7],
 }
 
 impl From<DeviceEntityFirmwareInfo> for FirmwareEntityInfo {
     fn from(info: DeviceEntityFirmwareInfo) -> Self {
         Self {
+            transport_pid: info.transport_pid(),
             kind: info.entity_type,
             prefix: info.firmware_prefix,
             number: info.firmware_number,
             revision: info.revision,
             build: info.build,
             active: info.active,
-            transport_pid: info.transport_pid,
-            extra_version: info.extra_version,
+            transport_specific_info: info.transport_specific_info,
         }
     }
 }
