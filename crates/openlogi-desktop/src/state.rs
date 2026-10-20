@@ -28,12 +28,13 @@ pub(crate) use device_key::DeviceKey;
 pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
 pub(crate) use easy_switch::HostRenameRefusal;
-pub(crate) use events::{StateEvent, StateEvents};
+pub(crate) use events::{RemovalOrigin, StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
     BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ReportRateLoad, SmartShiftLoad,
 };
+pub(crate) use receivers::{ReceiverSlot, ReceiverSlots, SlotOccupant};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,7 @@ mod lighting;
 mod load;
 mod os_layout;
 mod pointer;
+mod receivers;
 mod report_rate;
 mod scroll;
 mod settings;
@@ -174,6 +176,8 @@ pub struct AppState {
     agent: AgentSession,
     /// Merged device catalog, valid active selection, and per-device sessions.
     devices: DeviceStore,
+    /// Every slot of each connected receiver, derived alongside `devices`.
+    receivers: Vec<ReceiverSlots>,
     /// Binding-editor scope and projections derived from config.
     bindings: BindingState,
     /// Per-device Actions Ring profile open in this window's editor.
@@ -277,10 +281,12 @@ impl AppState {
                 .get(current_device)
                 .and_then(DeviceRecord::persistent_config_key),
         );
+        let receivers = receivers::build_receivers(inventories, &device_list);
         let mut state = Self {
             config,
             agent: AgentSession::default(),
             devices: DeviceStore::new(device_list, current_device),
+            receivers,
             bindings,
             action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
@@ -402,6 +408,12 @@ impl AppState {
     #[must_use]
     pub fn devices(&self) -> &[DeviceRecord] {
         &self.devices.records
+    }
+
+    /// Every slot of each connected receiver, in inventory order.
+    #[must_use]
+    pub(crate) fn receivers(&self) -> &[ReceiverSlots] {
+        &self.receivers
     }
 
     /// The selected gallery index, or `None` when there are no devices.

@@ -37,7 +37,26 @@ pub struct ReceiverDescriptor {
     pub protocol: ReceiverProtocol,
 }
 
+/// Pairing slots on a Logi Bolt receiver. Every Bolt slot is addressed by the
+/// probe, so this bounds its slot walk as well as what the GUI lists.
+pub const BOLT_PAIRING_SLOTS: u8 = 6;
+
+/// Pairing slots on a Logitech Unifying receiver, which pairs up to six
+/// devices.
+const UNIFYING_PAIRING_SLOTS: u8 = 6;
+
 impl ReceiverDescriptor {
+    /// How many devices this receiver can pair, or `None` where the count is
+    /// not recorded: Nano and Lightspeed receivers differ by model.
+    #[must_use]
+    pub const fn pairing_slots(&self) -> Option<u8> {
+        match self.brand {
+            ReceiverBrand::Bolt => Some(BOLT_PAIRING_SLOTS),
+            ReceiverBrand::Unifying => Some(UNIFYING_PAIRING_SLOTS),
+            ReceiverBrand::Nano | ReceiverBrand::Lightspeed => None,
+        }
+    }
+
     const fn logitech(product_id: u16, brand: ReceiverBrand, protocol: ReceiverProtocol) -> Self {
         Self {
             vendor_id: LOGITECH_VENDOR_ID,
@@ -128,6 +147,20 @@ mod tests {
                 receiver.product_id
             );
         }
+    }
+
+    #[test]
+    fn pairing_slots_are_recorded_only_where_the_family_fixes_them() {
+        let slots = |product_id| {
+            find_receiver(LOGITECH_VENDOR_ID, product_id)
+                .expect("known receiver")
+                .pairing_slots()
+        };
+
+        assert_eq!(slots(0xc548), Some(6), "Bolt");
+        assert_eq!(slots(0xc52b), Some(6), "Unifying");
+        assert_eq!(slots(0xc534), None, "Nano");
+        assert_eq!(slots(0xc53a), None, "Lightspeed");
     }
 
     #[test]

@@ -42,7 +42,7 @@ use super::smartshift::{
 };
 use super::{
     AppState, ConfigPersistence, DeviceKey, DeviceRecord, INVENTORY_MISS_GRACE, LightCommandStatus,
-    Load, Sources, StateEvent,
+    Load, RemovalOrigin, Sources, StateEvent,
 };
 
 mod asset_targets;

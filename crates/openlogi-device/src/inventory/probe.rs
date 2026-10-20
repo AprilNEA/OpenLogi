@@ -67,7 +67,7 @@ const RECEIVER_UID_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Maximum number of pairing slots a Bolt receiver supports. We iterate this
 /// range to surface paired-but-offline devices that won't fire arrival events.
-const MAX_BOLT_SLOTS: u8 = 6;
+const MAX_BOLT_SLOTS: u8 = openlogi_device_registry::receiver::BOLT_PAIRING_SLOTS;
 
 /// Upper bound on probing one HID node's I/O. `hidpp`'s request/response has
 /// no timeout of its own, so without this a single unresponsive (e.g. asleep)
