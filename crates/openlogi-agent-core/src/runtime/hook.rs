@@ -31,7 +31,7 @@ use crate::event_monitor::SharedEventMonitor;
 pub struct HookMaps {
     /// Per-button immediate or threshold binding — the non-gesture dispatch path.
     pub bindings: BTreeMap<ButtonId, Binding>,
-    /// Per-direction maps for the OS-hook gesture buttons (Back/Forward in
+    /// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
     /// gesture mode), so a hold+swipe resolves to a bound action. HID++
     /// gesture sources use the gesture watcher's separate map instead.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
@@ -60,7 +60,7 @@ pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 /// (keycode + modifiers).
 pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
 
-/// Tracks which OS-hook gesture button (Back/Forward) is mid-hold and defers the
+/// Tracks which OS-hook gesture button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
 /// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
 /// adds only the button identity the accumulator doesn't track; a press that
@@ -318,6 +318,10 @@ fn handle_button(
     SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s))
 }
 
+/// Whether the hook should let the press through natively. A long press
+/// always needs the runtime to time it. A wheel-hold binding reaching the hook
+/// was not armed over HID++ (no raw-wheel diversion), so it degrades to its
+/// click, which stays native when that is the button's own action.
 fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
     !matches!(binding, Binding::LongPress(_)) && is_native_click(id, &binding.click_action())
 }

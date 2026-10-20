@@ -413,4 +413,21 @@ impl Config {
             .or_default()
             .thumbwheel_sensitivity = sensitivity;
     }
+
+    /// Whether `device_key`'s main wheel is smoothed through its diverted
+    /// HID++ reports
+    /// ([`DeviceConfig::smooth_wheel`](super::DeviceConfig::smooth_wheel)).
+    /// Unconfigured devices keep a native wheel.
+    #[must_use]
+    pub fn smooth_wheel(&self, device_key: &str) -> bool {
+        self.devices.get(device_key).is_some_and(|d| d.smooth_wheel)
+    }
+
+    /// Turn `device_key`'s diverted smooth wheel on or off.
+    pub fn set_smooth_wheel(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .smooth_wheel = enabled;
+    }
 }

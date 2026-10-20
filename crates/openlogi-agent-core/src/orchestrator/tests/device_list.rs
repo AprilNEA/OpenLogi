@@ -24,6 +24,8 @@ fn raw_light_dev(key: &str) -> AgentDevice {
         }),
         online: true,
         settings_revision: 0,
+        codename: None,
+        battery: None,
     }
 }
 

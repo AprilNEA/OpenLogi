@@ -313,21 +313,25 @@ impl Runtime {
                     });
                 });
             }
-            ipc::GuiUpdate::DeviceUnpaired {
-                record_key,
+            ipc::GuiUpdate::EasySwitchHostRenamed {
+                key,
                 route,
-                config_key,
+                write,
                 result,
             } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| {
-                        state.apply_device_unpaired(
-                            &record_key,
-                            &route,
-                            config_key.as_deref(),
-                            result,
-                        )
+                        state.apply_easy_switch_host_renamed(&key, &route, write, result)
                     });
+                });
+            }
+            ipc::GuiUpdate::DeviceUnpaired {
+                route,
+                intent,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_unpaired(&route, intent, result));
                 });
             }
         }

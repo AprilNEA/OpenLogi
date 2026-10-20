@@ -14,10 +14,11 @@ use super::{
 };
 use crate::session::gesture::CaptureSpec;
 use crate::{
-    CaptureChannelSlot, CaptureHost, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
-    ChannelRegistry, DeviceIoGate, DeviceIoSignal, DeviceRoute, Enumerator, NodeId, NodeInfo,
-    PairingCommand, PairingEvent, ReceiverSelector, SharedChannel, device_io_channel,
-    reprog_controls, run_capture_session, run_keyboard_capture_session, run_pairing,
+    CaptureChannelSlot, CaptureHost, CaptureSessionFailure, CaptureSessionOutcome,
+    CaptureSessionStop, CapturedInput, ChannelRegistry, DeviceIoGate, DeviceIoSignal, DeviceRoute,
+    Enumerator, NodeId, NodeInfo, PairingCommand, PairingEvent, ReceiverSelector, SharedChannel,
+    device_io_channel, reprog_controls, run_capture_session, run_keyboard_capture_session,
+    run_pairing,
 };
 
 const CAPTURE_CHANNEL: &str = "capture-session";
@@ -185,7 +186,7 @@ impl ArmedReplay {
     fn host(
         &self,
         sink: mpsc::UnboundedSender<CapturedInput>,
-    ) -> (oneshot::Sender<()>, CaptureHost<'_>) {
+    ) -> (oneshot::Sender<CaptureSessionStop>, CaptureHost<'_>) {
         let (shutdown, shutdown_rx) = oneshot::channel();
         let host = CaptureHost {
             sink,
@@ -199,7 +200,7 @@ impl ArmedReplay {
 
     /// Once the session has armed and asked for `0x1d4b`, check that it has
     /// published its channel, then shut it down and let the lookup answer.
-    async fn stop_after_arm(&self, shutdown: oneshot::Sender<()>) {
+    async fn stop_after_arm(&self, shutdown: oneshot::Sender<CaptureSessionStop>) {
         self.wireless_lookup.request_written().await;
         let published = self
             .channel_slot
@@ -209,7 +210,7 @@ impl ArmedReplay {
             .expect("capture channel is published before the wireless lookup");
         assert!(self.registry.is_current(&published));
         shutdown
-            .send(())
+            .send(CaptureSessionStop::Shutdown)
             .expect("capture session still owns its shutdown receiver");
         self.wireless_lookup.release();
     }

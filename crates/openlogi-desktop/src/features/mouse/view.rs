@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use gpui::{
@@ -25,7 +25,7 @@ use super::inspector::{
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::profiles::{friendly_app_name, profile_canvas_status};
+use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE};
@@ -67,6 +67,8 @@ struct MouseWorkspaceData<'a> {
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     thumbwheel: bool,
     dpi_gestures: bool,
+    virtual_thumbwheel: bool,
+    wheel_hold: &'a BTreeSet<ButtonId>,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
@@ -94,28 +96,32 @@ impl<'a> MouseWorkspaceData<'a> {
                 .current_record()
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.dpi_gestures),
-            editing_app: state.editing_app().map(|app| {
-                state
-                    .recent_app_name(app)
-                    .map_or_else(|| friendly_app_name(app), str::to_string)
-            }),
+            virtual_thumbwheel: state
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|capabilities| capabilities.virtual_thumbwheel),
+            wheel_hold: state.wheel_hold_buttons(),
+            editing_app: state.editing_app().map(|app| profile_name(state, app)),
             overridden: state.editing_app_overrides(),
         })
     }
 
-    fn empty(
-        bindings: &'a BTreeMap<ButtonId, Action>,
-        gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    ) -> Self {
+    fn empty() -> Self {
+        static NO_BINDINGS: BTreeMap<ButtonId, Action> = BTreeMap::new();
+        static NO_GESTURE_MAPS: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> =
+            BTreeMap::new();
+        static NO_WHEEL_HOLD: BTreeSet<ButtonId> = BTreeSet::new();
         Self {
             device_key: None,
             asset: None,
             active: None,
-            bindings,
-            gesture_maps,
+            bindings: &NO_BINDINGS,
+            gesture_maps: &NO_GESTURE_MAPS,
             glow: None,
             thumbwheel: false,
             dpi_gestures: false,
+            virtual_thumbwheel: false,
+            wheel_hold: &NO_WHEEL_HOLD,
             editing_app: None,
             overridden: None,
         }
@@ -305,7 +311,6 @@ impl MouseModelView {
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.localize_action_picker_inputs(window, cx);
-        let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let MouseWorkspaceData {
             device_key,
             asset,
@@ -315,10 +320,11 @@ impl Render for MouseModelView {
             glow,
             thumbwheel,
             dpi_gestures,
+            virtual_thumbwheel,
+            wheel_hold,
             editing_app,
             overridden,
-        } = MouseWorkspaceData::read(cx)
-            .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
+        } = MouseWorkspaceData::read(cx).unwrap_or_else(MouseWorkspaceData::empty);
 
         self.reset_for_device(device_key);
 
@@ -392,6 +398,8 @@ impl Render for MouseModelView {
                 bindings,
                 gesture_maps,
                 dpi_gestures,
+                virtual_thumbwheel,
+                wheel_hold,
                 editing_app: editing_app.as_deref(),
                 overridden,
             },

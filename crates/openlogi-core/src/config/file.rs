@@ -13,7 +13,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use toml_edit::{DocumentMut, Item, Table};
 
-use super::{Config, SCHEMA_VERSION};
+use super::{Config, ConfigRevision, SCHEMA_VERSION};
 use crate::paths::{self, PathsError};
 
 const CONFIG_BACKUP_GENERATIONS: usize = 5;
@@ -88,6 +88,19 @@ pub enum ConfigError {
         path: PathBuf,
         /// The schema version the file declared.
         found: u32,
+    },
+    /// A per-app profile key names an alias that `[apps]` does not define, so
+    /// the profile could never apply.
+    #[error(
+        "config at {path}: device {device} has a per-app profile for {key}, but [apps] defines no such alias"
+    )]
+    UndefinedAppAlias {
+        /// The config file containing the profile.
+        path: PathBuf,
+        /// The device whose profile it is.
+        device: String,
+        /// The `app:<alias>` profile key.
+        key: String,
     },
 }
 
@@ -244,6 +257,13 @@ impl ConfigFile {
         self.source = Some(body);
         Ok(())
     }
+
+    /// The revision of the file as this handle loaded it or last saved it.
+    /// A missing file has the revision of an empty one.
+    #[must_use]
+    pub fn revision(&self) -> ConfigRevision {
+        ConfigRevision::of(self.source.as_deref().unwrap_or_default())
+    }
 }
 
 impl Config {
@@ -311,6 +331,13 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
         config.migrate_thumbwheel_native_direction();
     }
     config.repair_duplicate_routes();
+    if let Some((device, key)) = config.undefined_app_alias() {
+        return Err(ConfigError::UndefinedAppAlias {
+            path: path.to_path_buf(),
+            device: device.to_string(),
+            key: key.to_string(),
+        });
+    }
     config.schema_version = SCHEMA_VERSION;
     Ok((config, header.schema_version))
 }

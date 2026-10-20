@@ -32,6 +32,7 @@ use openlogi_hid::{
 use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
 
+use crate::capture_plan::SharedCapturePlans;
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
@@ -827,6 +828,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
     op: &DeviceOp,
     settings: VolatileMouseSettings,
     report_rate_order: &WriteOrder,
+    capture_plans: &SharedCapturePlans,
 ) {
     match op.resolve() {
         Ok(shared) => drop(shared),
@@ -847,6 +849,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
     let access = op.access.clone();
     let route = op.route.clone();
     let index = route.device_index();
+    let capture_plans = capture_plans.clone();
     std::thread::spawn(move || {
         let Some(rt) = one_shot_runtime("volatile reapply") else {
             return;
@@ -863,8 +866,9 @@ pub(crate) fn reapply_mouse_volatile_in_background(
             let op = DeviceOp { access, route };
             let turn = op.access.transport_turns.turn_for(&op.route);
             if let Some(change) = wheel {
+                let (plans, route) = (&capture_plans, &op.route);
                 let result = timed_on_current_channel(&op, &turn, |shared| async move {
-                    change.apply_on(&shared).await
+                    write_native_wheel_mode(change, &shared, plans, route).await
                 })
                 .await;
                 log_wheel_result(index, change, result);
@@ -974,8 +978,16 @@ impl WheelModeChange {
 fn log_wheel_result(
     index: u8,
     change: WheelModeChange,
-    result: Result<Result<(), WriteError>, Elapsed>,
+    result: Result<Result<NativeWheelWrite, WriteError>, Elapsed>,
 ) {
+    if let Ok(Ok(NativeWheelWrite::StoodDown)) = &result {
+        debug!(
+            index,
+            ?change,
+            "native wheel mode not written: a capture session owns the wheel"
+        );
+        return;
+    }
     // Plenty of mice have no HiResWheel or no inversion bit, so that refusal
     // is expected and stays out of the warnings every other write earns.
     if let Ok(Err(WriteError::FeatureUnsupported { feature_hex })) = &result {
@@ -987,7 +999,7 @@ fn log_wheel_result(
         );
         return;
     }
-    log_outcome(index, "wheel mode write", result, |()| {
+    log_outcome(index, "wheel mode write", result, |_written| {
         debug!(index, ?change, "native wheel mode written");
     });
 }
@@ -1009,14 +1021,62 @@ pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
 
 /// Spawn an OS thread that reconciles the configured native HiResWheel mode
 /// for `op`'s device. Unsupported devices are expected and only logged at
-/// debug level.
-pub fn write_scroll_wheel_mode_in_background(op: DeviceOp, change: WheelModeChange) {
+/// debug level. The write stands down if, by its turn, `capture_plans` hands
+/// the wheel to a capture session (see `write_native_wheel_mode`).
+pub fn write_scroll_wheel_mode_in_background(
+    op: DeviceOp,
+    change: WheelModeChange,
+    capture_plans: SharedCapturePlans,
+) {
     let index = op.route.device_index();
+    let route = op.route.clone();
     op.spawn_write(
         "wheel mode write",
-        move |shared| async move { change.apply_on(&shared).await },
+        move |shared| async move {
+            write_native_wheel_mode(change, &shared, &capture_plans, &route).await
+        },
         move |result| log_wheel_result(index, change, result),
     );
+}
+
+/// What a native wheel-mode write did once it held its transport turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeWheelWrite {
+    /// The change was written.
+    Written,
+    /// A capture session now owns the wheel, so nothing was written.
+    StoodDown,
+}
+
+/// Write `change` through `shared` unless the latest capture publication
+/// hands the main wheel at `route` to a capture session.
+///
+/// Every resolution or inversion write also selects native reporting, so a
+/// write queued before a plan diverted the wheel would hand it back to the OS
+/// and leave the session's eased scrolling silently off until it re-arms. The
+/// orchestrator queues no such write while the wheel is diverted; this check,
+/// made once the write holds its turn, retires the ones queued before.
+async fn write_native_wheel_mode(
+    change: WheelModeChange,
+    shared: &SharedChannel,
+    capture_plans: &SharedCapturePlans,
+    route: &DeviceRoute,
+) -> Result<NativeWheelWrite, WriteError> {
+    if capture_plans.borrow().diverts_main_wheel(route) {
+        return Ok(NativeWheelWrite::StoodDown);
+    }
+    change.apply_on(shared).await?;
+    if capture_plans.borrow().diverts_main_wheel(route) {
+        // The plan diverted the wheel while this write was on the wire, so it
+        // may have landed after the session's divert.
+        warn!(
+            %route,
+            ?change,
+            "native wheel mode written as capture took the wheel; smooth \
+             scrolling may stay off until the session re-arms"
+        );
+    }
+    Ok(NativeWheelWrite::Written)
 }
 
 /// Apply `lighting` to the keyboard at `op`'s device on a background thread.
@@ -1063,6 +1123,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+    use crate::capture_plan::CapturePublication;
     use openlogi_hid::device_io_channel;
 
     fn device_op(
@@ -1253,6 +1314,7 @@ mod tests {
                 ..VolatileMouseSettings::default()
             },
             &rates,
+            &no_capture_plans(),
         );
 
         assert!(
@@ -1502,6 +1564,7 @@ mod tests {
                 ..VolatileMouseSettings::default()
             },
             &WriteOrder::default(),
+            &no_capture_plans(),
         );
         wait_until_a_worker_holds_the_receiver(&receiver_access).await;
 
@@ -1520,6 +1583,119 @@ mod tests {
         .await
         .expect("reapply finishes without a connection instead of writing the retired one");
         assert!(published.retired.upgrade().is_none());
+    }
+
+    /// A capture publication with no plans: no session owns any wheel.
+    fn no_capture_plans() -> SharedCapturePlans {
+        tokio::sync::watch::channel(Arc::default()).1
+    }
+
+    /// The publication of one capture plan for `route`, which hands that
+    /// device's main wheel to its session when `divert`.
+    fn wheel_publication(route: &DeviceRoute, divert: bool) -> Arc<CapturePublication> {
+        let mut plan = crate::capture_plan::plan_for_device(
+            &openlogi_core::config::Config::default(),
+            openlogi_core::device_order::PhysicalDeviceKey::parse("unit:00000001")
+                .expect("fixture is a physical key"),
+            "mouse",
+            route.clone(),
+            None,
+            0,
+            true,
+        );
+        plan.target.spec.divert_main_wheel =
+            divert.then(openlogi_hid::session::gesture::MainWheelDivert::default);
+        Arc::new(CapturePublication::from_plans(vec![plan]))
+    }
+
+    /// The two background writes that set a native wheel mode.
+    #[derive(Debug, Clone, Copy)]
+    enum WheelWritePath {
+        /// The reload push of a changed resolution or inversion.
+        Reload,
+        /// The reconnect re-apply of every volatile setting.
+        Reapply,
+    }
+
+    /// Reports the replay mouse receives from a wheel write queued on `path`
+    /// behind a held transport turn, after the capture publication changed
+    /// while it waited to one that diverts the wheel when `divert_while_queued`.
+    async fn reports_from_a_queued_wheel_write(
+        path: WheelWritePath,
+        divert_while_queued: bool,
+    ) -> usize {
+        let published = publish_direct_mouse().await;
+        let turns = TransportTurns::default();
+        let receiver_access = ReceiverAccess::default();
+        let access = DeviceAccess {
+            channel: std::sync::Arc::new(RwLock::new(None)),
+            registry: published.registry.clone(),
+            receiver_access: receiver_access.clone(),
+            device_io: published.device_io.clone(),
+            transport_turns: turns.clone(),
+        };
+        let (publish, plans) =
+            tokio::sync::watch::channel(wheel_publication(&published.route, false));
+        let turn = turns.turn_for(&published.route);
+        let held = turn.lock().await;
+        let change = WheelModeChange::Resolution(ScrollResolution::Low);
+        match path {
+            WheelWritePath::Reload => {
+                write_scroll_wheel_mode_in_background(
+                    access.op(&published.route),
+                    change,
+                    plans.clone(),
+                );
+            }
+            WheelWritePath::Reapply => reapply_mouse_volatile_in_background(
+                &access.op(&published.route),
+                VolatileMouseSettings {
+                    wheel: Some(change),
+                    ..VolatileMouseSettings::default()
+                },
+                &WriteOrder::default(),
+                &plans,
+            ),
+        }
+        wait_until_a_worker_holds_the_receiver(&receiver_access).await;
+        publish.send_replace(wheel_publication(&published.route, divert_while_queued));
+        let written = || {
+            published
+                .backend
+                .channel_completion(ORIGINAL_CHANNEL)
+                .expect("known channel")
+                .written_reports
+                .len()
+        };
+        let before = written();
+        drop(held);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            receiver_access
+                .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing),
+        )
+        .await
+        .expect("the queued write finishes");
+        written() - before
+    }
+
+    /// A wheel write queued before a plan handed the wheel to a capture
+    /// session stands down at its turn on either path: writing a native mode
+    /// would select native reporting under the session. With the wheel still
+    /// native, the same write reaches the mouse.
+    #[tokio::test]
+    async fn a_queued_wheel_write_stands_down_once_capture_owns_the_wheel() {
+        for path in [WheelWritePath::Reload, WheelWritePath::Reapply] {
+            assert_eq!(
+                reports_from_a_queued_wheel_write(path, true).await,
+                0,
+                "{path:?}: the diverted wheel is left to its session"
+            );
+            assert!(
+                reports_from_a_queued_wheel_write(path, false).await > 0,
+                "{path:?}: a native wheel still gets the configured mode"
+            );
+        }
     }
 
     struct PublishedMouse {

@@ -5,7 +5,8 @@
 //! this crate's transport. This module re-exports it and adds
 //! [`open_route_channel`]: both the write path ([`crate::write`]) and the
 //! capture session ([`crate::session::gesture`]) resolve a route to an open channel
-//! through it, so the Bolt-vs-direct branch lives in exactly one place.
+//! through it, so the Bolt-vs-direct branch lives in exactly one place. A
+//! raw-HID route is found with [`find_raw_route_node`] instead.
 
 use std::sync::Arc;
 
@@ -22,7 +23,7 @@ pub use openlogi_core::hid::route::{
 
 use tracing::{debug, warn};
 
-use crate::backend::{BackendError, HidBackend, NodeInfo, RawWriter};
+use crate::backend::{BackendError, HidBackend, NodeInfo};
 use crate::host_lock::{RECEIVER_REGISTER_TIMEOUT, lock_receiver_registers};
 use crate::write::WriteError;
 
@@ -105,30 +106,35 @@ pub(crate) async fn open_route_channel(
     Ok(None)
 }
 
-/// Open the raw output-report writer for the device `route` reaches, for
-/// reports the HID++ wrapper can't model — e.g. the 64-byte `0x12` lighting
-/// frames G-series keyboards use. Returns `None` for receiver-slot routes or
-/// when no matching node is connected.
+/// The one enumerated node a raw-HID `route` addresses, or `None` when it is
+/// not connected (or `route` is not a raw-HID route).
 ///
-/// A direct route names one device outright, so the first match wins. A raw
-/// route is addressed by its full HID identity tuple, and two nodes answering
-/// to the same tuple cannot be told apart — that is an error, not a coin toss.
-pub(crate) async fn open_route_writer(
+/// A raw route is addressed by its full HID identity tuple, and two nodes
+/// answering to the same tuple cannot be told apart — that is an error, not
+/// a coin toss.
+pub(crate) async fn find_raw_route_node(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
-) -> Result<Option<Box<dyn RawWriter>>, WriteError> {
-    let candidates = match route {
-        DeviceRoute::Direct { .. } => backend.enumerate_hidpp().await?,
-        DeviceRoute::RawHid { .. } => backend.enumerate().await?,
-        _ => return Ok(None),
+) -> Result<Option<NodeInfo>, WriteError> {
+    let DeviceRoute::RawHid {
+        vendor_id,
+        product_id,
+        usage_page,
+        usage_id,
+        identity,
+    } = route
+    else {
+        return Ok(None);
     };
     let mut matched = None;
-    for node in candidates {
-        if !route_matches_node(route, &node) {
+    for node in backend.enumerate().await? {
+        let addressed = node.vendor_id == *vendor_id
+            && node.product_id == *product_id
+            && node.usage_page == *usage_page
+            && node.usage_id == *usage_id
+            && node.identity() == *identity;
+        if !addressed {
             continue;
-        }
-        if matches!(route, DeviceRoute::Direct { .. }) {
-            return Ok(Some(backend.open_raw_writer(&node).await?));
         }
         if matched.is_some() {
             warn!("multiple raw HID nodes matched one route");
@@ -136,32 +142,5 @@ pub(crate) async fn open_route_writer(
         }
         matched = Some(node);
     }
-    match matched {
-        Some(node) => Ok(Some(backend.open_raw_writer(&node).await?)),
-        None => Ok(None),
-    }
-}
-
-/// Whether `node` is the HID node `route` addresses.
-fn route_matches_node(route: &DeviceRoute, node: &NodeInfo) -> bool {
-    match route {
-        DeviceRoute::Direct {
-            vendor_id,
-            product_id,
-        } => node.vendor_id == *vendor_id && node.product_id == *product_id,
-        DeviceRoute::RawHid {
-            vendor_id,
-            product_id,
-            usage_page,
-            usage_id,
-            identity,
-        } => {
-            node.vendor_id == *vendor_id
-                && node.product_id == *product_id
-                && node.usage_page == *usage_page
-                && node.usage_id == *usage_id
-                && node.identity() == *identity
-        }
-        DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. } => false,
-    }
+    Ok(matched)
 }

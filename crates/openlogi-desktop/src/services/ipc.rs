@@ -31,8 +31,9 @@
 //! unavailable by the request itself ([`request::Request::deliver`]) and the
 //! next snapshot repairs the panel. A config reload is not — `config.toml` has already changed on disk and the
 //! agent must re-read it — but neither is it urgent while no agent is running:
-//! an agent that starts reads the file anyway. So `ReloadConfig` is held as
-//! state rather than dispatched: the loop delivers it over the next live
+//! an agent that starts reads the file anyway. So a reload ([`ReloadConfig`],
+//! [`LoadConfig`]) is held as state rather than dispatched: the loop delivers
+//! it over the next live
 //! connection and reports the agent's verdict then. That is what keeps an app
 //! relaunch that outruns its agent (every self-update does) from latching a
 //! "not applied" notice the agent's arrival could never clear.
@@ -40,8 +41,10 @@
 use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, FnLockState, LightCommand, ReportRateInfo, WriteError,
+    BacklightState, DeviceRoute, EasySwitchHosts, FnLockState, LightCommand, ReportRateInfo,
+    WriteError,
 };
+use openlogi_ipc::SavedConfig;
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
 use tarpc::client::RpcError;
@@ -63,10 +66,10 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, PairDevice, ReadBacklight, ReadDpi, ReadFnLock, ReadReportRate,
-    ReadSmartShift, ReloadConfig, RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock,
-    SetLight, SetLightManualPower, SetLighting, SetReportRate, SetSmartShift, StartPairing,
-    UnpairDevice,
+    CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts,
+    ReadFnLock, ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost,
+    RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight, SetLightManualPower,
+    SetLighting, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -134,20 +137,54 @@ pub enum GuiUpdate {
         /// The read-back, or why the write did not land.
         result: Result<BacklightState, WriteError>,
     },
+    /// What a device reports after an Easy-Switch host rename the GUI asked
+    /// for: the slots it reads back, or the typed refusal. Answers
+    /// [`RenameEasySwitchHost`].
+    EasySwitchHostRenamed {
+        /// The device that was written.
+        key: DeviceKey,
+        /// The connection the write went out on; an answer is stale once the
+        /// device moves, like [`Self::ReportRateWritten`]'s.
+        route: DeviceRoute,
+        /// Which rename this answers: [`RenameEasySwitchHost::write`].
+        write: u64,
+        /// The read-back, or why the rename did not land.
+        result: Result<EasySwitchHosts, WriteError>,
+    },
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
-    /// Whether the receiver let a forgotten device go. Answers
-    /// [`UnpairDevice`].
+    /// Whether the receiver let a pairing go. Answers [`UnpairDevice`].
     DeviceUnpaired {
-        /// The record the user asked to forget.
-        record_key: String,
         /// The pairing the receiver was asked to drop.
         route: DeviceRoute,
+        /// What the removal was for.
+        intent: UnpairIntent,
+        result: Result<(), UnpairFailure>,
+    },
+}
+
+/// Why the GUI asked a receiver to drop a pairing, which decides what the
+/// answer changes locally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnpairIntent {
+    /// The user forgot the device: its card and settings go once the
+    /// receiver lets it go.
+    Forget {
+        /// The record the user asked to forget.
+        record_key: String,
         /// Where its settings live.
         config_key: Option<String>,
-        result: Result<(), UnpairFailure>,
+        /// Pairings still to drop after this one. The settings go only once
+        /// the last of them is gone.
+        pending: Vec<DeviceRoute>,
+    },
+    /// A leftover slot of a device that stays: nothing local changes, the
+    /// next inventory simply no longer lists the slot.
+    StalePairing {
+        /// The device's display name, for a failure message.
+        name: String,
     },
 }
 
@@ -222,10 +259,7 @@ async fn observe_loop(
 ) {
     let mut link = Link::cold(Instant::now());
     let mut reflex = SpawnReflex::new();
-    // A `ReloadConfig` the agent has not answered yet — requested with no
-    // connection, or lost with one. Idempotent (the agent re-reads the file),
-    // so it is simply delivered again over the next live connection.
-    let mut reload_owed = false;
+    let mut owed = OwedReloads::default();
     let mut retry = ticker(RECONNECT_DELAY);
     loop {
         let woken = tokio::select! {
@@ -248,7 +282,8 @@ async fn observe_loop(
             Woken::Command(None) => break, // GUI dropped the sender → shut down
             // Not dispatched like the device commands below: held, and
             // delivered at the end of this turn if a connection exists.
-            Woken::Command(Some(Command::ReloadConfig(_))) => reload_owed = true,
+            Woken::Command(Some(Command::ReloadConfig(reload))) => owed.save(reload),
+            Woken::Command(Some(Command::LoadConfig(_))) => owed.load = true,
             Woken::Command(Some(cmd)) => {
                 let client = link.ensure(effects, update_tx).await;
                 if cmd.run(client, update_tx).await.is_err() {
@@ -262,12 +297,7 @@ async fn observe_loop(
         // Whatever this turn did to the link, a held reload goes out the
         // moment there is one to carry it. A transport failure here is the
         // same as anywhere: drop the link, keep the reload for the next one.
-        if reload_owed && let Some(client) = link.client() {
-            match request::run(ReloadConfig, Some(client), update_tx).await {
-                Ok(()) => reload_owed = false,
-                Err(LinkLost) => link.lose(Instant::now()),
-            }
-        }
+        owed.deliver(&mut link, update_tx).await;
         let now = Instant::now();
         if let Some(notice) = link
             .down_mut()
@@ -278,6 +308,67 @@ async fn observe_loop(
         if reflex.should_fire(&link, now) {
             effects.spawn_agent();
             reflex.fired(now);
+        }
+    }
+}
+
+/// The reloads the agent has not answered yet — requested with no
+/// connection, or lost with one. Each re-reads the file, so one owed reload
+/// stands for any number of requests and is delivered again over the next
+/// live connection.
+#[derive(Debug, Default)]
+struct OwedReloads {
+    /// A [`LoadConfig`] is owed.
+    load: bool,
+    /// A [`ReloadConfig`] is owed, at the revision of the latest save it
+    /// stands for and with the chosen controls of every one of them.
+    save: Option<SavedConfig>,
+}
+
+impl OwedReloads {
+    /// Owe `reload`, merged into the one already owed: the file is now at
+    /// the revision of this save, and its chosen controls join the others.
+    fn save(&mut self, reload: ReloadConfig) {
+        let ReloadConfig { chosen, revision } = reload;
+        let owed = self.save.get_or_insert_with(SavedConfig::default);
+        owed.revision = revision;
+        for light in chosen {
+            match owed
+                .chosen
+                .iter_mut()
+                .find(|owed| owed.device == light.device)
+            {
+                Some(owed) => {
+                    owed.power |= light.power;
+                    owed.brightness |= light.brightness;
+                    owed.temperature |= light.temperature;
+                }
+                None => owed.chosen.push(light),
+            }
+        }
+    }
+
+    /// Deliver what is owed if `link` is up. The saved reload goes first: it
+    /// takes the light values of the file as copies of what the lights
+    /// reported, so a load of the same file after it replaces no change made
+    /// on a light since. A transport failure drops the link and keeps the
+    /// reload for the next one.
+    async fn deliver(&mut self, link: &mut Link, update_tx: &mpsc::UnboundedSender<GuiUpdate>) {
+        if let Some(SavedConfig { revision, chosen }) = self.save.clone()
+            && let Some(client) = link.client()
+        {
+            match request::run(ReloadConfig { chosen, revision }, Some(client), update_tx).await {
+                Ok(()) => self.save = None,
+                Err(LinkLost) => link.lose(Instant::now()),
+            }
+        }
+        if self.load
+            && let Some(client) = link.client()
+        {
+            match request::run(LoadConfig, Some(client), update_tx).await {
+                Ok(()) => self.load = false,
+                Err(LinkLost) => link.lose(Instant::now()),
+            }
         }
     }
 }
@@ -309,11 +400,12 @@ mod tests {
 
     use std::sync::Mutex;
 
+    use openlogi_core::config::ConfigRevision;
     use openlogi_core::hid::DeviceRoute;
     use openlogi_ipc::testing::in_memory_agent;
     use openlogi_ipc::{
-        AgentRequest, AgentResponse, AgentStatus, ForegroundApps, InventoryHealth, Observation,
-        PROTOCOL_VERSION,
+        AgentRequest, AgentResponse, AgentStatus, ChosenLight, ForegroundApps, InventoryHealth,
+        Observation, PROTOCOL_VERSION,
     };
     use tokio::sync::oneshot;
 
@@ -343,16 +435,20 @@ mod tests {
                 let signal = signal.clone();
                 Box::pin(async move {
                     match request {
-                        AgentRequest::ReloadConfig {} => {
-                            counted.fetch_add(1, Ordering::SeqCst);
-                            match on_reload {
-                                OnReload::Accept => Ok(AgentResponse::ReloadConfig(Ok(()))),
-                                OnReload::Vanish => {
-                                    signal.notify_one();
-                                    std::future::pending().await
-                                }
-                            }
-                        }
+                        AgentRequest::ReloadConfig {} => Ok(reload_answer(
+                            on_reload,
+                            &counted,
+                            &signal,
+                            AgentResponse::ReloadConfig(Ok(())),
+                        )
+                        .await),
+                        AgentRequest::ReloadSavedConfig { .. } => Ok(reload_answer(
+                            on_reload,
+                            &counted,
+                            &signal,
+                            AgentResponse::ReloadSavedConfig(Ok(())),
+                        )
+                        .await),
                         AgentRequest::ReadDpi { .. } => {
                             Ok(AgentResponse::ReadDpi(Err(WriteError::AmbiguousRawDevice)))
                         }
@@ -364,6 +460,24 @@ mod tests {
             async move { vanish.notified().await },
         );
         (client, reloads)
+    }
+
+    /// Count a reload and answer it as `on_reload` says: `accepted`, or
+    /// never, with the connection closed.
+    async fn reload_answer(
+        on_reload: OnReload,
+        counted: &AtomicUsize,
+        signal: &tokio::sync::Notify,
+        accepted: AgentResponse,
+    ) -> AgentResponse {
+        counted.fetch_add(1, Ordering::SeqCst);
+        match on_reload {
+            OnReload::Accept => accepted,
+            OnReload::Vanish => {
+                signal.notify_one();
+                std::future::pending().await
+            }
+        }
     }
 
     /// Scripted effects: connect attempts pop the script front to back and
@@ -433,7 +547,7 @@ mod tests {
         let mut effects = ScriptedEffects::answering([down(), down(), Ok(agent)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
-        commands.send(ReloadConfig.into()).unwrap();
+        commands.send(LoadConfig.into()).unwrap();
 
         let verdict = tokio::select! {
             () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
@@ -463,7 +577,7 @@ mod tests {
         let mut effects = ScriptedEffects::answering([Ok(dying), Ok(successor)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
-        commands.send(ReloadConfig.into()).unwrap();
+        commands.send(ReloadConfig::default().into()).unwrap();
 
         let verdict = tokio::select! {
             () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
@@ -479,6 +593,140 @@ mod tests {
         );
         assert_eq!(dying_reloads.load(Ordering::SeqCst), 1);
         assert_eq!(successor_reloads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn saves_made_while_the_agent_is_down_reach_it_merged_and_before_the_load() {
+        // Each reload re-reads the file, so the saves made while no agent
+        // answers become one saved reload with the chosen controls of all of
+        // them, at the revision of the last. It goes before the load: the
+        // saved reload takes the light values of the file as copies of
+        // reports, which the load of the same file then finds in place.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let agent = in_memory_agent(
+            move |request| {
+                let recorded = recorded.clone();
+                Box::pin(async move {
+                    match request {
+                        AgentRequest::ReloadSavedConfig { saved } => {
+                            recorded.lock().unwrap().push(Some(saved));
+                            Ok(AgentResponse::ReloadSavedConfig(Ok(())))
+                        }
+                        AgentRequest::ReloadConfig {} => {
+                            recorded.lock().unwrap().push(None);
+                            Ok(AgentResponse::ReloadConfig(Ok(())))
+                        }
+                        AgentRequest::Observe { .. } => std::future::pending().await,
+                        other => panic!("the client loop sent an unexpected request: {other:?}"),
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+        let chosen = |device: &str, power, brightness, temperature| ChosenLight {
+            device: device.to_owned(),
+            power,
+            brightness,
+            temperature,
+        };
+        let mut effects = ScriptedEffects::answering([down(), Ok(agent)]);
+        let (update_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        commands.send(LoadConfig.into()).unwrap();
+        for (text, chosen) in [
+            ("first", vec![chosen("glow", false, true, false)]),
+            ("second", Vec::new()),
+            (
+                "third",
+                vec![
+                    chosen("glow", true, false, false),
+                    chosen("beam", false, false, true),
+                ],
+            ),
+        ] {
+            let revision = ConfigRevision::of(text);
+            commands
+                .send(ReloadConfig { chosen, revision }.into())
+                .unwrap();
+        }
+
+        let verdicts = tokio::select! {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+                panic!("the loop ends only once the GUI hangs up")
+            }
+            verdicts = async {
+                let owed = (reload_verdict(&mut updates).await, reload_verdict(&mut updates).await);
+                // A delivered reload is no longer owed: the next save goes
+                // out alone, and nothing follows it once the loop is idle.
+                commands.send(ReloadConfig::default().into()).unwrap();
+                let next = reload_verdict(&mut updates).await;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                (owed, next)
+            } => verdicts,
+        };
+
+        assert_eq!(verdicts, ((Ok(()), Ok(())), Ok(())));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                Some(SavedConfig {
+                    revision: ConfigRevision::of("third"),
+                    chosen: vec![
+                        chosen("glow", true, true, false),
+                        chosen("beam", false, false, true),
+                    ],
+                }),
+                None,
+                Some(SavedConfig::default()),
+            ],
+            "one saved reload with every chosen control, then the load, then the next save"
+        );
+    }
+
+    #[test]
+    fn owed_saves_merge_their_chosen_controls_by_light_at_the_latest_revision() {
+        let chosen = |device: &str, power, brightness, temperature| ChosenLight {
+            device: device.to_owned(),
+            power,
+            brightness,
+            temperature,
+        };
+        let save = |text: &str, chosen| ReloadConfig {
+            chosen,
+            revision: ConfigRevision::of(text),
+        };
+        // A save that chose nothing is still a save to deliver.
+        let mut owed = OwedReloads::default();
+        owed.save(save("first", Vec::new()));
+        assert_eq!(
+            owed.save,
+            Some(SavedConfig {
+                revision: ConfigRevision::of("first"),
+                chosen: Vec::new(),
+            })
+        );
+        // A control any merged save chose stays chosen, and the file is at
+        // the revision of the last save.
+        owed.save(save("second", vec![chosen("glow", true, true, true)]));
+        owed.save(save(
+            "third",
+            vec![
+                chosen("glow", false, false, false),
+                chosen("beam", false, false, true),
+            ],
+        ));
+        assert_eq!(
+            owed.save,
+            Some(SavedConfig {
+                revision: ConfigRevision::of("third"),
+                chosen: vec![
+                    chosen("glow", true, true, true),
+                    chosen("beam", false, false, true),
+                ],
+            })
+        );
+        assert!(!owed.load);
     }
 
     #[tokio::test(start_paused = true)]
@@ -559,6 +807,7 @@ mod tests {
             camera_active,
             pairing: None,
             foreground: ForegroundApps::default(),
+            lights: Vec::new(),
         }
     }
 

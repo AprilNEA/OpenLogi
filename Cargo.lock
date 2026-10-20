@@ -5477,7 +5477,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "anyhow",
  "openlogi-cli",
@@ -5486,7 +5486,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-agent"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "dispatch2",
  "embed-resource",
@@ -5526,7 +5526,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-agent-core"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "axwatch",
  "futures-lite",
@@ -5542,7 +5542,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-assets"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "atomic-write-file",
  "backon",
@@ -5577,7 +5577,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-camera"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "block2 0.6.2",
  "objc2 0.6.4",
@@ -5595,7 +5595,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-cli"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "anyhow",
  "atomic-write-file",
@@ -5619,7 +5619,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-core"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "atomic-write-file",
  "az",
@@ -5631,6 +5631,7 @@ dependencies = [
  "plist",
  "rust-i18n",
  "serde",
+ "sha2 0.10.9",
  "strum 0.27.2",
  "sys-locale",
  "tempfile",
@@ -5644,7 +5645,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-desktop"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "anyhow",
  "appcatalog",
@@ -5691,7 +5692,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-device"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "futures-concurrency",
  "futures-lite",
@@ -5709,11 +5710,11 @@ dependencies = [
 
 [[package]]
 name = "openlogi-device-registry"
-version = "0.8.13"
+version = "0.8.15"
 
 [[package]]
 name = "openlogi-fixture"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "openlogi-core",
  "serde",
@@ -5725,7 +5726,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hid"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "atomic-write-file",
  "futures-concurrency",
@@ -5747,7 +5748,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hidpp"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -5767,7 +5768,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hidpp-derive"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5776,7 +5777,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hook"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "axwatch",
  "block2 0.6.2",
@@ -5807,7 +5808,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-inject"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "block2 0.6.2",
  "core-foundation 0.10.0",
@@ -5833,7 +5834,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-ipc"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "bincode",
  "futures-lite",
@@ -5848,7 +5849,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-overlay"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -5873,7 +5874,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-permissions"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "objc2 0.6.4",
  "objc2-io-kit",
@@ -5885,7 +5886,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-ui"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "gpui-pre",
  "openlogi-core",
@@ -10469,7 +10470,7 @@ checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
 
 [[package]]
 name = "xtask"
-version = "0.8.13"
+version = "0.8.15"
 dependencies = [
  "anyhow",
  "appicon",
@@ -10481,11 +10482,13 @@ dependencies = [
  "openlogi-core",
  "path-absolutize",
  "plist",
+ "quote",
  "roxmltree 0.20.0",
  "serde",
  "serde_json",
  "sha2_hasher",
  "strum 0.27.2",
+ "syn 2.0.117",
  "sysinfo 0.38.4",
  "tempfile",
  "time",

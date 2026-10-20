@@ -10,23 +10,25 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
+use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
+use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_core::config::{Config, Lighting};
+use openlogi_core::config::{ConfigFile, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, HapticWaveform,
-    HidppOperation, LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    HapticWaveform, HidppOperation, LightCommand, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
-    ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingUpdate, RingObservation,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
+    BacklightObservation, ClientKind, ConfigReloadError, Generation, Identity, LockKeyObservation,
+    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::Compat;
 
@@ -53,6 +55,7 @@ pub struct AgentServer {
     pub action_ring: Arc<ActionRingManager>,
     pub dispatcher: ActionDispatcher,
     pub ring_haptics: RingHapticPlayer,
+    pub backlight_overlay: BacklightOverlayManager,
     /// Forwards each connection's [`ClientKind`] declaration to the
     /// dormancy gate.
     pub demand: tokio::sync::mpsc::UnboundedSender<ClientKind>,
@@ -61,6 +64,10 @@ pub struct AgentServer {
 impl AgentServer {
     /// Build a server and start the coalescing Actions Ring haptic worker.
     /// The second return is the demand channel the dormancy gate drains.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the IPC server owns the agent's independent runtime services"
+    )]
     pub fn new(
         orchestrator: Arc<Mutex<Orchestrator>>,
         shared: SharedHandles,
@@ -69,6 +76,7 @@ impl AgentServer {
         event_monitor: SharedEventMonitor,
         action_ring: Arc<ActionRingManager>,
         dispatcher: ActionDispatcher,
+        backlight_overlay: BacklightOverlayManager,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
         let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
@@ -82,47 +90,32 @@ impl AgentServer {
                 action_ring,
                 dispatcher,
                 ring_haptics,
+                backlight_overlay,
                 demand,
             },
             declarations,
         )
     }
-}
 
-#[expect(
-    clippy::unused_async_trait_impl,
-    reason = "the handlers that only read cached state need no await, but the RPC \
-              surface reads as one thing when every method in the impl keeps the \
-              `async fn` the tarpc trait declares — worth more than shaving a \
-              future off a dozen of them with `std::future::ready`"
-)]
-impl Agent for AgentServer {
-    async fn protocol_version(self, _: Context) -> u32 {
-        PROTOCOL_VERSION
-    }
-
-    /// `Run::mint` is process-global, so the overlay supervisor hands its
-    /// child the very same run this answers with.
-    async fn identity(self, _: Context) -> Identity {
-        Identity::mine(Compat::from(PROTOCOL_VERSION))
-    }
-
-    async fn status(self, _: Context) -> AgentStatus {
-        self.observable.read(|state| state.status.clone())
-    }
-
-    async fn inventory(self, _: Context) -> Vec<DeviceInventory> {
-        self.observable.read(|state| state.inventory.clone())
-    }
-
-    async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
-        match Config::load_or_default() {
-            Ok(config) => {
+    /// Re-read `config.toml` for [`Agent::reload_config`], or for
+    /// [`Agent::reload_saved_config`] when the GUI's save is given. The
+    /// revision is that of the text the config is parsed from, so an edit
+    /// that lands after the read cannot pass for the save.
+    async fn reload(self, saved: Option<SavedConfig>) -> Result<(), ConfigReloadError> {
+        match ConfigFile::load_or_default() {
+            Ok((config, file)) => {
                 let launch_at_login = config.app_settings.launch_at_login;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
                 let language = config.app_settings.language.clone();
-                self.orchestrator.lock().await.reload_config(config);
+                match saved {
+                    None => self.orchestrator.lock().await.reload_config(config),
+                    Some(saved) => self.orchestrator.lock().await.reload_saved_config(
+                        config,
+                        file.revision(),
+                        &saved,
+                    ),
+                }
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
@@ -147,6 +140,41 @@ impl Agent for AgentServer {
                 })
             }
         }
+    }
+}
+
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "the handlers that only read cached state need no await, but the RPC \
+              surface reads as one thing when every method in the impl keeps the \
+              `async fn` the tarpc trait declares — worth more than shaving a \
+              future off a dozen of them with `std::future::ready`"
+)]
+impl Agent for AgentServer {
+    async fn protocol_version(self, _: Context) -> u32 {
+        PROTOCOL_VERSION
+    }
+
+    async fn observe_backlight(self, _: Context, since: Generation) -> BacklightObservation {
+        self.backlight_overlay.observe(since).await
+    }
+
+    /// `Run::mint` is process-global, so the overlay supervisor hands its
+    /// child the very same run this answers with.
+    async fn identity(self, _: Context) -> Identity {
+        Identity::mine(Compat::from(PROTOCOL_VERSION))
+    }
+
+    async fn status(self, _: Context) -> AgentStatus {
+        self.observable.read(|state| state.status.clone())
+    }
+
+    async fn inventory(self, _: Context) -> Vec<DeviceInventory> {
+        self.observable.read(|state| state.inventory.clone())
+    }
+
+    async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
+        self.reload(None).await
     }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
@@ -299,6 +327,46 @@ impl Agent for AgentServer {
         self.shared.set_backlight(&route, change).await
     }
 
+    async fn read_easy_switch_hosts(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadHosts, |c| async move {
+                openlogi_hid::get_easy_switch_hosts_on(&c).await
+            })
+            .await
+    }
+
+    async fn rename_easy_switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError> {
+        self.shared
+            .rename_easy_switch_host(&route, slot, name)
+            .await
+    }
+    async fn reload_saved_config(
+        self,
+        _: Context,
+        saved: SavedConfig,
+    ) -> Result<(), ConfigReloadError> {
+        self.reload(Some(saved)).await
+    }
+
+    async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {
+        self.observable.notices().observe(since).await
+    }
+
+    async fn observe_lock_keys(self, _: Context, since: Generation) -> LockKeyObservation {
+        self.observable.lock_keys().observe(since).await
+    }
+
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {
         self.pairing.next_update().await
     }
@@ -321,7 +389,14 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         command: LightCommand,
     ) -> Result<(), WriteError> {
-        self.shared.hardware().apply_light(&route, command).await
+        let hardware = self.shared.hardware();
+        orchestrator::write_light(
+            &self.orchestrator,
+            &route,
+            command,
+            hardware.apply_light(&route, command),
+        )
+        .await
     }
 
     async fn set_light_manual_power(

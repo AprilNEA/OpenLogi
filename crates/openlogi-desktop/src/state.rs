@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use gpui::{App, Context, Entity, Global};
-use openlogi_core::app::ForegroundApp;
+use openlogi_core::app::{AppAliases, ForegroundApp, profile_applies_to};
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{Dpi, SmartShiftStatus};
@@ -25,11 +25,15 @@ use tracing::warn;
 
 pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
+pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
+pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{BacklightLoad, DpiLoad, FnLockLoad, ReportRateLoad, SmartShiftLoad};
+pub use load::{
+    BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ReportRateLoad, SmartShiftLoad,
+};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +74,7 @@ mod device_session;
 mod device_store;
 mod devices;
 mod dpi;
+mod easy_switch;
 mod events;
 mod fn_lock;
 mod inventory;
@@ -223,6 +228,7 @@ impl AppState {
             state.load_current_fn_lock(cx);
             state.load_current_report_rate(cx);
             state.load_current_backlight(cx);
+            state.load_current_easy_switch(cx);
         });
     }
 
@@ -286,7 +292,7 @@ impl AppState {
         // Plain `persist_config`, not `persist_and_reload` as
         // `refresh_inventories` uses for the same fold: there is no agent
         // connection to reload yet this early in startup, and the
-        // unconditional `ReloadConfig` send at the end of this constructor
+        // unconditional `LoadConfig` send at the end of this constructor
         // (below) already covers both branches once `state` is fully built —
         // sending it here too would just queue a second, redundant reload.
         if adopted {
@@ -295,7 +301,7 @@ impl AppState {
             state.persist_config("device identity");
         }
         if state.config.should_reload_agent() {
-            state.send_ipc(crate::services::ipc::ReloadConfig);
+            state.send_ipc(crate::services::ipc::LoadConfig);
         }
         state
     }
@@ -317,8 +323,23 @@ impl AppState {
     /// next reconnect or wake. A failed write restores the last persisted
     /// config and surfaces the persistence error in the GUI.
     fn persist_and_reload(&mut self, what: &str) -> bool {
+        self.persist_and_reload_choosing(what, Vec::new())
+    }
+
+    /// [`Self::persist_and_reload`] for a save in which the user set controls
+    /// of lights without a write to the light. `chosen` names them, so the
+    /// agent drops the changes made on the lights for those controls
+    /// ([`openlogi_ipc::Agent::reload_saved_config`]). The reload carries the
+    /// revision of the file this save wrote, so the agent can tell an edit
+    /// made after the save.
+    fn persist_and_reload_choosing(
+        &mut self,
+        what: &str,
+        chosen: Vec<openlogi_ipc::ChosenLight>,
+    ) -> bool {
         if self.persist_config(what) {
-            self.send_ipc(crate::services::ipc::ReloadConfig);
+            let revision = self.config.revision();
+            self.send_ipc(crate::services::ipc::ReloadConfig { chosen, revision });
             true
         } else {
             false
@@ -431,16 +452,25 @@ impl AppState {
             .map(|app| (app.id.as_str(), app.display_name.as_str()))
     }
 
-    /// The name the agent last reported for `app`, or `None` for one it has not
-    /// seen this session — a hand-written profile, or one carried in from
+    /// The name the agent last reported for an application the profile keyed
+    /// `key` applies to — the application itself, one whose executable an
+    /// `exe:` key names, or one an `app:` alias lists — or `None` when it has
+    /// seen none this session: a hand-written profile, or one carried in from
     /// another machine.
     #[must_use]
-    pub fn recent_app_name(&self, app: &str) -> Option<&str> {
+    pub fn recent_app_name(&self, key: &str) -> Option<&str> {
         self.foreground()
             .recent
             .iter()
-            .find(|seen| seen.id == app)
+            .find(|seen| profile_applies_to(key, &self.config.apps, &seen.id))
             .map(|seen| seen.display_name.as_str())
+    }
+
+    /// The `[apps]` alias table, which names the application an `app:<alias>`
+    /// profile key stands for.
+    #[must_use]
+    pub fn app_aliases(&self) -> &AppAliases {
+        &self.config.apps
     }
 
     /// The application whose profile the user is asking about.

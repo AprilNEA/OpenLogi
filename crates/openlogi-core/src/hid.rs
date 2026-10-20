@@ -10,6 +10,7 @@
 
 pub mod backlight;
 pub mod dpi;
+pub mod easy_switch;
 pub mod error;
 pub mod fn_lock;
 pub mod light;
@@ -23,6 +24,7 @@ pub use backlight::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
 };
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
+pub use easy_switch::{EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::FnLockState;
 pub use light::{LightCommand, commands_for_light_settings};

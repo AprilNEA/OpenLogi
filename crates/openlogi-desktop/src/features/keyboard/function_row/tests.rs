@@ -24,6 +24,20 @@ fn clicking_the_selected_key_closes_the_panel() {
 }
 
 #[test]
+fn picking_the_current_action_clears_the_binding() {
+    assert_eq!(binding_after_pick(Some(&Action::Copy), Action::Copy), None);
+}
+
+#[test]
+fn picking_an_action_sets_or_replaces_the_binding() {
+    assert_eq!(binding_after_pick(None, Action::Copy), Some(Action::Copy));
+    assert_eq!(
+        binding_after_pick(Some(&Action::Paste), Action::Copy),
+        Some(Action::Copy)
+    );
+}
+
+#[test]
 fn hover_or_selection_highlights_a_key() {
     assert!(key_is_highlighted(2, Some(2), None));
     assert!(key_is_highlighted(2, None, Some(2)));

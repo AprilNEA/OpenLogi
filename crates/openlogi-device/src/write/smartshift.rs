@@ -280,6 +280,46 @@ impl SmartShift {
         })
         .await
     }
+
+    /// Write a new tunable `torque` alone: the wheel mode and auto-disengage
+    /// threshold go out as HID++'s zero "do not change" sentinel.
+    ///
+    /// The capability gate is [`writable_torque`], as for [`Self::set_status`].
+    /// A full status write still applies its mode and threshold when the
+    /// device keeps its own torque, but this write has nothing else to apply,
+    /// so a device without
+    /// [`SmartShiftEnhancedCapabilities::TUNABLE_TORQUE`] — and every
+    /// `0x2110` wheel — refuses it with [`WriteError::FeatureUnsupported`].
+    /// The write counts only when the reply carries the torque it wrote.
+    async fn set_torque(&self, value: TunableTorque) -> Result<(), WriteError> {
+        let unsupported = WriteError::FeatureUnsupported {
+            feature_hex: SmartShiftEnhancedFeature::ID,
+        };
+        let Self::Enhanced(feature) = self else {
+            return Err(unsupported);
+        };
+        let Some(torque) = writable_torque(feature, Some(value)).await? else {
+            return Err(unsupported);
+        };
+        let applied = feature
+            .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
+                wheel_mode: None,
+                auto_disengage: None,
+                tunable_torque: Some(torque),
+            })
+            .await
+            .map_err(|e| {
+                classify_hidpp_error(
+                    e,
+                    HidppOperation::WriteSmartShift,
+                    SmartShiftEnhancedFeature::ID,
+                )
+            })?;
+        confirm_write(
+            applied.current_tunable_torque == torque.get(),
+            SmartShiftEnhancedFeature::ID,
+        )
+    }
 }
 
 /// The tunable torque to put on the wire for a requested `torque`.
@@ -358,6 +398,29 @@ pub async fn set_smartshift_sensitivity(
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
         let smartshift = SmartShift::open(&mut device).await?;
         smartshift.set_sensitivity(value).await?;
+        smartshift.status().await
+    })
+    .await
+}
+
+/// Set the SmartShift tunable torque (scrolling force) on `route`, leaving the
+/// mode and auto-disengage sensitivity unchanged. Returns the read-back status
+/// after the write so the caller can display and verify it.
+///
+/// `FeatureUnsupported` when the device has no `0x2111` SmartShift wheel, or
+/// has one that does not advertise tunable torque.
+pub async fn set_smartshift_torque(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    value: TunableTorque,
+) -> Result<SmartShiftStatus, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let smartshift = SmartShift::open(&mut device).await?;
+        smartshift.set_torque(value).await?;
         smartshift.status().await
     })
     .await

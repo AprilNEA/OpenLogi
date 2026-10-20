@@ -9,9 +9,10 @@ openlogi assets sync          # pre-fetch device renders from the fastest availa
 openlogi diag features        # dump every HID++ feature the active device reports
 openlogi diag controls        # dump reprogrammable controls and capability flags
 openlogi diag dpi             # read → write → read-back → restore DPI (smoke test)
-openlogi diag pointer-speed   # test 0x2205 pointer scaling and attempt to restore it
-openlogi diag smartshift      # toggle SmartShift and restore (smoke test)
-openlogi diag lighting ff0000 # solid colour for a wired RGB keyboard (any RRGGBB hex)
+openlogi diag pointer-speed             # test 0x2205 pointer scaling and attempt to restore it
+openlogi diag smartshift                # toggle SmartShift and restore (smoke test)
+openlogi diag smartshift --torque 60    # set scrolling force / feedback intensity (1-100%)
+openlogi diag lighting ff0000           # solid colour for a wired RGB keyboard (any RRGGBB hex)
 ```
 
 Running `openlogi` with no subcommand defaults to `list`. Set
@@ -42,6 +43,8 @@ openlogi api fn-lock --device "$DEVICE_ID" --set on
 openlogi api os-layout --device "$DEVICE_ID" --set off --save
 openlogi api report-rate --device "$DEVICE_ID"
 openlogi api report-rate --device "$DEVICE_ID" --set 1000 --save
+openlogi api easy-switch --device "$DEVICE_ID"
+openlogi api easy-switch --device "$DEVICE_ID" --channel 2 --name "Work laptop"
 ```
 
 ### Output and compatibility
@@ -74,6 +77,7 @@ stdout cannot provide a JSON envelope.
 | `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` (boolean, or null when the keyboard reports no firmware default) |
 | `os-layout` | `device`, `persistence`, `keep_os_layout` (boolean) |
 | `report-rate` | `device`, `persistence`, `current` (integer, hertz), `supported` (array of integers in hertz, for the current connection) |
+| `easy-switch` | `device`, `persistence`, `current_channel` (integer from 1, or null), `can_rename` (boolean), `channels`: array of `channel` (integer from 1), `paired` (boolean), `connection` (`unknown`, `unifying`, `usb`, `bluetooth`, or `bolt`), `name` (string or null), `name_max_len` (integer, UTF-8 bytes), `os` (string such as `macOS 15.2`, or null) |
 
 `inventory` is `scanning`, `ready`, or `unavailable`. Only `ready` with an empty
 device array means enumeration completed and found no peripherals. Device
@@ -131,6 +135,23 @@ receiver or a cable than over Bluetooth — so any other value fails with
 `invalid_value` before anything is written. A saved rate is re-applied on
 reconnect only over a connection that lists it. A device without HID++
 `0x8060` or `0x8061` returns `unsupported_feature`.
+
+`easy-switch` lists the device's Easy-Switch channels (HID++ `0x1815`) and the
+name and OS each paired computer reported. `--channel` and `--name` together
+rename the computer on that channel; the device stores the name itself, so
+there is no `--save` (it fails with `invalid_value`) and the result is always
+`persistence: "not_saved"`. Surrounding whitespace is trimmed. A name that is
+empty, contains NUL, or is longer than the channel's `name_max_len` bytes, or a
+channel with no paired computer, fails with `invalid_value` before anything is
+written. A device that does not let software rename hosts (`can_rename` is
+false) returns `unsupported_feature`, and a name the device does not read back
+returns `readback_mismatch`. A device without `0x1815` returns
+`unsupported_feature`.
+
+The desktop app shows the same channels in an Easy-Switch card on the Device
+tab and renames a paired channel under the same name rules. Neither the CLI
+nor the app renames a channel on its own: unlike Logi Options+, OpenLogi does
+not write this computer's name or OS onto the current channel when it starts.
 
 Hardware writes, file persistence, and reload are separate steps, not an atomic
 transaction. The config revision is checked under a writer lock; concurrent edits

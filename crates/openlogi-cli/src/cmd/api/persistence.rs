@@ -42,6 +42,12 @@ impl Save {
             {
                 &args.device
             }
+            ApiCommand::EasySwitch { .. } => {
+                return Err(ApiError::new(
+                    "invalid_value",
+                    "the device keeps Easy-Switch names itself; drop --save",
+                ));
+            }
             _ => {
                 return Err(ApiError::new(
                     "invalid_value",

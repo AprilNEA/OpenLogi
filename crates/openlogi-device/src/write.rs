@@ -18,6 +18,7 @@ use crate::channel::route::{DeviceRoute, open_route_channel};
 mod backlight;
 mod diagnostics;
 mod dpi;
+mod easy_switch;
 mod error;
 mod fn_lock;
 mod haptic;
@@ -37,6 +38,10 @@ pub use diagnostics::{
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
 };
+pub use easy_switch::{
+    get_easy_switch_hosts, get_easy_switch_hosts_on, rename_easy_switch_host,
+    rename_easy_switch_host_on,
+};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on};
@@ -53,9 +58,13 @@ pub use lighting::{
 };
 pub(crate) use litra::litra_capabilities;
 pub use litra::{
-    LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
-    apply as apply_litra, encode_command as encode_litra_command, find_litra,
-    litra_model_for_route, matches_litra,
+    LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightChange, LightCommand, LightControls,
+    LightWatch, LitraDescriptor, LitraModel, apply as apply_litra,
+    encode_command as encode_litra_command, find_litra, litra_model_for_route, matches_litra,
+    read_state as read_litra_state, watch as watch_litra,
+};
+pub use openlogi_core::hid::{
+    EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
 };
 pub use openlogi_core::hid::{ReportRate, ReportRateInfo};
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
@@ -65,7 +74,7 @@ pub use report_rate::{
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
-    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
+    set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift, toggle_smartshift_on,
 };
 
 // commands_for_light_settings operates purely on openlogi_core config/device

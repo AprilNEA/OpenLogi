@@ -4,18 +4,19 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 
 use openlogi_camera::Camera;
-use openlogi_core::config::{Config, DeviceIdentity, canonical_device_key};
+use openlogi_core::config::{Config, DeviceConfig, DeviceIdentity, canonical_device_key};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-    LightCapabilities, StandaloneDevice,
+    LightCapabilities, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{
     DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
 };
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, LOGITECH_VENDOR_ID};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
+use super::device_session::ObservedConnection;
 use crate::services::assets::{AssetResolver, ResolvedAsset};
 
 /// One paired device with everything the UI needs to switch to it in O(1):
@@ -91,6 +92,11 @@ pub struct DeviceRecord {
     ///
     /// [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
     pub settings_revision: u64,
+    /// Other slots on this record's receiver that pair the same physical
+    /// device and are offline: leftovers from pairing it again, folded into
+    /// this card by [`collapse_duplicate_pairings`] and offered for removal.
+    /// Ordered by slot. Empty for everything else.
+    pub(crate) stale_pairings: Vec<DeviceRoute>,
 }
 
 impl DeviceRecord {
@@ -141,6 +147,39 @@ impl DeviceRecord {
             return self.inventory_key();
         }
         self.config_key.clone()
+    }
+}
+
+impl super::AppState {
+    /// Presentation-only connection mode last observed for an offline device.
+    /// After restart, only a sole recorded link is unambiguous: the saved link
+    /// index has no chronology. Never restore a hardware-write route from history.
+    pub(crate) fn offline_connection(&self, record: &DeviceRecord) -> Option<ObservedConnection> {
+        if record.route.is_some() {
+            return None;
+        }
+        if let Some(transport) = self
+            .devices
+            .sessions
+            .get(&record.device_key())
+            .and_then(|session| session.last_connection)
+        {
+            return Some(transport);
+        }
+        let mut links = self.config.devices.get(&record.config_key)?.links.keys();
+        let link = links.next()?;
+        if links.next().is_some() {
+            return None;
+        }
+        let (vendor, product) = link.strip_prefix("direct:")?.split_once(':')?;
+        if u16::from_str_radix(vendor, 16).ok()? != LOGITECH_VENDOR_ID {
+            return None;
+        }
+        record
+            .model_info
+            .as_ref()?
+            .transport_for_product_id(u16::from_str_radix(product, 16).ok()?)
+            .map(ObservedConnection::Direct)
     }
 }
 
@@ -242,9 +281,11 @@ pub(super) fn build_device_list(
                 online: paired.online,
                 battery: paired.battery.clone(),
                 settings_revision: paired.settings_revision,
+                stale_pairings: Vec::new(),
             });
         }
     }
+    let folded_keys = collapse_duplicate_pairings(&mut list, config);
     append_standalone(&mut list, standalone, resolver, config);
     #[cfg(debug_assertions)]
     if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
@@ -255,13 +296,10 @@ pub(super) fn build_device_list(
         .filter_map(|inv| inv.receiver.unique_id.as_deref())
         .map(str::to_ascii_lowercase)
         .collect();
-    append_offline_known(
-        &mut list,
-        config.known_identities(),
-        resolver,
-        &present_receivers,
-        config,
-    );
+    let known = config
+        .known_identities()
+        .filter(|(key, _)| !folded_keys.contains(*key));
+    append_offline_known(&mut list, known, resolver, &present_receivers, config);
     // Cameras are UVC, not HID++, so they come from a parallel discovery path
     // (AVFoundation on macOS) rather than the receiver inventory. The caller
     // enumerates them off the UI thread — discovery is too slow for the render
@@ -273,6 +311,84 @@ pub(super) fn build_device_list(
     apply_custom_names(&mut list, config);
     sort_device_list(&mut list);
     list
+}
+
+/// Fold the offline slots that pair one physical device to the same receiver
+/// into a single card.
+///
+/// A receiver keeps a pairing until it is told to drop it, so pairing a
+/// device to it again leaves the old slot behind — answering with the same
+/// unit id, and with the same serial from the probe cache. Shown as is, one
+/// keyboard becomes three cards. The card that stays is the online slot, else
+/// the slot whose key is the device's own identity (the one that owns its
+/// settings), else a slot whose key holds saved settings, else the lowest
+/// slot; the other offline slots become its
+/// [`DeviceRecord::stale_pairings`]. An online duplicate is never folded: a
+/// live link is not a leftover. Slots on different receivers stay separate
+/// cards, since a second receiver can be a deliberate Easy-Switch host.
+///
+/// Returns the config keys of the folded slots, so a saved identity under one
+/// of them does not come back as an offline placeholder.
+fn collapse_duplicate_pairings(list: &mut Vec<DeviceRecord>, config: &Config) -> HashSet<String> {
+    let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    for (index, record) in list.iter().enumerate() {
+        let Some(
+            DeviceRoute::Bolt { receiver_uid, .. } | DeviceRoute::Unifying { receiver_uid, .. },
+        ) = &record.route
+        else {
+            continue;
+        };
+        let Some(identity) =
+            RouteIdentity::from_parts(record.serial_number.as_deref(), record.unit_id).config_key()
+        else {
+            continue;
+        };
+        groups
+            .entry((receiver_uid.to_ascii_lowercase(), identity))
+            .or_default()
+            .push(index);
+    }
+    let mut folded = HashSet::new();
+    for ((_, identity), members) in groups {
+        let Some(&keeper) = members.iter().max_by_key(|&&index| {
+            let record = &list[index];
+            (
+                record.online,
+                record.config_key == identity,
+                config
+                    .devices
+                    .get(&record.config_key)
+                    .is_some_and(DeviceConfig::holds_settings),
+                std::cmp::Reverse(record.slot),
+            )
+        }) else {
+            continue;
+        };
+        let mut stale: Vec<usize> = members
+            .into_iter()
+            .filter(|&index| index != keeper && !list[index].online)
+            .collect();
+        if stale.is_empty() {
+            continue;
+        }
+        stale.sort_by_key(|&index| list[index].slot);
+        list[keeper].stale_pairings = stale
+            .iter()
+            .filter_map(|&index| list[index].route.clone())
+            .collect();
+        folded.extend(stale);
+    }
+    let folded_keys = folded
+        .iter()
+        .map(|&index| list[index].config_key.clone())
+        .collect();
+    let mut index = 0;
+    list.retain(|_| {
+        let keep = !folded.contains(&index);
+        index += 1;
+        keep
+    });
+    folded_keys
 }
 
 fn apply_custom_names(list: &mut [DeviceRecord], config: &Config) {
@@ -332,6 +448,7 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         online: true,
         battery: None,
         settings_revision: 0,
+        stale_pairings: Vec::new(),
     }
 }
 
@@ -410,6 +527,7 @@ fn append_standalone(
             online: device.online,
             battery: None,
             settings_revision: 0,
+            stale_pairings: Vec::new(),
         });
     }
 }
@@ -609,6 +727,7 @@ fn offline_record(
         online: false,
         battery: None,
         settings_revision: 0,
+        stale_pairings: Vec::new(),
     }
 }
 
@@ -672,6 +791,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         online: live.online,
         battery: live.battery.or_else(|| known.battery.clone()),
         settings_revision: live.settings_revision,
+        stale_pairings: live.stale_pairings,
     }
 }
 
@@ -700,8 +820,16 @@ pub(super) fn fold_by_inventory_key(
                 slot.insert(record);
             }
             Entry::Occupied(mut slot) => {
+                let mut record = record;
                 if record.online || !slot.get().online {
+                    let mut stale = std::mem::take(&mut slot.get_mut().stale_pairings);
+                    stale.append(&mut record.stale_pairings);
+                    record.stale_pairings = stale;
                     slot.insert(record);
+                } else {
+                    slot.get_mut()
+                        .stale_pairings
+                        .append(&mut record.stale_pairings);
                 }
             }
         }
@@ -764,6 +892,7 @@ fn demo_keyboard() -> DeviceRecord {
         online: true,
         battery: None,
         settings_revision: 0,
+        stale_pairings: Vec::new(),
     }
 }
 
@@ -808,31 +937,6 @@ pub(super) fn pick_initial_device(list: &[DeviceRecord], saved: Option<&str>) ->
                 .position(|record| record.is_persistent() && record.config_key == key)
         })
         .unwrap_or(0)
-}
-
-/// Tidy a raw HID++ codename for display when no curated asset name exists.
-/// Logitech reports gaming codenames in ALL CAPS (e.g. `"G513 RGB MECHANICAL
-/// GAMING KEYBOARD"`); title-case each word so it reads like the asset names
-/// (`"MX Master 3S"`) instead of shouting, while keeping model numbers (tokens
-/// with a digit, e.g. `G513`) and short acronyms (`RGB`, `TKL`, `SE`) as-is.
-/// Codenames already in mixed case are returned unchanged.
-fn prettify_codename(raw: &str) -> String {
-    if raw.chars().any(char::is_lowercase) {
-        return raw.to_string();
-    }
-    raw.split_whitespace()
-        .map(|word| {
-            if word.len() <= 3 || word.bytes().any(|b| b.is_ascii_digit()) {
-                word.to_string()
-            } else {
-                let mut chars = word.chars();
-                chars.next().map_or_else(String::new, |first| {
-                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
-                })
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 #[cfg(test)]

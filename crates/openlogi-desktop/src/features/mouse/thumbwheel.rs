@@ -21,6 +21,7 @@ pub(crate) enum ThumbwheelPreset {
     BrowserHistory,
     Tabs,
     Desktops,
+    DesktopsReversed,
     Tracks,
     Volume,
     VolumeReversed,
@@ -34,12 +35,13 @@ pub(crate) enum ThumbwheelPreset {
 }
 
 impl ThumbwheelPreset {
-    pub(crate) const ALL: [Self; 15] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::BackForward,
         Self::UndoRedo,
         Self::BrowserHistory,
         Self::Tabs,
         Self::Desktops,
+        Self::DesktopsReversed,
         Self::Tracks,
         Self::Volume,
         Self::VolumeReversed,
@@ -60,6 +62,7 @@ impl ThumbwheelPreset {
             Self::BrowserHistory => (Action::BrowserBack, Action::BrowserForward),
             Self::Tabs => (Action::PrevTab, Action::NextTab),
             Self::Desktops => (Action::PreviousDesktop, Action::NextDesktop),
+            Self::DesktopsReversed => (Action::NextDesktop, Action::PreviousDesktop),
             Self::Tracks => (Action::PrevTrack, Action::NextTrack),
             Self::Volume => (Action::VolumeDown, Action::VolumeUp),
             Self::VolumeReversed => (Action::VolumeUp, Action::VolumeDown),
@@ -97,6 +100,7 @@ impl ThumbwheelPreset {
             Self::BrowserHistory => "pointer.browser_back_forward",
             Self::Tabs => "pointer.previous_next_tab",
             Self::Desktops => "pointer.previous_next_desktop",
+            Self::DesktopsReversed => "pointer.next_previous_desktop",
             Self::Tracks => "pointer.previous_next_track",
             // `Self::Volume` is the intuitive pairing (rolling the wheel up
             // raises the volume — see `pair()` above), so it takes the label a
@@ -122,7 +126,7 @@ impl ThumbwheelPreset {
             Self::UndoRedo => "action-icons/redo-2.svg",
             Self::BrowserHistory => "action-icons/arrow-right.svg",
             Self::Tabs => "action-icons/chevron-right.svg",
-            Self::Desktops => "action-icons/square-arrow-right.svg",
+            Self::Desktops | Self::DesktopsReversed => "action-icons/square-arrow-right.svg",
             Self::Tracks => "action-icons/skip-forward.svg",
             Self::Volume | Self::VolumeReversed => "action-icons/volume-2.svg",
             Self::Zoom | Self::ZoomReversed => "action-icons/zoom-in.svg",
@@ -137,6 +141,8 @@ impl ThumbwheelPreset {
 
 #[cfg(test)]
 mod tests {
+    use openlogi_core::binding::{ButtonId, default_binding};
+
     use super::*;
 
     #[test]
@@ -147,6 +153,7 @@ mod tests {
             (Action::BrowserBack, Action::BrowserForward),
             (Action::PrevTab, Action::NextTab),
             (Action::PreviousDesktop, Action::NextDesktop),
+            (Action::NextDesktop, Action::PreviousDesktop),
             (Action::PrevTrack, Action::NextTrack),
             (Action::VolumeDown, Action::VolumeUp),
             (Action::VolumeUp, Action::VolumeDown),
@@ -159,9 +166,58 @@ mod tests {
             (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
         ];
 
+        assert_eq!(expected.len(), ThumbwheelPreset::ALL.len());
         for (preset, (backward, forward)) in ThumbwheelPreset::ALL.into_iter().zip(expected) {
             assert_eq!(preset.pair(), ThumbwheelPair { backward, forward });
         }
+    }
+
+    #[test]
+    fn horizontal_scroll_presets_follow_native_defaults() {
+        let native = ThumbwheelPreset::HorizontalScroll.pair();
+        assert_eq!(
+            native.backward,
+            default_binding(ButtonId::ThumbwheelScrollDown),
+            "backward must stay the native down default so the plain preset does not divert"
+        );
+        assert_eq!(
+            native.forward,
+            default_binding(ButtonId::ThumbwheelScrollUp),
+            "forward must stay the native up default so the plain preset does not divert"
+        );
+
+        let reversed = ThumbwheelPreset::HorizontalScrollReversed.pair();
+        assert_eq!(reversed.backward, native.forward);
+        assert_eq!(reversed.forward, native.backward);
+        assert_eq!(
+            ThumbwheelPreset::recognize(&reversed.backward, &reversed.forward),
+            Some(ThumbwheelPreset::HorizontalScrollReversed)
+        );
+    }
+
+    #[test]
+    fn desktop_preset_labels_match_the_direction_they_actually_configure() {
+        // Rolling the wheel down fires `backward` and up fires `forward`; the
+        // label names the down action first, as the plain preset does.
+        for (preset, key) in [
+            (ThumbwheelPreset::Desktops, "pointer.previous_next_desktop"),
+            (
+                ThumbwheelPreset::DesktopsReversed,
+                "pointer.next_previous_desktop",
+            ),
+        ] {
+            let pair = preset.pair();
+            assert_eq!(preset.translation_key(), key);
+            assert_eq!(
+                pair.backward == Action::PreviousDesktop,
+                key == "pointer.previous_next_desktop",
+                "{preset:?}: label must name the down action first"
+            );
+        }
+        let plain = ThumbwheelPreset::Desktops.pair();
+        let reversed = ThumbwheelPreset::DesktopsReversed.pair();
+        assert_eq!(reversed.backward, plain.forward);
+        assert_eq!(reversed.forward, plain.backward);
     }
 
     #[test]

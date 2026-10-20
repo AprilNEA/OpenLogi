@@ -159,6 +159,7 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 | `tests (windows)` | `cargo test --workspace --exclude openlogi-desktop` | **Windows** only — the one place the `cfg(windows)` tests execute; nothing reproduces it elsewhere |
 | `cargo-deny` | `cargo deny --config .cargo/deny.toml --all-features --manifest-path crates/openlogi/Cargo.toml check` | any (needs `cargo-deny`; `nix run nixpkgs#cargo-deny -- …` also works) |
 | `clippy (windows)` | `cargo clippy --workspace --all-targets -- -D warnings` | **Windows**. Elsewhere: `devenv tasks run openlogi:check-windows` (ring-free subset, not the full workspace) |
+| `clippy (macos)` | `cargo clippy --workspace --all-targets -- -D warnings` | **macOS** only. CI runs it on `macos-latest` (arm64); it is the one job that lints the macOS `cfg` (`tests (macos)` compiles it, without clippy), and no other host can reproduce it |
 | `wasm (portable crates)` | `cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown` then `cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown` | any (needs the `wasm32-unknown-unknown` std; devenv installs it) |
 
 CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, and
@@ -174,7 +175,7 @@ The `fmt` job selects all workspace test jobs with the path filter in `ci.yml`. 
 
 Load the [ast-grep skill](../skills/ast-grep/SKILL.md) for structural searches, rewrites, and rule authoring. The following constraints govern OpenLogi guards:
 
-- Store each rule in the owning crate's `.ast-grep/rules/`, or `xtask/.ast-grep/rules/` for an xtask owner. Cross-crate guards live with the owner, even when they inspect other crates.
+- Store each rule in the owning crate's `.ast-grep/rules/`, or `xtask/.ast-grep/rules/` for an xtask owner. A workspace-wide policy that no crate owns, such as the lint table in the root `Cargo.toml`, goes in the root `.ast-grep/rules/`. Cross-crate guards live with the owner, even when they inspect other crates.
 - Register each rule directory in the root `sgconfig.yml`. Keep one project config. Rule `files` and `ignores` selectors are relative to that project root, not the YAML file.
 - Preserve unique rule IDs and name the owner in the diagnostic. For the consolidation trigger, follow [Single source of truth](../../AGENTS.md#single-source-of-truth).
 - Choose traversal depth for the intended relationship. Use `stopBy: end` only when the rule must search all ancestors or descendants.
@@ -222,6 +223,7 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | `crates/openlogi-ui/locales/**` | `cargo test -p openlogi-ui locale`; also `cargo test -p openlogi-desktop i18n` when binary wiring or desktop resolution changed |
 | `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `nix fmt -- --check devenv.nix` and `devenv --no-tui shell -- true` |
 | `flake.nix` / `flake.lock` / `packaging/linux/**` | Nix CI: `nix fmt -- --check flake.nix devenv.nix packaging/linux/package.nix packaging/linux/nixos-module.nix` and `nix flake check --all-systems --no-build --show-trace` |
+| `xtask/src/commands/lint/**` | `cargo test -p xtask lint::` and `cargo xtask lint sweep-allows`; the PR runs Stale allows on all three hosts |
 | `xtask/**` / `packaging/**` | unsigned `cargo xtask` package for that platform; the Build workflow is not part of `cargo xtask ci` |
 
 ## Other PR workflows
@@ -234,6 +236,17 @@ Not part of `ci.yml`, not in the default run:
 - **devenv CI** (path-filtered): format `devenv.nix` and `devenv --no-tui shell -- true`.
 - **Build**: unsigned installers on every PR. Run the matching `cargo xtask`
   package command only when the diff touches packaging.
+- **Build / Linux Flatpak**: gated behind the `needs: build` label like the rest
+  of that matrix, so a PR touching `packaging/linux/flatpak/**` gets no feedback
+  until someone labels it. Reproduce locally with
+  `flatpak-builder --user --disable-rofiles-fuse --force-clean --repo=repo
+  --default-branch=stable build packaging/linux/flatpak/org.openlogi.OpenLogi.yml`,
+  and keep the build tree off `/tmp` if it is a tmpfs: the workspace needs well
+  over 10 GB to compile inside the sandbox.
+- **Stale allows** (weekly, and path-filtered to the sweep itself): removes each
+  `#[allow]` in turn on Linux, Windows, and macOS, and fails on a lint that fires on
+  none of them. Local: `cargo xtask lint sweep-allows` for this host, then
+  `cargo xtask lint merge-allows <reports…>` over every host's report.
 
 ## When you add a CI job
 

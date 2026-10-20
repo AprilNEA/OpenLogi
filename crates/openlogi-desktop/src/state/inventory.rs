@@ -10,7 +10,7 @@ use tracing::debug;
 
 use crate::services::assets::AssetResolver;
 use crate::services::assets::sync::{AssetTarget, model_key};
-use crate::services::ipc::{UnpairDevice, UnpairFailure};
+use crate::services::ipc::{UnpairDevice, UnpairFailure, UnpairIntent};
 use crate::state::devices::{
     DeviceRecord, adopt_transient_record, build_device_list, direct_key_prefix,
     fold_by_inventory_key, record_wire_pid, sort_device_list,
@@ -195,6 +195,10 @@ impl AppState {
         let mut by_key = fold_by_inventory_key(new_list);
         let mut adopted = self.adopt_transient_records(&mut by_key);
         let mut merged = Vec::with_capacity(by_key.len().max(self.devices.records.len()));
+        let folded_routes: Vec<DeviceRoute> = by_key
+            .values()
+            .flat_map(|record| record.stale_pairings.iter().cloned())
+            .collect();
 
         for previous in &self.devices.records {
             let inv = previous.inventory_key();
@@ -208,6 +212,18 @@ impl AppState {
             if let Some(record) = adopted.remove(&inv) {
                 clear_inventory_misses(&mut self.devices.sessions, &key);
                 merged.push(record);
+                continue;
+            }
+
+            // A slot the snapshot folded into another card as a leftover
+            // pairing is not missing; grace-keeping it would bring back the
+            // duplicate card the fold removed.
+            if previous
+                .route
+                .as_ref()
+                .is_some_and(|route| folded_routes.contains(route))
+            {
+                clear_inventory_misses(&mut self.devices.sessions, &key);
                 continue;
             }
 
@@ -414,7 +430,9 @@ impl super::AppState {
     /// once the receiver has answered. A connected receiver lists every slot
     /// it pairs, so a card without a route is one whose receiver is absent:
     /// there is nothing to unpair, and once the receiver returns its slot
-    /// shows again with a route to unpair through.
+    /// shows again with a route to unpair through. The card's leftover slots
+    /// ([`DeviceRecord::stale_pairings`]) are unpaired first, one at a time,
+    /// so none of them returns as a card without its settings.
     pub(crate) fn forget_device(&mut self, record_key: &str) -> StateEvents {
         let Some(record) = self
             .devices
@@ -433,11 +451,31 @@ impl super::AppState {
         else {
             return self.drop_device(record_key, config_key.as_deref());
         };
-        let name = record.display_name.clone();
+        let mut pending = record.stale_pairings.clone();
+        pending.push(route);
+        self.send_forget_unpair(record_key.to_string(), config_key, pending)
+    }
+
+    /// Ask the receiver to drop the first of `pending`, carrying the rest so
+    /// [`Self::apply_unpaired`] can continue once it is gone.
+    fn send_forget_unpair(
+        &mut self,
+        record_key: String,
+        config_key: Option<String>,
+        mut pending: Vec<DeviceRoute>,
+    ) -> StateEvents {
+        if pending.is_empty() {
+            return StateEvents::none();
+        }
+        let route = pending.remove(0);
+        let name = self.record_name(&record_key);
         if self.send_ipc(UnpairDevice {
             route,
-            record_key: record_key.to_string(),
-            config_key,
+            intent: UnpairIntent::Forget {
+                record_key,
+                config_key,
+                pending,
+            },
         }) {
             StateEvents::none()
         } else {
@@ -446,6 +484,78 @@ impl super::AppState {
                 failure: UnpairFailure::AgentUnreachable,
             }
             .into()
+        }
+    }
+
+    /// The display name of `record_key`'s card, or the key itself once the
+    /// card is gone.
+    fn record_name(&self, record_key: &str) -> String {
+        self.devices
+            .records
+            .iter()
+            .find(|record| record.record_key() == record_key)
+            .map_or_else(
+                || record_key.to_string(),
+                |record| record.display_name.clone(),
+            )
+    }
+
+    /// Ask the receiver to drop every leftover slot folded into
+    /// `record_key`'s card ([`DeviceRecord::stale_pairings`]). The device, its
+    /// card, and its settings stay; once the receiver lets a slot go, the
+    /// agent's next inventory stops listing it.
+    pub(crate) fn remove_stale_pairings(&mut self, record_key: &str) -> StateEvents {
+        let Some(record) = self
+            .devices
+            .records
+            .iter()
+            .find(|record| record.record_key() == record_key)
+        else {
+            return StateEvents::none();
+        };
+        let name = record.display_name.clone();
+        let routes = record.stale_pairings.clone();
+        for route in routes {
+            let sent = self.send_ipc(UnpairDevice {
+                route,
+                intent: UnpairIntent::StalePairing { name: name.clone() },
+            });
+            if !sent {
+                return StateEvent::StalePairingRemovalFailed {
+                    name,
+                    failure: UnpairFailure::AgentUnreachable,
+                }
+                .into();
+            }
+        }
+        StateEvents::none()
+    }
+
+    /// The receiver's answer to an [`UnpairDevice`], dispatched on what the
+    /// removal was for.
+    pub(crate) fn apply_unpaired(
+        &mut self,
+        route: &DeviceRoute,
+        intent: UnpairIntent,
+        result: Result<(), UnpairFailure>,
+    ) -> StateEvents {
+        match intent {
+            UnpairIntent::Forget {
+                record_key,
+                config_key,
+                pending,
+            } if result.is_ok() && !pending.is_empty() => {
+                self.send_forget_unpair(record_key, config_key, pending)
+            }
+            UnpairIntent::Forget {
+                record_key,
+                config_key,
+                ..
+            } => self.apply_device_unpaired(&record_key, route, config_key.as_deref(), result),
+            UnpairIntent::StalePairing { name } => match result {
+                Ok(()) => StateEvents::none(),
+                Err(failure) => StateEvent::StalePairingRemovalFailed { name, failure }.into(),
+            },
         }
     }
 
@@ -466,18 +576,11 @@ impl super::AppState {
         match result {
             Ok(()) if self.device_is_back(record_key, route, config_key) => StateEvents::none(),
             Ok(()) => self.drop_device(record_key, config_key),
-            Err(failure) => {
-                let name = self
-                    .devices
-                    .records
-                    .iter()
-                    .find(|record| record.record_key() == record_key)
-                    .map_or_else(
-                        || record_key.to_string(),
-                        |record| record.display_name.clone(),
-                    );
-                StateEvent::DeviceRemovalFailed { name, failure }.into()
+            Err(failure) => StateEvent::DeviceRemovalFailed {
+                name: self.record_name(record_key),
+                failure,
             }
+            .into(),
         }
     }
 

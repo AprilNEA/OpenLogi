@@ -83,7 +83,7 @@ fn add_app_content(
     let list_scroll = catalog_state.list_scroll();
     catalog.update(cx, |picker, cx| {
         for choice in &choices.recent {
-            picker.ensure_icon(&choice.app, cx);
+            picker.ensure_icon(&choice.icon, cx);
         }
     });
     let recent_rows = choices
@@ -92,7 +92,7 @@ fn add_app_content(
         .filter(|choice| profile_matches_query(choice, &query))
         .cloned()
         .map(|choice| {
-            let icon = icons.state(&choice.app);
+            let icon = icons.state(&choice.icon);
             application_row(id_base, choice, icon, actions.clone(), pal, popover.clone())
         })
         .collect::<Vec<_>>();
@@ -194,8 +194,8 @@ fn catalog_list(
                         visible_range
                             .map(|index| {
                                 let choice = rows[index].clone();
-                                picker.ensure_icon(&choice.app, cx);
-                                let icon = picker.icon_state(&choice.app);
+                                picker.ensure_icon(&choice.icon, cx);
+                                let icon = picker.icon_state(&choice.icon);
                                 application_row(
                                     id_base,
                                     choice,

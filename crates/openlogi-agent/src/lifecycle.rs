@@ -27,12 +27,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
+use openlogi_agent_core::watchers::light::LightEvent;
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
@@ -231,6 +233,7 @@ impl Wanted {
             observable,
             event_monitor,
             inputs,
+            backlight_overlay,
             ring_haptics,
             demand,
         } = core;
@@ -244,6 +247,7 @@ impl Wanted {
                 observable,
                 event_monitor,
                 inputs,
+                backlight_overlay,
                 ring_haptics,
                 signals,
                 shutdown_requests,
@@ -270,6 +274,7 @@ struct Running {
     observable: Arc<ObservableState>,
     event_monitor: Arc<EventMonitor>,
     inputs: InputServices,
+    backlight_overlay: BacklightOverlayManager,
     ring_haptics: server::RingHapticPlayer,
     signals: ShutdownSignals,
     shutdown_requests: ShutdownRequests,
@@ -335,11 +340,11 @@ impl Armed {
 }
 
 impl Running {
-    /// Retire a terminal Windows hook worker and publish that input capture is
-    /// no longer installed. The native callbacks have already been cleared,
-    /// so the interval before this check remains pass-through rather than
+    /// Retire a terminal hook worker and publish that input capture is no
+    /// longer installed. The native callbacks have already been cleared, so
+    /// the interval before this check remains pass-through rather than
     /// suppressing input without a consumer.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     async fn apply_hook_health(&mut self) {
         let Some(hook) = self.hook.as_ref() else {
             return;
@@ -347,14 +352,32 @@ impl Running {
         if hook.is_running() {
             return;
         }
-        warn!("Windows hook worker exited — marking input capture unavailable");
+        warn!("input hook stopped — marking input capture unavailable");
         self.stop_hook();
+        self.publish_hook().await;
+    }
+
+    /// The Linux hook only grabs mice present at start, so retry on inventory changes.
+    #[cfg(target_os = "linux")]
+    async fn reinstall_hook(&mut self) {
+        if self.hook.is_some() || !self.capture_mouse_events {
+            return;
+        }
+        self.hook = self.start_hook();
+        if self.hook.is_some() {
+            self.publish_hook().await;
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    async fn publish_hook(&self) {
+        let installed = self.hook.is_some();
         self.orchestrator
             .lock()
             .await
-            .set_os_mouse_hook_available(false);
+            .set_os_mouse_hook_available(installed);
         self.observable
-            .set_accessibility_and_hook(Hook::has_accessibility(), false);
+            .set_accessibility_and_hook(Hook::has_accessibility(), installed);
     }
 
     /// Fold one watcher event into the agent's state.
@@ -367,12 +390,21 @@ impl Running {
 
         // Inventory and foreground-app samples make this a health
         // reconciliation without another timer in the control-plane loop.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         self.apply_hook_health().await;
 
         match event {
             WatcherEvent::Inventory(event) => {
+                #[cfg(target_os = "linux")]
+                let has_devices = matches!(
+                    &event,
+                    InventoryEvent::Snapshot { inventories, .. } if !inventories.is_empty()
+                );
                 self.apply_inventory(event, inventory_refresh).await;
+                #[cfg(target_os = "linux")]
+                if has_devices {
+                    self.reinstall_hook().await;
+                }
             }
             WatcherEvent::Camera(active) => {
                 self.orchestrator.lock().await.set_camera_active(active);
@@ -386,6 +418,12 @@ impl Running {
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
                 self.observable.set_input_monitoring_granted(granted);
+            }
+            WatcherEvent::Light(LightEvent::Read { route, state }) => {
+                self.orchestrator.lock().await.light_read(&route, state);
+            }
+            WatcherEvent::Light(LightEvent::Changed { route, change }) => {
+                self.orchestrator.lock().await.light_changed(&route, change);
             }
             // Watcher thread death — without a snapshot the GUI would scan
             // forever.
@@ -435,6 +473,17 @@ impl Running {
                     .lock()
                     .await
                     .reapply_volatile_on_next_refresh();
+            }
+            InventoryEvent::BacklightChanged {
+                device_index: _,
+                current_level,
+                levels,
+                visible,
+            } => {
+                self.backlight_overlay.show(current_level, levels, visible);
+            }
+            InventoryEvent::LockKeyChanged(change) => {
+                self.orchestrator.lock().await.announce_lock_key(change);
             }
             // A device broadcast its own reconnection (`0x1d4b`): reconfigure
             // it on the next snapshot even if no reconciliation ever saw it

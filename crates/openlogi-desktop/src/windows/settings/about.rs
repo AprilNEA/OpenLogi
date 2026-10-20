@@ -48,8 +48,8 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
         .gap_3()
         .child(
             img(crate::app_assets::LOGO)
-                .w(px(56.))
-                .h(px(56.))
+                .w(px(96.))
+                .h(px(96.))
                 .flex_shrink_0(),
         )
         .child(

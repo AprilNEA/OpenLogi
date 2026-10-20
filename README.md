@@ -52,16 +52,19 @@ Things OpenLogi does that Options+ won't:
 ## Features
 
 - Devices connected over Logi Bolt receivers, Unifying receivers, Bluetooth, or a wired connection, with battery percentage and charge state
+- Low-battery notices at the bottom of the screen, once per discharge, without an OS notification permission (on by default; Settings › General)
+- An on-screen indicator when a keyboard turns Caps Lock on or off, and Num Lock or Scroll Lock on Windows and Linux (`0x4220`, supported keyboards; on by default; Settings › General)
+- Easy-Switch channels: the name, OS, and connection of the computer paired on each channel, with a rename on devices that allow it (`0x1815`, supported devices)
 - Button remapping via the OS input hook: a built-in action catalog plus custom keyboard shortcuts authored in the TOML config, including independent short/long-press actions and hold-until-release chords for push-to-talk¹
-- Per-application profile overlays that auto-switch on app focus (macOS + Windows; Linux on X11 / XWayland only)
+- Per-application profile overlays that auto-switch on app focus (macOS + Windows; Linux on X11 / XWayland only); an `[apps]` alias lets one profile follow an application across platforms
 - Litra lights: power, brightness, and color temperature, with optional auto power that follows camera activity
 
 **Mouse**
 
 - Capture and remap the middle, mode-shift, and thumbwheel buttons (middle everywhere, the rest where the device exposes them)
-- Per-direction gesture bindings with live capture on supported buttons: Back/Forward, DPI/ModeShift, the dedicated gesture button, and the haptic panel
+- Per-direction gesture bindings with live capture on supported buttons: Middle Click, Back/Forward, DPI/ModeShift, the dedicated gesture button, and the haptic panel
   - DPI/ModeShift gestures require device-reported diversion and raw-XY support.
-  - Primary clicks and wheel controls cannot be newly assigned gestures; existing Middle Click gesture bindings are preserved.
+  - Primary clicks and wheel rotation/tilt cannot be newly assigned gestures.
 - Actions Ring: a cursor-centred, eight-slot overlay of actions (`ShowActionsRing`), with per-application layouts
 - DPI control with presets and Cycle / Set-preset actions (`0x2201`)
 - SmartShift wheel: mode toggle, sensitivity, and a permanent-ratchet panel (`0x2111`)
@@ -136,6 +139,27 @@ normal user, not with `sudo`. It installs the latest release by default. Use
 
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
 Pre-built packages require GLIBC 2.35 or newer (Ubuntu 22.04 baseline).
+
+Each release also carries a Flatpak bundle, for `amd64` and `arm64`:
+
+```sh
+flatpak install --user ./openlogi-*.flatpak
+```
+
+It is a one-time install: there is no remote behind it, so `flatpak update` has
+nothing to check and a new version means downloading the next bundle.
+
+A Flatpak cannot write to `/etc`, so its udev rules go on the host separately.
+They ship inside the application, so this needs no extra download:
+
+```sh
+flatpak run --command=cat org.openlogi.OpenLogi /app/share/openlogi/udev/70-openlogi.rules | sudo tee /etc/udev/rules.d/70-openlogi.rules >/dev/null && sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+Until that runs, no devices are detected at all. Nothing extra is needed for
+`/dev/uinput`: the rules create its node at boot with `static_node=uinput`, and
+opening it loads the module. The agent is launched by the application itself, so
+unlike the packages below there is no user service to enable.
 
 NixOS users can instead import the repository's module, which installs the
 package and udev rules and starts the agent with the graphical session:

@@ -1,5 +1,5 @@
-//! SWR-backed device-setting reads (DPI, SmartShift, Fn lock, report rate)
-//! keyed by device identity.
+//! SWR-backed device-setting reads (DPI, SmartShift, Fn lock, report rate,
+//! backlight, Easy-Switch hosts) keyed by device identity.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use gpui::{Context, Subscription};
 use openlogi_core::hid::{
-    BacklightChange, BacklightState, DeviceRoute, DpiInfo, FnLockState, ReportRateInfo,
-    SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, DpiInfo, EasySwitchHosts, FnLockState,
+    ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use swr_core::{
     MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
@@ -17,10 +17,13 @@ use swr_core::{
 use swr_gpui::Query;
 use tokio::sync::mpsc;
 
-use super::ipc::{Command, ReadBacklight, ReadDpi, ReadFnLock, ReadReportRate, ReadSmartShift};
+use super::ipc::{
+    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadReportRate,
+    ReadSmartShift,
+};
 use crate::state::{
-    AppState, BacklightLoad, DeviceKey, DpiLoad, FnLockLoad, Load, ReportRateLoad, SmartShiftLoad,
-    StateEvent,
+    AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, HostRenameRefusal,
+    Load, ReportRateLoad, SmartShiftLoad, StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -29,6 +32,7 @@ const SMARTSHIFT: &str = "smartshift";
 const FN_LOCK: &str = "fn-lock";
 const REPORT_RATE: &str = "report-rate";
 const BACKLIGHT: &str = "backlight";
+const EASY_SWITCH: &str = "easy-switch";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -69,6 +73,49 @@ pub(crate) struct DeviceReads {
     /// they went out on; cleared with that read.
     backlight_writes: BTreeMap<DeviceKey, BacklightWrites>,
     next_backlight_write: u64,
+    easy_switch: BTreeMap<DeviceKey, DeviceRead<EasySwitchHosts>>,
+    /// The host renames sent per device, for the read on the route they went
+    /// out on; cleared with that read.
+    host_renames: BTreeMap<DeviceKey, HostRenames>,
+    next_host_rename: u64,
+}
+
+/// The Easy-Switch host renames sent to one device that have not been
+/// answered yet, the newest one that has, and the device's last reading.
+/// The agent applies them one at a time in the order they were sent, so the
+/// answer to one also covers every earlier rename, and none of the later
+/// ones.
+#[derive(Default)]
+struct HostRenames {
+    /// Oldest first: the number, the zero-based slot and the name.
+    pending: Vec<(u64, u8, String)>,
+    answered: u64,
+    /// The slots as the device last reported them, without the pending names.
+    reading: Option<Arc<EasySwitchHosts>>,
+    /// Why the newest answered rename did not land, until another is sent or
+    /// one lands.
+    refused: Option<HostRenameRefusal>,
+}
+
+impl HostRenames {
+    /// `hosts` as the device will hold them once the unanswered renames land:
+    /// each pending name over its slot, the newer over the older.
+    fn shown(&self, hosts: Arc<EasySwitchHosts>) -> Arc<EasySwitchHosts> {
+        if self.pending.is_empty() {
+            return hosts;
+        }
+        let mut shown = (*hosts).clone();
+        for (_, slot, name) in &self.pending {
+            if let Some(entry) = shown
+                .slots
+                .iter_mut()
+                .find(|entry| entry.index == *slot && entry.paired)
+            {
+                entry.name = Some(name.clone());
+            }
+        }
+        Arc::new(shown)
+    }
 }
 
 /// The backlight changes sent to one keyboard that have not been answered
@@ -653,6 +700,192 @@ impl DeviceReads {
         self.backlight.get(key).map(|read| &read.load)
     }
 
+    /// Start the Easy-Switch host query unless the same device route is
+    /// already subscribed. A rename goes out through
+    /// [`Self::begin_host_rename`] and is answered through
+    /// [`Self::finish_host_rename`].
+    pub(crate) fn ensure_easy_switch(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .easy_switch
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_easy_switch(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| ReadEasySwitchHosts { route, reply }.into(),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !easy_switch_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(EASY_SWITCH, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        read_through(&client, EASY_SWITCH, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), easy_switch_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), easy_switch_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_easy_switch(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::EasySwitchChanged(observed_key.clone()));
+            }
+        });
+        self.easy_switch.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Show `name` on `key`'s Easy-Switch `slot` while it is written, and
+    /// number the rename. `None` when no reading is subscribed on `route`,
+    /// the connection the rename goes out on: there is then nothing to show
+    /// it on or to match its answer to.
+    ///
+    /// Until its answer arrives, `name` stays shown over every reading that
+    /// comes in, so the answer to an earlier rename cannot hide a later one.
+    pub(crate) fn begin_host_rename(
+        &mut self,
+        key: &DeviceKey,
+        route: &DeviceRoute,
+        slot: u8,
+        name: &str,
+    ) -> Option<u64> {
+        let read = self
+            .easy_switch
+            .get_mut(key)
+            .filter(|read| read.route == *route)?;
+        let Load::Ready(shown) = &read.load else {
+            return None;
+        };
+        let renames = self.host_renames.entry(key.clone()).or_default();
+        if renames.pending.is_empty() {
+            renames.reading = Some(shown.clone());
+        }
+        self.next_host_rename += 1;
+        let write = self.next_host_rename;
+        renames.pending.push((write, slot, name.to_owned()));
+        renames.refused = None;
+        if let Some(reading) = renames.reading.clone() {
+            read.load = Load::Ready(renames.shown(reading));
+        }
+        Some(write)
+    }
+
+    /// The device's answer to rename `write`, which went out on `route`: the
+    /// slots it reads back, shown with the renames sent after `write` still
+    /// applied, or — when it refused or could not be reached — the refusal,
+    /// kept for the card, and a re-read, with the last reading on screen
+    /// while it answers.
+    ///
+    /// Like [`Self::finish_backlight_write`], only the read subscribed on
+    /// `route` takes the answer, and an answer older than one already taken
+    /// is dropped. Returns whether the answer was taken.
+    pub(crate) fn finish_host_rename(
+        &mut self,
+        key: &DeviceKey,
+        route: &DeviceRoute,
+        write: u64,
+        result: Result<EasySwitchHosts, WriteError>,
+    ) -> bool {
+        let Some(read) = self
+            .easy_switch
+            .get_mut(key)
+            .filter(|read| read.route == *route)
+        else {
+            return false;
+        };
+        let renames = self.host_renames.entry(key.clone()).or_default();
+        if write <= renames.answered {
+            return false;
+        }
+        renames.answered = write;
+        let slot = renames
+            .pending
+            .iter()
+            .find(|&&(pending, ..)| pending == write)
+            .map(|&(_, slot, _)| slot);
+        renames.pending.retain(|&(pending, ..)| pending > write);
+        match result {
+            Ok(hosts) => {
+                renames.refused = None;
+                let value = Arc::new(hosts);
+                renames.reading = Some(value.clone());
+                read.load = Load::Ready(renames.shown(value.clone()));
+                if let Some(client) = &self.client {
+                    client.set::<_, Cached<EasySwitchHosts>, WriteError>(
+                        query_key(EASY_SWITCH, key),
+                        Some(value),
+                    );
+                }
+            }
+            Err(error) => {
+                renames.refused = slot.map(|slot| HostRenameRefusal { slot, error });
+                if let Some(reading) = renames.reading.clone() {
+                    read.load = Load::Ready(renames.shown(reading));
+                }
+                read.query.revalidate();
+            }
+        }
+        true
+    }
+
+    /// Why `key`'s newest answered host rename did not land, while no rename
+    /// has been sent or landed since.
+    #[must_use]
+    pub(crate) fn host_rename_refusal(&self, key: &DeviceKey) -> Option<&HostRenameRefusal> {
+        self.host_renames
+            .get(key)
+            .and_then(|renames| renames.refused.as_ref())
+    }
+
+    /// Retry an exhausted Easy-Switch host query.
+    pub(crate) fn retry_easy_switch(&mut self, key: &DeviceKey) {
+        let Some(read) = self.easy_switch.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
+    /// `key`'s Easy-Switch load, or `None` while nothing has subscribed to it.
+    #[must_use]
+    pub(crate) fn easy_switch_load(&self, key: &DeviceKey) -> Option<&EasySwitchLoad> {
+        self.easy_switch.get(key).map(|read| &read.load)
+    }
+
     /// Re-read `key`'s settings after the device reported changing one
     /// itself, keeping the shown values while it answers. Covers the settings
     /// such a report can concern — DPI, Fn lock, report rate and backlight (see
@@ -734,6 +967,7 @@ impl DeviceReads {
         self.remove_fn_lock(key);
         self.remove_report_rate(key);
         self.remove_backlight(key);
+        self.remove_easy_switch(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -772,6 +1006,14 @@ impl DeviceReads {
         }
     }
 
+    fn remove_easy_switch(&mut self, key: &DeviceKey) {
+        self.host_renames.remove(key);
+        if let Some(read) = self.easy_switch.remove(key) {
+            drop(read);
+            self.clear::<EasySwitchHosts>(EASY_SWITCH, key);
+        }
+    }
+
     /// Forget every query whose device is no longer present.
     pub(crate) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
         let removed: BTreeSet<_> = self
@@ -781,6 +1023,7 @@ impl DeviceReads {
             .chain(self.fn_lock.keys())
             .chain(self.report_rate.keys())
             .chain(self.backlight.keys())
+            .chain(self.easy_switch.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -868,6 +1111,28 @@ impl DeviceReads {
         };
         let load = match (load, self.backlight_writes.get(key)) {
             (Load::Ready(state), Some(writes)) => Load::Ready(writes.shown(state)),
+            (load, _) => load,
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_easy_switch(&mut self, key: &DeviceKey, flight: u64, load: EasySwitchLoad) -> bool {
+        let Some(read) = self
+            .easy_switch
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        let load = match (load, self.host_renames.get_mut(key)) {
+            (Load::Ready(hosts), Some(renames)) => {
+                renames.reading = Some(hosts.clone());
+                Load::Ready(renames.shown(hosts))
+            }
             (load, _) => load,
         };
         if read.load == load {
@@ -976,6 +1241,10 @@ fn report_rate_error_is_permanent(error: &WriteError) -> bool {
 }
 
 fn backlight_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+fn easy_switch_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
@@ -1161,6 +1430,24 @@ mod tests {
         );
         assert_eq!(
             attempt_count(WriteError::AgentUnavailable, report_rate_error_is_permanent).await,
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_without_easy_switch_hosts_is_asked_once() {
+        assert_eq!(
+            attempt_count(
+                WriteError::FeatureUnsupported {
+                    feature_hex: 0x1815,
+                },
+                easy_switch_error_is_permanent,
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            attempt_count(WriteError::AgentUnavailable, easy_switch_error_is_permanent).await,
             3
         );
     }

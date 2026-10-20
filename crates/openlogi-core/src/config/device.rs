@@ -170,12 +170,8 @@ pub struct DeviceConfig {
     #[serde(skip_serializing)]
     // Consumed only by the `fs` half's load migration. The field stays in
     // every build: it is part of the shape serde *deserializes*, and dropping
-    // it would turn an old config's key into an unknown field.
-    #[cfg_attr(
-        not(feature = "fs"),
-        expect(clippy::allow_attributes, reason = "see above"),
-        allow(dead_code, reason = "only the `fs` half's load migration reads it")
-    )]
+    // it would turn an old config's key into an unknown field. Without `fs`,
+    // `dead_code` stays quiet because the derived `PartialEq` reads it.
     pub(super) gesture_owner: Option<GestureOwner>,
     /// Last-known identity (name / kind / capabilities), captured while the
     /// device was online. Lets the UI render this device — with the right
@@ -273,6 +269,14 @@ pub struct DeviceConfig {
     /// current resolution unmanaged and omits the field from `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll_resolution: Option<ScrollResolution>,
+    /// Smooth this device's main wheel in software: the agent diverts the
+    /// wheel's HID++ `0x2121` reports and posts eased scrolling for them, the
+    /// way Logi Options+ "Smooth scrolling" does. Takes effect only while the
+    /// agent may post input events (on macOS, with Accessibility access);
+    /// otherwise the wheel stays native. `false` (default) leaves the wheel
+    /// native, and is omitted from `config.toml`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub smooth_wheel: bool,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -399,6 +403,7 @@ impl Default for DeviceConfig {
             thumbwheel_sensitivity: None,
             invert_scroll: false,
             scroll_resolution: None,
+            smooth_wheel: false,
             host_switch_targets: Vec::new(),
             fn_lock: None,
             keep_os_layout: None,
@@ -520,6 +525,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
     #[serde(default)]
+    smooth_wheel: bool,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
@@ -585,6 +592,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
+            smooth_wheel: raw.smooth_wheel,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,

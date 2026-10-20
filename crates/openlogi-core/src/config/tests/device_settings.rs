@@ -1,4 +1,4 @@
-//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, keeping the OS layout, the report rate, and the stored bindings.
+//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, the smooth wheel, keeping the OS layout, the report rate, and the stored bindings.
 
 use super::*;
 
@@ -73,6 +73,36 @@ fn unset_keep_os_layout_is_omitted_from_toml() {
     cfg.set_invert_scroll("2b042", true);
     let body = toml::to_string_pretty(&cfg).expect("serialize");
     assert!(!body.contains("keep_os_layout"), "{body}");
+}
+
+#[test]
+fn smooth_wheel_defaults_off_and_roundtrips_per_device() {
+    let mut cfg = Config::default();
+    assert!(!cfg.smooth_wheel("mouse"));
+    cfg.set_smooth_wheel("mouse", true);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("smooth_wheel = true"), "{body}");
+    let restored = write_and_read(&cfg);
+    assert!(restored.smooth_wheel("mouse"));
+    assert!(!restored.smooth_wheel("absent"));
+    cfg.set_smooth_wheel("mouse", false);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("smooth_wheel"), "off is omitted: {body}");
+    assert!(!write_and_read(&cfg).smooth_wheel("mouse"));
+}
+
+#[test]
+fn a_smooth_wheel_opt_in_survives_route_adoption() {
+    let route = "receiver:82839805:slot:2";
+    let mut config = Config::default();
+    config.set_smooth_wheel(route, true);
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:4f4c4403").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert!(
+        !config.devices.contains_key(route),
+        "sanity: the route entry folded"
+    );
+    assert!(config.smooth_wheel("unit:4f4c4403"));
 }
 
 #[test]

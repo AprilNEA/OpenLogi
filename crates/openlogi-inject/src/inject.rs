@@ -277,11 +277,16 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// is not a hard wall-clock limit on `execute`.
 ///
 /// On Linux, key and scroll events are injected via a lazily-created `uinput`
-/// virtual device. Mouse clicks inject `BTN_*` events. macOS-only window
-/// manager actions (`MissionControl`, `AppExpose`, `ShowDesktop`,
-/// `LaunchpadShow`) have no universal Linux equivalent and are silently
-/// skipped (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes to
-/// Linux key codes; macOS Cmd maps to Ctrl.
+/// virtual device. Mouse clicks inject `BTN_*` events. When
+/// `HYPRLAND_INSTANCE_SIGNATURE` is non-empty, `LaunchpadShow` runs
+/// `omarchy-menu toggle`, desktop switches run `hyprctl dispatch workspace`,
+/// and `LockScreen` runs `omarchy-system-lock` when available (never Super+L;
+/// the fallback is Super+Ctrl+L). Helpers run asynchronously with a bounded
+/// wait, then fall back to their compositor shortcut. Otherwise macOS-only
+/// window manager actions (`MissionControl`, `AppExpose`, `ShowDesktop`,
+/// `LaunchpadShow`) have no universal Linux equivalent and are silently skipped
+/// (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes to Linux key codes;
+/// macOS Cmd maps to Ctrl.
 ///
 /// On Windows, key and mouse events are synthesised via `SendInput`. The
 /// macOS window-manager actions map to their Windows equivalents (e.g.
@@ -504,6 +509,27 @@ fn quantize_axis(residual: &mut f64, input: f64, units_per_input: f64) -> i32 {
     let output = rounded as i32;
     *residual = exact - f64::from(output);
     output
+}
+
+/// Whether the OS reverses the scrolling a mouse wheel produces — macOS's
+/// "Natural scrolling", on by default — read fresh on every call because the
+/// user can change it while the agent runs.
+///
+/// The OS applies it to wheel events from a device, but not to the events
+/// [`post_scroll`] and [`post_smooth_scroll`] synthesise. A caller posting in
+/// place of a diverted wheel flips its own distance with this. `false` on
+/// Windows and Linux, which apply no such reversal to a mouse wheel's
+/// events here.
+#[must_use]
+pub fn natural_scrolling() -> bool {
+    cfg_select! {
+        target_os = "macos" => {
+            objc2::rc::autoreleasepool(|_| macos::natural_scrolling())
+        }
+        _ => {
+            false
+        }
+    }
 }
 
 /// Synthesise a typed scroll distance at the current focus.

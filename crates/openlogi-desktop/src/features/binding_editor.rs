@@ -252,4 +252,38 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(actions.contains(&Action::ShowActionsRing));
     }
+
+    /// [`action_icon_path`] is exhaustive over [`Action`], so the compiler
+    /// catches a missing arm — but nothing checks that the path an arm names is
+    /// actually embedded, and an unembedded path renders as a blank slot with
+    /// no error anywhere. [`Action::catalog`] misses the parameterised arms,
+    /// which hold the only references to the keyboard and terminal glyphs.
+    #[test]
+    fn every_reachable_action_icon_is_embedded() {
+        use gpui::AssetSource as _;
+        use openlogi_core::binding::ApplicationTarget;
+        use openlogi_ui::action_icons::ActionIcons;
+
+        let combo = || "Ctrl+A".parse().expect("Ctrl+A is a valid combo");
+        let uncataloged = [
+            Action::SetDpiPreset(0),
+            Action::CustomShortcut(combo()),
+            Action::HoldShortcut(combo()),
+            Action::TapKeyHoldingModifiers(combo()),
+            Action::TypeText(String::new()),
+            Action::RunShellCommand(String::new()),
+            Action::RunAppleScript(String::new()),
+            Action::Workflow(Vec::new()),
+            Action::OpenApplication(
+                ApplicationTarget::new("/usr/bin/true", "true").expect("non-empty path"),
+            ),
+        ];
+        for action in Action::catalog().into_iter().chain(uncataloged) {
+            let path = action_icon_path(&action);
+            assert!(
+                matches!(ActionIcons.load(path), Ok(Some(_))),
+                "{path}, bound to {action:?}, is not embedded"
+            );
+        }
+    }
 }

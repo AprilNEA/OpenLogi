@@ -1,18 +1,18 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use openlogi_core::device::{BatteryInfo, BatteryStatus};
+use openlogi_core::device::{BatteryInfo, BatteryStatus, LockKey};
 use openlogi_fixture::RequestMatch;
 use tokio::sync::mpsc;
 
 use super::Enumerator;
 use super::cache::{CACHE_MISS_GRACE, CacheKey, REFRESH_INTERVAL};
-use super::events::{HidppEventSource, observed_event_channel};
+use super::events::{HidppEventSource, event_channel, observed_event_channel};
 use super::replay_test_support::{
     BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, HEADSET_CHANNEL, HEADSET_PRODUCT_ID,
     adc_error, adc_reading, battery_only_fixture, bolt_fixture, connection_notification,
-    direct_fixture, headset_fixture, malformed_dpi_fixture, setting_fixture, short,
-    voltage_reading,
+    direct_fixture, headset_fixture, lock_key_fixture, malformed_dpi_fixture, setting_fixture,
+    short, voltage_reading,
 };
 use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend, ReplayTopology};
 use crate::{ChannelRegistry, get_dpi};
@@ -839,4 +839,50 @@ async fn a_dpi_button_moves_the_mouses_settings_revision() {
         .await,
         (0, 1)
     );
+}
+
+#[tokio::test]
+async fn the_first_lock_key_broadcast_names_the_key_against_the_state_read_on_connection() {
+    const PRODUCT_ID: u16 = 0xb36a;
+    // Caps Lock is on when the keyboard connects. One battery read rides each
+    // enumeration.
+    let fixture = lock_key_fixture(PRODUCT_ID, "Lock Test Keyboard", 2, 0x02);
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid lock-key replay"),
+    );
+    let (notifier, mut events) = event_channel();
+    let mut lock_keys = events.take_lock_keys().expect("lock keys not yet taken");
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_event_notifier(notifier);
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    enumerator.enumerate().await.expect("node probe succeeds");
+    // The second pass reuses the cached probe and reads the lock state no
+    // more: the device is still connected.
+    enumerator.enumerate().await.expect("cache hit succeeds");
+    backend
+        .require_complete()
+        .expect("one lock-state read per connection");
+
+    // Caps Lock off, broadcast on the lock-key index.
+    let mut report = vec![0x11, 0xff, 0x03, 0x00];
+    report.extend_from_slice(&[0; 16]);
+    assert_eq!(
+        backend
+            .emit_channel_report(HEADSET_CHANNEL, &report)
+            .expect("known channel"),
+        1
+    );
+    let update = tokio::time::timeout(Duration::from_secs(2), lock_keys.recv())
+        .await
+        .expect("the broadcast must name the key")
+        .expect("the notifier is alive");
+    assert_eq!((update.key, update.engaged), (LockKey::CapsLock, false));
+    // Lock keys are not inventory.
+    assert_eq!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 }

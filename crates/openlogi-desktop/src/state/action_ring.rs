@@ -47,12 +47,14 @@ impl AppState {
         events
     }
 
-    /// Complete layout shown by the Actions Ring editor. An application with
-    /// no saved profile inherits the default layout until its first edit.
+    /// Complete layout shown by the Actions Ring editor: the layout saved under
+    /// the profile key it edits. A key with no saved layout shows the default,
+    /// which its first edit copies — never another key's layout that an alias
+    /// or `exe:` key would apply to the same application.
     #[must_use]
     pub fn current_action_ring_layout(&self) -> ActionRingLayout {
-        let ring = self.current_action_ring();
-        ring.effective_layout(self.editing_action_ring_app())
+        self.current_action_ring()
+            .profile_layout(self.editing_action_ring_app())
     }
 
     /// Replace or clear one slot in the open Actions Ring layout.

@@ -1,3 +1,9 @@
+use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, LockKey};
+use openlogi_ipc::testing::in_memory_agent;
+use openlogi_ipc::{
+    AgentRequest, AgentResponse, LockKeyChange, Notice, NoticeKind, RingObservation,
+};
+
 use super::*;
 
 /// A client nobody serves: all a phase transition needs to stand for "an agent
@@ -9,12 +15,12 @@ fn unserved_client() -> AgentClient {
 
 #[test]
 fn the_first_failed_attempt_only_arms_the_give_up_clock() {
-    let mut link = InvocationLink::default();
+    let mut link = ObservationLink::<RingObservation>::default();
     let now = Instant::now();
     assert!(!link.connect_failed(now));
     assert!(matches!(
         link,
-        InvocationLink::Reconnecting {
+        ObservationLink::Reconnecting {
             unreachable_since: Some(armed)
         } if armed == now
     ));
@@ -23,7 +29,7 @@ fn the_first_failed_attempt_only_arms_the_give_up_clock() {
 #[test]
 fn an_agent_that_stays_away_past_the_deadline_ends_the_overlay() {
     let start = Instant::now();
-    let mut link = InvocationLink::default();
+    let mut link = ObservationLink::<RingObservation>::default();
     assert!(!link.connect_failed(start));
     assert!(!link.connect_failed(start + GIVE_UP_AFTER / 2));
     assert!(link.connect_failed(start + GIVE_UP_AFTER));
@@ -32,7 +38,7 @@ fn an_agent_that_stays_away_past_the_deadline_ends_the_overlay() {
 #[tokio::test]
 async fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() {
     let start = Instant::now();
-    let mut link = InvocationLink::default();
+    let mut link = ObservationLink::<RingObservation>::default();
     // Each round the agent is gone for half the deadline, then answers —
     // which moves the clock out of the reconnecting phase. Five rounds is
     // two and a half deadlines in total, so a version that kept the clock
@@ -43,7 +49,7 @@ async fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() 
             !link.connect_failed(gone),
             "a reachable agent must not inherit the previous outage's clock"
         );
-        link.connected(unserved_client());
+        link.connected(Observer::action_ring(unserved_client()));
         link.disconnected();
     }
 }
@@ -222,4 +228,140 @@ fn terminal_retries_last_only_until_the_session_deadline() {
         .unwrap_or_else(Instant::now);
     assert!(!retry_before(Some(past)));
     assert!(!retry_before(None));
+}
+
+#[test]
+fn losing_the_agent_hides_the_backlight_indicator() {
+    let lost = BACKLIGHT
+        .lost
+        .expect("the agent hides the indicator, so losing the agent must too");
+    assert!(!lost().visible);
+}
+
+/// A notice the agent is showing.
+fn low_battery_notice() -> NoticeObservation {
+    NoticeObservation {
+        generation: 1,
+        notices: vec![Notice {
+            id: 1,
+            kind: NoticeKind::LowBattery {
+                name: None,
+                kind: DeviceKind::Mouse,
+                battery: BatteryInfo {
+                    percentage: Some(15),
+                    level: BatteryLevel::Low,
+                    status: BatteryStatus::Discharging,
+                },
+            },
+        }],
+        language: None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn losing_the_agent_clears_the_notices_it_was_showing() {
+    // The agent ends its notices on its own timer, so once it is gone nothing
+    // else would ever take its card off the screen.
+    let (hang_up, agent_gone) = tokio::sync::oneshot::channel::<()>();
+    let agent = in_memory_agent(
+        |request| {
+            Box::pin(async move {
+                let AgentRequest::ObserveNotices { since } = request else {
+                    panic!("the notice loop sent an unexpected request: {request:?}");
+                };
+                if since != 0 {
+                    // Hold the poll open, as a quiet agent does.
+                    return std::future::pending().await;
+                }
+                Ok(AgentResponse::ObserveNotices(low_battery_notice()))
+            })
+        },
+        async move {
+            let _ = agent_gone.await;
+        },
+    );
+    // The first attempt reaches the agent; no replacement ever answers.
+    let mut agents = Some(agent);
+    let connect = move || {
+        let agent = agents.take();
+        async move {
+            match agent {
+                Some(agent) => Some(agent),
+                None => std::future::pending().await,
+            }
+        }
+    };
+    let mut hang_up = Some(hang_up);
+    let mut shown = Vec::new();
+    let observing = observe(connect, NOTICES, |observed: NoticeObservation| {
+        shown.push(observed.notices.len());
+        // The agent goes away once its notice is on screen.
+        if let Some(hang_up) = hang_up.take() {
+            let _ = hang_up.send(());
+        }
+        !observed.notices.is_empty()
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), observing)
+        .await
+        .expect("a lost agent's notices are cleared");
+    assert_eq!(shown, [1, 0]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn losing_the_agent_hides_the_lock_key_indicator() {
+    // The agent hides the indicator on its own timer, so once it is gone
+    // nothing else would ever take "Caps Lock On" off the screen.
+    let caps_lock_on = LockKeyChange {
+        key: LockKey::CapsLock,
+        engaged: true,
+    };
+    let (hang_up, agent_gone) = tokio::sync::oneshot::channel::<()>();
+    let agent = in_memory_agent(
+        move |request| {
+            Box::pin(async move {
+                let AgentRequest::ObserveLockKeys { since } = request else {
+                    panic!("the lock-key loop sent an unexpected request: {request:?}");
+                };
+                if since != 0 {
+                    // Hold the poll open, as a quiet agent does.
+                    return std::future::pending().await;
+                }
+                Ok(AgentResponse::ObserveLockKeys(LockKeyObservation {
+                    generation: 1,
+                    shown: Some(caps_lock_on),
+                    language: None,
+                }))
+            })
+        },
+        async move {
+            let _ = agent_gone.await;
+        },
+    );
+    // The first attempt reaches the agent; no replacement ever answers.
+    let mut agents = Some(agent);
+    let connect = move || {
+        let agent = agents.take();
+        async move {
+            match agent {
+                Some(agent) => Some(agent),
+                None => std::future::pending().await,
+            }
+        }
+    };
+    let mut hang_up = Some(hang_up);
+    let mut shown = Vec::new();
+    let observing = observe(connect, LOCK_KEYS, |observed: LockKeyObservation| {
+        shown.push(observed.shown);
+        // The agent goes away once its indicator is on screen.
+        if let Some(hang_up) = hang_up.take() {
+            let _ = hang_up.send(());
+        }
+        observed.shown.is_some()
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), observing)
+        .await
+        .expect("a lost agent's indicator is hidden");
+    assert_eq!(shown, [Some(caps_lock_on), None]);
 }

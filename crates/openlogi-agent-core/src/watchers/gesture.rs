@@ -28,7 +28,8 @@ use std::sync::Arc;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
-    CaptureHost, CaptureSessionOutcome, CapturedInput, PendingCaptureRestore, run_capture_session,
+    CaptureHost, CaptureSessionOutcome, CaptureSessionStop, CapturedInput, PendingCaptureRestore,
+    run_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -39,7 +40,9 @@ use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore
 use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
 use super::retry::RETRY_DELAY;
 use super::shutdown::{ManagerCompletion, WatcherHandle};
-use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
+use crate::capture_plan::{
+    CapturePublication, CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans,
+};
 use crate::hardware::DeviceAccess;
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::hook::SharedHookMaps;
@@ -105,6 +108,15 @@ impl GestureOutputs {
             openlogi_inject::post_scroll(delta);
         }
     }
+
+    /// Post a diverted main wheel's scroll, eased by the scroll runtime.
+    fn post_main_wheel_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {
+        if let Err(direct) = self.scroll.try_hidpp_wheel_scroll(session, delta) {
+            // As for `post_scroll`: the wheel no longer scrolls by itself.
+            // `direct` is already scaled by the wheel's sensitivity.
+            openlogi_inject::post_scroll(direct);
+        }
+    }
 }
 
 /// Spawn the capture-manager thread. It owns a current-thread tokio runtime that
@@ -129,8 +141,8 @@ pub fn spawn(
     })
 }
 
-type RunningSession = CaptureSession<CaptureTarget, DispatchPlan>;
-type GestureSlot = CaptureSlot<CaptureTarget, DispatchPlan, PendingRestore>;
+type RunningSession = CaptureSession<CaptureTarget, DispatchPlan, CaptureSessionStop>;
+type GestureSlot = CaptureSlot<CaptureTarget, DispatchPlan, PendingRestore, CaptureSessionStop>;
 
 struct CapturedEvent {
     physical_key: PhysicalDeviceKey,
@@ -162,7 +174,7 @@ struct SessionChannels {
 }
 
 struct GestureManagerContext {
-    capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    capture_plans: SharedCapturePlans,
     access: DeviceAccess,
     receiver_requests: watch::Receiver<ReceiverRequestState>,
     outputs: GestureOutputs,
@@ -219,12 +231,32 @@ fn dispatch_context_for<'a>(
 #[cfg(test)]
 fn wanted_sessions(
     requests: ReceiverRequestState,
-    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-) -> Arc<Vec<DeviceCapturePlan>> {
+    capture_plans: &SharedCapturePlans,
+) -> Vec<DeviceCapturePlan> {
     if requests.any() {
-        return Arc::new(Vec::new());
+        return Vec::new();
     }
-    Arc::clone(&capture_plans.borrow())
+    capture_plans.borrow().plans().to_vec()
+}
+
+/// Whether two dispatch plans resolve every input to the same action, differing
+/// at most in the hovered window they were selected for.
+fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
+    let DispatchPlan {
+        config_key,
+        bindings,
+        gesture_bindings,
+        side_gesture_bindings,
+        thumbwheel_sensitivity,
+        invert_wheel,
+        pointer_target: _,
+    } = a;
+    *config_key == b.config_key
+        && *bindings == b.bindings
+        && *gesture_bindings == b.gesture_bindings
+        && *side_gesture_bindings == b.side_gesture_bindings
+        && *thumbwheel_sensitivity == b.thumbwheel_sensitivity
+        && *invert_wheel == b.invert_wheel
 }
 
 fn reconcile_session(
@@ -232,14 +264,31 @@ fn reconcile_session(
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
 ) {
-    match session.reconcile(wanted) {
+    let pointer_only = wanted.is_some_and(|(_, plan)| same_bindings(session.dispatch(), plan));
+    match session.reconcile_with(wanted, stop_for_target_change) {
         ReconcileAction::DispatchChanged => {
-            dispatcher.cancel_session(session.id());
+            if !pointer_only {
+                dispatcher.cancel_session(session.id());
+            }
             let config_key = session.dispatch().config_key.clone();
             session.rekey(&config_key);
         }
         ReconcileAction::Retiring => dispatcher.cancel_zoom_session(session.id()),
         ReconcileAction::None => {}
+    }
+}
+
+/// Stop command for a target change. A different route must be restored through
+/// the successor; the same route, including a reconnect rearm, uses shutdown.
+fn stop_for_target_change(
+    current: &CaptureTarget,
+    wanted: Option<&CaptureTarget>,
+) -> CaptureSessionStop {
+    match wanted {
+        Some(next) if next.route != current.route => {
+            CaptureSessionStop::Handoff(next.route.clone())
+        }
+        _ => CaptureSessionStop::Shutdown,
     }
 }
 
@@ -250,14 +299,15 @@ fn reconcile_published_session(
     key: &PhysicalDeviceKey,
     session: &mut RunningSession,
     receiver_requests: &watch::Receiver<ReceiverRequestState>,
-    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    capture_plans: &SharedCapturePlans,
     dispatcher: &mut InputDispatcher,
 ) {
     if receiver_requests.borrow().any() {
         reconcile_session(session, None, dispatcher);
     } else {
-        let plans = capture_plans.borrow();
-        let wanted = plans
+        let published = capture_plans.borrow();
+        let wanted = published
+            .plans()
             .iter()
             .find(|plan| plan.target.physical_key == *key)
             .map(|plan| (&plan.target, &plan.dispatch));
@@ -277,9 +327,11 @@ fn acquire_session_lease(
     Some(fresh)
 }
 
+/// Retry owed restores. `routes` is the latest physical-device publication; `None` keeps each token on its current route.
 async fn retry_pending_restores(
     slots: &mut HashMap<PhysicalDeviceKey, GestureSlot>,
     registry: &openlogi_hid::ChannelRegistry,
+    routes: Option<&CapturePublication>,
     now: Instant,
 ) {
     let keys: Vec<_> = slots
@@ -299,7 +351,18 @@ async fn retry_pending_restores(
             slots.insert(key, GestureSlot::Recovering(recovery));
             continue;
         };
-        if let CaptureSessionOutcome::RestorePending(token) = pending.token.retry(registry).await {
+        // Routes include devices capture skips. A same-route retry keeps the
+        // replacement-only policy set by a channel change.
+        let elected = routes
+            .and_then(|routes| routes.restore_route(&key))
+            .cloned();
+        let outcome = match elected {
+            Some(route) if route != *pending.token.route() => {
+                pending.token.retry_via(route, registry).await
+            }
+            _ => pending.token.retry(registry).await,
+        };
+        if let CaptureSessionOutcome::RestorePending(token) = outcome {
             recovery.pending_restore = Some(PendingRestore {
                 token,
                 retry_at: Instant::now() + RETRY_DELAY,
@@ -362,7 +425,7 @@ impl GestureManagerState {
         &mut self,
         requests: ReceiverRequestState,
         device_io_allowed: bool,
-        published: &Arc<Vec<DeviceCapturePlan>>,
+        published: &Arc<CapturePublication>,
         channels: &SessionChannels,
     ) {
         let receiver_access = &channels.access.receiver_access;
@@ -377,7 +440,7 @@ impl GestureManagerState {
         let wanted = if requests.any() {
             &[][..]
         } else {
-            published.as_slice()
+            published.plans()
         };
         for (key, slot) in &mut self.slots {
             let Some(session) = slot.session_mut() else {
@@ -394,6 +457,7 @@ impl GestureManagerState {
                 return true;
             };
             if !published
+                .plans()
                 .iter()
                 .any(|plan| plan.target.physical_key == *key)
             {
@@ -415,7 +479,8 @@ impl GestureManagerState {
             None
         };
         if restore_lease.is_some() {
-            retry_pending_restores(&mut self.slots, &channels.access.registry, now).await;
+            let routes = (!requests.any()).then_some(published.as_ref());
+            retry_pending_restores(&mut self.slots, &channels.access.registry, routes, now).await;
         }
 
         for plan in wanted {
@@ -446,7 +511,7 @@ impl GestureManagerState {
         event: SessionEvent,
         device_io_allowed: bool,
         receiver_requests: &watch::Receiver<ReceiverRequestState>,
-        capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+        capture_plans: &SharedCapturePlans,
     ) -> bool {
         if device_io_allowed {
             self.input_dispatcher.resume_zoom();
@@ -532,7 +597,7 @@ async fn drain_for_shutdown(
     state: &mut GestureManagerState,
     event_rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
     receiver_requests: &watch::Receiver<ReceiverRequestState>,
-    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    capture_plans: &SharedCapturePlans,
     channels: &SessionChannels,
 ) {
     let zoom_cleanup = state.input_dispatcher.shutdown_zoom();
@@ -570,8 +635,17 @@ async fn drain_for_shutdown(
         if let Some(_lease) =
             acquire_session_lease(&channels.access.receiver_access, &mut state.lease)
         {
-            retry_pending_restores(&mut state.slots, &channels.access.registry, Instant::now())
-                .await;
+            // Clone before the await. Only this publication can move a stale
+            // handoff onto the route inventory still names, including a device
+            // whose capture plan was withdrawn.
+            let publication = Arc::clone(&capture_plans.borrow());
+            retry_pending_restores(
+                &mut state.slots,
+                &channels.access.registry,
+                Some(&publication),
+                Instant::now(),
+            )
+            .await;
         }
         if state.has_pending_restores() {
             tokio::time::sleep(RETRY_DELAY).await;
@@ -589,7 +663,7 @@ struct GestureManager {
 }
 
 impl CaptureManager for GestureManager {
-    type Published = Arc<Vec<DeviceCapturePlan>>;
+    type Published = Arc<CapturePublication>;
     type Event = SessionEvent;
 
     fn pause_input(&mut self) {

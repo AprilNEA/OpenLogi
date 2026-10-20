@@ -43,20 +43,6 @@ pub(crate) fn battery_charging_no_reading(battery: &BatteryInfo) -> bool {
     is_charging(battery.status) && charge_reading(battery) == ChargeReading::NoReading
 }
 
-/// Whether a discharging battery should draw the user's attention: 20% or
-/// less, or a low or critical level from a device without a percentage.
-pub(crate) fn battery_needs_attention(battery: &BatteryInfo) -> bool {
-    let low = match charge_reading(battery) {
-        ChargeReading::Percent(percentage) => percentage <= 20,
-        ChargeReading::Level(level) => matches!(level, BatteryLevel::Low | BatteryLevel::Critical),
-        ChargeReading::NoReading => false,
-    };
-    low && !matches!(
-        battery.status,
-        BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
-    )
-}
-
 /// A battery readout with presentations sized for each desktop context.
 #[derive(IntoElement)]
 pub(crate) struct BatteryIndicator {
@@ -218,7 +204,7 @@ fn secondary_label(battery: &BatteryInfo) -> Option<gpui::SharedString> {
         BatteryStatus::Full => Some(tr!("device.full")),
         BatteryStatus::Error => Some(tr!("device.battery_error")),
         BatteryStatus::Discharging | BatteryStatus::Unknown => {
-            battery_needs_attention(battery).then(|| tr!("device.low_battery"))
+            battery.needs_attention().then(|| tr!("device.low_battery"))
         }
     };
     label.filter(|label| label.as_ref() != value_label(battery))
@@ -251,7 +237,7 @@ fn summary_label(battery: &BatteryInfo) -> gpui::SharedString {
         BatteryStatus::Full => tr!("device.full"),
         BatteryStatus::Error => tr!("device.battery_error"),
         BatteryStatus::Discharging | BatteryStatus::Unknown => {
-            if battery_needs_attention(battery) {
+            if battery.needs_attention() {
                 tr!("device.low_battery")
             } else {
                 tr!("device.battery")
@@ -284,7 +270,7 @@ fn battery_tone(battery: &BatteryInfo) -> BatteryTone {
         BatteryStatus::Discharging | BatteryStatus::Unknown => {
             if battery.level == BatteryLevel::Critical {
                 BatteryTone::Critical
-            } else if battery_needs_attention(battery) {
+            } else if battery.needs_attention() {
                 BatteryTone::Low
             } else {
                 BatteryTone::Normal
@@ -664,24 +650,11 @@ mod tests {
     }
 
     #[test]
-    fn a_level_only_battery_is_flagged_by_its_level() {
-        for (level, expected) in [
-            (BatteryLevel::Critical, true),
-            (BatteryLevel::Low, true),
-            (BatteryLevel::Good, false),
-            (BatteryLevel::Full, false),
-            (BatteryLevel::Unknown, false),
-        ] {
-            assert_eq!(
-                battery_needs_attention(&level_only(level, BatteryStatus::Discharging)),
-                expected,
-                "{level:?}"
-            );
-        }
-        assert!(!battery_needs_attention(&level_only(
-            BatteryLevel::Critical,
-            BatteryStatus::Charging
-        )));
+    fn a_level_only_battery_is_toned_by_its_level() {
+        assert_eq!(
+            battery_tone(&level_only(BatteryLevel::Critical, BatteryStatus::Charging)),
+            BatteryTone::Charging
+        );
         assert_eq!(
             battery_tone(&level_only(
                 BatteryLevel::Critical,

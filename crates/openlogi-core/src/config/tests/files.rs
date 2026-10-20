@@ -107,6 +107,50 @@ fn config_backups_rotate_between_generations() {
     );
 }
 
+/// v8 adds wheel-hold bindings. A v7 file holds none, so it loads with its
+/// bindings unchanged, and a wheel hold saved into it stamps the file with the
+/// current schema and survives the reload.
+#[test]
+fn a_v7_file_loads_unchanged_and_a_wheel_hold_saves_at_the_current_schema() {
+    use crate::binding::{LongPressBinding, WheelHoldBinding};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 7\n\n[devices.2b042.bindings]\n\
+         Back = \"BrowserBack\"\n\
+         DpiToggle = { short = \"Copy\", long = \"Paste\" }\n",
+    )
+    .expect("write v7 config");
+    let mut cfg = Config::load_from_path(&path).expect("a v7 file loads");
+    let bindings = cfg.stored_bindings("2b042");
+    assert_eq!(
+        bindings.get(&ButtonId::Back),
+        Some(&Binding::Single(Action::BrowserBack))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::DpiToggle),
+        Some(&Binding::LongPress(LongPressBinding::new(
+            Action::Copy,
+            Action::Paste
+        )))
+    );
+
+    let wheel_hold = Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::BrowserBack));
+    cfg.set_binding("2b042", ButtonId::Back, wheel_hold.clone());
+    cfg.save_to_path(&path).expect("save");
+    let body = fs::read_to_string(&path).expect("read saved config");
+    assert!(
+        body.contains(&format!("schema_version = {SCHEMA_VERSION}")),
+        "got: {body}"
+    );
+    let reloaded = Config::load_from_path(&path).expect("a current file loads");
+    assert_eq!(
+        reloaded.stored_bindings("2b042").get(&ButtonId::Back),
+        Some(&wheel_hold)
+    );
+}
+
 #[test]
 fn missing_file_yields_default() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -467,4 +511,26 @@ fn symlink_resolution_follows_the_full_hop_limit() {
         super::resolve_symlinks(&link(41)).is_err(),
         "41 hops exceeds the limit"
     );
+}
+
+/// A reader of a save agrees with its writer on the revision, and an edit
+/// after the save changes it.
+#[test]
+fn a_saved_file_reads_back_at_the_revision_of_its_save() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let (mut config, mut writer) = ConfigFile::load_from_path(&path).expect("a missing file loads");
+    assert_eq!(writer.revision(), ConfigRevision::of(""));
+    config.selected_device = Some("saved".to_string());
+    writer.save(&config).expect("save");
+    assert_ne!(writer.revision(), ConfigRevision::of(""));
+    assert_ne!(writer.revision(), ConfigRevision::default());
+    let (_, reader) = ConfigFile::load_from_path(&path).expect("load the save");
+    assert_eq!(reader.revision(), writer.revision());
+
+    let mut edited = fs::read_to_string(&path).expect("read the save");
+    edited.push_str("# a hand edit\n");
+    fs::write(&path, edited).expect("edit the save");
+    let (_, reader) = ConfigFile::load_from_path(&path).expect("load the edit");
+    assert_ne!(reader.revision(), writer.revision());
 }

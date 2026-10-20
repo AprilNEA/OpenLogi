@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::binding::ButtonId;
 use crate::color::Rgb;
+use crate::device::ChangedOnLight;
 use crate::hid::{SmartShiftAutoDisengage, SmartShiftThreshold, TunableTorque};
 
 /// Light/dark appearance preference. `System` follows the OS appearance (the
@@ -282,6 +283,19 @@ pub struct AppSettings {
     /// unidentified pointer targets use focus.
     #[serde(default)]
     pub mouse_profile_target: MouseProfileTarget,
+    /// Whether the overlay shows a notice when a device's battery runs low.
+    /// **On by default**, as in Logi Options+. A device announces itself once
+    /// per discharge and again only after it has been charged; see
+    /// [`BatteryInfo::needs_attention`](crate::device::BatteryInfo::needs_attention)
+    /// for what counts as low.
+    #[serde(default = "default_true")]
+    pub low_battery_notifications: bool,
+    /// Whether the overlay briefly shows a lock key a keyboard turned on or
+    /// off. **On by default.** Caps Lock shows on every platform; Num Lock
+    /// and Scroll Lock do not show on macOS, as in Logi Options+ (see
+    /// [`LockKey::is_indicated_here`](crate::device::LockKey::is_indicated_here)).
+    #[serde(default = "default_true")]
+    pub lock_key_notifications: bool,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -484,14 +498,17 @@ impl Default for AppSettings {
             theme_dark: None,
             ui_radius: None,
             mouse_profile_target: MouseProfileTarget::Pointer,
+            low_battery_notifications: true,
+            lock_key_notifications: true,
         }
     }
 }
 
 /// serde default for the on-by-default [`AppSettings`] toggles
 /// ([`AppSettings::show_in_menu_bar`], [`AppSettings::capture_mouse_events`],
-/// [`AppSettings::auto_download_assets`]), so configs predating a field keep the
-/// out-of-the-box behavior.
+/// [`AppSettings::auto_download_assets`],
+/// [`AppSettings::low_battery_notifications`]), so configs predating a field
+/// keep the out-of-the-box behavior.
 fn default_true() -> bool {
     true
 }
@@ -580,6 +597,19 @@ impl LightSettings {
             brightness_percent: brightness_percent.min(100),
             temperature_kelvin,
             color: None,
+        }
+    }
+
+    /// Take the values changed on the light itself in place of these.
+    pub fn apply_changes_on_light(&mut self, changed: ChangedOnLight) {
+        if let Some(enabled) = changed.enabled {
+            self.enabled = enabled;
+        }
+        if let Some(percent) = changed.brightness_percent {
+            self.brightness_percent = percent;
+        }
+        if let Some(kelvin) = changed.temperature_kelvin {
+            self.temperature_kelvin = Some(kelvin);
         }
     }
 }

@@ -175,6 +175,39 @@ pub enum WriteError {
         /// The raw status byte the device reported.
         status: u8,
     },
+    /// A rename of an Easy-Switch slot's computer on a device whose `0x1815`
+    /// capabilities leave renaming out.
+    ///
+    /// Nothing was written.
+    #[error("the device does not let software rename its Easy-Switch hosts")]
+    HostRenameUnsupported,
+    /// A rename of an Easy-Switch slot that has no computer paired, or that
+    /// the device does not have.
+    ///
+    /// Nothing was written.
+    #[error("Easy-Switch channel {} has no paired computer", u16::from(*slot) + 1)]
+    HostSlotEmpty {
+        /// The zero-based slot index asked for.
+        slot: u8,
+    },
+    /// A host name that is empty, holds a NUL, or is longer than the slot
+    /// stores.
+    ///
+    /// Nothing was written.
+    #[error("a host name must be 1 to {max_len} bytes of UTF-8 without NUL")]
+    HostNameRejected {
+        /// The longest name, in UTF-8 bytes, the slot stores.
+        max_len: u8,
+    },
+    /// The device acknowledged a host-name write but reads back another
+    /// name.
+    #[error("device reports host name {actual:?} after a write of {requested:?}")]
+    HostNameNotApplied {
+        /// The name that was written.
+        requested: String,
+        /// The name the device reports afterwards, if any.
+        actual: Option<String>,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -231,6 +264,12 @@ pub enum HidppOperation {
     /// Write the `0x8060` / `0x8061` report rate. Appended last — variant
     /// order is wire format.
     WriteReportRate,
+    /// Read the `0x1815` Easy-Switch host slots, their names and OS.
+    /// Appended last — variant order is wire format.
+    ReadHosts,
+    /// Write an Easy-Switch slot's `0x1815` host name. Appended last —
+    /// variant order is wire format.
+    RenameHost,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.
