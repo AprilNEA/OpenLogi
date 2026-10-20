@@ -34,6 +34,7 @@ use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
 
 use crate::capture_plan::SharedCapturePlans;
+use crate::pointer_speed::SpeedTarget;
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
@@ -745,14 +746,16 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on:
     );
 }
 
-/// Spawn an OS thread that writes a pointer speed to `op`'s mouse via
-/// [`openlogi_hid::set_pointer_speed_on`], unless a newer pointer-speed write
+/// Spawn an OS thread that writes `target` to `op`'s mouse, a `0x2205` speed
+/// via [`openlogi_hid::set_pointer_speed_on`] or a DPI via
+/// [`openlogi_hid::set_dpi_target_on`], unless a newer pointer-speed write
 /// for the mouse was requested after `ticket`. Returns immediately; failures
-/// are logged. `on_applied` runs only when the mouse took the write.
+/// are logged. `on_applied` runs only when the mouse took the write, or when
+/// it reports no default DPI to write.
 pub(crate) fn write_pointer_speed_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
-    speed: PointerSpeed,
+    target: SpeedTarget,
     on_applied: impl FnOnce() + Send + 'static,
 ) {
     let index = op.route.device_index();
@@ -765,25 +768,53 @@ pub(crate) fn write_pointer_speed_in_background(
                 &turn,
                 || async {
                     let shared = op.resolve()?;
-                    openlogi_hid::set_pointer_speed_on(&shared, speed)
-                        .await
-                        .map(Some)
+                    let landed = match target {
+                        SpeedTarget::Scaled(speed) => openlogi_hid::set_pointer_speed_on(&shared, speed)
+                            .await
+                            .map(Landed::Speed)?,
+                        SpeedTarget::Dpi(dpi) => openlogi_hid::set_dpi_target_on(&shared, dpi)
+                            .await?
+                            .map_or(Landed::NoDefaultDpi, Landed::Dpi),
+                    };
+                    Ok(Some(landed))
                 },
                 || async { Ok(None) },
             )
             .await
         },
         move |result| {
-            log_outcome(index, "pointer-speed write", result, |applied| {
-                if let Some(applied) = applied {
-                    debug!(index, %speed, %applied, "pointer speed written");
+            log_outcome(index, "pointer-speed write", result, |landed| match landed {
+                Some(Landed::Speed(applied)) => {
+                    debug!(index, ?target, %applied, "pointer speed written");
                     on_applied();
-                } else {
-                    debug!(index, %speed, "pointer-speed write superseded by a newer one");
                 }
+                Some(Landed::Dpi(dpi)) => {
+                    debug!(index, ?target, %dpi, "pointer-speed DPI written");
+                    on_applied();
+                }
+                Some(Landed::NoDefaultDpi) => {
+                    // Nothing to write, so nothing to retry at a reconnect:
+                    // the mouse stays at its DPI until one is set.
+                    warn!(
+                        index,
+                        "mouse reports no default DPI — DPI left as it is; set a DPI to leave the lowest one"
+                    );
+                    on_applied();
+                }
+                None => debug!(index, ?target, "pointer-speed write superseded by a newer one"),
             });
         },
     );
+}
+
+/// What a pointer-speed write that reached the mouse did.
+enum Landed {
+    /// The mouse applied this `0x2205` speed.
+    Speed(PointerSpeed),
+    /// The mouse applied this DPI.
+    Dpi(Dpi),
+    /// The write asked for the default DPI, and the mouse reports none.
+    NoDefaultDpi,
 }
 
 /// The devices, by config key, whose "keep OS layout" is in effect as of the
@@ -1239,21 +1270,6 @@ fn log_wheel_result(
     log_outcome(index, "wheel mode write", result, |_written| {
         debug!(index, ?change, "native wheel mode written");
     });
-}
-
-/// Spawn an OS thread that writes `dpi` to `op`'s device via its current
-/// shared channel. Returns immediately; failures are logged.
-pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
-    let index = op.route.device_index();
-    op.spawn_write(
-        "DPI write",
-        move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
-        move |result| {
-            log_outcome(index, "DPI write", result, |()| {
-                debug!(index, %dpi, "DPI written to device");
-            });
-        },
-    );
 }
 
 /// Spawn an OS thread that reconciles the configured native HiResWheel mode

@@ -36,7 +36,8 @@ pub use diagnostics::{
     dump_firmware_entities, dump_reprog_controls, read_battery_raw,
 };
 pub use dpi::{
-    Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
+    Dpi, DpiCapabilities, DpiInfo, DpiTarget, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi,
+    set_dpi_on, set_dpi_target_on,
 };
 pub(crate) use easy_switch::read_name as read_host_friendly_name;
 pub use easy_switch::{

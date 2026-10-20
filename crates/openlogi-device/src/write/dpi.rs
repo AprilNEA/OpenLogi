@@ -93,6 +93,21 @@ impl DpiFeature {
         }
     }
 
+    /// [`SENSOR`]'s default DPI, or `None` when the device reports none.
+    async fn default_dpi(&self) -> Result<Option<Dpi>, Hidpp20Error> {
+        let default = match self {
+            Self::Adjustable(feature) => feature.get_sensor_default_dpi(SENSOR).await?,
+            Self::Extended(feature) => {
+                let dpi = feature
+                    .get_sensor_dpi_parameters(SENSOR)
+                    .await?
+                    .default_dpi_x;
+                (dpi != 0).then_some(dpi)
+            }
+        };
+        Ok(default.map(Dpi::from))
+    }
+
     /// Every DPI value [`SENSOR`] accepts, as a flat list.
     async fn supported_dpi(&self) -> Result<Vec<u16>, Hidpp20Error> {
         match self {
@@ -262,6 +277,19 @@ pub(super) async fn get_dpi_info_on_channel(
     })
 }
 
+/// A DPI to write, resolved against what sensor 0 reports when the write
+/// runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DpiTarget {
+    /// This DPI. The write fails when the sensor does not list it.
+    Value(Dpi),
+    /// The lowest DPI the sensor lists.
+    Lowest,
+    /// The sensor's default DPI, or the listed DPI nearest to it. Nothing is
+    /// written when the sensor reports no default.
+    Default,
+}
+
 /// Set sensor 0's DPI for the device addressed by `route`.
 pub async fn set_dpi(
     backend: &dyn HidBackend,
@@ -288,6 +316,19 @@ pub(super) async fn set_dpi_on_channel(
     index: u8,
     dpi: Dpi,
 ) -> Result<(), WriteError> {
+    set_dpi_target_on_channel(channel, index, DpiTarget::Value(dpi))
+        .await
+        .map(|_| ())
+}
+
+/// The DPI write behind [`set_dpi_on_channel`] and [`set_dpi_target_on`]:
+/// resolve `target` against the sensor, write it and return the DPI written,
+/// or `None` when [`DpiTarget::Default`] finds no default.
+async fn set_dpi_target_on_channel(
+    channel: &Arc<hidpp::channel::HidppChannel>,
+    index: u8,
+    target: DpiTarget,
+) -> Result<Option<Dpi>, WriteError> {
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
@@ -300,6 +341,17 @@ pub(super) async fn set_dpi_on_channel(
     // DPI may clamp it, ignore it or reject it, none of which the caller asked
     // for.
     let supported = DpiCapabilities::new(feature.supported_dpi().await.map_err(write_error)?)?;
+    let dpi = match target {
+        DpiTarget::Value(dpi) => dpi,
+        DpiTarget::Lowest => supported.min(),
+        DpiTarget::Default => {
+            let Some(default) = feature.default_dpi().await.map_err(write_error)? else {
+                debug!(index, "sensor reports no default DPI — nothing written");
+                return Ok(None);
+            };
+            supported.nearest(default)
+        }
+    };
     if !supported.contains(dpi) {
         return Err(WriteError::DpiUnsupported { requested: dpi });
     }
@@ -313,11 +365,11 @@ pub(super) async fn set_dpi_on_channel(
     // A failed read-back leaves the acknowledged write standing.
     let Ok(actual) = feature.current_dpi().await else {
         debug!(index, %dpi, "wrote DPI (read-back skipped)");
-        return Ok(());
+        return Ok(Some(dpi));
     };
     if actual == dpi {
         debug!(index, %dpi, "wrote DPI (verified)");
-        return Ok(());
+        return Ok(Some(dpi));
     }
     feature.set_dpi(dpi).await.map_err(write_error)?;
     match feature.current_dpi().await {
@@ -329,7 +381,7 @@ pub(super) async fn set_dpi_on_channel(
                 "DPI write landed on retry — first write was ACKed but dropped \
                  (device likely mid link re-establishment)"
             );
-            Ok(())
+            Ok(Some(dpi))
         }
         Ok(retried) => Err(WriteError::DpiNotApplied {
             requested: dpi,
@@ -337,7 +389,7 @@ pub(super) async fn set_dpi_on_channel(
         }),
         Err(_) => {
             debug!(index, %dpi, "re-wrote DPI (read-back skipped)");
-            Ok(())
+            Ok(Some(dpi))
         }
     }
 }
@@ -346,6 +398,16 @@ pub(super) async fn set_dpi_on_channel(
 /// enumeration and channel setup.
 pub async fn set_dpi_on(shared: &SharedChannel, dpi: Dpi) -> Result<(), WriteError> {
     set_dpi_on_channel(shared.channel(), shared.device_index(), dpi).await
+}
+
+/// Write `target` to sensor 0 on an already-open [`SharedChannel`] and return
+/// the DPI written, or `None` when [`DpiTarget::Default`] finds no default.
+/// Resolving and writing in one call keeps both on one transport turn.
+pub async fn set_dpi_target_on(
+    shared: &SharedChannel,
+    target: DpiTarget,
+) -> Result<Option<Dpi>, WriteError> {
+    set_dpi_target_on_channel(shared.channel(), shared.device_index(), target).await
 }
 
 /// Read current DPI and supported values on an already-open [`SharedChannel`].

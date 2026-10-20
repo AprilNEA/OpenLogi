@@ -260,18 +260,27 @@ under a profile. The desktop app does not create aliases; write them here.
 Action names are the serialized Rust variant names, including `Copy`,
 `BrowserBack`, `PlayPause`, `CycleDpiPresets`, and `ShowActionsRing`.
 
-`TogglePrecisionMode` switches a mouse that has `0x2205` between its
-`pointer_speed` (1× when none is saved) and the slowest speed, 0.125×.
-`CycleDpiPresets` does the same on such a mouse, because the mouse has no
-adjustable DPI; DPI presets saved for it are ignored. This makes the MX Ergo's
-precision button work with its default binding, as in Logi Options+. Precision
-mode stays on when the mouse reconnects. It ends at the next press, at a speed
-change from the desktop app or `config.toml`, and at a binding change for that
-mouse. A change made while the mouse is offline also ends it, and the mouse
-reconnects at its `pointer_speed`, or at 1× when none is saved. After an agent
-restart, precision mode is off. A mouse with a saved `pointer_speed` gets that
-speed when the agent connects to it. A mouse without one keeps the slowest
-speed until precision mode is switched on and off again.
+`TogglePrecisionMode` switches a mouse between its saved speed and its
+slowest speed, as in Logi Options+:
+
+| Mouse | Slowest speed | Saved speed | When none is saved |
+| --- | --- | --- | --- |
+| Has `0x2205` and no adjustable DPI, such as the MX Ergo | 0.125× | `pointer_speed` | 1× |
+| Has adjustable DPI (`0x2201` / `0x2202`) | The lowest DPI the sensor lists | `dpi` | The sensor's default DPI |
+
+`CycleDpiPresets` also switches precision mode on a `0x2205` mouse, because
+that mouse has no adjustable DPI; DPI presets saved for it are ignored. This
+makes the MX Ergo's precision button work with its default binding. On a mouse
+with adjustable DPI, `CycleDpiPresets` keeps cycling the DPI presets.
+
+Precision mode stays on when the mouse reconnects. It ends at the next press,
+at a speed or DPI change from the desktop app or `config.toml`, and at a
+binding change for that mouse. On a mouse with adjustable DPI, a DPI preset
+action also ends it. A change made while the mouse is offline also ends it,
+and the mouse reconnects at its saved speed, or at the speed for none saved.
+After an agent restart, precision mode is off. A mouse with a saved speed gets
+that speed when the agent connects to it. A mouse without one keeps the
+slowest speed until precision mode is switched on and off again.
 Payload actions use a one-key inline table:
 
 ```toml

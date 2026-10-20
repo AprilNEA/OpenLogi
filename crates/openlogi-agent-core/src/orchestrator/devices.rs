@@ -8,10 +8,11 @@ use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_hid::session::gesture::MainWheelDivert;
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, LeadCookie, PointerSpeed, ReportRate};
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, LeadCookie, ReportRate};
 
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
+use crate::pointer_speed::SavedSpeed;
 use crate::watchers::host_switch::HostSwitchLink;
 
 /// Resolve the two independently-gated HiResWheel settings for one device
@@ -109,17 +110,29 @@ pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Opti
         .flatten()
 }
 
-/// Whether `dev` is a mouse whose speed HID++ `0x2205` scales.
-pub(super) fn scales_pointer(dev: &AgentDevice) -> bool {
-    dev.capabilities.is_some_and(|caps| caps.pointer_scaling)
+/// How precision mode sets `dev`'s speed, with the value saved for it, or
+/// `None` when OpenLogi does not set its speed. A mouse with sensor DPI is a
+/// DPI mouse; [`Capabilities::pointer_scaling`] is never set on one.
+///
+/// [`Capabilities::pointer_scaling`]: openlogi_core::device::Capabilities::pointer_scaling
+pub(super) fn saved_speed(config: &Config, dev: &AgentDevice) -> Option<SavedSpeed> {
+    let caps = dev.capabilities?;
+    if caps.pointer {
+        Some(SavedSpeed::Dpi(configured_dpi(config, dev)))
+    } else if caps.pointer_scaling {
+        Some(SavedSpeed::Scaled(config.pointer_speed(&dev.config_key)))
+    } else {
+        None
+    }
 }
 
-/// The saved pointer speed to push to `dev`: only to a mouse whose speed
-/// `0x2205` scales, as for [`configured_report_rate`].
-pub(super) fn configured_pointer_speed(config: &Config, dev: &AgentDevice) -> Option<PointerSpeed> {
-    scales_pointer(dev)
-        .then(|| config.pointer_speed(&dev.config_key))
-        .flatten()
+/// The DPI saved for `dev` on its current link: what the volatile reapply
+/// writes.
+pub(super) fn configured_dpi(config: &Config, dev: &AgentDevice) -> Option<Dpi> {
+    config
+        .devices
+        .get(dev.config_key.as_str())
+        .and_then(|device| device.effective_dpi(&stable_id(dev).route_key()))
 }
 
 /// Whether the button assignments of the device `key` names differ between

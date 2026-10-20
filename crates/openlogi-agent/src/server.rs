@@ -178,12 +178,7 @@ impl Agent for AgentServer {
     }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::WriteDpi, |c| async move {
-                openlogi_hid::set_dpi_on(&c, dpi).await
-            })
-            .await
+        self.shared.set_dpi(&route, dpi).await
     }
 
     async fn set_lighting(

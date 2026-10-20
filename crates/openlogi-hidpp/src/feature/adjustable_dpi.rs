@@ -60,6 +60,27 @@ impl AdjustableDpiFeature {
         Ok(u16::from_be_bytes([payload[1], payload[2]]))
     }
 
+    /// Retrieves the default DPI of `sensor_index`, or `None` when the device
+    /// reports none.
+    ///
+    /// `getSensorDpi` carries the default after the current DPI, in bytes 3
+    /// and 4. Logi Options+ reads it there
+    /// (`devio::Feature2201AdjustableDPI::GetDefaultDPI`) and reads a reply
+    /// too short to carry it as 0, so 0 means the firmware reports no
+    /// default.
+    pub async fn get_sensor_default_dpi(
+        &self,
+        sensor_index: u8,
+    ) -> Result<Option<u16>, Hidpp20Error> {
+        let payload = self
+            .endpoint
+            .call(2, [sensor_index, 0x00, 0x00])
+            .await?
+            .extend_payload();
+        let default = u16::from_be_bytes([payload[3], payload[4]]);
+        Ok((default != 0).then_some(default))
+    }
+
     /// Sets the DPI for `sensor_index`.
     pub async fn set_sensor_dpi(&self, sensor_index: u8, dpi: u16) -> Result<(), Hidpp20Error> {
         let [dpi_hi, dpi_lo] = dpi.to_be_bytes();
@@ -187,6 +208,30 @@ mod tests {
             dpi_list_reply(0),
         );
         assert_matches!(list, Err(Hidpp20Error::UnsupportedResponse));
+    }
+
+    #[test]
+    fn default_dpi_read_takes_bytes_three_and_four() {
+        let mut reply = [0; 16];
+        reply[1..5].copy_from_slice(&[0x06, 0x40, 0x03, 0xe8]);
+        let dpi = answer(
+            2,
+            |dpi| async move { dpi.get_sensor_default_dpi(0).await },
+            reply,
+        );
+        assert_matches!(dpi, Ok(Some(1000)));
+    }
+
+    #[test]
+    fn a_zero_default_dpi_reads_as_none() {
+        let mut reply = [0; 16];
+        reply[1..3].copy_from_slice(&1600u16.to_be_bytes());
+        let dpi = answer(
+            2,
+            |dpi| async move { dpi.get_sensor_default_dpi(0).await },
+            reply,
+        );
+        assert_matches!(dpi, Ok(None));
     }
 
     #[test]

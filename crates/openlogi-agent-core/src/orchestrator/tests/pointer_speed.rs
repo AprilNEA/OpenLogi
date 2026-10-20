@@ -2,9 +2,11 @@
 //! mice get the saved speed, and which reloads end precision mode.
 
 use openlogi_core::hid::PointerSpeed;
+use openlogi_hid::DpiTarget;
 
-use super::super::{assignments_changed, configured_pointer_speed};
+use super::super::{assignments_changed, saved_speed};
 use super::*;
+use crate::pointer_speed::{PrecisionPress, SavedSpeed, SpeedTarget};
 
 fn speed(raw: u16) -> PointerSpeed {
     PointerSpeed::try_new(raw).expect("a speed in range")
@@ -20,36 +22,67 @@ fn scaled_mouse() -> AgentDevice {
     device
 }
 
+/// An online mouse `a` whose sensor DPI sets its speed.
+fn dpi_mouse() -> AgentDevice {
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        pointer: true,
+        ..Capabilities::default()
+    });
+    device
+}
+
 /// An orchestrator with [`scaled_mouse`] online, its precision mode on.
 fn orchestrator_in_precision(config: Config) -> Orchestrator {
+    orchestrator_with_precision_on(config, scaled_mouse())
+}
+
+/// An orchestrator with `mouse` online as `a`, its precision mode on.
+fn orchestrator_with_precision_on(config: Config, mouse: AgentDevice) -> Orchestrator {
     let mut orch = orchestrator(config);
-    orch.devices = vec![scaled_mouse()];
+    orch.devices = vec![mouse];
     orch.publish_device_runtime();
     let (on, _) = orch
         .shared
         .pointer_speeds
-        .toggle_precision(Some("a"))
-        .expect("an online scaled mouse");
+        .toggle_precision(Some("a"), PrecisionPress::Assigned)
+        .expect("an online mouse whose speed OpenLogi sets");
     assert!(on);
     orch
 }
 
 #[test]
-fn configured_pointer_speed_needs_the_feature_and_a_saved_speed() {
+fn saved_speed_follows_the_speed_feature_and_the_saved_value() {
     let mut config = Config::default();
     let mut device = scaled_mouse();
-    // Nothing saved: the mouse keeps its own speed.
-    assert_eq!(configured_pointer_speed(&config, &device), None);
+    assert_eq!(
+        saved_speed(&config, &device),
+        Some(SavedSpeed::Scaled(None))
+    );
     config.set_pointer_speed("a", speed(0x0180));
     assert_eq!(
-        configured_pointer_speed(&config, &device),
-        Some(speed(0x0180))
+        saved_speed(&config, &device),
+        Some(SavedSpeed::Scaled(Some(speed(0x0180))))
     );
-    // A mouse without `0x2205` is never written.
+
+    // Sensor DPI sets the speed of a DPI mouse, even with `0x2205`.
+    device.capabilities = Some(Capabilities {
+        pointer: true,
+        pointer_scaling: true,
+        ..Capabilities::default()
+    });
+    assert_eq!(saved_speed(&config, &device), Some(SavedSpeed::Dpi(None)));
+    config.set_dpi("a", Dpi::new(1600));
+    assert_eq!(
+        saved_speed(&config, &device),
+        Some(SavedSpeed::Dpi(Some(Dpi::new(1600))))
+    );
+
+    // A mouse without either feature, or not yet probed, is never written.
     device.capabilities = Some(Capabilities::default());
-    assert_eq!(configured_pointer_speed(&config, &device), None);
+    assert_eq!(saved_speed(&config, &device), None);
     device.capabilities = None;
-    assert_eq!(configured_pointer_speed(&config, &device), None);
+    assert_eq!(saved_speed(&config, &device), None);
 }
 
 #[test]
@@ -134,9 +167,9 @@ fn a_reload_ends_precision_mode_on_a_mouse_that_is_offline() {
     let write = orch
         .shared
         .pointer_speeds
-        .reapply("a", &route, None)
+        .reapply("a", &route, SavedSpeed::Scaled(None))
         .expect("a write owed to the reconnect");
-    assert_eq!(write.speed, PointerSpeed::DEFAULT);
+    assert_eq!(write.target, SpeedTarget::Scaled(PointerSpeed::DEFAULT));
 }
 
 #[test]
@@ -152,7 +185,7 @@ fn a_reload_with_a_new_speed_ends_precision_mode() {
 }
 
 #[test]
-fn a_mouse_without_pointer_scaling_has_no_precision_mode() {
+fn a_mouse_not_yet_probed_has_no_precision_mode() {
     let mut orch = orchestrator(Config::default());
     orch.devices = vec![dev("a", 1, true)];
     orch.publish_device_runtime();
@@ -160,7 +193,44 @@ fn a_mouse_without_pointer_scaling_has_no_precision_mode() {
     assert!(
         orch.shared
             .pointer_speeds
-            .toggle_precision(Some("a"))
+            .toggle_precision(Some("a"), PrecisionPress::Assigned)
             .is_none()
     );
+}
+
+#[test]
+fn a_reload_with_a_new_dpi_ends_precision_mode_on_a_dpi_mouse() {
+    let config = Config::default();
+    let mut orch = orchestrator_with_precision_on(config.clone(), dpi_mouse());
+
+    let mut faster = config;
+    faster.set_dpi("a", Dpi::new(1600));
+    orch.replace_config(faster);
+
+    assert!(!orch.shared.pointer_speeds.precision("a"));
+}
+
+#[test]
+fn an_offline_dpi_mouse_whose_mode_a_reload_ends_reconnects_at_its_default_dpi() {
+    let config = Config::default();
+    let mut orch = orchestrator_with_precision_on(config.clone(), dpi_mouse());
+    orch.devices[0].online = false;
+    orch.publish_device_runtime();
+
+    let mut rebound = config;
+    rebound.set_binding(
+        "a",
+        ButtonId::Back,
+        Binding::Single(Action::PreviousDesktop),
+    );
+    orch.replace_config(rebound);
+
+    assert!(!orch.shared.pointer_speeds.precision("a"));
+    let route = orch.devices[0].route.clone().expect("a route");
+    let write = orch
+        .shared
+        .pointer_speeds
+        .reapply("a", &route, SavedSpeed::Dpi(None))
+        .expect("a write owed to the reconnect");
+    assert_eq!(write.target, SpeedTarget::Dpi(DpiTarget::Default));
 }

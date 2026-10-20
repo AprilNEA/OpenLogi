@@ -207,12 +207,16 @@ pub enum Action {
     /// [`Action::HoldShortcut`].
     TapKeyHoldingModifiers(KeyCombo),
     /// Turn precision mode on or off, as the precision button of an MX Ergo
-    /// does in Logi Options+: on, the mouse moves at the slowest
-    /// [`PointerSpeed`](crate::hid::PointerSpeed); off, it returns to its
-    /// saved speed, or to 1× when none is saved. Acts on a mouse whose speed
-    /// is set by HID++ `0x2205` scaling
+    /// does in Logi Options+: on, the mouse moves at its slowest speed; off,
+    /// it returns to its saved speed. On a mouse whose speed HID++ `0x2205`
+    /// scales
     /// ([`Capabilities::pointer_scaling`](crate::device::Capabilities::pointer_scaling))
-    /// and does nothing on others.
+    /// the slowest speed is the slowest
+    /// [`PointerSpeed`](crate::hid::PointerSpeed), and with none saved the
+    /// mouse returns to 1×. On a mouse with adjustable DPI
+    /// ([`Capabilities::pointer`](crate::device::Capabilities::pointer)) it
+    /// is the lowest DPI the sensor lists, and with none saved the mouse
+    /// returns to the sensor's default DPI. Does nothing on other devices.
     TogglePrecisionMode,
 }
 

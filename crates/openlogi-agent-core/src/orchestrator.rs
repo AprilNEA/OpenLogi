@@ -27,8 +27,8 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, PointerSpeed,
-    ReportRate, ReportRateInfo, WriteError, commands_for_light_settings,
+    DeviceIoGate, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, HidppOperation, HostOs,
+    PointerSpeed, ReportRate, ReportRateInfo, WriteError, commands_for_light_settings,
     is_reserved_keyboard_control,
 };
 #[cfg(test)]
@@ -47,7 +47,7 @@ use crate::hardware::{
 };
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
-use crate::pointer_speed::{ReloadChange, ScaledMouse, SpeedWrite};
+use crate::pointer_speed::{ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
@@ -67,10 +67,10 @@ use devices::reapply_targets;
 use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, assignments_changed,
-    build_devices, changed_follower_cookies, config_keeps_os_layout, configured_pointer_speed,
+    build_devices, changed_follower_cookies, config_keeps_os_layout, configured_dpi,
     configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
     keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
-    plan_reapply, reconnect_follower_cookies, scales_pointer, settings_moved, stable_id,
+    plan_reapply, reconnect_follower_cookies, saved_speed, settings_moved, stable_id,
     wheel_inverted,
 };
 
@@ -289,13 +289,34 @@ impl SharedHandles {
         route: &DeviceRoute,
         speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError> {
-        let ticket = self.pointer_speeds.app_write(route, speed);
+        let ticket = self
+            .pointer_speeds
+            .app_write(route, SavedSpeed::Scaled(Some(speed)));
         self.device(route)
             .run_in_turn(
                 HidppOperation::WritePointerScaling,
                 &ticket,
                 |c| async move { openlogi_hid::set_pointer_speed_on(&c, speed).await },
                 |c| async move { openlogi_hid::get_pointer_speed_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write `dpi` to the mouse at `route`. On a DPI mouse the write ends
+    /// precision mode, so the pointer moves at the DPI the settings app
+    /// shows, and it is ordered with the precision button, the DPI preset
+    /// actions and the reconnect reapply. A write superseded before its turn
+    /// writes nothing.
+    pub async fn set_dpi(&self, route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
+        let ticket = self
+            .pointer_speeds
+            .app_write(route, SavedSpeed::Dpi(Some(dpi)));
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteDpi,
+                &ticket,
+                |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
+                |_| async { Ok(()) },
             )
             .await
     }
@@ -809,27 +830,25 @@ impl Orchestrator {
         guard.by_key = by_key;
     }
 
-    /// Publish every online, enabled mouse whose speed `0x2205` scales, for
+    /// Publish every online, enabled mouse whose speed OpenLogi sets, for
     /// the precision button. The precision mode of each mouse is kept.
     fn publish_pointer_speeds(&self, selected: Option<&str>) {
         self.shared
             .pointer_speeds
-            .publish(selected, self.scaled_mice());
+            .publish(selected, self.speed_mice());
     }
 
-    /// Every online, enabled mouse whose speed `0x2205` scales, with its
-    /// saved speed.
-    fn scaled_mice(&self) -> impl Iterator<Item = ScaledMouse> + '_ {
+    /// Every online, enabled mouse whose speed OpenLogi sets, with how it
+    /// sets it and the value saved for it.
+    fn speed_mice(&self) -> impl Iterator<Item = SpeedMouse> + '_ {
         self.devices
             .iter()
-            .filter(|dev| {
-                dev.online && scales_pointer(dev) && self.config.device_enabled(&dev.config_key)
-            })
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
             .filter_map(|dev| {
-                Some(ScaledMouse {
+                Some(SpeedMouse {
                     key: dev.config_key.clone(),
                     route: dev.route.clone()?,
-                    saved: configured_pointer_speed(&self.config, dev),
+                    saved: saved_speed(&self.config, dev)?,
                 })
             })
     }
@@ -1113,9 +1132,17 @@ impl Orchestrator {
         let key = &dev.config_key;
         let route_key = stable_id(dev).route_key();
         let device = self.config.devices.get(key.as_str());
+        let saved = saved_speed(&self.config, dev);
+        let speed_write =
+            saved.and_then(|saved| self.shared.pointer_speeds.reapply(key, &route, saved));
+        // While precision mode sets a DPI mouse's DPI, or a restore is owed,
+        // that write replaces the saved DPI.
+        let dpi_overridden = matches!(saved, Some(SavedSpeed::Dpi(_))) && speed_write.is_some();
         let settings = VolatileMouseSettings {
             wheel: self.wheel_mode_change(dev),
-            dpi: device.and_then(|d| d.effective_dpi(&route_key)),
+            dpi: device
+                .and_then(|d| d.effective_dpi(&route_key))
+                .filter(|_| !dpi_overridden),
             report_rate: configured_report_rate(&self.config, dev),
             smartshift: device
                 .and_then(|d| d.effective_smartshift(&route_key))
@@ -1138,13 +1165,7 @@ impl Orchestrator {
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
-        if scales_pointer(dev)
-            && let Some(write) = self.shared.pointer_speeds.reapply(
-                key,
-                &route,
-                configured_pointer_speed(&self.config, dev),
-            )
-        {
+        if let Some(write) = speed_write {
             self.write_pointer_speed(write);
         }
         self.keep_os_layout(dev);
@@ -1595,20 +1616,25 @@ impl Orchestrator {
         }
     }
 
-    /// End precision mode on every mouse whose speed or button assignments
-    /// the reload changed, online or not, and push the resulting speed to
-    /// the online ones (see [`crate::pointer_speed`]). An unrelated save
-    /// writes nothing, as for [`Self::apply_changed_fn_locks`].
+    /// End precision mode on every mouse whose speed, DPI or button
+    /// assignments the reload changed, online or not, and push the resulting
+    /// speed to the online ones (see [`crate::pointer_speed`]). An unrelated
+    /// save writes nothing, as for [`Self::apply_changed_fn_locks`].
     fn apply_changed_pointer_speeds(&self, previous: &Config) {
+        // A DPI is saved per link, so it is compared for the link each known
+        // mouse is on.
+        let dpi_changed: HashSet<&str> = self
+            .devices
+            .iter()
+            .filter(|dev| configured_dpi(previous, dev) != configured_dpi(&self.config, dev))
+            .map(|dev| dev.config_key.as_str())
+            .collect();
         let change = |key: &str| ReloadChange {
-            speed: self.config.pointer_speed(key) != previous.pointer_speed(key),
+            speed: self.config.pointer_speed(key) != previous.pointer_speed(key)
+                || dpi_changed.contains(key),
             assignments: assignments_changed(previous, &self.config, key),
         };
-        for write in self
-            .shared
-            .pointer_speeds
-            .reload(change, self.scaled_mice())
-        {
+        for write in self.shared.pointer_speeds.reload(change, self.speed_mice()) {
             self.write_pointer_speed(write);
         }
     }
@@ -1616,12 +1642,12 @@ impl Orchestrator {
     fn write_pointer_speed(&self, write: SpeedWrite) {
         let SpeedWrite {
             route,
-            speed,
+            target,
             ticket,
             restore,
         } = write;
         let speeds = Arc::clone(&self.shared.pointer_speeds);
-        write_pointer_speed_in_background(self.shared.device(&route), ticket, speed, move || {
+        write_pointer_speed_in_background(self.shared.device(&route), ticket, target, move || {
             if let Some(restore) = restore {
                 speeds.restored(&restore);
             }
