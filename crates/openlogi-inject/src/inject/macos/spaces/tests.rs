@@ -234,6 +234,21 @@ fn an_instant_switch_keeps_its_two_frames() {
 }
 
 #[test]
+fn the_host_choice_decides_how_the_next_switch_posts() {
+    // A switch reads the choice when it starts. No other test reads or sets
+    // it, so this test may change it, and it ends on the default.
+    assert_eq!(
+        desktop_switch(),
+        DesktopSwitch::Instant,
+        "switches stay instant until the host chooses"
+    );
+    set_desktop_switch(DesktopSwitch::Animated);
+    assert_eq!(desktop_switch(), DesktopSwitch::Animated);
+    set_desktop_switch(DesktopSwitch::Instant);
+    assert_eq!(desktop_switch(), DesktopSwitch::Instant);
+}
+
+#[test]
 fn an_animated_switch_prepares_every_slide_frame_with_its_time() {
     // Posting at those times is `space_switch::pace`, tested with a fake clock.
     for direction in [Direction::Previous, Direction::Next] {
