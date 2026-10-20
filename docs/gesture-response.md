@@ -24,3 +24,16 @@ Physical hold identity is retained across pointer/context changes with unchanged
 bindings. Each gesture action resolves the current target. Binding changes,
 source loss, cancellation and capture retirement terminate gesture output;
 independent wheel holds retain their own physical lifecycle.
+
+## Continuous volume
+
+Directions explicitly bound to Volume Up or Volume Down repeat per 50 raw units,
+with at least 20 ms between same-direction outputs on macOS/Linux or 10 ms on
+Windows. Fractional distance is retained; at most one step is emitted per new
+report. A pause produces no output and release clears the hold. Reversals discard
+old-direction progress and bypass its cooldown. Other axes and mixed non-volume
+bindings continue to use the shared recognizer and their ordinary response.
+
+Related work: #365 describes the one-step volume limitation. #1752 independently
+implements movement-driven continuation. This implementation keeps the general
+recognizer active after the first swipe, preserving #1652's direction chaining.

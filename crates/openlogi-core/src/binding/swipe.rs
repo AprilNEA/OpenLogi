@@ -106,6 +106,10 @@ impl GesturePolicy {
             if let Some(index) = direction_index(*direction) {
                 policy.enabled[index] = *action != Action::None;
                 policy.durations[index] = ordinary_duration();
+                if matches!(action, Action::VolumeUp | Action::VolumeDown) {
+                    policy.repeat_distances[index] = GESTURE_SWIPE_THRESHOLD;
+                    policy.durations[index] = volume_duration();
+                }
             }
         }
         policy
@@ -118,6 +122,10 @@ fn ordinary_duration() -> Duration {
     } else {
         400
     })
+}
+
+fn volume_duration() -> Duration {
+    Duration::from_millis(if cfg!(target_os = "windows") { 10 } else { 20 })
 }
 
 fn direction_index(direction: GestureDirection) -> Option<usize> {
@@ -538,6 +546,43 @@ mod tests {
         assert_eq!(acc.accumulate_at(now, 600, 0), None);
         assert_eq!(acc.accumulate_at(now, -30, 0), None);
         assert_eq!(acc.accumulate_at(now, -20, 0), Some(GestureDirection::Left));
+    }
+
+    #[test]
+    fn volume_progress_repeats_pauses_reverses_and_releases() {
+        let now = Instant::now();
+        let map = BTreeMap::from([
+            (GestureDirection::Up, Action::VolumeUp),
+            (GestureDirection::Down, Action::VolumeDown),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]);
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_at(now, GesturePolicy::for_bindings(&map));
+        assert_eq!(acc.accumulate_at(now, 0, -50), Some(GestureDirection::Up));
+        assert_eq!(acc.accumulate_at(now, 0, -5000), None);
+        let due = now + volume_duration();
+        assert_eq!(acc.accumulate_at(due, 0, 0), None);
+        assert_eq!(acc.accumulate_at(due, 0, -1), Some(GestureDirection::Up));
+        assert_eq!(acc.accumulate_at(due, 0, 25), None);
+        assert_eq!(acc.accumulate_at(due, 0, 25), Some(GestureDirection::Down));
+        // Cross-axis actions retain their ordinary policy and the same hold.
+        assert_eq!(acc.accumulate_at(due, 50, 0), Some(GestureDirection::Right));
+        assert_eq!(acc.accumulate_at(due, 600, 0), None);
+        assert_eq!(acc.accumulate_at(due, 0, -50), Some(GestureDirection::Up));
+        assert!(!acc.end_at(due));
+        assert_eq!(acc.accumulate_at(due + ordinary_duration(), 0, -5000), None);
+    }
+
+    #[test]
+    fn only_explicit_volume_bindings_get_volume_response() {
+        let map = BTreeMap::from([
+            (GestureDirection::Up, Action::VolumeUp),
+            (GestureDirection::Down, Action::Copy),
+        ]);
+        let policy = GesturePolicy::for_bindings(&map);
+        assert_eq!(policy.repeat_distances, [50, 600, 600, 600]);
+        assert_eq!(policy.durations[0], volume_duration());
+        assert_eq!(policy.durations[1], ordinary_duration());
     }
 
     // ── Gesture classification ────────────────────────────────────────────────
