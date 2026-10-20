@@ -389,6 +389,9 @@ impl ArmedCapture for GestureCapture {
 /// included. Logi Options+ reads the same sequence as a `Stop`
 /// (`devio_feature_2150::convert`, "Inconsistent transition from ACTIVE to
 /// INACTIVE. Consider this a STOP.").
+///
+/// A status byte the spec does not define never delivers a tap: only
+/// `Inactive` says the wheel is settled. Its rotation still scrolls.
 fn thumbwheel_input(
     event: thumbwheel::ThumbwheelEvent,
     previous: RotationStatus,
@@ -400,7 +403,7 @@ fn thumbwheel_input(
             resolution,
         });
     }
-    if event.rotation_status.is_rolling() || previous.leaves_roll_open() {
+    if !event.rotation_status.is_at_rest() || previous.leaves_roll_open() {
         return None;
     }
     event

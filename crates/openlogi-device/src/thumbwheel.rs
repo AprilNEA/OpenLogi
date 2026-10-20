@@ -81,35 +81,40 @@ pub enum RotationStatus {
     Active,
     /// The roll ended: released, no touch.
     Stop,
+    /// A value the spec does not define, carrying the raw byte. It says
+    /// nothing about a roll: it neither delivers a tap nor ends a roll.
+    Other(u8),
 }
 
 impl RotationStatus {
-    /// Decode `thumbwheelEvent` byte 4. Values outside the four the spec
-    /// defines decode as [`RotationStatus::Inactive`] — a firmware that
-    /// reports something else has said nothing about a roll, and the caller
-    /// still has the report's own `rotation` to go on. Claiming a roll here
-    /// instead would let one unrecognised value make the tap permanently
-    /// undeliverable. Logi Options+ maps an unrecognised value to the same
-    /// state as `Inactive` too (`devio_feature_2150::convert`).
+    /// Decode `thumbwheelEvent` byte 4. A value outside the four the spec
+    /// defines stays [`RotationStatus::Other`], as in the typed `hidpp`
+    /// wrapper: reading it as `Inactive` would claim a settled wheel and let
+    /// the report's tap bit fire a bound action.
     #[must_use]
     fn from_byte(byte: u8) -> Self {
         match byte {
+            0 => Self::Inactive,
             1 => Self::Start,
             2 => Self::Active,
             3 => Self::Stop,
-            _ => Self::Inactive,
+            other => Self::Other(other),
         }
     }
 
-    /// Whether this report belongs to a roll — including its `Stop`, which
-    /// carries no rotation of its own but is still the roll's own contact.
+    /// Whether this report says the wheel is at rest, the only status on
+    /// which a tap bit is the user's own. A roll's reports, its `Stop`
+    /// included, carry the tap bit of the contact that rolled the wheel, and
+    /// an unrecognised status does not say the wheel is settled.
     #[must_use]
-    pub fn is_rolling(self) -> bool {
-        !matches!(self, Self::Inactive)
+    pub fn is_at_rest(self) -> bool {
+        matches!(self, Self::Inactive)
     }
 
     /// Whether the roll this report belongs to is still under way after it:
     /// the roll began or continued here, and its `Stop` is still to come.
+    /// An unrecognised status leaves no roll open, so one such report cannot
+    /// hold back the next tap on a settled wheel.
     #[must_use]
     pub fn leaves_roll_open(self) -> bool {
         matches!(self, Self::Start | Self::Active)
@@ -445,10 +450,11 @@ mod tests {
         assert_eq!(status(1), RotationStatus::Start);
         assert_eq!(status(2), RotationStatus::Active);
         assert_eq!(status(3), RotationStatus::Stop);
+        assert_eq!(status(4), RotationStatus::Other(4));
         assert_eq!(
             status(0xff),
-            RotationStatus::Inactive,
-            "an unrecognised value must not make the tap permanently undeliverable"
+            RotationStatus::Other(0xff),
+            "an unrecognised value must not read as a settled wheel"
         );
     }
 
@@ -465,12 +471,15 @@ mod tests {
 
     /// The roll's own `Stop` reports no rotation — it is the release — so
     /// rotation alone cannot tell a settled wheel from one that just stopped.
+    /// An unrecognised status says neither.
     #[test]
-    fn a_stop_report_is_still_part_of_the_roll() {
-        assert!(RotationStatus::Stop.is_rolling());
-        assert!(RotationStatus::Start.is_rolling());
-        assert!(RotationStatus::Active.is_rolling());
-        assert!(!RotationStatus::Inactive.is_rolling());
+    fn only_an_inactive_report_is_at_rest() {
+        assert!(RotationStatus::Inactive.is_at_rest());
+        assert!(!RotationStatus::Start.is_at_rest());
+        assert!(!RotationStatus::Active.is_at_rest());
+        assert!(!RotationStatus::Stop.is_at_rest());
+        assert!(!RotationStatus::Other(4).is_at_rest());
+        assert!(!RotationStatus::Other(4).leaves_roll_open());
     }
 
     #[test]
