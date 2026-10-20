@@ -144,6 +144,8 @@ fn family_for(product_id: u16) -> Option<ReceiverFamily> {
     match crate::find_receiver(crate::LOGITECH_VENDOR_ID, product_id)?.protocol {
         crate::ReceiverProtocol::Bolt => Some(ReceiverFamily::Bolt),
         crate::ReceiverProtocol::Unifying => Some(ReceiverFamily::Unifying),
+        // No pairing flow is known for HID++ 2.0 receivers.
+        crate::ReceiverProtocol::Hidpp20 => None,
     }
 }
 
@@ -641,6 +643,7 @@ pub async fn unpair(backend: &dyn HidBackend, route: &DeviceRoute) -> Result<(),
         DeviceRoute::Unifying { receiver_uid, slot } => {
             (ReceiverFamily::Unifying, receiver_uid, *slot)
         }
+        DeviceRoute::Hidpp20Receiver { .. } => return Err(PairingError::UnsupportedCommand),
         DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. } => {
             return Err(PairingError::ReceiverNotFound);
         }

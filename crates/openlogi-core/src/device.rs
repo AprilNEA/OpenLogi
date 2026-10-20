@@ -189,6 +189,11 @@ pub struct Capabilities {
     /// persisted identity.
     #[serde(default)]
     pub virtual_thumbwheel: bool,
+    /// The device stores onboard profiles and can be switched between them
+    /// and host control — HID++ `0x8100`. Appended: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub onboard_profiles: bool,
 }
 
 impl Capabilities {
@@ -223,6 +228,7 @@ impl Capabilities {
             // Set by the `0x1b04` control walk; the feature table alone
             // cannot say which controls report raw wheel.
             virtual_thumbwheel: false,
+            onboard_profiles: ids.contains(&0x8100),
         }
     }
 
@@ -737,6 +743,7 @@ mod tests {
                     backlight: false,
                     easy_switch: false,
                     virtual_thumbwheel: false,
+                    onboard_profiles: false,
                 }),
                 settings_revision: 0,
             }],
@@ -855,6 +862,7 @@ mod tests {
                 backlight: false,
                 easy_switch: false,
                 virtual_thumbwheel: false,
+                onboard_profiles: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -878,6 +886,7 @@ mod tests {
                 backlight: false,
                 easy_switch: false,
                 virtual_thumbwheel: false,
+                onboard_profiles: false,
             }
         );
         // No driving features → nothing offered.
@@ -917,6 +926,8 @@ mod tests {
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a2]).fn_lock);
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a0]).fn_lock);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).fn_lock);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8100]).onboard_profiles);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x2202]).onboard_profiles);
     }
 
     #[test]

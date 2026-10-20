@@ -12,6 +12,21 @@ fn dpi_roundtrips_per_device() {
 }
 
 #[test]
+fn onboard_profiles_roundtrip_per_device_and_stay_unset_by_default() {
+    let mut cfg = Config::default();
+    cfg.set_onboard_profiles("serial:x3", false);
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.onboard_profiles("serial:x3"), Some(false));
+    assert_eq!(
+        restored.onboard_profiles("absent"),
+        None,
+        "a device nobody switched keeps its own mode"
+    );
+    let body = toml::to_string_pretty(&Config::default()).expect("serialize");
+    assert!(!body.contains("onboard_profiles"));
+}
+
+#[test]
 fn smartshift_roundtrips_per_device() {
     let mut cfg = Config::default();
     let smartshift = SmartShift {

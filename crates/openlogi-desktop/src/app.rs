@@ -334,6 +334,7 @@ impl AppView {
             }
             StateEvent::DpiChanged(key)
             | StateEvent::FnLockChanged(key)
+            | StateEvent::OnboardProfilesChanged(key)
             | StateEvent::BacklightChanged(key)
             | StateEvent::EasySwitchChanged(key) => {
                 !on_home && self.active_tab == DetailTab::Device && is_current(key)

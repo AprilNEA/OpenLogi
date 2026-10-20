@@ -55,6 +55,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 enum TransportKey {
     Bolt(String),
     Unifying(String),
+    Hidpp20Receiver(String),
     Direct(u16, u16),
     RawHid(u16, u16, u16, u16, String),
 }
@@ -64,6 +65,9 @@ impl From<&DeviceRoute> for TransportKey {
         match route {
             DeviceRoute::Bolt { receiver_uid, .. } => Self::Bolt(receiver_uid.clone()),
             DeviceRoute::Unifying { receiver_uid, .. } => Self::Unifying(receiver_uid.clone()),
+            DeviceRoute::Hidpp20Receiver { receiver_uid, .. } => {
+                Self::Hidpp20Receiver(receiver_uid.clone())
+            }
             DeviceRoute::Direct {
                 vendor_id,
                 product_id,
@@ -779,6 +783,83 @@ pub(crate) fn keep_os_layout_in_background(
     );
 }
 
+/// Switch `shared`'s device between its onboard profiles (`true`) and host
+/// control (`false`) and, when handing control to the host, write `host_dpi`
+/// — the user's own DPI, which the onboard profile had overridden and which
+/// the device rejects until the switch lands. Returns the mode the device
+/// reports. A DPI write that fails after a landed switch is logged rather
+/// than returned: the switch is what was asked, and it took.
+///
+/// The DPI carries its own [`WriteTicket`], taken from the device's DPI
+/// [`WriteOrder`] when the switch was requested: a DPI write the user asked
+/// for after that is newer, and the restore yields to it instead of
+/// overwriting it with the value captured before.
+pub(crate) async fn switch_onboard_profiles_on(
+    shared: &SharedChannel,
+    onboard_profiles: bool,
+    host_dpi: Option<(Dpi, WriteTicket)>,
+) -> Result<bool, WriteError> {
+    let reported = openlogi_hid::set_onboard_profiles_on(shared, onboard_profiles).await?;
+    if !reported && let Some((dpi, ticket)) = host_dpi {
+        ticket
+            .write_or(
+                || async {
+                    match openlogi_hid::set_dpi_on(shared, dpi).await {
+                        Ok(()) => debug!(%dpi, "DPI restored under host control"),
+                        Err(error) => {
+                            warn!(%dpi, ?error, "DPI write after host-control switch failed");
+                        }
+                    }
+                },
+                || async { debug!(%dpi, "DPI restore superseded by a newer DPI write") },
+            )
+            .await;
+    }
+    Ok(reported)
+}
+
+/// Spawn an OS thread that runs [`switch_onboard_profiles_on`] on `op`'s
+/// device, unless a newer onboard-mode write for the device was requested
+/// after `ticket`. Returns immediately; the outcome is logged.
+pub(crate) fn write_onboard_profiles_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    onboard_profiles: bool,
+    host_dpi: Option<(Dpi, WriteTicket)>,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "onboard-mode write",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    switch_onboard_profiles_on(&shared, onboard_profiles, host_dpi)
+                        .await
+                        .map(Some)
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "onboard-mode write", result, |reported| {
+                if reported.is_some() {
+                    debug!(index, onboard_profiles, "onboard mode written");
+                } else {
+                    debug!(
+                        index,
+                        onboard_profiles, "onboard-mode write superseded by a newer one"
+                    );
+                }
+            });
+        },
+    );
+}
+
 /// The settings a mouse forgets when it power-cycles, as one reapply pushes
 /// them. `None` leaves that setting alone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1387,6 +1468,69 @@ mod tests {
         assert!(
             reapply.await.expect("reapply joins").is_err(),
             "the stalled write gave up at its own deadline"
+        );
+    }
+
+    /// A GUI onboard-mode switch queued behind a reconnect switch for the same
+    /// mouse waits for its ticket without holding the transport turn: the
+    /// reconnect switch, which holds the ticket, still gets the turn it needs
+    /// to finish, rather than both waiting out the GUI's deadline.
+    #[tokio::test]
+    async fn a_write_waiting_for_its_ticket_leaves_the_transport_turn_free() {
+        let published = publish_direct_mouse().await;
+        let route = published.route.clone();
+        let op = device_op(
+            &std::sync::Arc::new(RwLock::new(None)),
+            &published.registry,
+            &ReceiverAccess::default(),
+            &published.device_io,
+            &route,
+        );
+        let transport = op.access.transport_turns.turn_for(&route);
+        let modes = WriteOrder::default();
+        let reconnect = modes.request(&route);
+        let (started, has_started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let reconnect_transport = Arc::clone(&transport);
+        let reconnecting = tokio::spawn(async move {
+            reconnect
+                .write_or(
+                    || async move {
+                        let _ = started.send(());
+                        let _ = released.await;
+                        after_transport_turn(&reconnect_transport, async {}).await;
+                    },
+                    || async {},
+                )
+                .await;
+        });
+        has_started
+            .await
+            .expect("the reconnect switch holds the ticket");
+
+        let gui = modes.request(&route);
+        let mut switching = std::pin::pin!(op.run_in_turn(
+            HidppOperation::WriteOnboardMode,
+            &gui,
+            |_| async { Ok::<_, WriteError>(true) },
+            |_| async { Ok::<_, WriteError>(false) },
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), switching.as_mut())
+                .await
+                .is_err(),
+            "the GUI switch waits for the reconnect switch"
+        );
+
+        release.send(()).expect("the reconnect switch is waiting");
+        tokio::time::timeout(Duration::from_secs(1), reconnecting)
+            .await
+            .expect("the reconnect switch gets the transport turn")
+            .expect("reconnect joins");
+        assert_eq!(
+            switching.await.ok(),
+            Some(true),
+            "the GUI switch, still the newest, writes"
         );
     }
 

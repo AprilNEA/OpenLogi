@@ -140,6 +140,16 @@ fn request_variant_order() {
         "040008463030444341464501fb4006",
     );
     assert_wire(
+        &AgentRequest::SetDpi {
+            route: DeviceRoute::Hidpp20Receiver {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            dpi: Dpi::new(1600),
+        },
+        "040408463030444341464501fb4006",
+    );
+    assert_wire(
         &AgentRequest::SetSmartshift {
             route: DeviceRoute::Bolt {
                 receiver_uid: "F00DCAFE".into(),
@@ -408,6 +418,31 @@ fn lock_keys() {
     );
 }
 
+/// Onboard-profiles RPCs are appended after the lock-key observer, so their
+/// variant indices (0x28/0x29) sit past every method above.
+#[test]
+fn onboard_profiles_requests() {
+    assert_wire(
+        &AgentRequest::ReadOnboardProfiles {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "280008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetOnboardProfiles {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            onboard_profiles: false,
+        },
+        "29000846303044434146450100",
+    );
+}
+
 /// A chord crosses the wire as its modifier bits and the key's HID usage.
 #[test]
 fn key_combo_modifier_bits() {
@@ -657,13 +692,14 @@ fn device_inventory() {
                 backlight: true,
                 easy_switch: true,
                 virtual_thumbwheel: true,
+                onboard_profiles: true,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010107",
     );
 }
 

@@ -81,6 +81,9 @@ fn derive_replay_route(
     audit: &HidCassetteAudit,
 ) -> Result<DeviceRoute> {
     match selected_route {
+        DeviceRoute::Hidpp20Receiver { .. } => {
+            bail!("HID++ 2.0 receiver routes have no fixture representation yet")
+        }
         DeviceRoute::Bolt { slot, .. } => {
             let value = unique_replacement(audit, SanitizedIdentityKind::ReceiverUniqueId)?;
             if value.len() != 16 || !value.is_ascii() {
