@@ -6,12 +6,14 @@ use nutype::nutype;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
 
-const MOD_COMMAND: u8 = 1 << 0;
-const MOD_SHIFT: u8 = 1 << 1;
-const MOD_CONTROL: u8 = 1 << 2;
-const MOD_OPTION: u8 = 1 << 3;
-const MOD_SUPER: u8 = 1 << 4;
-const ALL_MODIFIERS: u8 = MOD_COMMAND | MOD_SHIFT | MOD_CONTROL | MOD_OPTION | MOD_SUPER;
+use super::modifiers::Modifiers;
+
+pub(super) const MOD_COMMAND: u8 = 1 << 0;
+pub(super) const MOD_SHIFT: u8 = 1 << 1;
+pub(super) const MOD_CONTROL: u8 = 1 << 2;
+pub(super) const MOD_OPTION: u8 = 1 << 3;
+pub(super) const MOD_SUPER: u8 = 1 << 4;
+pub(super) const ALL_MODIFIERS: u8 = MOD_COMMAND | MOD_SHIFT | MOD_CONTROL | MOD_OPTION | MOD_SUPER;
 
 /// USB HID keyboard usage supported by custom shortcuts.
 ///
@@ -227,6 +229,12 @@ impl KeyCombo {
         self.modifiers & MOD_SUPER != 0
     }
 
+    /// The chord's modifiers alone, or `None` when it carries none.
+    #[must_use]
+    pub const fn modifiers(&self) -> Option<Modifiers> {
+        Modifiers::from_bits(self.modifiers)
+    }
+
     /// Canonical user-facing chord label.
     #[must_use]
     pub fn rendered_label(&self) -> String {
@@ -319,7 +327,7 @@ impl FromStr for KeyCombo {
     }
 }
 
-fn parse_modifier(token: &str) -> Option<u8> {
+pub(super) fn parse_modifier(token: &str) -> Option<u8> {
     match token.to_ascii_lowercase().as_str() {
         "cmd" | "command" => Some(MOD_COMMAND),
         "super" | "win" | "meta" => Some(MOD_SUPER),

@@ -104,6 +104,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::CustomShortcut(_)
         | Action::HoldShortcut(_)
         | Action::TapKeyHoldingModifiers(_)
+        | Action::HoldModifier(_)
         | Action::TypeText(_) => "action-icons/keyboard.svg",
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
     }
@@ -268,6 +269,7 @@ mod tests {
             Action::CustomShortcut(combo()),
             Action::HoldShortcut(combo()),
             Action::TapKeyHoldingModifiers(combo()),
+            Action::HoldModifier("Ctrl".parse().expect("Ctrl is a valid modifier")),
             Action::TypeText(String::new()),
             Action::RunShellCommand(String::new()),
             Action::RunAppleScript(String::new()),
