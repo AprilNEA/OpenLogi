@@ -320,7 +320,6 @@ impl SwipeAccumulator {
                 self.bound_pending_stroke(dir);
                 return None;
             }
-            self.fired = true;
             self.last = Some(dir);
             self.pending = None;
             self.repeat = 0;
