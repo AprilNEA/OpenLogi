@@ -150,6 +150,8 @@ pub struct SwipeAccumulator {
     /// zero after each commit, so one hold can chain swipes (left, right,
     /// left...) the way Options+ does.
     last: Option<GestureDirection>,
+    /// Recognized stroke waiting for pacing; only fresh continuation may emit it.
+    pending: Option<GestureDirection>,
     /// Net travel continuing `last` since it committed; fires `last` again at
     /// [`GESTURE_REPEAT_DISTANCE`].
     repeat: i32,
@@ -180,6 +182,7 @@ impl SwipeAccumulator {
         self.dy = 0;
         self.fired = false;
         self.last = None;
+        self.pending = None;
         self.repeat = 0;
         self.repeat_cross = 0;
         self.moved_at = None;
@@ -203,10 +206,18 @@ impl SwipeAccumulator {
         if dx == 0 && dy == 0 {
             return None;
         }
-        let pending_repeat = self
-            .last
-            .and_then(direction_index)
-            .is_some_and(|index| self.repeat >= self.policy.repeat_distances[index]);
+        if self.pending.is_some_and(|dir| !continues(dir, dx, dy)) {
+            // A turn abandons paced travel instead of releasing it in the old
+            // direction. The new report begins its own deliberate stroke.
+            self.dx = 0;
+            self.dy = 0;
+            self.pending = None;
+        }
+        let pending_repeat = self.pending.is_some()
+            || self
+                .last
+                .and_then(direction_index)
+                .is_some_and(|index| self.repeat >= self.policy.repeat_distances[index]);
         if !pending_repeat
             && self
                 .moved_at
@@ -306,16 +317,12 @@ impl SwipeAccumulator {
         if let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
             if !self.ready(dir, now) {
-                self.dx = self
-                    .dx
-                    .clamp(-GESTURE_SWIPE_THRESHOLD, GESTURE_SWIPE_THRESHOLD);
-                self.dy = self
-                    .dy
-                    .clamp(-GESTURE_SWIPE_THRESHOLD, GESTURE_SWIPE_THRESHOLD);
+                self.bound_pending_stroke(dir);
                 return None;
             }
             self.fired = true;
             self.last = Some(dir);
+            self.pending = None;
             self.repeat = 0;
             self.repeat_cross = 0;
             self.dx = 0;
@@ -323,6 +330,16 @@ impl SwipeAccumulator {
             return self.emit(dir, now);
         }
         None
+    }
+
+    /// Keep one paced stroke with its direction and cross-axis ratio intact.
+    fn bound_pending_stroke(&mut self, dir: GestureDirection) {
+        let distance = i64::from(along(dir, self.dx, self.dy));
+        self.dx = i32::try_from(i64::from(self.dx) * i64::from(GESTURE_SWIPE_THRESHOLD) / distance)
+            .unwrap_or(self.dx);
+        self.dy = i32::try_from(i64::from(self.dy) * i64::from(GESTURE_SWIPE_THRESHOLD) / distance)
+            .unwrap_or(self.dy);
+        self.pending = Some(dir);
     }
 
     /// Bound distance and sideways drift together, preserving the stroke's slope.
@@ -443,6 +460,51 @@ mod tests {
             (GestureDirection::Left, Action::Paste),
             (GestureDirection::Up, Action::VolumeUp),
         ]))
+    }
+
+    #[test]
+    fn paused_pending_stroke_requires_fresh_continuation() {
+        let now = Instant::now();
+        let mut policy = configured();
+        policy.durations = [Duration::from_millis(400); 4];
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_at(now, policy);
+        assert_eq!(acc.accumulate_at(now, 50, 0), Some(GestureDirection::Right));
+        assert_eq!(
+            acc.accumulate_at(now + Duration::from_millis(250), 50, 0),
+            None
+        );
+        assert_eq!(
+            acc.accumulate_at(now + Duration::from_millis(400), 0, -1),
+            None
+        );
+        assert_eq!(
+            acc.accumulate_at(now + Duration::from_millis(401), 0, -49),
+            Some(GestureDirection::Up)
+        );
+    }
+
+    #[test]
+    fn paused_pending_stroke_preserves_geometry() {
+        let now = Instant::now();
+        let mut policy = configured();
+        policy.durations = [Duration::from_millis(400); 4];
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_at(now, policy);
+        assert_eq!(acc.accumulate_at(now, 50, 0), Some(GestureDirection::Right));
+        assert_eq!(
+            acc.accumulate_at(now + Duration::from_millis(250), 200, 60),
+            None
+        );
+        assert_eq!(
+            acc.accumulate_at(now + Duration::from_millis(400), 1, 0),
+            Some(GestureDirection::Right)
+        );
+        assert_eq!(
+            acc.accumulate_at(now + Duration::from_millis(401), 1, 0),
+            None
+        );
+        assert!(!acc.end());
     }
 
     #[test]
