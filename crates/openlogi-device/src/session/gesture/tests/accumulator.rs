@@ -1026,3 +1026,96 @@ fn stale_return_travel_never_decides_the_next_held_gesture() {
         );
     }
 }
+
+#[test]
+fn volume_motion_repeats_and_reverses_with_one_pair_of_physical_edges() {
+    use openlogi_core::binding::Action;
+    use std::time::{Duration, Instant};
+    let actions = BTreeMap::from([
+        (GestureDirection::Up, Action::VolumeUp),
+        (GestureDirection::Down, Action::VolumeDown),
+    ]);
+    let mut acc = CaptureAccum::with_policies(BTreeMap::from([(
+        ButtonId::GestureButton,
+        GesturePolicy::for_bindings(&actions),
+    )]));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let start = Instant::now();
+    acc.on_event_at(start, press(), GESTURE, &[], &[], &[], &tx);
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
+    );
+    acc.on_event_at(
+        start,
+        RawControlEvent::RawXy { dx: 0, dy: -5000 },
+        GESTURE,
+        &[],
+        &[],
+        &[],
+        &tx,
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "one stale HID++ report is discarded"
+    );
+    let mut at = start;
+    for dy in [-50, -50, 50, 50] {
+        acc.on_event_at(
+            at,
+            RawControlEvent::RawXy { dx: 0, dy },
+            GESTURE,
+            &[],
+            &[],
+            &[],
+            &tx,
+        );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::Gesture(
+                ButtonId::GestureButton,
+                if dy < 0 {
+                    GestureDirection::Up
+                } else {
+                    GestureDirection::Down
+                }
+            ))
+        );
+        acc.on_event_at(
+            at,
+            RawControlEvent::RawXy {
+                dx: 0,
+                dy: dy * 100,
+            },
+            GESTURE,
+            &[],
+            &[],
+            &[],
+            &tx,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "same-direction continuation is paced"
+        );
+        at += Duration::from_millis(20);
+        acc.on_event_at(
+            at,
+            RawControlEvent::RawXy { dx: 0, dy: 0 },
+            GESTURE,
+            &[],
+            &[],
+            &[],
+            &tx,
+        );
+        assert!(rx.try_recv().is_err(), "pause never drains pending volume");
+    }
+    acc.on_event_at(at, release(), GESTURE, &[], &[], &[], &tx);
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::GestureButton))
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "release never clicks after a gesture"
+    );
+}

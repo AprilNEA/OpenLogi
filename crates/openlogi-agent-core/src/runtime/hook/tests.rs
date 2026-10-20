@@ -717,6 +717,104 @@ fn gesture_repeats_on_the_same_press_across_pointer_refresh_and_reversal() {
 }
 
 #[test]
+fn volume_gesture_repeats_on_the_same_press_across_pointer_refresh_and_reversal() {
+    use super::super::button::ButtonRuntimeEvent;
+    use openlogi_hook::PointerTarget;
+
+    HOLD.with_borrow_mut(HoldState::cancel);
+    SUPPRESSED_PRESSES.with_borrow_mut(HashSet::clear);
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let directions = BTreeMap::from([
+        (GestureDirection::Up, Action::VolumeUp),
+        (GestureDirection::Down, Action::VolumeDown),
+        (GestureDirection::Click, Action::Copy),
+    ]);
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(ButtonId::Back, directions.clone())]),
+        gesture_policies: BTreeMap::from([(
+            ButtonId::Back,
+            GesturePolicy::for_bindings(&directions),
+        )]),
+        pointer_target: Some(PointerTarget::Desktop),
+        ..HookMaps::default()
+    }));
+    assert_eq!(
+        gesture_button_event(true, &hooks, &dispatcher),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Started(press) = events
+        .recv_timeout(Duration::from_secs(1))
+        .expect("physical down")
+    else {
+        panic!("started")
+    };
+    let mut at = Instant::now();
+    for (index, sign) in [-1, -1, 1, 1].into_iter().enumerate() {
+        if index == 1 {
+            let current = PointerTarget::Window {
+                process_id: 41,
+                window_id: 7,
+            };
+            hooks.write().expect("maps").pointer_target = Some(current);
+            dispatcher.cancel_pointer_buttons_except(current);
+        }
+        handle_moved_at(at, 0, sign * 50, &hooks, &dispatcher);
+        let ButtonRuntimeEvent::Triggered {
+            press: triggered,
+            action,
+        } = events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("directional pulse")
+        else {
+            panic!("triggered")
+        };
+        assert_eq!(triggered.token(), press.token());
+        let current = hooks.read().expect("maps").pointer_target.unwrap();
+        let mut output = Vec::new();
+        if triggered
+            .target()
+            .resolve_with(&action, || current, |_| false, || None)
+            .is_some()
+        {
+            output.push(action.clone());
+        }
+        assert_eq!(
+            output,
+            [if sign < 0 {
+                Action::VolumeUp
+            } else {
+                Action::VolumeDown
+            }],
+            "fresh semantic target reaches output admission"
+        );
+        assert_eq!(
+            action,
+            if sign < 0 {
+                Action::VolumeUp
+            } else {
+                Action::VolumeDown
+            }
+        );
+        at += Duration::from_millis(20);
+    }
+    assert_eq!(
+        gesture_button_event(false, &hooks, &dispatcher),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Ended {
+        press: released, ..
+    } = events
+        .recv_timeout(Duration::from_secs(1))
+        .expect("physical release")
+    else {
+        panic!("ended")
+    };
+    assert_eq!(released.token(), press.token());
+    assert!(events.try_recv().is_err(), "no click or stationary repeat");
+    assert!(owner.shutdown());
+}
+
+#[test]
 fn changed_gesture_binding_cancels_and_still_suppresses_the_matching_release() {
     use super::super::button::ButtonRuntimeEvent;
 
