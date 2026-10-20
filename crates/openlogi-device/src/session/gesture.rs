@@ -115,6 +115,9 @@ pub enum CapturedInput {
         /// the wheel's `0x2121` multiplier for a high-resolution one.
         per_notch: NonZeroU8,
     },
+    /// The device power-cycled with buttons held. Their presses are over, but
+    /// nobody let go: they end without the action a release would run.
+    Interrupted,
 }
 
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the
@@ -384,12 +387,10 @@ impl ArmedCapture for GestureCapture {
             .thumb_status
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = RotationStatus::Inactive;
-        if let Some((_, captured)) = self.armed.onboard.as_ref().and_then(ArmedOnboard::spy) {
-            self.spy_edges
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .release_all(&captured);
-        }
+        self.spy_edges
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .interrupt();
     }
 
     async fn rearm(&self) -> bool {
