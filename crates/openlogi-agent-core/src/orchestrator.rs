@@ -424,7 +424,9 @@ pub struct Orchestrator {
     /// reload turns the setting off or disables the device.
     kept_os_layouts: Arc<KeptOsLayouts>,
     /// The cookie clears that wait for their linked device to be online.
-    pending_cookie_releases: Mutex<PendingCookieReleases>,
+    /// Shared with the cookie writes, which return a clear that does not
+    /// finish.
+    pending_cookie_releases: Arc<Mutex<PendingCookieReleases>>,
     /// Whether the OS mouse hook is currently installed. Back/Forward gesture
     /// motion comes from HID++, but diversion is published only while the
     /// broader mouse-remapping path is available so losing the hook leaves the
@@ -535,7 +537,7 @@ impl Orchestrator {
             light_writes: BTreeMap::new(),
             next_light_write: 0,
             kept_os_layouts: Arc::default(),
-            pending_cookie_releases: Mutex::default(),
+            pending_cookie_releases: Arc::default(),
             os_mouse_hook_available: false,
             capture_plans_tx,
             keyboard_spec_tx,
@@ -1158,11 +1160,19 @@ impl Orchestrator {
     /// Options+ on a keyboard's other hosts moves the same devices.
     fn write_follower_cookies(&self, writes: Vec<FollowerCookieWrite>) {
         for write in writes {
+            let pending = Arc::clone(&self.pending_cookie_releases);
+            let key = write.key;
             crate::hardware::write_follower_cookies_in_background(
                 self.shared.device(&write.follower),
                 self.shared.follower_cookie_order.request(&write.follower),
                 write.release,
                 write.link,
+                move |leads| {
+                    pending
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .requeue(&key, leads);
+                },
             );
         }
     }

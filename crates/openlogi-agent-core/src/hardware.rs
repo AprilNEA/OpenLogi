@@ -828,18 +828,57 @@ enum CookieOutcome {
     Linked(LeadCookie, Result<FollowerLink, HostSwitchError>),
 }
 
+/// The clears of one cookie write that the device has not confirmed. When
+/// the guard is dropped, it gives the clears that are left to `requeue`: the
+/// write failed, timed out, or did not run.
+struct UnconfirmedReleases<F: FnOnce(Vec<LeadCookie>)> {
+    leads: Vec<LeadCookie>,
+    requeue: Option<F>,
+}
+
+impl<F: FnOnce(Vec<LeadCookie>)> UnconfirmedReleases<F> {
+    fn new(leads: Vec<LeadCookie>, requeue: F) -> Self {
+        Self {
+            leads,
+            requeue: Some(requeue),
+        }
+    }
+
+    /// Record that the device no longer holds `lead`.
+    fn confirm(&mut self, lead: LeadCookie) {
+        self.leads.retain(|pending| *pending != lead);
+    }
+}
+
+impl<F: FnOnce(Vec<LeadCookie>)> Drop for UnconfirmedReleases<F> {
+    fn drop(&mut self) {
+        if self.leads.is_empty() {
+            return;
+        }
+        if let Some(requeue) = self.requeue.take() {
+            requeue(std::mem::take(&mut self.leads));
+        }
+    }
+}
+
 /// Spawn one write that clears the bytes in `release` from `op`'s pointing
 /// device and then writes the bytes in `link`, as Logi Options+ does (see
 /// [`openlogi_hid::link_follower_cookies_on`]). The writes for one device run
 /// in the order of their `ticket`, and none is skipped. Returns immediately;
 /// the outcome is logged.
+///
+/// A clear that fails, times out, or does not run because the device is gone
+/// or its I/O is suspended goes to `requeue`, which keeps it for the next
+/// time the device is online.
 pub(crate) fn write_follower_cookies_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
     release: Vec<LeadCookie>,
     link: Vec<LeadCookie>,
+    requeue: impl FnOnce(Vec<LeadCookie>) + Send + 'static,
 ) {
     let index = op.route.device_index();
+    let mut unconfirmed = UnconfirmedReleases::new(release.clone(), requeue);
     let turn = op.access.transport_turns.turn_for(&op.route);
     op.spawn_timed_write(
         "linked device cookie write",
@@ -871,6 +910,9 @@ pub(crate) fn write_follower_cookies_in_background(
         move |result| {
             log_outcome(index, "linked device cookie write", result, |outcomes| {
                 for outcome in outcomes {
+                    if let CookieOutcome::Released(lead, Ok(_)) = &outcome {
+                        unconfirmed.confirm(*lead);
+                    }
                     log_cookie_outcome(index, outcome);
                 }
             });
@@ -1286,6 +1328,58 @@ mod tests {
             transport_turns: TransportTurns::default(),
         }
         .op(route)
+    }
+
+    /// The cookie of the keyboard with unit ID `unit`.
+    fn lead(unit: u32) -> LeadCookie {
+        LeadCookie::for_unit_id(unit.to_be_bytes()).expect("a nonzero unit ID")
+    }
+
+    #[test]
+    fn unconfirmed_clears_are_requeued_when_the_guard_drops() {
+        let requeued = Cell::new(None);
+        let mut unconfirmed =
+            UnconfirmedReleases::new(vec![lead(1), lead(2)], |leads| requeued.set(Some(leads)));
+        unconfirmed.confirm(lead(1));
+        drop(unconfirmed);
+        assert_eq!(requeued.take(), Some(vec![lead(2)]));
+    }
+
+    #[test]
+    fn confirmed_clears_are_not_requeued() {
+        let requeued = Cell::new(false);
+        let mut unconfirmed = UnconfirmedReleases::new(vec![lead(1)], |_| requeued.set(true));
+        unconfirmed.confirm(lead(1));
+        drop(unconfirmed);
+        assert!(!requeued.get(), "a confirmed clear is done");
+    }
+
+    #[test]
+    fn a_cookie_write_that_cannot_run_requeues_its_clears() {
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let (_device_io_signal, device_io) = device_io_channel();
+        let route = unresolvable_route();
+        let requeued = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requeued_by_write = std::sync::Arc::clone(&requeued);
+        write_follower_cookies_in_background(
+            device_op(&capture, &registry, &receiver_access, &device_io, &route),
+            WriteOrder::default().request(&route),
+            vec![lead(7)],
+            vec![lead(9)],
+            move |leads| {
+                requeued_by_write
+                    .lock()
+                    .expect("not poisoned")
+                    .extend(leads);
+            },
+        );
+        assert_eq!(
+            *requeued.lock().expect("not poisoned"),
+            vec![lead(7)],
+            "the clear waits for the device; the link runs again on reconnect"
+        );
     }
 
     #[test]

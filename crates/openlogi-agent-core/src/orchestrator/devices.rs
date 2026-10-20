@@ -272,6 +272,9 @@ pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec
 /// therefore not refused because the old keyboard's byte is still there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FollowerCookieWrite {
+    /// The config key of the linked pointing device. A clear that does not
+    /// finish waits again under this key.
+    pub(super) key: String,
     /// The linked pointing device.
     pub(super) follower: DeviceRoute,
     /// The keyboard bytes to clear.
@@ -281,8 +284,8 @@ pub(super) struct FollowerCookieWrite {
 }
 
 /// The keyboard bytes that removed links left on devices that were offline,
-/// by the config key of each device. A clear runs when its device is next
-/// online.
+/// or that a clear did not remove, by the config key of each device. A clear
+/// runs when its device is next online.
 ///
 /// This list is kept in memory only. After an agent restart, a byte that it
 /// held stays on the device until the user links and unlinks the pair again.
@@ -306,6 +309,14 @@ impl PendingCookieReleases {
         }
     }
 
+    /// Keep the clears in `leads`, which did not finish on `follower`, until
+    /// it is next online.
+    pub(super) fn requeue(&mut self, follower: &str, leads: impl IntoIterator<Item = LeadCookie>) {
+        for lead in leads {
+            self.add(follower, lead);
+        }
+    }
+
     fn take(&mut self, follower: &str) -> Vec<LeadCookie> {
         self.0.remove(follower).unwrap_or_default()
     }
@@ -320,6 +331,7 @@ impl CookiePlan {
         self.0
             .entry(follower.to_owned())
             .or_insert_with(|| FollowerCookieWrite {
+                key: follower.to_owned(),
                 follower: route,
                 release: Vec::new(),
                 link: Vec::new(),
