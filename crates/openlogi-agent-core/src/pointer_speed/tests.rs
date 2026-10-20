@@ -188,10 +188,9 @@ fn a_reload_ends_precision_on_an_offline_mouse() {
     assert_eq!(write.speed, speed(0x0180));
 }
 
-/// The mouse left at the precision speed, so its reconnect writes 1× even
-/// with no speed saved. The write is owed once.
-#[test]
-fn an_offline_mouse_with_no_saved_speed_reconnects_at_one_times() {
+/// A mouse in precision mode goes offline, and a reload that changes its
+/// assignments ends the mode.
+fn offline_mouse_whose_precision_a_reload_ended() -> PointerSpeeds {
     let speeds = PointerSpeeds::default();
     speeds.publish(None, [mouse("a", 1, None)]);
     speeds.toggle_precision(Some("a"));
@@ -201,13 +200,77 @@ fn an_offline_mouse_with_no_saved_speed_reconnects_at_one_times() {
         ..ReloadChange::default()
     };
     assert!(speeds.reload(every_key(assignments), []).is_empty());
+    speeds
+}
+
+/// The mouse left at the precision speed, so its reconnect writes 1× even
+/// with no speed saved. Once that write lands, nothing more is owed.
+#[test]
+fn an_offline_mouse_with_no_saved_speed_reconnects_at_one_times() {
+    let speeds = offline_mouse_whose_precision_a_reload_ended();
 
     let write = speeds
         .reapply("a", &route(2), None)
         .expect("the mouse may still move at the precision speed");
     assert_eq!(write.speed, PointerSpeed::DEFAULT);
     assert_eq!(write.route, route(2));
+    speeds.restored(&write.restore.expect("the write settles the restore"));
+
+    assert!(!speeds.restore_pending("a"));
     assert!(speeds.reapply("a", &route(2), None).is_none());
+}
+
+/// A restore write that times out or fails settles nothing, so the next
+/// reconnect pass writes 1× again.
+#[test]
+fn a_restore_stays_pending_until_its_write_lands() {
+    let speeds = offline_mouse_whose_precision_a_reload_ended();
+
+    let first = speeds.reapply("a", &route(2), None).expect("a restore");
+    let second = speeds.reapply("a", &route(2), None).expect("still pending");
+    assert_eq!(second.speed, PointerSpeed::DEFAULT);
+    assert_eq!(first.restore, second.restore);
+    assert!(speeds.restore_pending("a"));
+}
+
+/// A restore write that lands after a newer reload replaced the entry does
+/// not clear the newer entry.
+#[test]
+fn a_late_restore_write_keeps_a_newer_pending_restore() {
+    let speeds = offline_mouse_whose_precision_a_reload_ended();
+    let stale = speeds
+        .reapply("a", &route(2), None)
+        .and_then(|write| write.restore)
+        .expect("a restore");
+
+    // The mouse comes back, enters precision mode, and leaves again before
+    // the old write lands; another reload ends the mode offline.
+    speeds.publish(None, [mouse("a", 2, None)]);
+    speeds.toggle_precision(Some("a"));
+    speeds.publish(None, []);
+    let assignments = ReloadChange {
+        assignments: true,
+        ..ReloadChange::default()
+    };
+    assert!(speeds.reload(every_key(assignments), []).is_empty());
+
+    speeds.restored(&stale);
+    assert!(speeds.restore_pending("a"));
+}
+
+/// A press or a write from the app replaces the pending restore with a
+/// write of its own.
+#[test]
+fn a_press_or_an_app_write_drops_the_pending_restore() {
+    let speeds = offline_mouse_whose_precision_a_reload_ended();
+    speeds.publish(None, [mouse("a", 2, None)]);
+    speeds.toggle_precision(Some("a"));
+    assert!(!speeds.restore_pending("a"));
+
+    let speeds = offline_mouse_whose_precision_a_reload_ended();
+    speeds.publish(None, [mouse("a", 2, None)]);
+    speeds.app_write(&route(2), speed(0x0180));
+    assert!(!speeds.restore_pending("a"));
 }
 
 #[test]

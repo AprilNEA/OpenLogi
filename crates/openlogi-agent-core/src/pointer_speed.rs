@@ -11,7 +11,8 @@
 //! The mode lives in the agent process only. It survives a reconnect,
 //! because the reconnect reapply writes the precision speed while the mode is
 //! on. A reload can end the mode while the mouse is offline. The reconnect
-//! then writes the saved speed, or 1× when no speed is saved. The mode does
+//! then writes the saved speed, or 1× when no speed is saved, and keeps
+//! writing it on every reconnect pass until one write lands. The mode does
 //! not survive an agent restart: the new agent writes the saved speed, and a
 //! mouse with no saved speed stays at the precision speed until its button
 //! is pressed twice.
@@ -50,8 +51,12 @@ struct State {
     precision: HashSet<String>,
     /// The config keys whose precision mode a reload ended while they were
     /// offline. Such a mouse may still move at the precision speed, so its
-    /// reconnect writes even when no speed is saved.
-    restore: HashSet<String>,
+    /// reconnects write even when no speed is saved, until one of those
+    /// writes lands. Each entry has a generation, so a write that lands
+    /// late cannot clear a newer entry.
+    restore: HashMap<String, u64>,
+    /// The generation of the newest `restore` entry.
+    restore_generation: u64,
 }
 
 struct OnlineMouse {
@@ -78,6 +83,17 @@ pub(crate) struct SpeedWrite {
     pub(crate) speed: PointerSpeed,
     /// Its place among the mouse's pointer-speed writes.
     pub(crate) ticket: WriteTicket,
+    /// The pending restore this write settles once it lands, if any. Pass
+    /// it to [`PointerSpeeds::restored`] then.
+    pub(crate) restore: Option<Restore>,
+}
+
+/// A pending restore a reconnect write carries: the mouse's config key and
+/// the generation of its entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Restore {
+    key: String,
+    generation: u64,
 }
 
 /// What a config reload changed for one mouse.
@@ -125,6 +141,8 @@ impl PointerSpeeds {
         let key = key.or(state.selected.as_deref())?.to_owned();
         let mouse = state.online.get(&key)?;
         let (route, saved) = (mouse.route.clone(), mouse.saved);
+        // This write supersedes a pending restore.
+        state.restore.remove(&key);
         let on = !state.precision.remove(&key);
         let speed = if on {
             state.precision.insert(key);
@@ -138,23 +156,37 @@ impl PointerSpeeds {
     /// The write a reconnect owes the mouse `key` names, now at `route`: the
     /// precision speed while the mode is on, else the `saved` speed. A mouse
     /// whose mode a reload ended while it was offline gets 1× when no speed
-    /// is saved. `None` when there is nothing to write.
+    /// is saved, on every reconnect pass until [`Self::restored`] reports
+    /// that write landed. `None` when there is nothing to write.
     pub(crate) fn reapply(
         &self,
         key: &str,
         route: &DeviceRoute,
         saved: Option<PointerSpeed>,
     ) -> Option<SpeedWrite> {
-        let mut state = self.lock();
-        let restore = state.restore.remove(key);
-        let speed = if state.precision.contains(key) {
-            PointerSpeed::MIN
-        } else if restore {
-            saved.unwrap_or_default()
-        } else {
-            saved?
+        let state = self.lock();
+        if state.precision.contains(key) {
+            return Some(self.write(route.clone(), PointerSpeed::MIN));
+        }
+        let Some(&generation) = state.restore.get(key) else {
+            return Some(self.write(route.clone(), saved?));
         };
-        Some(self.write(route.clone(), speed))
+        let mut write = self.write(route.clone(), saved.unwrap_or_default());
+        write.restore = Some(Restore {
+            key: key.to_owned(),
+            generation,
+        });
+        Some(write)
+    }
+
+    /// A write that carried `restore` landed: the mouse no longer moves at
+    /// the precision speed. Clears the pending restore unless a newer reload
+    /// replaced it.
+    pub(crate) fn restored(&self, restore: &Restore) {
+        let mut state = self.lock();
+        if state.restore.get(&restore.key) == Some(&restore.generation) {
+            state.restore.remove(&restore.key);
+        }
     }
 
     /// The settings app writes `speed` to the mouse at `route`. Ends that
@@ -205,12 +237,24 @@ impl PointerSpeeds {
                 } else {
                     return None;
                 };
+                // This write supersedes a pending restore.
+                state.restore.remove(&key);
                 Some(self.write(route, speed))
             })
             .collect();
         // What is left of `ended` is offline: its reconnect owes the write.
-        state.restore.extend(ended);
+        for key in ended {
+            state.restore_generation += 1;
+            let generation = state.restore_generation;
+            state.restore.insert(key, generation);
+        }
         writes
+    }
+
+    /// Whether a reconnect still owes the mouse `key` names a restore.
+    #[cfg(test)]
+    pub(crate) fn restore_pending(&self, key: &str) -> bool {
+        self.lock().restore.contains_key(key)
     }
 
     /// Whether precision mode is on for the mouse `key` names.
@@ -225,6 +269,7 @@ impl PointerSpeeds {
             route,
             speed,
             ticket,
+            restore: None,
         }
     }
 

@@ -1561,8 +1561,14 @@ impl Orchestrator {
             route,
             speed,
             ticket,
+            restore,
         } = write;
-        write_pointer_speed_in_background(self.shared.device(&route), ticket, speed);
+        let speeds = Arc::clone(&self.shared.pointer_speeds);
+        write_pointer_speed_in_background(self.shared.device(&route), ticket, speed, move || {
+            if let Some(restore) = restore {
+                speeds.restored(&restore);
+            }
+        });
     }
 
     /// The effective settings of every online standalone light, keyed by its

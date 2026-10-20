@@ -120,7 +120,13 @@ impl ActionExecutor {
             return false;
         };
         info!(on, speed = %write.speed, "precision mode toggled → writing pointer speed");
-        write_pointer_speed_in_background(self.access.op(&write.route), write.ticket, write.speed);
+        // A toggle write settles no pending restore: the toggle cleared it.
+        write_pointer_speed_in_background(
+            self.access.op(&write.route),
+            write.ticket,
+            write.speed,
+            || {},
+        );
         true
     }
 

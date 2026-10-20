@@ -723,11 +723,12 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on:
 /// Spawn an OS thread that writes a pointer speed to `op`'s mouse via
 /// [`openlogi_hid::set_pointer_speed_on`], unless a newer pointer-speed write
 /// for the mouse was requested after `ticket`. Returns immediately; failures
-/// are logged.
+/// are logged. `on_applied` runs only when the mouse took the write.
 pub(crate) fn write_pointer_speed_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
     speed: PointerSpeed,
+    on_applied: impl FnOnce() + Send + 'static,
 ) {
     let index = op.route.device_index();
     let turn = op.access.transport_turns.turn_for(&op.route);
@@ -751,6 +752,7 @@ pub(crate) fn write_pointer_speed_in_background(
             log_outcome(index, "pointer-speed write", result, |applied| {
                 if let Some(applied) = applied {
                     debug!(index, %speed, %applied, "pointer speed written");
+                    on_applied();
                 } else {
                     debug!(index, %speed, "pointer-speed write superseded by a newer one");
                 }
