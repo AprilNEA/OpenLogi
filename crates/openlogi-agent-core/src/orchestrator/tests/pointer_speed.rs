@@ -128,8 +128,15 @@ fn a_reload_ends_precision_mode_on_a_mouse_that_is_offline() {
     );
     orch.replace_config(rebound);
 
-    // The reconnect then writes the saved speed, not the precision speed.
     assert!(!orch.shared.pointer_speeds.precision("a"));
+    // Nothing is saved, so the reconnect writes 1×, not the precision speed.
+    let route = orch.devices[0].route.clone().expect("a route");
+    let write = orch
+        .shared
+        .pointer_speeds
+        .reapply("a", &route, None)
+        .expect("a write owed to the reconnect");
+    assert_eq!(write.speed, PointerSpeed::DEFAULT);
 }
 
 #[test]

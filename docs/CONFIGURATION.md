@@ -248,11 +248,13 @@ Action names are the serialized Rust variant names, including `Copy`,
 
 `TogglePrecisionMode` switches a mouse that has `0x2205` between its
 `pointer_speed` (1× when none is saved) and the slowest speed, 0.125×.
-`CycleDpiPresets` does the same on such a mouse, because the mouse has no DPI
-presets to cycle; this makes the MX Ergo's precision button work with its
-default binding, as in Logi Options+. Precision mode stays on when the mouse
-reconnects. It ends at the next press, at a speed change from the desktop app
-or `config.toml`, and at a binding change for that mouse. After an agent
+`CycleDpiPresets` does the same on such a mouse, because the mouse has no
+adjustable DPI; DPI presets saved for it are ignored. This makes the MX Ergo's
+precision button work with its default binding, as in Logi Options+. Precision
+mode stays on when the mouse reconnects. It ends at the next press, at a speed
+change from the desktop app or `config.toml`, and at a binding change for that
+mouse. A change made while the mouse is offline also ends it, and the mouse
+reconnects at its `pointer_speed`, or at 1× when none is saved. After an agent
 restart, precision mode is off. A mouse with a saved `pointer_speed` gets that
 speed when the agent connects to it. A mouse without one keeps the slowest
 speed until precision mode is switched on and off again.

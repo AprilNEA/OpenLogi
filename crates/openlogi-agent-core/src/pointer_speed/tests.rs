@@ -188,6 +188,28 @@ fn a_reload_ends_precision_on_an_offline_mouse() {
     assert_eq!(write.speed, speed(0x0180));
 }
 
+/// The mouse left at the precision speed, so its reconnect writes 1× even
+/// with no speed saved. The write is owed once.
+#[test]
+fn an_offline_mouse_with_no_saved_speed_reconnects_at_one_times() {
+    let speeds = PointerSpeeds::default();
+    speeds.publish(None, [mouse("a", 1, None)]);
+    speeds.toggle_precision(Some("a"));
+    speeds.publish(None, []);
+    let assignments = ReloadChange {
+        assignments: true,
+        ..ReloadChange::default()
+    };
+    assert!(speeds.reload(every_key(assignments), []).is_empty());
+
+    let write = speeds
+        .reapply("a", &route(2), None)
+        .expect("the mouse may still move at the precision speed");
+    assert_eq!(write.speed, PointerSpeed::DEFAULT);
+    assert_eq!(write.route, route(2));
+    assert!(speeds.reapply("a", &route(2), None).is_none());
+}
+
 #[test]
 fn a_reload_keeps_precision_on_the_mice_it_did_not_change() {
     let speeds = PointerSpeeds::default();

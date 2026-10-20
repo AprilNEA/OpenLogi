@@ -10,9 +10,11 @@
 //!
 //! The mode lives in the agent process only. It survives a reconnect,
 //! because the reconnect reapply writes the precision speed while the mode is
-//! on. It does not survive an agent restart: the new agent writes the saved
-//! speed, and a mouse with no saved speed stays at the precision speed until
-//! its button is pressed twice.
+//! on. A reload can end the mode while the mouse is offline. The reconnect
+//! then writes the saved speed, or 1× when no speed is saved. The mode does
+//! not survive an agent restart: the new agent writes the saved speed, and a
+//! mouse with no saved speed stays at the precision speed until its button
+//! is pressed twice.
 //!
 //! Every pointer-speed write is numbered in one `WriteOrder`, and each
 //! number is taken under the lock that reads or changes the mode. The newest
@@ -46,6 +48,10 @@ struct State {
     online: HashMap<String, OnlineMouse>,
     /// The config keys whose precision mode is on, online or not.
     precision: HashSet<String>,
+    /// The config keys whose precision mode a reload ended while they were
+    /// offline. Such a mouse may still move at the precision speed, so its
+    /// reconnect writes even when no speed is saved.
+    restore: HashSet<String>,
 }
 
 struct OnlineMouse {
@@ -130,17 +136,21 @@ impl PointerSpeeds {
     }
 
     /// The write a reconnect owes the mouse `key` names, now at `route`: the
-    /// precision speed while the mode is on, else the `saved` speed. `None`
-    /// when there is nothing to write.
+    /// precision speed while the mode is on, else the `saved` speed. A mouse
+    /// whose mode a reload ended while it was offline gets 1× when no speed
+    /// is saved. `None` when there is nothing to write.
     pub(crate) fn reapply(
         &self,
         key: &str,
         route: &DeviceRoute,
         saved: Option<PointerSpeed>,
     ) -> Option<SpeedWrite> {
-        let state = self.lock();
+        let mut state = self.lock();
+        let restore = state.restore.remove(key);
         let speed = if state.precision.contains(key) {
             PointerSpeed::MIN
+        } else if restore {
+            saved.unwrap_or_default()
         } else {
             saved?
         };
@@ -153,10 +163,14 @@ impl PointerSpeeds {
     pub(crate) fn app_write(&self, route: &DeviceRoute, speed: PointerSpeed) -> WriteTicket {
         let mut state = self.lock();
         let State {
-            online, precision, ..
+            online,
+            precision,
+            restore,
+            ..
         } = &mut *state;
         for (key, mouse) in online.iter_mut().filter(|(_, mouse)| mouse.route == *route) {
             precision.remove(key);
+            restore.remove(key);
             mouse.saved = Some(speed);
         }
         self.order.request(route)
@@ -166,25 +180,25 @@ impl PointerSpeeds {
     /// changed for a config key, and `mice` are the online mice.
     ///
     /// A changed speed or changed assignments end precision mode on every
-    /// mouse, online or not, as in Logi Options+. An offline mouse therefore
-    /// gets its saved speed when it reconnects. An online mouse whose mode
-    /// ended returns to its saved speed, or to 1× when no speed is saved. An
-    /// online mouse whose speed alone changed gets the new speed. The other
-    /// mice get no write.
+    /// mouse, online or not, as in Logi Options+. A mouse whose mode ended
+    /// returns to its saved speed, or to 1× when no speed is saved: an online
+    /// mouse now, an offline mouse when it reconnects. An online mouse whose
+    /// speed alone changed gets the new speed. The other mice get no write.
     pub(crate) fn reload(
         &self,
         change: impl Fn(&str) -> ReloadChange,
         mice: impl IntoIterator<Item = ScaledMouse>,
     ) -> Vec<SpeedWrite> {
         let mut state = self.lock();
-        let ended: HashSet<String> = state
+        let mut ended: HashSet<String> = state
             .precision
             .extract_if(|key| change(key).ends_precision())
             .collect();
         // The writes are numbered while the lock is held, as every write is.
-        mice.into_iter()
+        let writes = mice
+            .into_iter()
             .filter_map(|ScaledMouse { key, route, saved }| {
-                let speed = if ended.contains(&key) {
+                let speed = if ended.remove(&key) {
                     saved.unwrap_or_default()
                 } else if change(&key).speed {
                     saved?
@@ -193,7 +207,10 @@ impl PointerSpeeds {
                 };
                 Some(self.write(route, speed))
             })
-            .collect()
+            .collect();
+        // What is left of `ended` is offline: its reconnect owes the write.
+        state.restore.extend(ended);
+        writes
     }
 
     /// Whether precision mode is on for the mouse `key` names.
