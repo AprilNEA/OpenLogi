@@ -61,8 +61,7 @@ impl DpiCycles {
     }
 }
 
-/// The DPI a mouse had before a held DPI shift, read from its sensor when
-/// config or an action never set one.
+/// The DPI read from a mouse's sensor before a held DPI shift.
 ///
 /// It is kept until a restore is written. A hold that supersedes a pending
 /// restore then reuses it, where a fresh reading would be the shifted DPI.

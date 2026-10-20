@@ -1044,8 +1044,9 @@ pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dp
     );
 }
 
-/// [`write_dpi_in_background`] for a held DPI shift. Every hold retains its
-/// restore value in `before`, even when it came from the live DPI cache.
+/// [`write_dpi_in_background`] for a held DPI shift. Each new hold reads the
+/// sensor and retains its restore value in `before`. Overlapping holds and
+/// re-presses before restoration share that snapshot.
 /// Check it again inside the ordered write: an earlier restore may have
 /// completed and cleared it after this hold was requested. Read the sensor
 /// when empty; a failed read must never be followed by a low-DPI write.

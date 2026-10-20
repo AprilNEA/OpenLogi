@@ -6,6 +6,8 @@
 //! in [`hook`]; the button state machine remains an internal implementation.
 
 mod button;
+#[cfg(test)]
+mod dpi_tests;
 pub mod hook;
 mod pointer;
 pub mod scroll;
@@ -260,9 +262,9 @@ impl HeldDpiShifts {
         }
         let shift = executor.dpi_cycle.read().ok().and_then(|cycles| {
             let (key, low, route) = cycles.target_for_shift(device_key)?;
-            Some((key.to_owned(), low, route, cycles.current(key)))
+            Some((key.to_owned(), low, route))
         });
-        let Some((key, low, route, current)) = shift else {
+        let Some((key, low, route)) = shift else {
             debug!("no DPI presets or target — DPI shift ignored");
             return;
         };
@@ -274,10 +276,19 @@ impl HeldDpiShifts {
         }
         info!(%low, "DPI shift held");
         let before = self.before.entry(device.clone()).or_default().clone();
-        // The active hold owns its restore value independently of the live
-        // cache: reconnect confirmation can invalidate that cache at any time.
-        if let Some(current) = current {
-            before.set(current);
+        // Native DPI buttons and onboard profiles can change the sensor
+        // without an agent event. A new hold must read it, not trust a cached
+        // preset. Keep an unrestored prior hold's snapshot: a quick re-press
+        // may supersede its restore while the sensor is still shifted.
+        if let Ok(mut cycles) = executor.dpi_cycle.write() {
+            // A preset picked during the previous hold (or while its restore
+            // is pending) is still owed if this press supersedes that restore.
+            if before.get().is_some()
+                && let Some(current) = cycles.current(&key)
+            {
+                before.set(current);
+            }
+            cycles.invalidate_current(&route);
         }
         hold_dpi_in_background(
             executor.access.op(&route),
@@ -481,9 +492,17 @@ impl ActionRuntime {
         self.dispatcher.clone()
     }
 
-    /// Reject new button input, emit terminal cancellation, and join the worker.
+    /// Reject new button input, emit terminal cancellation, join the worker,
+    /// then finish its pending DPI writes before the process can exit.
     pub fn shutdown(&mut self) {
         let _ = self.buttons.shutdown();
+        futures_lite::future::block_on(self.dispatcher.executor.dpi_order.drain());
+    }
+}
+
+impl Drop for ActionRuntime {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -859,13 +878,15 @@ mod tests {
     }
 
     #[test]
-    fn dpi_shift_keeps_a_known_restore_value_when_reapply_invalidates_current() {
+    fn dpi_shift_keeps_its_reading_when_reapply_invalidates_current() {
         let executor = dpi_shift_executor(Some(Dpi::new(1200)));
         let first = PressToken::hook_for_test(1, ButtonId::G6);
         let second = PressToken::hook_for_test(2, ButtonId::G7);
         let mut shifts = HeldDpiShifts::default();
         shifts.start(&executor, &first, Some("mouse"));
-        let route = shifts.by_device.values().next().unwrap().route.clone();
+        let held = shifts.by_device.values().next().unwrap();
+        held.before.set(Dpi::new(1200));
+        let route = held.route.clone();
         executor
             .dpi_cycle
             .write()
@@ -887,6 +908,37 @@ mod tests {
             held.restore_to(&executor.dpi_cycle.read().unwrap()),
             Some(Dpi::new(1200))
         );
+    }
+
+    #[test]
+    fn dpi_re_press_preserves_a_preset_whose_restore_is_still_pending() {
+        let executor = dpi_shift_executor(None);
+        let first = PressToken::hook_for_test(1, ButtonId::Back);
+        let second = PressToken::hook_for_test(2, ButtonId::Back);
+        let mut shifts = HeldDpiShifts::default();
+        shifts.start(&executor, &first, Some("mouse"));
+        // The hold read 1200. There is no channel here, so releasing it cannot
+        // complete the restore; the next press must inherit the obligation.
+        shifts
+            .by_device
+            .values()
+            .next()
+            .unwrap()
+            .before
+            .set(Dpi::new(1200));
+        executor.dispatch(&Action::SetDpiPreset(1), Some("mouse"));
+        shifts.end(&executor, &first);
+        shifts.start(&executor, &second, Some("mouse"));
+        assert_eq!(
+            shifts
+                .by_device
+                .values()
+                .next()
+                .unwrap()
+                .restore_to(&executor.dpi_cycle.read().unwrap()),
+            Some(Dpi::new(1600))
+        );
+        shifts.end(&executor, &second);
     }
 
     #[test]
