@@ -394,10 +394,18 @@ engine stays the fallback everywhere else.
   at `appcast-<arch>.xml`, which keeps the matrix and the DMGs as they are. A
   universal bundle would allow one feed but doubles every binary in the
   download and changes what the release builds.
-- **Signed on Linux, in Rust.** `release appcast` signs in the publish job with
-  `ed25519-compact`, checked against signatures Sparkle's own `sign_update`
-  made, instead of running Sparkle's macOS-only tools there. It refuses a
-  private key that does not match the public key the bundles embed.
+- **Signed on Linux, in Rust.** `release appcast` signs in the publish job
+  through `gpui-updater-release`, checked against signatures Sparkle's own
+  `sign_update` made, instead of running Sparkle's macOS-only tools there. It
+  refuses a private key that does not match the public key the bundles embed.
+- **Deltas from the three newest Sparkle releases, made on macOS.** Sparkle
+  offers a delta only to an app at exactly its base version, so three bases
+  cover most installs and keep the macOS leg's time bounded; everyone else
+  takes the full DMG. `BinaryDelta` is macOS-only, so the build leg makes the
+  deltas from the stapled DMG and the Linux publish job only signs and lists
+  them. A delta is kept only after it rebuilds the new app exactly, and one
+  that cannot be made never blocks the release. For 0.8.14 → 0.8.15 on arm64
+  the delta is 3.7 MB against a 21.2 MB DMG.
 - **`CFBundleVersion` is the crate version.** Sparkle compares the appcast's
   `sparkle:version` against it, and cargo-bundle writes the build's UTC
   timestamp there, which would rank above every release. xtask stamps the

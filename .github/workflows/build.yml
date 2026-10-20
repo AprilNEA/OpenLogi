@@ -379,10 +379,30 @@ jobs:
           ref_name="${ref_name//\//-}"
           cp target/release/OpenLogi.dmg "dist/OpenLogi-${ref_name}-macos-${{ matrix.arch }}.dmg"
 
+      # Here and not in the publish job: Sparkle's BinaryDelta runs only on
+      # macOS. The deltas come from the stapled DMG, which holds the exact app
+      # users install, and each one is applied and compared before it is kept.
+      # One that cannot be made is a warning: the feed still offers the full
+      # DMG, so it costs a larger download, never an update.
+      - name: Make Sparkle deltas
+        if: ${{ inputs.sign && github.ref_type == 'tag' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cargo run -p xtask -- release sparkle-deltas \
+            --dmg "dist/OpenLogi-${GITHUB_REF_NAME}-macos-${{ matrix.arch }}.dmg" \
+            --tag "$GITHUB_REF_NAME"
+
       - uses: actions/upload-artifact@v7
         with:
           name: OpenLogi-macos-dmg-${{ matrix.arch }}
-          path: dist/*.dmg
+          # The deltas travel with their DMG; `release appcast` reads the
+          # metadata next to each one in the publish job.
+          path: |
+            dist/*.dmg
+            dist/*.sparkle-delta
+            dist/*.sparkle-delta.json
           # 'warn' (the default) would let an empty-dist job stay green while
           # `results.macos` reports success and the publish gate ships nothing —
           # same reasoning as the windows zip upload.

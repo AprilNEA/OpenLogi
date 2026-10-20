@@ -538,6 +538,23 @@ OPENLOGI_SPARKLE_PRIVATE_ED_KEY=… cargo run -p xtask -- release appcast \
 The stable feed takes `MAJOR.MINOR.PATCH` releases only: Sparkle's version
 comparator stops at the first `-`, so it would read `1.2.0-rc.1` as `1.2.0`.
 
+Each feed also offers Sparkle deltas from the three newest earlier releases
+that embed Sparkle (0.8.14 and later). The macOS build leg makes them right
+after it staples the DMG, because Sparkle's `BinaryDelta` runs only on macOS:
+
+```sh
+GH_TOKEN=… cargo run -p xtask -- release sparkle-deltas \
+  --dmg dist/OpenLogi-v0.2.0-macos-arm64.dmg \
+  --tag v0.2.0
+```
+
+It downloads each earlier DMG from the GitHub Release, applies the new delta
+to that app, and keeps the delta only when the result matches the new app file
+for file. It writes `<dmg>.from-<version>.sparkle-delta` and a `.json` next to
+it; `release appcast` reads that metadata and signs the delta. A delta that
+cannot be made is a warning, and the feed still offers the full DMG. The deltas
+go to `/releases/<tag>/` with the DMGs; their metadata stays out of R2.
+
 ## Crowdin translation sync
 
 `.github/workflows/crowdin.yml` syncs GUI locales with

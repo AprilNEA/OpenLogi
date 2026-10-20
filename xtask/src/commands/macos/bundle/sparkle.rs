@@ -169,7 +169,7 @@ fn configure(info_plist: &Path, feed: &Feed) -> Result<()> {
 /// Unpack the pinned Sparkle release under `target/sparkle`, downloading it
 /// first unless a copy with the pinned hash is already there. Unpacks afresh
 /// every time, so nothing left in that directory can reach the bundle.
-fn fetch_release(root: &Path) -> Result<PathBuf> {
+pub(crate) fn fetch_release(root: &Path) -> Result<PathBuf> {
     let dir = root.join("target/sparkle");
     fs_err::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
     let archive = dir.join(format!("Sparkle-{VERSION}.tar.xz"));

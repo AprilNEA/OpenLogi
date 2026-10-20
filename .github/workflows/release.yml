@@ -337,7 +337,8 @@ jobs:
       # the EdDSA signature must cover the bytes users download. The feeds stay
       # outside dist, which is uploaded as release assets. xtask reads the
       # private key from the environment only, and refuses one that does not
-      # match the public key the bundles embed.
+      # match the public key the bundles embed. Each feed also lists the
+      # Sparkle deltas the macOS build leg made for its DMG, signed here too.
       - name: Generate Sparkle appcasts
         env:
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
@@ -375,6 +376,7 @@ jobs:
           aws s3 cp dist/ "$release_prefix/" \
             --recursive \
             --exclude latest.json \
+            --exclude "*.sparkle-delta.json" \
             --exclude "*.exe" \
             --exclude "*.exe.minisig" \
             --cache-control "public, max-age=31536000, immutable" \

@@ -35,8 +35,10 @@ devenv shell -- cargo run -p xtask -- <command>
 - `release checkout-version-bump` — pin a release job to the commit that
   introduced the current workspace version.
 - `release latest-json` — generate the static updater manifest for the stable channel.
-- `release appcast` — sign the macOS DMGs with Sparkle's EdDSA key and write one
-  appcast per architecture.
+- `release appcast` — sign the macOS DMGs and their Sparkle deltas with
+  Sparkle's EdDSA key and write one appcast per architecture.
+- `release sparkle-deltas` — make verified Sparkle deltas from the newest
+  earlier releases to a stapled DMG, with the metadata `release appcast` reads.
 
 ### Bundle identity
 

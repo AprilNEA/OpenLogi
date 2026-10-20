@@ -1655,6 +1655,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ct-codecs"
+version = "1.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fd9f3db6f2cfef61c10613071955154ffdc9e515daebff26de4b54e35038fdd"
+
+[[package]]
 name = "ctor"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1874,6 +1880,9 @@ name = "ed25519-compact"
 version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
+dependencies = [
+ "getrandom 0.4.2",
+]
 
 [[package]]
 name = "educe"
@@ -3344,6 +3353,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-updater-core"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f58edfb69f1976c852dc7814d20ef542bee57769fb1476622acbd9fece0a3d4f"
+dependencies = [
+ "base64",
+ "ed25519-compact",
+ "minisign-verify",
+ "roxmltree 0.20.0",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "gpui-updater-pre"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3351,7 +3379,27 @@ checksum = "c11ccca59c85b01241ea8a899cf49bad9e24fb8bbb02669e689eaa88daa76de7"
 dependencies = [
  "futures",
  "gpui-pre",
- "gpui-updater-core",
+ "gpui-updater-core 0.2.0",
+]
+
+[[package]]
+name = "gpui-updater-release"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa6905202eca20dd158e0b4d38362431f9b22fb460530f1ed01a172d4c87288a"
+dependencies = [
+ "base64",
+ "ed25519-compact",
+ "gpui-updater-core 0.4.3",
+ "minisign",
+ "plist",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
 ]
 
 [[package]]
@@ -3361,7 +3409,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05cd3fd0aff428e5524d263e71e00992100aae72a76af00188d28e3740c20e05"
 dependencies = [
  "block2 0.6.2",
- "gpui-updater-core",
+ "gpui-updater-core 0.2.0",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
  "thiserror 2.0.18",
@@ -4624,6 +4672,18 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "minisign"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26541387415a1e829df5d532aad019fb11bc723e2b5bc99edefa4cf5bfad0de7"
+dependencies = [
+ "ct-codecs",
+ "getrandom 0.2.17",
+ "rpassword",
+ "scrypt",
+]
 
 [[package]]
 name = "minisign-verify"
@@ -6912,6 +6972,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpassword"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a1efe12a1469752d0e6ff5ebec0b6ef4924cc5c4c71046b0ec730040535819d"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rust-embed"
 version = "8.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7174,6 +7255,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "salsa20"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97a22f5af31f73a954c10289c93e8a50cc23d971e80ee446f1f6f7137a088213"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7250,6 +7340,17 @@ dependencies = [
  "objc-foundation",
  "objc_id",
  "once_cell",
+]
+
+[[package]]
+name = "scrypt"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0516a385866c09368f0b5bcd1caff3366aace790fcd46e2bb032697bb172fd1f"
+dependencies = [
+ "pbkdf2",
+ "salsa20",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -10477,8 +10578,8 @@ dependencies = [
  "base64",
  "clap",
  "comfy-table",
- "ed25519-compact",
  "fs-err",
+ "gpui-updater-release",
  "openlogi-core",
  "path-absolutize",
  "plist",

@@ -13,14 +13,14 @@ publish = false
 anyhow = { workspace = true }
 # Clearing the custom icon a run of the app may have left on a bundle.
 appicon = { git = "https://github.com/AprilNEA/appicon", tag = "v0.1.1" }
-# Sparkle's keys and EdDSA signatures are base64.
+# Sparkle's keys are base64 (the bundle checks the embedded public key).
 base64 = "0.22.1"
 clap = { workspace = true }
 comfy-table = { version = "8.0.0", default-features = false }
-# Signing the Sparkle appcast: plain Ed25519 over the whole DMG, as Sparkle's
-# `sign_update` signs. No randomness needed, so none pulled in.
-ed25519-compact = { version = "2.6.0", default-features = false, features = ["std"] }
 fs-err = "3.3.0"
+# The release side of gpui-updater: the Sparkle appcast (with its deltas),
+# EdDSA signing, and verified Sparkle deltas made with Sparkle's BinaryDelta.
+gpui-updater-release = { version = "0.4.3", default-features = false }
 # For `brand`: the bundle-identifier family stamped into every Info.plist and
 # advertised by the update manifest. The app reads the same constants at
 # runtime, so what packaging builds and what the app claims cannot diverge.

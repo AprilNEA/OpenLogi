@@ -1,19 +1,21 @@
 //! The Sparkle appcasts: one feed per macOS architecture, each offering that
 //! architecture's notarized DMG of this release, signed with Sparkle's EdDSA
-//! key.
+//! key, plus the deltas `release sparkle-deltas` made from earlier releases.
 //!
 //! Runs in the publish job after the DMGs are stapled — stapling rewrites the
 //! file, so a signature made before it would not match what users download.
 //! The bundles read these feeds from the URLs `support::update_feed` gives
-//! them, and the publish job uploads them there.
+//! them, and the publish job uploads them there. Rendering and signing are
+//! `gpui-updater-release`'s; what OpenLogi's feed says stays here.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Parser;
-use ed25519_compact::{KeyPair, PublicKey, Seed, Signature};
+use gpui_updater_release::sparkle::{self, SparkleDelta};
+use gpui_updater_release::{
+    Appcast, AppcastItem, Enclosure, ReleaseNotes, SparkleKey, ensure_sparkle_version,
+};
 use strum::VariantArray as _;
 use time::{OffsetDateTime, format_description::well_known::Rfc2822};
 
@@ -24,9 +26,14 @@ use crate::support::update_feed::{self, MacArch};
 /// process listing.
 const PRIVATE_KEY_ENV: &str = "OPENLOGI_SPARKLE_PRIVATE_ED_KEY";
 
+/// The extension of the deltas `release sparkle-deltas` writes; the rest of
+/// the name is `sparkle::delta::delta_file_name`'s.
+const DELTA_EXTENSION: &str = "sparkle-delta";
+
 #[derive(Parser)]
 pub(crate) struct Args {
-    /// Directory holding the stapled `…-macos-<arch>.dmg` release artifacts.
+    /// Directory holding the stapled `…-macos-<arch>.dmg` release artifacts
+    /// and the `<dmg>.from-<version>.sparkle-delta` files made from them.
     #[arg(long, default_value = "dist")]
     dist: PathBuf,
     /// Directory the `appcast-<arch>.xml` feeds are written to. Keep it out
@@ -49,14 +56,7 @@ pub(crate) struct Args {
     release_notes: Option<PathBuf>,
 }
 
-/// One architecture's offer: the DMG, its size, and its EdDSA signature.
-struct Enclosure {
-    url: String,
-    length: u64,
-    signature: String,
-}
-
-/// Everything an appcast item says about the release besides its enclosure.
+/// Everything an appcast item says about the release besides its enclosures.
 struct Release<'a> {
     /// `CFBundleVersion` of the bundles in the DMGs, which Sparkle compares
     /// against the running app's. `macos package` stamps the crate version
@@ -78,11 +78,9 @@ fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
     let version = args.tag.strip_prefix('v').unwrap_or(&args.tag);
     ensure_sparkle_orders(version)?;
     let key = signing_key(private_key)?;
-    let public_key = decode_public_key(&args.public_key)?;
-    ensure!(
-        key.pk == public_key,
-        "{PRIVATE_KEY_ENV} does not belong to the public key the bundles embed"
-    );
+    key.expect_public_key(&args.public_key).with_context(|| {
+        format!("{PRIVATE_KEY_ENV} does not belong to the public key the bundles embed")
+    })?;
 
     let notes = args
         .release_notes
@@ -109,24 +107,31 @@ fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
         args.tag
     );
 
+    // Collect every feed before writing any, so a bad delta leaves no feed
+    // half-updated next to the others.
+    let mut feeds = Vec::new();
+    for (arch, dmg) in release_dmgs(&args.dist)? {
+        let name = file_name(&dmg)?;
+        let enclosure = Enclosure::for_file(&dmg, format!("{release_base}/{name}"), Some(&key))
+            .with_context(|| format!("could not sign {}", dmg.display()))?;
+        let mut item = item(&release, enclosure);
+        for delta in release_deltas(&args.dist, name, version)? {
+            let url = format!("{release_base}/{}", file_name(&delta.path)?);
+            item = item.delta(
+                delta
+                    .enclosure(url, Some(&key))
+                    .with_context(|| format!("could not sign {}", delta.path.display()))?,
+            );
+        }
+        let feed_url = update_feed::appcast_url(&args.base_url, arch);
+        feeds.push((arch, appcast(&feed_url, item), feed_url));
+    }
+
     fs_err::create_dir_all(&args.output_dir)
         .with_context(|| format!("could not create {}", args.output_dir.display()))?;
-    for (arch, dmg) in release_dmgs(&args.dist)? {
-        let bytes =
-            fs_err::read(&dmg).with_context(|| format!("could not read {}", dmg.display()))?;
-        let name = dmg
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("release DMG name is not UTF-8")?;
-        let enclosure = Enclosure {
-            url: format!("{release_base}/{name}"),
-            length: bytes.len() as u64,
-            signature: sign(&key, &bytes)?,
-        };
+    for (arch, xml, feed_url) in feeds {
         let feed = args.output_dir.join(arch.appcast_file_name());
-        let feed_url = update_feed::appcast_url(&args.base_url, arch);
-        fs_err::write(&feed, appcast(&feed_url, &release, &enclosure))
-            .with_context(|| format!("could not write {}", feed.display()))?;
+        fs_err::write(&feed, xml).with_context(|| format!("could not write {}", feed.display()))?;
         println!("{} → {}", feed.display(), feed_url);
     }
     Ok(())
@@ -137,49 +142,22 @@ fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
 /// `1.2.0-rc.1` as `1.2.0`: whoever took the pre-release from the stable feed
 /// would never be offered the final 1.2.0.
 fn ensure_sparkle_orders(version: &str) -> Result<()> {
-    let parts: Vec<_> = version.split('.').collect();
-    ensure!(
-        parts.len() == 3
-            && parts
-                .iter()
-                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())),
-        "the stable appcast only carries MAJOR.MINOR.PATCH releases, not {version:?}"
-    );
-    Ok(())
+    ensure_sparkle_version(version, 3, 3).with_context(|| {
+        format!("the stable appcast only carries MAJOR.MINOR.PATCH releases, not {version:?}")
+    })
 }
 
-/// The key pair behind Sparkle's exported private key: base64 of the 32-byte
+/// The key behind Sparkle's exported private key: base64 of the 32-byte
 /// Ed25519 seed. Sparkle 1's 96-byte export is an expanded key that no
 /// longer yields its seed; re-export it with Sparkle 2's `generate_keys -x`.
-fn signing_key(encoded: &str) -> Result<KeyPair> {
-    let bytes = BASE64
-        .decode(encoded.trim())
-        .with_context(|| format!("{PRIVATE_KEY_ENV} is not base64"))?;
-    match bytes.len() {
-        Seed::BYTES => Ok(KeyPair::from_seed(Seed::from_slice(&bytes)?)),
-        96 => bail!(
-            "{PRIVATE_KEY_ENV} is a legacy 96-byte Sparkle key; export the seed with Sparkle 2's `generate_keys -x`"
-        ),
-        len => bail!("{PRIVATE_KEY_ENV} must be a 32-byte Ed25519 seed, not {len} bytes"),
-    }
+fn signing_key(encoded: &str) -> Result<SparkleKey> {
+    SparkleKey::from_base64(encoded).with_context(|| format!("{PRIVATE_KEY_ENV} is not usable"))
 }
 
-fn decode_public_key(encoded: &str) -> Result<PublicKey> {
-    let bytes = BASE64
-        .decode(encoded.trim())
-        .context("the Sparkle public key is not base64")?;
-    PublicKey::from_slice(&bytes).context("the Sparkle public key is not an Ed25519 public key")
-}
-
-/// `sparkle:edSignature` over `bytes`: a plain (deterministic) Ed25519
-/// signature of the whole file, as Sparkle's `sign_update` makes it, checked
-/// before it is written.
-fn sign(key: &KeyPair, bytes: &[u8]) -> Result<String> {
-    let signature: Signature = key.sk.sign(bytes, None);
-    key.pk
-        .verify(bytes, &signature)
-        .context("the EdDSA signature does not verify")?;
-    Ok(BASE64.encode(signature.as_ref()))
+fn file_name(path: &Path) -> Result<&str> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("{} has no UTF-8 file name", path.display()))
 }
 
 /// The release DMG of every macOS architecture in `dist`, in [`MacArch`]
@@ -220,60 +198,76 @@ fn release_dmgs(dist: &Path) -> Result<Vec<(MacArch, PathBuf)>> {
     Ok(dmgs)
 }
 
-/// The appcast at `feed_url`: one item, offering `enclosure`.
-fn appcast(feed_url: &str, release: &Release<'_>, enclosure: &Enclosure) -> String {
-    let notes = release.notes.as_deref().map_or_else(String::new, |notes| {
-        format!(
-            "      <description sparkle:format=\"markdown\"><![CDATA[{}]]></description>\n",
-            notes.replace("]]>", "]]]]><![CDATA[>")
-        )
-    });
-    format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
-  <channel>
-    <title>OpenLogi</title>
-    <link>{feed_url}</link>
-    <description>OpenLogi updates ({channel} channel)</description>
-    <item>
-      <title>OpenLogi {version}</title>
-      <pubDate>{pub_date}</pubDate>
-      <sparkle:version>{version}</sparkle:version>
-      <sparkle:shortVersionString>{version}</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>{minimum_os}</sparkle:minimumSystemVersion>
-      <link>{page_url}</link>
-      <sparkle:fullReleaseNotesLink>{page_url}</sparkle:fullReleaseNotesLink>
-{notes}      <enclosure url="{url}" length="{length}" type="application/x-apple-diskimage" sparkle:edSignature="{signature}"/>
-    </item>
-  </channel>
-</rss>
-"#,
-        feed_url = escape(feed_url),
-        channel = update_feed::CHANNEL,
-        version = escape(release.version),
-        pub_date = escape(&release.pub_date),
-        minimum_os = update_feed::MACOS_MINIMUM_OS_VERSION,
-        page_url = escape(&release.page_url),
-        url = escape(&enclosure.url),
-        length = enclosure.length,
-        signature = escape(&enclosure.signature),
-    )
-}
-
-/// `text` escaped for an XML attribute value or element text.
-fn escape(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&apos;"),
-            ch => escaped.push(ch),
+/// The Sparkle deltas in `dist` that update to the DMG named `dmg`, in file
+/// name order. Each must carry the metadata `release sparkle-deltas` wrote
+/// next to it, be named for the version it updates from, and produce
+/// `version`: a delta to any other build would hand the app a bundle the feed
+/// does not describe.
+fn release_deltas(dist: &Path, dmg: &str, version: &str) -> Result<Vec<SparkleDelta>> {
+    let prefix = format!("{dmg}.");
+    let mut paths = Vec::new();
+    for entry in fs_err::read_dir(dist)
+        .with_context(|| format!("could not read artifact directory {}", dist.display()))?
+    {
+        let path = entry?.path();
+        let is_delta = path.extension().is_some_and(|ext| ext == DELTA_EXTENSION);
+        if is_delta
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        {
+            paths.push(path);
         }
     }
-    escaped
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let delta = SparkleDelta::read_metadata(&path)
+                .with_context(|| format!("could not read the metadata of {}", path.display()))?;
+            let expected = sparkle::delta::delta_file_name(dmg, &delta.from.bundle_version);
+            ensure!(
+                file_name(&path)? == expected,
+                "{} updates from {}, so it should be named {expected}",
+                path.display(),
+                delta.from.bundle_version
+            );
+            ensure!(
+                delta.to_bundle_version == version,
+                "{} updates to {}, not {version}",
+                path.display(),
+                delta.to_bundle_version
+            );
+            Ok(delta)
+        })
+        .collect()
+}
+
+/// The appcast item for `release`, offering `enclosure`.
+fn item(release: &Release<'_>, enclosure: Enclosure) -> AppcastItem {
+    let item = AppcastItem::new(release.version, enclosure)
+        .title(format!("OpenLogi {}", release.version))
+        .pub_date(Some(release.pub_date.clone()))
+        .short_version(release.version)
+        .minimum_system_version(update_feed::MACOS_MINIMUM_OS_VERSION)
+        .link(&release.page_url)
+        .full_release_notes_link(&release.page_url);
+    match &release.notes {
+        Some(notes) => item.notes(ReleaseNotes::Markdown(notes.clone())),
+        None => item,
+    }
+}
+
+/// The appcast at `feed_url`: one item.
+fn appcast(feed_url: &str, item: AppcastItem) -> String {
+    Appcast::new("OpenLogi", feed_url)
+        .description(format!(
+            "OpenLogi updates ({} channel)",
+            update_feed::CHANNEL
+        ))
+        .item(item)
+        .render()
 }
 
 #[cfg(test)]
