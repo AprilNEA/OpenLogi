@@ -226,9 +226,11 @@ fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
         thumbwheel_sensitivity,
         invert_wheel,
         pointer_target: _,
+        shift_bindings,
     } = a;
     *config_key == b.config_key
         && *bindings == b.bindings
+        && *shift_bindings == b.shift_bindings
         && *gesture_bindings == b.gesture_bindings
         && *side_gesture_bindings == b.side_gesture_bindings
         && *thumbwheel_sensitivity == b.thumbwheel_sensitivity

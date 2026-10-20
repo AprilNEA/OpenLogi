@@ -129,8 +129,6 @@ impl DeviceCapturePlan {
                                 || (shift
                                     && may_capture(button)
                                     && !keeps_gestures(button)
-                                    && (config.app_settings.capture_mouse_events
-                                        || !button.is_os_hook_button())
                                     && self.dispatch.shift_bindings.contains_key(&button)
                                     && layout.remappable().any(|b| b == button))
                                 || diverted.iter().any(|&(_, b)| b == button);

@@ -697,7 +697,8 @@ fn g603_stored_gestures_do_not_enter_unattributed_or_raw_xy_paths() {
         assert!(!maps.gestures.contains_key(&button));
         assert!(!maps.bindings.contains_key(&button));
     }
-    let plans = orch.capture_plans_for();
+    let published = orch.shared.capture_plans.borrow();
+    let plans = published.plans();
     let plan = &plans[0];
     assert!(plan.dispatch.side_gesture_bindings.is_empty());
     assert!(plan.target.spec.divert_gesture_buttons.is_empty());

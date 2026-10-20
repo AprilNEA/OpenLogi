@@ -1016,6 +1016,7 @@ mod tests {
             bindings,
             gesture_maps,
             dpi_gestures: false,
+            native_gestures: true,
             extra_actions: &[],
             virtual_thumbwheel: true,
             wheel_hold,

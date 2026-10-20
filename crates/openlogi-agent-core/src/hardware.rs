@@ -1065,8 +1065,7 @@ pub(crate) fn hold_dpi_in_background(
                 &turn,
                 || async move {
                     let shared = op.resolve()?;
-                    if before.get().is_none()
-                    {
+                    if before.get().is_none() {
                         before.set(openlogi_hid::get_dpi_info_on(&shared).await?.current);
                     }
                     openlogi_hid::set_dpi_on(&shared, dpi).await.map(|()| true)

@@ -71,11 +71,15 @@ impl AppState {
     #[must_use]
     pub fn current_report_rate_locked(&self) -> bool {
         self.current_onboard_supported()
-            && self.current_onboard_active() != Some(OnboardMemory::Off)
+            && (self.current_gaming_layout().is_none()
+                || self.current_onboard_active() != Some(OnboardMemory::Off))
     }
 
     pub fn commit_onboard_memory(&mut self, memory: OnboardMemory) -> StateEvents {
         let events = self.for_current_device(StateEvent::OnboardChanged);
+        if memory == OnboardMemory::Off && self.current_gaming_layout().is_none() {
+            return events;
+        }
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
