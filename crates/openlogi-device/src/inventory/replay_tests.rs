@@ -756,12 +756,12 @@ async fn voltage_battery_broadcast_reports_charging_while_holding_the_percentage
 }
 
 /// Probe a [`setting_fixture`] node carrying `feature_id` (at index 3), emit
-/// that feature's long `broadcast` (function, then payload) on its channel,
-/// and return the node's settings revision before and after the
-/// reconciliation it requests.
+/// that feature's long `broadcasts` (each a function, then its payload) on
+/// its channel in one burst, and return the node's settings revision before
+/// and after the one reconciliation they request together.
 async fn setting_broadcast_revisions(
     feature_id: u16,
-    broadcast: [u8; 4],
+    broadcasts: &[&[u8]],
     source: HidppEventSource,
 ) -> (u64, u64) {
     const PRODUCT_ID: u16 = 0xb369;
@@ -790,20 +790,24 @@ async fn setting_broadcast_revisions(
     };
     let before = revision(&mut enumerator).await;
 
-    let [function, payload @ ..] = broadcast;
-    let mut report = vec![0x11, 0xff, 0x03, function << 4];
-    report.extend_from_slice(&payload);
-    report.extend_from_slice(&[0; 13]);
-    assert_eq!(
-        backend
-            .emit_channel_report(HEADSET_CHANNEL, &report)
-            .expect("known channel"),
-        1
-    );
-    tokio::time::timeout(Duration::from_secs(2), observed.wait_for(1))
+    for broadcast in broadcasts {
+        let (function, payload) = broadcast.split_first().expect("a function id");
+        let mut report = vec![0x11, 0xff, 0x03, function << 4];
+        report.extend_from_slice(payload);
+        report.resize(4 + 16, 0);
+        assert_eq!(
+            backend
+                .emit_channel_report(HEADSET_CHANNEL, &report)
+                .expect("known channel"),
+            1
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(2), observed.wait_for(broadcasts.len()))
         .await
-        .expect("the broadcast must be recognised as a reconciliation request");
+        .expect("each broadcast must be recognised as a reconciliation request");
+    // However many arrived, one reconciliation is due.
     assert_eq!(events.try_recv(), Ok(source));
+    assert_eq!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 
     let after = revision(&mut enumerator).await;
     backend
@@ -819,7 +823,7 @@ async fn fn_lock_toggled_on_the_keyboard_moves_its_settings_revision() {
     assert_eq!(
         setting_broadcast_revisions(
             0x40a3,
-            [0x00, 0x00, 0x01, 0x00],
+            &[&[0x00, 0x00, 0x01, 0x00]],
             HidppEventSource::FnInversion
         )
         .await,
@@ -833,11 +837,42 @@ async fn a_dpi_button_moves_the_mouses_settings_revision() {
     assert_eq!(
         setting_broadcast_revisions(
             0x2202,
-            [0x00, 0x00, 0x06, 0x40],
+            &[&[0x00, 0x00, 0x06, 0x40]],
             HidppEventSource::ExtendedDpi
         )
         .await,
         (0, 1)
+    );
+}
+
+/// 0x2202 event 1: sensor 0, X axis, correction +100, perpendicular delta -1.
+const CALIBRATION_COMPLETED: &[u8] = &[0x01, 0x00, 0x00, 0x00, 0x64, 0xff, 0xff];
+
+#[tokio::test]
+async fn a_finished_sensor_calibration_moves_the_mouses_settings_revision() {
+    assert_eq!(
+        setting_broadcast_revisions(
+            0x2202,
+            &[CALIBRATION_COMPLETED],
+            HidppEventSource::ExtendedDpi
+        )
+        .await,
+        (0, 1)
+    );
+}
+
+#[tokio::test]
+async fn a_dpi_button_and_a_calibration_in_one_burst_ask_for_one_reconciliation() {
+    // Event 0 (sensor 0 now at 1600 DPI), then event 1: each moves the
+    // revision, and together they queue one reconciliation request.
+    assert_eq!(
+        setting_broadcast_revisions(
+            0x2202,
+            &[&[0x00, 0x00, 0x06, 0x40], CALIBRATION_COMPLETED],
+            HidppEventSource::ExtendedDpi
+        )
+        .await,
+        (0, 2)
     );
 }
 
@@ -850,7 +885,7 @@ async fn a_disabled_key_change_from_elsewhere_moves_the_keyboards_settings_revis
     assert_eq!(
         setting_broadcast_revisions(
             0x4521,
-            [0x02, 0x11, 0x00, 0x00],
+            &[&[0x02, 0x11, 0x00, 0x00]],
             HidppEventSource::DisableKeys
         )
         .await,

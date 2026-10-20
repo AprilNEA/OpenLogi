@@ -570,3 +570,20 @@ fn parameters_broadcast_is_exactly_the_parameters_changed_event() {
         );
     }
 }
+
+#[test]
+fn calibration_broadcast_is_exactly_the_calibration_completed_event() {
+    use super::ExtendedDpiFeature;
+
+    for function in 0..=0x0f {
+        let completed = matches!(
+            decode_event(function, &[0; 16]),
+            Some(ExtendedDpiEvent::CalibrationCompleted(_))
+        );
+        assert_eq!(
+            ExtendedDpiFeature::is_calibration_broadcast(function),
+            completed,
+            "function {function}"
+        );
+    }
+}

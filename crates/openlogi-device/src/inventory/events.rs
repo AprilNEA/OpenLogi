@@ -77,7 +77,8 @@ pub enum HidppEventSource {
     /// Fn lock changing on the device, as Fn+Esc does.
     FnInversion,
     /// A mouse's `ExtendedAdjustableDpi` (`0x2202`) feature reported its
-    /// sensor DPI changing on the device, as a DPI button does.
+    /// sensor DPI changing on the device, as a DPI button does, or a sensor
+    /// calibration finishing.
     ExtendedDpi,
     /// A keyboard's `MultiPlatform` (`0x4531`) feature reported its key
     /// layout platform changing on the device, as a platform key combination
@@ -434,8 +435,11 @@ impl EventFeatureIndices {
         {
             return Some(HidppEventSource::FnInversion);
         }
+        // A calibration result can leave the sensor different from its last
+        // read just as a DPI button can.
         if self.extended_dpi == Some(header.feature_index)
-            && ExtendedDpiFeature::is_parameters_broadcast(function_id)
+            && (ExtendedDpiFeature::is_parameters_broadcast(function_id)
+                || ExtendedDpiFeature::is_calibration_broadcast(function_id))
         {
             return Some(HidppEventSource::ExtendedDpi);
         }
@@ -1198,13 +1202,19 @@ mod tests {
         .into();
         assert_eq!(state.decode(short, false), None);
         assert_eq!(handle.settings_revision(1), 2);
-        // 0x2202: the parameters broadcast, not a calibration result.
-        assert_eq!(
-            state.decode(long(1, 6, 0, 0), false),
-            Some(HidppEventSource::ExtendedDpi)
-        );
-        assert_eq!(state.decode(long(1, 6, 1, 0), false), None);
-        assert_eq!(handle.settings_revision(1), 3);
+        // 0x2202: the parameters broadcast and the calibration result, no
+        // other function.
+        for (function_id, revision) in [(0, 3), (1, 4)] {
+            assert_eq!(
+                state.decode(long(1, 6, function_id, 0), false),
+                Some(HidppEventSource::ExtendedDpi)
+            );
+            assert_eq!(handle.settings_revision(1), revision);
+        }
+        assert_eq!(state.decode(long(1, 6, 2, 0), false), None);
+        // A reply to our own calibration request is not a result.
+        assert_eq!(state.decode(long(1, 6, 1, 0xd), false), None);
+        assert_eq!(handle.settings_revision(1), 4);
 
         // Our own traffic is not a device-side change: a matched reply, or a
         // message carrying a software id.
@@ -1215,12 +1225,12 @@ mod tests {
             state.decode(long(1, 7, 0, 0), false),
             Some(HidppEventSource::BatteryStatus)
         );
-        assert_eq!(handle.settings_revision(1), 3);
+        assert_eq!(handle.settings_revision(1), 4);
 
         // A re-probe re-registers the device; the change it already made
         // stands.
         handle.register_device(1, features);
-        assert_eq!(handle.settings_revision(1), 3);
+        assert_eq!(handle.settings_revision(1), 4);
         // The revision is per device index, and an unknown index has none.
         assert_eq!(handle.settings_revision(2), 0);
         assert_eq!(state.decode(long(3, 5, 0, 0), false), None);
