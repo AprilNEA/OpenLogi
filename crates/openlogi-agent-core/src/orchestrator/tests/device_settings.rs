@@ -374,6 +374,37 @@ fn a_clear_that_did_not_finish_leaves_a_link_made_again() {
 }
 
 #[test]
+fn a_re_enabled_device_gets_the_link_changes_made_while_it_was_disabled() {
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        keyboard_with_unit("old", 4, 2, true),
+        dev("mouse", 2, true),
+    ];
+    let disabled = |links: &[(&str, &[&str])]| {
+        let mut config = linking(links);
+        config.set_device_enabled("mouse", false);
+        config
+    };
+    let both = disabled(&[("keyboard", &["mouse"]), ("old", &["mouse"])]);
+    let one = disabled(&[("keyboard", &["mouse"])]);
+    let mut pending = PendingCookieReleases::default();
+    assert!(
+        changed_follower_cookies(&both, &one, &devices, &mut pending).is_empty(),
+        "a disabled device gets no writes"
+    );
+    assert_eq!(
+        changed_follower_cookies(
+            &one,
+            &linking(&[("keyboard", &["mouse"])]),
+            &devices,
+            &mut pending
+        ),
+        vec![cookie_write("mouse", 2, &[lead(2)], &[lead(1)])],
+        "the held clear runs, and the unchanged link is written"
+    );
+}
+
+#[test]
 fn a_byte_that_another_linked_keyboard_shares_is_not_cleared() {
     // Unit IDs 28 and 30 hash to the same byte, 0x4d.
     let devices = [

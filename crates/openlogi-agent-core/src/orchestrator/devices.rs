@@ -352,6 +352,29 @@ impl CookiePlan {
         }
     }
 
+    /// The writes for `follower` when OpenLogi can write to it again: the
+    /// clears that `pending` holds for it, then a link for each keyboard that
+    /// `pairs` links to it. A held clear for a keyboard that is linked again
+    /// is dropped.
+    fn follower_online(
+        &mut self,
+        pairs: &BTreeSet<(&str, &str)>,
+        devices: &[AgentDevice],
+        follower: &str,
+        route: &DeviceRoute,
+        pending: &mut PendingCookieReleases,
+    ) {
+        let linked = linked_leads(pairs, devices, follower);
+        for lead in pending.take(follower) {
+            if !linked.contains(&lead) {
+                self.release(follower, route.clone(), lead);
+            }
+        }
+        for lead in linked {
+            self.link(follower, route.clone(), lead);
+        }
+    }
+
     fn into_writes(self) -> Vec<FollowerCookieWrite> {
         self.0.into_values().collect()
     }
@@ -414,8 +437,11 @@ fn linked_leads(
 /// The cookie writes that a config change asks for: clear each pair that
 /// `config` removes, and link each pair that it adds.
 ///
-/// A removed pair whose device is offline goes to `pending`. A byte that
-/// another keyboard still linked to the device shares is not cleared.
+/// A removed pair whose device is offline or disabled goes to `pending`. A
+/// byte that another keyboard still linked to the device shares is not
+/// cleared. A device that `config` enables again gets the writes of a
+/// reconnect, because the changes made while it was disabled were not
+/// written.
 pub(super) fn changed_follower_cookies(
     previous: &Config,
     config: &Config,
@@ -446,6 +472,15 @@ pub(super) fn changed_follower_cookies(
             plan.link(follower, route, lead);
         }
     }
+    for dev in devices {
+        let key = dev.config_key.as_str();
+        if previous.device_enabled(key) {
+            continue;
+        }
+        if let Some(route) = writable_follower(config, devices, key) {
+            plan.follower_online(&after, devices, key, &route, pending);
+        }
+    }
     plan.into_writes()
 }
 
@@ -462,15 +497,11 @@ pub(super) fn reconnect_follower_cookies(
     let pairs = host_switch_pairs(config);
     let mut plan = CookiePlan::default();
     if let Some(route) = writable_follower(config, devices, &dev.config_key) {
-        let linked = linked_leads(&pairs, devices, &dev.config_key);
-        for lead in pending.take(&dev.config_key) {
-            if !linked.contains(&lead) {
-                plan.release(&dev.config_key, route.clone(), lead);
-            }
-        }
+        plan.follower_online(&pairs, devices, &dev.config_key, &route, pending);
     }
+    // A keyboard that comes online fills the cookies of the devices it links.
     for &(keyboard, follower) in &pairs {
-        if keyboard != dev.config_key && follower != dev.config_key {
+        if keyboard != dev.config_key {
             continue;
         }
         if let (Some(lead), Some(route)) = (

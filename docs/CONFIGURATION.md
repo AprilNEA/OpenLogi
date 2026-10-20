@@ -182,7 +182,8 @@ Common device fields are:
   devices. It does not replace a cookie that names another keyboard. Removing
   a link clears the keyboard's cookie. When the device is offline or the clear
   fails, the agent clears it when the device is next online, unless the agent
-  restarts first
+  restarts first. A disabled device gets no cookie writes. When it is enabled
+  again, the agent writes the cookie changes that it skipped
 - `fn_lock` for compatible keyboards
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+
