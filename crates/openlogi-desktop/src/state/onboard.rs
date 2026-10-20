@@ -1,5 +1,8 @@
 //! G-series onboard memory.
 
+use std::time::Duration;
+
+use gpui::App;
 use openlogi_core::binding::GamingLayout;
 use openlogi_core::config::OnboardMemory;
 
@@ -60,6 +63,28 @@ impl AppState {
             .edit(|config| config.set_onboard_memory(&key, Some(memory)));
         self.persist_and_reload("onboard memory");
         events
+    }
+
+    /// Re-read the active mouse once the agent has had time to apply a change.
+    pub(crate) fn refresh_onboard_later(cx: &mut App) {
+        const SETTLE: Duration = Duration::from_secs(2);
+        Self::update(cx, |state, cx| {
+            let Some(key) = state.current_record().map(DeviceRecord::device_key) else {
+                return;
+            };
+            cx.spawn(async move |state, cx| {
+                cx.background_executor().timer(SETTLE).await;
+                state
+                    .update(cx, |state, _| {
+                        state.pointer.reads.refresh_onboard(&key);
+                        // A profile switch also changes the DPI and report rate.
+                        state.pointer.reads.retry_dpi(&key);
+                        state.pointer.reads.retry_report_rate(&key);
+                    })
+                    .ok();
+            })
+            .detach();
+        });
     }
 
     pub(super) fn load_current_onboard(&mut self, cx: &mut gpui::Context<Self>) {
