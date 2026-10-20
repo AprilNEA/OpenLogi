@@ -25,9 +25,9 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation, HostOs,
-    OsLayoutOutcome, PointerSpeed, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus,
-    WeakSharedChannel, WriteError,
+    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, FollowerLink,
+    FollowerRelease, HidppOperation, HostOs, LeadCookie, OsLayoutOutcome, PointerSpeed, ReportRate,
+    ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
@@ -818,6 +818,78 @@ pub(crate) fn keep_os_layout_in_background(
             });
         },
     );
+}
+
+/// Spawn a write that links (`link`) or unlinks `op`'s pointing device and
+/// the keyboard of `lead` in the device's `ChangeHost` cookies, as Logi
+/// Options+ does (see [`openlogi_hid::link_follower_cookies_on`]). Returns
+/// immediately; the outcome is logged.
+pub(crate) fn write_follower_cookies_in_background(op: DeviceOp, lead: LeadCookie, link: bool) {
+    let index = op.route.device_index();
+    let cookie = lead.get();
+    if link {
+        op.spawn_write(
+            "linked device cookie write",
+            move |c| async move { Ok(openlogi_hid::link_follower_cookies_on(&c, lead).await) },
+            move |result| {
+                log_outcome(
+                    index,
+                    "linked device cookie write",
+                    result,
+                    |outcome| match outcome {
+                        Ok(FollowerLink::Linked { slots }) => {
+                            info!(
+                                index,
+                                cookie, slots, "linked device cookies now name the keyboard"
+                            );
+                        }
+                        Ok(FollowerLink::LinkedToAnotherKeyboard { cookie: other }) => {
+                            info!(
+                                index,
+                                cookie,
+                                other,
+                                "linked device cookies name another keyboard; left as they are"
+                            );
+                        }
+                        Ok(outcome) => debug!(
+                            index,
+                            cookie,
+                            ?outcome,
+                            "linked device cookies left as they are"
+                        ),
+                        Err(error) => warn!(index, %error, "linked device cookie write failed"),
+                    },
+                );
+            },
+        );
+    } else {
+        op.spawn_write(
+            "linked device cookie clear",
+            move |c| async move { Ok(openlogi_hid::release_follower_cookies_on(&c, lead).await) },
+            move |result| {
+                log_outcome(
+                    index,
+                    "linked device cookie clear",
+                    result,
+                    |outcome| match outcome {
+                        Ok(FollowerRelease::Released { slots }) => {
+                            info!(
+                                index,
+                                cookie, slots, "linked device cookies no longer name the keyboard"
+                            );
+                        }
+                        Ok(outcome) => debug!(
+                            index,
+                            cookie,
+                            ?outcome,
+                            "linked device cookies left as they are"
+                        ),
+                        Err(error) => warn!(index, %error, "linked device cookie clear failed"),
+                    },
+                );
+            },
+        );
+    }
 }
 
 /// The settings a mouse forgets when it power-cycles, as one reapply pushes

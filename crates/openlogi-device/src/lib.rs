@@ -60,8 +60,9 @@ pub use session::gesture::{
     CaptureSessionStop, CapturedInput, PendingCaptureRestore, run_capture_session,
 };
 pub use session::host_switch::{
-    HostSwitchError, HostSwitchFollowUp, HostSwitchRestoreOutcome, HostSwitchSessionFailure,
-    HostSwitchSessionOutcome, HostSwitchStopReason, PendingHostSwitchRestore,
+    FollowerLink, FollowerRelease, HostSwitchError, HostSwitchFollowUp, HostSwitchRestoreOutcome,
+    HostSwitchSessionFailure, HostSwitchSessionOutcome, HostSwitchStopReason, LeadCookie,
+    PendingHostSwitchRestore, link_follower_cookies_on, release_follower_cookies_on,
     run_host_switch_session, switch_linked_hosts,
 };
 pub use session::keyboard::{

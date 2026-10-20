@@ -203,6 +203,124 @@ fn configured_report_rate_needs_the_feature_and_a_saved_rate() {
     assert_eq!(configured_report_rate(&config, &device), None);
 }
 
+fn bolt(slot: u8) -> DeviceRoute {
+    DeviceRoute::Bolt {
+        receiver_uid: "AA00".into(),
+        slot,
+    }
+}
+
+/// A keyboard in `slot` whose `0x0003` unit ID is `unit`.
+fn keyboard_with_unit(key: &str, slot: u8, unit: u8, online: bool) -> AgentDevice {
+    let mut keyboard = dev(key, slot, online);
+    keyboard.kind = openlogi_core::device::DeviceKind::Keyboard;
+    keyboard.unit_id = [0, 0, 0, unit];
+    keyboard
+}
+
+fn lead(unit: u8) -> openlogi_hid::LeadCookie {
+    openlogi_hid::LeadCookie::for_unit_id([0, 0, 0, unit])
+        .expect("the test unit IDs hash to a non-zero byte")
+}
+
+fn linking(links: &[(&str, &[&str])]) -> Config {
+    let mut config = Config::default();
+    for (keyboard, targets) in links {
+        config
+            .devices
+            .entry((*keyboard).into())
+            .or_default()
+            .host_switch_targets = targets.iter().map(|target| (*target).into()).collect();
+    }
+    config
+}
+
+#[test]
+fn a_config_change_links_new_pairs_and_unlinks_removed_ones() {
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, false),
+        dev("mouse", 2, true),
+        dev("trackball", 3, true),
+        dev("asleep", 4, false),
+    ];
+    let writes = changed_follower_cookies(
+        &linking(&[("keyboard", &["mouse", "asleep"])]),
+        &linking(&[("keyboard", &["trackball", "asleep"])]),
+        &devices,
+    );
+    assert_eq!(
+        writes,
+        vec![
+            FollowerCookieWrite {
+                follower: bolt(3),
+                lead: lead(1),
+                link: true,
+            },
+            FollowerCookieWrite {
+                follower: bolt(2),
+                lead: lead(1),
+                link: false,
+            },
+        ],
+        "an offline keyboard still names its byte; an unchanged pair is not written"
+    );
+}
+
+#[test]
+fn cookie_writes_skip_an_unknown_keyboard_and_a_disabled_device() {
+    let mut config = linking(&[("keyboard", &["mouse", "disabled"])]);
+    config.set_device_enabled("disabled", false);
+    let devices = [
+        dev("keyboard", 1, true),
+        dev("mouse", 2, true),
+        dev("disabled", 3, true),
+    ];
+    assert!(
+        changed_follower_cookies(&Config::default(), &config, &devices).is_empty(),
+        "a keyboard without a unit ID has no byte"
+    );
+
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, true),
+        dev("disabled", 3, true),
+    ];
+    let followers: Vec<_> = changed_follower_cookies(&Config::default(), &config, &devices)
+        .into_iter()
+        .map(|write| write.follower)
+        .collect();
+    assert_eq!(followers, vec![bolt(2)], "a disabled device is left native");
+}
+
+#[test]
+fn a_reconnect_links_each_pair_that_the_device_is_part_of() {
+    let config = linking(&[("keyboard", &["mouse", "trackball"]), ("other", &["mouse"])]);
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        keyboard_with_unit("other", 4, 2, true),
+        dev("mouse", 2, true),
+        dev("trackball", 3, true),
+    ];
+
+    let for_mouse = reconnect_follower_cookies(&config, &devices, &devices[2]);
+    assert_eq!(
+        for_mouse
+            .iter()
+            .map(|write| (write.follower.clone(), write.lead, write.link))
+            .collect::<Vec<_>>(),
+        vec![(bolt(2), lead(1), true), (bolt(2), lead(2), true)],
+        "the first keyboard to write keeps the mouse; the second is refused on the device"
+    );
+    let for_keyboard = reconnect_follower_cookies(&config, &devices, &devices[0]);
+    assert_eq!(
+        for_keyboard
+            .into_iter()
+            .map(|write| write.follower)
+            .collect::<Vec<_>>(),
+        vec![bolt(2), bolt(3)]
+    );
+}
+
 #[test]
 fn host_switch_links_keep_sleeping_targets_but_require_online_keyboard() {
     let mut config = Config::default();

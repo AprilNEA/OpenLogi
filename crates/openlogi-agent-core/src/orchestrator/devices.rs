@@ -1,14 +1,14 @@
 //! The agent's device list: built from an inventory snapshot and ordered the
 //! way the GUI carousel is, then diffed across ticks into the volatile-settings
-//! re-apply plan and the host-switch links.
+//! re-apply plan, the host-switch links, and the follower cookie writes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_hid::session::gesture::MainWheelDivert;
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, PointerSpeed, ReportRate};
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, LeadCookie, PointerSpeed, ReportRate};
 
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
@@ -259,6 +259,102 @@ pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec
             (!targets.is_empty()).then_some(HostSwitchLink { keyboard, targets })
         })
         .collect()
+}
+
+/// One write of the `ChangeHost` cookies of a linked pointing device.
+///
+/// Logi Options+ moves a pointing device after a keyboard only when the
+/// device's cookies name that keyboard. OpenLogi writes them for the links in
+/// its config, so that Options+ on the keyboard's other hosts moves the same
+/// devices. OpenLogi itself follows its config and never reads the cookies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FollowerCookieWrite {
+    /// The linked pointing device.
+    pub(super) follower: DeviceRoute,
+    /// The byte that names the keyboard.
+    pub(super) lead: LeadCookie,
+    /// `true` writes the keyboard's byte; `false` clears it.
+    pub(super) link: bool,
+}
+
+/// Each keyboard → linked device pair that `config` names, by config key.
+fn host_switch_pairs(config: &Config) -> BTreeSet<(&str, &str)> {
+    config
+        .devices
+        .iter()
+        .flat_map(|(keyboard, settings)| {
+            settings
+                .host_switch_targets
+                .iter()
+                .filter(move |target| *target != keyboard)
+                .map(move |target| (keyboard.as_str(), target.as_str()))
+        })
+        .collect()
+}
+
+/// The cookie writes that a config change asks for: link each pair that
+/// `config` adds, and unlink each pair that it removes.
+pub(super) fn changed_follower_cookies(
+    previous: &Config,
+    config: &Config,
+    devices: &[AgentDevice],
+) -> Vec<FollowerCookieWrite> {
+    let before = host_switch_pairs(previous);
+    let after = host_switch_pairs(config);
+    let linked = after.difference(&before).map(|&pair| (pair, true));
+    let unlinked = before.difference(&after).map(|&pair| (pair, false));
+    linked
+        .chain(unlinked)
+        .filter_map(|((keyboard, follower), link)| {
+            follower_cookie_write(config, devices, keyboard, follower, link)
+        })
+        .collect()
+}
+
+/// The cookie writes that `dev` coming online asks for: link each pair that
+/// it is part of. The write fills a cookie that the firmware cleared when a
+/// slot was paired again, as Options+ does when a linked device connects.
+pub(super) fn reconnect_follower_cookies(
+    config: &Config,
+    devices: &[AgentDevice],
+    dev: &AgentDevice,
+) -> Vec<FollowerCookieWrite> {
+    host_switch_pairs(config)
+        .into_iter()
+        .filter(|&(keyboard, follower)| keyboard == dev.config_key || follower == dev.config_key)
+        .filter_map(|(keyboard, follower)| {
+            follower_cookie_write(config, devices, keyboard, follower, true)
+        })
+        .collect()
+}
+
+/// The write for one pair. Skipped when the linked device is disabled,
+/// offline, or has no route, or when the keyboard's unit ID is unknown. The
+/// keyboard itself may be offline.
+fn follower_cookie_write(
+    config: &Config,
+    devices: &[AgentDevice],
+    keyboard: &str,
+    follower: &str,
+    link: bool,
+) -> Option<FollowerCookieWrite> {
+    if !config.device_enabled(follower) {
+        return None;
+    }
+    let lead = devices
+        .iter()
+        .find(|device| device.config_key == keyboard)
+        .and_then(|device| LeadCookie::for_unit_id(device.unit_id))?;
+    let follower = devices
+        .iter()
+        .find(|device| device.config_key == follower && device.online)?
+        .route
+        .clone()?;
+    Some(FollowerCookieWrite {
+        follower,
+        lead,
+        link,
+    })
 }
 
 /// The canonical identity of one device: what the GUI carousel orders by, what

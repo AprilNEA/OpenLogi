@@ -173,7 +173,14 @@ Common device fields are:
   changed since the save. With `auto_camera` on, a power change on the light
   is a manual choice until the next camera transition, like the power switch
   in the settings app
-- `host_switch_targets` and `fn_lock` for compatible keyboards
+- `host_switch_targets` for keyboards with Easy-Switch keys (HID++ `0x1814`):
+  the config keys of the mice and other devices that move with the keyboard
+  when it switches hosts. A linked device moves to its slot whose host name
+  (HID++ `0x1815`) matches the keyboard's new slot, and otherwise to the slot
+  with the same number. The agent also writes the linked device's `0x1814`
+  cookies, so that Logi Options+ on the keyboard's other hosts moves the same
+  devices. It does not replace a cookie that names another keyboard
+- `fn_lock` for compatible keyboards
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+
   does; `false` leaves the keyboard's layout to its own shortcuts
