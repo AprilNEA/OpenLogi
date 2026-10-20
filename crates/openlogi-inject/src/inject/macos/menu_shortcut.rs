@@ -265,7 +265,9 @@ fn find_item(
     })
 }
 
-fn frontmost_pid() -> Option<i32> {
+/// The frontmost app's process id, read again before an AX press so a switch
+/// of apps during a blocking search cancels it.
+pub(super) fn frontmost_pid() -> Option<i32> {
     Some(
         NSWorkspace::sharedWorkspace()
             .frontmostApplication()?

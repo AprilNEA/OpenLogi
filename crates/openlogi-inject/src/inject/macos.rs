@@ -87,6 +87,7 @@ pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
 pub(super) use spaces::natural_scrolling;
 use spaces::{next_desktop, previous_desktop};
 use symbolic_hotkey::{capture_region, screenshot};
+use window::WindowClose;
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -148,12 +149,18 @@ fn dispatch_click(button: MouseButton) {
 /// Finder), so press the focused window's own close button. Windows the
 /// Accessibility tree gives no close button keep ⌘W.
 fn close_focused_window() {
-    if window::ax_close_focused_window() {
-        tracing::debug!("Close Window via the focused window's AXCloseButton");
-        return;
+    match window::ax_close_focused_window() {
+        WindowClose::Pressed => {
+            tracing::debug!("Close Window via the focused window's AXCloseButton");
+        }
+        WindowClose::TargetChanged => {
+            tracing::debug!("frontmost app changed before the close button press — dropped");
+        }
+        WindowClose::NotPressed => {
+            tracing::debug!("no AX close button on the focused window — pressing ⌘W");
+            press_combo(&combo(Shortcut::CloseWindow));
+        }
     }
-    tracing::debug!("no AX close button on the focused window — pressing ⌘W");
-    press_combo(&combo(Shortcut::CloseWindow));
 }
 
 /// Shortcuts pressed as the frontmost app's menu item, so AppKit's remapping
