@@ -21,7 +21,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+
+use std::time::{Duration, Instant};
 
 use openlogi_hid::DeviceRoute;
 use tokio::sync::{MutexGuard, Notify};
@@ -38,6 +40,7 @@ struct Queue {
     finished: Mutex<Finished>,
     /// Woken whenever a ticket finishes.
     advanced: Notify,
+    drained: Condvar,
 }
 
 /// Every ticket up to `through` is done, as are the later `early` ones,
@@ -68,11 +71,26 @@ impl Queue {
             }
         }
         self.advanced.notify_waiters();
+        self.drained.notify_all();
     }
 
-    fn is_turn_of(&self, number: u64) -> bool {
-        let finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
-        finished.through + 1 >= number
+    async fn wait_through(&self, number: u64) {
+        loop {
+            let advanced = self.advanced.notified();
+            let mut advanced = std::pin::pin!(advanced);
+            // Register before checking, so completion cannot race the wait.
+            advanced.as_mut().enable();
+            if self
+                .finished
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .through
+                >= number
+            {
+                return;
+            }
+            advanced.await;
+        }
     }
 }
 
@@ -84,6 +102,54 @@ pub(crate) struct WriteTicket {
 }
 
 impl WriteOrder {
+    /// Wait for every already requested write, including superseded or failed
+    /// writes. Stop producers first. Unlike requesting a new ticket, this
+    /// barrier never supersedes the final restore it is meant to drain.
+    #[cfg(test)]
+    pub(crate) async fn drain(&self) {
+        let pending: Vec<_> = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .map(|queue| (Arc::clone(queue), queue.latest.load(Ordering::Acquire)))
+            .collect();
+        for (queue, through) in pending {
+            queue.wait_through(through).await;
+        }
+    }
+
+    /// Blocking exit barrier with one total deadline across all routes. No
+    /// async runtime is required, and a stuck receiver cannot strand exit.
+    pub(crate) fn drain_timeout(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let pending: Vec<_> = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .map(|queue| (Arc::clone(queue), queue.latest.load(Ordering::Acquire)))
+            .collect();
+        for (queue, through) in pending {
+            let finished = queue
+                .finished
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let (finished, _) = queue
+                .drained
+                .wait_timeout_while(
+                    finished,
+                    deadline.saturating_duration_since(Instant::now()),
+                    |finished| finished.through < through,
+                )
+                .unwrap_or_else(PoisonError::into_inner);
+            if finished.through < through {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Number a new write for `route`. Call it when the write is requested,
     /// not when it runs: the number is what orders it.
     pub(crate) fn request(&self, route: &DeviceRoute) -> WriteTicket {
@@ -133,17 +199,7 @@ impl WriteTicket {
     where
         Write: Future<Output = T>,
     {
-        loop {
-            let advanced = self.queue.advanced.notified();
-            let mut advanced = std::pin::pin!(advanced);
-            // Registered before the check, so a ticket finishing between the
-            // check and the wait still wakes this one.
-            advanced.as_mut().enable();
-            if self.queue.is_turn_of(self.number) {
-                break;
-            }
-            advanced.await;
-        }
+        self.queue.wait_through(self.number - 1).await;
         write().await
     }
 }
@@ -163,6 +219,33 @@ mod tests {
             receiver_uid: "receiver".into(),
             slot,
         }
+    }
+
+    #[tokio::test]
+    async fn drain_waits_for_all_routes_without_superseding_the_final_write() {
+        let order = WriteOrder::default();
+        let superseded = order.request(&route(1));
+        let restore = order.request(&route(1));
+        let other_device = order.request(&route(2));
+        let mut drain = std::pin::pin!(order.drain());
+        assert!(futures_lite::future::poll_once(&mut drain).await.is_none());
+        assert!(
+            !superseded
+                .write_or(|| async { true }, || async { false })
+                .await
+        );
+        drop(superseded);
+        assert!(
+            restore
+                .write_or(|| async { true }, || async { false })
+                .await
+        );
+        drop(restore);
+        assert!(futures_lite::future::poll_once(&mut drain).await.is_none());
+        // A failed/refused write drops its ticket too; it must not strand exit.
+        drop(other_device);
+        assert_eq!(futures_lite::future::poll_once(&mut drain).await, Some(()));
+        order.drain().await; // Shutdown is idempotent.
     }
 
     #[tokio::test]

@@ -60,7 +60,6 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         Arc::clone(&observable),
     )));
     let shared = orchestrator.lock().await.shared();
-    let inputs = InputServices::start(&shared)?;
     let backlight_overlay = BacklightOverlayManager::default();
 
     // Shared between the hook callback (which mirrors events into it) and
@@ -74,6 +73,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         Arc::clone(&observable),
     ));
 
+    let inputs = InputServices::start(&shared, Arc::clone(&pairing))?;
     let (ring_haptics, demand) = spawn_ipc_server(
         Arc::clone(&orchestrator),
         &shared,
@@ -128,13 +128,14 @@ pub(crate) struct InputServices {
     pub(crate) ring: Arc<ActionRingManager>,
     pub(crate) triggers: tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
     pub(crate) dispatcher: ActionDispatcher,
-    action_runtime: ActionRuntime,
+    action_runtime: Option<ActionRuntime>,
+    pairing: Arc<pairing::PairingManager>,
     pub(crate) scroll_input: ScrollInputHandle,
     scroll_runtime: ScrollRuntime,
 }
 
 impl InputServices {
-    fn start(shared: &SharedHandles) -> Option<Self> {
+    fn start(shared: &SharedHandles, pairing: Arc<pairing::PairingManager>) -> Option<Self> {
         let ring = Arc::new(ActionRingManager::default());
         let (sender, triggers) = tokio::sync::mpsc::unbounded_channel();
         let action_runtime =
@@ -158,15 +159,58 @@ impl InputServices {
             ring,
             triggers,
             dispatcher,
-            action_runtime,
+            action_runtime: Some(action_runtime),
+            pairing,
             scroll_input,
             scroll_runtime,
         })
     }
 
-    pub(crate) fn shutdown(&mut self) {
+    pub(crate) async fn stop_receiver_work(&self) {
+        self.pairing.shutdown().await;
+    }
+
+    /// Keep the runtime alive so a failed Unix exec can reuse every dispatcher.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(crate) async fn prepare_replacement(&mut self) -> bool {
+        self.ring.dismiss_active();
+        let Some(mut actions) = self.action_runtime.take() else {
+            return false;
+        };
+        match tokio::task::spawn_blocking(move || {
+            let ready = actions.prepare_replacement();
+            (actions, ready)
+        })
+        .await
+        {
+            Ok((actions, ready)) => {
+                self.action_runtime = Some(actions);
+                ready
+            }
+            Err(error) => {
+                warn!(%error, "action runtime replacement cleanup failed");
+                false
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(crate) fn resume_after_replacement_failure(&mut self) {
+        if let Some(actions) = &mut self.action_runtime {
+            actions.resume_after_replacement_failure();
+        }
+    }
+
+    pub(crate) async fn shutdown(&mut self) {
+        self.stop_receiver_work().await;
         self.scroll_runtime.shutdown();
-        self.action_runtime.shutdown();
+        if let Some(mut actions) = self.action_runtime.take() {
+            // Keep the pairing translator and receiver cleanup runnable while
+            // the synchronous action worker drains its outstanding writes.
+            if let Err(error) = tokio::task::spawn_blocking(move || actions.shutdown()).await {
+                warn!(%error, "action runtime shutdown failed");
+            }
+        }
     }
 }
 

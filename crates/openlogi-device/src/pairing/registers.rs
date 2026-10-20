@@ -1,3 +1,4 @@
+use hidpp::protocol::v10::{ErrorType, Hidpp10Error};
 use hidpp::{channel::HidppChannel, receiver::NotificationFlags};
 use tracing::warn;
 
@@ -52,8 +53,15 @@ pub(super) async fn write_register(
                 ?e,
                 "register write failed"
             );
-            PairingError::Register(format!("{e}"))
+            register_error(&e)
         })
+}
+
+fn register_error(e: &Hidpp10Error) -> PairingError {
+    match e {
+        Hidpp10Error::RegisterAccess(ErrorType::TooManyDevices) => PairingError::ReceiverFull,
+        _ => PairingError::Register(format!("{e}")),
+    }
 }
 
 pub(super) async fn write_long_register(
@@ -70,6 +78,23 @@ pub(super) async fn write_long_register(
                 ?e,
                 "long register write failed"
             );
-            PairingError::Register(format!("{e}"))
+            register_error(&e)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_receiver_is_its_own_failure() {
+        assert!(matches!(
+            register_error(&Hidpp10Error::RegisterAccess(ErrorType::TooManyDevices)),
+            PairingError::ReceiverFull
+        ));
+        assert!(matches!(
+            register_error(&Hidpp10Error::RegisterAccess(ErrorType::Busy)),
+            PairingError::Register(_)
+        ));
+    }
 }

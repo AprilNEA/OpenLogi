@@ -152,7 +152,7 @@ impl ShutdownSignals {
 /// Release the input hook, then end the process. The run loop is not the
 /// process — macOS keeps the AppKit tray loop on the main thread — so the
 /// exit has to be explicit, and it must run the hook's destructor.
-pub(crate) fn release_hook_and_exit(
+pub(crate) async fn release_hook_and_exit(
     hook: Option<Hook>,
     inputs: &mut InputServices,
     reason: &str,
@@ -160,7 +160,7 @@ pub(crate) fn release_hook_and_exit(
 ) -> ! {
     info!(reason, "releasing the input hook and exiting");
     drop(hook);
-    inputs.shutdown();
+    inputs.shutdown().await;
     #[expect(
         clippy::exit,
         reason = "a signalled shutdown must end the process, and the loop that observed it runs off the main thread"

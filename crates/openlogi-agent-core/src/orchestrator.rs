@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Binding, ButtonId};
+use openlogi_core::binding::{Binding, ButtonId, GamingLayout};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
     Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
@@ -27,8 +27,9 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, ReportRate,
-    ReportRateInfo, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
+    DeviceIoGate, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, HidppOperation, HostOs,
+    ReportRate, ReportRateInfo, WriteError, commands_for_light_settings,
+    is_reserved_keyboard_control,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -39,6 +40,7 @@ use tracing::{debug, info, warn};
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    shift_bindings_for,
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
@@ -561,6 +563,7 @@ impl Orchestrator {
         let mut gestures = oshook_gestures_for(&self.config, key, app);
         if cfg!(target_os = "macos")
             && let Some(key) = key
+            && !self.is_spy_only(key)
         {
             for button in hidpp_side_gesture_maps_for(&self.config, key, app)
                 .keys()
@@ -574,13 +577,46 @@ impl Orchestrator {
                 gestures.remove(button);
             }
         }
+        if let Some(layout) = key
+            .and_then(|key| self.devices.iter().find(|dev| dev.config_key == key))
+            .and_then(|dev| GamingLayout::for_model_key(&dev.model_key))
+        {
+            // A saved gesture must not fall back to senderless native events.
+            gestures.retain(|button, _| {
+                if layout.needs_host_mode(*button) {
+                    bindings.remove(button);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        let shift_bindings = key
+            .map(|key| shift_bindings_for(&self.config, key))
+            .unwrap_or_default();
         HookMaps {
             bindings,
             gestures,
             pointer_target,
             selected_device: key.map(str::to_owned),
+            shift_bindings,
             ..HookMaps::default()
         }
+    }
+
+    /// Whether `key` is a G-series mouse: one with a layout, or any other
+    /// without ReprogControls. It has no `0x1b04` raw XY, so its gesture
+    /// buttons stay with the OS hook.
+    fn is_spy_only(&self, key: &str) -> bool {
+        self.devices
+            .iter()
+            .find(|dev| dev.config_key == key)
+            .is_some_and(|dev| {
+                GamingLayout::for_model_key(&dev.model_key).is_some()
+                    || dev
+                        .capabilities
+                        .is_some_and(|capabilities| capabilities.no_button_diversion())
+            })
     }
 
     /// Publish hook maps while preserving thumb-wheel polarities learned from
@@ -592,6 +628,7 @@ impl Orchestrator {
             Ok(mut current) => {
                 maps.thumbwheel_positive_is_forward =
                     std::mem::take(&mut current.thumbwheel_positive_is_forward);
+                maps.shift_held = std::mem::take(&mut current.shift_held);
                 *current = maps;
             }
             Err(error) => {
@@ -744,18 +781,40 @@ impl Orchestrator {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            let presets = self.config.dpi_presets(&dev.config_key);
-            let previous = guard
-                .by_key
+            let mut presets = self.config.dpi_presets(&dev.config_key);
+            if presets.is_empty()
+                && let Some(layout) = GamingLayout::for_model_key(&dev.model_key)
+            {
+                presets = layout
+                    .stock_dpi_presets
+                    .iter()
+                    .copied()
+                    .map(Dpi::new)
+                    .collect();
+            }
+            let committed = self
+                .config
+                .devices
                 .get(&dev.config_key)
-                .filter(|state| state.presets == presets);
+                .and_then(|device| device.effective_dpi(&stable_id(dev).route_key()));
+            let previous = guard.by_key.get(&dev.config_key).filter(|state| {
+                state.committed == committed && state.target.as_ref() == Some(&route)
+            });
+            let current = previous.map_or(committed, |state| state.current);
+            let nearest = current.and_then(|dpi| {
+                (0..presets.len())
+                    .min_by_key(|&i| presets[i].into_inner().abs_diff(dpi.into_inner()))
+            });
+            let same_presets = previous.filter(|state| state.presets == presets);
             by_key.insert(
                 dev.config_key.clone(),
                 DpiCycleState {
-                    index: previous.map_or(0, |state| state.index),
-                    capabilities: previous.and_then(|state| state.capabilities.clone()),
+                    index: same_presets.map_or_else(|| nearest.unwrap_or(0), |state| state.index),
+                    capabilities: same_presets.and_then(|state| state.capabilities.clone()),
                     presets,
                     target: Some(route),
+                    current,
+                    committed,
                 },
             );
         }
@@ -808,6 +867,8 @@ impl Orchestrator {
             plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
             plan.target.spec.divert_main_wheel =
                 main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
+            let mut plan =
+                plan.with_onboard(&self.config, GamingLayout::for_model_key(&dev.model_key));
             if let Some(keyboard) = keyboard
                 .as_ref()
                 .filter(|keyboard| keyboard.route == plan.target.route)
@@ -1043,11 +1104,18 @@ impl Orchestrator {
                 .map(openlogi_hid::SmartShiftStatus::from),
         };
         if !settings.is_empty() {
+            let cycles = Arc::clone(&self.shared.dpi_cycle);
+            let dpi_route = route.clone();
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
                 settings,
                 &self.shared.report_rate_order,
                 &self.shared.capture_plans,
+                move || {
+                    if let Ok(mut cycles) = cycles.write() {
+                        cycles.invalidate_current(&dpi_route);
+                    }
+                },
             );
         }
         // A disabled entry is re-applied too: it writes black, and a device

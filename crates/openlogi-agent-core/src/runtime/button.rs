@@ -367,8 +367,9 @@ enum ButtonCommand {
     Wake,
 }
 
-struct ShutdownRequest {
+struct QuiesceRequest {
     done: mpsc::SyncSender<()>,
+    terminate: bool,
 }
 
 /// Sole owner of active press records.
@@ -717,7 +718,7 @@ impl ButtonInputHandle {
 /// Unique owner of the lifecycle worker and its graceful shutdown handshake.
 pub(crate) struct ButtonRuntimeOwner {
     input: ButtonInputHandle,
-    shutdown: mpsc::Sender<ShutdownRequest>,
+    shutdown: mpsc::Sender<QuiesceRequest>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -748,6 +749,24 @@ impl ButtonRuntimeOwner {
         self.input.clone()
     }
 
+    /// Reject new edges and acknowledge cancellation without destroying the worker.
+    pub(crate) fn suspend(&self) -> bool {
+        self.input.stop_accepting();
+        self.input.invalidate_all();
+        let (done, wait) = mpsc::sync_channel(0);
+        self.shutdown
+            .send(QuiesceRequest {
+                done,
+                terminate: false,
+            })
+            .is_ok()
+            && wait.recv_timeout(SHUTDOWN_TIMEOUT).is_ok()
+    }
+
+    pub(crate) fn resume(&self) {
+        self.input.accepting.store(true, Ordering::Release);
+    }
+
     pub(crate) fn shutdown(&mut self) -> bool {
         self.shutdown_with_timeout(SHUTDOWN_TIMEOUT)
     }
@@ -758,7 +777,14 @@ impl ButtonRuntimeOwner {
         };
         self.input.stop_accepting();
         let (done, wait) = mpsc::sync_channel(0);
-        if self.shutdown.send(ShutdownRequest { done }).is_err() {
+        if self
+            .shutdown
+            .send(QuiesceRequest {
+                done,
+                terminate: true,
+            })
+            .is_err()
+        {
             let _ = worker.join();
             return false;
         }

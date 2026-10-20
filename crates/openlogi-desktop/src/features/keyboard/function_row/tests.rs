@@ -292,8 +292,8 @@ fn same_lane_callouts_never_overlap() {
 #[test]
 fn function_key_callouts_stagger_even_lower_odd_upper() {
     assert!(callout_top_px(0) > callout_top_px(1));
-    assert_eq!(callout_top_px(0), callout_top_px(2));
-    assert_eq!(callout_top_px(1), callout_top_px(3));
+    assert!((callout_top_px(0) - callout_top_px(2)).abs() < f32::EPSILON);
+    assert!((callout_top_px(1) - callout_top_px(3)).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -354,6 +354,7 @@ fn legacy_asset(
         },
         png_width: png.0,
         png_height: png.1,
+        side_view: None,
     }
 }
 
@@ -391,6 +392,7 @@ fn asset_with_controls(controls: &[(u16, f32, f32)]) -> ResolvedAsset {
         },
         png_width: 1872,
         png_height: 728,
+        side_view: None,
     }
 }
 

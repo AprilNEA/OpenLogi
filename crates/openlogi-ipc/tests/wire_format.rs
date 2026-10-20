@@ -44,9 +44,9 @@ use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
     DeviceRoute, Dpi, DpiCapabilities, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
     HidppFeatureErrorKind, HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand,
-    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget,
-    ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
-    SmartShiftThreshold, TunableTorque, WriteError,
+    OnboardMode, OnboardProfile, OnboardState, PasskeyMethod, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
+    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -110,7 +110,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 37);
+    assert_eq!(PROTOCOL_VERSION, 38);
 }
 
 #[test]
@@ -129,6 +129,15 @@ fn config_reload_result() {
 #[test]
 fn request_variant_order() {
     assert_wire(&AgentRequest::ProtocolVersion {}, "00");
+    assert_wire(
+        &AgentRequest::ReadOnboard {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "280008463030444341464501",
+    );
     assert_wire(
         &AgentRequest::SetDpi {
             route: DeviceRoute::Bolt {
@@ -657,13 +666,32 @@ fn device_inventory() {
                 backlight: true,
                 easy_switch: true,
                 virtual_thumbwheel: true,
+                onboard_profiles: false,
+                button_spy: false,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101000007",
+    );
+}
+
+#[test]
+fn onboard_state() {
+    assert_wire(&HidppOperation::ReadOnboard, "17");
+    assert_wire(
+        &OnboardState {
+            mode: OnboardMode::Onboard,
+            active_profile: Some(5),
+            profiles: vec![OnboardProfile {
+                index: 5,
+                name: Some("Stock".into()),
+                enabled: true,
+            }],
+        },
+        "0001050105010553746f636b01",
     );
 }
 

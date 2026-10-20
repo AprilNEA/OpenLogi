@@ -49,7 +49,7 @@ impl AppState {
     /// that lists `rate` — the panel only offers listed rates, so that last
     /// case is a click from before the list changed.
     pub fn commit_report_rate(&mut self, rate: ReportRate) -> StateEvents {
-        if !self.current_report_rate_supported() {
+        if !self.current_report_rate_supported() || self.current_report_rate_locked() {
             return self.for_current_device(StateEvent::ReportRateChanged);
         }
         let load = self.current_report_rate_load();

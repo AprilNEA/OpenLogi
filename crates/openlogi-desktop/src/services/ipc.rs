@@ -67,7 +67,7 @@ use request::LinkLost;
 pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts,
-    ReadFnLock, ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost,
+    ReadFnLock, ReadOnboard, ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost,
     RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight, SetLightManualPower,
     SetLighting, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
 };

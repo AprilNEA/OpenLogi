@@ -33,6 +33,7 @@ use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
 
 use crate::capture_plan::SharedCapturePlans;
+use crate::dpi::DpiBeforeShift;
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
@@ -829,7 +830,11 @@ pub(crate) fn reapply_mouse_volatile_in_background(
     settings: VolatileMouseSettings,
     report_rate_order: &WriteOrder,
     capture_plans: &SharedCapturePlans,
+    invalidate_dpi: impl Fn() + Send + 'static,
 ) {
+    if settings.dpi.is_some() {
+        invalidate_dpi();
+    }
     match op.resolve() {
         Ok(shared) => drop(shared),
         Err(reason) => {
@@ -878,6 +883,9 @@ pub(crate) fn reapply_mouse_volatile_in_background(
                     openlogi_hid::set_dpi_on(&shared, dpi).await
                 })
                 .await;
+                // A timeout can still have changed the sensor. Forget any
+                // cached action value acquired while this write was in flight.
+                invalidate_dpi();
                 log_outcome(index, "DPI write", result, |()| {
                     debug!(index, %dpi, "DPI written to device");
                 });
@@ -1004,19 +1012,64 @@ fn log_wheel_result(
     });
 }
 
-/// Spawn an OS thread that writes `dpi` to `op`'s device via its current
-/// shared channel. Returns immediately; failures are logged.
-pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
+/// DPI presets, hold snapshots, and restores form a transaction history:
+/// dropping an earlier preset would change what a later hold must restore.
+/// Wait for order before leasing the receiver (never hold a shared lease while
+/// waiting behind a writer that may itself be queued behind pairing).
+fn spawn_dpi_write<F, Fut>(op: DeviceOp, ticket: WriteTicket, label: &'static str, write: F)
+where
+    F: FnOnce(SharedChannel) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), WriteError>>,
+{
     let index = op.route.device_index();
-    op.spawn_write(
-        "DPI write",
-        move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
-        move |result| {
-            log_outcome(index, "DPI write", result, |()| {
-                debug!(index, %dpi, "DPI written to device");
-            });
-        },
-    );
+    std::thread::spawn(move || {
+        let Some(rt) = one_shot_runtime(label) else {
+            return;
+        };
+        let result = rt.block_on(op.run_in_order(HidppOperation::WriteDpi, ticket, write));
+        log_outcome(index, label, Ok(result), |()| {
+            debug!(index, label, "DPI operation completed");
+        });
+    });
+}
+
+/// Write every requested preset before a subsequent hold reads its snapshot.
+pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dpi) {
+    spawn_dpi_write(op, ticket, "DPI write", move |shared| async move {
+        openlogi_hid::set_dpi_on(&shared, dpi).await
+    });
+}
+
+/// Read the sensor inside the ordered hold transaction. A preceding restore
+/// may have cleared the shared snapshot since this hold was requested.
+pub(crate) fn hold_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    dpi: Dpi,
+    before: DpiBeforeShift,
+) {
+    spawn_dpi_write(op, ticket, "DPI shift", move |shared| async move {
+        if before.get().is_none() {
+            before.set(openlogi_hid::get_dpi_info_on(&shared).await?.current);
+        }
+        openlogi_hid::set_dpi_on(&shared, dpi).await
+    });
+}
+
+/// Restore after earlier DPI transactions finish; retain the snapshot on error.
+pub(crate) fn restore_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    before: DpiBeforeShift,
+    restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
+) {
+    spawn_dpi_write(op, ticket, "DPI restore", move |shared| async move {
+        if let Some(dpi) = restore() {
+            openlogi_hid::set_dpi_on(&shared, dpi).await?;
+            before.clear();
+        }
+        Ok(())
+    });
 }
 
 /// Spawn an OS thread that reconciles the configured native HiResWheel mode
@@ -1315,6 +1368,7 @@ mod tests {
             },
             &rates,
             &no_capture_plans(),
+            || {},
         );
 
         assert!(
@@ -1565,6 +1619,7 @@ mod tests {
             },
             &WriteOrder::default(),
             &no_capture_plans(),
+            || {},
         );
         wait_until_a_worker_holds_the_receiver(&receiver_access).await;
 
@@ -1655,6 +1710,7 @@ mod tests {
                 },
                 &WriteOrder::default(),
                 &plans,
+                || {},
             ),
         }
         wait_until_a_worker_holds_the_receiver(&receiver_access).await;

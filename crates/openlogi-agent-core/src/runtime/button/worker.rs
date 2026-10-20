@@ -6,13 +6,13 @@ use std::time::Instant;
 
 use super::{
     ActivePress, ButtonCommand, ButtonInput, ButtonRuntimeEvent, ButtonState, CancelReason,
-    EVENT_QUEUE_CAPACITY, EndReason, PressBehavior, PressToken, SHUTDOWN_POLL_PERIOD,
-    ShutdownRequest,
+    EVENT_QUEUE_CAPACITY, EndReason, PressBehavior, PressToken, QuiesceRequest,
+    SHUTDOWN_POLL_PERIOD,
 };
 
 pub(super) fn run_worker(
     events: &mpsc::Receiver<ButtonCommand>,
-    shutdown: &mpsc::Receiver<ShutdownRequest>,
+    shutdown: &mpsc::Receiver<QuiesceRequest>,
     shared_generation: &AtomicU64,
     emit: &mut impl FnMut(ButtonRuntimeEvent),
 ) {
@@ -115,7 +115,7 @@ fn process_command(
 
 pub(super) fn settle_due_long_presses(
     events: &mpsc::Receiver<ButtonCommand>,
-    shutdown: &mpsc::Receiver<ShutdownRequest>,
+    shutdown: &mpsc::Receiver<QuiesceRequest>,
     shared_generation: &AtomicU64,
     generation: &mut u64,
     state: &mut ButtonState,
@@ -197,7 +197,7 @@ pub(super) fn settle_due_long_presses(
 }
 
 fn finish_deferred_shutdown_if_requested(
-    shutdown: &mpsc::Receiver<ShutdownRequest>,
+    shutdown: &mpsc::Receiver<QuiesceRequest>,
     state: &mut ButtonState,
     due_presses: &[PressToken],
     deferred: &mut Vec<ButtonRuntimeEvent>,
@@ -211,7 +211,7 @@ fn finish_deferred_shutdown_if_requested(
     });
     emit_settled_events(std::mem::take(deferred), due_presses, emit);
     let _ = request.done.send(());
-    true
+    request.terminate
 }
 
 fn emit_settled_events(
@@ -234,7 +234,7 @@ fn emit_settled_events(
 }
 
 fn finish_shutdown_if_requested(
-    shutdown: &mpsc::Receiver<ShutdownRequest>,
+    shutdown: &mpsc::Receiver<QuiesceRequest>,
     state: &mut ButtonState,
     emit: &mut impl FnMut(ButtonRuntimeEvent),
 ) -> bool {
@@ -243,7 +243,7 @@ fn finish_shutdown_if_requested(
     };
     emit_canceled(state.cancel_all(), CancelReason::Shutdown, emit);
     let _ = request.done.send(());
-    true
+    request.terminate
 }
 
 fn synchronize_generation(

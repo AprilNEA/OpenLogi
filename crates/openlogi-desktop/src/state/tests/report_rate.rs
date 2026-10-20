@@ -311,3 +311,45 @@ fn a_write_answered_after_a_route_change_keeps_the_new_connections_rates(
     );
     assert_eq!(current_load(cx), Load::Ready(Arc::new(receiver_answer)));
 }
+
+#[gpui::test]
+fn gaming_report_rate_requires_a_supported_host_layout(cx: &mut gpui::TestAppContext) {
+    use openlogi_core::config::OnboardMemory;
+
+    let (mut state, mut receiver) = mouse_state(true);
+    state.devices.records[0].model_key = "0b01c".into();
+    state.devices.records[0]
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .onboard_profiles = true;
+    let _ = state.commit_onboard_memory(OnboardMemory::Off);
+    install(state, cx);
+    answer_rate_read(&mut receiver, &info(1000, &[500, 1000]));
+    cx.run_until_parked();
+
+    cx.update(|cx| {
+        AppState::apply(cx, |state| {
+            let events = state.commit_report_rate(ReportRate::new(500));
+            assert_eq!(
+                state.config.report_rate(KNOWN_MOUSE_KEY),
+                Some(ReportRate::new(500))
+            );
+            let _ = state.commit_onboard_memory(OnboardMemory::Profile(1));
+            let _ = state.commit_report_rate(ReportRate::new(1000));
+            assert_eq!(
+                state.config.report_rate(KNOWN_MOUSE_KEY),
+                Some(ReportRate::new(500))
+            );
+            let _ = state.commit_onboard_memory(OnboardMemory::Off);
+            state.devices.records[0].model_key = "unknown-g705".into();
+            assert!(state.current_report_rate_locked());
+            let _ = state.commit_report_rate(ReportRate::new(1000));
+            assert_eq!(
+                state.config.report_rate(KNOWN_MOUSE_KEY),
+                Some(ReportRate::new(500))
+            );
+            events
+        });
+    });
+}

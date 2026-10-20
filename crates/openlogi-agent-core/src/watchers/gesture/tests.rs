@@ -835,6 +835,25 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         "a pointer-only refresh must not end the hold that caused it"
     );
 
+    // A G-Shift-only edit is a real binding change too: a held gesture
+    // must not finish using the layer from before the edit.
+    moved.dispatch.shift_bindings.insert(
+        ButtonId::Back,
+        openlogi_core::binding::Binding::Single(Action::Copy),
+    );
+    reconcile_session(
+        &mut session,
+        Some((&moved.target, &moved.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(!dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+    );
+    assert!(dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
+
     // A real binding change still ends every admitted press.
     let mut rebound = moved;
     rebound.dispatch.gesture_bindings.insert(

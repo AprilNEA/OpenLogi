@@ -16,6 +16,7 @@ fn manager_with_ctrl(ctrl: mpsc::UnboundedSender<PairingControl>) -> PairingMana
     let (_, upd_rx) = mpsc::unbounded_channel();
     PairingManager {
         ctrl,
+        stopping: tokio::sync::watch::channel(false).0,
         updates: Mutex::new(upd_rx),
         session: Arc::new(StdMutex::new(SessionOwner::default())),
         shared: shared_handles(),
@@ -563,4 +564,50 @@ async fn unpair_is_refused_while_a_pairing_session_holds_the_receiver() {
         manager.unpair(&route).await,
         Err(PairingFailure::ReceiverBusy)
     );
+}
+
+#[tokio::test]
+async fn shutdown_cancels_pairing_but_keeps_lease_until_cleanup() {
+    let (ctrl, mut controls) = mpsc::unbounded_channel();
+    let manager = manager_with_ctrl(ctrl);
+    let session = start_session(&manager, &mut controls).await;
+    let mut shutdown = std::pin::pin!(manager.shutdown());
+    assert!(futures::poll!(&mut shutdown).is_pending());
+    assert!(
+        matches!(controls.recv().await, Some(PairingControl::Cancel { session: id }) if id == session)
+    );
+    assert!(manager.shared.receiver_access.exclusive_requested());
+    assert_eq!(
+        manager.start(ReceiverSelector::First).await,
+        Err(PairingCommandError::WatcherUnavailable)
+    );
+    apply_session_event(
+        PairingSessionEvent {
+            session,
+            event: PairingEvent::Failed(PairingError::Cancelled),
+        },
+        &manager.session,
+        &manager.observable,
+    );
+    shutdown.await;
+    assert!(!manager.shared.receiver_access.exclusive_requested());
+}
+
+#[tokio::test]
+async fn shutdown_withdraws_pairing_waiting_for_receiver() {
+    let (ctrl, mut controls) = mpsc::unbounded_channel();
+    let manager = manager_with_ctrl(ctrl);
+    let access = manager.shared.receiver_access.clone();
+    let capture = access.acquire_for_io().await;
+    let mut start = std::pin::pin!(manager.start(ReceiverSelector::First));
+    assert!(futures::poll!(&mut start).is_pending());
+    let mut shutdown = std::pin::pin!(manager.shutdown());
+    assert!(futures::poll!(&mut shutdown).is_pending());
+    assert_eq!(start.await, Err(PairingCommandError::WatcherUnavailable));
+    shutdown.await;
+    assert!(!access.exclusive_requested());
+    controls
+        .try_recv()
+        .expect_err("shutdown must not start a pairing session");
+    drop(capture);
 }

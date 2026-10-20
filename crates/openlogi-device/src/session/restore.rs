@@ -34,8 +34,8 @@ enum RetiredChannelPolicy {
     /// Inventory declared the transport obsolete; wait for another current
     /// publication instead of writing underneath its replacement.
     ReplacementOnly,
-    /// The session stopped normally but a restore write failed, so retrying
-    /// the still-current original transport is safe.
+    /// The session has stopped, so its original transport may be used if
+    /// inventory currently publishes it for the exact route.
     CurrentAllowed,
 }
 
@@ -84,8 +84,9 @@ impl<P> PendingRestore<P> {
         }
     }
 
-    /// Permit a retry on the original channel after a normal teardown write
-    /// failed while that publication was still current.
+    /// Permit a retry on the original channel after capture has stopped.
+    /// Every attempt still resolves the registry's current exact-route winner;
+    /// a withdrawn route may return on the same underlying HID channel.
     pub(crate) fn allow_current_channel(mut self) -> Self {
         self.retired_policy = RetiredChannelPolicy::CurrentAllowed;
         self

@@ -441,3 +441,25 @@ fn gesture_maps_cover_every_gesture_mode_button() {
         "a promoted OS-hook button gets its own menu simultaneously"
     );
 }
+
+#[test]
+fn g603_cannot_enable_senderless_side_gestures() {
+    let mut state = state_with_a_known_mouse();
+    state.devices.records[0].model_key = "0b01c".into();
+    for button in [ButtonId::Back, ButtonId::Forward] {
+        assert!(!state.current_native_gesture_supported(button));
+        let _ = state.commit_gesture_mode(button, true);
+        assert!(!state.config.is_gesture_mode(KNOWN_MOUSE_KEY, button));
+    }
+}
+
+#[test]
+fn unknown_gaming_layout_cannot_commit_host_mode_or_report_rate() {
+    use openlogi_core::{config::OnboardMemory, hid::ReportRate};
+    let mut state = state_with_a_known_mouse();
+    state.devices.records[0].model_key = "unknown-g705".into();
+    let _ = state.commit_onboard_memory(OnboardMemory::Off);
+    assert_eq!(state.current_onboard_memory(), None);
+    let _ = state.commit_report_rate(ReportRate::new(1000));
+    assert_eq!(state.config.report_rate(KNOWN_MOUSE_KEY), None);
+}

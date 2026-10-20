@@ -260,6 +260,7 @@ async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
         ),
         None,
         None,
+        None,
     )
     .expect("one diverted control should require restoration");
 
@@ -307,6 +308,7 @@ fn diverted_gesture(
                 PointerDivert::RawXy,
             )],
         ),
+        None,
         None,
         None,
     )
@@ -504,6 +506,7 @@ async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
         ),
         None,
         None,
+        None,
     )
     .expect("one diverted control should require restoration");
 
@@ -566,6 +569,7 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
                 PointerDivert::RawXy,
             )],
         ),
+        None,
         None,
         None,
     );
@@ -741,4 +745,103 @@ async fn thumbwheel_left_diverted_is_restored_native_without_its_diverted_sign()
         arm_then_restore_thumbwheel([0x01, 0x01]).await,
         vec![[0x01, 0x00], [0x00, 0x00]]
     );
+}
+
+/// A wake that mutes the captured buttons but cannot start the spy leaves
+/// them dead, so the session has to end and restore the mouse.
+#[tokio::test]
+async fn host_rearm_reports_a_spy_that_did_not_start() {
+    const ONBOARD: u8 = 9;
+    const SPY: u8 = 10;
+    const START_SPY: u8 = 1;
+    let spy_fails = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder({
+        let spy_fails = Arc::clone(&spy_fails);
+        move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => {
+                    response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                        0x8100 => ONBOARD,
+                        0x8110 => SPY,
+                        _ => 0,
+                    };
+                }
+                (SPY, 0) | (ONBOARD, 2) => response[4] = 1,
+                (SPY, START_SPY) if spy_fails.load(std::sync::atomic::Ordering::Relaxed) => {
+                    response[2] = 0xff;
+                    response[3] = SPY;
+                    response[4] = request[3];
+                    response[5] = 2;
+                }
+                (ONBOARD | SPY, _) => {}
+                _ => panic!("unexpected capture request: {request:02x?}"),
+            }
+            Some(response)
+        }
+    });
+    let channel = scripted_channel(raw).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let spec = CaptureSpec {
+        onboard: Some(OnboardTarget::Host(HostMode {
+            slots: vec![(ButtonId::G9, true)],
+            report_rate: None,
+        })),
+        ..CaptureSpec::default()
+    };
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+        .await
+        .unwrap();
+
+    assert!(armed.rearm().await);
+    spy_fails.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(!armed.rearm().await);
+}
+
+/// A transient receiver probe may withdraw a route without closing its HID
+/// channel. Re-publishing that exact channel must not strand restoration and
+/// therefore prevent the manager from starting a successor capture session.
+#[tokio::test]
+async fn withdrawn_capture_route_restores_when_the_same_channel_returns() {
+    for returns_before_teardown in [false, true] {
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "receiver".into(),
+            slot: 1,
+        };
+        let node = NodeId::from("mouse-node".to_owned());
+        let registry = ChannelRegistry::default();
+        let (raw, writes) = ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+        let channel = scripted_channel(raw).await;
+        registry.replace_node(node.clone(), [route.clone()], channel.clone());
+        let shared = registry.lookup(&route).unwrap();
+        let pending = diverted_gesture(&route, &channel);
+        registry.replace_node(node.clone(), [], channel.clone());
+        let stop = wait_for_channel_change(&registry, &shared).await;
+        assert_eq!(stop, CaptureStop::ChannelChanged);
+        if returns_before_teardown {
+            registry.replace_node(node.clone(), [route.clone()], channel.clone());
+        }
+        let outcome = restore_after_stop(stop, Some(pending), &registry).await;
+        let outcome = if returns_before_teardown {
+            outcome
+        } else {
+            let CaptureSessionOutcome::RestorePending(pending) = outcome else {
+                panic!("absent routes must retain restoration ownership");
+            };
+            assert!(writes.written_reports().is_empty());
+            registry.replace_node(node, [route], channel);
+            pending.retry(&registry).await
+        };
+        assert!(
+            matches!(outcome, CaptureSessionOutcome::Restored),
+            "same-channel republication must release recovery ownership (returned before teardown: {returns_before_teardown})"
+        );
+        let reports = writes.written_reports();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(&reports[0][4..7], &[0, 0xc3, 0x22]);
+    }
 }
