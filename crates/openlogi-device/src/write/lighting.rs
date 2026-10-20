@@ -64,11 +64,8 @@ const KEYS_PER_FRAME: u8 = 0x0e;
 // that list. Index 0x01 is only the legacy guess, kept where no list can be
 // read: a device reporting zero zones, and a zone whose info is rejected.
 const LEGACY_FIXED_EFFECT_INDEX: u8 = 0x01;
-// The old raw `0x8070` path intentionally wrote only zones 0..4: enough for the
-// keyboards this path targets and bounded by a small, predictable delay budget.
-// Keep that cap even though the typed wrapper can query the reported zone count;
-// a malformed or unexpectedly large count should not stall a color apply.
-const MAX_COLOR_LED_EFFECT_ZONES: u8 = 4;
+// The zones the legacy guess covers on a device that reports zero zones.
+const LEGACY_FALLBACK_ZONES: u8 = 4;
 // Zones are paced apart because the controller can drop closely-spaced reports.
 const FRAME_GAP: Duration = Duration::from_millis(8);
 
@@ -356,6 +353,8 @@ async fn resolve_feature_index(
 /// first so only existing zones are driven (a typed `set_zone_effect` awaits the
 /// device's reply, so unlike the former raw fire-and-forget path a write to a
 /// non-existent zone would surface as an error rather than a silent no-op).
+/// Every reported zone is enumerated, as Logi Options+ and Solaar do; the
+/// caller's write deadline, not a zone cap, bounds a malformed count.
 /// Every target is located before the first write, so a keyboard without a
 /// fixed colour is left untouched for the next path.
 async fn set_color_effects(
@@ -384,19 +383,11 @@ async fn set_color_effects(
             index,
             "0x8070 reported zero zones; applying legacy 4-zone fallback"
         );
-        (0..MAX_COLOR_LED_EFFECT_ZONES)
+        (0..LEGACY_FALLBACK_ZONES)
             .map(|zone| (zone, LEGACY_FIXED_EFFECT_INDEX))
             .collect()
     } else {
-        if zone_count > MAX_COLOR_LED_EFFECT_ZONES {
-            debug!(
-                index,
-                zone_count,
-                capped_zone_count = MAX_COLOR_LED_EFFECT_ZONES,
-                "0x8070 zone count capped to legacy write limit"
-            );
-        }
-        fixed_color_targets(&feature, index, zone_count.min(MAX_COLOR_LED_EFFECT_ZONES)).await?
+        fixed_color_targets(&feature, index, zone_count).await?
     };
     if targets.is_empty() {
         debug!(index, zone_count, "no 0x8070 zone offers a fixed colour");

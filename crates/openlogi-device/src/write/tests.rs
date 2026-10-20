@@ -1352,6 +1352,31 @@ async fn a_fixed_colour_targets_each_zones_own_fixed_effect() -> Result<(), Writ
 }
 
 #[tokio::test]
+async fn a_fixed_colour_reaches_every_reported_zone() -> Result<(), WriteError> {
+    // Six zones, past the four the writer used to stop at. The fixed colour
+    // sits at a different ordinal in each, so every write must come from that
+    // zone's own list. The keyboard does not answer for a seventh zone, so an
+    // out-of-range request would fail the write.
+    const ZONES: ScriptedZones = &[
+        (0x0001, &[0x0001]),
+        (0x0002, &[0x0000, 0x0001]),
+        (0x0006, &[0x0003, 0x0004, 0x0001]),
+        (0x0007, &[0x0001, 0x0003]),
+        (0x0008, &[0x0000, 0x0003, 0x0004, 0x0001]),
+        (0x0009, &[0x0004, 0x0001]),
+    ];
+    let (shared, handle) = color_led_effects_shared(ZONES).await;
+
+    set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await?;
+
+    assert_eq!(
+        zone_effect_writes(&handle),
+        [(0, 0), (1, 1), (2, 2), (3, 0), (4, 3), (5, 1)]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_keyboard_whose_zones_offer_no_fixed_colour_is_not_written() {
     const ZONES: ScriptedZones = &[(0x0001, &[0x0003, 0x0004]), (0x0002, &[0x0000])];
     let (shared, handle) = color_led_effects_shared(ZONES).await;
