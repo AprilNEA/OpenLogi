@@ -482,11 +482,13 @@ fn the_dpi_button_toggles_precision_mode_only_on_a_scaled_mouse() {
 }
 
 #[test]
-fn a_dpi_mouse_reconnects_at_its_lowest_dpi_and_leaves_its_saved_dpi_to_the_volatile_reapply() {
+fn a_dpi_mouse_reconnects_at_its_lowest_dpi_in_precision_mode_and_at_its_saved_dpi_otherwise() {
     let speeds = PointerSpeeds::default();
     speeds.publish(None, [dpi_mouse("m", 2, Some(Dpi::new(1600)))]);
     let saved = SavedSpeed::Dpi(Some(Dpi::new(1600)));
-    assert!(speeds.reapply("m", &route(2), saved).is_none());
+    let write = speeds.reapply("m", &route(2), saved).expect("a saved DPI");
+    assert_eq!(write.target, dpi(DpiTarget::Value(Dpi::new(1600))));
+    assert!(write.restore.is_none());
 
     speeds.toggle_precision(Some("m"), PrecisionPress::Assigned);
     let write = speeds.reapply("m", &route(2), saved).expect("precision on");
@@ -499,7 +501,49 @@ fn a_dpi_mouse_reconnects_at_its_lowest_dpi_and_leaves_its_saved_dpi_to_the_vola
     assert_eq!(write.target, dpi(DpiTarget::Value(Dpi::new(1600))));
     let restore = write.restore.expect("the restore rides on the write");
     speeds.restored(&restore);
-    assert!(speeds.reapply("m", &route(2), saved).is_none());
+    let write = speeds.reapply("m", &route(2), saved).expect("a saved DPI");
+    assert_eq!(write.target, dpi(DpiTarget::Value(Dpi::new(1600))));
+    assert!(write.restore.is_none());
+}
+
+#[test]
+fn a_dpi_mouse_with_no_saved_dpi_gets_no_reconnect_write_outside_precision_mode() {
+    let speeds = PointerSpeeds::default();
+    speeds.publish(None, [dpi_mouse("m", 2, None)]);
+
+    assert!(
+        speeds
+            .reapply("m", &route(2), SavedSpeed::Dpi(None))
+            .is_none()
+    );
+}
+
+/// Whether `write` still writes when its turn comes.
+fn takes_its_turn(write: &SpeedWrite) -> bool {
+    futures_lite::future::block_on(write.ticket.write_or(|| async { true }, || async { false }))
+}
+
+#[test]
+fn a_press_supersedes_a_reconnect_write_still_waiting_for_the_mouse() {
+    for mouse in [
+        dpi_mouse("m", 2, Some(Dpi::new(1600))),
+        self::mouse("m", 2, Some(speed(0x0180))),
+    ] {
+        let speeds = PointerSpeeds::default();
+        let saved = mouse.saved;
+        speeds.publish(None, [mouse]);
+        let reconnect = speeds
+            .reapply("m", &route(2), saved)
+            .expect("a saved value");
+
+        let (on, press) = speeds
+            .toggle_precision(Some("m"), PrecisionPress::Assigned)
+            .expect("an online mouse");
+
+        assert!(on);
+        assert!(!takes_its_turn(&reconnect), "{saved:?}: the press is newer");
+        assert!(takes_its_turn(&press));
+    }
 }
 
 #[test]

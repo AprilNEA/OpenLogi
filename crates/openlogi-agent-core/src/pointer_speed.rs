@@ -125,6 +125,16 @@ impl SavedSpeed {
         }
     }
 
+    /// The saved value, `None` when nothing is saved: what a reconnect
+    /// outside precision mode writes.
+    const fn value(self) -> Option<SpeedTarget> {
+        match self {
+            Self::Scaled(Some(speed)) => Some(SpeedTarget::Scaled(speed)),
+            Self::Dpi(Some(dpi)) => Some(SpeedTarget::Dpi(DpiTarget::Value(dpi))),
+            Self::Scaled(None) | Self::Dpi(None) => None,
+        }
+    }
+
     /// Whether `other` is saved for a mouse of the same kind.
     const fn same_kind(self, other: Self) -> bool {
         matches!(
@@ -252,12 +262,15 @@ impl PointerSpeeds {
     }
 
     /// The write a reconnect owes the mouse `key` names, now at `route`: the
-    /// precision speed while the mode is on, else the `saved` speed. A mouse
-    /// whose mode ended gets its default when nothing is saved, on every
-    /// reconnect pass until [`Self::restored`] reports that a write of its
-    /// speed landed. `None` when there is nothing to write, and for a DPI
-    /// mouse outside both cases: the volatile reapply writes its saved DPI,
-    /// as it does for every mouse.
+    /// precision speed while the mode is on, else the `saved` speed or DPI.
+    /// A mouse whose mode ended gets its default when nothing is saved, on
+    /// every reconnect pass until [`Self::restored`] reports that a write of
+    /// its speed landed. `None` when there is nothing to write.
+    ///
+    /// The write is numbered like every other pointer-speed write, so a
+    /// precision press or a settings-app write made while it waits for the
+    /// mouse supersedes it. The volatile reapply therefore leaves out the DPI
+    /// of a mouse this returns a write for.
     pub(crate) fn reapply(
         &self,
         key: &str,
@@ -269,10 +282,9 @@ impl PointerSpeeds {
             return Some(self.write(route.clone(), saved.precision(), None));
         }
         let Some(restore) = state.pending_restore(key) else {
-            let SavedSpeed::Scaled(speed) = saved else {
-                return None;
-            };
-            return Some(self.write(route.clone(), SpeedTarget::Scaled(speed?), None));
+            return saved
+                .value()
+                .map(|target| self.write(route.clone(), target, None));
         };
         Some(self.write(route.clone(), saved.restored(), Some(restore)))
     }

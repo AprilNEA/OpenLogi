@@ -1135,8 +1135,9 @@ impl Orchestrator {
         let saved = saved_speed(&self.config, dev);
         let speed_write =
             saved.and_then(|saved| self.shared.pointer_speeds.reapply(key, &route, saved));
-        // While precision mode sets a DPI mouse's DPI, or a restore is owed,
-        // that write replaces the saved DPI.
+        // A DPI mouse gets its DPI from `speed_write`, numbered with the
+        // precision presses and the settings-app writes, so a newer one
+        // supersedes it. The volatile reapply leaves the DPI out then.
         let dpi_overridden = matches!(saved, Some(SavedSpeed::Dpi(_))) && speed_write.is_some();
         let settings = VolatileMouseSettings {
             wheel: self.wheel_mode_change(dev),
