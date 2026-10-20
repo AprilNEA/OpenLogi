@@ -801,3 +801,47 @@ async fn host_rearm_reports_a_spy_that_did_not_start() {
     spy_fails.store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(!armed.rearm().await);
 }
+
+/// A transient receiver probe may withdraw a route without closing its HID
+/// channel. Re-publishing that exact channel must not strand restoration and
+/// therefore prevent the manager from starting a successor capture session.
+#[tokio::test]
+async fn withdrawn_capture_route_restores_when_the_same_channel_returns() {
+    for returns_before_teardown in [false, true] {
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "receiver".into(),
+            slot: 1,
+        };
+        let node = NodeId::from("mouse-node".to_owned());
+        let registry = ChannelRegistry::default();
+        let (raw, writes) = ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+        let channel = scripted_channel(raw).await;
+        registry.replace_node(node.clone(), [route.clone()], channel.clone());
+        let shared = registry.lookup(&route).unwrap();
+        let pending = diverted_gesture(&route, &channel);
+        registry.replace_node(node.clone(), [], channel.clone());
+        let stop = wait_for_channel_change(&registry, &shared).await;
+        assert_eq!(stop, CaptureStop::ChannelChanged);
+        if returns_before_teardown {
+            registry.replace_node(node.clone(), [route.clone()], channel.clone());
+        }
+        let outcome = restore_after_stop(stop, Some(pending), &registry).await;
+        let outcome = if returns_before_teardown {
+            outcome
+        } else {
+            let CaptureSessionOutcome::RestorePending(pending) = outcome else {
+                panic!("absent routes must retain restoration ownership");
+            };
+            assert!(writes.written_reports().is_empty());
+            registry.replace_node(node, [route], channel);
+            pending.retry(&registry).await
+        };
+        assert!(
+            matches!(outcome, CaptureSessionOutcome::Restored),
+            "same-channel republication must release recovery ownership (returned before teardown: {returns_before_teardown})"
+        );
+        let reports = writes.written_reports();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(&reports[0][4..7], &[0, 0xc3, 0x22]);
+    }
+}

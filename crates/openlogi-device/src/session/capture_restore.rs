@@ -323,8 +323,15 @@ pub(crate) async fn restore_after_stop(
         return CaptureSessionOutcome::Restored;
     };
     match stop {
-        CaptureStop::Shutdown => pending.allow_current_channel().retry(registry).await,
-        CaptureStop::ChannelChanged => pending.retry(registry).await,
+        // Capture has ended. Resolve the current exact-route publication on
+        // every retry; never write through the retired handle itself. A probe
+        // can temporarily withdraw a route while retaining its HID channel,
+        // so that same channel may legitimately become current again. Keeping
+        // ReplacementOnly here would retain the restore debt forever and
+        // prevent the manager from arming a successor.
+        CaptureStop::Shutdown | CaptureStop::ChannelChanged => {
+            pending.allow_current_channel().retry(registry).await
+        }
         CaptureStop::Handoff(route) => pending.retry_via(route, registry).await,
     }
 }
