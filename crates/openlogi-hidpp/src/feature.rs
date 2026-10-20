@@ -85,18 +85,41 @@ pub trait EmittingFeature<T>: Feature {
 /// Decodes a feature's event payload from its HID++2.0 event sub-id.
 ///
 /// Implemented by a feature's event enum. [`EventSource::attach`] calls
-/// [`Self::decode`] for every unsolicited broadcast addressed to the feature,
-/// so this is the only part of a feature's event handling that has to vary —
-/// [`EventSource`] owns the listener registration, the [`event_payload`]
-/// filtering, and the emitting. Returning `None` drops the report exactly
-/// like the hand-rolled per-feature listeners this replaced did on an
-/// unrecognised sub-id or an unparsable payload.
+/// [`Self::decode_message`] for every unsolicited broadcast addressed to the
+/// feature, so this is the only part of a feature's event handling that has
+/// to vary — [`EventSource`] owns the listener registration, the
+/// [`event_message`] filtering, and the emitting. Returning `None` drops the
+/// report exactly like the hand-rolled per-feature listeners this replaced
+/// did on an unrecognised sub-id or an unparsable payload.
 pub(crate) trait DecodeEvent: Clone + Send + Sync + 'static {
     /// Decodes `payload` for event sub-id `sub_id`, or returns `None` to drop
     /// the report.
     fn decode(sub_id: u8, payload: &[u8; LONG_REPORT_LENGTH - 4]) -> Option<Self>
     where
         Self: Sized;
+
+    /// The fewest payload bytes event `sub_id` must carry on the wire. The
+    /// default is no minimum.
+    ///
+    /// [`Self::decode`] sees a zero-extended payload, so it cannot tell a
+    /// short report's missing fields from zeroes the device sent.
+    fn min_payload_len(_sub_id: u8) -> usize {
+        0
+    }
+
+    /// Decodes a received event `msg`. Drops a report whose wire payload is
+    /// shorter than [`Self::min_payload_len`] before [`Self::decode`] sees
+    /// it.
+    fn decode_message(msg: &v20::Message) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        let sub_id = msg.header().function_id.to_lo();
+        if msg.payload_len() < Self::min_payload_len(sub_id) {
+            return None;
+        }
+        Self::decode(sub_id, &msg.extend_payload())
+    }
 }
 
 /// Owns the [`EventEmitter`] and message listener backing an
@@ -104,7 +127,7 @@ pub(crate) trait DecodeEvent: Clone + Send + Sync + 'static {
 ///
 /// Every emitting feature used to hand-roll the same listener ceremony in its
 /// `CreatableFeature::new`: build an `Arc<EventEmitter<E>>`, register a
-/// guarded message listener, filter the raw report through [`event_payload`],
+/// guarded message listener, filter the raw report through [`event_message`],
 /// and emit whatever the feature's own decode step produced. A feature now
 /// holds one `EventSource<E>` field, builds it with [`Self::attach`], and
 /// implements [`EmittingFeature`] with a one-line [`Self::listen`] delegate.
@@ -117,8 +140,8 @@ pub(crate) struct EventSource<E: DecodeEvent> {
 
 impl<E: DecodeEvent> EventSource<E> {
     /// Registers a listener on `chan` that decodes broadcasts addressed to
-    /// `(device_index, feature_index)` via [`DecodeEvent::decode`] and emits
-    /// them to receivers created by [`Self::listen`].
+    /// `(device_index, feature_index)` via [`DecodeEvent::decode_message`] and
+    /// emits them to receivers created by [`Self::listen`].
     pub(crate) fn attach(chan: &Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
         let emitter = Arc::new(EventEmitter::new());
 
@@ -126,12 +149,10 @@ impl<E: DecodeEvent> EventSource<E> {
             let emitter = Arc::clone(&emitter);
 
             move |raw, matched| {
-                let Some((func, payload)) =
-                    event_payload(raw, matched, device_index, feature_index)
-                else {
+                let Some(msg) = event_message(raw, matched, device_index, feature_index) else {
                     return;
                 };
-                if let Some(event) = E::decode(func.to_lo(), &payload) {
+                if let Some(event) = E::decode_message(&msg) {
                     emitter.emit(event);
                 }
             }
@@ -287,15 +308,16 @@ impl FeatureEndpoint {
 /// Drops reports already matched to an outgoing request, parses the raw report
 /// as a HID++2.0 message, and keeps only unsolicited broadcasts addressed to
 /// this `(device_index, feature_index)` with a zero software id. Returns the
-/// event's function id (its sub-id) and extended payload, leaving sub-id
-/// dispatch to the caller — so a multi-event feature filters its sub-ids
-/// explicitly rather than folding the check into the header guard.
-pub(crate) fn event_payload(
+/// whole message, so the caller still knows how many payload bytes it carried
+/// on the wire, and leaves sub-id dispatch to the caller — so a multi-event
+/// feature filters its sub-ids explicitly rather than folding the check into
+/// the header guard.
+pub(crate) fn event_message(
     raw: HidppMessage,
     matched: bool,
     device_index: u8,
     feature_index: u8,
-) -> Option<(U4, [u8; LONG_REPORT_LENGTH - 4])> {
+) -> Option<v20::Message> {
     if matched {
         return None;
     }
@@ -309,7 +331,7 @@ pub(crate) fn event_payload(
         return None;
     }
 
-    Some((header.function_id, msg.extend_payload()))
+    Some(msg)
 }
 
 bitflags::bitflags! {
@@ -352,23 +374,27 @@ bitflags::bitflags! {
 
 #[cfg(test)]
 mod tests {
-    use super::event_payload;
+    use super::{DecodeEvent, event_message};
     use crate::{
         channel::HidppMessage,
         nibble::U4,
         protocol::v20::{Message, MessageHeader},
     };
 
+    fn header(device_index: u8, feature_index: u8, function: u8, software: u8) -> MessageHeader {
+        MessageHeader {
+            device_index,
+            feature_index,
+            function_id: U4::from_lo(function),
+            software_id: U4::from_lo(software),
+        }
+    }
+
     /// Builds a raw long report carrying a HID++2.0 broadcast with the given
     /// header fields and a recognisable payload.
     fn broadcast(device_index: u8, feature_index: u8, function: u8, software: u8) -> HidppMessage {
         Message::Long(
-            MessageHeader {
-                device_index,
-                feature_index,
-                function_id: U4::from_lo(function),
-                software_id: U4::from_lo(software),
-            },
+            header(device_index, feature_index, function, software),
             [0xab; 16],
         )
         .into()
@@ -376,23 +402,22 @@ mod tests {
 
     #[test]
     fn accepts_matching_broadcast_and_returns_sub_id() {
-        let (func, payload) =
-            event_payload(broadcast(2, 5, 1, 0), false, 2, 5).expect("broadcast should pass");
-        assert_eq!(func.to_lo(), 1);
-        assert_eq!(payload, [0xab; 16]);
+        let msg = event_message(broadcast(2, 5, 1, 0), false, 2, 5).expect("broadcast should pass");
+        assert_eq!(msg.header().function_id.to_lo(), 1);
+        assert_eq!(msg.extend_payload(), [0xab; 16]);
     }
 
     #[test]
     fn rejects_request_matched_report() {
         // A report already matched to an outgoing request is a response, not an
         // event.
-        assert!(event_payload(broadcast(2, 5, 0, 0), true, 2, 5).is_none());
+        assert!(event_message(broadcast(2, 5, 0, 0), true, 2, 5).is_none());
     }
 
     #[test]
     fn rejects_other_device_or_feature() {
-        assert!(event_payload(broadcast(9, 5, 0, 0), false, 2, 5).is_none());
-        assert!(event_payload(broadcast(2, 9, 0, 0), false, 2, 5).is_none());
+        assert!(event_message(broadcast(9, 5, 0, 0), false, 2, 5).is_none());
+        assert!(event_message(broadcast(2, 9, 0, 0), false, 2, 5).is_none());
     }
 
     #[test]
@@ -402,7 +427,34 @@ mod tests {
         // and must still pass. This is the invariant the old per-feature
         // `nibble::combine(software_id, function_id) != 0` guard got right only
         // by accident (those features happened to emit a single sub-id 0 event).
-        assert!(event_payload(broadcast(2, 5, 0, 1), false, 2, 5).is_none());
-        assert!(event_payload(broadcast(2, 5, 7, 0), false, 2, 5).is_some());
+        assert!(event_message(broadcast(2, 5, 0, 1), false, 2, 5).is_none());
+        assert!(event_message(broadcast(2, 5, 7, 0), false, 2, 5).is_some());
+    }
+
+    /// An event that keeps the sub-id and the first payload byte, and needs
+    /// four payload bytes for sub-id 1 only.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Probe(u8, u8);
+
+    impl DecodeEvent for Probe {
+        fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+            Some(Self(sub_id, payload[0]))
+        }
+
+        fn min_payload_len(sub_id: u8) -> usize {
+            if sub_id == 1 { 4 } else { 0 }
+        }
+    }
+
+    #[test]
+    fn decode_message_drops_a_wire_payload_below_the_minimum() {
+        // A short report carries 3 payload bytes: below sub-id 1's minimum,
+        // enough for sub-id 0, which has none.
+        let short = |function| Message::Short(header(2, 5, function, 0), [7, 8, 9]);
+        assert_eq!(Probe::decode_message(&short(1)), None);
+        assert_eq!(Probe::decode_message(&short(0)), Some(Probe(0, 7)));
+        // The same sub-id 1 event in a long report decodes.
+        let long = Message::Long(header(2, 5, 1, 0), [7; 16]);
+        assert_eq!(Probe::decode_message(&long), Some(Probe(1, 7)));
     }
 }
