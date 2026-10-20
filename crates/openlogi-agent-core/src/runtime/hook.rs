@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
+    Action, Binding, ButtonId, GestureDirection, GesturePolicy, SwipeAccumulator, default_binding,
 };
 use openlogi_core::config::KeyTrigger;
 use openlogi_hook::{
@@ -35,6 +35,8 @@ pub struct HookMaps {
     /// gesture mode), so a hold+swipe resolves to a bound action. HID++
     /// gesture sources use the gesture watcher's separate map instead.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// Runtime timing derived from each effective gesture map.
+    pub gesture_policies: BTreeMap<ButtonId, GesturePolicy>,
     /// The pointer identity that selected this snapshot, or focused policy.
     pub(crate) pointer_target: Option<openlogi_hook::PointerTarget>,
     /// Device whose binding maps this snapshot contains.
@@ -60,9 +62,8 @@ pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 /// (keycode + modifiers).
 pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
 
-/// Tracks which OS-hook gesture button (Middle/Back/Forward) is mid-hold and defers the
-/// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
-/// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
+/// Tracks which OS-hook gesture button (Back/Forward) is mid-hold and defers the
+/// report recognition to the shared [`SwipeAccumulator`]. This wrapper
 /// adds only the button identity the accumulator doesn't track; a press that
 /// never commits a direction is a plain click, fired on release.
 /// A gesture hold this old is presumed stale — real hold+swipe interactions
@@ -80,6 +81,7 @@ struct GestureHold {
     button: ButtonId,
     started_at: Instant,
     press: PressToken,
+    bindings: BTreeMap<GestureDirection, Action>,
 }
 
 enum HoldAdmission {
@@ -108,7 +110,7 @@ impl HoldState {
             return HoldAdmission::Refuse;
         }
 
-        self.swipe.end();
+        self.swipe.cancel();
         if held.button == button {
             HoldAdmission::Begin
         } else {
@@ -117,22 +119,39 @@ impl HoldState {
     }
 
     /// Store the token returned by the accepted lifecycle `Down`.
-    fn begin(&mut self, button: ButtonId, press: PressToken) {
+    fn begin(
+        &mut self,
+        button: ButtonId,
+        press: PressToken,
+        bindings: BTreeMap<GestureDirection, Action>,
+        policy: GesturePolicy,
+    ) {
         self.current = Some(GestureHold {
             button,
             started_at: Instant::now(),
             press,
+            bindings,
         });
-        self.swipe.begin();
+        self.swipe.begin_with_policy(policy);
     }
 
     /// Feed a pointer-move delta into the active hold, tagging a committed swipe
-    /// with its exact press token and held button. Returns one commit per hold,
-    /// or `None` while still too short, already fired, or not holding.
+    /// with its exact press token and held button. Each directional action
+    /// requires a completed recognition/action sequence.
+    #[cfg(test)]
     fn accumulate(&mut self, dx: i32, dy: i32) -> Option<(PressToken, ButtonId, GestureDirection)> {
+        self.accumulate_at(Instant::now(), dx, dy)
+    }
+
+    fn accumulate_at(
+        &mut self,
+        now: Instant,
+        dx: i32,
+        dy: i32,
+    ) -> Option<(PressToken, ButtonId, GestureDirection)> {
         let held = self.current.as_ref()?;
         self.swipe
-            .accumulate(dx, dy)
+            .accumulate_at(now, dx, dy)
             .map(|dir| (held.press.clone(), held.button, dir))
     }
 
@@ -149,7 +168,7 @@ impl HoldState {
     /// that the next stray pointer move turns into a phantom swipe.
     fn cancel(&mut self) {
         self.current = None;
-        self.swipe.end();
+        self.swipe.cancel();
     }
 
     /// Age the current hold past the staleness horizon, so tests can exercise
@@ -251,14 +270,19 @@ fn handle_button(
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
-    let (binding, is_gesture, pointer_target) =
-        hooks.try_read().map_or((None, false, None), |maps| {
+    cancel_changed_gesture(hooks, dispatcher);
+    let (binding, gesture, policy, pointer_target) = hooks.try_read().map_or_else(
+        |_| (None, None, GesturePolicy::default(), None),
+        |maps| {
             (
                 maps.bindings.get(&id).cloned(),
-                maps.gestures.contains_key(&id),
+                maps.gestures.get(&id).cloned(),
+                maps.gesture_policies.get(&id).cloned().unwrap_or_default(),
                 maps.pointer_target,
             )
-        });
+        },
+    );
+    let is_gesture = gesture.is_some();
     let action_target = if pressed {
         ActionDispatchTarget::for_pointer(pointer_target, capture_safari_pid)
     } else {
@@ -274,7 +298,7 @@ fn handle_button(
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None, action_target) {
-                HOLD.with_borrow_mut(|h| h.begin(id, press));
+                HOLD.with_borrow_mut(|h| h.begin(id, press, gesture.unwrap_or_default(), policy));
                 return EventDisposition::Suppress;
             }
             return SUPPRESSED_PRESSES
@@ -288,10 +312,17 @@ fn handle_button(
                 let action = hooks
                     .try_read()
                     .ok()
-                    .map(|m| resolve_gesture_click(&m.gestures, id));
-                if let Some(action) = action {
+                    .map(|m| (resolve_gesture_click(&m.gestures, id), m.pointer_target));
+                if let Some((action, pointer)) = action {
                     info!(button = %id, action = %action.label(), "gesture click → executing bound action");
-                    dispatcher.try_dispatch_while_pressed(&press, &action);
+                    dispatcher.try_dispatch_while_pressed(
+                        &press,
+                        &action,
+                        ActionDispatchTarget::for_pointer(
+                            pointer,
+                            openlogi_hook::frontmost_safari_pid,
+                        ),
+                    );
                 }
             }
             dispatcher.try_hook_button_up(id);
@@ -364,24 +395,59 @@ fn queued_event_disposition(queued: bool) -> EventDisposition {
     }
 }
 
-/// Feed an in-progress gesture hold; always pass motion through so the cursor moves.
+/// Cancel a semantic binding change while preserving the suppressed edge pair.
+fn cancel_changed_gesture(hooks: &SharedHookMaps, dispatcher: &ActionDispatcher) {
+    let stale = HOLD.with_borrow_mut(|hold| {
+        let current = hold.current.as_ref()?;
+        let maps = hooks.try_read().ok()?;
+        if maps.gestures.get(&current.button) == Some(&current.bindings) {
+            return None;
+        }
+        let press = current.press.clone();
+        let button = current.button;
+        hold.cancel();
+        Some((press, button))
+    });
+    if let Some((press, button)) = stale {
+        SUPPRESSED_PRESSES.with_borrow_mut(|pressed| pressed.insert(button));
+        dispatcher.cancel_stale_hook_press(&press);
+    }
+}
+
+/// Feed an in-progress hold, leaving native pointer movement unchanged.
 fn handle_moved(
     delta_x: i32,
     delta_y: i32,
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
 ) -> EventDisposition {
-    let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
+    handle_moved_at(Instant::now(), delta_x, delta_y, hooks, dispatcher)
+}
+
+fn handle_moved_at(
+    now: Instant,
+    delta_x: i32,
+    delta_y: i32,
+    hooks: &SharedHookMaps,
+    dispatcher: &ActionDispatcher,
+) -> EventDisposition {
+    cancel_changed_gesture(hooks, dispatcher);
+    let commit = HOLD.with_borrow_mut(|h| h.accumulate_at(now, delta_x, delta_y));
     if let Some((press, button, dir)) = commit {
         let action = hooks.try_read().ok().map(|m| {
-            m.gestures
+            let action = m
+                .gestures
                 .get(&button)
-                .and_then(|dirs| dirs.get(&dir).cloned())
-                .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
+                .and_then(|dirs| dirs.get(&dir).cloned());
+            action.map(|action| (action, m.pointer_target))
         });
-        if let Some(action) = action {
+        if let Some(Some((action, pointer))) = action {
             info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-            dispatcher.try_dispatch_while_pressed(&press, &action);
+            dispatcher.try_dispatch_while_pressed(
+                &press,
+                &action,
+                ActionDispatchTarget::for_pointer(pointer, openlogi_hook::frontmost_safari_pid),
+            );
         }
     }
     EventDisposition::PassThrough

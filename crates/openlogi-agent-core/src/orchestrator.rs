@@ -332,6 +332,17 @@ impl SharedHandles {
     }
 }
 
+/// Lifecycle admission result of a foreground-context publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForegroundChange {
+    /// The app identity did not change.
+    Unchanged,
+    /// Context changed while effective bindings stayed equal; gesture holds survive.
+    ContextOnly,
+    /// Effective bindings changed; old press capabilities must be invalidated.
+    BindingsChanged,
+}
+
 /// Owns the config + device selection and keeps [`SharedHandles`] in sync.
 pub struct Orchestrator {
     config: Config,
@@ -575,6 +586,15 @@ impl Orchestrator {
             }
         }
         HookMaps {
+            gesture_policies: gestures
+                .iter()
+                .map(|(button, actions)| {
+                    (
+                        *button,
+                        openlogi_core::binding::GesturePolicy::for_bindings(actions),
+                    )
+                })
+                .collect(),
             bindings,
             gestures,
             pointer_target,
@@ -1298,40 +1318,49 @@ impl Orchestrator {
     /// per-app effective too (HID++ dispatch reads them at event time). Both
     /// hook maps are recomputed: a per-app override of the gesture owner turns
     /// it into a single action for that app, dropping it from the OS-hook
-    /// gesture set — so the gesture map is app-scoped too. The dedicated HID++
-    /// gesture map is not app-scoped and stays untouched.
+    /// gesture set. HID++ gesture maps receive the same per-app overlay when
+    /// capture plans are republished.
     ///
     /// Only the identifier decides whether any of that runs: an application
     /// that merely changed its localized name resolves to the same bindings,
     /// and republishing for it could restart a capture session (a plan's
     /// divert set is part of its identity) over nothing. The observable cell
     /// still gets the whole value — it dedupes on its own, and its recent list
-    /// is the only source a client has for these identifiers. Returns whether
-    /// the app changed in a way that alters bindings (the old or new app has a
-    /// per-app override), so active button lifecycles must be canceled.
-    pub fn set_current_app(&mut self, app: Option<ForegroundApp>) -> bool {
+    /// is the only source a client has for these identifiers. The result
+    /// distinguishes ordinary context cancellation from gesture invalidation.
+    pub fn set_current_app(&mut self, app: Option<ForegroundApp>) -> ForegroundChange {
         let id = app.as_ref().map(|app| app.id.clone());
         self.observable.set_foreground(app);
         if id == self.current_app {
-            return false;
+            return ForegroundChange::Unchanged;
         }
-        let previous = std::mem::replace(&mut self.current_app, id);
+        let previous = self.hook_maps_for(self.current_key());
+        let previous_keys = self
+            .shared
+            .keyboard_bindings
+            .read()
+            .ok()
+            .map(|keys| keys.clone());
+        self.current_app = id;
         self.publish_hook_maps(self.hook_maps_for(self.current_key()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
-        // Only a per-app override on either side changes what a held button
-        // resolves to. Without one, keep the hold: a gesture that switches
-        // desktops changes the front app and must not end its own hold (#1634).
-        let overridden = |app: Option<&str>| {
-            app.is_some_and(|app| {
-                self.config
-                    .devices
-                    .keys()
-                    .any(|key| self.config.has_app_override(key, app))
-            })
-        };
-        overridden(previous.as_deref()) || overridden(self.current_app.as_deref())
+        let next = self.hook_maps_for(self.current_key());
+        let changed = previous.bindings != next.bindings
+            || previous.gestures != next.gestures
+            || previous_keys
+                != self
+                    .shared
+                    .keyboard_bindings
+                    .read()
+                    .ok()
+                    .map(|keys| keys.clone());
+        if changed {
+            ForegroundChange::BindingsChanged
+        } else {
+            ForegroundChange::ContextOnly
+        }
     }
 
     /// Publish a pointer-window change separately from keyboard focus. The

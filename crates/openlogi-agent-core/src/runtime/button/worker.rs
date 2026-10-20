@@ -85,11 +85,11 @@ fn process_command(
             input,
         } if input_generation == generation => process_input(state, input, emit),
         ButtonCommand::Input { .. } | ButtonCommand::Wake => {}
-        ButtonCommand::CancelStalePress(token) => {
+        ButtonCommand::CancelPress { token, reason } => {
             if let Some(press) = state.cancel_press(&token) {
                 emit(ButtonRuntimeEvent::Ended {
                     press,
-                    reason: EndReason::Canceled(CancelReason::StaleHold),
+                    reason: EndReason::Canceled(reason),
                 });
             }
         }
@@ -102,6 +102,9 @@ fn process_command(
         }
         ButtonCommand::CancelHooks => {
             emit_canceled(state.cancel_hooks(), CancelReason::SourceEnded, emit);
+        }
+        ButtonCommand::CancelContext => {
+            emit_canceled(state.cancel_context(), CancelReason::Invalidated, emit);
         }
         ButtonCommand::CancelPointerExcept(current) => {
             emit_canceled(
@@ -297,8 +300,17 @@ pub(super) fn process_input(
                 emit_released(press, emit);
             }
         }
-        ButtonInput::TriggerWhilePressed { token, action } => {
-            if let Some(press) = state.active(&token).cloned() {
+        ButtonInput::TriggerWhilePressed {
+            token,
+            action,
+            target,
+        } => {
+            if let Some(mut press) = state.active(&token).cloned() {
+                // Only gesture semantics refresh their output target; ordinary
+                // button actions retain their press-time admission context.
+                if matches!(press.behavior, PressBehavior::LifecycleOnly) {
+                    press.target = target;
+                }
                 emit(ButtonRuntimeEvent::Triggered { press, action });
             }
         }
