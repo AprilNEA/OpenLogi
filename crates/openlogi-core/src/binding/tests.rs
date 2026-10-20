@@ -491,6 +491,22 @@ fn persisted_action_variant_names_are_stable() {
 }
 
 #[test]
+fn only_mute_microphone_depends_on_the_platform() {
+    assert_eq!(
+        Action::MuteMicrophone.fires_here(),
+        cfg!(target_os = "linux")
+    );
+    for action in Action::catalog() {
+        if action != Action::MuteMicrophone {
+            assert!(
+                action.fires_here(),
+                "{action:?} should fire on every platform"
+            );
+        }
+    }
+}
+
+#[test]
 fn custom_shortcut_roundtrips_toml() {
     let action = Action::CustomShortcut("Cmd+Shift+P".parse().expect("valid shortcut failed"));
     assert_eq!(roundtrip(&action), action);

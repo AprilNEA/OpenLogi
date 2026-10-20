@@ -206,7 +206,8 @@ pub enum Action {
     /// this to a balanced tap of the whole chord, exactly as they do for
     /// [`Action::HoldShortcut`].
     TapKeyHoldingModifiers(KeyCombo),
-    /// Close the focused window (⌘W on macOS, Alt+F4 on Linux and Windows).
+    /// Close the focused window: Alt+F4 on Linux and Windows; on macOS the
+    /// window's close button through Accessibility, since ⌘W closes only a tab.
     ///
     /// Declared last because the variant index is part of the IPC wire
     /// format; it is listed with the other window actions in the catalog.
@@ -463,5 +464,15 @@ impl Action {
             Self::TapKeyHoldingModifiers(combo) => Some((combo, HeldKeys::ModifiersOnly)),
             _ => None,
         }
+    }
+
+    /// Whether this platform's injection backend can carry the action out, so
+    /// a picker offers only bindings that fire.
+    ///
+    /// Mute Microphone presses `KEY_MICMUTE` on Linux; macOS and Windows have
+    /// no system-wide microphone mute key, and their backends only log.
+    #[must_use]
+    pub const fn fires_here(&self) -> bool {
+        cfg!(target_os = "linux") || !matches!(self, Self::MuteMicrophone)
     }
 }

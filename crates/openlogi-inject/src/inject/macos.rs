@@ -668,15 +668,10 @@ fn post_media_key(nx_key: i32) {
     });
 }
 
-/// Put the system to sleep via `pmset sleepnow` — sleep has no CGEvent
-/// equivalent, and `pmset` performs the console user's sleep request
-/// without privileges. Fire-and-forget; a spawn failure is logged. The
-/// child is reaped on a detached thread so it can't linger as a zombie
-/// in this long-running agent.
 /// Ask loginwindow to shut down (the `aevtrsdn` Apple event behind the Apple
 /// menu's Shut Down…), so macOS shows its own confirmation with the usual
-/// countdown and apps get the chance to save. Spawned and reaped like
-/// [`sleep_system`].
+/// countdown and apps get the chance to save. Spawned like [`sleep_system`];
+/// the reaper thread logs a refusal.
 fn power_off_system() {
     match std::process::Command::new("/usr/bin/osascript")
         .args(["-e", "tell application \"loginwindow\" to «event aevtrsdn»"])
@@ -692,6 +687,11 @@ fn power_off_system() {
     }
 }
 
+/// Put the system to sleep via `pmset sleepnow` — sleep has no CGEvent
+/// equivalent, and `pmset` performs the console user's sleep request
+/// without privileges. Fire-and-forget; a spawn failure is logged. The
+/// child is reaped on a detached thread so it can't linger as a zombie
+/// in this long-running agent.
 fn sleep_system() {
     match std::process::Command::new("/usr/bin/pmset")
         .arg("sleepnow")

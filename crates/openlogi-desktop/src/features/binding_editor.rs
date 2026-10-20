@@ -21,10 +21,11 @@ pub(crate) const EDITOR_LIST_MAX_H: f32 = 360.;
 pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 
 /// The action catalog grouped by [`Category`], preserving catalog order within
-/// each group and first-seen order across groups.
+/// each group and first-seen order across groups. Actions this platform cannot
+/// carry out ([`Action::fires_here`]) are left out.
 pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
     let mut sections: Vec<(Category, Vec<Action>)> = Vec::new();
-    for action in Action::catalog() {
+    for action in Action::catalog().into_iter().filter(Action::fires_here) {
         let category = action.category();
         if let Some(section) = sections
             .iter_mut()
