@@ -1,4 +1,4 @@
-//! Battery presentation and warning policy, shared by the device UI and tray.
+//! Battery presentation and warning policies, shared by the UI, tray and overlay.
 
 use crate::device::{BatteryFreshness, BatteryInfo, BatteryLevel, BatteryStatus};
 
@@ -62,7 +62,29 @@ impl BatteryInfo {
         self.severity() != Severity::Normal
     }
 
-    /// A measured recovery rearms notifications. Merely plugging in does not.
+    /// Whether the transient overlay may announce the next discharge.
+    ///
+    /// The overlay resets when charging starts, the charge reaches 30%, or a
+    /// level-only device reports good/full again. Persistent OS alerts use
+    /// [`Self::rearms_warning`] instead, so briefly plugging in cannot repeat them.
+    #[must_use]
+    pub fn rearms_overlay_notice(&self) -> bool {
+        if self.freshness == BatteryFreshness::Cached {
+            return false;
+        }
+        if self.is_charging() || self.status == BatteryStatus::Full {
+            return true;
+        }
+        match self.usable_percentage() {
+            Some(percentage) => percentage >= 30,
+            None if self.percentage.is_none() => {
+                matches!(self.level, BatteryLevel::Good | BatteryLevel::Full)
+            }
+            None => false,
+        }
+    }
+
+    /// A measured recovery rearms persistent OS notifications. Merely plugging in does not.
     #[must_use]
     pub fn rearms_warning(&self) -> bool {
         self.usable_percentage()
@@ -148,6 +170,9 @@ mod tests {
             freshness: BatteryFreshness::Current,
         };
         assert_eq!(battery.usable_percentage(), None);
+        assert!(!battery.rearms_overlay_notice());
+        battery.percentage = Some(255);
+        assert!(!battery.rearms_overlay_notice());
         for (percentage, rearms) in [(20, false), (21, false), (25, false), (26, true)] {
             battery.percentage = Some(percentage);
             assert_eq!(battery.rearms_warning(), rearms);

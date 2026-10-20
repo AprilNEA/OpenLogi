@@ -11,6 +11,7 @@ fn low_battery(id: u64, name: Option<&str>, percentage: Option<u8>) -> Notice {
             name: name.map(str::to_owned),
             kind: DeviceKind::Mouse,
             battery: BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage,
                 level: BatteryLevel::Low,
                 status: BatteryStatus::Discharging,

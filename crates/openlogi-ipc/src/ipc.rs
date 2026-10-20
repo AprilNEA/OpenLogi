@@ -131,7 +131,10 @@ pub use succession::Identity;
 ///      that precision mode lights. `ReceiverSelector::ReceiverUid`
 ///      appended — a pairing target matched by receiver product ID and
 ///      unique ID, never falling back to another receiver.
-pub const PROTOCOL_VERSION: u32 = 38;
+/// v39: `BatteryInfo::freshness`, `AgentSnapshot::device_selection`, and
+///      `Agent::acknowledge_device_selection` appended for battery freshness
+///      and retained, acknowledged tray navigation.
+pub const PROTOCOL_VERSION: u32 = 39;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

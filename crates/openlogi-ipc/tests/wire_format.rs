@@ -359,6 +359,7 @@ fn notices() {
                     name: Some("MX".into()),
                     kind: DeviceKind::Mouse,
                     battery: BatteryInfo {
+                        freshness: openlogi_core::device::BatteryFreshness::Current,
                         percentage: Some(15),
                         level: BatteryLevel::Low,
                         status: BatteryStatus::Discharging,
@@ -367,7 +368,7 @@ fn notices() {
             }],
             language: Some("de".into()),
         },
-        "0301020001024d5800010f010001026465",
+        "0301020001024d5800010f01000001026465",
     );
     assert_wire(
         &NoticeObservation {
@@ -1075,7 +1076,12 @@ fn pointer_speed_and_precision_mode() {
 #[test]
 fn battery_preferences_and_device_selection() {
     use openlogi_core::config::BatteryPreferences;
+    use openlogi_core::device::BatteryFreshness;
     use openlogi_ipc::DeviceSelection;
+
+    assert_wire(&BatteryFreshness::Current, "00");
+    assert_wire(&BatteryFreshness::Cached, "01");
+    assert_wire(&BatteryFreshness::HeldPercentage, "02");
     assert_wire(&BatteryPreferences::default(), "0101");
     assert_wire(
         &BatteryPreferences {
@@ -1092,6 +1098,6 @@ fn battery_preferences_and_device_selection() {
     assert_wire(&request, "07200207756e69743a6161");
     assert_wire(
         &AgentRequest::AcknowledgeDeviceSelection { request },
-        "2607200207756e69743a6161",
+        "2807200207756e69743a6161",
     );
 }

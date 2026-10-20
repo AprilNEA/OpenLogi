@@ -285,6 +285,9 @@ default battery preferences and do not offer saved per-device options.
 A notification is sent once per low-battery episode, including when the app first
 observes an already-low device. The episode only resets after a current reading
 above 25%; reconnecting, restarting, or briefly charging does not reset it.
+Disabling `warn_low` also mutes that device's on-screen OpenLogi overlay notices.
+The global `low_battery_notifications` setting can mute all overlay notices
+without changing the tray icon or OS notifications.
 Notification delivery respects the operating system's notification permissions.
 Warning history is stored in `battery-warnings.json` in the profile's state
 directory. Devices without their own serial or unit ID use session-only history.

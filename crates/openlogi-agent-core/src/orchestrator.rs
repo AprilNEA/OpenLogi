@@ -1077,7 +1077,7 @@ impl Orchestrator {
             let Some(battery) = device.battery.as_ref() else {
                 continue;
             };
-            if !announcing {
+            if !announcing || !self.config.battery_preferences(&device.config_key).warn_low {
                 self.low_battery.observe_muted(&device.config_key, battery);
                 continue;
             }

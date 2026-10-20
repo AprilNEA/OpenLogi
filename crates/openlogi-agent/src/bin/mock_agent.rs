@@ -481,6 +481,7 @@ impl State {
             name: mouse.codename.as_deref().map(prettify_codename),
             kind: mouse.kind,
             battery: BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: Some(15),
                 level: BatteryLevel::Low,
                 status: BatteryStatus::Discharging,

@@ -7,6 +7,7 @@ use super::{LowBatteryWatch, NOTICE_LIFETIME, NoticeBoard};
 
 fn reading(percentage: Option<u8>, level: BatteryLevel, status: BatteryStatus) -> BatteryInfo {
     BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage,
         level,
         status,
@@ -258,4 +259,22 @@ async fn an_unchanged_board_answers_after_the_hold() {
     let unchanged = board.observe(since).await;
     assert_eq!(unchanged.generation, since);
     assert_eq!(started.elapsed(), OBSERVE_HOLD);
+}
+
+#[test]
+fn cached_readings_neither_announce_nor_rearm_a_low_battery() {
+    let mut watch = LowBatteryWatch::default();
+    let mut cached = discharging(15);
+    cached.freshness = openlogi_core::device::BatteryFreshness::Cached;
+    assert!(!watch.observe("mouse", &cached));
+    assert!(watch.observe("mouse", &discharging(15)));
+
+    for status in [BatteryStatus::Discharging, BatteryStatus::Charging] {
+        cached.percentage = Some(80);
+        cached.status = status;
+        watch.observe_muted("mouse", &cached);
+        assert!(!watch.observe("mouse", &discharging(15)));
+    }
+    watch.observe_muted("mouse", &discharging(80));
+    assert!(watch.observe("mouse", &discharging(15)));
 }

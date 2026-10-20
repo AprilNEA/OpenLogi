@@ -326,29 +326,6 @@ pub struct BatteryInfo {
     pub freshness: BatteryFreshness,
 }
 
-/// The charge at or below which a discharging battery needs attention.
-const LOW_BATTERY_PERCENT: u8 = 20;
-
-impl BatteryInfo {
-    /// Whether this reading should draw the user's attention: a discharging
-    /// battery at 20% or less, or, on a device that reports no percentage, at
-    /// the firmware's low or critical level.
-    ///
-    /// Every low-battery cue asks this one rule: the settings app's warning
-    /// tone and caption, and the agent's low-battery notice.
-    #[must_use]
-    pub fn needs_attention(&self) -> bool {
-        let low = match self.percentage {
-            Some(percentage) => percentage <= LOW_BATTERY_PERCENT,
-            None => matches!(self.level, BatteryLevel::Low | BatteryLevel::Critical),
-        };
-        low && !matches!(
-            self.status,
-            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
-        )
-    }
-}
-
 /// Tidy a device name reported over HID++ for display.
 ///
 /// Logitech reports gaming names in ALL CAPS (e.g. `"G513 RGB MECHANICAL
@@ -674,6 +651,7 @@ mod tests {
     #[test]
     fn a_low_discharging_battery_needs_attention() {
         let battery = |percentage, level, status| BatteryInfo {
+            freshness: crate::device::BatteryFreshness::Current,
             percentage,
             level,
             status,

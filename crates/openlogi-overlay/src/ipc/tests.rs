@@ -248,6 +248,7 @@ fn low_battery_notice() -> NoticeObservation {
                 name: None,
                 kind: DeviceKind::Mouse,
                 battery: BatteryInfo {
+                    freshness: openlogi_core::device::BatteryFreshness::Current,
                     percentage: Some(15),
                     level: BatteryLevel::Low,
                     status: BatteryStatus::Discharging,
