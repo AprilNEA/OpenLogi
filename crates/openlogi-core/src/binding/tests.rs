@@ -445,6 +445,7 @@ fn persisted_action_variant_names_are_stable() {
         "MissionControl",
         "MouseBack",
         "MouseForward",
+        "MuteMicrophone",
         "MuteVolume",
         "NewTab",
         "NextDesktop",

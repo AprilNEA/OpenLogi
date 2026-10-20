@@ -220,6 +220,7 @@ fn dispatch_generic_linux_native(action: &Action, native: NativeAction) {
         }
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
+        NativeAction::MicMute => press_mic_mute(),
     }
 }
 
@@ -238,7 +239,15 @@ fn dispatch_hyprland_native(action: &Action, native: NativeAction) {
             press_key(&[], KeyCode::KEY_SYSRQ);
         }
         NativeAction::Sleep => sleep_system(),
+        NativeAction::MicMute => press_mic_mute(),
     }
+}
+
+/// `KEY_MICMUTE` (XF86AudioMicMute): GNOME, KDE and most compositors bind it
+/// to the default source's mute toggle and show their own indicator, so the
+/// desktop's audio stack does the work, as `KEY_MUTE` does for the output.
+fn press_mic_mute() {
+    press_key(&[], KeyCode::KEY_MICMUTE);
 }
 
 fn skip_unsupported_native(action: &Action) {
@@ -536,6 +545,7 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     // Multimedia
     KeyCode::KEY_PLAYPAUSE, KeyCode::KEY_NEXTSONG, KeyCode::KEY_PREVIOUSSONG,
     KeyCode::KEY_VOLUMEUP,  KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_MUTE,
+    KeyCode::KEY_MICMUTE,
     // Mouse buttons (injected as EV_KEY with BTN_* codes). The side pair
     // must be registered here or the kernel silently drops their events.
     KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE,

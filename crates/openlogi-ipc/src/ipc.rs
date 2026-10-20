@@ -121,6 +121,7 @@ pub use succession::Identity;
 ///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
 ///      off over HID++ `0x4220`, for the overlay's transient indicator.
 /// v38: `Action::CloseWindow` appended — close the focused window.
+///      `Action::MuteMicrophone` appended — toggle the microphone mute.
 pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the

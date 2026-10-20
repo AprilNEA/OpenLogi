@@ -271,6 +271,10 @@ fn dispatch_native(native: NativeAction) {
         // synthesised power key), so ask powermanagement directly. `pmset
         // sleepnow` works for the console user without privileges.
         NativeAction::Sleep => sleep_system(),
+        // macOS has no system-wide microphone mute key or event to post.
+        NativeAction::MicMute => {
+            tracing::debug!("MicMute has no macOS synthesis yet — action skipped");
+        }
     }
 }
 

@@ -211,6 +211,11 @@ pub enum Action {
     /// Declared last because the variant index is part of the IPC wire
     /// format; it is listed with the other window actions in the catalog.
     CloseWindow,
+    /// Toggle the system microphone mute.
+    ///
+    /// Declared last because the variant index is part of the IPC wire
+    /// format; it is listed with the other media actions in the catalog.
+    MuteMicrophone,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -317,6 +322,7 @@ macro_rules! for_each_unit_action {
             VolumeUp "Volume Up" "actions.volume_up" Media Volume,
             VolumeDown "Volume Down" "actions.volume_down" Media VolumeDown,
             MuteVolume "Mute" "actions.mute" Media Mute,
+            MuteMicrophone "Mute Microphone" "actions.mute_microphone" Media Mute,
             // DPI
             CycleDpiPresets "Cycle DPI Presets" "pointer.cycle_dpi_presets" Dpi Gauge,
             ToggleSmartShift "Toggle SmartShift" "pointer.toggle_smartshift" Dpi Refresh,

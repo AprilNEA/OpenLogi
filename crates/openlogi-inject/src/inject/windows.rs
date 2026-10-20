@@ -140,6 +140,10 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::Sleep => {
             tracing::debug!("Sleep has no Windows synthesis yet — action skipped");
         }
+        // Windows has no virtual key for the microphone mute.
+        NativeAction::MicMute => {
+            tracing::debug!("MicMute has no Windows synthesis yet — action skipped");
+        }
     }
 }
 

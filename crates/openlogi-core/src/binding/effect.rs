@@ -199,6 +199,8 @@ pub enum NativeAction {
     CaptureRegion,
     /// Put the computer to sleep.
     Sleep,
+    /// Toggle the system microphone mute.
+    MicMute,
 }
 
 /// A power-user scripting escape hatch, borrowed from the originating
@@ -268,6 +270,7 @@ impl Action {
             Action::VolumeUp => Effect::Media(MediaKey::VolumeUp),
             Action::VolumeDown => Effect::Media(MediaKey::VolumeDown),
             Action::MuteVolume => Effect::Media(MediaKey::Mute),
+            Action::MuteMicrophone => Effect::Native(NativeAction::MicMute),
 
             // DPI/SmartShift/the Actions Ring/OpenApplication are all handled
             // above (or beside) the injector — see `Effect::AgentSide`.
