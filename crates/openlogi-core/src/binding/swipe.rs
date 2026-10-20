@@ -216,7 +216,10 @@ impl SwipeAccumulator {
             // direction. Summed travel the new report heads against is an
             // abandoned partial swipe and is dropped; travel it continues is
             // kept, so a reversal paused halfway still completes.
-            if i64::from(self.dx) * i64::from(dx) + i64::from(self.dy) * i64::from(dy) < 0 {
+            if (i64::from(self.dx) * i64::from(dx))
+                .saturating_add(i64::from(self.dy) * i64::from(dy))
+                < 0
+            {
                 self.dx = 0;
                 self.dy = 0;
             }
@@ -255,7 +258,7 @@ impl SwipeAccumulator {
                     self.dx = 0;
                     self.dy = 0;
                     if !self.ready(dir, now) {
-                        self.repeat = distance;
+                        self.bound_pending_repeat(distance);
                         return None;
                     }
                     // Carry the excess, so a report spanning two repeat
@@ -320,6 +323,14 @@ impl SwipeAccumulator {
             return self.emit(dir, now);
         }
         None
+    }
+
+    /// Bound distance and sideways drift together, preserving the stroke's slope.
+    fn bound_pending_repeat(&mut self, distance: i32) {
+        // distance <= repeat, so scaling cannot enlarge drift.
+        let scaled = i64::from(self.repeat_cross) * i64::from(distance) / i64::from(self.repeat);
+        self.repeat_cross = i32::try_from(scaled).unwrap_or(self.repeat_cross);
+        self.repeat = distance;
     }
 
     fn ready(&self, direction: GestureDirection, now: Instant) -> bool {
@@ -446,6 +457,11 @@ mod tests {
         assert_eq!(acc.accumulate_at(due, 1, 0), Some(GestureDirection::Right));
         assert_eq!(acc.accumulate_at(due, 1, 0), None);
         assert_eq!(acc.accumulate_at(due + ordinary_duration(), 1, 0), None);
+        // Bounding progress must retain a straight report's cross-axis ratio.
+        acc.begin_at(now, configured());
+        assert_eq!(acc.accumulate_at(now, 50, 0), Some(GestureDirection::Right));
+        assert_eq!(acc.accumulate_at(now, i32::MAX, 1000), None);
+        assert_eq!(acc.accumulate_at(due, 1, 0), Some(GestureDirection::Right));
     }
 
     #[test]
@@ -906,6 +922,10 @@ mod tests {
             None,
             "the saturating sum must not panic"
         );
+        acc.begin();
+        assert_eq!(acc.accumulate(i32::MIN, i32::MIN), None);
+        acc.rest_for_test();
+        assert_eq!(acc.accumulate(i32::MIN, i32::MIN), None);
         // A clean axis on a fresh hold still commits with a saturated magnitude.
         acc.begin();
         acc.backdate_hold_for_test();
