@@ -4,6 +4,54 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: macOS key synthesis types through a virtual HID keyboard when entitled
+
+A key that `CGEventPost` injects enters the window server as software input.
+Some system consumers treat it differently from a key typed on a keyboard:
+issues #1653 and #744 report shortcuts that a real keyboard triggers and a
+posted event does not. An `IOHIDUserDevice` keyboard reports its keys into the
+HID event system, where a USB keyboard's keys enter. The agent therefore
+creates one at arming and sends shortcut keys through it.
+
+- **The entitlement decides, at run time.** Creating the device needs the
+  restricted `com.apple.developer.hid.virtual.device` entitlement. Apple grants
+  it only through a provisioning profile, and AMFI kills a process that claims
+  it without one (an ad-hoc signed probe exited with `SIGKILL` on macOS 26.7).
+  No OpenLogi build carries the profile yet, so creation fails and every key
+  stays on `CGEventPost`. Shipping the profile is a signing change, not a code
+  change.
+- **Logi Options+ creates the same kind of device, but sends nothing through
+  it.** Its 2.8.981479 agent holds the entitlement and a Developer ID profile.
+  `gestures::create_virtual_hid_keyboard` passes only a `ReportDescriptor` (a
+  65-byte boot keyboard with five key slots and an LED output report). The
+  binary imports no `IOHIDUserDeviceHandleReport*` function, and the gesture
+  then posts F14 or F15 as `CGEvent`s. OpenLogi's use of input reports has no
+  Options+ precedent to copy.
+- **A boot keyboard without outputs.** The descriptor has the modifier bitmap,
+  a reserved byte and six key slots: an eight-byte input report without a
+  report ID. It declares no LED report, because a device without a dispatch
+  queue receives no output reports. The properties set only the descriptor
+  and `Product`. Without a vendor ID, `openlogi-hid`'s Logitech filter never
+  opens the device.
+- **A key is released on the path that pressed it.** A key without a HID usage,
+  a press beyond six keys, and an up edge whose down edge the device did not
+  carry all go out as `CGEvent`s. A tap reports its release before it returns,
+  so the device holds keys only for held chords. A rejected report removes the
+  device and reports every key released; key synthesis then posts `CGEvent`s
+  for the rest of the process.
+- **The hook recognises the device by name.** Its key events carry no
+  `SYNTHETIC_EVENT_USER_DATA`, because the HID event system creates them. The
+  hook resolves each key event's sender to the device's `Product` and skips
+  OpenLogi's own, as it skips a tagged `CGEvent`.
+- **The agent owns it.** Only the armed agent creates the device. The exit path
+  removes it after the input workers stop, so a chord released during shutdown
+  still reaches it. The CLI and the GUI keep posting `CGEvent`s.
+
+Verified with unit tests of the report state, the routing and the descriptor,
+and by running an unentitled build: creation fails and keys keep the
+`CGEvent` path. Nobody has run an entitled build, so the report path and its
+effect on #1653 and #744 are not verified.
+
 ## 2026-10: One application on every platform is an `[apps]` alias
 
 A per-app profile was keyed by the identifier one platform reports: a macOS

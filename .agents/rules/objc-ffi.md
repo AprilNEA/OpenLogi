@@ -47,6 +47,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-inject/src/inject/macos/{app_services,dock,symbolic_hotkey}.rs` | the `dlopen`'d private SPIs: `CoreDockSendNotification` and the CGS symbolic-hotkey trio |
 | `openlogi-inject/src/inject/macos/keyboard_layout.rs` | the active keyboard layout's `uchr` data (Text Input Source Services, read on the main thread) and `UCKeyTranslate` over it |
 | `openlogi-inject/src/inject/macos/main_thread.rs` | the bounded hand-off of main-thread work from the action worker to the main queue (`dispatch2`) |
+| `openlogi-inject/src/inject/macos/virtual_keyboard/device.rs` | the `IOHIDUserDevice` virtual keyboard that key synthesis types through: its creation (which needs the `com.apple.developer.hid.virtual.device` entitlement) and its timestamped input reports. The report state in `virtual_keyboard.rs` above it is safe code |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
@@ -282,6 +283,11 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   thread reads the layout), so a worker hands the read to the main queue and
   waits a bounded time; only `UCKeyTranslate`, a pure function of the copied
   data, runs on the worker.
+- `inject/macos/virtual_keyboard/device.rs` — `IOHIDUserDevice::with_properties`,
+  `handle_report_with_time_stamp` over the eight-byte report, `mach2`'s
+  `mach_absolute_time` for its timestamp, and the `Send` impl that lets the
+  process-wide slot hold the device. The device is never scheduled on a dispatch
+  queue, so it needs no `Activate` / `Cancel` pair: releasing it removes it.
 - `permissions/macos.rs` — the CoreBluetooth force-link and the `CBManager`
   class-method send. `IOHIDCheckAccess` needs none: `objc2-io-kit` exposes it as
   a safe fn, in `openlogi-permissions` and `openlogi-hid` alike.

@@ -12,4 +12,4 @@ pub use inject::{
 #[cfg(target_os = "linux")]
 pub use inject::action_device_path;
 #[cfg(target_os = "macos")]
-pub use inject::prepare_menu_shortcuts;
+pub use inject::{VirtualKeyboard, is_virtual_keyboard_product, prepare_menu_shortcuts};
