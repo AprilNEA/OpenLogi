@@ -8,7 +8,9 @@
 //!
 //! A delta that cannot be made is a warning, not a failure. The feed still
 //! offers the full DMG, which every installed app can take, so a missing delta
-//! costs one larger download and never an update.
+//! costs one larger download and never an update. This holds for the shared
+//! setup too (listing releases, fetching Sparkle, reading the new DMG): only
+//! arguments that cannot name a release DMG fail the command.
 
 use std::path::{Path, PathBuf};
 
@@ -93,7 +95,21 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .dmg
         .parent()
         .context("the DMG has no parent directory")?;
+    if let Err(error) = make_deltas(args, current, arch, dmg_name, out_dir) {
+        println!("::warning::no Sparkle deltas for {dmg_name}: {error:#}");
+    }
+    Ok(())
+}
 
+/// Make every delta for one DMG. An error here is from the shared setup;
+/// [`run`] reports it as a warning, and a failed base is reported here.
+fn make_deltas(
+    args: &Args,
+    current: Version,
+    arch: MacArch,
+    dmg_name: &str,
+    out_dir: &Path,
+) -> Result<()> {
     let sh = Shell::new()?;
     let repo = &args.repo;
     let listed = cmd!(
