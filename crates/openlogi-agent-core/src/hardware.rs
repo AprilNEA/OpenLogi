@@ -1044,15 +1044,16 @@ pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dp
     );
 }
 
-/// [`write_dpi_in_background`] for a held DPI shift. With `before`, the sensor
-/// DPI is read into it first unless an earlier hold's reading is still owed a
-/// restore. If that read fails nothing is written: the release would have
-/// nothing to return to.
+/// [`write_dpi_in_background`] for a held DPI shift. Every hold retains its
+/// restore value in `before`, even when it came from the live DPI cache.
+/// Check it again inside the ordered write: an earlier restore may have
+/// completed and cleared it after this hold was requested. Read the sensor
+/// when empty; a failed read must never be followed by a low-DPI write.
 pub(crate) fn hold_dpi_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
     dpi: Dpi,
-    before: Option<DpiBeforeShift>,
+    before: DpiBeforeShift,
 ) {
     let index = op.route.device_index();
     let turn = op.access.transport_turns.turn_for(&op.route);
@@ -1064,8 +1065,7 @@ pub(crate) fn hold_dpi_in_background(
                 &turn,
                 || async move {
                     let shared = op.resolve()?;
-                    if let Some(before) = before
-                        && before.get().is_none()
+                    if before.get().is_none()
                     {
                         before.set(openlogi_hid::get_dpi_info_on(&shared).await?.current);
                     }
@@ -1422,6 +1422,7 @@ mod tests {
             },
             &rates,
             &no_capture_plans(),
+            || {},
         );
 
         assert!(
@@ -1672,6 +1673,7 @@ mod tests {
             },
             &WriteOrder::default(),
             &no_capture_plans(),
+            || {},
         );
         wait_until_a_worker_holds_the_receiver(&receiver_access).await;
 
@@ -1762,6 +1764,7 @@ mod tests {
                 },
                 &WriteOrder::default(),
                 &plans,
+                || {},
             ),
         }
         wait_until_a_worker_holds_the_receiver(&receiver_access).await;
