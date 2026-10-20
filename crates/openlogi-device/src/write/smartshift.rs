@@ -167,6 +167,9 @@ impl SmartShift {
 
     /// Read the current mode + auto-disengage threshold. Enhanced (`0x2111`)
     /// also reports tunable torque; Legacy (`0x2110`) has no such concept.
+    ///
+    /// The torque is the status reply's raw byte, for write paths comparing
+    /// against it; callers outside this module see [`Self::reported_status`].
     async fn status(&self) -> Result<SmartShiftStatus, WriteError> {
         match self {
             Self::Enhanced(feature) => {
@@ -200,6 +203,28 @@ impl SmartShift {
                 })
             }
         }
+    }
+
+    /// [`Self::status`] as callers see it: a torque level only on a device that
+    /// advertises [`SmartShiftEnhancedCapabilities::TUNABLE_TORQUE`], so torque
+    /// control is offered exactly where a torque write can apply. A status
+    /// with no level needs no capability read.
+    async fn reported_status(&self) -> Result<SmartShiftStatus, WriteError> {
+        let status = self.status().await?;
+        let Self::Enhanced(feature) = self else {
+            return Ok(status);
+        };
+        if status.tunable_torque.is_none() || has_tunable_torque(feature).await? {
+            return Ok(status);
+        }
+        debug!(
+            torque = ?status.tunable_torque,
+            "device does not advertise tunable torque; not reporting its level"
+        );
+        Ok(SmartShiftStatus {
+            tunable_torque: None,
+            ..status
+        })
     }
 
     /// Write a full desired status — wheel mode plus the auto-disengage
@@ -322,19 +347,13 @@ impl SmartShift {
     }
 }
 
-/// The tunable torque to put on the wire for a requested `torque`.
+/// Whether the `0x2111` capabilities advertise
+/// [`SmartShiftEnhancedCapabilities::TUNABLE_TORQUE`].
 ///
-/// The status reply's torque byte is not a capability claim — only the
-/// `0x2111` capabilities bit is, and both Options+ and Solaar gate their
-/// torque control on it. Without the bit the torque is sent as the zero
-/// "do not change" sentinel so the mode and threshold still apply.
-async fn writable_torque(
-    feature: &SmartShiftEnhancedFeature,
-    torque: Option<TunableTorque>,
-) -> Result<Option<NonZeroU8>, WriteError> {
-    let Some(torque) = torque else {
-        return Ok(None);
-    };
+/// The status reply's torque byte is not a capability claim — only this bit
+/// is, and both Options+ and Solaar gate their torque control on it. A failed
+/// read fails the caller instead of guessing.
+async fn has_tunable_torque(feature: &SmartShiftEnhancedFeature) -> Result<bool, WriteError> {
     let info = feature.get_capabilities().await.map_err(|e| {
         classify_hidpp_error(
             e,
@@ -342,10 +361,22 @@ async fn writable_torque(
             SmartShiftEnhancedFeature::ID,
         )
     })?;
-    if info
+    Ok(info
         .capabilities
-        .contains(SmartShiftEnhancedCapabilities::TUNABLE_TORQUE)
-    {
+        .contains(SmartShiftEnhancedCapabilities::TUNABLE_TORQUE))
+}
+
+/// The tunable torque to put on the wire for a requested `torque`: the level
+/// on a device that [`has_tunable_torque`], otherwise the zero "do not change"
+/// sentinel so the mode and threshold still apply.
+async fn writable_torque(
+    feature: &SmartShiftEnhancedFeature,
+    torque: Option<TunableTorque>,
+) -> Result<Option<NonZeroU8>, WriteError> {
+    let Some(torque) = torque else {
+        return Ok(None);
+    };
+    if has_tunable_torque(feature).await? {
         Ok(Some(NonZeroU8::from(torque)))
     } else {
         debug!(
@@ -357,7 +388,9 @@ async fn writable_torque(
 }
 
 /// Read the device's current SmartShift mode + sensitivity — companion to
-/// [`toggle_smartshift`].
+/// [`toggle_smartshift`]. The tunable torque is reported only on a device that
+/// advertises it, at the cost of one capabilities read when the status carries
+/// a level.
 pub async fn get_smartshift_status(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
@@ -377,7 +410,7 @@ pub(super) async fn get_smartshift_status_on_channel(
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let smartshift = SmartShift::open(&mut device).await?;
-    smartshift.status().await
+    smartshift.reported_status().await
 }
 
 /// Set the SmartShift auto-disengage sensitivity on `route`, preserving the
@@ -398,7 +431,7 @@ pub async fn set_smartshift_sensitivity(
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
         let smartshift = SmartShift::open(&mut device).await?;
         smartshift.set_sensitivity(value).await?;
-        smartshift.status().await
+        smartshift.reported_status().await
     })
     .await
 }
@@ -421,6 +454,8 @@ pub async fn set_smartshift_torque(
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
         let smartshift = SmartShift::open(&mut device).await?;
         smartshift.set_torque(value).await?;
+        // `set_torque` succeeds only on a device that advertises tunable
+        // torque, so its raw status is already the reported one.
         smartshift.status().await
     })
     .await

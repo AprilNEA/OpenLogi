@@ -347,6 +347,82 @@ async fn status_read_reports_a_zero_torque_byte_as_absent() -> Result<(), WriteE
     let status = get_smartshift_status_on(&harness.shared).await?;
 
     assert_eq!(status.tunable_torque, None);
+    assert_eq!(
+        harness.capability_reads(),
+        0,
+        "a status with no level needs no capability read"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_read_reports_the_torque_of_a_wheel_that_advertises_it() -> Result<(), WriteError> {
+    let harness = Harness::new(Wheel::new(
+        SmartShiftEnhancedCapabilities::TUNABLE_TORQUE,
+        75,
+    ))
+    .await;
+
+    let status = get_smartshift_status_on(&harness.shared).await?;
+
+    assert_eq!(status.tunable_torque, Some(torque(75)));
+    assert_eq!(harness.capability_reads(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_read_hides_the_torque_byte_without_the_capability() -> Result<(), WriteError> {
+    // The status reply carries a non-zero torque byte even though the
+    // capabilities bit is clear; reporting it would offer a torque control
+    // whose writes the device never applies (#1886).
+    let harness = Harness::new(Wheel::new(SmartShiftEnhancedCapabilities::empty(), 50)).await;
+
+    let status = get_smartshift_status_on(&harness.shared).await?;
+
+    assert_eq!(
+        status,
+        SmartShiftStatus {
+            mode: SmartShiftMode::Ratchet,
+            auto_disengage: threshold(10),
+            tunable_torque: None,
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_read_fails_when_capabilities_cannot_be_read() {
+    let mut wheel = Wheel::new(SmartShiftEnhancedCapabilities::TUNABLE_TORQUE, 75);
+    wheel.fail_capabilities = true;
+    let harness = Harness::new(wheel).await;
+
+    let err = get_smartshift_status_on(&harness.shared)
+        .await
+        .expect_err("an unreadable capability must not be guessed");
+
+    assert!(
+        matches!(
+            err,
+            WriteError::HidppFeature {
+                operation: HidppOperation::ReadSmartShift,
+                feature_hex: 0x2111,
+                kind: HidppFeatureErrorKind::InvalidFunctionId,
+            }
+        ),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_status_read_sends_only_its_status_request() -> Result<(), WriteError> {
+    let harness = Harness::new(Wheel::legacy()).await;
+
+    let status = get_smartshift_status_on(&harness.shared).await?;
+
+    assert_eq!(status.tunable_torque, None);
+    // `0x2110` function 0 is its status getter, and `0x2110` has no
+    // capabilities read to follow it.
+    assert_eq!(harness.requests_to(0).len(), 1);
     Ok(())
 }
 
