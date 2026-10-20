@@ -151,18 +151,34 @@ async fn round_trip(route: &openlogi_hid::DeviceRoute, original: &[u8]) -> Resul
         ..restore.clone()
     };
     println!("  round trip: report rate {rate} Hz → {other} Hz");
-    let written = openlogi_hid::write_onboard_profile(route, change)
+    // A failed write may still have saved the changed sector before a later
+    // step failed: restore whatever the outcome, and keep both errors.
+    let tested = openlogi_hid::write_onboard_profile(route, change)
         .await
-        .context("write the changed profile")?;
-    let kept = written.profile.and_then(|p| p.report_rate);
-    anyhow::ensure!(
-        kept == Some(ReportRate::new(other)),
-        "the mouse reads back {kept:?} after writing {other} Hz"
-    );
-    println!("  ✓ the mouse kept {other} Hz");
-    openlogi_hid::write_onboard_profile(route, restore)
+        .context("write the changed profile")
+        .and_then(|written| {
+            let kept = written.profile.and_then(|p| p.report_rate);
+            anyhow::ensure!(
+                kept == Some(ReportRate::new(other)),
+                "the mouse reads back {kept:?} after writing {other} Hz"
+            );
+            Ok(())
+        });
+    if tested.is_ok() {
+        println!("  ✓ the mouse kept {other} Hz");
+    }
+    let restored = openlogi_hid::write_onboard_profile(route, restore)
         .await
-        .context("restore the profile")?;
+        .context("restore the profile");
+    match (tested, restored) {
+        (Err(test), Err(restore)) => {
+            anyhow::bail!("{test:#}; restoring the profile failed too: {restore:#}")
+        }
+        (Err(test), Ok(_)) => return Err(test.context("the profile was restored")),
+        (Ok(()), restored) => {
+            restored?;
+        }
+    }
     let after = openlogi_hid::dump_onboard_memory(route)
         .await
         .context("re-read onboard memory")?;
