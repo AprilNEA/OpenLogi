@@ -75,6 +75,7 @@ mod spaces;
 mod symbolic_hotkey;
 #[cfg(test)]
 mod tests;
+mod window;
 
 use app_services::symbol as app_services_symbol;
 pub(super) use browser::ax_browser_navigate;
@@ -108,6 +109,7 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) if MENU_SHORTCUTS.contains(&shortcut) => {
             press_menu_shortcut(&combo(shortcut));
         }
+        Effect::Shortcut(Shortcut::CloseWindow) => close_focused_window(),
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
@@ -140,6 +142,18 @@ fn dispatch_click(button: MouseButton) {
         MouseButton::Back => post_other_button(3),
         MouseButton::Forward => post_other_button(4),
     }
+}
+
+/// ⌘W closes only the current tab in a tabbed window (Safari, Chrome,
+/// Finder), so press the focused window's own close button. Windows the
+/// Accessibility tree gives no close button keep ⌘W.
+fn close_focused_window() {
+    if window::ax_close_focused_window() {
+        tracing::debug!("Close Window via the focused window's AXCloseButton");
+        return;
+    }
+    tracing::debug!("no AX close button on the focused window — pressing ⌘W");
+    press_combo(&combo(Shortcut::CloseWindow));
 }
 
 /// Shortcuts pressed as the frontmost app's menu item, so AppKit's remapping
@@ -236,8 +250,9 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::BrowserBack => "Cmd+[",
         Shortcut::BrowserForward => "Cmd+]",
         Shortcut::NewTab => "Cmd+T",
-        Shortcut::CloseTab => "Cmd+W",
-        Shortcut::CloseWindow => "Cmd+W",
+        // `CloseWindow` presses the window's close button through AX first
+        // (`close_focused_window`); ⌘W is its fallback.
+        Shortcut::CloseTab | Shortcut::CloseWindow => "Cmd+W",
         Shortcut::ReopenTab => "Cmd+Shift+T",
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
@@ -658,13 +673,13 @@ fn post_media_key(nx_key: i32) {
 fn power_off_system() {
     match std::process::Command::new("/usr/bin/osascript")
         .args(["-e", "tell application \"loginwindow\" to «event aevtrsdn»"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
     {
-        Ok(mut child) => {
+        Ok(child) => {
             tracing::debug!("Shut Down via loginwindow aevtrsdn");
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
+            std::thread::spawn(move || super::log_failed_child("osascript shut down", child));
         }
         Err(e) => tracing::warn!(error = %e, "osascript shut down spawn failed"),
     }

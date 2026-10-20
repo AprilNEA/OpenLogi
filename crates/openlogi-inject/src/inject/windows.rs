@@ -148,19 +148,26 @@ fn dispatch_native(native: NativeAction) {
     }
 }
 
+/// `CREATE_NO_WINDOW` (`winbase.h`): the agent has no console, so a console
+/// program it starts would otherwise get a window of its own.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// `shutdown /s /t 0`: the standard shutdown of the signed-in user, which
-/// needs no elevation. Reaped on a detached thread so the long-running agent
-/// keeps no zombie handle.
+/// needs no elevation. Started without a console window and reaped on a
+/// detached thread, which logs a refusal.
 fn power_off_system() {
+    use std::os::windows::process::CommandExt as _;
+
     match std::process::Command::new("shutdown")
         .args(["/s", "/t", "0"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
     {
-        Ok(mut child) => {
+        Ok(child) => {
             tracing::debug!("Shut Down via shutdown /s");
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
+            std::thread::spawn(move || super::log_failed_child("shutdown /s", child));
         }
         Err(e) => tracing::warn!(error = %e, "shutdown spawn failed"),
     }

@@ -216,6 +216,22 @@ fn parse_shortcut(text: &str) -> KeyCombo {
         .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
 }
 
+/// Wait for a power helper the agent started and log its refusal: a non-zero
+/// exit and whatever it wrote to stderr (which the caller must have piped).
+/// Runs on the detached thread that reaps the child.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn log_failed_child(what: &str, child: std::process::Child) {
+    match child.wait_with_output() {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => tracing::warn!(
+            status = %output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "{what} failed"
+        ),
+        Err(e) => tracing::warn!(error = %e, "{what}: waiting for the child failed"),
+    }
+}
+
 /// Run a script off the caller's thread: a shell command, an AppleScript or a
 /// workflow can take seconds, and the caller is the input hook.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
