@@ -120,12 +120,17 @@ impl ActionExecutor {
             return false;
         };
         info!(on, speed = %write.speed, "precision mode toggled → writing pointer speed");
-        // A toggle write settles no pending restore: the toggle cleared it.
+        let speeds = Arc::clone(&self.pointer_speeds);
+        let restore = write.restore;
         write_pointer_speed_in_background(
             self.access.op(&write.route),
             write.ticket,
             write.speed,
-            || {},
+            move || {
+                if let Some(restore) = restore {
+                    speeds.restored(&restore);
+                }
+            },
         );
         true
     }

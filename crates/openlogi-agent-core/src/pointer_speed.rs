@@ -10,12 +10,13 @@
 //!
 //! The mode lives in the agent process only. It survives a reconnect,
 //! because the reconnect reapply writes the precision speed while the mode is
-//! on. A reload can end the mode while the mouse is offline. The reconnect
-//! then writes the saved speed, or 1× when no speed is saved, and keeps
-//! writing it on every reconnect pass until one write lands. The mode does
-//! not survive an agent restart: the new agent writes the saved speed, and a
-//! mouse with no saved speed stays at the precision speed until its button
-//! is pressed twice.
+//! on. When the mode ends, by a press or a reload, online or offline, the
+//! mouse is owed its saved speed, or 1× when no speed is saved. Every
+//! reconnect pass writes it until one write of it lands, so a write lost to
+//! a sleeping mouse does not leave it slow. The mode does not survive an
+//! agent restart: the new agent writes the saved speed, and a mouse with no
+//! saved speed stays at the precision speed until its button is pressed
+//! twice.
 //!
 //! Every pointer-speed write is numbered in one `WriteOrder`, and each
 //! number is taken under the lock that reads or changes the mode. The newest
@@ -49,14 +50,35 @@ struct State {
     online: HashMap<String, OnlineMouse>,
     /// The config keys whose precision mode is on, online or not.
     precision: HashSet<String>,
-    /// The config keys whose precision mode a reload ended while they were
-    /// offline. Such a mouse may still move at the precision speed, so its
-    /// reconnects write even when no speed is saved, until one of those
-    /// writes lands. Each entry has a generation, so a write that lands
-    /// late cannot clear a newer entry.
+    /// The config keys of the mice that may still move at the precision
+    /// speed: their precision mode ended, and no write of their own speed
+    /// has landed since. A reconnect writes such a mouse even when no speed
+    /// is saved. Each entry has a generation, so a write that lands late
+    /// cannot clear a newer entry.
     restore: HashMap<String, u64>,
     /// The generation of the newest `restore` entry.
     restore_generation: u64,
+}
+
+impl State {
+    /// Record that `key`'s mouse may still move at the precision speed, and
+    /// return the entry the write that ends it settles.
+    fn owe_restore(&mut self, key: &str) -> Restore {
+        self.restore_generation += 1;
+        self.restore.insert(key.to_owned(), self.restore_generation);
+        Restore {
+            key: key.to_owned(),
+            generation: self.restore_generation,
+        }
+    }
+
+    /// `key`'s pending restore entry, if any.
+    fn pending_restore(&self, key: &str) -> Option<Restore> {
+        self.restore.get(key).map(|&generation| Restore {
+            key: key.to_owned(),
+            generation,
+        })
+    }
 }
 
 struct OnlineMouse {
@@ -141,23 +163,23 @@ impl PointerSpeeds {
         let key = key.or(state.selected.as_deref())?.to_owned();
         let mouse = state.online.get(&key)?;
         let (route, saved) = (mouse.route.clone(), mouse.saved);
-        // This write supersedes a pending restore.
-        state.restore.remove(&key);
-        let on = !state.precision.remove(&key);
-        let speed = if on {
-            state.precision.insert(key);
-            PointerSpeed::MIN
+        if state.precision.remove(&key) {
+            // The mouse stays owed its speed until this write lands.
+            let restore = state.owe_restore(&key);
+            let write = self.write(route, saved.unwrap_or_default(), Some(restore));
+            Some((false, write))
         } else {
-            saved.unwrap_or_default()
-        };
-        Some((on, self.write(route, speed)))
+            state.restore.remove(&key);
+            state.precision.insert(key);
+            Some((true, self.write(route, PointerSpeed::MIN, None)))
+        }
     }
 
     /// The write a reconnect owes the mouse `key` names, now at `route`: the
     /// precision speed while the mode is on, else the `saved` speed. A mouse
-    /// whose mode a reload ended while it was offline gets 1× when no speed
-    /// is saved, on every reconnect pass until [`Self::restored`] reports
-    /// that write landed. `None` when there is nothing to write.
+    /// whose mode ended gets 1× when no speed is saved, on every reconnect
+    /// pass until [`Self::restored`] reports that a write of its speed
+    /// landed. `None` when there is nothing to write.
     pub(crate) fn reapply(
         &self,
         key: &str,
@@ -166,17 +188,12 @@ impl PointerSpeeds {
     ) -> Option<SpeedWrite> {
         let state = self.lock();
         if state.precision.contains(key) {
-            return Some(self.write(route.clone(), PointerSpeed::MIN));
+            return Some(self.write(route.clone(), PointerSpeed::MIN, None));
         }
-        let Some(&generation) = state.restore.get(key) else {
-            return Some(self.write(route.clone(), saved?));
+        let Some(restore) = state.pending_restore(key) else {
+            return Some(self.write(route.clone(), saved?, None));
         };
-        let mut write = self.write(route.clone(), saved.unwrap_or_default());
-        write.restore = Some(Restore {
-            key: key.to_owned(),
-            generation,
-        });
-        Some(write)
+        Some(self.write(route.clone(), saved.unwrap_or_default(), Some(restore)))
     }
 
     /// A write that carried `restore` landed: the mouse no longer moves at
@@ -214,8 +231,9 @@ impl PointerSpeeds {
     /// A changed speed or changed assignments end precision mode on every
     /// mouse, online or not, as in Logi Options+. A mouse whose mode ended
     /// returns to its saved speed, or to 1× when no speed is saved: an online
-    /// mouse now, an offline mouse when it reconnects. An online mouse whose
-    /// speed alone changed gets the new speed. The other mice get no write.
+    /// mouse now, and every mouse at its reconnects until one such write
+    /// lands. An online mouse whose speed alone changed gets the new speed.
+    /// The other mice get no write.
     pub(crate) fn reload(
         &self,
         change: impl Fn(&str) -> ReloadChange,
@@ -230,23 +248,23 @@ impl PointerSpeeds {
         let writes = mice
             .into_iter()
             .filter_map(|ScaledMouse { key, route, saved }| {
-                let speed = if ended.remove(&key) {
-                    saved.unwrap_or_default()
+                let (speed, restore) = if ended.remove(&key) {
+                    (saved.unwrap_or_default(), Some(state.owe_restore(&key)))
                 } else if change(&key).speed {
-                    saved?
+                    // A pending restore rides on this write: 1× when the
+                    // speed was removed, since the mouse may still be slow.
+                    let restore = state.pending_restore(&key);
+                    let fallback = restore.as_ref().map(|_| PointerSpeed::default());
+                    (saved.or(fallback)?, restore)
                 } else {
                     return None;
                 };
-                // This write supersedes a pending restore.
-                state.restore.remove(&key);
-                Some(self.write(route, speed))
+                Some(self.write(route, speed, restore))
             })
             .collect();
         // What is left of `ended` is offline: its reconnect owes the write.
         for key in ended {
-            state.restore_generation += 1;
-            let generation = state.restore_generation;
-            state.restore.insert(key, generation);
+            state.owe_restore(&key);
         }
         writes
     }
@@ -263,13 +281,18 @@ impl PointerSpeeds {
         self.lock().precision.contains(key)
     }
 
-    fn write(&self, route: DeviceRoute, speed: PointerSpeed) -> SpeedWrite {
+    fn write(
+        &self,
+        route: DeviceRoute,
+        speed: PointerSpeed,
+        restore: Option<Restore>,
+    ) -> SpeedWrite {
         let ticket = self.order.request(&route);
         SpeedWrite {
             route,
             speed,
             ticket,
-            restore: None,
+            restore,
         }
     }
 

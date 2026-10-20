@@ -273,6 +273,58 @@ fn a_press_or_an_app_write_drops_the_pending_restore() {
     assert!(!speeds.restore_pending("a"));
 }
 
+/// A press that ends precision mode owes the mouse its speed until that
+/// write lands. A mouse that sleeps before it lands gets 1× at its
+/// reconnect.
+#[test]
+fn a_press_that_ends_precision_owes_the_speed_until_its_write_lands() {
+    let speeds = PointerSpeeds::default();
+    speeds.publish(None, [mouse("a", 1, None)]);
+    speeds.toggle_precision(Some("a"));
+    let (on, off) = speeds.toggle_precision(Some("a")).expect("an online mouse");
+    assert!(!on);
+    let restore = off.restore.expect("the press owes a restore");
+
+    let write = speeds.reapply("a", &route(1), None).expect("still owed");
+    assert_eq!(write.speed, PointerSpeed::DEFAULT);
+    speeds.restored(&restore);
+    assert!(speeds.reapply("a", &route(1), None).is_none());
+}
+
+/// The same holds for a reload that ends precision mode on an online mouse.
+#[test]
+fn an_online_reload_that_ends_precision_owes_the_speed_until_its_write_lands() {
+    let speeds = PointerSpeeds::default();
+    speeds.publish(None, [mouse("a", 1, None)]);
+    speeds.toggle_precision(Some("a"));
+    let assignments = ReloadChange {
+        assignments: true,
+        ..ReloadChange::default()
+    };
+
+    let mut writes = speeds.reload(every_key(assignments), [mouse("a", 1, None)]);
+    let write = writes.pop().expect("a write to 1×");
+    assert!(speeds.restore_pending("a"));
+    speeds.restored(&write.restore.expect("the reload owes a restore"));
+    assert!(!speeds.restore_pending("a"));
+}
+
+/// A reload that removes the saved speed of a mouse that may still be slow
+/// writes 1×, and that write settles the restore.
+#[test]
+fn a_reload_that_removes_the_speed_writes_one_times_while_a_restore_is_pending() {
+    let speeds = offline_mouse_whose_precision_a_reload_ended();
+    let changed = every_key(ReloadChange {
+        speed: true,
+        ..ReloadChange::default()
+    });
+
+    let writes = speeds.reload(&changed, [mouse("a", 2, None)]);
+
+    assert_eq!(written(&writes), [PointerSpeed::DEFAULT]);
+    assert!(writes[0].restore.is_some());
+}
+
 #[test]
 fn a_reload_keeps_precision_on_the_mice_it_did_not_change() {
     let speeds = PointerSpeeds::default();
