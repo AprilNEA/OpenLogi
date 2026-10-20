@@ -38,6 +38,7 @@ pub use diagnostics::{
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
 };
+pub(crate) use easy_switch::read_name as read_host_friendly_name;
 pub use easy_switch::{
     get_easy_switch_hosts, get_easy_switch_hosts_on, rename_easy_switch_host,
     rename_easy_switch_host_on,

@@ -2,19 +2,38 @@ use std::sync::Arc;
 
 use hidpp::channel::HidppChannel;
 
+use hidpp::feature::change_host::HostChangeRequest;
+use tokio::sync::oneshot;
+
 use super::{
-    ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, PendingHostSwitchRestore,
-    ReportingMode, event_host, host_change_required, host_channel, prepare_host_change_on,
-    restoration_change, rollback_host_switch_start, shares_channel,
+    ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionOutcome,
+    HostSwitchStop, HostTrigger, KeyboardPosition, PendingHostSwitchRestore, PreparedHostChange,
+    ReportingMode, host_change_required, host_channel, key_trigger, prepare_host_change_with,
+    queued_departure, restoration_change, rollback_host_switch_start, run_host_switch_session,
+    shares_channel, timed_hidpp,
 };
+use crate::ChannelPool;
 use crate::backend::NodeId;
 use crate::channel::scripted::{
-    ScriptedRawHidChannel, feature_error, scripted_channel as raw_scripted_channel,
+    ScriptedBackend, ScriptedRawHidChannel, feature_error, scripted_channel as raw_scripted_channel,
 };
 use crate::reprog_controls::{
     AnalyticsKeyEvent, CidReporting, ControlId, CtrlIdInfo, ReprogControlsEvent,
 };
 use crate::{ChannelRegistry, DeviceRoute, SharedChannel, device_io_channel};
+
+async fn prepare_host_change_on(
+    channel: &Arc<HidppChannel>,
+    device_index: u8,
+    host: u8,
+) -> Result<PreparedHostChange, HostSwitchError> {
+    let mut device = timed_hidpp(
+        "opening host-change device",
+        hidpp::device::Device::new(Arc::clone(channel), device_index),
+    )
+    .await?;
+    prepare_host_change_with(&mut device, device_index, host).await
+}
 
 /// Feature index the scripted keyboard reports for `0x1814 ChangeHost`.
 const CHANGE_HOST_INDEX: u8 = 0x04;
@@ -381,8 +400,83 @@ fn analytics_event_selects_the_matching_host() {
         event: 1,
     };
     assert_eq!(
-        event_host(&controls, ReprogControlsEvent::AnalyticsKeyEvents(events)),
-        Some(2)
+        key_trigger(&controls, ReprogControlsEvent::AnalyticsKeyEvents(events)),
+        Some(HostTrigger::Reported(2))
+    );
+}
+
+#[test]
+fn a_key_event_counts_only_for_the_mode_its_control_was_armed_in() {
+    let control = |mode| ArmedControl {
+        cid: 0x00d3,
+        host: 2,
+        mode,
+        original: noisy_reporting(),
+    };
+    let mut analytics = [AnalyticsKeyEvent::default(); 5];
+    analytics[0] = AnalyticsKeyEvent {
+        cid: ControlId(0x00d3),
+        event: 1,
+    };
+    let diverted = ReprogControlsEvent::DivertedButtons([
+        ControlId(0x00d3),
+        ControlId(0),
+        ControlId(0),
+        ControlId(0),
+    ]);
+    assert_eq!(
+        key_trigger(&[control(ReportingMode::Diverted)], diverted),
+        Some(HostTrigger::Pressed(2))
+    );
+    // A diverted key does not switch the keyboard, so its analytics report
+    // must not move the mice ahead of it.
+    assert_eq!(
+        key_trigger(
+            &[control(ReportingMode::Diverted)],
+            ReprogControlsEvent::AnalyticsKeyEvents(analytics)
+        ),
+        None
+    );
+    assert_eq!(
+        key_trigger(&[control(ReportingMode::Analytics)], diverted),
+        None
+    );
+}
+
+#[test]
+fn only_a_switch_away_from_this_host_is_a_departure() {
+    let position = KeyboardPosition {
+        feature_index: CHANGE_HOST_INDEX,
+        version: 2,
+        host_count: 3,
+        current_host: 1,
+        announces: true,
+    };
+    let announced =
+        |from, to| position.stop_for(HostTrigger::Announced(HostChangeRequest { from, to }));
+    assert_eq!(announced(1, 0), Some(HostSwitchStop::Departed(0)));
+    assert_eq!(announced(1, 2), Some(HostSwitchStop::Departed(2)));
+    assert_eq!(
+        announced(0, 1),
+        None,
+        "the reversed byte order would move the mice to this host"
+    );
+    assert_eq!(announced(1, 1), None, "no change");
+    assert_eq!(announced(1, 3), None, "outside the host count");
+    assert_eq!(
+        position.stop_for(HostTrigger::Reported(2)),
+        Some(HostSwitchStop::Departed(2))
+    );
+    assert_eq!(
+        position.stop_for(HostTrigger::Reported(1)),
+        None,
+        "the key of the current host does not switch"
+    );
+    assert_eq!(position.stop_for(HostTrigger::Reported(3)), None);
+    assert_eq!(
+        position.stop_for(HostTrigger::Pressed(1)),
+        Some(HostSwitchStop::Pressed(1)),
+        "a diverted press goes to the commanded transition"
     );
 }
 
@@ -439,4 +533,336 @@ fn analytics_cleanup_restores_the_original_analytics_bit() {
     assert_eq!(change.analytics_key_events, Some(true));
     assert_eq!(change.diverted, None);
     assert_eq!(change.raw_xy, None);
+}
+
+/// Receiver slot of the scripted keyboard in [`bolt_pair`].
+const KEYBOARD_SLOT: u8 = 1;
+/// Receiver slot of the scripted mouse in [`bolt_pair`].
+const MOUSE_SLOT: u8 = 2;
+/// Feature index the scripted mouse reports for `0x1814 ChangeHost`.
+const MOUSE_CHANGE_HOST_INDEX: u8 = 0x06;
+/// The keyboard's `ReprogControlsV4` index in [`bolt_pair`].
+const REPROG_INDEX: u8 = 0x07;
+
+/// The keyboard of [`bolt_pair`].
+#[derive(Clone, Copy)]
+struct PairedKeyboard {
+    /// The `ChangeHost` version that the keyboard reports.
+    change_host_version: u8,
+    /// The keyboard reports `ANNOUNCES_HOST_CHANGE`.
+    announces: bool,
+    /// The keyboard has `0x1815`, with hosts 0 and 1 paired and host 2 empty.
+    hosts_info: bool,
+    /// The keyboard has `0x1b04` with one control: the key for host 1, which
+    /// reports analytics events but cannot be diverted.
+    analytics_host_key: bool,
+}
+
+/// A Bolt receiver with a keyboard in slot 1 and a mouse in slot 2, both on
+/// host 0 of three. The mouse has neither `0x1b04` nor `0x1815`.
+fn bolt_pair(request: &[u8], keyboard: PairedKeyboard) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_id = u16::from_be_bytes([request[4], request[5]]);
+    let mut payload = [0u8; 16];
+    match (request[1], request[2], request[3] >> 4) {
+        (KEYBOARD_SLOT | MOUSE_SLOT, 0x00, 0x01) => payload[0] = 4,
+        (KEYBOARD_SLOT, 0x00, 0x00) => match feature_id {
+            0x1814 => {
+                payload[0] = CHANGE_HOST_INDEX;
+                payload[2] = keyboard.change_host_version;
+            }
+            0x1815 if keyboard.hosts_info => payload[0] = HOSTS_INFO_INDEX,
+            0x1b04 if keyboard.analytics_host_key => payload[0] = REPROG_INDEX,
+            _ => {}
+        },
+        (KEYBOARD_SLOT, CHANGE_HOST_INDEX, 0x00) | (MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 0x00) => {
+            payload[..2].copy_from_slice(&[3, 0]);
+        }
+        (KEYBOARD_SLOT, CHANGE_HOST_INDEX, 0x04) => payload[0] = u8::from(keyboard.announces),
+        (KEYBOARD_SLOT, HOSTS_INFO_INDEX, 0x00) => payload[2] = 3,
+        (KEYBOARD_SLOT, HOSTS_INFO_INDEX, 0x01) => {
+            payload[0] = request[4];
+            payload[1] = u8::from(request[4] < 2);
+        }
+        (KEYBOARD_SLOT, REPROG_INDEX, 0x00) => payload[0] = 1,
+        (KEYBOARD_SLOT, REPROG_INDEX, 0x01) => {
+            payload[..4].copy_from_slice(&[0x00, HOST_1_CID, 0x00, 0xaf]);
+            // Additional flags: analytics key events only.
+            payload[8] = 0x04;
+        }
+        (KEYBOARD_SLOT, REPROG_INDEX, 0x02) => payload[..2].copy_from_slice(&request[4..6]),
+        (KEYBOARD_SLOT, REPROG_INDEX, 0x03) => {
+            let echo = (request.len() - 4).min(payload.len());
+            payload[..echo].copy_from_slice(&request[4..4 + echo]);
+        }
+        (MOUSE_SLOT, 0x00, 0x00) if feature_id == 0x1814 => payload[0] = MOUSE_CHANGE_HOST_INDEX,
+        (MOUSE_SLOT, 0x00, 0x00) => {}
+        _ => return None,
+    }
+    // A control's information does not fit a short report.
+    if request[2] == REPROG_INDEX {
+        let mut response = vec![0u8; 20];
+        response[0] = 0x11;
+        response[1..4].copy_from_slice(&request[1..4]);
+        response[4..].copy_from_slice(&payload);
+        return Some(response);
+    }
+    let mut response = vec![0u8; 7];
+    response[0] = 0x10;
+    response[1..4].copy_from_slice(&request[1..4]);
+    response[4..].copy_from_slice(&payload[..3]);
+    Some(response)
+}
+
+/// The control ID (low byte) of the keyboard's key for host 1 in
+/// [`bolt_pair`].
+const HOST_1_CID: u8 = 0xd2;
+
+/// The keyboard's `0x1b04` analytics event for the key for host 1.
+fn analytics_report() -> Vec<u8> {
+    let mut report = vec![0u8; 20];
+    report[..7].copy_from_slice(&[
+        0x11,
+        KEYBOARD_SLOT,
+        REPROG_INDEX,
+        0x20,
+        0x00,
+        HOST_1_CID,
+        0x01,
+    ]);
+    report
+}
+
+fn bolt_route(slot: u8) -> DeviceRoute {
+    DeviceRoute::Bolt {
+        receiver_uid: "cafe".to_owned(),
+        slot,
+    }
+}
+
+/// The keyboard's `ChangeHost` event 0: it leaves `from` for `to`.
+fn announcement(from: u8, to: u8) -> Vec<u8> {
+    vec![0x10, KEYBOARD_SLOT, CHANGE_HOST_INDEX, 0x00, from, to, 0]
+}
+
+fn is_request(report: &[u8], slot: u8, feature_index: u8, function: u8) -> bool {
+    report[1] == slot && report[2] == feature_index && report[3] >> 4 == function
+}
+
+/// Run a session for the keyboard of [`bolt_pair`] with the mouse linked,
+/// send `announcement` once the session listens, and return the outcome
+/// and every report written.
+async fn announce_to_session(
+    keyboard: PairedKeyboard,
+    announcement: Vec<u8>,
+) -> (
+    Result<HostSwitchSessionOutcome, super::HostSwitchSessionFailure>,
+    Vec<Vec<u8>>,
+) {
+    // The capability read comes after the listener is installed.
+    trigger_session(keyboard, (CHANGE_HOST_INDEX, 4), announcement).await
+}
+
+/// Run a session for the keyboard of [`bolt_pair`] with the mouse linked.
+/// Send `report` from the keyboard once the session has written function
+/// `ready.1` of feature index `ready.0` to it, and return the outcome and
+/// every report written.
+async fn trigger_session(
+    keyboard: PairedKeyboard,
+    ready: (u8, u8),
+    report: Vec<u8>,
+) -> (
+    Result<HostSwitchSessionOutcome, super::HostSwitchSessionFailure>,
+    Vec<Vec<u8>>,
+) {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(move |request| bolt_pair(request, keyboard));
+    let incoming = raw.incoming_sender();
+    let registry = ChannelRegistry::default();
+    registry.replace_node(
+        NodeId::from("bolt-receiver".to_owned()),
+        [bolt_route(KEYBOARD_SLOT), bolt_route(MOUSE_SLOT)],
+        raw_scripted_channel(raw).await,
+    );
+    let (_stop, stopped) = oneshot::channel();
+    let (_signal, gate) = device_io_channel();
+    let session = tokio::spawn(async move {
+        let pool = ChannelPool::with_backend(ScriptedBackend::new(Vec::new()));
+        run_host_switch_session(
+            bolt_route(KEYBOARD_SLOT),
+            &[bolt_route(MOUSE_SLOT)],
+            stopped,
+            &registry,
+            &pool,
+            gate,
+        )
+        .await
+    });
+    let (ready_index, ready_function) = ready;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !handle
+            .written_reports()
+            .iter()
+            .any(|written| is_request(written, KEYBOARD_SLOT, ready_index, ready_function))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the session reaches the ready request");
+    incoming.send(report).expect("the channel is open");
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), session)
+        .await
+        .expect("the report ends the session")
+        .expect("the session task does not panic");
+    (outcome, handle.written_reports())
+}
+
+#[tokio::test]
+async fn an_announced_switch_moves_the_mouse_and_leaves_the_keyboard_alone() {
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: true,
+        hosts_info: false,
+        analytics_host_key: false,
+    };
+    let (outcome, writes) = announce_to_session(keyboard, announcement(0, 1)).await;
+
+    assert!(
+        matches!(
+            outcome,
+            Ok(HostSwitchSessionOutcome::Departed { restore: None })
+        ),
+        "an announcing keyboard has no host keys to restore"
+    );
+    let mouse_moves: Vec<_> = writes
+        .iter()
+        .filter(|report| is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1))
+        .collect();
+    assert_eq!(mouse_moves.len(), 1, "the mouse follows once");
+    assert_eq!(mouse_moves[0][4], 1, "to the keyboard's new host");
+    assert!(
+        !writes
+            .iter()
+            .any(|report| is_request(report, KEYBOARD_SLOT, CHANGE_HOST_INDEX, 1)),
+        "the keyboard moves by itself"
+    );
+    assert!(
+        writes
+            .iter()
+            .filter(|report| report[1] == KEYBOARD_SLOT)
+            .all(|report| matches!(report[2], 0x00 | CHANGE_HOST_INDEX)),
+        "the keyboard's host keys keep their reporting"
+    );
+}
+
+#[tokio::test]
+async fn a_switch_to_an_empty_keyboard_slot_leaves_the_mouse() {
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: true,
+        hosts_info: true,
+        analytics_host_key: false,
+    };
+    let (outcome, writes) = announce_to_session(keyboard, announcement(0, 2)).await;
+
+    assert!(matches!(
+        outcome,
+        Ok(HostSwitchSessionOutcome::Departed { restore: None })
+    ));
+    assert!(
+        !writes
+            .iter()
+            .any(|report| is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1)),
+        "slot 2 of the mouse belongs to another computer"
+    );
+}
+
+#[tokio::test]
+async fn a_keyboard_without_the_capability_or_host_keys_is_still_heard() {
+    // A K880 has no host keys that report to software, but announces a
+    // switch before it leaves (#1145).
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: false,
+        hosts_info: false,
+        analytics_host_key: false,
+    };
+    let (outcome, writes) = announce_to_session(keyboard, announcement(0, 1)).await;
+
+    assert!(matches!(
+        outcome,
+        Ok(HostSwitchSessionOutcome::Departed { restore: None })
+    ));
+    assert!(
+        writes
+            .iter()
+            .any(|report| is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1)),
+        "the mouse follows the announcement"
+    );
+}
+
+#[tokio::test]
+async fn an_analytics_report_moves_the_mouse_without_writing_to_the_keyboard() {
+    // The keyboard reports the key and leaves at once. A request to it after
+    // the report waits for a keyboard that is gone (#1623).
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: false,
+        hosts_info: false,
+        analytics_host_key: true,
+    };
+    let (outcome, writes) = trigger_session(keyboard, (REPROG_INDEX, 3), analytics_report()).await;
+
+    assert!(
+        matches!(
+            outcome,
+            Ok(HostSwitchSessionOutcome::Departed { restore: Some(_) })
+        ),
+        "the analytics bit is restored after the keyboard is back"
+    );
+    let armed_at = writes
+        .iter()
+        .position(|report| is_request(report, KEYBOARD_SLOT, REPROG_INDEX, 3))
+        .expect("the session enables analytics reporting");
+    let after_report = &writes[armed_at + 1..];
+    assert!(
+        after_report.iter().all(|report| report[1] != KEYBOARD_SLOT),
+        "no request goes to the keyboard after it reports the key"
+    );
+    assert!(
+        after_report.iter().any(|report| {
+            is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1) && report[4] == 1
+        }),
+        "the mouse follows to host 1"
+    );
+}
+
+#[test]
+fn a_departure_queued_before_the_channel_changed_still_moves_the_linked_devices() {
+    let position = KeyboardPosition {
+        feature_index: 3,
+        version: 2,
+        host_count: 3,
+        current_host: 0,
+        announces: false,
+    };
+    let (triggers_tx, mut triggers) = tokio::sync::mpsc::unbounded_channel();
+    triggers_tx.send(HostTrigger::Pressed(2)).unwrap();
+    triggers_tx.send(HostTrigger::Reported(0)).unwrap();
+    triggers_tx.send(HostTrigger::Reported(1)).unwrap();
+    assert_eq!(
+        queued_departure(&mut triggers, position),
+        Some(HostSwitchStop::Departed(1)),
+        "a press and a report for this host are skipped"
+    );
+
+    triggers_tx.send(HostTrigger::Pressed(1)).unwrap();
+    assert_eq!(
+        queued_departure(&mut triggers, position),
+        None,
+        "a press needs the keyboard's channel"
+    );
 }

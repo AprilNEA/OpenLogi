@@ -91,7 +91,7 @@ fn decode_name(bytes: &[u8]) -> Option<String> {
 ///
 /// A reply that names another slot or offset, such as a late answer to an
 /// earlier request, fails the read instead of joining this name.
-async fn read_name(
+pub(crate) async fn read_name(
     feature: &HostsInfoFeature,
     slot: u8,
     name_len: u8,
