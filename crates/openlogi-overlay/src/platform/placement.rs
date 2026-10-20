@@ -10,7 +10,7 @@ use crate::ring::{Placement, WINDOW_SIZE, clamp_window_origin, ring_window_optio
 
 /// Captured placement for one invocation, before its windows are opened.
 pub(crate) struct RingPlacement {
-    windows: Vec<(WindowOptions, Placement)>,
+    alternatives: Vec<Vec<(WindowOptions, Placement)>>,
 }
 
 impl RingPlacement {
@@ -22,28 +22,41 @@ impl RingPlacement {
         if on_wayland() {
             let displays = cx.displays();
             if !displays.is_empty() {
+                // A layer surface names its display. An ordinary window goes
+                // where the compositor puts it, and GNOME, which has no layer
+                // shell, stacks every display's window on one (#1901).
+                let layer_shell = displays
+                    .iter()
+                    .filter_map(|display| layer_shell_ring(display.as_ref()))
+                    .map(|options| (options, Placement::AtPointer))
+                    .collect();
+                let covering = displays
+                    .iter()
+                    .map(|display| {
+                        (
+                            covering_window_options(display.as_ref()),
+                            Placement::AtPointer,
+                        )
+                    })
+                    .collect();
                 return Ok(Self {
-                    windows: displays
-                        .iter()
-                        .map(|display| {
-                            (
-                                covering_window_options(display.as_ref()),
-                                Placement::AtPointer { center: None },
-                            )
-                        })
+                    alternatives: [layer_shell, covering]
+                        .into_iter()
+                        .filter(|windows: &Vec<_>| !windows.is_empty())
                         .collect(),
                 });
             }
             warn!("no displays reported; falling back to a positioned Actions Ring window");
         }
         Ok(Self {
-            windows: vec![positioned_window(cx)],
+            alternatives: vec![vec![positioned_window(cx)]],
         })
     }
 
-    /// Window options for this invocation, paired with how each view places its panel.
-    pub(crate) fn openings(&mut self) -> Vec<(WindowOptions, Placement)> {
-        std::mem::take(&mut self.windows)
+    /// Sets of windows to try in order, each window's options paired with how
+    /// its view places the panel. The first set that opens a window is the ring.
+    pub(crate) fn openings(&mut self) -> Vec<Vec<(WindowOptions, Placement)>> {
+        std::mem::take(&mut self.alternatives)
     }
 
     #[expect(
@@ -199,15 +212,14 @@ fn wayland_notice_windows(size: Size<Pixels>) -> Vec<WindowOptions> {
 }
 
 /// The notice as a layer-shell surface on the bottom edge, above other
-/// windows and never taking the keyboard.
+/// windows and never taking the keyboard, unless the compositor refused one.
 #[cfg(target_os = "linux")]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the other targets have no layer shell to offer"
-)]
 fn layer_shell_notice(bounds: Option<WindowBounds>) -> Option<WindowOptions> {
     use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 
+    if super::layer_shell_refused() {
+        return None;
+    }
     Some(WindowOptions {
         kind: gpui::WindowKind::LayerShell(LayerShellOptions {
             namespace: crate::notice::NOTICE_APP_ID.to_string(),
@@ -224,6 +236,42 @@ fn layer_shell_notice(bounds: Option<WindowBounds>) -> Option<WindowOptions> {
 
 #[cfg(not(target_os = "linux"))]
 const fn layer_shell_notice(_bounds: Option<WindowBounds>) -> Option<WindowOptions> {
+    None
+}
+
+/// The ring's window on `display` as a layer-shell surface over the whole
+/// display, above every window and never taking the keyboard, unless the
+/// compositor refused one.
+///
+/// Anchored to all four edges with no size of its own, the surface takes
+/// whatever size the compositor gives that display. Display bounds would not
+/// do: GPUI derives them from an integer scale, which is wrong under
+/// fractional scaling.
+#[cfg(target_os = "linux")]
+fn layer_shell_ring(display: &dyn PlatformDisplay) -> Option<WindowOptions> {
+    use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
+
+    if super::layer_shell_refused() {
+        return None;
+    }
+    Some(WindowOptions {
+        kind: gpui::WindowKind::LayerShell(LayerShellOptions {
+            namespace: crate::ring::RING_APP_ID.to_string(),
+            layer: Layer::Overlay,
+            anchor: Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
+            // Cover the panels too, rather than the area they leave free.
+            exclusive_zone: Some(px(-1.0)),
+            keyboard_interactivity: KeyboardInteractivity::None,
+            ..LayerShellOptions::default()
+        }),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::default())),
+        display_id: Some(display.id()),
+        ..ring_window_options()
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn layer_shell_ring(_display: &dyn PlatformDisplay) -> Option<WindowOptions> {
     None
 }
 

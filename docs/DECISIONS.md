@@ -4,6 +4,37 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: On Wayland, the ring opens a layer-shell surface on each display
+
+A Wayland client cannot read the global cursor position or place its own
+windows. Since #1004 the overlay has opened one ring window per display, and
+each window draws the ring where the pointer enters it. On GNOME 50 with two
+monitors, both rings appeared on one monitor (#1901). An ordinary window
+cannot name its output, Mutter put both windows on one display, and each
+window that heard the pointer drew a ring of its own.
+
+- **Layer-shell surfaces first.** A `wlr-layer-shell` surface names its
+  output. Each display gets one on the overlay layer, anchored to all four
+  edges and without keyboard focus. The surface has no size of its own, so
+  the compositor sizes it to the display. GPUI derives display bounds from an
+  integer scale, which is wrong under fractional scaling, so the overlay does
+  not use them here.
+- **Ordinary windows as the fallback.** GNOME does not offer
+  `wlr-layer-shell`, so there the overlay opens the maximized windows it
+  opened before. The overlay remembers the first refusal for the life of the
+  process, for rings and notices alike. GPUI binds the compositor's globals
+  once, and each refused request leaves behind the `wl_surface` GPUI created
+  for it.
+- **One window draws the ring.** The windows of one ring share one record of
+  which window heard the pointer last, and only that window draws the ring.
+  When the windows are stacked on one display, the last to hear the pointer
+  is the one on top, the only one a click can reach. A window that loses the
+  ring also drops its hovered slot.
+
+Verified with unit tests and a GPUI test that opens two ring windows for one
+ring. Nobody has run the Wayland paths on screen yet. CI builds and tests
+them on Linux.
+
 ## 2026-10: The lock-key indicator follows Logi Options+ 2.8, without Fn Lock
 
 Logi Options+ 2.8 shows lock-key changes in its own on-screen indicator. Its

@@ -23,9 +23,10 @@ pub(crate) struct RingPlacement {
 }
 
 impl RingPlacement {
-    /// Window options for this invocation, paired with how the view places its panel.
-    pub(crate) fn openings(&self) -> Vec<(WindowOptions, Placement)> {
-        vec![(self.window_options(), Placement::Window)]
+    /// The one set of windows to try: the window at the cursor, paired with
+    /// how its view places the panel.
+    pub(crate) fn openings(&self) -> Vec<Vec<(WindowOptions, Placement)>> {
+        vec![vec![(self.window_options(), Placement::Window)]]
     }
 
     pub(crate) fn window_options(&self) -> WindowOptions {
@@ -162,11 +163,9 @@ mod tests {
     /// The single positioned window this placement opens.
     #[track_caller]
     fn opened(placement: &RingPlacement) -> WindowOptions {
-        let (options, panel) = placement
-            .openings()
-            .into_iter()
-            .next()
-            .expect("a Windows ring opens one window");
+        let mut windows = placement.openings().into_iter().flatten();
+        let (options, panel) = windows.next().expect("a Windows ring opens a window");
+        assert!(windows.next().is_none(), "a Windows ring opens one window");
         assert_eq!(panel, Placement::Window);
         options
     }

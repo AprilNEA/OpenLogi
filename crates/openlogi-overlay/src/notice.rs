@@ -211,30 +211,30 @@ pub(crate) fn present(cx: &mut gpui::App, shelf: &Rc<RefCell<NoticeShelf>>, card
     };
     // Wayland offers a fallback for compositors without layer-shell: the
     // first window that opens is the notice.
-    for options in placement.openings() {
+    let alternatives = placement
+        .openings()
+        .into_iter()
+        .map(|options| vec![options]);
+    let opened = crate::platform::open_first(alternatives.collect(), |options| {
         let view = NoticeView {
             cards: cards.to_vec(),
             shelf: Rc::clone(shelf),
         };
-        let handle = match cx.open_window(options, |_, cx| cx.new(|_| view)) {
-            Ok(handle) => handle,
-            Err(error) => {
-                warn!(%error, "could not open the notice window");
-                continue;
-            }
-        };
-        let placed = handle
-            .update(cx, |_, window, cx| {
-                // As for the ring: native placement resizes the window inside
-                // this update, so resync GPUI's viewport and scale.
-                placement.show(window).map(|()| window.bounds_changed(cx))
-            })
-            .and_then(std::convert::identity);
-        if let Err(error) = placed {
-            warn!(%error, "could not position the notice window");
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
-        }
+        cx.open_window(options, |_, cx| cx.new(|_| view))
+    });
+    let Some(handle) = opened else {
         return;
+    };
+    let placed = handle
+        .update(cx, |_, window, cx| {
+            // As for the ring: native placement resizes the window inside
+            // this update, so resync GPUI's viewport and scale.
+            placement.show(window).map(|()| window.bounds_changed(cx))
+        })
+        .and_then(std::convert::identity);
+    if let Err(error) = placed {
+        warn!(%error, "could not position the notice window");
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
 }
 

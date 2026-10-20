@@ -38,7 +38,7 @@ use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::notice::NoticeShelf;
 use crate::platform::RingPlacement;
-use crate::ring::RingView;
+use crate::ring::{RingPointer, RingView};
 use crate::session::{
     ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
     spawn_click_away_dismissal,
@@ -128,23 +128,27 @@ fn main() -> Result<()> {
                     let commands = commands.clone();
                     let timeout_commands = commands.clone();
                     let session_id = invocation.session_id;
-                    // Wayland opens one window per display. One that fails to
-                    // open must not sink the others.
-                    let mut primary = None;
-                    for (options, panel) in placement.openings() {
+                    // Wayland opens one window per display; they share where
+                    // the pointer was heard, so only one of them draws the ring.
+                    let pointer = cx.new(|_| RingPointer::default());
+                    let primary = platform::open_first(placement.openings(), |(options, panel)| {
                         let invocation = invocation.clone();
                         let commands = commands.clone();
-                        match cx.open_window(options, |_, cx| {
-                            cx.new(|_| RingView::new(invocation, commands, &live_session, panel))
-                        }) {
-                            Ok(handle) => {
-                                if primary.is_none() {
-                                    primary = Some(handle);
-                                }
-                            }
-                            Err(error) => warn!(%error, "could not open Actions Ring window"),
-                        }
-                    }
+                        let pointer = pointer.clone();
+                        cx.open_window(options, |window, cx| {
+                            cx.new(|cx| {
+                                RingView::new(
+                                    invocation,
+                                    commands,
+                                    &live_session,
+                                    panel,
+                                    pointer,
+                                    window,
+                                    cx,
+                                )
+                            })
+                        })
+                    });
                     let Some(primary) = primary else {
                         return;
                     };
