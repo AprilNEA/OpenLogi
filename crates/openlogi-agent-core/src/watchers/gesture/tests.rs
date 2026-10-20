@@ -487,6 +487,111 @@ fn same_route_rearm_shuts_down_instead_of_handing_off() {
     );
 }
 
+fn live_session_following_specs(
+    plan: &DeviceCapturePlan,
+) -> (
+    RunningSession,
+    oneshot::Receiver<CaptureSessionStop>,
+    watch::Receiver<CaptureSpec>,
+) {
+    let (stop, stopped) = oneshot::channel();
+    let (spec_updates, specs) = watch::channel(plan.target.spec.clone());
+    let session = CaptureSession::active(
+        session_id(7),
+        plan.target.clone(),
+        plan.dispatch.clone(),
+        stop,
+    )
+    .with_retarget(retarget_spec_in_place(spec_updates));
+    (session, stopped, specs)
+}
+
+#[test]
+fn every_spec_change_reloads_the_live_session_with_the_complete_spec() {
+    let changed_specs = [
+        CaptureSpec {
+            divert_buttons: vec![(0x0053, ButtonId::Back)],
+            ..CaptureSpec::default()
+        },
+        CaptureSpec {
+            divert_gesture_sources: vec![0x00c3],
+            ..CaptureSpec::default()
+        },
+        CaptureSpec {
+            capture_thumbwheel: true,
+            ..CaptureSpec::default()
+        },
+    ];
+    for wanted in changed_specs {
+        let old_plan = plan();
+        assert_ne!(old_plan.target.spec, wanted);
+        let (mut session, mut stopped, mut specs) = live_session_following_specs(&old_plan);
+        let mut new_plan = old_plan.clone();
+        new_plan.target.spec = wanted.clone();
+
+        assert_eq!(
+            session.reconcile_with(
+                Some((&new_plan.target, &new_plan.dispatch)),
+                stop_for_target_change,
+            ),
+            ReconcileAction::DispatchChanged,
+            "the manager must forget input tracked under the old spec"
+        );
+        assert!(
+            session.is_active() && stopped.try_recv().is_err(),
+            "a capture-spec change must not stop the capture session"
+        );
+        assert_eq!(session.target(), &new_plan.target);
+        assert!(specs.has_changed().unwrap_or(false));
+        assert_eq!(*specs.borrow_and_update(), wanted);
+    }
+}
+
+#[test]
+fn route_or_rearm_change_retires_a_session_that_follows_specs() {
+    let old_plan = plan();
+    let mut moved = old_plan.clone();
+    moved.target.route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb023,
+    };
+    let mut rearmed = old_plan.clone();
+    rearmed.target.rearm_generation += 1;
+    for mut new_plan in [moved, rearmed] {
+        new_plan.target.spec.capture_thumbwheel = !old_plan.target.spec.capture_thumbwheel;
+        let (mut session, _stopped, specs) = live_session_following_specs(&old_plan);
+
+        assert_eq!(
+            session.reconcile_with(
+                Some((&new_plan.target, &new_plan.dispatch)),
+                stop_for_target_change,
+            ),
+            ReconcileAction::Retiring
+        );
+        assert!(
+            !specs.has_changed().unwrap_or(true),
+            "a retiring session must not be reloaded as well"
+        );
+    }
+}
+
+#[test]
+fn spec_change_retires_a_session_whose_task_already_ended() {
+    let old_plan = plan();
+    let (mut session, _stopped, specs) = live_session_following_specs(&old_plan);
+    drop(specs);
+    let mut new_plan = old_plan.clone();
+    new_plan.target.spec.capture_thumbwheel = !old_plan.target.spec.capture_thumbwheel;
+
+    assert_eq!(
+        session.reconcile_with(
+            Some((&new_plan.target, &new_plan.dispatch)),
+            stop_for_target_change,
+        ),
+        ReconcileAction::Retiring
+    );
+}
+
 #[test]
 fn config_key_adoption_hot_refreshes_the_same_physical_capture_slot() {
     let old_plan = plan();

@@ -128,6 +128,18 @@ impl ArmedReporting {
         }
     }
 
+    /// Compute the `setCidReporting` change that moves this control from the
+    /// way `previous` diverted it to the way it is armed now.
+    pub(crate) fn rediverted_from(self, previous: Self) -> reprog_controls::CidReportingChange {
+        let mut change = self.divert_change();
+        if previous.policy == ReprogRestorePolicy::Pointer(PointerDivert::RawWheel)
+            && change.raw_wheel.is_none()
+        {
+            change.raw_wheel = Some(false);
+        }
+        change
+    }
+
     /// Compute the `setCidReporting` change that restores this control.
     pub(crate) fn undivert_change(self) -> reprog_controls::CidReportingChange {
         match self.policy {
@@ -302,6 +314,23 @@ impl PendingCaptureRestore {
             },
         ))
     }
+}
+
+/// Hand back, on a live session's own channel, the firmware state a
+/// reconfiguration no longer diverts. Returns whether every write succeeded.
+pub(crate) async fn restore_now(
+    current: &SharedChannel,
+    reprog: Option<ReprogRestore>,
+    thumb: Option<ThumbwheelRestore>,
+    main_wheel: Option<HiResWheelRestore>,
+) -> bool {
+    CaptureRestorePlan {
+        reprog,
+        thumb,
+        main_wheel,
+    }
+    .restore_on(current)
+    .await
 }
 
 /// Release firmware ownership after an active session stops.

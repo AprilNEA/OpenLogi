@@ -137,7 +137,7 @@ async fn armed_thumbwheel_capture() -> GestureCapture {
     arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
         .await
         .unwrap();
-    GestureCapture::new(armed)
+    gesture_capture(armed)
 }
 
 /// A `thumbwheelEvent` from the wheel [`armed_thumbwheel_capture`] arms, with
