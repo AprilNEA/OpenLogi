@@ -5,10 +5,10 @@ use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyW, SendInput,
 };
 
 use openlogi_core::binding::{
@@ -29,7 +29,9 @@ const VK_L: u16 = 0x4C;
 const VK_S: u16 = 0x53;
 const VK_TAB: u16 = 0x09;
 const VK_LEFT: u16 = 0x25;
+const VK_UP: u16 = 0x26;
 const VK_RIGHT: u16 = 0x27;
+const VK_DOWN: u16 = 0x28;
 const VK_SHIFT: u16 = 0x10;
 const VK_CONTROL: u16 = 0x11;
 const VK_MENU: u16 = 0x12;
@@ -43,6 +45,22 @@ const VK_VOLUME_UP: u16 = 0xAF;
 const VK_MEDIA_NEXT_TRACK: u16 = 0xB0;
 const VK_MEDIA_PREV_TRACK: u16 = 0xB1;
 const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
+
+// The extended virtual keys, from WinUser.h. windows-sys keeps these
+// behind the same feature gate as the ones above, and the file only
+// needs the numeric values.
+const VK_PRIOR: u16 = 0x21;
+const VK_NEXT: u16 = 0x22;
+const VK_END: u16 = 0x23;
+const VK_HOME: u16 = 0x24;
+const VK_INSERT: u16 = 0x2D;
+const VK_DELETE: u16 = 0x2E;
+const VK_DIVIDE: u16 = 0x6F;
+const VK_NUMLOCK: u16 = 0x90;
+const VK_APPS: u16 = 0x5D;
+const VK_RCONTROL: u16 = 0xA3;
+const VK_RMENU: u16 = 0xA5;
+const VK_RWIN: u16 = 0x5C;
 
 // XBUTTON1/XBUTTON2 from WinUser.h — windows-sys puts them behind the
 // Win32_UI_WindowsAndMessaging feature; not worth enabling for two
@@ -323,17 +341,74 @@ fn send_inputs(inputs: &[INPUT]) {
     }
 }
 
+/// Virtual keys that live on the *extended* part of the keyboard, i.e.
+/// the keys the numeric keypad shares a physical position with.
+///
+/// Without `KEYEVENTF_EXTENDEDKEY` (and the matching scan code), an
+/// injected `VK_RIGHT` is delivered as the numeric-keypad `Num 6`, and
+/// Windows applies the classic "Shift temporarily cancels Num Lock"
+/// behaviour: with Num Lock on, `Shift+Right` arrives as plain `Right`
+/// and the Shift modifier is lost. Physical keyboards mark these keys
+/// with the extended bit, so injection has to do the same.
+const EXTENDED_KEYS: &[u16] = &[
+    VK_LEFT,
+    VK_UP,
+    VK_RIGHT,
+    VK_DOWN,
+    VK_HOME,
+    VK_END,
+    VK_PRIOR,
+    VK_NEXT,
+    VK_INSERT,
+    VK_DELETE,
+    VK_DIVIDE,
+    VK_NUMLOCK,
+    VK_SNAPSHOT,
+    VK_APPS,
+    VK_RCONTROL,
+    VK_RMENU,
+    VK_RWIN,
+];
+
+/// Whether `vk` needs the extended-key flag and a scan code.
+fn is_extended_key(vk: u16) -> bool {
+    EXTENDED_KEYS.contains(&vk)
+}
+
+/// The scan code Windows expects for `vk`, or 0 when it has none.
+///
+/// `MapVirtualKeyW` is the documented way to translate a virtual key
+/// into a scan code; it returns 0 for keys that have no scan code of
+/// their own (for example `VK_INSERT` and `VK_RCONTROL`), in which case
+/// the virtual key alone still identifies the key and the extended flag
+/// is enough to keep it off the numeric keypad.
+fn scan_code(vk: u16) -> u16 {
+    // SAFETY: `MapVirtualKeyW` is a pure lookup with no preconditions.
+    let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) };
+    u16::try_from(scan).unwrap_or(0)
+}
+
 fn key_input(vk: u16, key_up: bool) -> INPUT {
     let mut flags = 0;
     if key_up {
         flags |= KEYEVENTF_KEYUP;
     }
+    // Extended keys need the extended flag, and a scan code that says
+    // so. `wVk` stays set as well: Windows uses `wVk` when `wScan` is
+    // 0, and the pair is unambiguous for the keys that have a scan
+    // code of their own.
+    let scan = if is_extended_key(vk) {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+        scan_code(vk)
+    } else {
+        0
+    };
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: vk,
-                wScan: 0,
+                wScan: scan,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
@@ -362,7 +437,10 @@ fn mouse_input(flags: u32, data: i32) -> INPUT {
 mod tests {
     use openlogi_core::binding::Shortcut;
 
-    use super::{VK_BROWSER_BACK, VK_BROWSER_FORWARD, combo};
+    use super::{
+        EXTENDED_KEYS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VK_BROWSER_BACK, VK_BROWSER_FORWARD,
+        VK_DELETE, VK_DOWN, VK_HOME, VK_LEFT, VK_RIGHT, VK_UP, combo, is_extended_key, key_input,
+    };
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
     /// edit to the table can't silently change what Ctrl+C sends.
@@ -411,5 +489,81 @@ mod tests {
                 "{shortcut:?} table entry has no Windows virtual-key mapping"
             );
         }
+    }
+
+    /// The keys Windows delivers from the numeric keypad instead of the
+    /// navigation cluster must carry the extended flag, or `Shift+Right`
+    /// loses its Shift whenever Num Lock is on (#1895).
+    #[test]
+    fn navigation_keys_are_flagged_extended() {
+        for vk in [VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_HOME, VK_DELETE] {
+            assert!(
+                is_extended_key(vk),
+                "virtual key {vk:#x} must be treated as an extended key"
+            );
+        }
+    }
+
+    /// A plain key must not be flagged: marking `A` extended would make
+    /// Windows read it as a keypad key.
+    #[test]
+    fn plain_keys_are_not_extended() {
+        assert!(!is_extended_key(u16::from(b'B')));
+        assert!(!is_extended_key(super::VK_SHIFT));
+    }
+
+    /// The extended flag has to be set on both edges of the key press,
+    /// and the key-up edge has to carry the key-up flag as well.
+    #[test]
+    fn key_input_sets_extended_flag_and_scan_code() {
+        // SAFETY: `key_input` fully initialises the `INPUT` it returns,
+        // so reading the `ki` arm of the union is well-defined.
+        let (down_ki, up_ki) = unsafe {
+            let down = key_input(VK_RIGHT, false);
+            let up = key_input(VK_RIGHT, true);
+            (down.Anonymous.ki, up.Anonymous.ki)
+        };
+        assert_eq!(down_ki.wVk, VK_RIGHT);
+        assert_ne!(
+            down_ki.dwFlags & KEYEVENTF_EXTENDEDKEY,
+            0,
+            "extended key press must set KEYEVENTF_EXTENDEDKEY"
+        );
+        assert_eq!(down_ki.dwFlags & KEYEVENTF_KEYUP, 0);
+        assert_ne!(
+            down_ki.wScan, 0,
+            "an extended key with a scan code must carry it"
+        );
+
+        assert_ne!(
+            up_ki.dwFlags & KEYEVENTF_EXTENDEDKEY,
+            0,
+            "extended key release must set KEYEVENTF_EXTENDEDKEY"
+        );
+        assert_ne!(up_ki.dwFlags & KEYEVENTF_KEYUP, 0);
+        assert_eq!(up_ki.wScan, down_ki.wScan);
+    }
+
+    /// A key with no scan code of its own still needs the extended
+    /// flag, and must not carry a stale scan code.
+    #[test]
+    fn key_input_leaves_plain_keys_alone() {
+        // SAFETY: `key_input` fully initialises the `INPUT` it returns.
+        let ki = unsafe { key_input(u16::from(b'B'), false).Anonymous.ki };
+        assert_eq!(ki.wVk, u16::from(b'B'));
+        assert_eq!(ki.wScan, 0);
+        assert_eq!(ki.dwFlags & KEYEVENTF_EXTENDEDKEY, 0);
+    }
+
+    /// The extended-key list must not contain duplicates: a duplicate
+    /// would only mean a slower lookup, but a stale entry left behind
+    /// after a rename would silently mis-flag a key.
+    #[test]
+    fn extended_key_list_has_no_duplicates() {
+        let mut sorted = EXTENDED_KEYS.to_vec();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(sorted.len(), before, "EXTENDED_KEYS contains a duplicate");
     }
 }
