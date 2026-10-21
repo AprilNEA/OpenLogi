@@ -1012,8 +1012,13 @@ impl DeviceReads {
         if let Some(read) = self.dpi.get_mut(key) {
             read.query.revalidate();
         }
-        if let Some(read) = self.smartshift.get_mut(key) {
-            read.query.revalidate();
+        if self.smartshift.contains_key(key)
+            && let Some(client) = &self.client
+        {
+            // A SmartShift read already in flight may predate the change, so
+            // it is discarded rather than joined. The shown mode stays until
+            // the new read answers.
+            client.invalidate(query_key(SMARTSHIFT, key));
         }
         self.refresh_fn_lock(key);
         if let Some(read) = self.report_rate.get_mut(key) {

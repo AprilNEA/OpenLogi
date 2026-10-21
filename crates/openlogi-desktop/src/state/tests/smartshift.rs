@@ -73,21 +73,32 @@ fn status(mode: SmartShiftMode) -> SmartShiftStatus {
     }
 }
 
+/// The SmartShift reads the state has queued. Every other read is dropped.
+fn smartshift_reads(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+) -> Vec<ReadSmartShift> {
+    drain(receiver)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::ReadSmartShift(read) => Some(read),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Answer the SmartShift read the state has queued, returning the route it
 /// was asked on. Every other read is left unanswered.
 fn answer_smartshift_read(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     status: SmartShiftStatus,
 ) -> DeviceRoute {
-    let mut answered = None;
-    for command in drain(receiver) {
-        if let Command::ReadSmartShift(ReadSmartShift { route, reply }) = command {
-            assert!(answered.is_none(), "one SmartShift read at a time");
-            let _ = reply.send(Ok(status));
-            answered = Some(route);
-        }
-    }
-    answered.expect("the state asked the mouse for its SmartShift mode")
+    let mut reads = smartshift_reads(receiver);
+    assert!(reads.len() <= 1, "one SmartShift read at a time");
+    let ReadSmartShift { route, reply } = reads
+        .pop()
+        .expect("the state asked the mouse for its SmartShift mode");
+    let _ = reply.send(Ok(status));
+    route
 }
 
 /// Install `state` with live swr-backed reads, as the app does, and have it
@@ -146,6 +157,43 @@ fn a_mode_change_the_mouse_reports_re_reads_smartshift(cx: &mut gpui::TestAppCon
 
     let freespin = status(SmartShiftMode::Free);
     assert_eq!(answer_smartshift_read(&mut receiver, freespin), route);
+    cx.run_until_parked();
+    assert_eq!(smartshift_load(cx, &key), Load::Ready(Arc::new(freespin)));
+}
+
+/// The mouse can change its mode while a SmartShift read is still out. That
+/// read may carry the old mode, so the change starts a new read instead of
+/// waiting for it, and a late answer to the old read does not win.
+#[gpui::test]
+fn a_mode_change_during_a_read_starts_a_new_read(cx: &mut gpui::TestAppContext) {
+    let unit_id = [0xa3, 0x93, 0xca, 0xe0];
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories: &[direct_inventory(unit_id)],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+    let key = state.current_record().expect("mouse").device_key();
+    install(state, cx);
+    let [first_read] = <[ReadSmartShift; 1]>::try_from(smartshift_reads(&mut receiver))
+        .unwrap_or_else(|_| panic!("the state asked the mouse once"));
+
+    cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            let mut switched = direct_inventory(unit_id);
+            switched.paired[0].settings_revision = 1;
+            let _ = state.refresh_inventories(&[switched], &[], &resolver, &[]);
+        });
+    });
+    cx.run_until_parked();
+
+    let freespin = status(SmartShiftMode::Free);
+    assert_eq!(
+        answer_smartshift_read(&mut receiver, freespin),
+        first_read.route
+    );
+    cx.run_until_parked();
+    let _ = first_read.reply.send(Ok(status(SmartShiftMode::Ratchet)));
     cx.run_until_parked();
     assert_eq!(smartshift_load(cx, &key), Load::Ready(Arc::new(freespin)));
 }
