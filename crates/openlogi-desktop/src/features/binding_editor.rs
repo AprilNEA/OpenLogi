@@ -133,14 +133,28 @@ pub(crate) fn action_rows_matching(
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
-    action_rows_with(id_prefix, current, query, &[], on_pick, pal)
+    action_rows_with(
+        id_prefix,
+        current,
+        query,
+        ActionOffer::default(),
+        on_pick,
+        pal,
+    )
+}
+
+/// What a picker offers beyond the catalog, and what of it it leaves out.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ActionOffer<'a> {
+    pub extra: &'a [Action],
+    pub hidden: &'a [Action],
 }
 
 pub(crate) fn action_rows_with(
     id_prefix: &'static str,
     current: Option<&Action>,
     query: &str,
-    extra: &[Action],
+    offer: ActionOffer<'_>,
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
@@ -148,7 +162,14 @@ pub(crate) fn action_rows_with(
     let mut catalog_index = 0usize;
     let mut sections = Vec::new();
     for (category, mut actions) in grouped_catalog() {
-        actions.extend(extra.iter().filter(|a| a.category() == category).cloned());
+        actions.extend(
+            offer
+                .extra
+                .iter()
+                .filter(|a| a.category() == category)
+                .cloned(),
+        );
+        actions.retain(|action| !offer.hidden.contains(action));
         let category_label = rust_i18n::t!(category.translation_key());
         let category_matches = category_label.to_lowercase().contains(&query);
         // Number the full catalog before filtering so typing in the search box

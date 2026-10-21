@@ -88,6 +88,12 @@ enum DetailTab {
     Device,
 }
 
+/// Whether `record` has an Actions Ring to open: binding the action anywhere
+/// else would open a ring nothing can configure.
+pub(crate) fn offers_actions_ring(record: &DeviceRecord) -> bool {
+    DetailTab::tabs_for(record).contains(&DetailTab::ActionsRing)
+}
+
 impl DetailTab {
     /// The detail sections shown for `record`, in tab order. Always non-empty:
     /// every device gets at least the info tab.
@@ -152,7 +158,9 @@ impl DetailTab {
         // mouse model), so any keyboard that gets a Keys tab needs the ring
         // editor too — otherwise the ring opens but has nothing configured
         // in it and no way to configure it (#1833).
-        if caps.haptic_panel || (buttons && can_show_mouse_model) || shows_keys_tab {
+        // A G-series mouse gets no ring: its buttons are for games.
+        let gaming = caps.onboard_profiles || caps.button_spy;
+        if caps.haptic_panel || (buttons && can_show_mouse_model && !gaming) || shows_keys_tab {
             tabs.push(Self::ActionsRing);
         }
         let has_software_scroll = openlogi_hook::SOFTWARE_SCROLL_INVERSION
