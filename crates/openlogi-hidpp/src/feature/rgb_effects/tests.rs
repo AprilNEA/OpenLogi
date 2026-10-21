@@ -277,6 +277,19 @@ fn ignores_unknown_event_sub_id() {
     }
 }
 
+/// Receives the next event, or fails the test when none arrives within one
+/// second. The feature keeps the sender alive, so a bare `recv` would hang.
+async fn next_event(events: &async_channel::Receiver<RgbEffectsEvent>) -> RgbEffectsEvent {
+    use futures::FutureExt as _;
+
+    futures::select! {
+        event = events.recv().fuse() => event.unwrap(),
+        () = futures_timer::Delay::new(std::time::Duration::from_secs(1)).fuse() => {
+            panic!("no event within one second")
+        }
+    }
+}
+
 /// The public `listen` path publishes event `3` and still drops event `4`.
 #[test]
 fn listeners_receive_the_nv_effect_sync_event() {
@@ -319,11 +332,11 @@ fn listeners_receive_the_nv_effect_sync_event() {
             .await;
 
         assert_eq!(
-            events.recv().await.unwrap(),
+            next_event(&events).await,
             RgbEffectsEvent::NvEffectSync { payload }
         );
         assert_eq!(
-            events.recv().await.unwrap(),
+            next_event(&events).await,
             RgbEffectsEvent::EffectSync {
                 cluster_index: 0xff,
                 effect_counter: 0,
