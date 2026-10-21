@@ -5,7 +5,9 @@
 //! The agent owns all device I/O, so the GUI never opens a device — it routes
 //! "apply now" / "read" commands here, and polls snapshots.
 
-use std::sync::Arc;
+mod haptic_restore;
+
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
@@ -20,8 +22,9 @@ use openlogi_core::config::{ConfigFile, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    HapticWaveform, HidppOperation, LightCommand, PointerSpeed, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation, LightCommand,
+    PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -32,6 +35,7 @@ use openlogi_ipc::{
 };
 use succession::Compat;
 
+use self::haptic_restore::RestoreLedger;
 use crate::pairing::PairingManager;
 // Brings `Listener::accept` into scope for the concrete listener `transport::bind`
 // returns; `as _` keeps it anonymous (method resolution only).
@@ -478,11 +482,15 @@ impl Agent for AgentServer {
             HapticWaveform::DampStateChange,
             "activation",
         );
+        // After the confirmation buzz, so it plays before the engine is
+        // handed back.
+        self.ring_haptics.end_session(session_id);
         Ok(())
     }
 
     async fn action_ring_cancel(self, _: Context, session_id: u64) {
         self.action_ring.cancel(session_id);
+        self.ring_haptics.end_session(session_id);
     }
 }
 
@@ -495,10 +503,31 @@ impl Agent for AgentServer {
 /// collateral timeouts for unrelated writes (DPI, SmartShift) on the same
 /// receiver. A stale hover buzz has no value, so dropping superseded requests
 /// is strictly better than queueing them.
+///
+/// The worker also owns the device-wide enable flag that arming may turn on
+/// for a session: [`haptic_restore::RestoreLedger`] records each enable
+/// arming made, and the worker hands it back once that session is over.
 #[derive(Clone)]
 pub struct RingHapticPlayer {
     tx: tokio::sync::watch::Sender<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
-    pending_arm: Arc<std::sync::Mutex<Option<DeviceRoute>>>,
+    sessions: Arc<std::sync::Mutex<SessionNews>>,
+    /// Wakes the worker for a closed session without touching the play slot:
+    /// an activation buzz queued just before must still play first, and a
+    /// buzz that already played must not play again.
+    closed: tokio::sync::watch::Sender<()>,
+}
+
+/// What the trigger and the IPC handlers have reported about ring sessions
+/// since the worker last looked. Only the newest of each matters: session ids
+/// only grow, and one session is open at a time.
+#[derive(Debug, Default)]
+struct SessionNews {
+    /// The newest session that opened with haptic feedback, and its device.
+    opened: Option<(u64, DeviceRoute)>,
+    /// The newest session that closed.
+    closed: Option<u64>,
+    /// The agent is leaving: hand every engine back now, then answer here.
+    leaving: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// How long every attempt at one buzz may take together.
@@ -518,18 +547,38 @@ const PLAY_BUDGET: Duration = Duration::from_secs(2);
 /// attempts at the write path's budget put 10 s in front of the first buzz.
 const ARM_BUDGET: Duration = Duration::from_secs(1);
 
+/// How long one attempt to hand a device's engine back may take.
+///
+/// A restore runs after its session, but the worker is single-flight: the
+/// next session's arming and buzzes wait behind it. An attempt that does not
+/// finish in time is owed again, see [`haptic_restore::RESTORE_RETRY`].
+const RESTORE_BUDGET: Duration = Duration::from_secs(1);
+
+/// How long the agent's exit waits for engines to be handed back.
+///
+/// Enough for a buzz already in flight plus one restore. Nothing owed — the
+/// usual case — answers at once; a device that does not answer in time keeps
+/// the engine on, as it would if the agent crashed.
+const FINISH_BUDGET: Duration = PLAY_BUDGET.saturating_add(RESTORE_BUDGET);
+
 /// Re-assert the firmware haptic engine before the session's first buzz,
-/// within [`ARM_BUDGET`].
+/// within [`ARM_BUDGET`]. Returns the restore owed when this turned the
+/// engine on.
 ///
 /// Best-effort by design: a device that never lost the state plays fine
 /// without this, so a silent channel must cost the session a bounded delay
-/// rather than its whole haptic budget.
-async fn arm_firmware_haptics(shared: &SharedHandles, route: &DeviceRoute) {
+/// rather than its whole haptic budget. An arming whose reply is lost cannot
+/// prove it turned the engine on, so it owes nothing: a restore without that
+/// proof could turn off an engine the user turned on.
+async fn arm_firmware_haptics(
+    shared: &SharedHandles,
+    route: &DeviceRoute,
+) -> Option<HapticRestore> {
     let budget = Budget::starting_at(Instant::now(), ARM_BUDGET);
     for attempt in 1..=2u8 {
         let Some(remaining) = budget.remaining(Instant::now()) else {
             warn!("firmware haptic check ran out of time — leaving it to the buzz");
-            return;
+            return None;
         };
         match tokio::time::timeout(
             remaining,
@@ -541,11 +590,11 @@ async fn arm_firmware_haptics(shared: &SharedHandles, route: &DeviceRoute) {
         )
         .await
         {
-            Ok(Ok(true)) => {
-                info!("firmware haptics were disarmed — re-enabled");
-                return;
+            Ok(Ok(Some(restore))) => {
+                info!("firmware haptics were disarmed — re-enabled for the Actions Ring session");
+                return Some(restore);
             }
-            Ok(Ok(false)) => return,
+            Ok(Ok(None)) => return None,
             Ok(Err(error)) => {
                 if attempt == 2 {
                     warn!(%error, "could not verify firmware haptic state");
@@ -553,6 +602,57 @@ async fn arm_firmware_haptics(shared: &SharedHandles, route: &DeviceRoute) {
             }
             // Out of budget mid-attempt; the loop head reports it and returns.
             Err(_elapsed) => {}
+        }
+    }
+    None
+}
+
+/// Whether a restore attempt settled the debt or left it owed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestoreAttempt {
+    /// Restored, left alone because another writer changed it, or refused by
+    /// the device: nothing further to try.
+    Settled,
+    /// The device was not reached; a later attempt can still restore it.
+    Unreached,
+}
+
+/// Hand the engine that `restore` proves OpenLogi turned on back to off,
+/// within [`RESTORE_BUDGET`].
+async fn restore_firmware_haptics(
+    shared: &SharedHandles,
+    route: &DeviceRoute,
+    restore: HapticRestore,
+) -> RestoreAttempt {
+    match tokio::time::timeout(
+        RESTORE_BUDGET,
+        shared
+            .device(route)
+            .run(HidppOperation::PlayHaptic, |c| async move {
+                openlogi_hid::restore_haptics_on(&c, restore).await
+            }),
+    )
+    .await
+    {
+        Ok(Ok(HapticRestoreOutcome::Restored)) => {
+            info!("firmware haptics turned back off after the Actions Ring session");
+            RestoreAttempt::Settled
+        }
+        Ok(Ok(HapticRestoreOutcome::Superseded)) => {
+            debug!("firmware haptic configuration changed since arming — left as found");
+            RestoreAttempt::Settled
+        }
+        Ok(Err(error)) if haptic_restore::is_unreached(&error) => {
+            debug!(%error, "firmware haptic restore did not reach the device — owed");
+            RestoreAttempt::Unreached
+        }
+        Ok(Err(error)) => {
+            warn!(%error, "could not turn firmware haptics back off");
+            RestoreAttempt::Settled
+        }
+        Err(_elapsed) => {
+            debug!("firmware haptic restore ran out of time — owed");
+            RestoreAttempt::Unreached
         }
     }
 }
@@ -716,58 +816,140 @@ impl RingHapticPlayer {
         let (tx, mut rx) = tokio::sync::watch::channel::<
             Option<(DeviceRoute, HapticWaveform, &'static str)>,
         >(None);
-        let pending_arm = Arc::new(std::sync::Mutex::new(None::<DeviceRoute>));
-        let worker_arm = Arc::clone(&pending_arm);
+        let (closed, mut closed_rx) = tokio::sync::watch::channel(());
+        let sessions = Arc::new(std::sync::Mutex::new(SessionNews::default()));
+        let worker_sessions = Arc::clone(&sessions);
         tokio::spawn(async move {
             let mut breaker = HapticBreaker::default();
-            while rx.changed().await.is_ok() {
+            let mut ledger = RestoreLedger::default();
+            // Once the agent is leaving, no session arms the engine again:
+            // nothing would be left to hand it back.
+            let mut left = false;
+            loop {
+                let due = ledger.next_due();
+                let woke_for_play = tokio::select! {
+                    biased;
+                    changed = rx.changed() => match changed {
+                        Ok(()) => true,
+                        Err(_) => break,
+                    },
+                    changed = closed_rx.changed() => match changed {
+                        Ok(()) => false,
+                        Err(_) => break,
+                    },
+                    () = tokio::time::sleep_until(
+                        due.map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
+                    ), if due.is_some() => false,
+                };
+                let news = std::mem::take(
+                    &mut *worker_sessions
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
+                left |= news.leaving.is_some();
                 // Firmware arming is sequenced through this worker so it is
                 // guaranteed to complete before the session's first buzz —
                 // spawning it separately let the first hover race (and lose
-                // to) a disarmed haptic engine.
-                let arm_route = worker_arm
-                    .lock()
-                    .ok()
-                    .and_then(|mut pending| pending.take());
-                if let Some(route) = arm_route {
+                // to) a disarmed haptic engine. A session that already closed
+                // is not armed at all.
+                if let Some((session, route)) = news.opened
+                    && !left
+                    && news.closed.is_none_or(|closed| closed < session)
+                {
                     // A new session starts the breaker over. It is
                     // worker-lifetime state, so without this a session that
                     // ended two failures deep makes the next session's first
                     // failure trip the cool-down, and a cool-down opened at the
                     // tail of one ring silences the opening of the next.
                     breaker = HapticBreaker::default();
-                    arm_firmware_haptics(&shared, &route).await;
+                    let restore = arm_firmware_haptics(&shared, &route).await;
+                    ledger.opened(session, route, restore, Instant::now());
                 }
-                let request = rx.borrow_and_update().clone();
-                let Some((route, waveform, interaction)) = request else {
-                    continue;
-                };
-                if !breaker.allows(Instant::now()) {
-                    continue;
+                // Plays before closes: a session's last buzz is queued before
+                // its close, so it plays before the engine is handed back.
+                if woke_for_play || rx.has_changed().unwrap_or(false) {
+                    let request = rx.borrow_and_update().clone();
+                    if let Some((route, waveform, interaction)) = request
+                        && breaker.allows(Instant::now())
+                    {
+                        let outcome =
+                            play_within_budget(&shared, &rx, &route, waveform, interaction).await;
+                        if breaker.record(outcome, Instant::now()) {
+                            info!(
+                                interaction,
+                                "ring haptics cooling down after repeated HID++ loss"
+                            );
+                        }
+                    }
                 }
-                let outcome = play_within_budget(&shared, &rx, &route, waveform, interaction).await;
-                if breaker.record(outcome, Instant::now()) {
-                    info!(
-                        interaction,
-                        "ring haptics cooling down after repeated HID++ loss"
-                    );
+                if let Some(session) = news.closed {
+                    ledger.closed(session, Instant::now());
+                }
+                if left {
+                    ledger.leaving(Instant::now());
+                }
+                while let Some(owed) = ledger.take_due(Instant::now()) {
+                    if restore_firmware_haptics(&shared, &owed.route, owed.restore).await
+                        == RestoreAttempt::Unreached
+                    {
+                        ledger.retry(owed, Instant::now());
+                    }
+                }
+                if let Some(done) = news.leaving {
+                    let _ = done.send(());
                 }
             }
         });
-        Self { tx, pending_arm }
+        Self {
+            tx,
+            sessions,
+            closed,
+        }
     }
 
-    /// Queue a firmware arming check to run before the session's first buzz.
-    /// The wake-up send also clears any stale not-yet-played waveform from a
-    /// previous session so it cannot replay.
-    pub fn arm(&self, route: Option<DeviceRoute>) {
+    /// Report that ring session `session` opened. With a haptic route, the
+    /// worker arms the device's engine before the session's first buzz and
+    /// owes back any enable that arming made. The wake-up send also clears
+    /// any stale not-yet-played waveform from a previous session so it
+    /// cannot replay.
+    pub fn begin_session(&self, session: u64, route: Option<DeviceRoute>) {
         let Some(route) = route else {
             return;
         };
-        if let Ok(mut pending) = self.pending_arm.lock() {
-            *pending = Some(route);
-        }
+        self.news().opened = Some((session, route));
         let _ = self.tx.send(None);
+    }
+
+    /// Report that ring session `session` closed, after queueing any buzz it
+    /// still plays. An enable its arming made is handed back once that buzz
+    /// has played. A close older than a device's newest session leaves that
+    /// device's engine alone.
+    pub fn end_session(&self, session: u64) {
+        {
+            let mut news = self.news();
+            news.closed = news.closed.max(Some(session));
+        }
+        let _ = self.closed.send(());
+    }
+
+    /// End every session for good as the agent leaves: hand back each enable
+    /// still owed, within [`FINISH_BUDGET`]. Call it while inventory still
+    /// publishes the channels the restores need. No session arms the engine
+    /// after this.
+    pub async fn finish(&self) {
+        let (done, handed_back) = tokio::sync::oneshot::channel();
+        self.news().leaving = Some(done);
+        let _ = self.closed.send(());
+        if tokio::time::timeout(FINISH_BUDGET, handed_back)
+            .await
+            .is_err()
+        {
+            warn!("Actions Ring haptics did not finish handing engines back before exit");
+        }
+    }
+
+    fn news(&self) -> std::sync::MutexGuard<'_, SessionNews> {
+        self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Queue `waveform`, replacing any not-yet-played request.
@@ -821,7 +1003,8 @@ pub async fn run(server: AgentServer) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ARM_BUDGET, Budget, HapticBreaker, PLAY_BUDGET, PlayOutcome, WriteError, is_worth_retrying,
+        ARM_BUDGET, Budget, HapticBreaker, PLAY_BUDGET, PlayOutcome, RESTORE_BUDGET, WriteError,
+        haptic_restore, is_worth_retrying,
     };
     use std::time::{Duration, Instant};
 
@@ -857,6 +1040,39 @@ mod tests {
     fn the_budgets_stay_within_a_ring_session() {
         assert!(ARM_BUDGET < PLAY_BUDGET);
         assert!(ARM_BUDGET + PLAY_BUDGET < Duration::from_secs(15));
+    }
+
+    /// The worker is single-flight, so a device that stays away must leave it
+    /// idle most of the time between attempts, free for the next session.
+    #[test]
+    fn an_owed_restore_leaves_the_worker_mostly_idle() {
+        assert!(RESTORE_BUDGET * 5 <= haptic_restore::RESTORE_RETRY);
+    }
+
+    /// A session that closed before the worker looked is never armed, so it
+    /// owes nothing, and the exit hears back at once instead of waiting out
+    /// [`super::FINISH_BUDGET`].
+    #[tokio::test]
+    async fn an_exit_with_nothing_owed_answers_at_once() {
+        let shared = openlogi_agent_core::orchestrator::Orchestrator::new(
+            openlogi_core::config::Config::default(),
+            std::sync::Arc::new(openlogi_agent_core::observable::ObservableState::new(
+                "test".to_owned(),
+            )),
+        )
+        .shared();
+        let player = super::RingHapticPlayer::spawn(shared);
+        player.begin_session(
+            1,
+            Some(openlogi_hid::DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb042,
+            }),
+        );
+        player.end_session(1);
+        tokio::time::timeout(Duration::from_secs(1), player.finish())
+            .await
+            .expect("the worker answers the exit itself");
     }
 
     #[test]
