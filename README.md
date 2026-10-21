@@ -162,6 +162,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 | Per-application profiles | ✓ | ✓ | X11, wlroots (sway, Hyprland), GNOME with the [companion extension](crates/openlogi-hook/gnome-shell-extension/README.md) |
 | Mouse profile follows the window under the pointer | ✓ | ✓ | X11 only |
 | Media keys | Native | Native | D-Bus MPRIS |
+| Brightness Up / Down actions | Native (built-in and Apple displays; for other displays use a tool like [MonitorControl](https://github.com/MonitorControl/MonitorControl)) | Not yet | Standard brightness keys; an external monitor needs a DDC/CI tool, see [the guide](docs/INSTALL-linux.md#brightness-keys-on-external-monitors) |
 | Window-manager actions (desktops, Mission Control, …) | Native | Native equivalents | GNOME, KDE (KWin), Hyprland; some macOS-only actions do nothing |
 | Menu-bar / tray icon | ✓ | ✓ | — |
 | In-app updates | Sparkle | Built-in | Built-in |
