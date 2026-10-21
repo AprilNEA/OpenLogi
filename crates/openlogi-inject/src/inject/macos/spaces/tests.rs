@@ -189,6 +189,7 @@ fn slide_frames_carry_progress_phase_and_an_exit_velocity_on_end() {
         (SlidePhase::Began, 1),
         (SlidePhase::Changed, 2),
         (SlidePhase::Ended, 4),
+        (SlidePhase::Cancelled, 8),
     ] {
         let frame = SlideFrame {
             phase,
@@ -329,34 +330,47 @@ fn interactive_space_round_trip() {
 }
 
 #[test]
-fn live_swipe_frames_carry_progress_phase_and_an_exit_velocity_on_end() {
-    for (phase, value) in [
-        (SpaceSwipePhase::Began, 1),
-        (SpaceSwipePhase::Changed, 2),
-        (SpaceSwipePhase::Ended, 4),
-        (SpaceSwipePhase::Cancelled, 8),
-    ] {
-        let event = live_swipe_event(-0.25, phase).expect("CGEvent allocation");
-        assert_eq!(CGEvent::r#type(Some(&event)), CGEventType(30));
-        for (field, expected) in [(110, 23), (123, 1), (132, value), (134, value)] {
+fn live_swipe_frames_use_this_macos_layout_with_an_exit_velocity_only_on_end() {
+    autoreleasepool(|_| {
+        let phases = [
+            (SpaceSwipePhase::Began, 1),
+            (SpaceSwipePhase::Changed, 2),
+            (SpaceSwipePhase::Ended, 4),
+            (SpaceSwipePhase::Cancelled, 8),
+        ];
+        if *DOCK_SWIPE_LAYOUT == DockSwipeLayout::Fields {
+            for (phase, value) in phases {
+                let event = live_swipe_event(-0.25, phase).expect("CGEvent allocation");
+                for field in [132, 134] {
+                    assert_eq!(
+                        CGEvent::integer_value_field(Some(&event), CGEventField(field)),
+                        value
+                    );
+                }
+                let velocity = CGEvent::double_value_field(Some(&event), CGEventField(129));
+                let exit = if phase == SpaceSwipePhase::Ended {
+                    -9999.0
+                } else {
+                    0.0
+                };
+                assert_eq!(velocity.to_bits(), f64::to_bits(exit), "{phase:?}");
+            }
+            return;
+        }
+        let copy_hid = hid_swipe_reader().expect("macOS 27 has the HID swipe APIs");
+        // The attached event signs progress by the host's scroll preference.
+        let expected = if natural_scrolling() { 0.25 } else { -0.25 };
+        for (phase, value) in phases {
+            let event = live_swipe_event(-0.25, phase).expect("HIDEvent-backed CGEvent");
+            let reading = read_hid_swipe(copy_hid, &event);
+            assert_eq!(i64::from(reading.phase), value, "{phase:?}");
+            assert!((reading.progress - expected).abs() < 1e-4, "{reading:?}");
+            let exit = (phase == SpaceSwipePhase::Ended).then(|| expected.signum() * 9999.0);
             assert_eq!(
-                CGEvent::integer_value_field(Some(&event), CGEventField(field)),
-                expected
+                reading.velocity.map(|(x, y)| (x.to_bits(), y.to_bits())),
+                exit.map(|v: f64| (v.to_bits(), v.to_bits())),
+                "{phase:?}"
             );
         }
-        assert_eq!(
-            CGEvent::double_value_field(Some(&event), CGEventField(124)).to_bits(),
-            (-0.25_f64).to_bits()
-        );
-        assert_eq!(
-            CGEvent::integer_value_field(Some(&event), CGEventField(135)),
-            i64::from((-0.25_f32).to_bits())
-        );
-        let velocity = CGEvent::double_value_field(Some(&event), CGEventField(129));
-        if phase == SpaceSwipePhase::Ended {
-            assert_eq!(velocity.to_bits(), (-9999.0_f64).to_bits());
-        } else {
-            assert_eq!(velocity.to_bits(), 0.0_f64.to_bits());
-        }
-    }
+    });
 }

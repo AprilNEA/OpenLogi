@@ -41,6 +41,13 @@ pub(super) enum SlidePhase {
     Changed,
     /// The release: the Dock finishes the switch.
     Ended,
+    /// The Dock springs back to the Space the gesture started on. Only a live
+    /// swipe cancels; a slide always finishes.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "only the macOS live swipe posts it")
+    )]
+    Cancelled,
 }
 
 /// One frame of a slide to the neighbouring Space.

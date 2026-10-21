@@ -452,6 +452,7 @@ const fn slide_phase(phase: SlidePhase) -> u32 {
         SlidePhase::Began => 1,
         SlidePhase::Changed => 2,
         SlidePhase::Ended => 4,
+        SlidePhase::Cancelled => 8,
     }
 }
 
@@ -607,12 +608,6 @@ fn dock_swipe_hid_event(
 static LIVE_LEASE: Mutex<Option<Lease<'static>>> = Mutex::new(None);
 
 pub(in crate::inject) fn post_space_swipe(progress: f64, phase: SpaceSwipePhase) -> bool {
-    // Live frames are verified only in the field layout (#1389, Mac Mouse
-    // Fix); the HID-event layout keeps the one-shot switch until they are
-    // verified there.
-    if *DOCK_SWIPE_LAYOUT != DockSwipeLayout::Fields {
-        return false;
-    }
     let mut lease = LIVE_LEASE.lock().unwrap_or_else(PoisonError::into_inner);
     match phase {
         SpaceSwipePhase::Began => {
@@ -659,57 +654,25 @@ pub(in crate::inject) fn post_space_swipe(progress: f64, phase: SpaceSwipePhase)
     posted
 }
 
+/// One live-swipe frame in the Dock swipe layout this macOS reads: the same
+/// frame a slide posts, at the hand's progress rather than a scheduled one.
 fn live_swipe_event(progress: f64, phase: SpaceSwipePhase) -> Option<CFRetained<CGEvent>> {
-    let event = CGEvent::new(None)?;
-    CGEvent::set_type(Some(&event), CGEventType(30));
-    let phase = live_swipe_phase(phase);
-    // Dock swipe subtype, horizontal motion, and the phase in both slots the
-    // trackpad path fills.
-    for (field, value) in [(110, 23), (123, 1), (165, 1), (132, phase), (134, phase)] {
-        CGEvent::set_integer_value_field(Some(&event), CGEventField(field), value);
+    let phase = match phase {
+        SpaceSwipePhase::Began => SlidePhase::Began,
+        SpaceSwipePhase::Changed => SlidePhase::Changed,
+        SpaceSwipePhase::Ended => SlidePhase::Ended,
+        SpaceSwipePhase::Cancelled => SlidePhase::Cancelled,
+    };
+    match *DOCK_SWIPE_LAYOUT {
+        DockSwipeLayout::HidEvent => {
+            HidSwipe::new(natural_scrolling())?.event(slide_phase(phase), progress)
+        }
+        DockSwipeLayout::Fields => slide_event(SlideFrame {
+            phase,
+            progress,
+            at: Duration::ZERO,
+        }),
     }
-    CGEvent::set_double_value_field(Some(&event), CGEventField(41), 33_231.0);
-    CGEvent::set_double_value_field(Some(&event), CGEventField(124), progress);
-    // The Dock also reads the progress as raw IEEE-754 f32 bits.
-    CGEvent::set_integer_value_field(
-        Some(&event),
-        CGEventField(135),
-        i64::from(live_swipe_progress_bits(progress)),
-    );
-    let horizontal = f64::from(f32::from_bits(1));
-    CGEvent::set_double_value_field(Some(&event), CGEventField(119), horizontal);
-    CGEvent::set_double_value_field(Some(&event), CGEventField(139), horizontal);
-    CGEvent::set_integer_value_field(Some(&event), CGEventField(136), 1);
-    if phase == live_swipe_phase(SpaceSwipePhase::Ended) {
-        // An emphatic exit velocity toward the progress sign asks the Dock to
-        // finish the switch rather than spring back, as the one-shot path does.
-        let velocity = progress.signum() * 9999.0;
-        CGEvent::set_double_value_field(Some(&event), CGEventField(129), velocity);
-        CGEvent::set_double_value_field(Some(&event), CGEventField(130), velocity);
-    }
-    CGEvent::set_integer_value_field(
-        Some(&event),
-        CGEventField::EventSourceUserData,
-        super::super::SYNTHETIC_EVENT_USER_DATA,
-    );
-    Some(event)
-}
-
-const fn live_swipe_phase(phase: SpaceSwipePhase) -> i64 {
-    match phase {
-        SpaceSwipePhase::Began => 1,
-        SpaceSwipePhase::Changed => 2,
-        SpaceSwipePhase::Ended => 4,
-        SpaceSwipePhase::Cancelled => 8,
-    }
-}
-
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the Dock swipe field stores its progress as IEEE-754 f32 bits"
-)]
-fn live_swipe_progress_bits(progress: f64) -> u32 {
-    (progress as f32).to_bits()
 }
 
 type Dictionary = CFDictionary<CFString, CFType>;

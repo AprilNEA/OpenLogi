@@ -683,10 +683,10 @@ pub enum SpaceSwipePhase {
 /// Post one frame of a live, follow-the-hand Space transition.
 ///
 /// `progress` is the cumulative travel since the transition began, in desktop
-/// widths, positive toward the next desktop. Returns `false` when nothing was
-/// posted (no such transition on this platform, a macOS whose Dock swipe event
-/// layout is unverified, or non-finite progress), so the caller can fall back
-/// to the one-shot desktop action.
+/// widths, positive toward the next desktop. macOS posts it in whichever Dock
+/// swipe layout the running release reads. Returns `false` when nothing was
+/// posted (no such transition on this platform, or non-finite progress), so
+/// the caller can fall back to the one-shot desktop action.
 ///
 /// One transition runs at a time, from an accepted [`SpaceSwipePhase::Began`]
 /// to a posted [`SpaceSwipePhase::Ended`] or any [`SpaceSwipePhase::Cancelled`].
