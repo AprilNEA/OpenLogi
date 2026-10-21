@@ -7,6 +7,7 @@ const BUTTON: ButtonId = ButtonId::GestureButton;
 
 thread_local! {
     static TICKS: Cell<u64> = const { Cell::new(0) };
+    static HAS_NEXT: Cell<bool> = const { Cell::new(true) };
 }
 
 /// A counter that moves on every read: a desktop that changes at once.
@@ -48,6 +49,19 @@ const LAST: SpaceProbe = SpaceProbe {
             current: 7,
             has_previous: true,
             has_next: false,
+        })
+    },
+    changes: || Some(0),
+};
+
+/// A desktop whose switches never report landing, with a next desktop only
+/// while [`HAS_NEXT`] says so.
+const SILENT_UNTIL_LAST: SpaceProbe = SpaceProbe {
+    position: || {
+        Some(SpacePosition {
+            current: 7,
+            has_previous: true,
+            has_next: HAS_NEXT.get(),
         })
     },
     changes: || Some(0),
@@ -203,6 +217,42 @@ fn motion_waits_for_the_switch_to_land_then_restarts() {
     // A release while settling has nothing in flight.
     let mut settling = swipes_settling(start);
     assert!(settling.end(&session(), BUTTON, start).is_empty());
+}
+
+#[test]
+fn a_full_desktop_report_after_landing_finishes_at_once() {
+    let mut swipes = swipes(SILENT);
+    let start = Instant::now();
+    begin_right(&mut swipes, start);
+    let (_, now) = sweep(&mut swipes, start, 8, 100);
+    // A single report worth more than a desktop opens the next leg and
+    // finishes it, rather than leaving a Began past full width.
+    let frames = swipes.motion(&session(), BUTTON, 900, now + SETTLE_TIMEOUT);
+    assert_eq!(
+        frames,
+        vec![
+            Frame::new(0.0, SpaceSwipePhase::Began),
+            Frame::new(1.0, SpaceSwipePhase::Ended),
+        ]
+    );
+}
+
+#[test]
+fn a_full_desktop_report_after_landing_on_the_last_desktop_holds_at_the_edge() {
+    HAS_NEXT.set(true);
+    let mut swipes = swipes(SILENT_UNTIL_LAST);
+    let start = Instant::now();
+    begin_right(&mut swipes, start);
+    let (_, now) = sweep(&mut swipes, start, 8, 100);
+    // The switch landed on the last desktop.
+    HAS_NEXT.set(false);
+    let later = now + SETTLE_TIMEOUT;
+    let frames = swipes.motion(&session(), BUTTON, 900, later);
+    assert_eq!(frames, vec![Frame::new(1.0, SpaceSwipePhase::Began)]);
+    // Pulling back responds at once: there is no excess travel to undo.
+    let frames = swipes.motion(&session(), BUTTON, -100, later + Duration::from_millis(8));
+    assert_eq!(phases(&frames), vec![SpaceSwipePhase::Changed]);
+    assert!((frames[0].progress - (1.0 - 100.0 / TRAVEL)).abs() < 1e-9);
 }
 
 #[test]

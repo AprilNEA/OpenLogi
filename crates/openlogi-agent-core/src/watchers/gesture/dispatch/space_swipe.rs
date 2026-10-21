@@ -163,6 +163,25 @@ struct Transition {
     moved_at: Instant,
 }
 
+/// Move a leg to `progress`: follow the hand below a full desktop, hold at the
+/// edge of the last desktop, or finish the switch at a full width and settle.
+fn step(progress: f64, bounds: Bounds, probe: SpaceProbe, now: Instant) -> (Stage, Frame) {
+    let sign = progress.signum();
+    if progress.abs() < 1.0 || !bounds.allows(sign) {
+        let progress = if progress.abs() < 1.0 { progress } else { sign };
+        return (
+            Stage::InFlight { progress, bounds },
+            Frame::new(progress, SpaceSwipePhase::Changed),
+        );
+    }
+    let settling = Stage::Settling {
+        since: now,
+        changes: (probe.changes)(),
+        space: (probe.position)().map(|position| position.current),
+    };
+    (settling, Frame::new(sign, SpaceSwipePhase::Ended))
+}
+
 /// Live transitions by capture session and held gesture source. A hold keeps
 /// its entry from the first desktop swipe until release, so later swipes in
 /// the same hold are motion for the transition rather than new actions.
@@ -294,33 +313,21 @@ impl SpaceSwipes {
                     return Vec::new();
                 }
                 // The switch landed: the next transition starts from this
-                // report, not from wherever the hand got to meanwhile.
-                let progress = hold_sign(delta);
+                // report, not from wherever the hand got to meanwhile, and
+                // the report gets the same edge and completion checks as any
+                // other (a full desktop's worth finishes at once).
                 t.velocity = 0.0;
-                t.stage = Stage::InFlight {
-                    progress,
-                    bounds: Bounds::read(probe),
-                };
-                vec![Frame::new(progress, SpaceSwipePhase::Began)]
+                let (stage, frame) = step(hold_sign(delta), Bounds::read(probe), probe, now);
+                t.stage = stage;
+                match frame.phase {
+                    SpaceSwipePhase::Ended => vec![Frame::new(0.0, SpaceSwipePhase::Began), frame],
+                    _ => vec![Frame::new(frame.progress, SpaceSwipePhase::Began)],
+                }
             }
             Stage::InFlight { progress, bounds } => {
-                *progress = hold_sign(*progress + delta);
-                let sign = progress.signum();
-                if progress.abs() < 1.0 {
-                    return vec![Frame::new(*progress, SpaceSwipePhase::Changed)];
-                }
-                if !bounds.allows(sign) {
-                    // The last desktop: hold at the edge.
-                    *progress = sign;
-                    return vec![Frame::new(*progress, SpaceSwipePhase::Changed)];
-                }
-                // A full desktop width: finish this switch and settle.
-                t.stage = Stage::Settling {
-                    since: now,
-                    changes: (probe.changes)(),
-                    space: (probe.position)().map(|position| position.current),
-                };
-                vec![Frame::new(sign, SpaceSwipePhase::Ended)]
+                let (stage, frame) = step(hold_sign(*progress + delta), *bounds, probe, now);
+                t.stage = stage;
+                vec![frame]
             }
         }
     }
