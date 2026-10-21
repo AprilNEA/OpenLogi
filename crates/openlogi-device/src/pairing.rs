@@ -153,7 +153,10 @@ fn family_for(product_id: u16) -> Option<ReceiverFamily> {
 /// A pairing-capable receiver currently connected to the host.
 #[derive(Clone, Debug)]
 pub struct PairingReceiver {
-    /// Bolt unique ID, when readable. `None` for Unifying (no read path yet).
+    /// The receiver's unique ID — the Bolt unique ID or the Unifying serial
+    /// number — in the form [`ReceiverSelector::ReceiverUid`] matches. `None`
+    /// when the read fails or another OpenLogi process holds the receiver's
+    /// register phase.
     pub uid: Option<String>,
     /// Receiver protocol family.
     pub family: ReceiverFamily,
@@ -245,12 +248,8 @@ pub async fn list_pairing_receivers(
         let Some(family) = family_for(channel.product_id) else {
             continue;
         };
-        let uid = match family {
-            ReceiverFamily::Bolt => read_receiver_uid(&channel, &node.id).await,
-            ReceiverFamily::Unifying => None,
-        };
         out.push(PairingReceiver {
-            uid,
+            uid: read_receiver_uid(&channel, &node.id).await,
             family,
             product_id: channel.product_id,
         });

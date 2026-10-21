@@ -11,7 +11,8 @@ use crate::{NodeId, NodeInfo};
 
 use super::super::{
     PairingError, PairingEvent, ReceiverFamily, ReceiverIdentityCache, ReceiverSelector,
-    ReceiverTarget, open_receiver, open_receiver_with_inventory, run_pairing,
+    ReceiverTarget, list_pairing_receivers, open_receiver, open_receiver_with_inventory,
+    run_pairing,
 };
 
 const BOLT_A: &str = "00000000AAAABBBB";
@@ -472,4 +473,39 @@ async fn an_unknown_unifying_unique_id_fails_without_touching_either_receiver() 
         );
         assert_eq!(backend.channel_lifetime_count(channel).unwrap(), 0);
     }
+}
+
+#[tokio::test]
+async fn listing_reports_the_unique_id_of_every_receiver_family() {
+    let backend = backend_with(
+        "listing",
+        &[
+            ("unifying-a", 0xc52b, UNIFYING_A),
+            ("unifying-b", 0xc52b, UNIFYING_B),
+            ("bolt-a", 0xc548, BOLT_A),
+        ],
+    );
+    let listed: Vec<_> = list_pairing_receivers(&backend)
+        .await
+        .expect("every receiver opens")
+        .into_iter()
+        .map(|receiver| (receiver.family, receiver.product_id, receiver.uid))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            (
+                ReceiverFamily::Unifying,
+                0xc52b,
+                Some(UNIFYING_A.to_owned())
+            ),
+            (
+                ReceiverFamily::Unifying,
+                0xc52b,
+                Some(UNIFYING_B.to_owned())
+            ),
+            (ReceiverFamily::Bolt, 0xc548, Some(BOLT_A.to_owned())),
+        ],
+        "each listed ID must be one a `ReceiverUid` selection can name"
+    );
 }
