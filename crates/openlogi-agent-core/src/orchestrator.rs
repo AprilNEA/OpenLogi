@@ -290,20 +290,20 @@ impl SharedHandles {
         route: &DeviceRoute,
         speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError> {
-        let AppWrite {
-            ticket,
-            ends_precision,
-        } = self
+        let AppWrite { ticket, restore } = self
             .pointer_speeds
             .app_write(route, SavedSpeed::Scaled(Some(speed)));
+        let speeds = Arc::clone(&self.pointer_speeds);
         self.device(route)
             .run_in_turn(
                 HidppOperation::WritePointerScaling,
                 &ticket,
                 |c| async move {
+                    let started = tokio::time::Instant::now();
                     let applied = openlogi_hid::set_pointer_speed_on(&c, speed).await?;
-                    if ends_precision {
-                        show_precision_led(&c, false).await;
+                    if let Some(restore) = restore {
+                        show_precision_led(&c, false, started).await;
+                        speeds.restored(&restore);
                     }
                     Ok(applied)
                 },
@@ -319,20 +319,20 @@ impl SharedHandles {
     /// the reconnect reapply. A write superseded before its turn writes
     /// nothing.
     pub async fn set_dpi(&self, route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
-        let AppWrite {
-            ticket,
-            ends_precision,
-        } = self
+        let AppWrite { ticket, restore } = self
             .pointer_speeds
             .app_write(route, SavedSpeed::Dpi(Some(dpi)));
+        let speeds = Arc::clone(&self.pointer_speeds);
         self.device(route)
             .run_in_turn(
                 HidppOperation::WriteDpi,
                 &ticket,
                 |c| async move {
+                    let started = tokio::time::Instant::now();
                     openlogi_hid::set_dpi_on(&c, dpi).await?;
-                    if ends_precision {
-                        show_precision_led(&c, false).await;
+                    if let Some(restore) = restore {
+                        show_precision_led(&c, false, started).await;
+                        speeds.restored(&restore);
                     }
                     Ok(())
                 },

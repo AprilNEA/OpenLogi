@@ -204,9 +204,11 @@ pub(crate) struct SpeedWrite {
 pub(crate) struct AppWrite {
     /// Its place among the mouse's pointer-speed writes.
     pub(crate) ticket: WriteTicket,
-    /// Whether the write ends the precision speed of the mouse: its mode was
-    /// on, or a restore was owed. The DPI LED goes dark with the write then.
-    pub(crate) ends_precision: bool,
+    /// The restore the write settles once it lands, when it ends the
+    /// precision speed of the mouse: its mode was on, or a restore was owed.
+    /// The DPI LED goes dark with the write then. Until it lands, a newer
+    /// write that supersedes it carries the restore, and with it the LED.
+    pub(crate) restore: Option<Restore>,
 }
 
 /// A pending restore a reconnect write carries: the mouse's config key and
@@ -323,27 +325,31 @@ impl PointerSpeeds {
     /// `route`. Ends the precision mode of that mouse when `saved` is of its
     /// kind, makes `saved` the value precision mode returns to until the next
     /// reload, and numbers the write.
+    ///
+    /// A mouse whose precision speed the write ends stays owed a restore
+    /// until a write lands, as after a press: a newer write that supersedes
+    /// this one then settles it and darkens the LED.
     pub(crate) fn app_write(&self, route: &DeviceRoute, saved: SavedSpeed) -> AppWrite {
         let mut state = self.lock();
-        let State {
-            online,
-            precision,
-            restore,
-            ..
-        } = &mut *state;
-        let mut ends_precision = false;
-        for (key, mouse) in online
-            .iter_mut()
+        let keys: Vec<String> = state
+            .online
+            .iter()
             .filter(|(_, mouse)| mouse.route == *route && mouse.saved.same_kind(saved))
-        {
-            let was_on = precision.remove(key);
-            let was_owed = restore.remove(key).is_some();
-            ends_precision |= was_on || was_owed;
-            mouse.saved = saved;
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut restore = None;
+        for key in keys {
+            let was_on = state.precision.remove(&key);
+            if was_on || state.restore.contains_key(&key) {
+                restore = Some(state.owe_restore(&key));
+            }
+            if let Some(mouse) = state.online.get_mut(&key) {
+                mouse.saved = saved;
+            }
         }
         AppWrite {
             ticket: self.order.request(route),
-            ends_precision,
+            restore,
         }
     }
 

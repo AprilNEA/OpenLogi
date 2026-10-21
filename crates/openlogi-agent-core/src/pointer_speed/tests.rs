@@ -4,7 +4,8 @@ use openlogi_core::hid::{DeviceRoute, Dpi, PointerSpeed};
 use openlogi_hid::DpiTarget;
 
 use super::{
-    PointerSpeeds, PrecisionPress, ReloadChange, SavedSpeed, SpeedMouse, SpeedTarget, SpeedWrite,
+    AppWrite, PointerSpeeds, PrecisionPress, ReloadChange, SavedSpeed, SpeedMouse, SpeedTarget,
+    SpeedWrite,
 };
 
 fn route(slot: u8) -> DeviceRoute {
@@ -309,10 +310,10 @@ fn a_late_restore_write_keeps_a_newer_pending_restore() {
     assert!(speeds.restore_pending("a"));
 }
 
-/// A press or a write from the app replaces the pending restore with a
-/// write of its own.
+/// A press drops the pending restore: it sets the precision speed again. A
+/// write from the app takes the restore over and settles it once it lands.
 #[test]
-fn a_press_or_an_app_write_drops_the_pending_restore() {
+fn a_press_drops_the_pending_restore_and_an_app_write_takes_it_over() {
     let speeds = offline_mouse_whose_precision_a_reload_ended();
     speeds.publish(None, [mouse("a", 2, None)]);
     speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
@@ -320,7 +321,10 @@ fn a_press_or_an_app_write_drops_the_pending_restore() {
 
     let speeds = offline_mouse_whose_precision_a_reload_ended();
     speeds.publish(None, [mouse("a", 2, None)]);
-    speeds.app_write(&route(2), SavedSpeed::Scaled(Some(speed(0x0180))));
+    let app = speeds.app_write(&route(2), SavedSpeed::Scaled(Some(speed(0x0180))));
+    assert!(speeds.restore_pending("a"), "until the app write lands");
+
+    speeds.restored(&app.restore.expect("the app write ends the slow speed"));
     assert!(!speeds.restore_pending("a"));
 }
 
@@ -661,15 +665,70 @@ fn a_reconnect_shows_the_mode_on_the_led_and_leaves_it_otherwise() {
 }
 
 #[test]
-fn an_app_write_ends_the_precision_speed_only_once() {
+fn app_writes_end_the_precision_speed_until_one_lands() {
     let speeds = one_mouse();
     speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
 
     let first = speeds.app_write(&route(1), SavedSpeed::Scaled(Some(speed(0x0200))));
     let second = speeds.app_write(&route(1), SavedSpeed::Scaled(Some(speed(0x0220))));
+    assert!(first.restore.is_some());
+    assert!(
+        second.restore.is_some(),
+        "the first write has not landed: the mouse may still be slow"
+    );
+    assert!(speeds.restore_pending("a"));
 
-    assert!(first.ends_precision);
-    assert!(!second.ends_precision);
+    speeds.restored(&second.restore.expect("a restore"));
+    assert!(!speeds.restore_pending("a"));
+    let third = speeds.app_write(&route(1), SavedSpeed::Scaled(Some(speed(0x0240))));
+    assert!(third.restore.is_none());
+}
+
+#[test]
+fn a_late_restore_of_an_older_app_write_leaves_the_newer_one_owed() {
+    let speeds = one_mouse();
+    speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
+    let first = speeds.app_write(&route(1), SavedSpeed::Scaled(Some(speed(0x0200))));
+    let _second = speeds.app_write(&route(1), SavedSpeed::Scaled(Some(speed(0x0220))));
+
+    speeds.restored(&first.restore.expect("a restore"));
+
+    assert!(speeds.restore_pending("a"));
+}
+
+#[test]
+fn a_preset_that_supersedes_an_app_write_darkens_the_led_in_its_place() {
+    let speeds = PointerSpeeds::default();
+    speeds.publish(None, [dpi_mouse("a", 1, Some(Dpi::new(1600)))]);
+    speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
+    let app = speeds.app_write(&route(1), SavedSpeed::Dpi(Some(Dpi::new(1200))));
+    assert!(app.restore.is_some());
+
+    let preset = speeds.preset_write(&route(1), Dpi::new(800));
+
+    assert!(!takes_its_turn_app(&app), "the preset is newer");
+    assert_eq!(preset.led, Some(false));
+    assert!(preset.restore.is_some(), "the preset settles the restore");
+}
+
+#[test]
+fn a_reconnect_after_an_app_write_that_never_landed_darkens_the_led() {
+    let speeds = one_mouse();
+    speeds.toggle_precision(Some("a"), PrecisionPress::Assigned);
+    let _app = speeds.app_write(&route(1), SavedSpeed::Scaled(Some(speed(0x0200))));
+
+    let write = speeds
+        .reapply("a", &route(1), SavedSpeed::Scaled(Some(speed(0x0200))))
+        .expect("a restore is owed");
+
+    assert_eq!(write.target, SpeedTarget::Scaled(speed(0x0200)));
+    assert_eq!(write.led, Some(false));
+    assert!(write.restore.is_some());
+}
+
+/// Whether the app write still writes when its turn comes.
+fn takes_its_turn_app(write: &AppWrite) -> bool {
+    futures_lite::future::block_on(write.ticket.write_or(|| async { true }, || async { false }))
 }
 
 #[test]
@@ -681,7 +740,7 @@ fn an_app_write_after_a_press_that_ended_the_mode_still_darkens_the_led() {
 
     let write = speeds.app_write(&route(1), SavedSpeed::Scaled(Some(speed(0x0200))));
 
-    assert!(write.ends_precision);
+    assert!(write.restore.is_some());
 }
 
 #[test]

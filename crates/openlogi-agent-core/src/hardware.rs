@@ -754,7 +754,8 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on:
 /// it reports no default DPI to write.
 ///
 /// When `led` is set, the same turn then lights (`true`) or darkens the DPI
-/// LED with [`show_precision_led`]. The LED never fails the speed write.
+/// LED with [`show_precision_led`]. The LED never fails the speed write: it
+/// gives up before the turn's timeout would.
 pub(crate) fn write_pointer_speed_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
@@ -771,6 +772,7 @@ pub(crate) fn write_pointer_speed_in_background(
                 &ticket,
                 &turn,
                 || async {
+                    let started = tokio::time::Instant::now();
                     let shared = op.resolve()?;
                     let landed = match target {
                         SpeedTarget::Scaled(speed) => openlogi_hid::set_pointer_speed_on(&shared, speed)
@@ -781,7 +783,7 @@ pub(crate) fn write_pointer_speed_in_background(
                             .map_or(Landed::NoDefaultDpi, Landed::Dpi),
                     };
                     if let Some(on) = led {
-                        show_precision_led(&shared, on).await;
+                        show_precision_led(&shared, on, started).await;
                     }
                     Ok(Some(landed))
                 },
@@ -814,15 +816,41 @@ pub(crate) fn write_pointer_speed_in_background(
     );
 }
 
+/// How long after its speed write started a DPI LED write may run: one
+/// second less than [`WRITE_TIMEOUT`], which bounds the speed write and the
+/// LED write together.
+const PRECISION_LED_BUDGET: Duration = WRITE_TIMEOUT.saturating_sub(Duration::from_secs(1));
+
+/// Run `led`, a DPI LED write that follows a speed write started at
+/// `write_started`, until [`PRECISION_LED_BUDGET`] after that start. `None`
+/// when it ran out of time. The write gives up inside [`WRITE_TIMEOUT`], so
+/// a lost LED reply cannot time out the speed write that already landed.
+async fn within_led_budget<T>(
+    write_started: tokio::time::Instant,
+    led: impl Future<Output = T>,
+) -> Option<T> {
+    tokio::time::timeout_at(write_started + PRECISION_LED_BUDGET, led)
+        .await
+        .ok()
+}
+
 /// Light (`on`) or darken the DPI LED of the mouse on `shared` for
-/// precision mode. A mouse without one gets no write. A failure is logged
+/// precision mode, after a speed write that started at `write_started`. A
+/// mouse without one gets no write. A failure or a lost reply is logged
 /// only: the LED is a hint, and the speed write it follows has landed.
-pub(crate) async fn show_precision_led(shared: &openlogi_hid::SharedChannel, on: bool) {
+pub(crate) async fn show_precision_led(
+    shared: &openlogi_hid::SharedChannel,
+    on: bool,
+    write_started: tokio::time::Instant,
+) {
     let index = shared.route().device_index();
-    match openlogi_hid::set_dpi_led_on(shared, on).await {
-        Ok(openlogi_hid::DpiLed::Set) => {}
-        Ok(openlogi_hid::DpiLed::Missing) => debug!(index, "no DPI LED to show precision mode"),
-        Err(error) => debug!(index, on, %error, "DPI LED write failed"),
+    match within_led_budget(write_started, openlogi_hid::set_dpi_led_on(shared, on)).await {
+        Some(Ok(openlogi_hid::DpiLed::Set)) => {}
+        Some(Ok(openlogi_hid::DpiLed::Missing)) => {
+            debug!(index, "no DPI LED to show precision mode");
+        }
+        Some(Err(error)) => debug!(index, on, %error, "DPI LED write failed"),
+        None => debug!(index, on, "DPI LED write ran out of time"),
     }
 }
 
@@ -2271,5 +2299,28 @@ mod tests {
                 operation: HidppOperation::WriteDpi
             })
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_led_reply_gives_up_before_the_speed_write_times_out() {
+        let outcome = tokio::time::timeout(WRITE_TIMEOUT, async {
+            let started = tokio::time::Instant::now();
+            // The speed write used most of the turn before the LED write.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let led = within_led_budget(started, std::future::pending::<()>()).await;
+            (led, started.elapsed())
+        })
+        .await;
+
+        let (led, elapsed) = outcome.expect("the speed result outlives a lost LED reply");
+        assert_eq!(led, None);
+        assert!(elapsed < WRITE_TIMEOUT, "gave up after {elapsed:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_led_write_that_answers_in_time_keeps_its_result() {
+        let started = tokio::time::Instant::now();
+
+        assert_eq!(within_led_budget(started, async { 7 }).await, Some(7));
     }
 }
