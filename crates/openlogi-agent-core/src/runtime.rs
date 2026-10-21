@@ -314,7 +314,13 @@ struct HeldDpiShift {
 }
 
 impl HeldDpiShift {
-    fn restore_to(&self, cycles: &DpiCycles) -> Option<Dpi> {
+    /// None while precision mode, turned on during the hold, owns the speed;
+    /// the reading goes too, as the end of precision mode sets the DPI.
+    fn restore_to(&self, cycles: &DpiCycles, speeds: &PointerSpeeds) -> Option<Dpi> {
+        if speeds.precision(&self.key) {
+            self.before.clear();
+            return None;
+        }
         cycles.current(&self.key).or_else(|| self.before.get())
     }
 }
@@ -370,11 +376,12 @@ impl HeldDpiShifts {
             return;
         };
         let cycles = Arc::clone(&executor.dpi_cycle);
+        let speeds = Arc::clone(&executor.pointer_speeds);
         restore_dpi_in_background(
             executor.access.op(&held.route),
             executor.pointer_speeds.ticket(&held.route),
             held.before.clone(),
-            move || held.restore_to(&*cycles.read().ok()?),
+            move || held.restore_to(&*cycles.read().ok()?, &speeds),
         );
     }
 }
@@ -971,7 +978,20 @@ mod tests {
                 ..DpiCycleState::default()
             },
         );
-        let held = HeldDpiShift {
+        let held = held_shift();
+        let speeds = PointerSpeeds::default();
+        // Never set and not read yet: a preset is not the DPI to return to.
+        assert_eq!(held.restore_to(&cycles, &speeds), None);
+        held.before.set(Dpi::new(1200));
+        assert_eq!(held.restore_to(&cycles, &speeds), Some(Dpi::new(1200)));
+        // A preset picked during the hold stays after release.
+        cycles.state_for(Some("mouse")).unwrap().step(true);
+        assert_eq!(held.restore_to(&cycles, &speeds), Some(Dpi::new(1600)));
+    }
+
+    /// A shift on "mouse" at a Bolt route, with nothing read yet.
+    fn held_shift() -> HeldDpiShift {
+        HeldDpiShift {
             presses: 1,
             key: "mouse".into(),
             route: DeviceRoute::Bolt {
@@ -979,14 +999,31 @@ mod tests {
                 slot: 1,
             },
             before: DpiBeforeShift::default(),
-        };
-        // Never set and not read yet: a preset is not the DPI to return to.
-        assert_eq!(held.restore_to(&cycles), None);
+        }
+    }
+
+    /// Precision mode turned on during the hold owns the speed, so the
+    /// release leaves the mouse at the precision DPI and forgets its reading.
+    #[test]
+    fn dpi_shift_release_leaves_precision_mode_alone() {
+        let held = held_shift();
+        let speeds = PointerSpeeds::default();
+        speeds.publish(
+            None,
+            [crate::pointer_speed::SpeedMouse {
+                key: "mouse".to_string(),
+                route: held.route.clone(),
+                saved: crate::pointer_speed::SavedSpeed::Dpi(Some(Dpi::new(1600))),
+            }],
+        );
+        let (on, _) = speeds
+            .toggle_precision(Some("mouse"), PrecisionPress::Assigned)
+            .expect("a DPI mouse toggles precision mode");
+        assert!(on);
         held.before.set(Dpi::new(1200));
-        assert_eq!(held.restore_to(&cycles), Some(Dpi::new(1200)));
-        // A preset picked during the hold stays after release.
-        cycles.state_for(Some("mouse")).unwrap().step(true);
-        assert_eq!(held.restore_to(&cycles), Some(Dpi::new(1600)));
+        let cycles = DpiCycles::default();
+        assert_eq!(held.restore_to(&cycles, &speeds), None);
+        assert_eq!(held.before.get(), None);
     }
 
     #[test]

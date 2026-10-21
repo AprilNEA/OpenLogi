@@ -441,7 +441,6 @@ impl PointerSpeeds {
     }
 
     /// Whether precision mode is on for the mouse `key` names.
-    #[cfg(test)]
     pub(crate) fn precision(&self, key: &str) -> bool {
         self.lock().precision.contains(key)
     }
