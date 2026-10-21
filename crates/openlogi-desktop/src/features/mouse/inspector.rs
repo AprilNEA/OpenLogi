@@ -18,7 +18,7 @@ use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::features::binding_editor::{
-    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_with, editor_section,
+    ActionOffer, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_with, editor_section,
     gesture_direction_icon,
 };
 use crate::state::AppState;
@@ -43,6 +43,8 @@ pub(super) struct BindingInspectorData<'a> {
     pub editing_app: Option<&'a str>,
     pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
     pub extra_actions: &'a [Action],
+    /// Catalog actions the picker leaves out.
+    pub hidden_actions: &'a [Action],
 }
 
 #[derive(Clone, Copy)]
@@ -161,7 +163,7 @@ fn button_inspector(
         && !overridden
         && gesture_map.is_some()
     {
-        return inherited_gesture_inspector(button, app, picker, pal, cx);
+        return inherited_gesture_inspector(button, app, picker, data.hidden_actions, pal, cx);
     }
 
     let action = data
@@ -241,7 +243,10 @@ fn button_inspector(
                 "inspector-action",
                 Some(&action),
                 picker,
-                data.extra_actions,
+                ActionOffer {
+                    extra: data.extra_actions,
+                    hidden: data.hidden_actions,
+                },
                 &on_pick,
                 pal,
                 cx,
@@ -334,6 +339,7 @@ fn inherited_gesture_inspector(
     button: ButtonId,
     app: &str,
     picker: ActionPickerContext<'_>,
+    hidden: &[Action],
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
@@ -376,7 +382,7 @@ fn inherited_gesture_inspector(
                 "inspector-gesture-override",
                 None,
                 picker,
-                &[],
+                ActionOffer { extra: &[], hidden },
                 &on_pick,
                 pal,
                 cx,
@@ -444,7 +450,10 @@ fn gesture_inspector(
                 "inspector-gesture-action",
                 Some(&current),
                 picker,
-                &[],
+                ActionOffer {
+                    extra: &[],
+                    hidden: data.hidden_actions,
+                },
                 &on_pick,
                 pal,
                 cx,
@@ -762,13 +771,13 @@ fn action_library(
     id_prefix: &'static str,
     current: Option<&Action>,
     picker: ActionPickerContext<'_>,
-    extra: &[Action],
+    offer: ActionOffer<'_>,
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
     let query = picker.search.read(cx).value();
-    let rows = action_rows_with(id_prefix, current, &query, extra, on_pick, pal);
+    let rows = action_rows_with(id_prefix, current, &query, offer, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()
@@ -1000,6 +1009,7 @@ mod tests {
             gesture_maps,
             dpi_gestures: false,
             extra_actions: &[],
+            hidden_actions: &[],
             virtual_thumbwheel: true,
             wheel_hold,
             editing_app: None,

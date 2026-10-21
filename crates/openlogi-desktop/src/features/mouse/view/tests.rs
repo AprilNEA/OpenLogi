@@ -224,6 +224,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 editing_app: None,
                 overridden: None,
                 extra_actions: &[],
+                hidden_actions: &[],
             },
             ActionPickerContext {
                 open: true,

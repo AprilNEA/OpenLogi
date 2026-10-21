@@ -1470,11 +1470,11 @@ fn a_key_binding_edit_repaints_the_secure_input_notice(cx: &mut gpui::TestAppCon
 }
 
 /// A G-series mouse carries the gaming control tables and no `0x1b04`. The
-/// OS hook still remaps its middle/back/forward, and `ShowActionsRing`
-/// dispatches from those same buttons, so both panels appear, with or without
-/// a layout for the model (#392, #730, #877).
+/// OS hook still remaps its middle/back/forward, so it gets the Buttons panel,
+/// with or without a layout for the model (#392, #730, #877). It gets no
+/// Actions Ring, so its buttons are not offered one either.
 #[test]
-fn a_mouse_without_reprogcontrols_still_gets_buttons_and_ring() {
+fn a_mouse_without_reprogcontrols_gets_buttons_but_no_ring() {
     let caps = Some(Capabilities::from_feature_ids(&[0x2201, 0x8100, 0x8110]));
     let unknown_model = record(DeviceKind::Mouse, caps);
     let g502 = DeviceRecord {
@@ -1484,7 +1484,8 @@ fn a_mouse_without_reprogcontrols_still_gets_buttons_and_ring() {
     for mouse in [unknown_model, g502] {
         let tabs = DetailTab::tabs_for(&mouse);
         assert!(tabs.contains(&DetailTab::Buttons));
-        assert!(tabs.contains(&DetailTab::ActionsRing));
+        assert!(!tabs.contains(&DetailTab::ActionsRing));
+        assert!(!super::offers_actions_ring(&mouse));
         assert!(tabs.contains(&DetailTab::Pointer));
     }
 }
