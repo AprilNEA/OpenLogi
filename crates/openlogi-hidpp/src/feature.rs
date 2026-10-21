@@ -5,6 +5,7 @@ use std::{any::Any, sync::Arc};
 use crate::{
     channel::{
         AbandonedReply, HidppChannel, HidppMessage, LONG_REPORT_LENGTH, MessageListenerGuard,
+        RequestSwIds,
     },
     emitter::EventEmitter,
     nibble::U4,
@@ -86,11 +87,13 @@ pub trait EmittingFeature<T>: Feature {
 ///
 /// Implemented by a feature's event enum. [`EventSource::attach`] calls
 /// [`Self::decode_message`] for every unsolicited broadcast addressed to the
-/// feature, so this is the only part of a feature's event handling that has
-/// to vary — [`EventSource`] owns the listener registration, the
-/// [`event_message`] filtering, and the emitting. Returning `None` drops the
-/// report exactly like the hand-rolled per-feature listeners this replaced
-/// did on an unrecognised sub-id or an unparsable payload.
+/// feature, and [`Self::decode_foreign_response`] for every response
+/// addressed to it that answers another client's request. These are the only
+/// parts of a feature's event handling that have to vary — [`EventSource`]
+/// owns the listener registration, the [`inbound_report`] filtering, and the
+/// emitting. Returning `None` drops the report exactly like the hand-rolled
+/// per-feature listeners this replaced did on an unrecognised sub-id or an
+/// unparsable payload.
 pub(crate) trait DecodeEvent: Clone + Send + Sync + 'static {
     /// Decodes `payload` for event sub-id `sub_id`, or returns `None` to drop
     /// the report.
@@ -120,6 +123,21 @@ pub(crate) trait DecodeEvent: Clone + Send + Sync + 'static {
         }
         Self::decode(sub_id, &msg.extend_payload())
     }
+
+    /// Decodes `response`, a response that answers a request another client
+    /// sent, or returns `None` to drop it.
+    ///
+    /// "Another client" is any sender whose requests carry a software id this
+    /// channel never sends (see [`RequestSwIds`]). Its response tells this
+    /// channel that the client changed something. The default drops every
+    /// such response; a feature decodes one only when its owner must learn of
+    /// that change.
+    fn decode_foreign_response(_response: &v20::Message) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
 
 /// Owns the [`EventEmitter`] and message listener backing an
@@ -127,7 +145,7 @@ pub(crate) trait DecodeEvent: Clone + Send + Sync + 'static {
 ///
 /// Every emitting feature used to hand-roll the same listener ceremony in its
 /// `CreatableFeature::new`: build an `Arc<EventEmitter<E>>`, register a
-/// guarded message listener, filter the raw report through [`event_message`],
+/// guarded message listener, filter the raw report through [`inbound_report`],
 /// and emit whatever the feature's own decode step produced. A feature now
 /// holds one `EventSource<E>` field, builds it with [`Self::attach`], and
 /// implements [`EmittingFeature`] with a one-line [`Self::listen`] delegate.
@@ -139,20 +157,30 @@ pub(crate) struct EventSource<E: DecodeEvent> {
 }
 
 impl<E: DecodeEvent> EventSource<E> {
-    /// Registers a listener on `chan` that decodes broadcasts addressed to
-    /// `(device_index, feature_index)` via [`DecodeEvent::decode_message`] and
-    /// emits them to receivers created by [`Self::listen`].
+    /// Registers a listener on `chan` that decodes the reports addressed to
+    /// `(device_index, feature_index)` — broadcasts via
+    /// [`DecodeEvent::decode_message`] and other clients' responses via
+    /// [`DecodeEvent::decode_foreign_response`] — and emits them to receivers
+    /// created by [`Self::listen`].
     pub(crate) fn attach(chan: &Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
         let emitter = Arc::new(EventEmitter::new());
+        // Read once. Only `set_sw_id_policy` changes the policy, and it needs
+        // `&mut HidppChannel`: a feature that decodes foreign responses keeps
+        // `chan` shared in its endpoint for as long as this listener lives.
+        let own = chan.request_sw_ids();
 
         let listener = chan.add_msg_listener_guarded({
             let emitter = Arc::clone(&emitter);
 
             move |raw, matched| {
-                let Some(msg) = event_message(raw, matched, device_index, feature_index) else {
-                    return;
+                let event = match inbound_report(raw, matched, device_index, feature_index, own) {
+                    Some(InboundReport::Broadcast(msg)) => E::decode_message(&msg),
+                    Some(InboundReport::ForeignResponse(response)) => {
+                        E::decode_foreign_response(&response)
+                    }
+                    None => None,
                 };
-                if let Some(event) = E::decode_message(&msg) {
+                if let Some(event) = event {
                     emitter.emit(event);
                 }
             }
@@ -303,35 +331,54 @@ impl FeatureEndpoint {
     }
 }
 
+/// A report that a feature's event listener may decode, by who caused it.
+///
+/// Both variants carry the whole message, so the caller still knows how many
+/// payload bytes it carried on the wire.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InboundReport {
+    /// A device notification: software id `0`. Its function id is the event's
+    /// sub-id.
+    Broadcast(v20::Message),
+    /// A response to a request that another client sent: a nonzero software
+    /// id that the channel's own requests never carry.
+    ForeignResponse(v20::Message),
+}
+
 /// Shared prelude for a feature's event listener.
 ///
 /// Drops reports already matched to an outgoing request, parses the raw report
-/// as a HID++2.0 message, and keeps only unsolicited broadcasts addressed to
-/// this `(device_index, feature_index)` with a zero software id. Returns the
-/// whole message, so the caller still knows how many payload bytes it carried
-/// on the wire, and leaves sub-id dispatch to the caller — so a multi-event
-/// feature filters its sub-ids explicitly rather than folding the check into
-/// the header guard.
-pub(crate) fn event_message(
+/// as a HID++2.0 message, and keeps only the reports addressed to this
+/// `(device_index, feature_index)` that no request of this channel caused:
+/// broadcasts with a zero software id, and responses whose software id is not
+/// in `own`. A response with an id in `own` can answer one of this channel's
+/// own requests even when nothing matched it — late, or abandoned — so it is
+/// dropped. Sub-id dispatch is left to the caller, so a multi-event feature
+/// filters its sub-ids explicitly rather than folding the check into the
+/// header guard.
+pub(crate) fn inbound_report(
     raw: HidppMessage,
     matched: bool,
     device_index: u8,
     feature_index: u8,
-) -> Option<v20::Message> {
+    own: RequestSwIds,
+) -> Option<InboundReport> {
     if matched {
         return None;
     }
 
     let msg = v20::Message::from(raw);
     let header = msg.header();
-    if header.device_index != device_index
-        || header.feature_index != feature_index
-        || header.software_id.to_lo() != 0
-    {
+    if header.device_index != device_index || header.feature_index != feature_index {
         return None;
     }
-
-    Some(msg)
+    if header.software_id.to_lo() == 0 {
+        Some(InboundReport::Broadcast(msg))
+    } else if own.contains(header.software_id) {
+        None
+    } else {
+        Some(InboundReport::ForeignResponse(msg))
+    }
 }
 
 bitflags::bitflags! {
@@ -374,12 +421,17 @@ bitflags::bitflags! {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeEvent, event_message};
+    use super::{DecodeEvent, InboundReport, inbound_report};
     use crate::{
-        channel::HidppMessage,
+        channel::{HidppMessage, RequestSwIds, SwIdPolicy},
         nibble::U4,
         protocol::v20::{Message, MessageHeader},
     };
+
+    /// The default policy's set: id `1` only.
+    fn own() -> RequestSwIds {
+        SwIdPolicy::default().request_sw_ids()
+    }
 
     fn header(device_index: u8, feature_index: u8, function: u8, software: u8) -> MessageHeader {
         MessageHeader {
@@ -390,19 +442,27 @@ mod tests {
         }
     }
 
-    /// Builds a raw long report carrying a HID++2.0 broadcast with the given
-    /// header fields and a recognisable payload.
-    fn broadcast(device_index: u8, feature_index: u8, function: u8, software: u8) -> HidppMessage {
+    /// Builds a HID++2.0 long report with the given header fields and a
+    /// recognisable payload.
+    fn message(device_index: u8, feature_index: u8, function: u8, software: u8) -> Message {
         Message::Long(
             header(device_index, feature_index, function, software),
             [0xab; 16],
         )
-        .into()
+    }
+
+    /// [`message`] as the raw report a listener receives.
+    fn report(device_index: u8, feature_index: u8, function: u8, software: u8) -> HidppMessage {
+        message(device_index, feature_index, function, software).into()
     }
 
     #[test]
     fn accepts_matching_broadcast_and_returns_sub_id() {
-        let msg = event_message(broadcast(2, 5, 1, 0), false, 2, 5).expect("broadcast should pass");
+        let Some(InboundReport::Broadcast(msg)) =
+            inbound_report(report(2, 5, 1, 0), false, 2, 5, own())
+        else {
+            panic!("broadcast should pass");
+        };
         assert_eq!(msg.header().function_id.to_lo(), 1);
         assert_eq!(msg.extend_payload(), [0xab; 16]);
     }
@@ -410,25 +470,48 @@ mod tests {
     #[test]
     fn rejects_request_matched_report() {
         // A report already matched to an outgoing request is a response, not an
-        // event.
-        assert!(event_message(broadcast(2, 5, 0, 0), true, 2, 5).is_none());
+        // event, whatever software id it carries.
+        assert!(inbound_report(report(2, 5, 0, 0), true, 2, 5, own()).is_none());
+        assert!(inbound_report(report(2, 5, 3, 9), true, 2, 5, own()).is_none());
     }
 
     #[test]
     fn rejects_other_device_or_feature() {
-        assert!(event_message(broadcast(9, 5, 0, 0), false, 2, 5).is_none());
-        assert!(event_message(broadcast(2, 9, 0, 0), false, 2, 5).is_none());
+        for software in [0, 9] {
+            assert!(inbound_report(report(9, 5, 3, software), false, 2, 5, own()).is_none());
+            assert!(inbound_report(report(2, 9, 3, software), false, 2, 5, own()).is_none());
+        }
     }
 
     #[test]
     fn gates_on_software_id_only_not_sub_id() {
-        // Only the software id gates a broadcast: a nonzero one is rejected, but
-        // a nonzero function id is a valid event sub-id the caller dispatches on
-        // and must still pass. This is the invariant the old per-feature
+        // Only the software id tells a broadcast from a response: a nonzero
+        // function id is a valid event sub-id the caller dispatches on and
+        // must still pass as a broadcast. This is the invariant the old per-feature
         // `nibble::combine(software_id, function_id) != 0` guard got right only
         // by accident (those features happened to emit a single sub-id 0 event).
-        assert!(event_message(broadcast(2, 5, 0, 1), false, 2, 5).is_none());
-        assert!(event_message(broadcast(2, 5, 7, 0), false, 2, 5).is_some());
+        assert!(matches!(
+            inbound_report(report(2, 5, 7, 0), false, 2, 5, own()),
+            Some(InboundReport::Broadcast(..))
+        ));
+    }
+
+    #[test]
+    fn drops_an_unmatched_response_this_channel_may_have_asked_for() {
+        // A late or abandoned reply to this channel's own request matches
+        // nothing, but it reports no change made by anyone else.
+        assert!(inbound_report(report(2, 5, 3, 1), false, 2, 5, own()).is_none());
+    }
+
+    #[test]
+    fn keeps_another_clients_response_whole() {
+        for software in [2, 9, 15] {
+            assert_eq!(
+                inbound_report(report(2, 5, 3, software), false, 2, 5, own()),
+                Some(InboundReport::ForeignResponse(message(2, 5, 3, software))),
+                "software id {software}"
+            );
+        }
     }
 
     /// An event that keeps the sub-id and the first payload byte, and needs

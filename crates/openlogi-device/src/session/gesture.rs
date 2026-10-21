@@ -46,6 +46,7 @@ pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
 pub use main_wheel::MainWheelDivert;
 
+use super::capture_restore::ArmedReporting;
 pub use super::capture_restore::{
     CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome,
     CaptureSessionStop, PendingCaptureRestore,
@@ -364,6 +365,10 @@ impl ArmedCapture for GestureCapture {
 
     async fn rearm(&self) {
         self.armed.rearm().await;
+    }
+
+    fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
+        self.armed.armed_reporting()
     }
 
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {

@@ -2,7 +2,11 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{feature::DecodeEvent, nibble::U4, protocol::v20};
 
-use super::ControlId;
+use super::{CidReportingChangeEcho, ControlId};
+
+/// `setCidReporting`, the function whose response [`ReprogControlsEvent::ReportingChangedElsewhere`]
+/// carries.
+const SET_CID_REPORTING: u8 = 3;
 
 fn i16_from_be_payload(bytes: &[u8]) -> i16 {
     i16::from_be_bytes([bytes[0], bytes[1]])
@@ -62,6 +66,22 @@ pub enum ReprogControlsEvent {
         /// Vertical wheel delta.
         delta_vertical: i16,
     },
+    /// Another client changed how one control reports: the device's response
+    /// to a `setCidReporting` (function `3`) request that this channel did
+    /// not send. Another application (Logi Options+, for example) or another
+    /// OpenLogi channel to the same HID node sent it.
+    ///
+    /// The echo carries only the settings that request changed; a `None`
+    /// field kept its value. The feature defines no notification for such a
+    /// change, so this response, which reaches every open handle of the node,
+    /// is the only report of it. Logi Options+ 2.8 handles the same
+    /// response as a change to the control's diversion (reverse-engineered:
+    /// static analysis of its `0x1b04` unexpected-response handling).
+    ///
+    /// Only [`super::ReprogControlsFeature`]'s event stream publishes this
+    /// variant: it needs the channel's own software ids, which
+    /// [`decode_event`] does not have.
+    ReportingChangedElsewhere(CidReportingChangeEcho),
 }
 
 impl ReprogControlsEvent {
@@ -73,6 +93,9 @@ impl ReprogControlsEvent {
 }
 
 /// Decode an unsolicited `0x1b04` HID++ message.
+///
+/// Only broadcasts (software id `0`) decode here. A response never does, so
+/// this never returns [`ReprogControlsEvent::ReportingChangedElsewhere`].
 #[must_use]
 pub fn decode_event(
     msg: &v20::Message,
@@ -123,5 +146,21 @@ pub(super) fn decode_event_payload(
 impl DecodeEvent for ReprogControlsEvent {
     fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
         decode_event_payload(sub_id, payload)
+    }
+
+    /// Decodes another client's `setCidReporting` response. Every other
+    /// response is dropped, and so is a short one: the echo is a long report,
+    /// and a short one would lack its remap and second flags byte.
+    fn decode_foreign_response(response: &v20::Message) -> Option<Self> {
+        match response {
+            v20::Message::Long(header, payload)
+                if header.function_id.to_lo() == SET_CID_REPORTING =>
+            {
+                Some(Self::ReportingChangedElsewhere(
+                    CidReportingChangeEcho::from_payload(*payload),
+                ))
+            }
+            _ => None,
+        }
     }
 }

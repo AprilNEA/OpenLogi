@@ -89,6 +89,13 @@ impl ArmedControls {
         })
     }
 
+    /// The `0x1b04` accessor and every control armed through it, or `None`
+    /// when the session armed no `0x1b04` control.
+    pub(super) fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
+        let reprog = self.reprog.as_ref()?;
+        (!self.reporting.is_empty()).then_some((reprog, self.reporting.as_slice()))
+    }
+
     /// Convert all armed firmware state into the one capability that can
     /// release it. Consuming `self` prevents a session and a restore retry from
     /// both claiming ownership at once.

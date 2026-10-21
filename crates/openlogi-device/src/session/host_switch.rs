@@ -1197,7 +1197,8 @@ fn key_trigger(
             })
         }
         reprog_controls::ReprogControlsEvent::DivertedRawMouseXy { .. }
-        | reprog_controls::ReprogControlsEvent::DivertedRawWheel { .. } => None,
+        | reprog_controls::ReprogControlsEvent::DivertedRawWheel { .. }
+        | reprog_controls::ReprogControlsEvent::ReportingChangedElsewhere(_) => None,
     }
 }
 

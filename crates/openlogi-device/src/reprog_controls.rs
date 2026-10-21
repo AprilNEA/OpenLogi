@@ -20,9 +20,10 @@
 
 use std::sync::Arc;
 
+use futures_lite::{Stream, StreamExt as _};
 use hidpp::{
     channel::HidppChannel,
-    feature::{CreatableFeature, reprog_controls as hidpp_reprog},
+    feature::{CreatableFeature, EmittingFeature as _, reprog_controls as hidpp_reprog},
     protocol::v20::Hidpp20Error,
 };
 
@@ -230,5 +231,21 @@ impl ReprogControlsV4 {
         )
         .await?;
         Ok(())
+    }
+
+    /// The reporting changes that other clients make on this feature, from
+    /// the feature's event stream: one [`CidReportingChangeEcho`] for every
+    /// `setCidReporting` that another client sent to the device. Another
+    /// client is another application (Logi Options+, for example) or another
+    /// OpenLogi channel to the same HID node. This channel's own writes never
+    /// appear, and only the changes made after this call arrive.
+    pub fn reporting_changes(&self) -> impl Stream<Item = CidReportingChangeEcho> + Send + use<> {
+        self.inner.listen().filter_map(|event| match event {
+            ReprogControlsEvent::ReportingChangedElsewhere(echo) => Some(echo),
+            ReprogControlsEvent::DivertedButtons(_)
+            | ReprogControlsEvent::DivertedRawMouseXy { .. }
+            | ReprogControlsEvent::AnalyticsKeyEvents(_)
+            | ReprogControlsEvent::DivertedRawWheel { .. } => None,
+        })
     }
 }

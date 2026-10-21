@@ -206,6 +206,10 @@ impl ArmedCapture for ArmedKeys {
         }
     }
 
+    fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
+        (!self.reporting.is_empty()).then_some((&self.controls, self.reporting.as_slice()))
+    }
+
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
         let feature_index = self.controls.feature_index();
         PendingCaptureRestore::new(

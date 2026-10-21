@@ -3,7 +3,9 @@
 //! Logitech's v6 document names this feature `SpecialKeysMseButtons`: it
 //! enumerates physical and virtual controls, lets host software divert or remap
 //! them, and emits notifications for diverted buttons, raw XY, analytics key
-//! events, and raw wheel movement.
+//! events, and raw wheel movement. The event stream also reports a reporting
+//! change that another client made (see
+//! [`ReprogControlsEvent::ReportingChangedElsewhere`]).
 
 use openlogi_hidpp_derive::Feature;
 
