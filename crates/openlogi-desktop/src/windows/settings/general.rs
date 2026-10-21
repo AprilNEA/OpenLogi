@@ -96,7 +96,8 @@ pub(super) fn general_page(
 
     let group = group
         .item(low_battery_notifications_item())
-        .item(lock_key_notifications_item());
+        .item(lock_key_notifications_item())
+        .item(backlight_notifications_item());
 
     // Momentum scrolling's app-wide default. A mouse can set its own on its
     // Pointer tab; the card counts those.
@@ -209,6 +210,20 @@ fn lock_key_notifications_item() -> SettingItem {
     } else {
         tr!("app.lock_key_notifications_description")
     })
+}
+
+/// The switch for the overlay's backlight indicator.
+fn backlight_notifications_item() -> SettingItem {
+    SettingItem::new(
+        tr!("app.backlight_notifications"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().backlight_notifications),
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_backlight_notifications(enabled));
+            },
+        ),
+    )
+    .description(tr!("app.backlight_notifications_description"))
 }
 
 /// A sensitivity slider laid out as the device pages lay theirs out — label
