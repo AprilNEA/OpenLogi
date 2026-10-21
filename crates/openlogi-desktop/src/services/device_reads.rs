@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::{Context, Subscription};
 use openlogi_core::hid::{
-    BacklightChange, BacklightState, DeviceRoute, DpiInfo, EasySwitchHosts, FnLockState,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     PointerSpeed, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use swr_core::{
@@ -159,6 +159,8 @@ impl DeviceReads {
     }
 
     /// Start the DPI query unless the same device route is already subscribed.
+    /// A write answers through [`Self::set_dpi_current`] with the DPI the
+    /// device reports, or [`Self::refresh_dpi`] when that is not known.
     pub(crate) fn ensure_dpi(
         &mut self,
         key: DeviceKey,
@@ -1046,6 +1048,36 @@ impl DeviceReads {
             read.load = Load::Loading;
         }
         read.query.revalidate();
+    }
+
+    /// Show `current` as `key`'s DPI reading now: the value the device
+    /// reported after a write. Like [`Self::set_fn_lock_ready`], a local
+    /// write supersedes a fetch still in flight. Only a ready reading takes
+    /// it, because the supported values come from the device's own read.
+    pub(crate) fn set_dpi_current(&mut self, key: &DeviceKey, current: Dpi) {
+        let Some(read) = self.dpi.get_mut(key) else {
+            return;
+        };
+        let Load::Ready(info) = &read.load else {
+            return;
+        };
+        let value = Arc::new(DpiInfo {
+            current,
+            capabilities: info.capabilities.clone(),
+        });
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<DpiInfo>, WriteError>(query_key(DPI, key), Some(value.clone()));
+        }
+        read.load = Load::Ready(value);
+    }
+
+    /// Re-read `key`'s DPI from the device, keeping the last value on screen
+    /// while it answers. The fallback after a write that did not land, when
+    /// the device's value is not known.
+    pub(crate) fn refresh_dpi(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.dpi.get_mut(key) {
+            read.query.revalidate();
+        }
     }
 
     /// Retry an exhausted initial SmartShift query.

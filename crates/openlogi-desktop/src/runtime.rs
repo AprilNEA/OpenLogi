@@ -289,6 +289,18 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_config_reload_result(result));
                 });
             }
+            ipc::GuiUpdate::DpiWritten {
+                key,
+                write,
+                dpi,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_dpi_written(&key, write, dpi, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::FnLockWritten { key, result } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| state.apply_fn_lock_written(&key, result));

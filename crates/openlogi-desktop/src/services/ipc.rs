@@ -41,7 +41,7 @@
 use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, EasySwitchHosts, FnLockState, LightCommand, PointerSpeed,
+    BacklightState, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, LightCommand, PointerSpeed,
     ReportRateInfo, WriteError,
 };
 use openlogi_ipc::SavedConfig;
@@ -105,6 +105,18 @@ pub enum GuiUpdate {
     },
     /// Whether the agent adopted the config currently on disk.
     ConfigReloadResult(Result<(), ConfigReloadError>),
+    /// The device's verdict on a DPI write the GUI asked for: taken, or the
+    /// typed refusal. Answers [`SetDpi`].
+    DpiWritten {
+        /// The device that was written.
+        key: DeviceKey,
+        /// Which write this answers: [`SetDpi::write`].
+        write: u64,
+        /// The DPI that was written.
+        dpi: Dpi,
+        /// `Ok` once the device took `dpi`, or why it did not.
+        result: Result<(), WriteError>,
+    },
     /// What a keyboard reports after an Fn-lock write the GUI asked for: the
     /// state it took, or the typed refusal. Answers [`SetFnLock`].
     FnLockWritten {

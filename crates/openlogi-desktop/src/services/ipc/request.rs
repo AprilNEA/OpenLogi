@@ -101,10 +101,15 @@ fn log_rejection(what: &str, outcome: Result<Result<(), WriteError>, Unavailable
     }
 }
 
-/// Apply a DPI value to a device now.
+/// Write a DPI value to a device now, answered as [`GuiUpdate::DpiWritten`]
+/// with the device's verdict.
 pub struct SetDpi {
     pub route: DeviceRoute,
     pub dpi: Dpi,
+    pub key: DeviceKey,
+    /// The number the state gave this write, returned with the answer so it
+    /// is matched to the write it answers.
+    pub write: u64,
 }
 
 impl Request for SetDpi {
@@ -116,8 +121,13 @@ impl Request for SetDpi {
             .await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
-        log_rejection("DPI", outcome);
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::DpiWritten {
+            key: self.key,
+            write: self.write,
+            dpi: self.dpi,
+            result: or_unavailable(outcome),
+        });
     }
 }
 
