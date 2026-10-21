@@ -999,8 +999,10 @@ async fn a_refused_next_leg_drops_the_holds_live_transition() {
         CapturedInput::Gesture(button, GestureDirection::Right),
         // A full desktop width finishes the first leg; the switch lands at once.
         motion(800),
-        // The next leg's Began is refused.
-        motion(100),
+        // The next leg's Began is refused. The report spans a desktop, so the
+        // leg's own Ended rides in the same batch and must not follow: it
+        // would end whichever swipe owns the Dock now.
+        motion(900),
         // Nothing owns the Dock for this hold any more.
         motion(100),
         CapturedInput::ButtonUp(button),

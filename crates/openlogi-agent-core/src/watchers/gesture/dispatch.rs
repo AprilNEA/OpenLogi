@@ -190,11 +190,12 @@ impl InputDispatcher {
     /// ending the Dock path refuses falls back to a cancel: a Dock gesture
     /// left open would hang mid-transition.
     ///
-    /// Returns whether a Began was refused. The Dock never opened that
-    /// transition, so the caller drops it instead of posting frames for it.
+    /// A refused Began stops the batch at once: the Dock never opened that
+    /// transition, so it is owed no ending, and one posted anyway would end
+    /// whichever hold owns the Dock now. Returns whether that happened, so the
+    /// caller drops the transition instead of posting frames for it.
     fn post_space_frames(&self, key: &str, button: ButtonId, frames: &[Frame]) -> bool {
         let mut refused = false;
-        let mut began_refused = false;
         for frame in frames {
             let ending = frame.phase != SpaceSwipePhase::Changed;
             if refused && !ending {
@@ -209,14 +210,14 @@ impl InputDispatcher {
             debug!(key, %button, phase = ?frame.phase, "live Space frame not posted");
             refused = true;
             match frame.phase {
-                SpaceSwipePhase::Began => began_refused = true,
+                SpaceSwipePhase::Began => return true,
                 SpaceSwipePhase::Ended => {
                     let _ = (self.post_space)(frame.progress, SpaceSwipePhase::Cancelled);
                 }
                 SpaceSwipePhase::Changed | SpaceSwipePhase::Cancelled => {}
             }
         }
-        began_refused
+        false
     }
 
     /// Whether `button`'s admitted gesture press on `session` is still live:
