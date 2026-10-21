@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::device_io_channel;
+use crate::replay::ReplayChannelHandle;
 
 const REPROG_INDEX: u8 = 2;
 const GESTURE_CID: u16 = reprog_controls::GESTURE_BUTTON_CID;
@@ -15,14 +16,34 @@ const MIDDLE_CID: u16 = 0x0052;
 const OWN_SW_ID: u8 = 0x01;
 /// A software id that no request on a scripted channel carries.
 const FOREIGN_SW_ID: u8 = 0x0a;
+/// The `getCidReporting` flags of a control diverted with raw XY.
+const DIVERTED_RAW_XY: u8 = 0x11;
 
 /// Each control's `getCidReporting` flags byte and remap.
 type ReportingState = Arc<Mutex<BTreeMap<u16, (u8, [u8; 2])>>>;
 
+/// Where another client's response is injected; `None` once used.
+type OtherClient = Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>;
+
+/// Both controls native and mapped to themselves.
+fn native_controls() -> ReportingState {
+    Arc::new(Mutex::new(BTreeMap::from([
+        (GESTURE_CID, (0x00, [0, 0])),
+        (MIDDLE_CID, (0x00, [0, 0])),
+    ])))
+}
+
 /// A mouse with the gesture button and the middle button on `0x1b04` at
 /// [`REPROG_INDEX`], and no other feature. `setCidReporting` writes update
 /// `state` and are echoed.
-fn mouse(state: ReportingState) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
+///
+/// When `other_client` holds a sender, the first write to the middle button
+/// also plays another client: it hands the gesture button back, and that
+/// client's response goes out through the sender.
+fn mouse(
+    state: ReportingState,
+    other_client: OtherClient,
+) -> (ScriptedRawHidChannel, ReplayChannelHandle) {
     ScriptedRawHidChannel::with_dynamic_responder(move |request| {
         let mut response = vec![0; 20];
         response[..4].copy_from_slice(&request[..4]);
@@ -62,8 +83,17 @@ fn mouse(state: ReportingState) -> (ScriptedRawHidChannel, crate::replay::Replay
                         *flags = (*flags & !setting) | (written & setting);
                     }
                 }
+                // Remap `0` keeps the current remap.
                 if request[7..9] != [0, 0] {
                     remap.copy_from_slice(&request[7..9]);
+                }
+                if id == MIDDLE_CID
+                    && let Some(sender) = other_client.lock().unwrap().take()
+                {
+                    state.insert(GESTURE_CID, (0x00, [0, 0]));
+                    sender
+                        .send(undivert_response(FOREIGN_SW_ID, GESTURE_CID, [0, 0]))
+                        .unwrap();
                 }
                 return Some(request.to_vec());
             }
@@ -100,7 +130,7 @@ fn requests(reports: &[Vec<u8>], function: u8, cid: u16) -> Vec<Vec<u8>> {
 
 /// Wait until `done` holds for the reports written so far.
 async fn written_until(
-    handle: &crate::replay::ReplayChannelHandle,
+    handle: &ReplayChannelHandle,
     what: &str,
     done: impl Fn(&[Vec<u8>]) -> bool,
 ) {
@@ -113,45 +143,65 @@ async fn written_until(
     .unwrap_or_else(|_| panic!("the session never wrote {what}"));
 }
 
+/// A running gesture capture session over `raw`: the gesture button diverted
+/// with raw XY, then the middle button diverted plainly.
+struct Session {
+    shutdown: oneshot::Sender<CaptureSessionStop>,
+    task: tokio::task::JoinHandle<Result<CaptureSessionOutcome, CaptureSessionFailure>>,
+}
+
+impl Session {
+    async fn start(raw: ScriptedRawHidChannel) -> Self {
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        };
+        let registry = ChannelRegistry::default();
+        registry.replace_node(
+            NodeId::from("mouse-node".to_owned()),
+            [route.clone()],
+            scripted_channel(raw).await,
+        );
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (sink, _inputs) = mpsc::unbounded_channel();
+            let (_signal, device_io) = device_io_channel();
+            let spec = CaptureSpec {
+                divert_gesture_sources: vec![GESTURE_CID],
+                divert_buttons: vec![(MIDDLE_CID, ButtonId::MiddleClick)],
+                ..CaptureSpec::default()
+            };
+            let host = CaptureHost {
+                sink,
+                shutdown: shutdown_rx,
+                channel_slot: Arc::new(RwLock::new(None)),
+                registry: &registry,
+                device_io,
+            };
+            run_capture_session(route, spec, host).await
+        });
+        Self { shutdown, task }
+    }
+
+    /// Stop the session and require that it handed every control back.
+    async fn stop(self) {
+        self.shutdown.send(CaptureSessionStop::Shutdown).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), self.task)
+            .await
+            .expect("the session stops")
+            .expect("the session task does not panic");
+        assert!(matches!(outcome, Ok(CaptureSessionOutcome::Restored)));
+    }
+}
+
 #[tokio::test]
 async fn another_clients_undivert_is_answered_and_this_channels_own_is_not() {
-    let state: ReportingState = Arc::new(Mutex::new(BTreeMap::from([
-        (GESTURE_CID, (0x00, [0, 0])),
-        (MIDDLE_CID, (0x00, [0, 0])),
-    ])));
-    let (raw, handle) = mouse(Arc::clone(&state));
+    let state = native_controls();
+    let (raw, handle) = mouse(Arc::clone(&state), OtherClient::default());
     let incoming = raw.incoming_sender();
-    let route = DeviceRoute::Direct {
-        vendor_id: 0x046d,
-        product_id: 0xb35b,
-    };
-    let registry = ChannelRegistry::default();
-    registry.replace_node(
-        NodeId::from("mouse-node".to_owned()),
-        [route.clone()],
-        scripted_channel(raw).await,
-    );
-    let (shutdown, shutdown_rx) = oneshot::channel();
-    let (sink, _inputs) = mpsc::unbounded_channel();
-    let session = tokio::spawn(async move {
-        let (_signal, device_io) = device_io_channel();
-        let spec = CaptureSpec {
-            divert_gesture_sources: vec![GESTURE_CID],
-            divert_buttons: vec![(MIDDLE_CID, ButtonId::MiddleClick)],
-            ..CaptureSpec::default()
-        };
-        let host = CaptureHost {
-            sink,
-            shutdown: shutdown_rx,
-            channel_slot: Arc::new(RwLock::new(None)),
-            registry: &registry,
-            device_io,
-        };
-        run_capture_session(route, spec, host).await
-    });
+    let session = Session::start(raw).await;
 
-    // The session subscribes to reporting changes before it looks up
-    // `0x1d4b`.
+    // Arming has finished once the session looks up `0x1d4b`.
     written_until(&handle, "the wireless lookup", |reports| {
         reports
             .iter()
@@ -193,8 +243,13 @@ async fn another_clients_undivert_is_answered_and_this_channels_own_is_not() {
     let [cid_hi, cid_lo] = GESTURE_CID.to_be_bytes();
     assert_eq!(
         redivert[4..9],
-        [cid_hi, cid_lo, 0x33, remap[0], remap[1]],
-        "the re-divert restores diversion and raw XY and keeps the other client's remap"
+        [cid_hi, cid_lo, 0x33, 0, 0],
+        "the re-divert restores diversion and raw XY, and writes no remap"
+    );
+    assert_eq!(
+        state.lock().unwrap()[&GESTURE_CID],
+        (DIVERTED_RAW_XY, remap),
+        "the other client's remap survives the re-divert"
     );
     // The middle button's response was handled first, so any answer to it
     // would already be written.
@@ -209,10 +264,35 @@ async fn another_clients_undivert_is_answered_and_this_channels_own_is_not() {
         "only arming writes the middle button"
     );
 
-    shutdown.send(CaptureSessionStop::Shutdown).unwrap();
-    let outcome = tokio::time::timeout(Duration::from_secs(2), session)
-        .await
-        .expect("the session stops")
-        .expect("the session task does not panic");
-    assert!(matches!(outcome, Ok(CaptureSessionOutcome::Restored)));
+    session.stop().await;
+}
+
+#[tokio::test]
+async fn a_change_while_arming_continues_is_answered_once_capture_runs() {
+    // Another client hands the gesture button back right after the session
+    // armed it, while the session still arms the middle button. Its only
+    // report of the change arrives before capture runs.
+    let state = native_controls();
+    let other_client = OtherClient::default();
+    let (raw, handle) = mouse(Arc::clone(&state), Arc::clone(&other_client));
+    *other_client.lock().unwrap() = Some(raw.incoming_sender());
+    let session = Session::start(raw).await;
+
+    written_until(&handle, "the gesture button's re-divert", |reports| {
+        requests(reports, 3, GESTURE_CID).len() == 2
+    })
+    .await;
+    assert!(
+        other_client.lock().unwrap().is_none(),
+        "the other client's change happened while arming"
+    );
+    let reports = handle.written_reports();
+    assert_eq!(
+        requests(&reports, 2, GESTURE_CID).len(),
+        2,
+        "arming and the change each read the control once"
+    );
+    assert_eq!(state.lock().unwrap()[&GESTURE_CID].0, DIVERTED_RAW_XY);
+
+    session.stop().await;
 }

@@ -145,25 +145,25 @@ impl ArmedReporting {
     /// it was armed, given its `current` reporting, or `None` when `current`
     /// still has every setting that arming wrote.
     ///
-    /// The change writes the current remap, not the one read before arming:
-    /// capture does not own the remap, and another client may have just set
-    /// it. The original state stays the one that teardown restores.
+    /// The change leaves the remap alone (`remap: None`, which the device
+    /// reads as "keep the current remap"). Capture does not own the remap,
+    /// and another client may set it again between the read of `current` and
+    /// this write; writing the remap read in `current` would undo that. The
+    /// original state stays the one that teardown restores.
     pub(crate) fn redivert_change(
         self,
         current: reprog_controls::CidReporting,
     ) -> Option<reprog_controls::CidReportingChange> {
-        let change = Self {
-            original: current,
-            ..self
-        }
-        .divert_change();
+        let change = reprog_controls::CidReportingChange {
+            remap: None,
+            ..self.divert_change()
+        };
         (!holds(change, current)).then_some(change)
     }
 }
 
 /// Whether `current` already has every flag that `change` writes. The remap
-/// is not compared: [`ArmedReporting::redivert_change`] writes the current one
-/// back.
+/// is not compared: [`ArmedReporting::redivert_change`] does not write it.
 fn holds(
     change: reprog_controls::CidReportingChange,
     current: reprog_controls::CidReporting,

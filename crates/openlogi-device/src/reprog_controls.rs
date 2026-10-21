@@ -239,7 +239,9 @@ impl ReprogControlsV4 {
     /// client is another application (Logi Options+, for example) or another
     /// OpenLogi channel to the same HID node. This channel's own writes never
     /// appear, and only the changes made after this call arrive.
-    pub fn reporting_changes(&self) -> impl Stream<Item = CidReportingChangeEcho> + Send + use<> {
+    pub fn reporting_changes(
+        &self,
+    ) -> impl Stream<Item = CidReportingChangeEcho> + Send + Sync + use<> {
         self.inner.listen().filter_map(|event| match event {
             ReprogControlsEvent::ReportingChangedElsewhere(echo) => Some(echo),
             ReprogControlsEvent::DivertedButtons(_)

@@ -14,11 +14,11 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use futures_lite::{Stream, StreamExt as _};
+use futures_lite::StreamExt as _;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use super::ArmedCapture;
+use super::{ArmedCapture, ReportingChangeStream};
 use crate::reprog_controls::CidReportingChangeEcho;
 
 /// The span over which the re-diverts of one control are counted.
@@ -89,18 +89,15 @@ impl RedivertBudget {
 
 /// One capture session's subscription to the reporting changes that other
 /// clients make, and the re-divert budget that answers them.
-pub(super) struct ReportingChanges<S> {
+pub(super) struct ReportingChanges {
     /// `None` when the session armed no `0x1b04` control, or once the
     /// subscription has closed.
-    changes: Option<S>,
+    changes: Option<ReportingChangeStream>,
     budget: RedivertBudget,
 }
 
-impl<S> ReportingChanges<S>
-where
-    S: Stream<Item = CidReportingChangeEcho> + Unpin,
-{
-    pub(super) fn new(changes: Option<S>) -> Self {
+impl ReportingChanges {
+    pub(super) fn new(changes: Option<ReportingChangeStream>) -> Self {
         Self {
             changes,
             budget: RedivertBudget::default(),
@@ -234,18 +231,32 @@ mod tests {
     }
 
     #[test]
-    fn a_change_that_undid_the_diversion_is_reverted_with_the_current_remap() {
+    fn a_change_that_undid_the_diversion_is_reverted_without_touching_the_remap() {
         let armed =
             ArmedReporting::pointer(CID, reporting(false, false, None), PointerDivert::RawXy);
-        let remap = Some(ControlId(0x0052));
+        // Another client remapped the control. `remap: None` keeps whatever
+        // remap the device holds when the write lands.
         assert_eq!(
-            armed.redivert_change(reporting(false, true, remap)),
+            armed.redivert_change(reporting(false, true, Some(ControlId(0x0052)))),
             Some(CidReportingChange {
                 diverted: Some(true),
                 raw_xy: Some(true),
-                remap,
+                remap: None,
                 ..Default::default()
             })
+        );
+        // Arming a remapped control wrote its remap; the re-divert still
+        // leaves it to the device.
+        let remapped = ArmedReporting::pointer(
+            CID,
+            reporting(false, false, Some(ControlId(0x0056))),
+            PointerDivert::Plain,
+        );
+        assert_eq!(
+            remapped
+                .redivert_change(reporting(false, false, None))
+                .map(|change| change.remap),
+            Some(None)
         );
         // Raw XY alone counts too: a raw-XY gesture source without it reports
         // no movement.

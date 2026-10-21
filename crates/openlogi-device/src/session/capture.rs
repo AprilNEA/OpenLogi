@@ -12,6 +12,7 @@
 mod liveness;
 mod redivert;
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -110,6 +111,22 @@ pub(super) enum Liveness {
     Unwatched,
 }
 
+/// The reporting changes that other clients make on one capture's `0x1b04`
+/// feature (see [`ReprogControlsV4::reporting_changes`]). `Sync` because the
+/// armed capture that holds it is shared across the session's awaits.
+pub(super) type ReportingChangeStream =
+    Pin<Box<dyn Stream<Item = CidReportingChangeEcho> + Send + Sync>>;
+
+/// Subscribe to the reporting changes that other clients make on `controls`.
+///
+/// The event stream does not replay a change made before the subscription.
+/// Arming therefore subscribes before its first diversion write: a change to
+/// an armed control while arming continues then waits in the stream until
+/// [`run_capture`] answers it.
+pub(super) fn subscribe_reporting_changes(controls: &ReprogControlsV4) -> ReportingChangeStream {
+    Box::pin(controls.reporting_changes())
+}
+
 /// The device-specific half of a capture session: the controls one session
 /// armed, what their reports mean, and how they are re-armed and handed back.
 /// [`run_capture`] owns the rest.
@@ -142,6 +159,11 @@ pub(super) trait ArmedCapture {
     /// of these again when another client hands it back.
     fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])>;
 
+    /// Take the subscription to the reporting changes that other clients
+    /// make, which arming took before its first diversion write. `None` when
+    /// this capture armed no `0x1b04` control, or once taken.
+    fn take_reporting_changes(&mut self) -> Option<ReportingChangeStream>;
+
     /// Convert all armed firmware state into the one capability that can
     /// release it. Consuming `self` prevents a session and a restore retry
     /// from both claiming ownership at once.
@@ -156,7 +178,7 @@ pub(super) trait ArmedCapture {
 /// for the caller to retry on the current inventory channel.
 pub(super) async fn run_capture<A: ArmedCapture>(
     shared: SharedChannel,
-    armed: A,
+    mut armed: A,
     host: CaptureHost<'_>,
 ) -> CaptureSessionOutcome {
     let CaptureHost {
@@ -195,13 +217,7 @@ pub(super) async fn run_capture<A: ArmedCapture>(
             on_report(&v20::Message::from(raw));
         }
     });
-    // Subscribed with the listener, before the wireless lookup, so that no
-    // change another client makes once capture is armed goes unanswered.
-    let changes = ReportingChanges::new(
-        armed
-            .armed_reporting()
-            .map(|(controls, _)| Box::pin(controls.reporting_changes())),
-    );
+    let changes = ReportingChanges::new(armed.take_reporting_changes());
 
     // Wireless devices drop their diverted-control state when they
     // power-cycle (idle sleep, power switch, Easy-Switch host change) — the
@@ -312,16 +328,13 @@ async fn idle_deadline(watchdog: Option<&Watchdog<'_>>) {
 /// the device announces a reconnect or another client hands a control back.
 /// Returns only the typed reason capture stopped; restoration performs a
 /// fresh registry lookup after monitoring.
-async fn monitor<A: ArmedCapture, S>(
+async fn monitor<A: ArmedCapture>(
     context: CaptureMonitor<'_, A>,
     wireless: Option<WirelessDeviceStatusFeature>,
-    mut changes: ReportingChanges<S>,
+    mut changes: ReportingChanges,
     shutdown: oneshot::Receiver<CaptureSessionStop>,
     mut device_io: DeviceIoGate,
-) -> CaptureStop
-where
-    S: Stream<Item = CidReportingChangeEcho> + Unpin,
-{
+) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
     let mut shutdown = std::pin::pin!(shutdown);
     let mut watchdog = context.activity.map(Watchdog::new);

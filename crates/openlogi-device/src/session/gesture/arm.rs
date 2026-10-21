@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 use super::main_wheel::{self, ArmedMainWheel, MainWheelDivert};
 use super::{CaptureSpec, CapturedInput};
 use crate::reprog_controls::{self, ReprogControlsV4};
-use crate::session::capture::open_device;
+use crate::session::capture::{ReportingChangeStream, open_device, subscribe_reporting_changes};
 use crate::session::capture_restore::{
     ArmedReporting, CaptureError, CaptureSessionFailure, HiResWheelRestore, PendingCaptureRestore,
     PointerDivert, ReprogRestore, ThumbwheelRestore,
@@ -52,6 +52,10 @@ pub(super) struct ArmedControls {
     pub(super) hires_per_notch: Option<NonZeroU8>,
     /// Original reporting state for every diverted `0x1b04` control.
     reporting: Vec<ArmedReporting>,
+    /// The reporting changes that other clients make on `reprog`, subscribed
+    /// before the first diversion write; [`Self::take_reporting_changes`]
+    /// hands it to the running session.
+    reporting_changes: Option<ReportingChangeStream>,
     /// `0x2150` accessor and the information read before diverting it,
     /// present when the thumb wheel is diverted.
     pub(super) thumb: Option<ArmedThumbwheel>,
@@ -94,6 +98,14 @@ impl ArmedControls {
     pub(super) fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
         let reprog = self.reprog.as_ref()?;
         (!self.reporting.is_empty()).then_some((reprog, self.reporting.as_slice()))
+    }
+
+    /// Take the subscription to other clients' reporting changes, or `None`
+    /// when the session armed no `0x1b04` control or the subscription was
+    /// already taken.
+    pub(super) fn take_reporting_changes(&mut self) -> Option<ReportingChangeStream> {
+        let changes = self.reporting_changes.take()?;
+        (!self.reporting.is_empty()).then_some(changes)
     }
 
     /// Convert all armed firmware state into the one capability that can
@@ -203,6 +215,7 @@ pub(super) async fn arm_controls_into(
         // Register an accessor before the first divert, so a failure on any
         // divert (including the first) can become a restore capability.
         armed.reprog = Some(rc.clone());
+        armed.reporting_changes = Some(subscribe_reporting_changes(&rc));
 
         // Divert each gesture-mode source; a source not listed stays native
         // (an idle HID++ control must not be captured-and-dropped).

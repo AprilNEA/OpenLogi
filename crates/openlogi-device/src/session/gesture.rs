@@ -40,7 +40,7 @@ use crate::SharedChannel;
 use crate::channel::route::DeviceRoute;
 
 pub use super::capture::CaptureHost;
-use super::capture::{ArmedCapture, Liveness, run_capture};
+use super::capture::{ArmedCapture, Liveness, ReportingChangeStream, run_capture};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
@@ -369,6 +369,10 @@ impl ArmedCapture for GestureCapture {
 
     fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
         self.armed.armed_reporting()
+    }
+
+    fn take_reporting_changes(&mut self) -> Option<ReportingChangeStream> {
+        self.armed.take_reporting_changes()
     }
 
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
