@@ -1051,7 +1051,15 @@ fn reversal_cooldown_scales_by_time_since_the_departed_direction() {
     // the corrective burst's age (332 ms of the 2000 ms recovery).
     let compressed = 3.25 + (4.0 - 3.25) * (332.0 / 2000.0);
     assert!((cooldown.attenuate(4.0, at(400)) - compressed).abs() < EPSILON);
-    // A tick after the full recovery window runs unscaled.
+    // Ticks under a cooldown apart keep the axis warm, so the recovery
+    // window, not a cold restart, decides when the compression ends: still
+    // fading late in the window (1832 ms of 2000)…
+    for millis in [700, 1000, 1300, 1600] {
+        cooldown.attenuate(4.0, at(millis));
+    }
+    let fading = 3.25 + (4.0 - 3.25) * (1832.0 / 2000.0);
+    assert!((cooldown.attenuate(4.0, at(1900)) - fading).abs() < EPSILON);
+    // …and unscaled once the corrective burst is a full recovery old.
     assert!((cooldown.attenuate(4.0, at(2068)) - 4.0).abs() < EPSILON);
 }
 
