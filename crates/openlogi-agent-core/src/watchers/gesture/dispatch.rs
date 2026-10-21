@@ -17,6 +17,7 @@ use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
 use crate::runtime::hook::SharedHookMaps;
+use crate::runtime::scroll::HidppWheel;
 use crate::runtime::{HidppSessionId, PressToken};
 
 /// Effective thumb-wheel configuration whose continuity is tied to one
@@ -276,6 +277,7 @@ impl InputDispatcher {
         match binding.wheel() {
             HeldWheel::HorizontalScroll => self.outputs.post_scroll(
                 session,
+                HidppWheel::Main,
                 held_wheel_scroll(delta, per_notch, plan.invert_wheel),
                 1.0,
             ),
@@ -308,6 +310,7 @@ impl InputDispatcher {
                 debug!(key, ?button, action = %action.label(), ?delta, "thumb wheel → scroll");
                 self.outputs.post_scroll(
                     session,
+                    HidppWheel::Thumb,
                     delta,
                     configuration.sensitivity.scroll_multiplier(),
                 );

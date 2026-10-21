@@ -15,7 +15,7 @@ use openlogi_core::config::{
 use openlogi_core::scroll::ScrollDelta;
 use tracing::warn;
 
-use super::{MotionTuning, ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
+use super::{HidppWheel, MotionTuning, ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
 use crate::runtime::HidppSessionId;
 
 /// OS-hook callbacks must fail open rather than wait for the worker.
@@ -210,7 +210,7 @@ impl ScrollInput {
             (ScrollOutputMode::Eased { at }, _) => ScrollOutputMode::Eased { at },
             (
                 ScrollOutputMode::Smooth { at } | ScrollOutputMode::Phased { at },
-                ScrollSource::Hidpp(_),
+                ScrollSource::Hidpp(..),
             ) => ScrollOutputMode::hidpp(smoothing, self.impulse, at)
                 .unwrap_or(ScrollOutputMode::Direct),
             (
@@ -224,7 +224,7 @@ impl ScrollInput {
 
 enum ScrollCommand {
     Input(ScrollInput),
-    CancelSource(ScrollSource),
+    CancelSession(HidppSessionId),
     Wake,
 }
 
@@ -281,7 +281,7 @@ impl OverflowCancellations {
         input.generation == self.generation
             && match &input.source {
                 ScrollSource::OsHook(_) => true,
-                ScrollSource::Hidpp(session) => self
+                ScrollSource::Hidpp(session, _) => self
                     .sessions
                     .get(session.device_key())
                     .is_none_or(|cancelled_epoch| session.epoch() > *cancelled_epoch),
@@ -336,13 +336,15 @@ impl ScrollInputHandle {
         self.try_enqueue(ScrollSource::current_hook(), scaled, distance_scale, output)
     }
 
-    /// Queue one diverted thumb-wheel impulse from an active HID++ session.
+    /// Queue one impulse from a diverted wheel of an active HID++ session:
+    /// the thumb wheel, or the main wheel turned while a wheel-hold button is
+    /// held. Each `wheel` keeps motion of its own.
     ///
     /// With smoothing on the impulse is eased. With it off, a horizontal-only
     /// impulse becomes a phased gesture, because AppKit's swipe recognizers
     /// (e.g. Messages revealing timestamps) ignore horizontal scrolls that
-    /// carry no scroll phase. `sensitivity` is the thumb wheel's own
-    /// multiplier, already applied to `delta`.
+    /// carry no scroll phase. `sensitivity` is the wheel's own multiplier,
+    /// already applied to `delta`.
     ///
     /// # Errors
     ///
@@ -356,6 +358,7 @@ impl ScrollInputHandle {
     pub(crate) fn try_hidpp_scroll(
         &self,
         session: &HidppSessionId,
+        wheel: HidppWheel,
         delta: ScrollDelta,
         sensitivity: f64,
     ) -> Result<(), ScrollDelta> {
@@ -374,7 +377,7 @@ impl ScrollInputHandle {
         };
         let queued = self.accepting.load(Ordering::Acquire)
             && self.try_enqueue(
-                ScrollSource::Hidpp(session.clone()),
+                ScrollSource::Hidpp(session.clone(), wheel),
                 impulse,
                 distance_scale,
                 output,
@@ -418,7 +421,7 @@ impl ScrollInputHandle {
         };
         let queued = self.accepting.load(Ordering::Acquire)
             && self.try_enqueue(
-                ScrollSource::Hidpp(session.clone()),
+                ScrollSource::Hidpp(session.clone(), HidppWheel::Main),
                 scaled,
                 WheelDelta {
                     x: 1.0,
@@ -468,10 +471,9 @@ impl ScrollInputHandle {
     /// Cancel output belonging to one HID++ capture-session incarnation.
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
         let generation = self.generation.load(Ordering::Acquire);
-        let source = ScrollSource::Hidpp(session.clone());
         match self
             .commands
-            .try_send(ScrollCommand::CancelSource(source.clone()))
+            .try_send(ScrollCommand::CancelSession(session.clone()))
         {
             Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
             Err(mpsc::TrySendError::Full(_)) => {
@@ -640,7 +642,7 @@ fn run_worker(
                         engine.cancel_all(emit_smooth);
                     }
                     if cancellations.cancel(&session, cancelled_generation) {
-                        engine.cancel_source(&ScrollSource::Hidpp(session), emit_smooth);
+                        engine.cancel_hidpp_session(&session, emit_smooth);
                     }
                 }
                 ScrollControl::Shutdown(request) => {
@@ -691,8 +693,8 @@ fn run_worker(
                     }
                 }
             }
-            Ok(ScrollCommand::CancelSource(source)) => {
-                engine.cancel_source(&source, emit_smooth);
+            Ok(ScrollCommand::CancelSession(session)) => {
+                engine.cancel_hidpp_session(&session, emit_smooth);
             }
             Ok(ScrollCommand::Input(_) | ScrollCommand::Wake) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -746,7 +748,8 @@ mod tests {
         };
         let configured = SmoothScrollAcceleration::MAX.max_gain();
         let hook = ScrollSource::OsHook(thread::current().id());
-        let hidpp = ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 1));
+        let hidpp =
+            ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 1), HidppWheel::Thumb);
 
         let hook_gain = snapshot.motion_tuning(&hook).max_gain;
         if cfg!(target_os = "macos") {
@@ -855,7 +858,12 @@ mod tests {
 
         let session = HidppSessionId::with_epoch("mouse-a", 7);
         assert_eq!(
-            input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(3.0, 0.0), 3.0),
+            input.try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(3.0, 0.0),
+                3.0
+            ),
             Ok(())
         );
         let hidpp = queued_input(&receiver);
@@ -876,7 +884,12 @@ mod tests {
         let (input, receiver, _controls) = standalone_input(1, preferences(true, 7));
         let session = HidppSessionId::with_epoch("mouse-a", 7);
         assert_eq!(
-            input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0), 1.0),
+            input.try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(0.0, 2.0),
+                1.0
+            ),
             Ok(())
         );
 
@@ -890,16 +903,31 @@ mod tests {
         let (input, receiver, _controls) = standalone_input(3, preferences(false, 14));
         let session = HidppSessionId::with_epoch("mouse-a", 7);
         assert_eq!(
-            input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(2.0, 0.0), 1.0),
+            input.try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(2.0, 0.0),
+                1.0
+            ),
             Ok(())
         );
         assert_eq!(
-            input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0), 1.0),
+            input.try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(0.0, 2.0),
+                1.0
+            ),
             Err(ScrollDelta::wheel_ticks(0.0, 2.0)),
             "a vertical tick keeps the caller's direct, unphased wheel output"
         );
         assert_eq!(
-            input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(2.0, 1.0), 1.0),
+            input.try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(2.0, 1.0),
+                1.0
+            ),
             Err(ScrollDelta::wheel_ticks(2.0, 1.0)),
             "a mixed tick is not a horizontal wheel"
         );
@@ -978,16 +1006,19 @@ mod tests {
             };
             let preferences = Arc::new(ScrollPreferences::new(smoothing, sensitivity(14), tuning));
             let (input, receiver, _controls) = standalone_input(1, preferences);
-            assert_eq!(input.try_hidpp_scroll(&session, tick, 1.0), Ok(()));
             assert_eq!(
-                input.try_hidpp_scroll(&session, tick, 1.0),
+                input.try_hidpp_scroll(&session, HidppWheel::Thumb, tick, 1.0),
+                Ok(())
+            );
+            assert_eq!(
+                input.try_hidpp_scroll(&session, HidppWheel::Thumb, tick, 1.0),
                 Err(handed_back),
                 "a full queue, smoothing {smoothing}"
             );
             queued_input(&receiver);
             input.accepting.store(false, Ordering::Release);
             assert_eq!(
-                input.try_hidpp_scroll(&session, tick, 1.0),
+                input.try_hidpp_scroll(&session, HidppWheel::Thumb, tick, 1.0),
                 Err(handed_back),
                 "a stopped runtime, smoothing {smoothing}"
             );
@@ -1047,6 +1078,72 @@ mod tests {
         assert!((eased - y).abs() < 1e-6, "eased {eased}, handed back {y}");
     }
 
+    /// Run `send` against a live worker and total the eased frames it
+    /// scrolls, collected until it has been quiet for a while.
+    fn eased_by(
+        preferences: Arc<ScrollPreferences>,
+        send: impl FnOnce(&ScrollInputHandle),
+    ) -> WheelDelta {
+        let (frames, received) = mpsc::channel();
+        let mut runtime = ScrollRuntime::spawn_with(
+            preferences,
+            move |frame: ScrollFrame| {
+                let _ = frames.send(frame.delta);
+            },
+            |_| {},
+        )
+        .expect("spawn scroll worker");
+        send(&runtime.input());
+        let mut total = WheelDelta::ZERO;
+        while let Ok(delta) = received.recv_timeout(Duration::from_millis(400)) {
+            total = total.plus(delta);
+        }
+        runtime.shutdown();
+        total
+    }
+
+    #[test]
+    fn a_thumb_wheel_spin_does_not_accelerate_the_main_wheel() {
+        let accelerating = || {
+            Arc::new(ScrollPreferences::new(
+                true,
+                sensitivity(14),
+                SmoothScrollTuning {
+                    acceleration: SmoothScrollAcceleration::MAX,
+                    ..neutral_tuning()
+                },
+            ))
+        };
+        let session = HidppSessionId::with_epoch("mouse-a", 7);
+        let thumb_tick = ScrollDelta::wheel_ticks(0.0, 1.0);
+        let main_tick = ScrollDelta::wheel_ticks(0.0, 1.0);
+        let thumb_spin = |input: &ScrollInputHandle| {
+            for _ in 0..12 {
+                assert_eq!(
+                    input.try_hidpp_scroll(&session, HidppWheel::Thumb, thumb_tick, 1.0),
+                    Ok(())
+                );
+            }
+        };
+        let main_notch = |input: &ScrollInputHandle| {
+            assert_eq!(input.try_hidpp_wheel_scroll(&session, main_tick), Ok(()));
+        };
+
+        let thumb_alone = eased_by(accelerating(), thumb_spin);
+        let main_alone = eased_by(accelerating(), main_notch);
+        let both = eased_by(accelerating(), |input| {
+            thumb_spin(input);
+            main_notch(input);
+        });
+        assert!(
+            (both.y - (thumb_alone.y + main_alone.y)).abs() < 1e-6,
+            "both wheels scrolled {}, separately {} + {}",
+            both.y,
+            thumb_alone.y,
+            main_alone.y
+        );
+    }
+
     #[test]
     fn phased_horizontal_ticks_begin_and_end_through_the_worker() {
         let (frames, received) = mpsc::channel();
@@ -1063,11 +1160,21 @@ mod tests {
         let input = runtime.input();
         let session = HidppSessionId::with_epoch("mouse-a", 1);
         assert_eq!(
-            input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0), 1.0),
+            input.try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(1.0, 0.0),
+                1.0
+            ),
             Ok(())
         );
         assert_eq!(
-            input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0), 1.0),
+            input.try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(1.0, 0.0),
+                1.0
+            ),
             Ok(())
         );
 
@@ -1103,9 +1210,12 @@ mod tests {
         .expect("spawn scroll worker");
         let session = HidppSessionId::with_epoch("mouse-a", 1);
         assert_eq!(
-            runtime
-                .input()
-                .try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0), 1.0),
+            runtime.input().try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(1.0, 0.0),
+                1.0
+            ),
             Ok(())
         );
         assert_eq!(
@@ -1143,7 +1253,12 @@ mod tests {
         let input = runtime.input();
         let session = HidppSessionId::with_epoch("mouse-a", 1);
         assert_eq!(
-            input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0), 1.0),
+            input.try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(1.0, 0.0),
+                1.0
+            ),
             Ok(())
         );
         assert_eq!(
@@ -1205,7 +1320,12 @@ mod tests {
         resume.send(()).expect("worker resumes its receive");
         let session = HidppSessionId::with_epoch("mouse-a", 1);
         assert_eq!(
-            input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0), 1.0),
+            input.try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(1.0, 0.0),
+                1.0
+            ),
             Ok(())
         );
 
@@ -1259,7 +1379,12 @@ mod tests {
         let generation = Arc::clone(&input.generation);
         let session = HidppSessionId::with_epoch("mouse-a", 1);
         assert_eq!(
-            input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0), 1.0),
+            input.try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(1.0, 0.0),
+                1.0
+            ),
             Ok(())
         );
         preferences.publish(!initial_smoothing, sensitivity(14), neutral_tuning());
@@ -1328,7 +1453,8 @@ mod tests {
     #[test]
     fn stale_input_is_reclassified_as_if_submitted_now() {
         let at = Instant::now();
-        let hidpp = ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 1));
+        let hidpp =
+            ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 1), HidppWheel::Thumb);
         let hook = ScrollSource::current_hook();
         let input = |source: &ScrollSource, x, y, output| ScrollInput {
             generation: 0,
@@ -1387,7 +1513,12 @@ mod tests {
         let session = HidppSessionId::with_epoch("mouse-a", 1);
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
         assert_eq!(
-            input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0), 1.0),
+            input.try_hidpp_scroll(
+                &session,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(0.0, 2.0),
+                1.0
+            ),
             Ok(())
         );
         preferences.publish(false, sensitivity(14), neutral_tuning());
@@ -1441,10 +1572,9 @@ mod tests {
         let session = HidppSessionId::with_epoch("mouse-a", 7);
         input.cancel_hidpp_session(&session);
 
-        let ScrollCommand::CancelSource(ScrollSource::Hidpp(cancelled)) =
-            commands.recv().expect("queued cancellation")
+        let ScrollCommand::CancelSession(cancelled) = commands.recv().expect("queued cancellation")
         else {
-            panic!("expected HID++ source cancellation");
+            panic!("expected HID++ session cancellation");
         };
         assert_eq!(cancelled, session);
         assert_eq!(input.generation.load(Ordering::Acquire), 0);
@@ -1457,11 +1587,21 @@ mod tests {
         let cancelled = HidppSessionId::with_epoch("mouse-a", 7);
         let survivor = HidppSessionId::with_epoch("mouse-b", 3);
         assert_eq!(
-            input.try_hidpp_scroll(&cancelled, ScrollDelta::wheel_ticks(1.0, 0.0), 1.0),
+            input.try_hidpp_scroll(
+                &cancelled,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(1.0, 0.0),
+                1.0
+            ),
             Ok(())
         );
         assert_eq!(
-            input.try_hidpp_scroll(&survivor, ScrollDelta::wheel_ticks(0.0, 1.0), 1.0),
+            input.try_hidpp_scroll(
+                &survivor,
+                HidppWheel::Thumb,
+                ScrollDelta::wheel_ticks(0.0, 1.0),
+                1.0
+            ),
             Ok(())
         );
 
@@ -1526,7 +1666,7 @@ mod tests {
         let successor = HidppSessionId::with_epoch("mouse-a", 8);
         let input = |session: &HidppSessionId, generation| ScrollInput {
             generation,
-            source: ScrollSource::Hidpp(session.clone()),
+            source: ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb),
             impulse: WheelDelta { x: 0.0, y: 1.0 },
             distance_scale: WheelDelta::UNIT,
             output: ScrollOutputMode::Direct,
@@ -1582,7 +1722,7 @@ mod tests {
         commands
             .send(ScrollCommand::Input(ScrollInput {
                 generation: 1,
-                source: ScrollSource::Hidpp(session.clone()),
+                source: ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb),
                 impulse: WheelDelta { x: 0.0, y: 1.0 },
                 distance_scale: WheelDelta::UNIT,
                 output: ScrollOutputMode::Smooth { at: Instant::now() },
@@ -1637,7 +1777,7 @@ mod tests {
         let direct = |session: &HidppSessionId, generation, y| {
             Ok(ScrollCommand::Input(ScrollInput {
                 generation,
-                source: ScrollSource::Hidpp(session.clone()),
+                source: ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb),
                 impulse: WheelDelta { x: 0.0, y },
                 distance_scale: WheelDelta { x: 1.0, y: 1.0 },
                 output: ScrollOutputMode::Direct,
@@ -1721,7 +1861,10 @@ mod tests {
         commands
             .send(ScrollCommand::Input(ScrollInput {
                 generation: 1,
-                source: ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 7)),
+                source: ScrollSource::Hidpp(
+                    HidppSessionId::with_epoch("mouse-a", 7),
+                    HidppWheel::Thumb,
+                ),
                 impulse: WheelDelta { x: scale, y: 0.0 },
                 distance_scale: WheelDelta { x: scale, y: scale },
                 output: ScrollOutputMode::Smooth { at: Instant::now() },

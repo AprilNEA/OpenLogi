@@ -206,11 +206,27 @@ impl ScrollFrame {
 /// One physical producer. Linux runs one hook callback thread per grabbed
 /// mouse; macOS and Windows use one global callback thread. HID++ capture
 /// sessions use their epoch-bearing identity so a restarted session cannot
-/// inherit motion from the one it replaced.
+/// inherit motion from the one it replaced, and each of a session's wheels
+/// is a producer of its own, so one wheel's rate never accelerates another's
+/// ticks. A session is cancelled as a whole.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ScrollSource {
     OsHook(ThreadId),
-    Hidpp(HidppSessionId),
+    Hidpp(HidppSessionId, HidppWheel),
+}
+
+/// A physical wheel that scrolls through a HID++ capture session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum HidppWheel {
+    /// The main scroll wheel: diverted by its smooth-wheel switch, or turned
+    /// while a wheel-hold button is held.
+    Main,
+    /// The thumb wheel.
+    Thumb,
+}
+
+impl HidppWheel {
+    const ALL: [Self; 2] = [Self::Main, Self::Thumb];
 }
 
 impl ScrollSource {
@@ -604,6 +620,17 @@ impl ScrollEngine {
         let was_phased = self.phased.remove(source).is_some();
         if (was_smooth || was_phased) && self.active.is_empty() && self.phased.is_empty() {
             self.output.cancel(emit);
+        }
+    }
+
+    /// Cancel every wheel of one HID++ capture-session incarnation.
+    fn cancel_hidpp_session(
+        &mut self,
+        session: &HidppSessionId,
+        emit: &mut impl FnMut(ScrollFrame),
+    ) {
+        for wheel in HidppWheel::ALL {
+            self.cancel_source(&ScrollSource::Hidpp(session.clone(), wheel), emit);
         }
     }
 

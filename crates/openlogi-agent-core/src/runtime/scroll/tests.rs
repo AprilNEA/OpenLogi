@@ -13,7 +13,10 @@ fn source() -> ScrollSource {
 }
 
 fn hidpp_source(device_key: &str, epoch: u64) -> ScrollSource {
-    ScrollSource::Hidpp(HidppSessionId::with_epoch(device_key, epoch))
+    ScrollSource::Hidpp(
+        HidppSessionId::with_epoch(device_key, epoch),
+        HidppWheel::Thumb,
+    )
 }
 
 fn wheel(x: f64, y: f64) -> WheelDelta {
@@ -430,6 +433,34 @@ fn concurrent_sources_share_one_balanced_output_stream() {
             .all(|frame| { !matches!(frame.phase, SmoothScrollPhase::Cancelled) })
     );
     assert!(engine.active.is_empty());
+}
+
+#[test]
+fn a_sessions_wheels_move_apart_and_are_cancelled_together() {
+    let base = Instant::now();
+    let session = HidppSessionId::with_epoch("mouse-a", 1);
+    let main = ScrollSource::Hidpp(session.clone(), HidppWheel::Main);
+    let thumb = ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb);
+    let other = hidpp_source("mouse-b", 1);
+    let mut engine = ScrollEngine::default();
+    for source in [&main, &thumb, &other] {
+        engine.impulse(
+            source.clone(),
+            wheel(0.0, 1.0),
+            base,
+            neutral(),
+            &mut |_| {},
+        );
+    }
+    assert_eq!(engine.active.len(), 3, "each wheel keeps motion of its own");
+
+    engine.cancel_hidpp_session(&session, &mut |_| {});
+    assert!(!engine.active.contains_key(&main));
+    assert!(!engine.active.contains_key(&thumb));
+    assert!(
+        engine.active.contains_key(&other),
+        "another session keeps scrolling"
+    );
 }
 
 #[test]
