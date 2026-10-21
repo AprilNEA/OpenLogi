@@ -110,7 +110,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 38);
+    assert_eq!(PROTOCOL_VERSION, 39);
 }
 
 #[test]
@@ -556,14 +556,14 @@ fn agent_snapshot() {
         lights: Vec::new(),
         device_selection: None,
     };
-    assert_wire(&snapshot, "010001010705302e362e3601000000000000000000");
+    assert_wire(&snapshot, "010001010705302e362e360100000000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e3601000000000000000000");
+    assert_wire(&observed, "03010001010705302e362e360100000000000000000000");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:
@@ -676,7 +676,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b0000101015002000001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b0000101015002000001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010107",
     );
 }
 
@@ -1098,6 +1098,6 @@ fn battery_preferences_and_device_selection() {
     assert_wire(&request, "07200207756e69743a6161");
     assert_wire(
         &AgentRequest::AcknowledgeDeviceSelection { request },
-        "2807200207756e69743a6161",
+        "2a07200207756e69743a6161",
     );
 }

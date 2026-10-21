@@ -367,7 +367,10 @@ mod hold_tests {
             assert_eq!(held.percentage, Some(85), "mileage {mileage}");
             assert_eq!(held.status, BatteryStatus::Charging, "mileage {mileage}");
             assert_eq!(held.usable_percentage(), None);
-            assert!(!held.rearms_warning(), "a held percentage is not a measured recovery");
+            assert!(
+                !held.rearms_warning(),
+                "a held percentage is not a measured recovery"
+            );
         }
         let legacy = BatteryProbe::Legacy {
             index: 0,
@@ -506,7 +509,10 @@ mod hold_tests {
                 battery: Some(battery(Some(8), BatteryStatus::Discharging)),
                 ..ProbedFeatures::default()
             },
-            battery: Some(BatteryProbe::Legacy(1)),
+            battery: Some(BatteryProbe::Legacy {
+                index: 1,
+                mileage: true,
+            }),
             events: EventFeatureIndices::default(),
             probed_at: now,
         };

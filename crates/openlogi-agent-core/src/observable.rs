@@ -25,8 +25,8 @@ use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, DeviceSelection, ForegroundApps, FoundDevice, Generation, Identity,
-    InventoryHealth, OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
-    SecureInput,
+    InventoryHealth, OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION, PairingPhase,
+    RECENT_APPS, SecureInput,
 };
 use tokio::sync::watch;
 
