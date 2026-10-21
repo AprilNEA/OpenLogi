@@ -882,7 +882,8 @@ async fn a_desktop_swipe_drives_one_live_transition_until_release() {
         transport_turns: crate::hardware::TransportTurns::default(),
     };
     let mut actions =
-        crate::runtime::ActionRuntime::new(Arc::default(), device_access, ring).unwrap();
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
     let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
         false,
         VerticalScrollSensitivity::default(),
@@ -966,7 +967,8 @@ async fn a_refused_next_leg_drops_the_holds_live_transition() {
         transport_turns: crate::hardware::TransportTurns::default(),
     };
     let mut actions =
-        crate::runtime::ActionRuntime::new(Arc::default(), device_access, ring).unwrap();
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
     let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
         false,
         VerticalScrollSensitivity::default(),
