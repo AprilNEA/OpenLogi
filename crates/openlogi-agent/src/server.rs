@@ -510,11 +510,23 @@ impl Agent for AgentServer {
 #[derive(Clone)]
 pub struct RingHapticPlayer {
     tx: tokio::sync::watch::Sender<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
-    sessions: Arc<std::sync::Mutex<SessionNews>>,
+    sessions: Arc<std::sync::Mutex<Sessions>>,
     /// Wakes the worker for a closed session without touching the play slot:
     /// an activation buzz queued just before must still play first, and a
     /// buzz that already played must not play again.
     closed: tokio::sync::watch::Sender<()>,
+}
+
+/// What the worker shares with the trigger, the IPC handlers, and the
+/// lifecycle.
+#[derive(Debug, Default)]
+struct Sessions {
+    /// What the worker has not looked at yet.
+    news: SessionNews,
+    /// While set, no session arms the engine: the agent is leaving, or
+    /// handing over to a replacement, and an enable made now could not be
+    /// handed back.
+    paused: bool,
 }
 
 /// What the trigger and the IPC handlers have reported about ring sessions
@@ -526,8 +538,8 @@ struct SessionNews {
     opened: Option<(u64, DeviceRoute)>,
     /// The newest session that closed.
     closed: Option<u64>,
-    /// The agent is leaving: hand every engine back now, then answer here.
-    leaving: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Hand every engine back now, then answer here.
+    hand_back: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// How long every attempt at one buzz may take together.
@@ -554,7 +566,8 @@ const ARM_BUDGET: Duration = Duration::from_secs(1);
 /// finish in time is owed again, see [`haptic_restore::RESTORE_RETRY`].
 const RESTORE_BUDGET: Duration = Duration::from_secs(1);
 
-/// How long the agent's exit waits for engines to be handed back.
+/// How long the agent's exit or replacement waits for engines to be handed
+/// back.
 ///
 /// Enough for a buzz already in flight plus one restore. Nothing owed — the
 /// usual case — answers at once; a device that does not answer in time keeps
@@ -610,8 +623,9 @@ async fn arm_firmware_haptics(
 /// Whether a restore attempt settled the debt or left it owed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RestoreAttempt {
-    /// Restored, left alone because another writer changed it, or refused by
-    /// the device: nothing further to try.
+    /// Restored, left alone because another writer changed it or another
+    /// device answers on the route, or refused by the device: nothing
+    /// further to try.
     Settled,
     /// The device was not reached; a later attempt can still restore it.
     Unreached,
@@ -640,6 +654,10 @@ async fn restore_firmware_haptics(
         }
         Ok(Ok(HapticRestoreOutcome::Superseded)) => {
             debug!("firmware haptic configuration changed since arming — left as found");
+            RestoreAttempt::Settled
+        }
+        Ok(Ok(HapticRestoreOutcome::OtherDevice)) => {
+            debug!("another device answers where haptics were armed — left as found");
             RestoreAttempt::Settled
         }
         Ok(Err(error)) if haptic_restore::is_unreached(&error) => {
@@ -817,14 +835,11 @@ impl RingHapticPlayer {
             Option<(DeviceRoute, HapticWaveform, &'static str)>,
         >(None);
         let (closed, mut closed_rx) = tokio::sync::watch::channel(());
-        let sessions = Arc::new(std::sync::Mutex::new(SessionNews::default()));
+        let sessions = Arc::new(std::sync::Mutex::new(Sessions::default()));
         let worker_sessions = Arc::clone(&sessions);
         tokio::spawn(async move {
             let mut breaker = HapticBreaker::default();
             let mut ledger = RestoreLedger::default();
-            // Once the agent is leaving, no session arms the engine again:
-            // nothing would be left to hand it back.
-            let mut left = false;
             loop {
                 let due = ledger.next_due();
                 let woke_for_play = tokio::select! {
@@ -841,19 +856,19 @@ impl RingHapticPlayer {
                         due.map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
                     ), if due.is_some() => false,
                 };
-                let news = std::mem::take(
-                    &mut *worker_sessions
+                let (news, paused) = {
+                    let mut sessions = worker_sessions
                         .lock()
-                        .unwrap_or_else(PoisonError::into_inner),
-                );
-                left |= news.leaving.is_some();
+                        .unwrap_or_else(PoisonError::into_inner);
+                    (std::mem::take(&mut sessions.news), sessions.paused)
+                };
                 // Firmware arming is sequenced through this worker so it is
                 // guaranteed to complete before the session's first buzz —
                 // spawning it separately let the first hover race (and lose
                 // to) a disarmed haptic engine. A session that already closed
-                // is not armed at all.
+                // is not armed at all, nor is one while the agent is leaving.
                 if let Some((session, route)) = news.opened
-                    && !left
+                    && !paused
                     && news.closed.is_none_or(|closed| closed < session)
                 {
                     // A new session starts the breaker over. It is
@@ -885,7 +900,7 @@ impl RingHapticPlayer {
                 if let Some(session) = news.closed {
                     ledger.closed(session, Instant::now());
                 }
-                if left {
+                if news.hand_back.is_some() {
                     ledger.leaving(Instant::now());
                 }
                 while let Some(owed) = ledger.take_due(Instant::now()) {
@@ -895,7 +910,7 @@ impl RingHapticPlayer {
                         ledger.retry(owed, Instant::now());
                     }
                 }
-                if let Some(done) = news.leaving {
+                if let Some(done) = news.hand_back {
                     let _ = done.send(());
                 }
             }
@@ -916,7 +931,7 @@ impl RingHapticPlayer {
         let Some(route) = route else {
             return;
         };
-        self.news().opened = Some((session, route));
+        self.sessions().news.opened = Some((session, route));
         let _ = self.tx.send(None);
     }
 
@@ -926,29 +941,39 @@ impl RingHapticPlayer {
     /// device's engine alone.
     pub fn end_session(&self, session: u64) {
         {
-            let mut news = self.news();
-            news.closed = news.closed.max(Some(session));
+            let mut sessions = self.sessions();
+            sessions.news.closed = sessions.news.closed.max(Some(session));
         }
         let _ = self.closed.send(());
     }
 
-    /// End every session for good as the agent leaves: hand back each enable
-    /// still owed, within [`FINISH_BUDGET`]. Call it while inventory still
-    /// publishes the channels the restores need. No session arms the engine
-    /// after this.
+    /// End every session as the agent leaves or hands over to a replacement:
+    /// hand back each enable still owed, within [`FINISH_BUDGET`], and arm no
+    /// session until [`Self::resume`]. Call it while inventory still
+    /// publishes the channels the restores need.
     pub async fn finish(&self) {
         let (done, handed_back) = tokio::sync::oneshot::channel();
-        self.news().leaving = Some(done);
+        {
+            let mut sessions = self.sessions();
+            sessions.paused = true;
+            sessions.news.hand_back = Some(done);
+        }
         let _ = self.closed.send(());
         if tokio::time::timeout(FINISH_BUDGET, handed_back)
             .await
             .is_err()
         {
-            warn!("Actions Ring haptics did not finish handing engines back before exit");
+            warn!("Actions Ring haptics did not finish handing engines back in time");
         }
     }
 
-    fn news(&self) -> std::sync::MutexGuard<'_, SessionNews> {
+    /// Arm sessions again after [`Self::finish`]: a replacement did not
+    /// happen, and the agent stays.
+    pub fn resume(&self) {
+        self.sessions().paused = false;
+    }
+
+    fn sessions(&self) -> std::sync::MutexGuard<'_, Sessions> {
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
     }
 

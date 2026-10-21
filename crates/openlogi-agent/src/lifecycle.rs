@@ -658,6 +658,12 @@ impl Running {
                 self.shut_down("the app was uninstalled", None).await;
             }
             ShutdownRequest::Restart { path, retry } => {
+                // A replacement ends the ring session as an exit does, and
+                // the successor knows nothing of an enable this agent owes:
+                // hand it back while inventory still publishes the channels.
+                // No session arms until the agent stays, see
+                // `restart_hidpp_watchers`.
+                self.ring_haptics.finish().await;
                 self.hidpp_watchers
                     .begin_replacement(Replacement { path, retry });
             }
@@ -677,6 +683,9 @@ impl Running {
     }
 
     fn restart_hidpp_watchers(&mut self) {
+        // The agent stays — at startup, or after a replacement that did not
+        // happen — so ring sessions arm the haptic engine again.
+        self.ring_haptics.resume();
         self.hidpp_watchers =
             WatcherFleet::Running(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
     }

@@ -97,8 +97,8 @@ impl<R> RestoreLedger<R> {
         }
     }
 
-    /// The agent is leaving, which ends every session: every restore is due
-    /// at `now`.
+    /// The agent is leaving, or handing over to a replacement, which ends
+    /// every session: every restore is due at `now`.
     pub(super) fn leaving(&mut self, now: Instant) {
         for owed in &mut self.owed {
             owed.due = owed.due.min(now);
