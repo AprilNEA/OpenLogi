@@ -1079,6 +1079,108 @@ fn jitter_during_a_committed_reversal_keeps_its_recovery() {
 }
 
 #[test]
+fn jitter_does_not_keep_the_departed_direction_warm() {
+    const EPSILON: f64 = 1.0e-9;
+    let base = Instant::now();
+    let at = |millis| base + Duration::from_millis(millis);
+    let mut cooldown = ReversalCooldown::default();
+    cooldown.attenuate(-5.0, at(0));
+    // Free-spin jitter at the end of the flick is cooled, but it is not
+    // scrolling: it must not extend the departed direction's window.
+    assert!((cooldown.attenuate(0.2, at(50)) - 0.2 * 0.125).abs() < EPSILON);
+    // 420 ms after the departed direction's last tick the flip is cold, so
+    // it starts fresh: neither ramped nor knee-compressed, and nor is the
+    // burst that follows.
+    let flip = cooldown.attenuate(8.0, at(420));
+    assert!((flip - 8.0).abs() < EPSILON, "{flip}");
+    let burst = cooldown.attenuate(8.0, at(500));
+    assert!((burst - 8.0).abs() < EPSILON, "{burst}");
+}
+
+#[test]
+fn jitter_on_a_cold_axis_cannot_take_the_direction() {
+    const EPSILON: f64 = 1.0e-9;
+    let base = Instant::now();
+    let at = |millis| base + Duration::from_millis(millis);
+    let mut cooldown = ReversalCooldown::default();
+    cooldown.attenuate(-5.0, at(0));
+    cooldown.attenuate(0.2, at(300));
+    // The departed direction goes cold under this tick, which passes whole,
+    // but 0.4 of jitter in all is still below the commit floor…
+    assert!((cooldown.attenuate(0.2, at(420)) - 0.2).abs() < EPSILON);
+    // …so the main direction resuming is not a reversal.
+    for millis in [440, 520] {
+        let resumed = cooldown.attenuate(-8.0, at(millis));
+        assert!((resumed + 8.0).abs() < EPSILON, "{millis} ms: {resumed}");
+    }
+
+    // Likewise for jitter that outlasts a committed reversal's warm axis:
+    // the corrective direction resuming after it starts fresh.
+    let mut cooldown = ReversalCooldown::default();
+    cooldown.attenuate(8.0, at(0));
+    cooldown.attenuate(-8.0, at(40));
+    cooldown.attenuate(0.1, at(300));
+    cooldown.attenuate(0.1, at(450));
+    let resumed = cooldown.attenuate(-8.0, at(470));
+    assert!((resumed + 8.0).abs() < EPSILON, "{resumed}");
+}
+
+#[test]
+fn a_slow_flip_keeps_its_distance_when_the_departed_direction_goes_cold() {
+    const EPSILON: f64 = 1.0e-9;
+    let base = Instant::now();
+    let at = |millis| base + Duration::from_millis(millis);
+    let mut cooldown = ReversalCooldown::default();
+    cooldown.attenuate(-5.0, at(0));
+    assert!((cooldown.attenuate(0.3, at(300)) - 0.3 * 0.75).abs() < EPSILON);
+    // The departed direction is cold by now, so this tick passes whole, and
+    // with the first one it crosses the commit floor: the flip is committed,
+    // fresh, with nothing left to recover from…
+    assert!((cooldown.attenuate(0.3, at(420)) - 0.3).abs() < EPSILON);
+    // …so a counter-tick is jitter against the new direction, and the burst
+    // that follows runs unscaled.
+    assert!((cooldown.attenuate(-0.1, at(440)) + 0.1 * 0.05).abs() < EPSILON);
+    for millis in [460, 540] {
+        let burst = cooldown.attenuate(8.0, at(millis));
+        assert!((burst - 8.0).abs() < EPSILON, "{millis} ms: {burst}");
+    }
+}
+
+#[test]
+fn opposing_ticks_a_cooldown_apart_do_not_add_up_to_a_flip() {
+    const EPSILON: f64 = 1.0e-9;
+    let base = Instant::now();
+    let at = |millis| base + Duration::from_millis(millis);
+    let mut cooldown = ReversalCooldown::default();
+    cooldown.attenuate(-5.0, at(0));
+    // Stray ticks seconds apart are each jitter on their own: together they
+    // cross the commit floor, but they never take the direction…
+    assert!((cooldown.attenuate(0.3, at(500)) - 0.3).abs() < EPSILON);
+    assert!((cooldown.attenuate(0.3, at(5000)) - 0.3).abs() < EPSILON);
+    // …so the main direction resuming right after is not a reversal.
+    let resumed = cooldown.attenuate(-8.0, at(5020));
+    assert!((resumed + 8.0).abs() < EPSILON, "{resumed}");
+}
+
+#[test]
+fn a_cold_axis_has_no_direction_to_reverse() {
+    const EPSILON: f64 = 1.0e-9;
+    let base = Instant::now();
+    let at = |millis| base + Duration::from_millis(millis);
+    let mut cooldown = ReversalCooldown::default();
+    cooldown.attenuate(-5.0, at(0));
+    // Once the axis is cold, ticks either way below the commit floor pass
+    // whole, and a sub-commit tick the old way does not revive the old
+    // direction for the burst after it to reverse.
+    assert!((cooldown.attenuate(0.3, at(500)) - 0.3).abs() < EPSILON);
+    assert!((cooldown.attenuate(-0.1, at(520)) + 0.1).abs() < EPSILON);
+    for millis in [540, 620] {
+        let burst = cooldown.attenuate(8.0, at(millis));
+        assert!((burst - 8.0).abs() < EPSILON, "{millis} ms: {burst}");
+    }
+}
+
+#[test]
 fn reversal_compression_tames_the_corrective_burst_and_fades() {
     const EPSILON: f64 = 1.0e-9;
     let base = Instant::now();
@@ -1148,6 +1250,90 @@ fn leisurely_reversal_starts_fresh_and_unscaled() {
     });
     assert_delta(cumulative(&frames), wheel(0.0, -10.0 + 5.0));
     assert!(engine.active.is_empty());
+}
+
+#[test]
+fn end_of_flick_jitter_does_not_turn_the_resumed_scroll_into_a_reversal() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    // Two jitter ticks back up, the second a full cooldown after the
+    // flick: it passes whole, and the downward scroll resuming 20 ms later
+    // is not cooled as a flip away from it.
+    for (millis, delta) in [(0, -5.0), (300, 0.2), (420, 0.2), (440, -8.0)] {
+        engine.impulse(
+            source(),
+            wheel(0.0, delta),
+            base + Duration::from_millis(millis),
+            preaccelerated(),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(900), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, -5.0 + 0.15 + 0.2 - 8.0));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn a_slow_flip_that_commits_after_the_cooldown_starts_fresh() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    // The opposing run starts warm and commits once the departed direction
+    // is cold: the counter-tick after it is jitter, and the burst is whole.
+    for (millis, delta) in [(0, -5.0), (300, 0.3), (420, 0.3), (440, -0.1), (460, 8.0)] {
+        engine.impulse(
+            source(),
+            wheel(0.0, delta),
+            base + Duration::from_millis(millis),
+            preaccelerated(),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(900), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(
+        cumulative(&frames),
+        wheel(0.0, -5.0 + 0.225 + 0.3 - 0.005 + 8.0),
+    );
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn the_other_axis_does_not_change_how_a_cold_axis_restarts() {
+    // The same vertical input, with and without a horizontal tick keeping
+    // the source alive while the vertical axis goes cold: either way the
+    // vertical axis restarts uncommitted, and the burst passes whole.
+    let vertical = [(0, -5.0), (500, 0.3), (520, -0.1), (540, 8.0)];
+    for horizontal in [None, Some((300, 1.0))] {
+        let base = Instant::now();
+        let mut engine = ScrollEngine::default();
+        let mut frames = Vec::new();
+        let mut ticks: Vec<_> = vertical
+            .iter()
+            .map(|&(millis, delta)| (millis, wheel(0.0, delta)))
+            .chain(horizontal.map(|(millis, delta)| (millis, wheel(delta, 0.0))))
+            .collect();
+        ticks.sort_by_key(|&(millis, _)| millis);
+        for (millis, delta) in ticks {
+            engine.impulse(
+                source(),
+                delta,
+                base + Duration::from_millis(millis),
+                preaccelerated(),
+                &mut |frame| frames.push(frame),
+            );
+        }
+        engine.advance_due(base + Duration::from_millis(1000), &mut |frame| {
+            frames.push(frame);
+        });
+        let x = horizontal.map_or(0.0, |(_, delta)| delta);
+        assert_delta(cumulative(&frames), wheel(x, -5.0 + 0.3 - 0.1 + 8.0));
+        assert!(engine.active.is_empty());
+    }
 }
 
 #[test]

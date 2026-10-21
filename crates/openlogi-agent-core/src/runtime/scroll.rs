@@ -304,6 +304,23 @@ struct Flip {
     started_at: Instant,
 }
 
+/// A run of ticks in one direction that has not yet crossed
+/// [`REVERSAL_COMMIT`]: against the committed direction, or either way while
+/// none is committed.
+#[derive(Clone, Copy)]
+struct PendingFlip {
+    /// Sign of the run.
+    sign: i8,
+    /// The flip it would commit, or `None` when there is no warm direction
+    /// to depart from, leaving nothing to cool.
+    flip: Option<Flip>,
+    /// The run's raw distance so far.
+    distance: f64,
+    /// Arrival of the run's latest tick. A run that stops for a full
+    /// [`REVERSAL_COOLDOWN`] was jitter, and is dropped.
+    last_at: Instant,
+}
+
 /// One axis of cold-start attenuation for quick direction reversals of
 /// pre-accelerated input.
 ///
@@ -317,21 +334,21 @@ struct Flip {
 /// unscaled.
 #[derive(Default)]
 struct ReversalCooldown {
-    /// Sign of the committed scroll direction; `0` before any input.
+    /// Sign of the committed scroll direction; `0` while none is: before
+    /// any input, and again once the axis has gone cold.
     dir: i8,
-    /// Arrival of the committed direction's most recent tick.
+    /// Arrival of the committed direction's most recent tick; `None` while
+    /// no direction is committed. The axis goes cold when this is a full
+    /// [`REVERSAL_COOLDOWN`] old, however busy the source's other axis has
+    /// been meanwhile: sub-commit jitter back the other way is not
+    /// scrolling, so it never refreshes this.
     last_at: Option<Instant>,
     /// A committed reversal still within [`REVERSAL_RECOVERY`]. It is kept
     /// apart from `pending`, so a sub-commit tick back the old way during the
     /// recovery cannot discard it.
     recovering: Option<Flip>,
-    /// Opposing ticks that have not yet crossed [`REVERSAL_COMMIT`], with
-    /// their raw distance so far.
-    pending: Option<(Flip, f64)>,
-    /// Arrival of this axis's most recent tick in either direction. Once it
-    /// is a full [`REVERSAL_COOLDOWN`] old the axis starts fresh, however
-    /// busy the source's other axis has been meanwhile.
-    last_tick: Option<Instant>,
+    /// Ticks that have not yet committed a direction.
+    pending: Option<PendingFlip>,
 }
 
 impl ReversalCooldown {
@@ -360,20 +377,24 @@ impl ReversalCooldown {
         if value == 0.0 {
             return value;
         }
-        if self
-            .last_tick
-            .is_some_and(|last| at.saturating_duration_since(last) >= REVERSAL_COOLDOWN)
-        {
-            // Cold axis: any flip is over, so this tick starts exactly unscaled.
-            *self = Self::default();
+        let cold = |last: Instant| at.saturating_duration_since(last) >= REVERSAL_COOLDOWN;
+        if self.last_at.is_some_and(cold) {
+            // Cold axis: the departed direction's acceleration has decayed
+            // and any flip is over, so the axis is uncommitted again, as
+            // before any input, and this tick starts exactly unscaled. A
+            // flip still under way keeps its distance, though not its warm
+            // references, so a slow flip still commits.
+            self.dir = 0;
+            self.last_at = None;
+            self.recovering = None;
+            if let Some(pending) = &mut self.pending {
+                pending.flip = None;
+            }
         }
-        self.last_tick = Some(at);
+        if self.pending.is_some_and(|pending| cold(pending.last_at)) {
+            self.pending = None;
+        }
         let sign: i8 = if value > 0.0 { 1 } else { -1 };
-        if self.dir == 0 {
-            self.dir = sign;
-            self.last_at = Some(at);
-            return value;
-        }
         if sign == self.dir {
             self.last_at = Some(at);
             // Opposing ticks that never committed were free-spin jitter, and
@@ -391,25 +412,33 @@ impl ReversalCooldown {
                 }
             };
         }
-        // Opposing tick: keep the pending flip's references, or start a
-        // fresh flip from the departed direction's last arrival.
-        let departed_at = self.last_at.unwrap_or(at);
-        let (flip, distance) = self.pending.get_or_insert((
-            Flip {
-                departed_at,
-                started_at: at,
-            },
-            0.0,
-        ));
-        *distance += value.abs();
-        let flip = *flip;
-        if *distance >= REVERSAL_COMMIT {
-            self.dir = sign;
-            self.last_at = Some(at);
-            self.recovering = Some(flip);
+        // Opposing tick, or any tick while no direction is committed: it
+        // takes the direction only once its run crosses the commit floor, so
+        // jitter never does. Keep the run's references, or start a fresh run
+        // from the departed direction's last arrival, if there is one.
+        if self.pending.is_some_and(|pending| pending.sign != sign) {
             self.pending = None;
         }
-        Self::rescale(value, flip, at)
+        let departed_at = self.last_at;
+        let pending = self.pending.get_or_insert_with(|| PendingFlip {
+            sign,
+            flip: departed_at.map(|departed_at| Flip {
+                departed_at,
+                started_at: at,
+            }),
+            distance: 0.0,
+            last_at: at,
+        });
+        pending.distance += value.abs();
+        pending.last_at = at;
+        let flip = pending.flip;
+        if pending.distance >= REVERSAL_COMMIT {
+            self.dir = sign;
+            self.last_at = Some(at);
+            self.recovering = flip;
+            self.pending = None;
+        }
+        flip.map_or(value, |flip| Self::rescale(value, flip, at))
     }
 }
 
@@ -417,9 +446,10 @@ impl ReversalCooldown {
 /// pulse can finish well inside [`REVERSAL_COOLDOWN`] (the 80 ms minimum
 /// and the 360 ms default both do), and an opposing tick arriving after the
 /// animation ended but while the OS curve is still hot must still be cooled.
-/// Each axis starts fresh once it has gone a full cooldown without a tick —
-/// by then any flip is cold, which is exactly unscaled — and the entry is
-/// dropped once the whole source has.
+/// Each axis starts fresh once it has gone a full cooldown without a tick in
+/// its committed direction — by then any flip is cold, which is exactly
+/// unscaled — and the entry is dropped once the whole source has gone that
+/// long without any tick.
 #[derive(Default)]
 struct SourceCooldown {
     x: ReversalCooldown,
