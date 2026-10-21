@@ -5,6 +5,10 @@ use openlogi_hidpp_derive::Feature;
 
 use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
+/// The first feature version whose `getSensorDpi` reply carries the default
+/// DPI.
+const DEFAULT_DPI_MIN_VERSION: u8 = 1;
+
 /// Implements the `AdjustableDpi` / `0x2201` feature.
 #[derive(Clone, Feature)]
 #[creatable(id = 0x2201, version = 0)]
@@ -63,15 +67,22 @@ impl AdjustableDpiFeature {
     /// Retrieves the default DPI of `sensor_index`, or `None` when the device
     /// reports none.
     ///
-    /// `getSensorDpi` carries the default after the current DPI, in bytes 3
-    /// and 4. Logi Options+ reads it there
+    /// `version` is the feature version the device reports for `0x2201`.
+    /// The x2201 specification adds the default DPI in feature version 1,
+    /// after the current DPI in bytes 3 and 4 of the `getSensorDpi` reply;
+    /// version 0 reports no default there. So for version 0 this returns
+    /// `None` and sends no request, whatever those bytes would hold. From
+    /// version 1 a default of 0 is also `None`: Logi Options+ reads it there
     /// (`devio::Feature2201AdjustableDPI::GetDefaultDPI`) and reads a reply
-    /// too short to carry it as 0, so 0 means the firmware reports no
-    /// default.
+    /// too short to carry it as 0, so 0 means the firmware reports no default.
     pub async fn get_sensor_default_dpi(
         &self,
+        version: u8,
         sensor_index: u8,
     ) -> Result<Option<u16>, Hidpp20Error> {
+        if version < DEFAULT_DPI_MIN_VERSION {
+            return Ok(None);
+        }
         let payload = self
             .endpoint
             .call(2, [sensor_index, 0x00, 0x00])
@@ -212,14 +223,16 @@ mod tests {
 
     #[test]
     fn default_dpi_read_takes_bytes_three_and_four() {
-        let mut reply = [0; 16];
-        reply[1..5].copy_from_slice(&[0x06, 0x40, 0x03, 0xe8]);
-        let dpi = answer(
-            2,
-            |dpi| async move { dpi.get_sensor_default_dpi(0).await },
-            reply,
-        );
-        assert_matches!(dpi, Ok(Some(1000)));
+        for version in [1, 2] {
+            let mut reply = [0; 16];
+            reply[1..5].copy_from_slice(&[0x06, 0x40, 0x03, 0xe8]);
+            let dpi = answer(
+                2,
+                |dpi| async move { dpi.get_sensor_default_dpi(version, 0).await },
+                reply,
+            );
+            assert_matches!(dpi, Ok(Some(1000)), "version {version}");
+        }
     }
 
     #[test]
@@ -228,10 +241,43 @@ mod tests {
         reply[1..3].copy_from_slice(&1600u16.to_be_bytes());
         let dpi = answer(
             2,
-            |dpi| async move { dpi.get_sensor_default_dpi(0).await },
+            |dpi| async move { dpi.get_sensor_default_dpi(1, 0).await },
             reply,
         );
         assert_matches!(dpi, Ok(None));
+    }
+
+    #[test]
+    fn a_version_zero_sensor_has_no_default_dpi() {
+        use std::sync::Arc;
+
+        use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+        use crate::feature::CreatableFeature;
+        use crate::nibble::U4;
+        use crate::protocol::v20::{Message, MessageHeader};
+
+        // Version 0 reports no default DPI, so a nonzero value in bytes 3
+        // and 4 of this firmware's `getSensorDpi` reply is not a default.
+        let mut reply = [0; 16];
+        reply[1..5].copy_from_slice(&[0x06, 0x40, 0x03, 0xe8]);
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let feature = super::AdjustableDpiFeature::new(channel, 3, 8);
+            let header = MessageHeader {
+                device_index: 3,
+                feature_index: 8,
+                function_id: U4::from_lo(2),
+                software_id: U4::from_lo(1),
+            };
+            handle.queue_response(Message::Long(header, reply).into());
+
+            assert_matches!(feature.get_sensor_default_dpi(0, 0).await, Ok(None));
+            assert!(
+                handle.written_reports().is_empty(),
+                "a version-0 default read sends no request"
+            );
+        });
     }
 
     #[test]
