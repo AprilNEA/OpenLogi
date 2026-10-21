@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.16] - 2026-10-21
+
+### Added
+
+- *(pointer)* light the DPI LED in precision mode ([#1934](https://github.com/AprilNEA/OpenLogi/pull/1934))
+- *(pointer)* precision mode on mice with adjustable DPI ([#1932](https://github.com/AprilNEA/OpenLogi/pull/1932))
+- *(release)* ship Sparkle delta updates ([#1925](https://github.com/AprilNEA/OpenLogi/pull/1925))
+- *(core,agent,gui)* pointer speed and precision mode for 0x2205 mice ([#1922](https://github.com/AprilNEA/OpenLogi/pull/1922))
+- *(xtask,ci)* sign the macOS agent with its HID virtual-device profile ([#1929](https://github.com/AprilNEA/OpenLogi/pull/1929))
+- *(macos,gui)* say when Secure Input pauses key remapping ([#1926](https://github.com/AprilNEA/OpenLogi/pull/1926))
+- *(inject,gui)* slide desktop switches like a three-finger swipe ([#1921](https://github.com/AprilNEA/OpenLogi/pull/1921))
+- *(inject)* type synthesized macOS keys through a virtual HID keyboard ([#1918](https://github.com/AprilNEA/OpenLogi/pull/1918))
+
+### Fixed
+
+- *(hidpp)* publish the 0x8071 nv-effect sync event as raw bytes ([#1951](https://github.com/AprilNEA/OpenLogi/pull/1951))
+- *(core,device,agent,gui)* choose the receiver before pairing a device ([#1614](https://github.com/AprilNEA/OpenLogi/pull/1614))
+- *(hidpp,device)* read the 0x2201 default DPI only from feature version 1 ([#1952](https://github.com/AprilNEA/OpenLogi/pull/1952))
+- *(device)* read the 0x1000 battery capability before mapping levels ([#1938](https://github.com/AprilNEA/OpenLogi/pull/1938))
+- *(hidpp,device)* publish 0x1b04 reporting changes made by other clients ([#1946](https://github.com/AprilNEA/OpenLogi/pull/1946))
+- *(hidpp)* decode unified battery status bytes 3-5 by feature version ([#1941](https://github.com/AprilNEA/OpenLogi/pull/1941))
+- *(device)* drop short 0x2121 movements and re-read SmartShift on a ratchet switch ([#1944](https://github.com/AprilNEA/OpenLogi/pull/1944))
+- *(agent)* hand the haptic enable back after Actions Ring sessions ([#1942](https://github.com/AprilNEA/OpenLogi/pull/1942))
+- *(hidpp,device)* reconcile DPI after a sensor calibration broadcast ([#1947](https://github.com/AprilNEA/OpenLogi/pull/1947))
+- *(gui)* save a DPI only after the device confirms it ([#1943](https://github.com/AprilNEA/OpenLogi/pull/1943))
+- *(hidpp,device,cli)* keep getFwInfo transport bytes 9-15 raw ([#1945](https://github.com/AprilNEA/OpenLogi/pull/1945))
+- *(hidpp,device)* re-read settings on a 0x4521 disabled-key report ([#1940](https://github.com/AprilNEA/OpenLogi/pull/1940))
+- *(hidpp)* bound 0x2111 torque and refuse a short capabilities reply ([#1939](https://github.com/AprilNEA/OpenLogi/pull/1939))
+- *(hidpp)* gate the illumination effective maximum in its wrapper ([#1937](https://github.com/AprilNEA/OpenLogi/pull/1937))
+- *(hidpp,device)* write all 0x8070 zones safely and gate v1 functions ([#1936](https://github.com/AprilNEA/OpenLogi/pull/1936))
+- *(device)* restore thumb-wheel reporting as found and harden its capture ([#1935](https://github.com/AprilNEA/OpenLogi/pull/1935))
+- *(hidpp)* keep unmodelled backlight option bits on write ([#1933](https://github.com/AprilNEA/OpenLogi/pull/1933))
+- *(desktop)* show Pointer tab for mice and trackballs with software scroll inversion ([#1880](https://github.com/AprilNEA/OpenLogi/pull/1880))
+- *(device,agent)* move linked devices after a keyboard that switches by itself ([#1920](https://github.com/AprilNEA/OpenLogi/pull/1920))
+- *(deps)* bump rustls-webpki and webpki roots for emSign advisories ([#1924](https://github.com/AprilNEA/OpenLogi/pull/1924))
+- *(agent)* relaunch when Input Monitoring is granted after launch ([#1919](https://github.com/AprilNEA/OpenLogi/pull/1919))
+
 ## [0.8.15] - 2026-10-20
 
 ### Added
