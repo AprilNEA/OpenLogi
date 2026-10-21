@@ -253,8 +253,83 @@ fn decodes_cluster_changed_event() {
 }
 
 #[test]
+fn decodes_nv_effect_sync_event_with_its_raw_payload() {
+    let payload = [
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32,
+        0x10,
+    ];
+    assert_eq!(
+        decode_event(3, &payload),
+        Some(RgbEffectsEvent::NvEffectSync { payload })
+    );
+}
+
+/// Sub-ids past the four known events stay dropped.
+#[test]
 fn ignores_unknown_event_sub_id() {
-    assert!(decode_event(7, &[0; 16]).is_none());
+    let payload = [0xa5; 16];
+    for sub_id in 4..=u8::MAX {
+        assert_eq!(
+            decode_event(sub_id, &payload),
+            None,
+            "decoded unknown sub-id {sub_id}"
+        );
+    }
+}
+
+/// The public `listen` path publishes event `3` and still drops event `4`.
+#[test]
+fn listeners_receive_the_nv_effect_sync_event() {
+    use std::sync::Arc;
+
+    use super::RgbEffectsFeature;
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::{CreatableFeature as _, EmittingFeature as _};
+    use crate::nibble::U4;
+    use crate::protocol::v20::{Message, MessageHeader};
+
+    let broadcast = |sub_id| MessageHeader {
+        device_index: 3,
+        feature_index: 8,
+        function_id: U4::from_lo(sub_id),
+        software_id: U4::from_lo(0),
+    };
+    let payload = [
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32,
+        0x10,
+    ];
+    let mut sync = [0; 16];
+    sync[0] = 0xff;
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let feature = RgbEffectsFeature::new(channel, 3, 8);
+        let events = feature.listen();
+
+        handle
+            .send_incoming(Message::Long(broadcast(3), payload).into())
+            .await;
+        handle
+            .send_incoming(Message::Long(broadcast(4), payload).into())
+            .await;
+        // The read thread delivers in order, so this event arrives last.
+        handle
+            .send_incoming(Message::Long(broadcast(0), sync).into())
+            .await;
+
+        assert_eq!(
+            events.recv().await.unwrap(),
+            RgbEffectsEvent::NvEffectSync { payload }
+        );
+        assert_eq!(
+            events.recv().await.unwrap(),
+            RgbEffectsEvent::EffectSync {
+                cluster_index: 0xff,
+                effect_counter: 0,
+            }
+        );
+    });
 }
 
 #[test]
