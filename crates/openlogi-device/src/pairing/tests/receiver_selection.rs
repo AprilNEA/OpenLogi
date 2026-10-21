@@ -1,6 +1,7 @@
 use openlogi_fixture::{
     CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
 };
+use tokio::sync::mpsc;
 
 use crate::replay::{
     ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
@@ -9,22 +10,33 @@ use crate::replay::{
 use crate::{NodeId, NodeInfo};
 
 use super::super::{
-    PairingError, ReceiverFamily, ReceiverIdentityCache, ReceiverSelector, ReceiverTarget,
-    open_receiver, open_receiver_with_inventory,
+    PairingError, PairingEvent, ReceiverFamily, ReceiverIdentityCache, ReceiverSelector,
+    ReceiverTarget, open_receiver, open_receiver_with_inventory, run_pairing,
 };
 
 const BOLT_A: &str = "00000000AAAABBBB";
 const BOLT_B: &str = "00000000CCCCDDDD";
+const UNIFYING_A: &str = "11223344";
+const UNIFYING_B: &str = "5566AABB";
 
 fn backend(tag: &str) -> ReplayBackend {
+    backend_with(
+        tag,
+        &[
+            ("unifying", 0xc52b, UNIFYING_A),
+            ("bolt-a", 0xc548, BOLT_A),
+            ("bolt-b", 0xc548, BOLT_B),
+        ],
+    )
+}
+
+/// Replays `receivers` — `(name, product ID, unique ID)` — in enumeration
+/// order. Each receiver answers only its unique-ID read.
+fn backend_with(tag: &str, receivers: &[(&str, u16, &str)]) -> ReplayBackend {
     let mut nodes = Vec::new();
     let mut channels = Vec::new();
     let mut cassettes = Vec::new();
-    for (name, product_id, uid) in [
-        ("unifying", 0xc52b, "11223344"),
-        ("bolt-a", 0xc548, BOLT_A),
-        ("bolt-b", 0xc548, BOLT_B),
-    ] {
+    for &(name, product_id, uid) in receivers {
         nodes.push(ReplayNode {
             info: NodeInfo {
                 id: node_id(tag, name),
@@ -56,7 +68,9 @@ fn backend(tag: &str) -> ReplayBackend {
         if product_id == 0xc548 {
             response.extend_from_slice(uid.as_bytes());
         } else {
-            response.extend_from_slice(&[3, 0x11, 0x22, 0x33, 0x44, 0, 6]);
+            response.push(3);
+            response.extend_from_slice(&unifying_serial(uid));
+            response.extend_from_slice(&[0, 6]);
             response.resize(20, 0);
         }
         cassettes.push(HidCassette {
@@ -385,4 +399,77 @@ async fn disconnected_selection_never_falls_back_to_another_receiver() {
         vec![vec![0x10, 0xff, 0x83, 0xfb, 0, 0, 0]],
         "only an identity read is allowed on a different receiver"
     );
+}
+
+/// The four serial bytes a Unifying `0xB5`/`0x03` read answers with for `uid`.
+fn unifying_serial(uid: &str) -> [u8; 4] {
+    u32::from_str_radix(uid, 16)
+        .expect("a Unifying unique ID is eight hex digits")
+        .to_be_bytes()
+}
+
+/// Two Unifying receivers share one product ID; only the unique ID tells
+/// them apart.
+fn two_unifying(tag: &str) -> ReplayBackend {
+    backend_with(
+        tag,
+        &[
+            ("unifying-a", 0xc52b, UNIFYING_A),
+            ("unifying-b", 0xc52b, UNIFYING_B),
+        ],
+    )
+}
+
+/// The Unifying unique-ID read: the only report a receiver may see before
+/// it is confirmed as the selected one.
+fn unifying_uid_read() -> Vec<u8> {
+    vec![0x10, 0xff, 0x83, 0xb5, 3, 0, 0]
+}
+
+#[tokio::test]
+async fn selects_the_second_unifying_receiver_by_its_unique_id() {
+    let backend = two_unifying("second-unifying");
+    let opened = open_receiver(
+        &backend,
+        &ReceiverTarget::Selector(&target(0xc52b, &UNIFYING_B.to_ascii_lowercase())),
+    )
+    .await
+    .expect("the selected Unifying receiver opens");
+    assert!(matches!(opened.family, ReceiverFamily::Unifying));
+    assert_eq!(backend.channel_lifetime_count("unifying-a").unwrap(), 0);
+    assert_eq!(backend.channel_lifetime_count("unifying-b").unwrap(), 1);
+    for channel in ["unifying-a", "unifying-b"] {
+        assert_eq!(
+            backend.channel_completion(channel).unwrap().written_reports,
+            vec![unifying_uid_read()],
+            "{channel}: only the identity read may precede the session"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_unifying_unique_id_fails_without_touching_either_receiver() {
+    let backend = two_unifying("unknown-unifying");
+    let (_commands_tx, commands) = mpsc::unbounded_channel();
+    let (events_tx, mut events) = mpsc::unbounded_channel();
+    let result = run_pairing(&backend, target(0xc52b, "99AABBCC"), commands, events_tx).await;
+    assert!(
+        matches!(result, Err(PairingError::ReceiverNotFound)),
+        "{result:?}"
+    );
+    assert!(
+        matches!(
+            events.try_recv(),
+            Ok(PairingEvent::Failed(PairingError::ReceiverNotFound))
+        ),
+        "the session must report why it did not start"
+    );
+    for channel in ["unifying-a", "unifying-b"] {
+        assert_eq!(
+            backend.channel_completion(channel).unwrap().written_reports,
+            vec![unifying_uid_read()],
+            "{channel}: an unknown selection must never fall back to this receiver"
+        );
+        assert_eq!(backend.channel_lifetime_count(channel).unwrap(), 0);
+    }
 }
