@@ -1291,6 +1291,7 @@ fn status_with(secure_input: openlogi_ipc::SecureInput) -> openlogi_ipc::AgentSt
         input_monitoring_granted: true,
         hid_open_failures: false,
         secure_input,
+        battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
     }
 }
 

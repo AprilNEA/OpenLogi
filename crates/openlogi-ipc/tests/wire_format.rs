@@ -559,14 +559,14 @@ fn agent_snapshot() {
         // Pinned populated in `observed_light` below.
         lights: Vec::new(),
     };
-    assert_wire(&snapshot, "010001010705302e362e3601000000000000000000");
+    assert_wire(&snapshot, "010001010705302e362e360100000000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e3601000000000000000000");
+    assert_wire(&observed, "03010001010705302e362e360100000000000000000000");
 }
 
 #[test]
