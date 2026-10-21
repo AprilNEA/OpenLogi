@@ -15,6 +15,7 @@ pub mod battery;
 pub mod controls;
 pub mod dpi;
 pub mod features;
+pub mod lamparray;
 pub mod lighting;
 pub mod pointer_speed;
 pub mod smartshift;
@@ -38,6 +39,8 @@ pub enum DiagCmd {
     Wheel(wheel::WheelArgs),
     /// Read 0x2205 pointer scaling → write a test value → read back → restore.
     PointerSpeed(pointer_speed::PointerSpeedArgs),
+    /// Report Logitech's LampArray USB filter on this host (Windows only).
+    Lamparray(lamparray::LamparrayArgs),
 }
 
 impl DiagCmd {
@@ -54,6 +57,9 @@ impl DiagCmd {
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
             Self::PointerSpeed(args) => pointer_speed::run(args).await,
+            // A registry read of the host's device tree — no device I/O, so
+            // it needs no async runtime.
+            Self::Lamparray(args) => lamparray::run(args),
         }
     }
 }
