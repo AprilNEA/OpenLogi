@@ -796,3 +796,60 @@ fn a_reload_darkens_the_led_of_the_mice_whose_mode_it_ends() {
 
     assert_eq!(leds(&writes), [Some(false), None]);
 }
+
+/// A DPI shift's restore waits out precision mode: no place while the mode
+/// is on, nor while a newer end of it is owed, so neither write is skipped.
+#[test]
+fn a_dpi_shift_restore_takes_no_place_from_precision_mode() {
+    let speeds = PointerSpeeds::default();
+    speeds.publish(None, [dpi_mouse("a", 1, Some(Dpi::new(1600)))]);
+    let restore = speeds
+        .shift_restore("a", &route(1), None)
+        .expect("nothing owed");
+    assert_eq!(restore.restore, None);
+
+    speeds
+        .toggle_precision(Some("a"), PrecisionPress::Assigned)
+        .expect("precision on");
+    assert!(speeds.shift_restore("a", &route(1), None).is_none());
+
+    let (on, off) = speeds
+        .toggle_precision(Some("a"), PrecisionPress::Assigned)
+        .expect("precision off");
+    assert!(!on);
+    assert!(speeds.shift_restore("a", &route(1), None).is_none());
+    speeds.restored(off.restore.as_ref().expect("the end owes a restore"));
+    assert!(speeds.shift_restore("a", &route(1), None).is_some());
+}
+
+/// A shift that began in precision mode ended it with its own low write. A
+/// quick release must still restore, and takes over the restore that write
+/// owed, since its place skips the write if it still waits. A newer end of
+/// precision mode keeps the release out.
+#[test]
+fn a_dpi_shift_restore_takes_over_its_own_end_of_precision_mode() {
+    let speeds = PointerSpeeds::default();
+    speeds.publish(None, [dpi_mouse("a", 1, Some(Dpi::new(1600)))]);
+    speeds
+        .toggle_precision(Some("a"), PrecisionPress::Assigned)
+        .expect("precision on");
+    let shift = speeds.preset_write(&route(1), Dpi::new(400));
+    let own = shift
+        .restore
+        .clone()
+        .expect("the shift ends precision mode");
+
+    let restore = speeds
+        .shift_restore("a", &route(1), Some(&own))
+        .expect("the release restores");
+    assert_eq!(restore.restore, Some(own.clone()));
+
+    speeds
+        .toggle_precision(Some("a"), PrecisionPress::Assigned)
+        .expect("precision on again");
+    let (_, off) = speeds
+        .toggle_precision(Some("a"), PrecisionPress::Assigned)
+        .expect("precision off again");
+    assert_ne!(off.restore.as_ref(), Some(&own));
+    assert!(speeds.shift_restore("a", &route(1), Some(&own)).is_none());
+}

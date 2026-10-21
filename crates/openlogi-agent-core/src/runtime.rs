@@ -27,7 +27,7 @@ use crate::hardware::{
     DeviceAccess, restore_dpi_in_background, toggle_smartshift_in_background,
     write_pointer_speed_in_background,
 };
-use crate::pointer_speed::{PrecisionPress, SpeedWrite};
+use crate::pointer_speed::{PrecisionPress, Restore, ShiftRestore, SpeedWrite};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 use openlogi_hid::{DeviceRoute, Dpi};
 
@@ -330,6 +330,8 @@ struct HeldDpiShift {
     key: String,
     route: DeviceRoute,
     before: DpiBeforeShift,
+    /// The restore the shift's own write carries, from ending precision mode.
+    own_restore: Option<Restore>,
 }
 
 impl HeldDpiShift {
@@ -359,10 +361,9 @@ impl HeldDpiShifts {
         }
         info!(%low, "DPI shift held");
         let before = self.before.entry(device.clone()).or_default().clone();
-        executor.write_speed_reading(
-            executor.pointer_speeds.preset_write(&route, low),
-            current.is_none().then(|| before.clone()),
-        );
+        let write = executor.pointer_speeds.preset_write(&route, low);
+        let own_restore = write.restore.clone();
+        executor.write_speed_reading(write, current.is_none().then(|| before.clone()));
         self.by_device.insert(
             device,
             HeldDpiShift {
@@ -370,6 +371,7 @@ impl HeldDpiShifts {
                 key,
                 route,
                 before,
+                own_restore,
             },
         );
     }
@@ -388,12 +390,31 @@ impl HeldDpiShifts {
         let Some(held) = self.by_device.remove(&device) else {
             return;
         };
+        let Some(ShiftRestore { ticket, restore }) = executor.pointer_speeds.shift_restore(
+            &held.key,
+            &held.route,
+            held.own_restore.as_ref(),
+        ) else {
+            // Precision mode sets the DPI now, so the reading is stale.
+            held.before.clear();
+            debug!("precision mode holds the DPI — DPI shift restore skipped");
+            return;
+        };
         let cycles = Arc::clone(&executor.dpi_cycle);
+        let speeds = Arc::clone(&executor.pointer_speeds);
+        // Settling a restore ends the precision speed, so the LED goes dark.
+        let led = restore.as_ref().map(|_| false);
         restore_dpi_in_background(
             executor.access.op(&held.route),
-            executor.pointer_speeds.ticket(&held.route),
+            ticket,
             held.before.clone(),
+            led,
             move || held.restore_to(&*cycles.read().ok()?),
+            move || {
+                if let Some(restore) = restore {
+                    speeds.restored(&restore);
+                }
+            },
         );
     }
 }
@@ -998,6 +1019,7 @@ mod tests {
                 slot: 1,
             },
             before: DpiBeforeShift::default(),
+            own_restore: None,
         };
         // Never set and not read yet: a preset is not the DPI to return to.
         assert_eq!(held.restore_to(&cycles), None);
@@ -1006,6 +1028,77 @@ mod tests {
         // A preset picked during the hold stays after release.
         cycles.state_for(Some("mouse")).unwrap().step(true);
         assert_eq!(held.restore_to(&cycles), Some(Dpi::new(1600)));
+    }
+
+    /// Precision mode turned on during the hold sets the DPI, and its write
+    /// may still be waiting, so the release writes nothing after it and
+    /// forgets its reading.
+    #[test]
+    fn dpi_shift_release_leaves_precision_mode_alone() {
+        let speeds = Arc::new(PointerSpeeds::default());
+        speeds.publish(
+            None,
+            [crate::pointer_speed::SpeedMouse {
+                key: "mouse".to_string(),
+                route: DeviceRoute::Bolt {
+                    receiver_uid: "AA00".into(),
+                    slot: 1,
+                },
+                saved: crate::pointer_speed::SavedSpeed::Dpi(Some(Dpi::new(1600))),
+            }],
+        );
+        let mut executor = dpi_shift_executor(None);
+        executor.pointer_speeds = Arc::clone(&speeds);
+        let press = PressToken::hook_for_test(1, ButtonId::G7);
+        let mut held = HeldDpiShifts::default();
+        held.start(&executor, &press, Some("mouse"));
+        let before = held.by_device.values().next().unwrap().before.clone();
+        before.set(Dpi::new(1200));
+        let (on, _) = speeds
+            .toggle_precision(Some("mouse"), PrecisionPress::Assigned)
+            .expect("a DPI mouse toggles precision mode");
+        assert!(on);
+
+        held.end(&executor, &press);
+        assert!(held.by_device.is_empty());
+        assert_eq!(before.get(), None, "the reading goes with the restore");
+    }
+
+    /// A quick press while precision mode is on: the shift's own low write
+    /// ended the mode and still waits when the press ends. The release must
+    /// restore anyway, and owe nothing once it has.
+    #[test]
+    fn a_quick_dpi_shift_in_precision_mode_still_restores() {
+        let speeds = Arc::new(PointerSpeeds::default());
+        speeds.publish(
+            None,
+            [crate::pointer_speed::SpeedMouse {
+                key: "mouse".to_string(),
+                route: DeviceRoute::Bolt {
+                    receiver_uid: "AA00".into(),
+                    slot: 1,
+                },
+                saved: crate::pointer_speed::SavedSpeed::Dpi(Some(Dpi::new(1600))),
+            }],
+        );
+        speeds
+            .toggle_precision(Some("mouse"), PrecisionPress::Assigned)
+            .expect("precision on");
+        let mut executor = dpi_shift_executor(None);
+        executor.pointer_speeds = Arc::clone(&speeds);
+        let press = PressToken::hook_for_test(1, ButtonId::G7);
+        let mut held = HeldDpiShifts::default();
+        held.start(&executor, &press, Some("mouse"));
+        let before = held.by_device.values().next().unwrap().before.clone();
+        before.set(Dpi::new(1200));
+
+        held.end(&executor, &press);
+        assert!(held.by_device.is_empty());
+        assert_eq!(
+            before.get(),
+            Some(Dpi::new(1200)),
+            "the release restores, so it keeps the reading until it lands"
+        );
     }
 
     #[test]

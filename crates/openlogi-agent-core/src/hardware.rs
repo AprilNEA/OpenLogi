@@ -1366,12 +1366,15 @@ fn log_wheel_result(
 }
 
 /// Write the DPI `restore` yields once this write's turn comes, if any, and
-/// forget `before` once it is written.
+/// forget `before` once it is written. As a pointer-speed write does, it then
+/// sets the DPI LED when `led` says, and runs `on_restored` once it landed.
 pub(crate) fn restore_dpi_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
     before: DpiBeforeShift,
+    led: Option<bool>,
     restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
+    on_restored: impl FnOnce() + Send + 'static,
 ) {
     let index = op.route.device_index();
     let turn = op.access.transport_turns.turn_for(&op.route);
@@ -1385,8 +1388,12 @@ pub(crate) fn restore_dpi_in_background(
                     let Some(dpi) = restore() else {
                         return Ok(Some(None));
                     };
+                    let started = tokio::time::Instant::now();
                     let shared = op.resolve()?;
                     openlogi_hid::set_dpi_on(&shared, dpi).await?;
+                    if let Some(on) = led {
+                        show_precision_led(&shared, on, started).await;
+                    }
                     before.clear();
                     Ok(Some(Some(dpi)))
                 },
@@ -1396,7 +1403,10 @@ pub(crate) fn restore_dpi_in_background(
         },
         move |result| {
             log_outcome(index, "DPI restore", result, |restored| match restored {
-                Some(Some(dpi)) => debug!(index, %dpi, "DPI restored"),
+                Some(Some(dpi)) => {
+                    debug!(index, %dpi, "DPI restored");
+                    on_restored();
+                }
                 Some(None) => debug!(index, "no DPI to restore"),
                 None => debug!(index, "DPI restore superseded by a newer write"),
             });

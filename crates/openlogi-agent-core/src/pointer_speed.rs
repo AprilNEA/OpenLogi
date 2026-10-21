@@ -219,6 +219,13 @@ pub(crate) struct Restore {
     generation: u64,
 }
 
+/// A DPI shift's restore write: its place, and the pending restore it
+/// settles once it lands.
+pub(crate) struct ShiftRestore {
+    pub(crate) ticket: WriteTicket,
+    pub(crate) restore: Option<Restore>,
+}
+
 /// What a config reload changed for one mouse.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReloadChange {
@@ -353,10 +360,27 @@ impl PointerSpeeds {
         }
     }
 
-    /// A place among the pointer-speed writes of the mouse at `route`, for
-    /// a DPI write made outside them, such as a DPI shift's restore.
-    pub(crate) fn ticket(&self, route: &DeviceRoute) -> WriteTicket {
-        self.order.request(route)
+    /// A place for a DPI shift's restore among the pointer-speed writes of
+    /// the mouse `key` names, at `route`. `own` is the restore the shift's
+    /// own write carries, from ending precision mode as it began; the
+    /// restore takes it over, since its place skips that write if it still
+    /// waits. `None` while precision mode is on or a newer end of it is
+    /// owed: that write sets the DPI, and a later place would skip it.
+    pub(crate) fn shift_restore(
+        &self,
+        key: &str,
+        route: &DeviceRoute,
+        own: Option<&Restore>,
+    ) -> Option<ShiftRestore> {
+        let state = self.lock();
+        let restore = state.pending_restore(key);
+        if state.precision.contains(key) || restore.is_some() && restore.as_ref() != own {
+            return None;
+        }
+        Some(ShiftRestore {
+            ticket: self.order.request(route),
+            restore,
+        })
     }
 
     /// A DPI preset action writes `dpi` to the mouse at `route`. Ends the
