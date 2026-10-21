@@ -128,7 +128,9 @@ pub use succession::Identity;
 ///      that speed read and set from the settings app;
 ///      `Action::TogglePrecisionMode` appended — precision mode bound to a
 ///      button; `HidppOperation::WriteLed` appended — the `0x1300` DPI LED
-///      that precision mode lights.
+///      that precision mode lights. `ReceiverSelector::ReceiverUid`
+///      appended — a pairing target matched by receiver product ID and
+///      unique ID, never falling back to another receiver.
 pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the

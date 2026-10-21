@@ -782,6 +782,14 @@ fn device_settings_payloads() {
         &ReceiverSelector::BoltUid("F00DCAFE".into()),
         "01084630304443414645",
     );
+    assert_wire(&ReceiverSelector::First, "00");
+    assert_wire(
+        &ReceiverSelector::ReceiverUid {
+            product_id: 0xc548,
+            uid: "F00DCAFE".into(),
+        },
+        "02fb48c5084630304443414645",
+    );
 }
 
 #[test]
