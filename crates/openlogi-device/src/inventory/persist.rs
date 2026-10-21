@@ -52,7 +52,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v14 adds the `Capabilities::pointer_scaling` flag (`0x2205` pointer
 /// motion scaling on a mouse without adjustable DPI).
 /// v15 adds the `0x4521` disable-keys event index.
-const SCHEMA_VERSION: u32 = 15;
+/// v16 adds the `0x2121` hi-res wheel event index.
+const SCHEMA_VERSION: u32 = 16;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -251,6 +252,7 @@ mod tests {
             extended_report_rate: Some(15),
             backlight: Some(16),
             lock_key_state: Some(17),
+            hires_wheel: Some(19),
         };
         let mut cache = HashMap::new();
         cache.insert(

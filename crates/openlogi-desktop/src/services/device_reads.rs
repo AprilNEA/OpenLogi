@@ -1003,13 +1003,16 @@ impl DeviceReads {
 
     /// Re-read `key`'s settings after the device reported changing one
     /// itself, keeping the shown values while it answers. Covers the settings
-    /// such a report can concern — DPI, Fn lock, report rate and backlight (see
-    /// [`PairedDevice::settings_revision`]); a read nothing subscribed to
-    /// stays unsubscribed.
+    /// such a report can concern — DPI, Fn lock, report rate, backlight and
+    /// the SmartShift wheel mode (see [`PairedDevice::settings_revision`]); a
+    /// read nothing subscribed to stays unsubscribed.
     ///
     /// [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
     pub(crate) fn revalidate_device_settings(&mut self, key: &DeviceKey) {
         if let Some(read) = self.dpi.get_mut(key) {
+            read.query.revalidate();
+        }
+        if let Some(read) = self.smartshift.get_mut(key) {
             read.query.revalidate();
         }
         self.refresh_fn_lock(key);

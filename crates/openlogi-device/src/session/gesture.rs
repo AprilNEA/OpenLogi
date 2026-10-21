@@ -341,6 +341,9 @@ impl ArmedCapture for GestureCapture {
                 && let Some(event) = hires_wheel::decode_event(msg, device_index, idx)
             {
                 if let HiResWheelEvent::RatchetSwitch(state) = event {
+                    // Not input. The inventory's listener on this channel
+                    // counts it as a setting change, so clients re-read
+                    // SmartShift.
                     debug!(index = device_index, ?state, "wheel ratchet switched");
                 } else if let Some(input) = main_wheel::movement_input(event, per_notch) {
                     let _ = sink.send(input);

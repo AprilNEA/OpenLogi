@@ -39,6 +39,7 @@ use hidpp::feature::extended_report_rate::ExtendedReportRateFeature;
 use hidpp::feature::fn_inversion::{
     FnInversionMultiHostFeature, FnInversionWithDefaultStateFeature,
 };
+use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::feature::lock_key_state::{LockKeyStateFeature, LockKeys};
 use hidpp::feature::multi_platform::PlatformChange;
 use hidpp::feature::unified_battery::BatteryEvent;
@@ -94,6 +95,10 @@ pub enum HidppEventSource {
     /// changing on the device — the backlight keys, the ambient-light
     /// sensor, or the battery.
     Backlight,
+    /// A mouse's `HiResWheel` (`0x2121`) feature reported its wheel switching
+    /// between ratchet and free-spin on the device. The wheel mode a client
+    /// shows is the SmartShift one, which the client re-reads.
+    HiResWheelRatchet,
 }
 
 impl HidppEventSource {
@@ -108,6 +113,7 @@ impl HidppEventSource {
                 | Self::DisableKeys
                 | Self::ExtendedReportRate
                 | Self::Backlight
+                | Self::HiResWheelRatchet
         )
     }
 }
@@ -341,9 +347,9 @@ pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventOb
 /// measurement — broadcasts its changes, so each has an index here. So do the
 /// settings a user can change on the device itself: Fn lock (`0x40a2`,
 /// `0x40a3`), extended DPI (`0x2202`), the keyboard platform (`0x4531`), the
-/// keyboard's disabled keys (`0x4521`), the extended report rate (`0x8061`)
-/// and the keyboard backlight (`0x1982`). So do the keyboard's lock keys
-/// (`0x4220`), for the on-screen indicator only.
+/// keyboard's disabled keys (`0x4521`), the extended report rate (`0x8061`),
+/// the keyboard backlight (`0x1982`) and the wheel's ratchet (`0x2121`). So
+/// do the keyboard's lock keys (`0x4220`), for the on-screen indicator only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct EventFeatureIndices {
     pub(super) wireless_status: Option<u8>,
@@ -359,6 +365,7 @@ pub(super) struct EventFeatureIndices {
     pub(super) extended_report_rate: Option<u8>,
     pub(super) backlight: Option<u8>,
     pub(super) lock_key_state: Option<u8>,
+    pub(super) hires_wheel: Option<u8>,
 }
 
 impl EventFeatureIndices {
@@ -382,6 +389,7 @@ impl EventFeatureIndices {
                 0x8061 => indices.extended_report_rate = Some(index),
                 0x1982 => indices.backlight = Some(index),
                 0x4220 => indices.lock_key_state = Some(index),
+                0x2121 => indices.hires_wheel = Some(index),
                 _ => {}
             }
         }
@@ -463,6 +471,15 @@ impl EventFeatureIndices {
             && BacklightFeature::is_info_broadcast(function_id)
         {
             return Some(HidppEventSource::Backlight);
+        }
+        // Only the ratchet switch: a movement report is input, not a setting.
+        if self.hires_wheel == Some(header.feature_index)
+            && matches!(
+                hires_wheel::decode_event(message, header.device_index, header.feature_index),
+                Some(HiResWheelEvent::RatchetSwitch(_))
+            )
+        {
+            return Some(HidppEventSource::HiResWheelRatchet);
         }
         None
     }
@@ -848,6 +865,7 @@ mod tests {
                 extended_report_rate: None,
                 backlight: None,
                 lock_key_state: None,
+                hires_wheel: None,
             }
         );
     }
@@ -895,6 +913,7 @@ mod tests {
                 extended_report_rate: None,
                 backlight: None,
                 lock_key_state: None,
+                hires_wheel: None,
             },
         });
         state.receiver_snapshot_depth.store(1, Ordering::Release);
@@ -938,6 +957,7 @@ mod tests {
                 extended_report_rate: None,
                 backlight: None,
                 lock_key_state: None,
+                hires_wheel: None,
             },
         });
 
@@ -1010,6 +1030,7 @@ mod tests {
                 extended_report_rate: None,
                 backlight: None,
                 lock_key_state: None,
+                hires_wheel: None,
             },
         });
         let event = |function_id: u8, software_id: u8, bytes: [u8; 3]| {
@@ -1225,6 +1246,56 @@ mod tests {
         assert_eq!(handle.settings_revision(2), 0);
         assert_eq!(state.decode(long(3, 5, 0, 0), false), None);
         assert_eq!(handle.settings_revision(3), 0);
+    }
+
+    /// The mode-shift button switching the wheel between ratchet and
+    /// free-spin sends a `0x2121` ratchet-switch broadcast. It bumps the
+    /// revision, so a client re-reads SmartShift. A movement report on the
+    /// same index is input, not a setting.
+    #[test]
+    fn a_wheel_ratchet_switch_bumps_the_revision() {
+        let mouse = EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x2121]);
+        assert_eq!(mouse.hires_wheel, Some(3));
+        let state = state(Some(ReceiverProtocol::Bolt));
+        let handle = EventSubscriptionHandle {
+            state: Arc::clone(&state),
+        };
+        handle.register_device(1, mouse);
+        let header = |function_id: u8, software_id: u8| v20::MessageHeader {
+            device_index: 1,
+            feature_index: 3,
+            function_id: U4::from_lo(function_id),
+            software_id: U4::from_lo(software_id),
+        };
+        let mut payload = [0; 16];
+        payload[0] = 1;
+        let ratchet = v20::Message::Long(header(1, 0), payload).into();
+        let freespin = v20::Message::Short(header(1, 0), [0, 0, 0]).into();
+
+        assert_eq!(
+            state.decode(freespin, false),
+            Some(HidppEventSource::HiResWheelRatchet)
+        );
+        assert_eq!(
+            state.decode(ratchet, false),
+            Some(HidppEventSource::HiResWheelRatchet)
+        );
+        assert_eq!(handle.settings_revision(1), 2);
+
+        // Low resolution, 1 period, deltaV = -1.
+        let mut movement = [0; 16];
+        movement[..3].copy_from_slice(&[1, 0xff, 0xff]);
+        assert_eq!(
+            state.decode(v20::Message::Long(header(0, 0), movement).into(), false),
+            None
+        );
+        // Our own traffic: a matched reply, or a message with a software id.
+        assert_eq!(state.decode(ratchet, true), None);
+        assert_eq!(
+            state.decode(v20::Message::Long(header(1, 0xd), payload).into(), false),
+            None
+        );
+        assert_eq!(handle.settings_revision(1), 2);
     }
 
     #[test]
