@@ -289,6 +289,87 @@ OpenLogi never overwrites or deletes a unit it did not generate, at either
 location, and it only turns off an autostart it turned on. Enabling the service
 yourself with the command above keeps working regardless of the GUI toggle.
 
+## Brightness keys on external monitors
+
+The Brightness Up / Down actions press the standard Linux brightness keys
+(`KEY_BRIGHTNESSUP` / `KEY_BRIGHTNESSDOWN`). Your desktop decides what to do
+with them. On a laptop, GNOME and KDE change the built-in screen, so it should
+work natively.
+
+An external monitor is different. If `/sys/class/backlight` is empty, your
+desktop ignores the keys. You can still control the monitor over DDC/CI with
+[ddcutil](https://www.ddcutil.com/). This setup is not part of OpenLogi; it is
+one example that works.
+
+1. Install `ddcutil` and a daemon that runs a command when a key is pressed,
+   such as `triggerhappy`. For example, on Debian or Ubuntu:
+
+   ```sh
+   sudo apt install ddcutil triggerhappy
+   ```
+
+2. Find the I2C bus of your monitor. Look for the `I2C bus: /dev/i2c-N` line:
+
+   ```sh
+   sudo ddcutil detect
+   ```
+
+3. Check that the monitor accepts DDC/CI (code `10` is brightness):
+
+   ```sh
+   sudo ddcutil --bus N getvcp 10
+   ```
+
+4. Add the key rules in `/etc/triggerhappy/triggers.d/brightness.conf`. Replace
+   `N` with your bus number:
+
+   ```
+   KEY_BRIGHTNESSUP    1    /usr/bin/ddcutil --bus N --disable-dynamic-sleep --sleep-multiplier 0.2 setvcp 10 + 10
+   KEY_BRIGHTNESSDOWN  1    /usr/bin/ddcutil --bus N --disable-dynamic-sleep --sleep-multiplier 0.2 setvcp 10 - 10
+   ```
+
+   These flags make each press fast (about 0.2 s instead of 2 s or more):
+
+   - `--bus N` skips the search for the monitor.
+   - `--disable-dynamic-sleep` stops ddcutil from waiting longer and longer
+     when the monitor was idle for a while.
+   - `--sleep-multiplier 0.2` shortens the standard DDC/CI waits. If some
+     presses do nothing on your monitor, try a bigger value like `0.5`.
+
+5. ddcutil needs access to `/dev/i2c-*`, and a packaged triggerhappy service
+   may run as an unprivileged user (on Debian it is `nobody`). One simple way
+   is to run it as root. For example, open an override with
+   `sudo systemctl edit triggerhappy` and add:
+
+   ```ini
+   [Service]
+   ExecStart=
+   ExecStart=/usr/sbin/thd --triggers /etc/triggerhappy/triggers.d/ --socket /run/thd.socket --deviceglob /dev/input/event*
+   ```
+
+6. Debian only: also fix the triggerhappy socket. Debian's `triggerhappy.socket`
+   creates a stream socket, but triggerhappy talks over a datagram socket. With
+   the wrong type, triggerhappy never sees input devices that show up after it
+   starts, and OpenLogi's virtual keyboard is one of them. Open an override
+   with `sudo systemctl edit triggerhappy.socket` and add:
+
+   ```ini
+   [Socket]
+   ListenStream=
+   ListenDatagram=/run/thd.socket
+   ```
+
+7. Restart the socket and the service together. Restarting only the service
+   removes the socket file:
+
+   ```sh
+   sudo systemctl stop triggerhappy.service triggerhappy.socket
+   sudo systemctl start triggerhappy.socket triggerhappy.service
+   ```
+
+   To check the socket, run `th-cmd --socket /run/thd.socket --enable`. It
+   should print nothing.
+
 ## Verify the installation
 
 ```sh
