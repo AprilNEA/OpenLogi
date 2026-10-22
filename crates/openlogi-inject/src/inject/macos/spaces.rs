@@ -1,6 +1,9 @@
-//! DockSwipe injection with read-only, per-display Space confirmation.
+//! Adjacent-Space switches with read-only, per-display Space confirmation.
 //!
-//! Private event format follows yabai's SIP-enabled implementation:
+//! An animated switch types the user's own "Move left/right a space"
+//! shortcut when it is enabled, so the Dock plays the slide it plays for the
+//! keyboard (#1722, #1972). Otherwise, and for an instant switch, it posts
+//! DockSwipe events. Their format follows yabai's SIP-enabled implementation:
 //! <https://github.com/asmvik/yabai/blob/dd845723416f5fe92af49fad5ebab00369e07edd/src/space_manager.c#L927-L981>
 //! A slide's frames follow Mac Mouse Fix's three-finger swipes instead, in
 //! both of its event layouts, and are paced the way Logi Options+ drives its
@@ -215,19 +218,36 @@ impl Backend for Native {
 
 /// Every event of one switch. All of them are built before the first is
 /// posted, so a failed allocation cannot leave the Dock in an unterminated
-/// gesture.
+/// gesture. The shortcut builds its key edges the same way, when it posts.
 enum Output {
     /// Began and Ended at full travel: the Dock switches at once.
     Instant([CFRetained<CGEvent>; 2]),
     /// A slide's frames, each with its time from the first.
     Slide(Vec<(Duration, CFRetained<CGEvent>)>),
+    /// The user's enabled Space shortcut, typed as a keyboard types it. The
+    /// Dock then slides exactly as it does for the keyboard. `fallback` is
+    /// the slide to post instead if a held chord owns the shortcut's key.
+    Shortcut {
+        shortcut: super::symbolic_hotkey::SpaceShortcut,
+        fallback: Vec<(Duration, CFRetained<CGEvent>)>,
+    },
 }
 
 impl Output {
     fn prepare(switch: DesktopSwitch, direction: Direction) -> Option<Self> {
         match switch {
             DesktopSwitch::Instant => swipe_events(direction).map(Self::Instant),
-            DesktopSwitch::Animated => slide_events(direction).map(Self::Slide),
+            DesktopSwitch::Animated => {
+                let frames = slide_events(direction)?;
+                if let Some(shortcut) = super::symbolic_hotkey::space_shortcut(direction) {
+                    return Some(Self::Shortcut {
+                        shortcut,
+                        fallback: frames,
+                    });
+                }
+                tracing::debug!(?direction, "no usable Space shortcut — sliding");
+                Some(Self::Slide(frames))
+            }
         }
     }
 
@@ -239,14 +259,24 @@ impl Output {
                     CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
                 }
             }
-            Self::Slide(frames) => space_switch::pace(
-                frames,
-                &mut SessionTap {
-                    origin: Instant::now(),
-                },
-            ),
+            Self::Slide(frames) => post_slide(frames),
+            Self::Shortcut { shortcut, fallback } => {
+                if !shortcut.post() {
+                    tracing::debug!("Space shortcut not typed — sliding");
+                    post_slide(fallback);
+                }
+            }
         }
     }
+}
+
+fn post_slide(frames: &[(Duration, CFRetained<CGEvent>)]) {
+    space_switch::pace(
+        frames,
+        &mut SessionTap {
+            origin: Instant::now(),
+        },
+    );
 }
 
 /// Posts a slide's frames to the session event tap on the real clock.

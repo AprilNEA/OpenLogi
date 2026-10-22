@@ -251,11 +251,15 @@ fn the_host_choice_decides_how_the_next_switch_posts() {
 #[test]
 fn an_animated_switch_prepares_every_slide_frame_with_its_time() {
     // Posting at those times is `space_switch::pace`, tested with a fake clock.
+    // With the user's Space shortcut enabled the slide is its fallback, so
+    // either way the switch carries every frame.
     for direction in [Direction::Previous, Direction::Next] {
         let output =
             Output::prepare(DesktopSwitch::Animated, direction).expect("CGEvent allocation");
-        let Output::Slide(frames) = output else {
-            panic!("an animated switch slides: {direction:?}");
+        let frames = match output {
+            Output::Slide(frames) => frames,
+            Output::Shortcut { fallback, .. } => fallback,
+            Output::Instant(_) => panic!("an animated switch slides: {direction:?}"),
         };
         let expected = space_switch::slide(direction);
         assert_eq!(frames.len(), expected.len());
