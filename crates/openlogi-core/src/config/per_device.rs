@@ -318,14 +318,21 @@ impl Config {
     /// ([`HapticSettings::is_silent`]), even with the ring toggle on.
     #[must_use]
     pub fn ring_haptic_engine(&self, device_key: &str) -> RingHaptics {
-        if !self.action_ring(device_key).haptics {
-            return RingHaptics::Off;
+        if !self.action_ring(device_key).haptics || self.haptics_silenced(device_key) {
+            RingHaptics::Off
+        } else if self.haptics(device_key).is_some() {
+            RingHaptics::Owned
+        } else {
+            RingHaptics::Borrow
         }
-        match self.haptics(device_key) {
-            None => RingHaptics::Borrow,
-            Some(settings) if settings.is_silent() => RingHaptics::Off,
-            Some(_) => RingHaptics::Owned,
-        }
+    }
+
+    /// Whether the user silenced `device_key`'s haptic engine in OpenLogi
+    /// ([`HapticSettings::is_silent`]), which silences its Actions Ring too.
+    #[must_use]
+    pub fn haptics_silenced(&self, device_key: &str) -> bool {
+        self.haptics(device_key)
+            .is_some_and(HapticSettings::is_silent)
     }
 
     /// Whether the agent keeps `device_key`'s key layout on the host OS. On
