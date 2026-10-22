@@ -131,7 +131,12 @@ pub use succession::Identity;
 ///      that precision mode lights. `ReceiverSelector::ReceiverUid`
 ///      appended — a pairing target matched by receiver product ID and
 ///      unique ID, never falling back to another receiver.
-pub const PROTOCOL_VERSION: u32 = 38;
+/// v39: `HidppOperation::WriteKeyImage` appended — an image written to one
+///      of the MX Creative Keypad's LCD keys; `Action::{PreviousKeypadPage,
+///      NextKeypadPage}` appended and `ButtonId` grid keys gain
+///      page-qualified names (`page2:gridMiddle`) — the keypad's binding
+///      pages.
+pub const PROTOCOL_VERSION: u32 = 39;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

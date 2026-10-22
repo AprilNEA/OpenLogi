@@ -24,6 +24,7 @@ mod error;
 mod fn_lock;
 mod haptic;
 mod hires_wheel;
+mod key_display;
 mod lighting;
 mod litra;
 mod os_layout;
@@ -59,6 +60,7 @@ pub use hires_wheel::{
     get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
 };
+pub use key_display::{KeyDisplay, KeyImageJpeg, key_display_for, write_key_image_on};
 pub use lighting::{
     LightingMethod, LightingWrite, RgbControlLease, release_rgb_control, set_keyboard_color,
     set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,

@@ -52,7 +52,7 @@ fn test_dispatcher() -> (
                 device_io: openlogi_hid::device_io_channel().1,
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
-            action_ring,
+            requests: action_ring,
         },
         buttons: owner.input(),
     };

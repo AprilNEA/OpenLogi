@@ -11,7 +11,7 @@ use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, deserialize_gesture_owner,
 };
-use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
+use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection, KeypadPage};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -313,6 +313,12 @@ pub struct DeviceConfig {
     /// leave the mouse's speed alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer_speed: Option<PointerSpeed>,
+    /// The last of a keypad's binding pages — its page count. Grid bindings
+    /// on later pages are dropped when it shrinks (see
+    /// [`Config::set_keypad_pages`](crate::config::Config::set_keypad_pages)).
+    /// One page is the default and is omitted from `config.toml`.
+    #[serde(default, skip_serializing_if = "is_first_page")]
+    pub keypad_pages: KeypadPage,
 }
 
 impl DeviceConfig {
@@ -417,8 +423,19 @@ impl Default for DeviceConfig {
             keep_os_layout: None,
             report_rate: None,
             pointer_speed: None,
+            keypad_pages: KeypadPage::FIRST,
         }
     }
+}
+
+/// `skip_serializing_if` helper: a single-page keypad (or any other device)
+/// keeps `keypad_pages` out of `config.toml`.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_first_page(page: &KeypadPage) -> bool {
+    *page == KeypadPage::FIRST
 }
 
 /// `serde(default)` helper for `bool` fields that default to `true`.
@@ -545,6 +562,8 @@ struct RawDeviceConfig {
     report_rate: Option<ReportRate>,
     #[serde(default)]
     pointer_speed: Option<PointerSpeed>,
+    #[serde(default)]
+    keypad_pages: KeypadPage,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -609,6 +628,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             keep_os_layout: raw.keep_os_layout,
             report_rate: raw.report_rate,
             pointer_speed: raw.pointer_speed,
+            keypad_pages: raw.keypad_pages,
         }
     }
 }

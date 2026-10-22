@@ -50,6 +50,34 @@
     ],
     "raw_battery": "0x1004 UnifiedBattery: version=3 percentage=75 level=Full status=Discharging external_power=0x00"
   },
+  "mx-creative-keypad-001": {
+    "cases": ["backlight-state", "dpi-info", "feature-table", "raw-battery", "reprogrammable-controls", "smartshift-status", "wheel-mode"],
+    "features": [
+      [0, 2, 0],
+      [1, 2, 0],
+      [3, 7, 0],
+      [5, 5, 0],
+      [8, 1, 0],
+      [17, 0, 0],
+      [195, 1, 0],
+      [5634, 0, 0],
+      [6146, 0, 112],
+      [6149, 0, 96],
+      [6151, 4, 112],
+      [6916, 6, 0],
+      [7680, 0, 64],
+      [7682, 0, 96],
+      [7856, 0, 112],
+      [32832, 1, 0],
+      [37602, 0, 112],
+      [6155, 0, 112]
+    ],
+    "controls": [
+      [417, 0, 32],
+      [418, 0, 32]
+    ],
+    "raw_battery": null
+  },
   "mx-ergo-001": {
     "cases": ["backlight-state", "dpi-info", "feature-table", "raw-battery", "reprogrammable-controls", "smartshift-status", "wheel-mode"],
     "features": [

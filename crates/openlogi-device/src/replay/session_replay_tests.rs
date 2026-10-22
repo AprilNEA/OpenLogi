@@ -16,9 +16,9 @@ use crate::session::gesture::CaptureSpec;
 use crate::{
     CaptureChannelSlot, CaptureHost, CaptureSessionFailure, CaptureSessionOutcome,
     CaptureSessionStop, CapturedInput, ChannelRegistry, DeviceIoGate, DeviceIoSignal, DeviceRoute,
-    Enumerator, NodeId, NodeInfo, PairingCommand, PairingEvent, ReceiverSelector, SharedChannel,
-    device_io_channel, reprog_controls, run_capture_session, run_keyboard_capture_session,
-    run_pairing,
+    Enumerator, KeyboardWanted, NodeId, NodeInfo, PairingCommand, PairingEvent, ReceiverSelector,
+    SharedChannel, device_io_channel, reprog_controls, run_capture_session,
+    run_keyboard_capture_session, run_pairing,
 };
 
 const CAPTURE_CHANNEL: &str = "capture-session";
@@ -96,7 +96,10 @@ async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown(
     let (shutdown, host) = replay.host(sink);
     let capture = run_keyboard_capture_session(
         replay.route.clone(),
-        BTreeMap::from([(KEYBOARD_CID, ButtonId::control(KEYBOARD_CID))]),
+        KeyboardWanted {
+            controls: BTreeMap::from([(KEYBOARD_CID, ButtonId::control(KEYBOARD_CID))]),
+            grid: BTreeMap::new(),
+        },
         host,
     );
 

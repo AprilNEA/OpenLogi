@@ -117,6 +117,12 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
             DetailTab::Pointer,
             DetailTab::Device,
         ],
+        // Kind Numpad with a measured 0x1b04 table and no pointer sensor: the
+        // Keys panel is its configuration screen, and a key can open the
+        // Actions Ring, so the ring editor follows it.
+        "mx-creative-keypad-001" => {
+            vec![DetailTab::Keys, DetailTab::ActionsRing, DetailTab::Device]
+        }
         id => panic!("{id}: add reviewed desktop panel expectations"),
     }
 }
