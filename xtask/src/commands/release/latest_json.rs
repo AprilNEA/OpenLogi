@@ -11,6 +11,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 // both come from one constant.
 use openlogi_core::brand::APP_ID;
 
+use crate::support::release_tag::ReleaseTag;
 use crate::support::update_feed::{BASE_URL_ENV, CHANNEL, MACOS_MINIMUM_OS_VERSION};
 
 /// Windows 10+. Informational — the client updater doesn't gate on it today,
@@ -78,7 +79,7 @@ struct Classified {
 }
 
 pub(crate) fn run(args: &Args) -> Result<()> {
-    let version = args.tag.strip_prefix('v').unwrap_or(&args.tag).to_string();
+    let version = ReleaseTag::parse(&args.tag)?.version().to_string();
     let release_base = format!(
         "{}/releases/{}",
         args.base_url.trim_end_matches('/'),

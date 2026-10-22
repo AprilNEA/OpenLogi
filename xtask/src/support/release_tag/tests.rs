@@ -1,0 +1,166 @@
+use openlogi_core::update_feed::UpdateChannel;
+use semver::Version;
+
+use super::{BuildVersion, ReleaseTag};
+
+fn tags(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+fn build_version(tag: &str, merged: &[&str]) -> anyhow::Result<String> {
+    let tag = ReleaseTag::parse(tag)?;
+    BuildVersion::of(&tag, &tags(merged)).map(|build| build.to_string())
+}
+
+#[test]
+fn a_stable_tag_is_its_version_on_the_stable_channel() {
+    let tag = ReleaseTag::parse("v0.8.16").unwrap();
+    assert_eq!(tag.channel(), UpdateChannel::Stable);
+    assert_eq!(tag.version(), &Version::new(0, 8, 16));
+    assert_eq!(tag.to_string(), "v0.8.16");
+}
+
+#[test]
+fn a_beta_tag_is_its_version_on_the_beta_channel() {
+    let tag = ReleaseTag::parse("v0.8.17-beta.12").unwrap();
+    assert_eq!(tag.channel(), UpdateChannel::Beta);
+    assert_eq!(tag.version().to_string(), "0.8.17-beta.12");
+    assert_eq!(tag.to_string(), "v0.8.17-beta.12");
+}
+
+#[test]
+fn every_other_shape_is_rejected() {
+    for tag in [
+        "0.8.16",
+        "v0.8",
+        "v0.8.16.1",
+        "v01.8.16",
+        "v+0.8.16",
+        "v0.8.16+build.1",
+        "v0.8.17-beta",
+        "v0.8.17-beta.",
+        "v0.8.17-beta.01",
+        "v0.8.17-beta.1.2",
+        "v0.8.17-beta.x",
+        "v0.8.17-rc.1",
+        "v0.8.17-alpha.1",
+        "vnext",
+        "",
+    ] {
+        assert!(ReleaseTag::parse(tag).is_err(), "{tag:?} parsed");
+        assert_eq!(ReleaseTag::stable_version(tag), None, "{tag:?}");
+    }
+}
+
+#[test]
+fn stable_version_skips_betas() {
+    assert_eq!(
+        ReleaseTag::stable_version("v10.0.123"),
+        Some(Version::new(10, 0, 123))
+    );
+    assert_eq!(ReleaseTag::stable_version("v0.8.17-beta.12"), None);
+}
+
+#[test]
+fn a_stable_release_builds_as_its_version() {
+    assert_eq!(build_version("v0.8.16", &[]).unwrap(), "0.8.16");
+}
+
+#[test]
+fn a_beta_builds_as_the_stable_release_before_it_and_its_number() {
+    let merged = [
+        "v0.8.9",
+        "v0.8.15",
+        "v0.8.16",
+        "v0.8.17-beta.3",
+        "v0.8.17-beta.12",
+        "vnext",
+    ];
+    assert_eq!(
+        build_version("v0.8.17-beta.12", &merged).unwrap(),
+        "0.8.16.12"
+    );
+    // A beta toward a minor release follows the same stable release.
+    assert_eq!(
+        build_version("v0.9.0-beta.40", &merged).unwrap(),
+        "0.8.16.40"
+    );
+}
+
+#[test]
+fn a_beta_needs_a_stable_release_before_it() {
+    let error = build_version("v0.1.0-beta.1", &["v0.1.0-beta.1"]).unwrap_err();
+    assert!(error.to_string().contains("no stable release"), "{error}");
+}
+
+#[test]
+fn a_beta_must_lead_past_the_stable_release_before_it() {
+    // A beta for 0.8.16 cut after 0.8.16 shipped would build below it.
+    let error = build_version("v0.8.16-beta.2", &["v0.8.16"]).unwrap_err();
+    assert!(error.to_string().contains("does not lead past"), "{error}");
+}
+
+#[test]
+fn build_versions_order_betas_between_the_stable_releases() {
+    let parse = |text: &str| -> Vec<u64> {
+        text.split('.')
+            .map(|field| field.parse().unwrap())
+            .collect()
+    };
+    let stable = parse(&build_version("v0.8.16", &[]).unwrap());
+    let early = parse(&build_version("v0.8.17-beta.3", &["v0.8.16"]).unwrap());
+    let late = parse(&build_version("v0.8.17-beta.12", &["v0.8.16"]).unwrap());
+    let next = parse(&build_version("v0.8.17", &[]).unwrap());
+    // Sparkle compares the fields left to right, a missing field below any.
+    assert!(stable < early && early < late && late < next);
+}
+
+#[test]
+fn a_build_version_must_fit_an_msi_product_version() {
+    assert_eq!(
+        build_version("v255.255.65535", &[]).unwrap(),
+        "255.255.65535"
+    );
+    for (tag, merged) in [
+        ("v256.0.0", &[][..]),
+        ("v0.256.0", &[][..]),
+        ("v0.0.65536", &[][..]),
+        ("v0.8.17-beta.65536", &["v0.8.16"][..]),
+    ] {
+        let error = build_version(tag, merged).unwrap_err();
+        assert!(error.to_string().contains("MSI"), "{tag}: {error}");
+    }
+}
+
+#[test]
+fn a_build_version_parses_back_from_its_text() {
+    for text in ["0.8.16", "0.8.16.12", "0.0.0", "255.255.65535.65535"] {
+        let build: BuildVersion = text.parse().unwrap();
+        assert_eq!(build.to_string(), text);
+    }
+    let built = BuildVersion::of(
+        &ReleaseTag::parse("v0.8.17-beta.12").unwrap(),
+        &tags(&["v0.8.16"]),
+    )
+    .unwrap();
+    assert_eq!(built.to_string().parse::<BuildVersion>().unwrap(), built);
+}
+
+#[test]
+fn a_build_version_is_only_numeric_fields() {
+    for text in [
+        "",
+        "0.8",
+        "0.8.16.12.1",
+        "0.8.16-beta.12",
+        "0.8.016",
+        "0..16",
+        "0.8.+16",
+        "0.8.16.",
+        "256.0.0",
+        "0.8.16.65536",
+        "0.8.99999999999999999999",
+    ] {
+        assert!(text.parse::<BuildVersion>().is_err(), "{text:?} parsed");
+    }
+}

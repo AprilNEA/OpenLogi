@@ -19,6 +19,7 @@ use gpui_updater_release::{
 use strum::VariantArray as _;
 use time::{OffsetDateTime, format_description::well_known::Rfc2822};
 
+use crate::support::release_tag::ReleaseTag;
 use crate::support::update_feed::{self, MacArch};
 
 /// The base64 private key: the 32-byte seed Sparkle's `generate_keys -x`
@@ -75,8 +76,8 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 }
 
 fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
-    let version = args.tag.strip_prefix('v').unwrap_or(&args.tag);
-    ensure_sparkle_orders(version)?;
+    let version = ReleaseTag::parse(&args.tag)?.version().to_string();
+    ensure_sparkle_orders(&version)?;
     let key = signing_key(private_key)?;
     key.expect_public_key(&args.public_key).with_context(|| {
         format!("{PRIVATE_KEY_ENV} does not belong to the public key the bundles embed")
@@ -91,7 +92,7 @@ fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
         })
         .transpose()?;
     let release = Release {
-        version,
+        version: &version,
         pub_date: OffsetDateTime::now_utc()
             .format(&Rfc2822)
             .context("could not format the publication date")?,
@@ -115,7 +116,7 @@ fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
         let enclosure = Enclosure::for_file(&dmg, format!("{release_base}/{name}"), Some(&key))
             .with_context(|| format!("could not sign {}", dmg.display()))?;
         let mut item = item(&release, enclosure);
-        for delta in release_deltas(&args.dist, name, version)? {
+        for delta in release_deltas(&args.dist, name, &version)? {
             let url = format!("{release_base}/{}", file_name(&delta.path)?);
             item = item.delta(
                 delta

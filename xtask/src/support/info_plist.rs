@@ -8,6 +8,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result, ensure};
 use plist::{Dictionary, Value};
 
+use crate::support::release_tag::BuildVersion;
 use crate::support::update_feed::MACOS_MINIMUM_OS_VERSION;
 
 /// The scheme `openlogi://` deep links open the app with.
@@ -72,15 +73,43 @@ fn launch_services_entries() -> [(&'static str, Value); 2] {
     ]
 }
 
-pub(crate) fn stamp_bundle_version(info_plist: &Path, version: &str) -> Result<()> {
+/// The two versions every bundle's `Info.plist` carries.
+#[derive(Clone, Debug)]
+pub(crate) struct BundleVersions {
+    /// `CFBundleShortVersionString`: the release version people read, which
+    /// is the crate version.
+    pub(crate) short: String,
+    /// `CFBundleVersion`: the numeric version Sparkle orders releases by.
+    pub(crate) build: String,
+}
+
+impl BundleVersions {
+    /// This build's versions. `build` is the release's [`BuildVersion`];
+    /// without one, `CFBundleVersion` is the crate version too, which is a
+    /// stable release's build version.
+    pub(crate) fn of_build(build: Option<&BuildVersion>) -> Self {
+        let short = env!("CARGO_PKG_VERSION").to_owned();
+        let build = build.map_or_else(|| short.clone(), BuildVersion::to_string);
+        Self { short, build }
+    }
+}
+
+/// Stamp `versions` into `info_plist`, replacing cargo-bundle's build
+/// timestamp in `CFBundleVersion`.
+pub(crate) fn stamp_bundle_version(info_plist: &Path, versions: &BundleVersions) -> Result<()> {
     let mut plist = Value::from_file(info_plist)
         .with_context(|| format!("could not read {}", info_plist.display()))?;
     let dict = plist
         .as_dictionary_mut()
         .with_context(|| format!("{} is not a plist dictionary", info_plist.display()))?;
-    for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
-        dict.insert(key.into(), Value::String(version.to_string()));
-    }
+    dict.insert(
+        "CFBundleShortVersionString".into(),
+        Value::String(versions.short.clone()),
+    );
+    dict.insert(
+        "CFBundleVersion".into(),
+        Value::String(versions.build.clone()),
+    );
     plist
         .to_file_xml(info_plist)
         .with_context(|| format!("could not write {}", info_plist.display()))

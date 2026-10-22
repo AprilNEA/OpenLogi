@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 
 use crate::icon::IconPipeline as _;
 use crate::icon::macos::AppBundle;
+use crate::support::release_tag::{self, BuildVersion};
 use crate::support::update_feed;
 use bundle::identity::Channel;
 
@@ -59,6 +60,11 @@ pub(crate) struct PackageArgs {
     /// the agent types through `CGEventPost`. Requires `--sign-identity`.
     #[arg(long, env = bundle::AGENT_PROFILE_ENV)]
     agent_provisioning_profile: Option<PathBuf>,
+    /// `CFBundleVersion` of every bundle: the release's build version, as
+    /// `release version` prints it. Omit it for the crate version, which is
+    /// a stable release's build version.
+    #[arg(long, env = release_tag::BUILD_VERSION_ENV)]
+    build_version: Option<String>,
 }
 
 impl PackageArgs {
@@ -79,6 +85,17 @@ impl PackageArgs {
             );
         }
         bundle::AgentProfile::load(path).map(Some)
+    }
+
+    /// The build version to stamp, or `None` for the crate version. An empty
+    /// value counts as none: CI passes an unset input as an empty string.
+    fn build_version(&self) -> Result<Option<BuildVersion>> {
+        self.build_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .map(str::parse)
+            .transpose()
     }
 
     /// The Sparkle feed to embed, or `None` without a public key. An empty
@@ -116,11 +133,13 @@ pub(crate) fn run(command: Command) -> Result<()> {
         Command::Package(args) => {
             let feed = args.sparkle_feed()?;
             let agent_profile = args.agent_profile()?;
+            let build_version = args.build_version()?;
             bundle::run_for_distribution(
                 args.dmg.sign_identity.as_deref(),
                 agent_profile.as_ref(),
                 args.target,
                 feed.as_ref(),
+                build_version.as_ref(),
             )?;
             dmg::run(&args.dmg)
         }

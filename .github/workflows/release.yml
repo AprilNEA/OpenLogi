@@ -24,12 +24,62 @@ env:
   SCCACHE_GHA_RW_MODE: READ_ONLY
 
 jobs:
+  # What the tag says (channel, version, build version), checked against the
+  # tagged commit before anything builds: `release version` fails unless the
+  # workspace version is the tag's. Tag runs only; a branch dispatch builds
+  # without a build version.
+  version:
+    name: Release version
+    if: ${{ github.ref_type == 'tag' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      channel: ${{ steps.version.outputs.channel }}
+      version: ${{ steps.version.outputs.version }}
+      build_version: ${{ steps.version.outputs.build_version }}
+    steps:
+      # Full history with tags: a beta's build version counts from the stable
+      # release tag before it.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      # Match CI so Cargo inputs and sccache compiler objects are reusable.
+      - name: Align compiler inputs with CI
+        run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cargo
+          shared-key: linux-stable-debug
+          cache-targets: false
+          save-if: false
+      - name: Read the release version
+        id: version
+        run: cargo xtask release version --tag "$GITHUB_REF_NAME"
+      # A beta tag parses, but publish cannot route it to a beta channel yet:
+      # fail here, before anything is built or signed.
+      - name: Refuse a channel publish cannot route
+        if: ${{ steps.version.outputs.channel != 'stable' }}
+        env:
+          CHANNEL: ${{ steps.version.outputs.channel }}
+        run: |
+          echo "::error::$GITHUB_REF_NAME is a $CHANNEL release; this workflow publishes stable releases only"
+          exit 1
+
   # Build (and sign/notarize) every platform's installers. The build matrix
   # lives in a reusable workflow so PRs / manual dispatches can build the same
   # installers UNSIGNED for testing; here we pass sign: true for the signed,
   # notarized artifacts the publish job ships.
   build:
     name: Build installers
+    needs: version
+    # A branch dispatch skips `version` and still builds; a tag whose version
+    # does not check out builds nothing, so nothing publishes.
+    if: ${{ !cancelled() && needs.version.result != 'failure' }}
     uses: ./.github/workflows/build.yml
     # Required so build.yml can read the 1Password / Azure / R2 signing secrets.
     secrets: inherit
@@ -38,6 +88,7 @@ jobs:
       id-token: write # build.yml mints an OIDC token for Azure Artifact Signing.
     with:
       sign: true
+      build_version: ${{ needs.version.outputs.build_version }}
 
   release-notes:
     name: Generate release notes

@@ -18,7 +18,7 @@ use plist::Value;
 use sha2_hasher::Sha2Hasher as _;
 use xshell::{Shell, cmd};
 
-use crate::support::info_plist;
+use crate::support::info_plist::{self, BundleVersions};
 use crate::support::update_feed::{self, MacArch, SPARKLE_PUBLIC_KEY_ENV as PUBLIC_KEY_ENV};
 
 /// The Sparkle release the bundle embeds.
@@ -102,9 +102,10 @@ pub(super) fn code_inside_out(app: &Path) -> Vec<PathBuf> {
     ]
 }
 
-/// Embed the pinned Sparkle.framework into `app` and point it at `feed`.
-/// Runs before signing: the bundle's signature seals both.
-pub(super) fn embed(root: &Path, app: &Path, feed: &Feed) -> Result<()> {
+/// Embed the pinned Sparkle.framework into `app` and point it at `feed`,
+/// after checking that `app` carries `versions`. Runs before signing: the
+/// bundle's signature seals both.
+pub(super) fn embed(root: &Path, app: &Path, feed: &Feed, versions: &BundleVersions) -> Result<()> {
     println!("==> Sparkle {VERSION} ({})", feed.url);
     let release = fetch_release(root)?;
     let source = release.join("Sparkle.framework");
@@ -136,22 +137,22 @@ pub(super) fn embed(root: &Path, app: &Path, feed: &Feed) -> Result<()> {
     // Sparkle is MIT-licensed; its notice travels with the framework.
     fs_err::copy(release.join("LICENSE"), version.join("Resources/LICENSE"))
         .context("could not copy Sparkle's license")?;
-    configure(&app.join("Contents/Info.plist"), feed)
+    configure(&app.join("Contents/Info.plist"), feed, versions)
 }
 
 /// Stamp `feed`'s keys into `info_plist` and read every one back, after
 /// checking the bundle version Sparkle will compare.
-fn configure(info_plist: &Path, feed: &Feed) -> Result<()> {
+fn configure(info_plist: &Path, feed: &Feed, versions: &BundleVersions) -> Result<()> {
     // Sparkle offers an update only when the appcast's `sparkle:version` — the
-    // release version — is newer than `CFBundleVersion`. cargo-bundle's build
-    // timestamp there would outrank every release, so no update would ever be
-    // offered.
+    // release's build version — is newer than `CFBundleVersion`. cargo-bundle's
+    // build timestamp there would outrank every release, so no update would
+    // ever be offered.
     let bundle_version = info_plist::read_plist_string(info_plist, "CFBundleVersion")?;
-    let release_version = info_plist::read_plist_string(info_plist, "CFBundleShortVersionString")?;
     ensure!(
-        bundle_version.is_some() && bundle_version == release_version,
-        "{} has CFBundleVersion {bundle_version:?}; Sparkle needs the release version {release_version:?} there",
-        info_plist.display()
+        bundle_version.as_deref() == Some(versions.build.as_str()),
+        "{} has CFBundleVersion {bundle_version:?}; Sparkle needs the build version {:?} there",
+        info_plist.display(),
+        versions.build
     );
     let entries = feed.info_plist_entries();
     info_plist::stamp_plist_values(info_plist, &entries)?;

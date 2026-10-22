@@ -17,16 +17,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use gpui_updater_release::sparkle::{self, DeltaOptions, SparkleDistribution};
+use semver::Version;
 use xshell::{Shell, cmd};
 
 use crate::commands::macos::bundle::sparkle as bundled_sparkle;
 use crate::support::fs::repo_root;
+use crate::support::release_tag::ReleaseTag;
 use crate::support::update_feed::MacArch;
 
 /// The first release whose bundle embeds Sparkle. Older apps update through
 /// `latest.json` and never read an appcast, so a delta from them is never
 /// used.
-const FIRST_SPARKLE_RELEASE: Version = Version([0, 8, 14]);
+const FIRST_SPARKLE_RELEASE: Version = Version::new(0, 8, 14);
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -47,42 +49,21 @@ pub(crate) struct Args {
     repo: String,
 }
 
-/// A final `vMAJOR.MINOR.PATCH` release, ordered numerically.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Version([u64; 3]);
-
-impl Version {
-    /// The version of a final release tag; `None` for a pre-release or any
-    /// other tag, which never reaches the stable feed.
-    fn of_tag(tag: &str) -> Option<Self> {
-        let mut parts = tag.strip_prefix('v')?.split('.');
-        let mut version = [0; 3];
-        for slot in &mut version {
-            let part = parts.next()?;
-            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            *slot = part.parse().ok()?;
-        }
-        parts.next().is_none().then_some(Self(version))
-    }
-}
-
 /// The release tags to make deltas from: final releases that embed Sparkle
 /// and are older than `current`, newest first, at most `count`.
-fn delta_bases(tags: &[String], current: Version, count: usize) -> Vec<&str> {
+fn delta_bases<'a>(tags: &'a [String], current: &Version, count: usize) -> Vec<&'a str> {
     let mut bases: Vec<(Version, &str)> = tags
         .iter()
-        .filter_map(|tag| Some((Version::of_tag(tag)?, tag.as_str())))
-        .filter(|(version, _)| (FIRST_SPARKLE_RELEASE..current).contains(version))
+        .filter_map(|tag| Some((ReleaseTag::stable_version(tag)?, tag.as_str())))
+        .filter(|(version, _)| *version >= FIRST_SPARKLE_RELEASE && version < current)
         .collect();
     bases.sort_unstable_by(|a, b| b.cmp(a));
-    bases.dedup_by_key(|(version, _)| *version);
+    bases.dedup_by(|a, b| a.0 == b.0);
     bases.into_iter().take(count).map(|(_, tag)| tag).collect()
 }
 
 pub(crate) fn run(args: &Args) -> Result<()> {
-    let current = Version::of_tag(&args.tag)
+    let current = ReleaseTag::stable_version(&args.tag)
         .with_context(|| format!("{:?} is not a final vMAJOR.MINOR.PATCH tag", args.tag))?;
     let dmg_name = args
         .dmg
@@ -95,7 +76,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .dmg
         .parent()
         .context("the DMG has no parent directory")?;
-    if let Err(error) = make_deltas(args, current, arch, dmg_name, out_dir) {
+    if let Err(error) = make_deltas(args, &current, arch, dmg_name, out_dir) {
         println!("::warning::no Sparkle deltas for {dmg_name}: {error:#}");
     }
     Ok(())
@@ -105,7 +86,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 /// [`run`] reports it as a warning, and a failed base is reported here.
 fn make_deltas(
     args: &Args,
-    current: Version,
+    current: &Version,
     arch: MacArch,
     dmg_name: &str,
     out_dir: &Path,

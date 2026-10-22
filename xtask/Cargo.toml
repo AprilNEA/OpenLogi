@@ -30,6 +30,7 @@ plist = "1.10.0"
 # For `lint sweep-allows`: parsing each `allow` attribute the lexical scan finds,
 # and printing back the parts of a `cfg_attr` it keeps.
 quote = "1.0.47"
+semver = "1.0.28"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2_hasher = { version = "0.3.2", features = ["sync"] }

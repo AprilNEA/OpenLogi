@@ -39,6 +39,9 @@ devenv shell -- cargo run -p xtask -- <command>
   Sparkle's EdDSA key and write one appcast per architecture.
 - `release sparkle-deltas` — make verified Sparkle deltas from the newest
   earlier releases to a stapled DMG, with the metadata `release appcast` reads.
+- `release version` — print a release tag's channel, version and build
+  version as GitHub Actions outputs, after checking that the tagged commit's
+  workspace version is the tag's.
 
 ### Bundle identity
 
@@ -87,6 +90,10 @@ into `Info.plist`. The feed URL comes from `support/update_feed.rs`: one appcast
 per architecture under `OPENLOGI_UPDATE_BASE_URL`, because each architecture
 ships its own DMG. `release appcast` writes those feeds from the same module,
 so the URL a bundle reads and the file a release uploads cannot drift apart.
+Sparkle orders releases by `CFBundleVersion`, so every bundle carries the
+release's build version there (`--build-version`, from `release version`) and
+the crate version in `CFBundleShortVersionString`. A stable release's build
+version is its version; `support/release_tag.rs` owns the encoding.
 Signing re-signs Sparkle's `Autoupdate`, `Updater.app` and the framework, inside
 out, before the app seals them. Without the key the bundle has no Sparkle and
 the app updates through its built-in engine, which is what every non-release
@@ -173,6 +180,9 @@ xtask/
         checkout_version_bump/tests.rs
         latest_json.rs
         latest_json/tests.rs
+        sparkle_deltas.rs
+        sparkle_deltas/tests.rs
+        version.rs           # a release tag's channel, version and build version
     icon.rs                  # the icon set, and the pipeline a platform implements
     icon/
       macos.rs               # Icon Composer documents -> icns + asset catalog
@@ -180,8 +190,11 @@ xtask/
     support/
       mod.rs
       fs.rs                  # shared filesystem/process guards only
+      github_output.rs       # GitHub Actions step outputs
       info_plist.rs          # reading and stamping plist keys
       manifest.rs            # the root Cargo.toml's [workspace.package]
+      release_tag.rs         # release tag syntax, channel and build version
+      release_tag/tests.rs
       update_feed.rs         # channel, update host and feed URLs packaging and release share
       update_feed/tests.rs
 ```

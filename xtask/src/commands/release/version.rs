@@ -1,0 +1,70 @@
+//! `release version`: what a release tag says, checked against the commit it
+//! names.
+
+use std::path::PathBuf;
+
+use anyhow::{Result, ensure};
+use clap::Parser;
+use xshell::{Shell, cmd};
+
+use crate::support::github_output;
+use crate::support::manifest::workspace_package;
+use crate::support::release_tag::{BuildVersion, ReleaseTag};
+
+#[derive(Parser)]
+pub(crate) struct Args {
+    /// Release tag, for example `v0.8.17` or `v0.8.17-beta.12`. It must be
+    /// checked out.
+    #[arg(long, env = "GITHUB_REF_NAME")]
+    tag: String,
+}
+
+/// Print the tag's `channel`, `version` and `build_version` as `key=value`
+/// lines, and append them to the step's GitHub Actions outputs.
+///
+/// Fails unless `HEAD` is the tagged commit and its workspace version is the
+/// tag's version, so every build of the tag reports the version it names.
+pub(crate) fn run(args: &Args) -> Result<()> {
+    let sh = Shell::new()?;
+    let root = PathBuf::from(cmd!(sh, "git rev-parse --show-toplevel").quiet().read()?);
+    sh.change_dir(&root);
+    let tag = ReleaseTag::parse(&args.tag)?;
+
+    let name = &args.tag;
+    let tagged_commit = format!("{name}^{{commit}}");
+    let head_commit = "HEAD^{commit}";
+    let tagged = cmd!(sh, "git rev-parse --verify {tagged_commit}")
+        .quiet()
+        .read()?;
+    let head = cmd!(sh, "git rev-parse --verify {head_commit}")
+        .quiet()
+        .read()?;
+    ensure!(
+        tagged == head,
+        "{tag} is {tagged}, but HEAD is {head}; check the tag out first"
+    );
+    let workspace = workspace_package(&root)?.version;
+    ensure!(
+        workspace == tag.version().to_string(),
+        "{tag} names version {}, but its workspace version is {workspace}",
+        tag.version()
+    );
+
+    let merged: Vec<String> = cmd!(sh, "git tag --merged {name} --list v*")
+        .quiet()
+        .read()?
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let build = BuildVersion::of(&tag, &merged)?.to_string();
+    let version = tag.version().to_string();
+    let outputs = [
+        ("channel", tag.channel().as_str()),
+        ("version", version.as_str()),
+        ("build_version", build.as_str()),
+    ];
+    for (key, value) in outputs {
+        println!("{key}={value}");
+    }
+    github_output::write(&outputs)
+}

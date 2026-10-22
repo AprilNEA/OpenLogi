@@ -478,8 +478,16 @@ fn a_key_the_bundles_do_not_embed_signs_nothing() {
     assert!(error.to_string().contains("does not belong"), "{error}");
     assert!(fs_err::read_dir(out.path()).unwrap().next().is_none());
 
+    // Not a release tag at all.
     let error = write_appcasts(
         &args(dist.path(), out.path(), "v0.9.0-rc.1", PUBLIC_KEY),
+        PRIVATE_KEY,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("pre-release"), "{error}");
+    // A beta tag, which the stable appcast does not carry.
+    let error = write_appcasts(
+        &args(dist.path(), out.path(), "v0.9.0-beta.1", PUBLIC_KEY),
         PRIVATE_KEY,
     )
     .unwrap_err();

@@ -10,8 +10,10 @@
 /// A release channel: the set of releases an installation is offered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateChannel {
-    /// Every tagged release. Today the only channel releases publish to.
+    /// Final releases, tagged `vX.Y.Z`.
     Stable,
+    /// Pre-releases, tagged `vX.Y.Z-beta.N`. Nothing publishes to it yet.
+    Beta,
 }
 
 impl UpdateChannel {
@@ -21,6 +23,7 @@ impl UpdateChannel {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Stable => "stable",
+            Self::Beta => "beta",
         }
     }
 
@@ -58,6 +61,10 @@ mod tests {
         assert_eq!(
             UpdateChannel::Stable.manifest_url("https://mirror.example.org/"),
             "https://mirror.example.org/channels/stable/latest.json"
+        );
+        assert_eq!(
+            UpdateChannel::Beta.manifest_url("https://updates.openlogi.org"),
+            "https://updates.openlogi.org/channels/beta/latest.json"
         );
     }
 
