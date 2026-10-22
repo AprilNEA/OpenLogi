@@ -150,7 +150,7 @@ pub struct AppInfo {
     pub show_in_menu_bar: Option<bool>,
     /// Automatic update-check setting, `None` when unknown.
     pub check_for_updates: Option<bool>,
-    /// Update channel the settings make the app follow, `None` when unknown.
+    /// Update channel the updater follows this launch, `None` when unknown.
     pub update_channel: Option<UpdateChannel>,
     /// Thumbwheel sensitivity setting, `None` when unknown.
     pub thumbwheel_sensitivity: Option<i32>,

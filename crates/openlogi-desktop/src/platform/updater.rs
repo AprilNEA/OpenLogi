@@ -460,6 +460,11 @@ mod tests {
             assert_eq!(committed.update_channel, Some(picked));
             assert_eq!(followed_channel(Some(&committed)), picked);
             assert_eq!(channel_in_use(cx), launched);
+            assert_eq!(
+                crate::services::diagnostics::collect(cx).app.update_channel,
+                Some(launched),
+                "the report names the channel the updater uses, not the pending pick"
+            );
         });
     }
 
