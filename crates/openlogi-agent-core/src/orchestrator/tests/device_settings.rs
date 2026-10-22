@@ -99,6 +99,7 @@ fn the_main_wheel_is_diverted_only_with_every_gate_open() {
         Some(MainWheelDivert {
             resolution: Some(ScrollResolution::High),
             inverted: Some(true),
+            high_resolution: false,
         })
     );
     assert_eq!(
