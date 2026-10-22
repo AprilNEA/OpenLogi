@@ -103,6 +103,11 @@ pub struct Enumerator {
     /// Whether the most recent pass needs a bounded fast follow-up to advance
     /// ledger/channel/cache grace or retry a failed open.
     retry_needed_last_tick: bool,
+    /// Nodes whose channel was retired for failing probes and not yet reopened.
+    evicted_nodes: HashSet<NodeId>,
+    /// Nodes the most recent pass reopened after retiring their channel for
+    /// failing probes.
+    replaced_last_tick: Vec<NodeId>,
     /// Coalesced lifecycle-event sink installed on newly opened channels.
     event_notifier: Option<EventNotifier>,
     /// The timeouts every pass's probes run under.
@@ -125,6 +130,8 @@ struct PreparedNodes {
     active: Vec<ActiveNode>,
     open_failures: Vec<NodeId>,
     retiring: Vec<NodeId>,
+    /// Nodes whose open replaced a channel retired for failing probes.
+    replaced: Vec<NodeId>,
 }
 
 fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
@@ -349,6 +356,17 @@ impl Enumerator {
         self.retry_needed_last_tick
     }
 
+    /// Whether the last pass opened a replacement for a channel it had retired
+    /// for failing probes. The device came back without the published
+    /// inventory ever showing it offline — the ledger replayed it as online
+    /// throughout — so no offline→online transition will prompt a re-apply,
+    /// yet its firmware may have lost its volatile settings. `false` before
+    /// the first pass.
+    #[must_use]
+    pub fn replaced_channels_last_tick(&self) -> bool {
+        !self.replaced_last_tick.is_empty()
+    }
+
     /// An enumerator that walks `backend` — this host's HID stack, a scripted
     /// device tree in tests, or another host's.
     #[must_use]
@@ -366,6 +384,8 @@ impl Enumerator {
             cache_dirty: false,
             open_failures_last_tick: false,
             retry_needed_last_tick: false,
+            evicted_nodes: HashSet::new(),
+            replaced_last_tick: Vec::new(),
             event_notifier: None,
             timeouts: ProbeTimeouts::DEFAULT,
         }
@@ -419,6 +439,7 @@ impl Enumerator {
         let mut seen_nodes = HashSet::new();
         let mut open_failures = Vec::new();
         let mut retiring = Vec::new();
+        let mut replaced = Vec::new();
         let mut to_open = Vec::new();
         let mut queued_to_open = HashSet::new();
         for info in candidates {
@@ -474,6 +495,9 @@ impl Enumerator {
                     // Inventory replay remains bounded until a probe produces
                     // a new authoritative snapshot.
                     self.ledger.reset_channel_failures_after_open(&node);
+                    if self.evicted_nodes.remove(&node) {
+                        replaced.push(node.clone());
+                    }
                     // Attach before the first feature/register check. Receiver
                     // events are recognizable immediately; per-device feature
                     // indexes are registered during the ensuing table walk.
@@ -520,11 +544,15 @@ impl Enumerator {
         self.ledger.retain_nodes(&seen_nodes);
         self.node_cache_keys
             .retain(|node, _| seen_nodes.contains(node));
+        // A node that left the listing comes back as a new arrival, which the
+        // offline→online transition already reconfigures.
+        self.evicted_nodes.retain(|node| seen_nodes.contains(node));
 
         PreparedNodes {
             active,
             open_failures,
             retiring,
+            replaced,
         }
     }
 
@@ -582,8 +610,10 @@ impl Enumerator {
             active,
             open_failures,
             retiring: retiring_nodes,
+            replaced,
         } = self.prepare_nodes(&*backend, candidates).await;
         self.open_failures_last_tick = !open_failures.is_empty();
+        self.replaced_last_tick = replaced;
 
         // Probe each open channel concurrently, sharing `&cache` read-only;
         // updates are collected and applied afterwards (no `RefCell`). Each
@@ -647,6 +677,7 @@ impl Enumerator {
                 if self.channels.retire_node(&node) {
                     warn!("node probe keeps failing — retiring its channel before reopen");
                 }
+                self.evicted_nodes.insert(node.clone());
             } else if let Some(registry) = &self.registry {
                 let routes = settled
                     .inventory

@@ -321,6 +321,10 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
             .channel_completion(BOLT_CHANNEL)
             .expect("known channel")
     );
+    assert!(
+        !enumerator.replaced_channels_last_tick(),
+        "a first open replaces nothing"
+    );
     let stale = registry.lookup(&route).expect("receiver route published");
 
     backend
@@ -331,6 +335,7 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
     assert!(enumerator.ledger.contains_last_good(&node_id));
     assert!(!stale.channel().is_connected());
     assert!(registry.is_current(&stale));
+    assert!(!enumerator.replaced_channels_last_tick());
 
     let second_failure = enumerator
         .enumerate()
@@ -340,6 +345,7 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
     assert!(enumerator.channels.is_retiring(&node_id));
     assert!(!registry.is_current(&stale));
     assert!(registry.lookup(&route).is_none());
+    assert!(!enumerator.replaced_channels_last_tick());
     drop(stale);
 
     backend
@@ -350,11 +356,16 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
         .await
         .expect("quiescent retirement is deferred for one pass");
     assert_eq!(draining, std::slice::from_ref(&expected));
+    assert!(!enumerator.replaced_channels_last_tick());
     let repaired = enumerator
         .enumerate()
         .await
         .expect("replacement probe succeeds");
 
+    assert!(
+        enumerator.replaced_channels_last_tick(),
+        "the pass that reopens a retired channel must report the replacement"
+    );
     assert_eq!(repaired, [expected]);
     let replacement = registry.lookup(&route).expect("replacement published");
     assert!(replacement.channel().is_connected());

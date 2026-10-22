@@ -80,13 +80,15 @@ pub enum InventoryEvent {
     /// A keyboard's `LockKeyState` feature (`0x4220`) reported a lock key
     /// turning on or off.
     LockKeyChanged(LockKeyChange),
-    /// A device's `WirelessDeviceStatus` feature (`0x1d4b`) broadcast a
-    /// reconnection — the firmware explicitly asking the host to reconfigure
-    /// it after a nap. A nap can be too short for any reconciliation to have
-    /// observed the device offline, so the agent must not rely on an
-    /// offline→online transition in the snapshot that follows: it re-applies
-    /// volatile settings on the next snapshot, like [`Self::SystemWake`] but
-    /// with the shorter link-race confirm budget.
+    /// A device reconnected without any reconciliation observing it offline:
+    /// its `WirelessDeviceStatus` feature (`0x1d4b`) broadcast a reconnection
+    /// — the firmware explicitly asking the host to reconfigure it after a
+    /// nap — or the enumerator replaced a channel it had retired for failing
+    /// probes, while the ledger kept replaying the device as online. Either
+    /// way the agent must not rely on an offline→online transition in the
+    /// snapshot that follows: it re-applies volatile settings on the next
+    /// snapshot, like [`Self::SystemWake`] but with the shorter link-race
+    /// confirm budget.
     DeviceWake,
 }
 
@@ -551,7 +553,7 @@ impl InventoryWorker {
         result: Result<Vec<DeviceInventory>, openlogi_hid::InventoryError>,
         started: Instant,
     ) -> bool {
-        let (event, outcome) = match result {
+        let (event, outcome, replaced) = match result {
             Ok(inventories) => {
                 let standalone = self.hardware.enumerate_standalone().await;
                 let standalone_failed = standalone.is_err();
@@ -565,9 +567,14 @@ impl InventoryWorker {
                 let needs_repair = self.enumerator.retry_needed_last_tick()
                     || standalone_failed
                     || self.state.raw_nodes.has_pending_misses();
-                (Some(event), ScanOutcome::Snapshot { needs_repair })
+                let replaced = self.enumerator.replaced_channels_last_tick();
+                (
+                    Some(event),
+                    ScanOutcome::Snapshot { needs_repair },
+                    replaced,
+                )
             }
-            Err(error) => (self.state.classify(Err(error)), ScanOutcome::Failed),
+            Err(error) => (self.state.classify(Err(error)), ScanOutcome::Failed, false),
         };
         if !self.device_io.allows_io() {
             debug!(
@@ -575,6 +582,15 @@ impl InventoryWorker {
                 "device I/O suspended during inventory reconciliation — result discarded"
             );
             return true;
+        }
+        // Request the reconnect re-apply before the snapshot that publishes
+        // the replacement channel, so that snapshot carries it out.
+        if replaced {
+            info!("reopened a channel retired for failing probes — re-applying volatile settings");
+            if self.events.send(InventoryEvent::DeviceWake).is_err() {
+                debug!("inventory watcher receiver dropped — exiting");
+                return false;
+            }
         }
         if let Some(event) = event
             && self.events.send(event).is_err()

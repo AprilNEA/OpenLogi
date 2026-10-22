@@ -1131,8 +1131,9 @@ impl Orchestrator {
         // wheel mode) live in device RAM and reset on a power cycle. Every
         // reconnect shape re-applies the persisted values (#189): a first
         // sighting, a replug (new route), a wake from device sleep
-        // (offline→online), or — via the forced budget — a system wake or a
-        // device's own `0x1d4b` reconnect broadcast, where none of those
+        // (offline→online), or — via the forced budget — a system wake, a
+        // device's own `0x1d4b` reconnect broadcast, or a channel the
+        // enumerator replaced after retiring it, where none of those
         // transitions are observable.
         let forced = self.forced_reapply_budget.take();
         let next_current = pick_current(&devices, self.config.selected_device());
@@ -1307,11 +1308,13 @@ impl Orchestrator {
     }
 
     /// Force a volatile-settings re-apply on the next inventory refresh
-    /// because a device broadcast its own reconnection (`0x1d4b`). The
-    /// firmware is explicitly asking to be reconfigured, and — as after a
-    /// system wake — the snapshot that follows can look identical to the last
-    /// one (a nap short enough that no reconciliation ever observed the
-    /// device offline), so the offline→online trigger cannot be relied on.
+    /// because a device reconnected unobserved: it broadcast its own
+    /// reconnection (`0x1d4b`), the firmware explicitly asking to be
+    /// reconfigured, or the enumerator replaced its dead channel while still
+    /// replaying it as online. As after a system wake, the snapshot that
+    /// follows can look identical to the last one (a nap or a link drop short
+    /// enough that no reconciliation ever observed the device offline), so
+    /// the offline→online trigger cannot be relied on.
     /// The event channel is identity-free by design, so every online device
     /// re-applies; the writes are idempotent and the confirm budget is the
     /// short link-race one, not the boot ladder.
