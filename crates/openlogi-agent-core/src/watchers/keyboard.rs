@@ -574,17 +574,8 @@ fn spawn_session(
     let slot = Arc::clone(&channels.access.channel);
     let session_registry = channels.access.registry.clone();
     let id = HidppSessionId::new(&dispatch.config_key);
-    let (sink, mut session_rx) = mpsc::unbounded_channel();
-    let forward_events = channels.events.clone();
-    let forward_id = id.clone();
-    let forward = tokio::spawn(async move {
-        while let Some(input) = session_rx.recv().await {
-            let _ = forward_events.send(KeyboardSessionEvent::Input(KeyboardInput {
-                session: forward_id.clone(),
-                input,
-            }));
-        }
-    });
+    let (sink, session_rx) = mpsc::unbounded_channel();
+    let forward = spawn_input_forwarder(id.clone(), session_rx, channels.events.clone());
     let session_events = channels.events.clone();
     let done_id = id.clone();
     let route = target.route.clone();
@@ -616,18 +607,50 @@ fn spawn_session(
             }
         }
     });
-    tokio::spawn(async move {
-        let pending_restore = settle_capture_task(session_task, "keyboard").await;
-        // The device layer drops its listener only after restoration. Draining
-        // this forwarder before Done preserves every input accepted while
-        // diversion was still active ahead of the ownership boundary.
-        let _ = forward.await;
-        let _ = session_events.send(KeyboardSessionEvent::Done(KeyboardDone {
-            session: done_id,
-            pending_restore,
-        }));
-    });
+    tokio::spawn(complete_session(
+        session_task,
+        forward,
+        session_events,
+        done_id,
+    ));
     CaptureSession::active(id, target, dispatch, stop_tx)
+}
+
+/// Forward one capture session's inputs onto the manager's ordered event
+/// channel. The sender closes only after the device listener has been dropped.
+fn spawn_input_forwarder(
+    session: HidppSessionId,
+    mut inputs: mpsc::UnboundedReceiver<CapturedInput>,
+    events: mpsc::UnboundedSender<KeyboardSessionEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(input) = inputs.recv().await {
+            let _ = events.send(KeyboardSessionEvent::Input(KeyboardInput {
+                session: session.clone(),
+                input,
+            }));
+        }
+    })
+}
+
+/// Settle the session task, then report its completion once every input it
+/// accepted has been forwarded. Apart from [`spawn_session`] so the path a
+/// panicking body takes can be driven in a test without a device.
+async fn complete_session(
+    session_task: tokio::task::JoinHandle<Option<PendingCaptureRestore>>,
+    forward: tokio::task::JoinHandle<()>,
+    events: mpsc::UnboundedSender<KeyboardSessionEvent>,
+    session: HidppSessionId,
+) {
+    let pending_restore = settle_capture_task(session_task, "keyboard").await;
+    // The device layer drops its listener only after restoration. Draining
+    // the forwarder before Done preserves every input accepted while
+    // diversion was still active ahead of the ownership boundary.
+    let _ = forward.await;
+    let _ = events.send(KeyboardSessionEvent::Done(KeyboardDone {
+        session,
+        pending_restore,
+    }));
 }
 
 #[cfg(test)]
