@@ -1,5 +1,6 @@
 //! OS input-event synthesis split out of openlogi-core so the core stays platform- and IO-free.
 
+pub mod display_link;
 mod inject;
 #[cfg(target_os = "linux")]
 pub mod uinput;
