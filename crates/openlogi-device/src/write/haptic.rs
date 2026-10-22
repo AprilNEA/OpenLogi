@@ -670,6 +670,19 @@ mod tests {
         status: StatusReply,
         unit: Option<Unit>,
     ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
+        haptics_with_levels(initial, firmware, waveforms, status, unit, 0)
+    }
+
+    /// [`haptics_identified`] whose capabilities report `levels` as their
+    /// level-set byte (byte 2).
+    fn haptics_with_levels(
+        initial: [u8; 3],
+        firmware: fn(&mut [u8; 3]),
+        waveforms: u32,
+        status: StatusReply,
+        unit: Option<Unit>,
+        levels: u8,
+    ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
         let state = StdMutex::new(initial);
         ScriptedRawHidChannel::with_dynamic_responder(move |request| {
             if request.len() < 7 || request[0] != 0x10 {
@@ -711,9 +724,10 @@ mod tests {
                 return Some(response);
             }
             if (request[2], request[3] >> 4) == (HAPTIC_INDEX, 0x00) {
-                // getCapabilities: a long reply, the mask in bytes 4..8.
+                // getCapabilities: a long reply, the level set in byte 2
+                // and the mask in bytes 4..8.
                 let mut response = vec![0x11, request[1], request[2], request[3]];
-                response.extend_from_slice(&[0; 4]);
+                response.extend_from_slice(&[0, 0, levels, 0]);
                 response.extend_from_slice(&waveforms.to_be_bytes());
                 response.resize(20, 0);
                 return Some(response);
@@ -1312,5 +1326,63 @@ mod tests {
         .expect("the scripted device accepts the write");
         assert_eq!(config_writes(&handle).last(), Some(&[0x82, 63, 0]));
         assert_eq!(applied.intensity.get(), 63, "intensity is kept as read");
+    }
+
+    #[tokio::test]
+    async fn an_intensity_the_level_set_refuses_is_never_written() {
+        for (levels, requested) in [(1, 63), (7, 50)] {
+            let (raw, handle) = haptics_with_levels(
+                [0x01, 45, 0],
+                |_| {},
+                RING_WAVEFORMS,
+                StatusReply::Status(0),
+                None,
+                levels,
+            );
+            let shared = shared_channel(raw).await;
+            let result = change_haptics_on_channel(
+                shared.channel(),
+                shared.device_index(),
+                HapticChange {
+                    intensity: HapticIntensity::new(requested),
+                    ..HapticChange::default()
+                },
+            )
+            .await;
+            assert_matches!(
+                result,
+                Err(WriteError::HapticIntensityUnsupported { requested: r }) if r == requested,
+                "level set {levels} refuses {requested}"
+            );
+            assert!(
+                config_writes(&handle).is_empty(),
+                "level set {levels}: nothing is written"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quarter_step_intensity_is_written() {
+        let (raw, handle) = haptics_with_levels(
+            [0x01, 50, 0],
+            |_| {},
+            RING_WAVEFORMS,
+            StatusReply::Status(0),
+            None,
+            1,
+        );
+        let shared = shared_channel(raw).await;
+        let applied = change_haptics_on_channel(
+            shared.channel(),
+            shared.device_index(),
+            HapticChange {
+                intensity: HapticIntensity::new(75),
+                ..HapticChange::default()
+            },
+        )
+        .await
+        .expect("75 is a quarter step");
+        assert_eq!(config_writes(&handle), vec![[0x01, 75, 0]]);
+        assert_eq!(applied.intensity.get(), 75);
     }
 }
