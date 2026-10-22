@@ -278,13 +278,25 @@ fn tab_body(
     content: impl IntoElement,
 ) -> gpui_component::scroll::Scrollable<gpui::Div> {
     v_flex()
+        .debug_selector(|| "detail-tab-body".into())
         .flex_1()
         .w_full()
+        // Beside the navigation rail the body must narrow to what is left of
+        // the window; without this, a flex item never shrinks below its
+        // content's widest line, and the pointer grid kept two columns past
+        // the window edge instead of wrapping.
+        .min_w_0()
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
         .p(SCREEN_PAD.rems())
-        .child(div().w_full().max_w(width.rems()).child(content))
+        .child(
+            div()
+                .debug_selector(|| "detail-tab-content".into())
+                .w_full()
+                .max_w(width.rems())
+                .child(content),
+        )
 }
 
 /// Keys tab: the function-row remapper for a keyboard.
@@ -326,11 +338,13 @@ fn pointer_tab(
     tab_body(
         ContentWidth::Large,
         h_flex()
+            .debug_selector(|| "pointer-grid".into())
             .w_full()
             .items_stretch()
             .gap_4()
             .flex_wrap()
             .child(pointer_grid_card(
+                "pointer-card-tuning",
                 PanelCard::new(
                     tr!("device.pointer_tuning"),
                     Icon::empty().path("action-icons/gauge.svg"),
@@ -339,6 +353,7 @@ fn pointer_tab(
                 .fill(),
             ))
             .child(pointer_grid_card(
+                "pointer-card-smartshift",
                 PanelCard::new(
                     tr!("pointer.smartshift"),
                     Icon::empty().path("action-icons/refresh-cw.svg"),
@@ -348,12 +363,14 @@ fn pointer_tab(
             ))
             .child(
                 div()
+                    .debug_selector(|| "pointer-card-scrolling".into())
                     .min_w(POINTER_CARD_MIN_W)
                     .flex_1()
                     .child(scrolling_card(pal, cx)),
             )
             .when(haptics, |grid| {
                 grid.child(pointer_grid_card(
+                    "pointer-card-haptics",
                     PanelCard::new(
                         tr!("pointer.haptic_feedback"),
                         Icon::empty().path("action-icons/bell.svg"),
@@ -365,12 +382,14 @@ fn pointer_tab(
     )
 }
 
-fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
-    // At 100%, two cards plus one 16 px gap fit exactly inside the 720 px
-    // window minimum after this tab's 20 px side insets, while still leaving a
-    // usable slider: 332·2 + 16 + 20·2 = 720. In rems, the whole relationship
-    // scales together.
+fn pointer_grid_card(selector: &'static str, card: impl IntoElement) -> impl IntoElement {
+    // A card never narrows below a usable slider, `POINTER_CARD_MIN_W`; the
+    // grid wraps to one column instead. Two columns need the tab body to hold
+    // two cards, the 16 px gap, and its `SCREEN_PAD` insets, beside the
+    // `DETAIL_RAIL_W` rail: at 100%, 168 + 20·2 + 332·2 + 16 = 888 px of
+    // window. The 720 px window minimum therefore shows one column.
     div()
+        .debug_selector(move || selector.into())
         .min_w(POINTER_CARD_MIN_W)
         .flex_1()
         .h_full()

@@ -291,6 +291,17 @@ fn pointer_tab_shows(
     selector: &'static str,
     adjust: impl FnOnce(&mut openlogi_core::device::DeviceInventory),
 ) -> bool {
+    pointer_tab_bounds(cx, 1280., &[selector], adjust)[0].is_some()
+}
+
+/// Open the known mouse's Pointer tab in a window `width` px wide with
+/// `adjust` applied to its inventory, and return the bounds of `selectors`.
+fn pointer_tab_bounds(
+    cx: &mut gpui::TestAppContext,
+    width: f32,
+    selectors: &[&'static str],
+    adjust: impl FnOnce(&mut openlogi_core::device::DeviceInventory),
+) -> Vec<Option<gpui::Bounds<gpui::Pixels>>> {
     use std::{cell::RefCell, rc::Rc};
 
     use gpui::{AppContext as _, px, size};
@@ -344,7 +355,7 @@ fn pointer_tab_shows(
         .borrow_mut()
         .take()
         .expect("the window hosts the app view");
-    cx.simulate_resize(size(px(1280.), px(900.)));
+    cx.simulate_resize(size(px(width), px(900.)));
     cx.update(|window, cx| {
         let record_key = AppState::try_read(cx)
             .expect("state is installed")
@@ -358,7 +369,60 @@ fn pointer_tab_shows(
         });
         window.draw(cx).clear(cx);
     });
-    cx.debug_bounds(selector).is_some()
+    selectors
+        .iter()
+        .map(|selector| cx.debug_bounds(selector))
+        .collect()
+}
+
+/// The Pointer tab's grid wraps to one column at the 720 px window minimum,
+/// where two cards do not fit beside the navigation rail, and every card
+/// stays inside the tab body; at the default 1280 px it shows two columns.
+#[gpui::test]
+fn the_pointer_grid_fits_the_window(cx: &mut gpui::TestAppContext) {
+    const SELECTORS: [&str; 5] = [
+        "detail-tab-content",
+        "pointer-card-tuning",
+        "pointer-card-smartshift",
+        "pointer-card-scrolling",
+        "pointer-card-haptics",
+    ];
+    let with_haptics = |inventory: &mut openlogi_core::device::DeviceInventory| {
+        inventory.paired[0]
+            .capabilities
+            .as_mut()
+            .expect("the fixture mouse has capabilities")
+            .haptic_feedback = true;
+    };
+    let bounds = |cx: &mut gpui::TestAppContext, width| {
+        pointer_tab_bounds(cx, width, &SELECTORS, with_haptics)
+            .into_iter()
+            .map(|bounds| bounds.expect("the Pointer tab draws every card"))
+            .collect::<Vec<_>>()
+    };
+
+    let narrow = bounds(cx, 720.);
+    let (content, cards) = narrow.split_first().expect("content first");
+    assert!(
+        content.right() <= gpui::px(720.),
+        "the tab content {content:?} stays inside a 720 px window"
+    );
+    for card in cards {
+        assert!(
+            card.left() >= content.left() && card.right() <= content.right(),
+            "card {card:?} stays inside the tab content {content:?}"
+        );
+        assert_eq!(card.left(), content.left(), "one column at 720 px");
+    }
+
+    let wide = bounds(cx, 1280.);
+    let (content, cards) = wide.split_first().expect("content first");
+    let [tuning, smartshift, scrolling, haptics] = cards else {
+        panic!("four cards");
+    };
+    assert_eq!(tuning.top(), smartshift.top(), "two columns at 1280 px");
+    assert_eq!(scrolling.top(), haptics.top(), "two columns at 1280 px");
+    assert!(smartshift.right() <= content.right());
 }
 
 /// "Charging" replaces the bogus percentage only when charging *and* the
