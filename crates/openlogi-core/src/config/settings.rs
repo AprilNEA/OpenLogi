@@ -12,6 +12,7 @@ use crate::binding::ButtonId;
 use crate::color::Rgb;
 use crate::device::ChangedOnLight;
 use crate::hid::{SmartShiftAutoDisengage, SmartShiftThreshold, TunableTorque};
+use crate::update_feed::UpdateChannel;
 
 /// Light/dark appearance preference. `System` follows the OS appearance (the
 /// historical behaviour); `Light` / `Dark` force a mode regardless of the OS.
@@ -191,6 +192,12 @@ pub struct AppSettings {
     /// user opt in on first launch.
     #[serde(default)]
     pub update_prompt_seen: bool,
+    /// The update channel picked in Settings → Updates, or `None` to follow
+    /// the running version's channel (see [`UpdateChannel::followed`]). The
+    /// updater reads it once per launch, so a change applies after a restart.
+    /// Omitted from the file until a user picks a channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_channel: Option<UpdateChannel>,
     /// Whether OpenLogi shows a macOS menu-bar (status item) icon — and, on
     /// Windows, the notification-area (tray) icon. `true` (default) → the
     /// agent is visible in the menu bar / tray; `false` → it runs with no
@@ -487,6 +494,7 @@ impl Default for AppSettings {
             check_for_updates: false,
             auto_install_updates: false,
             update_prompt_seen: false,
+            update_channel: None,
             show_in_menu_bar: true,
             capture_mouse_events: true,
             smooth_scroll: false,

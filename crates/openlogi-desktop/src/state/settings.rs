@@ -9,6 +9,7 @@ use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MouseProfileTarget,
     ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
+use openlogi_core::update_feed::UpdateChannel;
 
 impl AppState {
     /// App-wide settings backing the Settings window (launch-at-login,
@@ -68,6 +69,18 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.check_for_updates = enabled);
         self.persist_config("update-check setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Pick the update channel and persist it. The updater reads it at the
+    /// next launch, so there is no immediate side effect here. An
+    /// already-picked channel writes nothing and is still reported.
+    pub fn commit_update_channel(&mut self, channel: UpdateChannel) -> StateEvents {
+        if self.config.app_settings.update_channel == Some(channel) {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.update_channel = Some(channel));
+        self.persist_config("update-channel setting");
         StateEvent::SettingsChanged.into()
     }
     /// Toggle opt-in automatic install and persist it. The launch-time updater

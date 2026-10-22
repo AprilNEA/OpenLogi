@@ -1,19 +1,21 @@
 //! Updates settings page.
 
 use super::{
-    App, AppState, Button, Disableable, Entity, FontWeight, IconName, InteractiveElement as _,
-    ParentElement, RELEASES_URL, SettingField, SettingGroup, SettingItem, SettingPage, Sizable,
-    StatefulInteractiveElement as _, Styled, Tag, UpdateStatus, Updater, div, h_flex, img, px,
-    v_flex,
+    App, AppState, Button, ButtonGroup, Disableable, Entity, FontWeight, IconName,
+    InteractiveElement as _, ParentElement, RELEASES_URL, Selectable, SettingField, SettingGroup,
+    SettingItem, SettingPage, Sizable, StatefulInteractiveElement as _, Styled, Tag, UpdateStatus,
+    Updater, div, h_flex, img, px, v_flex,
 };
 use crate::platform::installation::{HomebrewCask, Installation, InstallationSource, LinuxPackage};
 use crate::ui::theme::Typography as _;
 use gpui_base::Link;
 use gpui_component::ActiveTheme as _;
+use openlogi_core::update_feed::UpdateChannel;
 
 /// The Updates page: a hero card with the running build, its update status, and
 /// the contextual check / install / restart action; the opt-in auto-check and
-/// auto-install switches; installation ownership and where updates come from.
+/// auto-install switches and the update channel; installation ownership and
+/// where updates come from.
 pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
     let hero = SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
         update_hero(&updater, cx)
@@ -44,6 +46,13 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
                 ),
             )
             .description(tr!("updates.automatic_update_description")),
+        )
+        .item(
+            SettingItem::new(
+                tr!("updates.update_channel"),
+                SettingField::render(|_, _, cx| channel_segment(cx)),
+            )
+            .description(tr!("updates.update_channel_description")),
         );
 
     let source = SettingGroup::new()
@@ -77,6 +86,7 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
 fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
     let pal = crate::ui::theme::palette(cx);
     let status = updater.read(cx).status().clone();
+    let channel = crate::platform::updater::channel_in_use(cx);
 
     // A short status tag for the settled states (semantic colours from the theme);
     // transient states carry their detail in the message line instead.
@@ -173,11 +183,52 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
                                 .text_caption()
                                 .text_color(pal.text_muted)
                                 .truncate()
-                                .child(message.unwrap_or_else(|| tr!("updates.stable_channel"))),
+                                .child(message.unwrap_or_else(|| channel_label(channel))),
                         ),
                 ),
         )
         .child(div().flex_shrink_0().child(action.disabled(busy)))
+}
+
+/// The hero line's name for the channel this launch follows.
+fn channel_label(channel: UpdateChannel) -> gpui::SharedString {
+    match channel {
+        UpdateChannel::Stable => tr!("updates.stable_channel"),
+        UpdateChannel::Beta => tr!("updates.beta_channel"),
+    }
+}
+
+/// Stable / Beta. The selected one is the channel the settings make the next
+/// launch follow, picked or not; clicking one picks it.
+fn channel_segment(cx: &App) -> ButtonGroup {
+    let current = crate::platform::updater::followed_channel(
+        AppState::try_read(cx).map(AppState::app_settings),
+    );
+    ButtonGroup::new("update-channel")
+        .outline()
+        .children(
+            UpdateChannel::ALL
+                .into_iter()
+                .zip(0_u32..)
+                .map(|(channel, index)| {
+                    Button::new(("update-channel", index))
+                        .label(match channel {
+                            UpdateChannel::Stable => tr!("updates.channel_stable"),
+                            UpdateChannel::Beta => tr!("updates.channel_beta"),
+                        })
+                        .selected(current == channel)
+                }),
+        )
+        .on_click(|clicks, _, cx| {
+            let Some(channel) = clicks
+                .first()
+                .and_then(|index| UpdateChannel::ALL.get(*index))
+                .copied()
+            else {
+                return;
+            };
+            AppState::apply(cx, |state| state.commit_update_channel(channel));
+        })
 }
 
 /// Read the published snapshot only; rendering must never probe the filesystem.
@@ -326,6 +377,7 @@ mod tests {
         let view = view.unwrap();
         let mut visual = VisualTestContext::from_window(handle.into(), cx);
         visual.update(|window, cx| window.draw(cx).clear(cx));
+        scroll_to_sources(&mut visual);
         assert_source_geometry(&mut visual);
         assert_release_link_activation(&mut visual);
         let notified = Rc::new(Cell::new(false));
@@ -347,6 +399,7 @@ mod tests {
                 "the open Settings view must observe detection completion"
             );
             visual.update(|window, cx| window.draw(cx).clear(cx));
+            scroll_to_sources(&mut visual);
             assert_source_geometry(&mut visual);
         }
 
@@ -364,15 +417,27 @@ mod tests {
                 "a live locale change must refresh installation metadata"
             );
             visual.update(|window, cx| window.draw(cx).clear(cx));
+            scroll_to_sources(&mut visual);
+            assert_source_geometry(&mut visual);
+        }
+        rust_i18n::set_locale("en");
+    }
+
+    /// Scroll the page to its end, where the source group is, and redraw.
+    ///
+    /// `SettingPage` lays its groups out in a virtualized list, which measures
+    /// a group when it draws it. After a scale or language change, a scroll
+    /// still uses the heights measured before the change and can stop short
+    /// of the end. The second scroll, after a redraw, uses the new heights.
+    fn scroll_to_sources(visual: &mut VisualTestContext) {
+        for _ in 0..2 {
             visual.simulate_event(ScrollWheelEvent {
                 position: point(px(700.), px(500.)),
                 delta: ScrollDelta::Pixels(point(px(0.), px(-1000.))),
                 ..Default::default()
             });
             visual.update(|window, cx| window.draw(cx).clear(cx));
-            assert_source_geometry(&mut visual);
         }
-        rust_i18n::set_locale("en");
     }
 
     fn assert_source_geometry(visual: &mut VisualTestContext) {

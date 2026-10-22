@@ -7,8 +7,14 @@
 //! for that URL cannot drift apart. The release workflow's upload
 //! destinations (`release.yml`) still spell the layout themselves.
 
+use serde::{Deserialize, Serialize};
+
 /// A release channel: the set of releases an installation is offered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Settings persist the channel a user picks by its name, for example
+/// `update_channel = "beta"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UpdateChannel {
     /// Final releases, tagged `vX.Y.Z`.
     Stable,
@@ -17,6 +23,31 @@ pub enum UpdateChannel {
 }
 
 impl UpdateChannel {
+    /// Every channel, in the order Settings offers them.
+    pub const ALL: [Self; 2] = [Self::Stable, Self::Beta];
+
+    /// The channel an installation follows: `chosen`, the one the user picked,
+    /// or else the channel of `running_version`. A pre-release such as
+    /// `0.8.17-beta.12` follows beta, so a beta keeps updating to newer betas
+    /// until its user picks stable. Every reader of the channel decides it
+    /// here.
+    #[must_use]
+    pub fn followed(chosen: Option<Self>, running_version: &str) -> Self {
+        chosen.unwrap_or_else(|| Self::of_version(running_version))
+    }
+
+    /// The channel `version` comes from: a semantic-version pre-release is a
+    /// beta. The pre-release starts at the first `-` before any `+`, because
+    /// build metadata may contain `-` too.
+    fn of_version(version: &str) -> Self {
+        let without_build = version.split_once('+').map_or(version, |(head, _)| head);
+        if without_build.contains('-') {
+            Self::Beta
+        } else {
+            Self::Stable
+        }
+    }
+
     /// The channel's name, as the feed layout and the feeds themselves spell
     /// it.
     #[must_use]
@@ -66,6 +97,27 @@ mod tests {
             UpdateChannel::Beta.manifest_url("https://updates.openlogi.org"),
             "https://updates.openlogi.org/channels/beta/latest.json"
         );
+    }
+
+    #[test]
+    fn a_chosen_channel_wins_over_the_running_version() {
+        for version in ["0.8.16", "0.8.17-beta.12"] {
+            for channel in UpdateChannel::ALL {
+                assert_eq!(UpdateChannel::followed(Some(channel), version), channel);
+            }
+        }
+    }
+
+    #[test]
+    fn without_a_choice_a_pre_release_follows_beta() {
+        for (version, channel) in [
+            ("0.8.16", UpdateChannel::Stable),
+            ("0.8.16+build-7", UpdateChannel::Stable),
+            ("0.8.17-beta.12", UpdateChannel::Beta),
+            ("0.8.17-beta.12+build-7", UpdateChannel::Beta),
+        ] {
+            assert_eq!(UpdateChannel::followed(None, version), channel, "{version}");
+        }
     }
 
     #[test]

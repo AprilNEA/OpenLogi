@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 
 use crate::device::{BatteryInfo, BatteryStatus, Capabilities, DeviceKind, DeviceTransports};
+use crate::update_feed::UpdateChannel;
 
 /// Where the resolver found the bundled device renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +150,8 @@ pub struct AppInfo {
     pub show_in_menu_bar: Option<bool>,
     /// Automatic update-check setting, `None` when unknown.
     pub check_for_updates: Option<bool>,
+    /// Update channel the settings make the app follow, `None` when unknown.
+    pub update_channel: Option<UpdateChannel>,
     /// Thumbwheel sensitivity setting, `None` when unknown.
     pub thumbwheel_sensitivity: Option<i32>,
     /// `schema_version` of the loaded `config.toml`, when one loaded.
@@ -247,10 +250,11 @@ impl DiagnosticsReport {
         );
         let _ = writeln!(
             out,
-            "- Launch at login: {} · Menu bar: {} · Update check: {}",
+            "- Launch at login: {} · Menu bar: {} · Update check: {} · Update channel: {}",
             opt_state(a.launch_at_login, "yes", "no"),
             opt_state(a.show_in_menu_bar, "yes", "no"),
             opt_state(a.check_for_updates, "on", "off"),
+            a.update_channel.map_or("unknown", UpdateChannel::as_str),
         );
         let source = if a.running_from_bundle {
             "app bundle (release)"
@@ -513,6 +517,7 @@ mod tests {
     use crate::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceKind, DeviceTransports,
     };
+    use crate::update_feed::UpdateChannel;
 
     fn app() -> AppInfo {
         AppInfo {
@@ -532,6 +537,7 @@ mod tests {
             launch_at_login: Some(true),
             show_in_menu_bar: Some(true),
             check_for_updates: Some(false),
+            update_channel: Some(UpdateChannel::Stable),
             thumbwheel_sensitivity: Some(0),
             config_schema_version: Some(2),
             configured_device_count: Some(3),

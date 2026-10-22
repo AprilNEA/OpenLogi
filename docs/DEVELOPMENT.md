@@ -432,6 +432,16 @@ asset carries a minisign signature that verifies against that key, plus a
 matching SHA-256. A build without the key embedded (local/dev) fails closed —
 the update check errors rather than installing an unverified artifact.
 
+The app follows one update channel per launch, which
+`UpdateChannel::followed` decides. A channel picked in Settings → Updates
+(`update_channel` in `config.toml`) wins. Without one, a pre-release such as
+`0.8.17-beta.12` follows `beta` and a final release follows `stable`. The
+engine reads `${OPENLOGI_UPDATE_BASE_URL}/channels/<channel>/latest.json`.
+Sparkle keeps reading the stable appcasts below and, on `beta`, also offers
+their items tagged `<sparkle:channel>beta</sparkle:channel>`. Nothing publishes
+to `beta` yet: until the release workflow writes `/channels/beta/latest.json`,
+an engine build that follows `beta` finds no manifest.
+
 ### macOS: Sparkle
 
 The signed macOS release bundle embeds
