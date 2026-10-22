@@ -316,8 +316,9 @@ impl HapticCapabilities {
 /// (function 3).
 ///
 /// Logi Options+ plays a waveform only while this status is zero. Its
-/// protobuf enum names 1 "disabled"; no other value is named, so the raw
-/// byte is kept so a refusal can say what the device reported.
+/// protobuf enum names 1 "disabled", which an MX Master 4 reports while
+/// [`HapticConfigFlags::ENABLED`] is clear. No other value is named, so the
+/// raw byte is kept so a refusal can say what the device reported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct HapticStatus(u8);
