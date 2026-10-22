@@ -7,18 +7,21 @@ message: Release channels are decided by xtask's support::release_tag; read the 
 note: |
   `cargo xtask release version` parses the tag once and prints its channel.
   A workflow that matched `-beta` in the tag would be a second parser.
-  A best-effort syntax guard, without data flow. It fires on a scalar that
+  A best-effort, lexical guard without data flow. It fires on a scalar that
   contains `-beta` and either:
-  - references a tag or ref: `github.ref_name`, `GITHUB_REF`, `github.ref`,
-    `refs/tags`, a shell variable such as `$TAG`, `${RELEASE_TAG}` or
-    `$TAG_NAME`, or an expression property such as `env.RELEASE_TAG`; or
-  - is in the `tags` / `tags-ignore` filter of an `on.push` trigger, in
-    block or flow style, with the key quoted or not.
-  Other `-beta` text passes: names, dependency versions, image tags, and an
-  action's `with: tags:` input. A tag copied into another variable first
-  (`inputs.release_version`) passes too. A `run` script that references a
-  ref and also mentions an unrelated `-beta` fires; move the unrelated part
-  to its own step.
+  - references a tag or ref: `github.ref` / `github.ref_name`,
+    `github['ref']`, `GITHUB_REF` / `GITHUB_REF_NAME`, `refs/tags`, a shell
+    variable such as `$TAG`, `${RELEASE_TAG}` or `$tag_name`, a property
+    such as `env.TAG`, `inputs.tag`, `steps.<id>.outputs.release_tag` or
+    `github.event.release.tag_name`, or bracket access such as `env['TAG']`;
+    or
+  - is in the `tags` / `tags-ignore` filter of the `on.push` trigger, in
+    block or flow style, with the keys quoted or not.
+  Known limits, not a complete list: a tag copied into another variable
+  first (`env.VERSION`) passes; a `run` script that references a ref and
+  also mentions an unrelated `-beta` fires (move the unrelated part to its
+  own step); and literal text that reads like a reference, such as a step
+  name with `$TAG-beta` or `GITHUB_REF-beta`, fires.
   See "Single source of truth" in AGENTS.md.
 files:
   - .github/workflows/**
@@ -31,7 +34,7 @@ rule:
   all:
     - regex: "-beta"
     - any:
-        - regex: "(?i)ref_name|github_ref|github\\.ref|refs/tags|\\$\\{?(\\w*_)?tag(_\\w*)?\\b|\\.(\\w*_)?tag(_\\w*)?\\b"
+        - regex: "(?i)github\\.ref|github\\[\\s*['\"]ref|github_ref|refs/tags|\\$\\{?(\\w*_)?tag(_\\w*)?\\b|\\b(env|inputs|vars|matrix|outputs|event|release)\\.(\\w*_)?tag(_\\w*)?\\b|\\[\\s*['\"](\\w*_)?tag(_\\w*)?['\"]\\s*\\]"
         - inside:
             stopBy: end
             any:
@@ -48,3 +51,11 @@ rule:
               has:
                 field: key
                 regex: "^[\"']?push[\"']?$"
+              inside:
+                stopBy: end
+                any:
+                  - kind: block_mapping_pair
+                  - kind: flow_pair
+                has:
+                  field: key
+                  regex: "^[\"']?on[\"']?$"
