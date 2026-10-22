@@ -76,6 +76,21 @@ the agent claims no entitlements: AMFI kills a process that claims a
 restricted entitlement without its profile. The release workflow reads the
 profile from 1Password (`APPLE_AGENT_PROVISIONING_PROFILE`, base64).
 
+The profile lists the Developer ID Application certificate that signs the
+release. `provisioning.rs` refuses a profile that has expired or that does not
+list the signing certificate, so a stale profile fails the build. The current
+profile expires on 2044-10-15, and its certificate expires on 2031-01-20. When
+either is renewed:
+
+1. In the Apple Developer portal, create a Developer ID profile for the
+   `org.openlogi.agent` App ID with the current Developer ID Application
+   certificate. The App ID must keep the HID Virtual Device capability.
+2. Put the profile's base64 in the `APPLE_AGENT_PROVISIONING_PROFILE` field of
+   the 1Password item that `OP_APPLE_SECRET_ITEM` names.
+3. Before the next release, run a signed build on a branch
+   (`gh workflow run build.yml --ref <branch> -f sign=true`) and check that its
+   macOS jobs pass.
+
 `macos bundle` asks `cargo-bundle` for the base `.app` only, then embeds and signs
 the helpers. Use `macos package` when you need the final DMG. The package command
 also accepts `--target aarch64-apple-darwin` or `--target x86_64-apple-darwin` so

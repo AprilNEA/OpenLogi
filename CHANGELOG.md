@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.16] - 2026-10-21
 
+### Highlights
+
+- **macOS: shortcut keys go through a virtual HID keyboard.** When a button
+  sends a keyboard shortcut, the signed OpenLogi Agent presses the keys on a
+  virtual keyboard named "OpenLogi Virtual Keyboard". macOS handles them as keys
+  from a USB keyboard. This targets shortcuts that work from a real keyboard but
+  did not work from OpenLogi ([#1653](https://github.com/AprilNEA/OpenLogi/issues/1653),
+  [#744](https://github.com/AprilNEA/OpenLogi/issues/744)). Apple granted
+  OpenLogi the restricted HID virtual-device entitlement for this
+  ([#1918](https://github.com/AprilNEA/OpenLogi/pull/1918),
+  [#1929](https://github.com/AprilNEA/OpenLogi/pull/1929)). No new permission is
+  needed. Builds from source, and a system that does not let the agent create
+  the device, type keys as before.
+
 ### Added
 
 - *(pointer)* light the DPI LED in precision mode ([#1934](https://github.com/AprilNEA/OpenLogi/pull/1934))

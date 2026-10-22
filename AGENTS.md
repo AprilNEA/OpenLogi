@@ -34,7 +34,7 @@ access devices directly.
 | `crates/openlogi-assets` | Device-render registry + cached fetch from OpenLogi asset mirrors |
 | `crates/openlogi-cli` | CLI dispatch: agent-backed inventory when available, plus direct hardware diagnostics |
 | `crates/openlogi-hook` | OS input capture: CGEventTap / evdev+uinput / WH_MOUSE_LL |
-| `crates/openlogi-inject` | OS input synthesis: CGEvent / uinput+MPRIS / SendInput |
+| `crates/openlogi-inject` | OS input synthesis: CGEvent + virtual HID keyboard / uinput+MPRIS / SendInput |
 | `crates/openlogi-agent-core` | Shared agent orchestration: hook runtime, HID++ writes, DPI cycle, Actions Ring session state |
 | `crates/openlogi-ipc` | The tarpc IPC contract (`src/ipc.rs`) + its local-socket transport, shared by the agent and its clients |
 | `crates/openlogi-agent` | The `openlogi-agent` binary — runtime HID/input server |
