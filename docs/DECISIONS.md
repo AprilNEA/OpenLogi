@@ -4,6 +4,40 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: An animated desktop switch types the user's Space shortcut first
+
+0.8.16 shipped the timed DockSwipe slide of the next entry. Users on macOS
+26.6.1 and 27.0.1 report that it is slower than a native Ctrl+←/→ switch
+(#1722) and that it stutters in the middle (#1972). The Dock plays its own
+slide for that shortcut. An animated switch therefore types the user's "Move
+left a space" or "Move right a space" shortcut (symbolic hotkeys 79 and 81),
+as #1847 proposed. This revisits the "Not the shortcut" point below.
+
+- **Typed as a keyboard types it.** Each modifier goes down as a key of its
+  own, and an arrow key carries the numeric-pad flag. WindowServer ignores a
+  synthesized hotkey in any other shape (#1653).
+- **Through the virtual HID keyboard when it is installed.** Each edge goes
+  through the device, as a held chord's edges do. An edge the device does not
+  carry goes out as its `CGEvent`. Every `CGEvent` is built before the first
+  edge goes out.
+- **Held chords stay intact.** The keystroke is typed under the held-chord
+  lock. A held modifier the shortcut does not use is lifted for the keystroke
+  and pressed again after it. A held modifier the shortcut uses stays down.
+- **The slide stays as the fallback.** Its frames are built before the gate.
+  They are posted when the shortcut is off or cannot be read, and when a held
+  chord holds the shortcut's key down. A rebound shortcut is read from its
+  record, so it still switches with the Dock's slide.
+- **Instant stays a DockSwipe.** With `animate_desktop_switch` off, the switch
+  posts the two-frame DockSwipe, because the shortcut always animates.
+
+Verified: unit tests check the order, flags and routing key of every edge.
+#1847's author switched both ways with the Dock's slide on macOS 27.0.1. That
+run used the `CGEvent` edges, because the test process had no virtual
+keyboard. On 0.8.16, #1653's reporter switched Spaces with the slide through
+a Ctrl+←/→ binding on the virtual keyboard. That binding sends the same four
+reports as this keystroke. Not verified on hardware: this keystroke through
+the virtual keyboard, and the fallback slide.
+
 ## 2026-10: Desktop switches slide like an Options+ three-finger swipe, and can switch at once
 
 Previous Desktop and Next Desktop on macOS posted a DockSwipe of two frames,

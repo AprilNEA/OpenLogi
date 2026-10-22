@@ -48,9 +48,9 @@ pub(super) struct SpaceShortcut {
 /// disabled or cannot be read.
 ///
 /// Read-only: unlike the screenshot hotkeys, a disabled Space shortcut is
-/// never enabled — the caller falls back to a DockSwipe instead. Typing the
-/// shortcut lets the Dock play the same slide it plays for the keyboard,
-/// which a synthesized swipe does not (#1722).
+/// never enabled — the caller slides through DockSwipe events instead.
+/// Typing the shortcut lets the Dock play the same slide it plays for the
+/// keyboard, which synthesized swipe frames only approximate (#1722, #1972).
 pub(super) fn space_shortcut(direction: Direction) -> Option<SpaceShortcut> {
     let hotkey = match direction {
         Direction::Previous => SPACE_LEFT,
@@ -77,6 +77,10 @@ impl SpaceShortcut {
     /// restored before the lock is released, and every event is built before
     /// the first is posted.
     ///
+    /// Each edge goes through the virtual HID keyboard when it carries the
+    /// edge, as a held chord's edges do, so the shortcut reaches WindowServer
+    /// as keyboard input. An edge it does not carry goes out as its `CGEvent`.
+    ///
     /// Returns `false`, posting nothing, when a held chord keeps the
     /// shortcut's own key down: its key-up would end that hold early.
     pub(super) fn post(&self) -> bool {
@@ -85,14 +89,34 @@ impl SpaceShortcut {
                 tracing::debug!("a held chord owns the Space shortcut's key");
                 return false;
             }
-            let Some(events) = keystroke(self.virtual_key, self.flags, held) else {
+            let Some(edges) = keystroke(self.virtual_key, self.flags, held) else {
                 tracing::warn!("could not build the Space shortcut's key events");
                 return false;
             };
-            for event in events {
-                event.post(CGEventTapLocation::HID);
+            for edge in edges {
+                if !super::virtual_keyboard::edge(edge.virtual_key, edge.phase) {
+                    edge.event.post(CGEventTapLocation::HID);
+                }
             }
             true
+        })
+    }
+}
+
+/// One key edge of a keystroke, with the `CGEvent` that posts it when the
+/// virtual HID keyboard does not carry it.
+struct KeyEdge {
+    virtual_key: u16,
+    phase: KeyPhase,
+    event: CGEvent,
+}
+
+impl KeyEdge {
+    fn new(virtual_key: u16, flags: CGEventFlags, phase: KeyPhase) -> Option<Self> {
+        Some(Self {
+            virtual_key,
+            phase,
+            event: super::key_event(virtual_key, flags, phase)?,
         })
     }
 }
@@ -107,7 +131,7 @@ impl SpaceShortcut {
 /// key event that merely carries the modifier flags is ignored, as is an
 /// arrow key without the numeric-pad flag every Apple keyboard sets on it
 /// (#1653).
-fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Option<Vec<CGEvent>> {
+fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Option<Vec<KeyEdge>> {
     let pressed: Vec<HeldKey> = MODIFIER_KEYS
         .iter()
         .filter(|&&(flag, key)| flags.contains(flag) && !held.contains(key))
@@ -126,31 +150,31 @@ fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Opti
     }
 
     let mut modifiers = held;
-    let mut events = Vec::with_capacity((pressed.len() + released.len()) * 2 + 2);
+    let mut edges = Vec::with_capacity((pressed.len() + released.len()) * 2 + 2);
     for &key in &released {
         let (vk, edge_flags) = super::held_key_event(key, KeyPhase::Up, &mut modifiers)?;
-        events.push(super::key_event(vk, edge_flags, KeyPhase::Up)?);
+        edges.push(KeyEdge::new(vk, edge_flags, KeyPhase::Up)?);
     }
     for &key in &pressed {
         let (vk, edge_flags) = super::held_key_event(key, KeyPhase::Down, &mut modifiers)?;
-        events.push(super::key_event(vk, edge_flags, KeyPhase::Down)?);
+        edges.push(KeyEdge::new(vk, edge_flags, KeyPhase::Down)?);
     }
     let chord = super::held_modifier_flags(modifiers) | key_flags;
-    events.push(super::key_event(virtual_key, chord, KeyPhase::Down)?);
-    events.push(super::key_event(virtual_key, chord, KeyPhase::Up)?);
+    edges.push(KeyEdge::new(virtual_key, chord, KeyPhase::Down)?);
+    edges.push(KeyEdge::new(virtual_key, chord, KeyPhase::Up)?);
     for &key in pressed.iter().rev() {
         let (vk, edge_flags) = super::held_key_event(key, KeyPhase::Up, &mut modifiers)?;
-        events.push(super::key_event(vk, edge_flags, KeyPhase::Up)?);
+        edges.push(KeyEdge::new(vk, edge_flags, KeyPhase::Up)?);
     }
     for &key in released.iter().rev() {
         let (vk, edge_flags) = super::held_key_event(key, KeyPhase::Down, &mut modifiers)?;
-        events.push(super::key_event(vk, edge_flags, KeyPhase::Down)?);
+        edges.push(KeyEdge::new(vk, edge_flags, KeyPhase::Down)?);
     }
     debug_assert_eq!(
         modifiers, held,
         "a keystroke leaves held modifiers as it found them"
     );
-    Some(events)
+    Some(edges)
 }
 
 /// The physical key and modifier mask `hotkey` is bound to.
@@ -287,14 +311,15 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use core_graphics::event::{CGEvent, CGEventFlags, CGEventType, EventField};
+    use core_graphics::event::{CGEventFlags, CGEventType, EventField};
 
-    use super::{HeldKey, HeldModifiers, HotkeyRestore, keystroke};
+    use super::{HeldKey, HeldModifiers, HotkeyRestore, KeyEdge, KeyPhase, keystroke};
 
     const NONE: CGEventFlags = CGEventFlags::CGEventFlagNull;
     const COMMAND: CGEventFlags = CGEventFlags::CGEventFlagCommand;
     const CONTROL: CGEventFlags = CGEventFlags::CGEventFlagControl;
     const SHIFT: CGEventFlags = CGEventFlags::CGEventFlagShift;
+    const OPTION: CGEventFlags = CGEventFlags::CGEventFlagAlternate;
     const FN: CGEventFlags = CGEventFlags::CGEventFlagSecondaryFn;
     const PAD: CGEventFlags = CGEventFlags::CGEventFlagNumericPad;
 
@@ -309,22 +334,36 @@ mod tests {
     }
     use Edge::{Down, Flags, Up};
 
-    /// Each event as (virtual key, edge, flags).
-    fn edges(events: &[CGEvent]) -> Vec<(i64, Edge, CGEventFlags)> {
-        events
+    /// Each edge's event as (virtual key, edge, flags). Also checks that the
+    /// key and phase the virtual keyboard is offered are the event's own, so
+    /// both paths type the same keystroke.
+    fn edges(edges: &[KeyEdge]) -> Vec<(i64, Edge, CGEventFlags)> {
+        edges
             .iter()
-            .map(|event| {
-                let edge = match event.get_type() {
-                    CGEventType::KeyDown => Down,
-                    CGEventType::KeyUp => Up,
-                    CGEventType::FlagsChanged => Flags,
+            .map(|edge| {
+                let event = &edge.event;
+                let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+                assert_eq!(keycode, i64::from(edge.virtual_key));
+                let down = match event.get_type() {
+                    CGEventType::KeyDown => true,
+                    CGEventType::KeyUp => false,
+                    // A modifier's own flag tells its press from its release.
+                    CGEventType::FlagsChanged => event.get_flags().contains(match keycode {
+                        0x37 => COMMAND,
+                        0x38 => SHIFT,
+                        0x3a => OPTION,
+                        0x3b => CONTROL,
+                        other => panic!("unexpected modifier key {other:#x}"),
+                    }),
                     other => panic!("unexpected event type {other:?}"),
                 };
-                (
-                    event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
-                    edge,
-                    event.get_flags(),
-                )
+                assert_eq!(edge.phase == KeyPhase::Down, down, "{keycode:#x}");
+                let kind = match event.get_type() {
+                    CGEventType::FlagsChanged => Flags,
+                    _ if down => Down,
+                    _ => Up,
+                };
+                (keycode, kind, event.get_flags())
             })
             .collect()
     }
@@ -418,11 +457,12 @@ mod tests {
     /// The hook skips OpenLogi's own key edges only by their tag.
     #[test]
     fn every_keystroke_edge_carries_the_synthetic_tag() {
-        for event in
+        for edge in
             keystroke(0x7b, CONTROL | FN, HeldModifiers::default()).expect("keyboard events")
         {
             assert_eq!(
-                event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
+                edge.event
+                    .get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
                 crate::SYNTHETIC_EVENT_USER_DATA
             );
         }

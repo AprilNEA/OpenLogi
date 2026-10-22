@@ -352,8 +352,9 @@ pub fn execute(action: &Action) {
 pub enum DesktopSwitch {
     /// Switch at once, with no slide.
     Instant,
-    /// Slide over the way a three-finger swipe does. Only macOS animates an
-    /// injected swipe; elsewhere this switches like [`Self::Instant`].
+    /// Slide over the way a three-finger swipe does. macOS types the user's
+    /// Space shortcut for the Dock's own slide, or posts swipe frames when
+    /// that shortcut is off. Elsewhere this switches like [`Self::Instant`].
     Animated,
 }
 
