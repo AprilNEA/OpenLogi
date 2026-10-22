@@ -62,8 +62,10 @@ jobs:
         id: version
         run: cargo xtask release version --tag "$GITHUB_REF_NAME"
       # A beta tag parses, and publish keeps a beta off the stable side
-      # effects, but no beta feed can carry it yet (the appcasts take stable
-      # releases only): fail here, before anything is built or signed.
+      # effects, but the rest of the beta path is not ready: `sparkle-deltas`
+      # and `appcast` reject a beta, `latest-json` would label it stable, and
+      # publish writes no beta channel file. Fail here, before anything is
+      # built or signed.
       - name: Refuse a channel publish cannot route
         if: ${{ steps.version.outputs.channel != 'stable' }}
         env:
@@ -183,7 +185,8 @@ jobs:
     # The channel files on R2 are shared by every release. One publish at a
     # time keeps two tags from interleaving their writes. `queue: max` keeps
     # every waiting publish (up to 100) instead of only the newest one;
-    # waiting publishes start in the order they began to wait.
+    # waiting publishes start in the order they began to wait. The queue does
+    # not make a re-run safe: see the NOTE above.
     concurrency:
       group: release-publish
       cancel-in-progress: false

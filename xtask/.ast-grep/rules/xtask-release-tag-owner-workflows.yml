@@ -3,17 +3,30 @@
 id: xtask-release-tag-owner-workflows
 language: yaml
 severity: error
-message: Release channels are decided by xtask's support::release_tag; read the `version` job's `channel` output instead of matching `-beta` in a workflow.
+message: Release channels are decided by xtask's support::release_tag; read the `version` job's `channel` output instead of matching `-beta` against a tag in a workflow.
 note: |
   `cargo xtask release version` parses the tag once and prints its channel.
   A workflow that matched `-beta` in the tag would be a second parser.
+  The rule fires on a scalar that contains `-beta` and also reads a tag or
+  ref (`github.ref_name`, `GITHUB_REF`, `refs/tags`, a `TAG` variable), or
+  that sits in a `tags` / `tags-ignore` trigger filter. Other `-beta` text,
+  such as a step name or a dependency version, passes. A long `run` script
+  that reads a ref and also mentions an unrelated `-beta` fires too; move the
+  unrelated part to its own step.
   See "Single source of truth" in AGENTS.md.
 files:
   - .github/workflows/**
 rule:
-  regex: "-beta"
   any:
     - kind: string_scalar
     - kind: single_quote_scalar
     - kind: double_quote_scalar
     - kind: block_scalar
+  all:
+    - regex: "-beta"
+    - any:
+        - regex: "(?i)ref_name|github_ref|github\\.ref|refs/tags|\\btag|_tag\\b"
+        - inside:
+            kind: block_mapping_pair
+            regex: "^tags(-ignore)?\\s*:"
+            stopBy: end

@@ -492,11 +492,14 @@ uploaded after the artifacts they point at, and only a stable release moves
 them. Until beta releases publish their own, a stable release writes the same
 `latest.json` to both channels, so the newest release on the beta channel is
 the newest stable one. Publish jobs run one at a time (the `release-publish`
-concurrency group), so two tags never interleave these writes. Waiting publish
-jobs queue (`queue: max`) instead of replacing each other, and start in the
-order they began to wait. A publish re-run for an older stable tag moves the
-channel files and the latest GitHub Release back to that tag. Before you re-run
-one, check that no newer stable tag has published.
+concurrency group), so two tags never interleave these writes. Up to 100
+waiting publish jobs queue (`queue: max`) instead of replacing each other, and
+start in the order they began to wait. The queue only keeps writes apart: it
+does not order releases by version, and it does not make a re-run safe. Never
+re-run publish for a tag whose release has published, even partly. The release
+is immutable, so the re-run fails, after it has already overwritten that tag's
+R2 files and pointed the channel files at that tag. A missing artifact ships
+with the next tag.
 
 Generate the Sparkle key pair once, with the `generate_keys` tool from the
 [Sparkle release](https://github.com/sparkle-project/Sparkle/releases) xtask
