@@ -49,9 +49,8 @@ const VK_MEDIA_NEXT_TRACK: u16 = 0xB0;
 const VK_MEDIA_PREV_TRACK: u16 = 0xB1;
 const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
 
-// The extended virtual keys, from WinUser.h. windows-sys keeps these
-// behind the same feature gate as the ones above, and the file only
-// needs the numeric values.
+// The rest of the extended keys, from WinUser.h. The file codes virtual
+// keys as plain numbers, like the VK_* constants above.
 const VK_PRIOR: u16 = 0x21;
 const VK_NEXT: u16 = 0x22;
 const VK_END: u16 = 0x23;
@@ -352,10 +351,12 @@ fn send_inputs(inputs: &[INPUT]) {
 /// tells the two apart with the extended prefix, so an injected key has to
 /// carry the prefix too.
 ///
-/// Without it Windows reads the injected key as the keypad one and applies
-/// the classic "Shift temporarily cancels Num Lock" behaviour: with Num Lock
-/// on, `Shift+Right` arrives as a bare `Right` and the Shift modifier is
-/// lost (#1895).
+/// Without the prefix the injected key is ambiguous: Windows cannot tell it
+/// apart from the keypad key that shares its scan code, and an injected
+/// scan code without the prefix is the keypad key that arrives
+/// (`VK_NUMPAD6` and a `6`). Either way Windows applies the classic "Shift
+/// temporarily cancels Num Lock" behaviour: with Num Lock on, `Shift+Right`
+/// arrives as a bare `Right` and the Shift modifier is lost (#1895).
 const EXTENDED_KEYS: &[u16] = &[
     VK_LEFT,
     VK_UP,
