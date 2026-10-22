@@ -23,9 +23,10 @@ use crate::session;
 
 const PILL_W: f32 = 132.0;
 const PILL_H: f32 = 34.0;
-/// Width of the hovered slot's full caption under the hub: the widest strip
-/// that clears the left and right pills.
+/// Width the hub grows to while it shows the hovered slot's full caption: the
+/// widest capsule that clears the left and right pills.
 const LABEL_W: f32 = 176.0;
+const HUB: f32 = 48.0;
 const HOVER_RING: f32 = 64.0;
 const RADIUS: f32 = 160.0;
 const ENTER_SECS: f32 = 0.294;
@@ -39,7 +40,6 @@ const EXIT: Duration = Duration::from_millis(196);
 
 const GLYPH: Hsla = neutral(0.98, 1.0);
 const INK: Hsla = neutral(0.08, 1.0);
-const LABEL: Hsla = neutral(0.94, 1.0);
 const CANCEL_GLYPH: Hsla = neutral(0.84, 1.0);
 
 const fn neutral(lightness: f32, alpha: f32) -> Hsla {
@@ -178,26 +178,8 @@ impl RingView {
                 reduce,
             ))
             .children(slots)
-            .when_some(hovered_caption, |panel, caption| {
-                panel.child(hovered_label(caption))
-            })
-            .child(cancel_control(cx))
+            .child(cancel_control(hovered_caption, cx))
     }
-}
-
-/// The hovered slot's whole caption, under the hub. A pill truncates a long
-/// label, and user-authored labels can differ only at their end, so hovering
-/// must still show all of it.
-fn hovered_label(caption: SharedString) -> impl IntoElement {
-    div()
-        .absolute()
-        .left(px(WINDOW_SIZE / 2.0 - LABEL_W / 2.0))
-        .top(px(WINDOW_SIZE / 2.0 + 34.0))
-        .w(px(LABEL_W))
-        .text_center()
-        .text_sm()
-        .text_color(LABEL)
-        .child(caption)
 }
 
 fn slot_element(
@@ -264,13 +246,19 @@ fn slot_element(
     )
 }
 
-fn cancel_control(cx: &mut Context<RingView>) -> impl IntoElement {
+/// The hub: the cancel button, which widens into a capsule carrying the
+/// hovered slot's whole caption. A pill truncates a long label, and
+/// user-authored labels can differ only at their end, so hovering must still
+/// show all of it; the hub is the one spot every slot is equidistant from.
+fn cancel_control(caption: Option<SharedString>, cx: &mut Context<RingView>) -> impl IntoElement {
+    let width = if caption.is_some() { LABEL_W } else { HUB };
     div()
         .id("ring-cancel")
         .absolute()
-        .left(px(WINDOW_SIZE / 2.0 - 24.0))
-        .top(px(WINDOW_SIZE / 2.0 - 24.0))
-        .size(px(48.0))
+        .left(px(WINDOW_SIZE / 2.0 - width / 2.0))
+        .top(px(WINDOW_SIZE / 2.0 - HUB / 2.0))
+        .w(px(width))
+        .h(px(HUB))
         .flex()
         .items_center()
         .justify_center()
@@ -291,7 +279,17 @@ fn cancel_control(cx: &mut Context<RingView>) -> impl IntoElement {
                 ))
                 .text_color(GLYPH)
         })
-        .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
+        .map(|hub| match caption {
+            Some(caption) => hub.child(
+                div()
+                    .px(px(12.0))
+                    .text_sm()
+                    .text_center()
+                    .text_color(GLYPH)
+                    .child(caption),
+            ),
+            None => hub.child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none()),
+        })
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             let session_id = this.invocation.session_id;
