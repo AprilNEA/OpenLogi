@@ -322,9 +322,10 @@ fn action_ring_tab(
         .child(tab_body(ContentWidth::Medium, panel.clone()))
 }
 
-/// Pointer tab: the DPI panel, the SmartShift wheel controls, the
-/// scroll-wheel preferences, and haptic feedback on a device that has it,
-/// each in a titled card. Use a responsive two-column
+/// Pointer tab: the DPI panel, the SmartShift wheel controls, haptic
+/// feedback on a device that has it, and the scroll-wheel preferences, each
+/// in a titled card. Scrolling takes a full row: its wheel-resolution
+/// control is wider than a half card in many languages. Use a responsive two-column
 /// grid that still fits the window's 720 px minimum width, so these short
 /// controls don't force a vertical scroll.
 fn pointer_tab(
@@ -361,13 +362,6 @@ fn pointer_tab(
                 )
                 .fill(),
             ))
-            .child(
-                div()
-                    .debug_selector(|| "pointer-card-scrolling".into())
-                    .min_w(POINTER_CARD_MIN_W)
-                    .flex_1()
-                    .child(scrolling_card(pal, cx)),
-            )
             .when(haptics, |grid| {
                 grid.child(pointer_grid_card(
                     "pointer-card-haptics",
@@ -378,7 +372,11 @@ fn pointer_tab(
                     )
                     .fill(),
                 ))
-            }),
+            })
+            .child(pointer_grid_row(
+                "pointer-card-scrolling",
+                scrolling_card(pal, cx),
+            )),
     )
 }
 
@@ -393,6 +391,15 @@ fn pointer_grid_card(selector: &'static str, card: impl IntoElement) -> impl Int
         .min_w(POINTER_CARD_MIN_W)
         .flex_1()
         .h_full()
+        .child(card)
+}
+
+/// A card that takes a whole row of the pointer grid, for content wider than
+/// a half card.
+fn pointer_grid_row(selector: &'static str, card: impl IntoElement) -> impl IntoElement {
+    div()
+        .debug_selector(move || selector.into())
+        .w_full()
         .child(card)
 }
 
@@ -564,7 +571,10 @@ fn smooth_wheel_caption(hires: HiresWheel) -> gpui::SharedString {
     }
 }
 
-fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> impl IntoElement {
+pub(super) fn wheel_resolution_control(
+    selected: Option<ScrollResolution>,
+    enabled: bool,
+) -> impl IntoElement {
     let values = [
         None,
         Some(ScrollResolution::Low),

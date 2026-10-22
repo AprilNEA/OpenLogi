@@ -355,7 +355,7 @@ fn pointer_tab_bounds(
         .borrow_mut()
         .take()
         .expect("the window hosts the app view");
-    cx.simulate_resize(size(px(width), px(900.)));
+    cx.simulate_resize(size(px(width), px(853.)));
     cx.update(|window, cx| {
         let record_key = AppState::try_read(cx)
             .expect("state is installed")
@@ -377,31 +377,11 @@ fn pointer_tab_bounds(
 
 /// The Pointer tab's grid wraps to one column at the 720 px window minimum,
 /// where two cards do not fit beside the navigation rail, and every card
-/// stays inside the tab body; at the default 1280 px it shows two columns.
+/// stays inside the window. At the default 1280 × 853 window the top row
+/// holds two cards and Scrolling takes a full row.
 #[gpui::test]
 fn the_pointer_grid_fits_the_window(cx: &mut gpui::TestAppContext) {
-    const SELECTORS: [&str; 5] = [
-        "detail-tab-content",
-        "pointer-card-tuning",
-        "pointer-card-smartshift",
-        "pointer-card-scrolling",
-        "pointer-card-haptics",
-    ];
-    let with_haptics = |inventory: &mut openlogi_core::device::DeviceInventory| {
-        inventory.paired[0]
-            .capabilities
-            .as_mut()
-            .expect("the fixture mouse has capabilities")
-            .haptic_feedback = true;
-    };
-    let bounds = |cx: &mut gpui::TestAppContext, width| {
-        pointer_tab_bounds(cx, width, &SELECTORS, with_haptics)
-            .into_iter()
-            .map(|bounds| bounds.expect("the Pointer tab draws every card"))
-            .collect::<Vec<_>>()
-    };
-
-    let narrow = bounds(cx, 720.);
+    let narrow = pointer_cards(cx, 720.);
     let (content, cards) = narrow.split_first().expect("content first");
     assert!(
         content.right() <= gpui::px(720.),
@@ -415,14 +395,96 @@ fn the_pointer_grid_fits_the_window(cx: &mut gpui::TestAppContext) {
         assert_eq!(card.left(), content.left(), "one column at 720 px");
     }
 
-    let wide = bounds(cx, 1280.);
+    let wide = pointer_cards(cx, 1280.);
     let (content, cards) = wide.split_first().expect("content first");
     let [tuning, smartshift, scrolling, haptics] = cards else {
         panic!("four cards");
     };
     assert_eq!(tuning.top(), smartshift.top(), "two columns at 1280 px");
-    assert_eq!(scrolling.top(), haptics.top(), "two columns at 1280 px");
     assert!(smartshift.right() <= content.right());
+    assert!(
+        haptics.top() > smartshift.top(),
+        "Haptics starts the next row"
+    );
+    assert!(scrolling.top() > haptics.top(), "Scrolling comes last");
+    assert_eq!(
+        scrolling.size.width, content.size.width,
+        "Scrolling takes a full row"
+    );
+}
+
+/// The wheel-resolution group fits the full-row Scrolling card at the
+/// default 1280 px window in every language, so a longer translation fails
+/// here instead of overflowing the card.
+#[gpui::test]
+fn the_wheel_resolution_group_fits_the_scrolling_card(cx: &mut gpui::TestAppContext) {
+    use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+
+    struct NaturalWidth;
+
+    impl gpui::Render for NaturalWidth {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            gpui::div().flex().items_start().child(
+                gpui::div()
+                    .debug_selector(|| "wheel-resolution-natural".into())
+                    .flex_none()
+                    .child(super::detail::wheel_resolution_control(None, true)),
+            )
+        }
+    }
+
+    let wide = pointer_cards(cx, 1280.);
+    let scrolling = wide[3];
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    cx.update(gpui_component::init);
+    for (locale, _) in openlogi_core::locale::SUPPORTED {
+        rust_i18n::set_locale(locale);
+        let (_view, vcx) = cx.add_window_view(|_, _| NaturalWidth);
+        vcx.simulate_resize(gpui::size(gpui::px(1600.), gpui::px(600.)));
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let group = vcx
+            .debug_bounds("wheel-resolution-natural")
+            .expect("the group renders");
+        let pad = vcx.update(|window, _| {
+            crate::ui::theme::CARD_PAD
+                .rems()
+                .to_pixels(window.rem_size())
+        });
+        // The card's padding on both sides, and its 1 px border.
+        let room = scrolling.size.width - pad * 2. - gpui::px(2.);
+        assert!(
+            group.size.width <= room,
+            "{locale}: the wheel-resolution group needs {:?}, the Scrolling card holds {room:?}",
+            group.size.width
+        );
+    }
+    rust_i18n::set_locale("en");
+}
+
+/// The tab content and the four Pointer cards, for a haptic mouse in a
+/// window `width` px wide.
+fn pointer_cards(cx: &mut gpui::TestAppContext, width: f32) -> Vec<gpui::Bounds<gpui::Pixels>> {
+    const SELECTORS: [&str; 5] = [
+        "detail-tab-content",
+        "pointer-card-tuning",
+        "pointer-card-smartshift",
+        "pointer-card-scrolling",
+        "pointer-card-haptics",
+    ];
+    pointer_tab_bounds(cx, width, &SELECTORS, |inventory| {
+        inventory.paired[0]
+            .capabilities
+            .as_mut()
+            .expect("the fixture mouse has capabilities")
+            .haptic_feedback = true;
+    })
+    .into_iter()
+    .map(|bounds| bounds.expect("the Pointer tab draws every card"))
+    .collect()
 }
 
 /// "Charging" replaces the bogus percentage only when charging *and* the
