@@ -6,8 +6,8 @@ use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_component::ThemeMode;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MouseProfileTarget,
-    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MomentumScrolling,
+    MouseProfileTarget, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 use openlogi_core::update_feed::UpdateChannel;
 
@@ -317,6 +317,20 @@ impl AppState {
         self.persist_and_reload("smooth scroll");
         StateEvent::SettingsChanged.into()
     }
+    /// Persist the momentum-scrolling settings. The agent reads them on
+    /// config reload, and re-arms a smoothed wheel's capture when the switch
+    /// flips. An unchanged value writes nothing and is still reported; disk
+    /// failures restore the persisted value.
+    pub fn commit_momentum_scrolling(&mut self, momentum: MomentumScrolling) -> StateEvents {
+        if self.config.app_settings.momentum_scrolling == momentum {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.momentum_scrolling = momentum);
+        self.persist_and_reload("momentum scrolling");
+        StateEvent::SettingsChanged.into()
+    }
+
     /// Toggle the overlay's low-battery notices and persist it. The agent
     /// decides when a battery is low, so it reads the new value on config
     /// reload; while off it posts no notice. An already-set value writes
