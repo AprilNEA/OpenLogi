@@ -57,7 +57,14 @@ impl RingPlacement {
         reason = "360 DIP scaled by a native display DPI fits in screen-sized i32 pixels"
     )]
     fn bounds(&self, dpi: u32) -> Bounds<DevicePixels> {
-        let edge = DevicePixels((f64::from(WINDOW_SIZE) * f64::from(dpi) / 96.0).round() as i32);
+        let full = (f64::from(WINDOW_SIZE) * f64::from(dpi) / 96.0).round() as i32;
+        // The physical half of `ring::panel_edge`: a display shorter than the
+        // ring gets a ring the size of its shorter side, and the skin scales
+        // its layout to match.
+        let edge = DevicePixels(
+            full.min(self.display.size.width.0)
+                .min(self.display.size.height.0),
+        );
         let half = DevicePixels(edge.0 / 2);
         let desired = self.cursor - point(half, half);
         // If the display is smaller than the ring, anchor to its top-left
@@ -275,10 +282,22 @@ mod tests {
     }
 
     #[test]
+    fn a_display_shorter_than_the_ring_gets_a_ring_its_own_height() {
+        // 1280×720 at 200%: the full ring would be 960 px on a 720 px display,
+        // with its bottom slot below the screen. It shrinks to 720 instead
+        // and spans the display top to bottom.
+        let bounds = placement((640, 360), (0, 0, 1280, 720)).bounds(192);
+        assert_eq!(bounds.origin, point(DevicePixels(280), DevicePixels(0)));
+        assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
+    }
+
+    #[test]
     fn undersized_display_keeps_a_valid_clamp_range() {
+        // Narrower than tall: the shorter side wins, and the clamp range
+        // stays valid on the long side too.
         let bounds = placement((-100, -50), (-200, -100, 0, 0)).bounds(192);
-        assert_eq!(bounds.origin, point(DevicePixels(-200), DevicePixels(-100)));
-        assert_eq!(bounds.size, size(DevicePixels(960), DevicePixels(960)));
+        assert_eq!(bounds.origin, point(DevicePixels(-150), DevicePixels(-100)));
+        assert_eq!(bounds.size, size(DevicePixels(100), DevicePixels(100)));
     }
 
     fn rect_bounds(rect: (i32, i32, i32, i32)) -> Bounds<DevicePixels> {
