@@ -74,6 +74,11 @@ impl AppState {
     /// controls show `settings` at once; the device's echo arrives as
     /// [`Self::apply_haptics_written`]. No-op when no device is selected or
     /// it reports no haptic feedback.
+    ///
+    /// `settings` carries every field, so a change to one control saves the
+    /// others as shown. While an Actions Ring session borrows the engine the
+    /// device reads back as on, and a slider change then saves the engine as
+    /// on: the user saw it on when they chose the intensity.
     pub fn commit_haptics(&mut self, settings: HapticSettings, preview: bool) -> StateEvents {
         let events = self.for_current_device(StateEvent::HapticsChanged);
         if !self.current_haptics_supported() {

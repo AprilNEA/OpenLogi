@@ -360,8 +360,10 @@ impl Agent for AgentServer {
         settings: HapticSettings,
         preview: bool,
     ) -> Result<HapticSettings, WriteError> {
-        // The user chose this engine whether or not the write lands; the
-        // agent writes the saved settings again when the device reconnects.
+        // The settings are the user's saved choice whether or not the write
+        // lands, so a ring session hands nothing back on this engine even
+        // when the device refuses or misses the write; the agent writes the
+        // saved settings again when the device reconnects.
         self.ring_haptics.user_chose_haptics(route.clone());
         let applied = self.shared.set_haptics(&route, settings).await?;
         if previews(preview, applied) {
