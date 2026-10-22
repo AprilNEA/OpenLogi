@@ -846,3 +846,38 @@ fn reload_names_the_devices_whose_haptics_the_user_chose() {
     );
     assert!(orch.reload_config(config).is_empty());
 }
+
+/// The settings app saves haptics and writes them itself. Its write is
+/// numbered before the save's reload reaches the agent, so a write from the
+/// reload would supersede it and the app would read the device back before
+/// its own settings landed. A save of the app therefore writes nothing, and
+/// the app's write stays the newest; a hand edit still writes.
+#[tokio::test]
+async fn a_gui_save_leaves_the_haptics_write_to_the_gui() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![haptic_device("a", 1, true)];
+    let route = orch.devices[0].route.clone().expect("a Bolt route");
+    let mut config = Config::default();
+    config.set_haptics("a", haptics(true, 60));
+
+    let gui_write = orch.shared.haptics_order.request(&route);
+    let _ = orch.replace_saved_config(config.clone(), &[]);
+    assert!(
+        gui_write
+            .write_or(|| async { true }, || async { false })
+            .await,
+        "the app's write is still the newest after its own save"
+    );
+    drop(gui_write);
+
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![haptic_device("a", 1, true)];
+    let gui_write = orch.shared.haptics_order.request(&route);
+    let _ = orch.replace_config(config);
+    assert!(
+        !gui_write
+            .write_or(|| async { true }, || async { false })
+            .await,
+        "a hand edit writes the device and supersedes the older write"
+    );
+}

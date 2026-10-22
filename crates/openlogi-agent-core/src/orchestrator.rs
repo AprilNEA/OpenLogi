@@ -1658,7 +1658,14 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
-        let haptics_chosen = self.apply_changed_haptics(&previous);
+        let haptics_chosen = match source {
+            // The GUI writes the haptics it saves itself, in the same
+            // request that answers with the device's echo. A write from here
+            // would be numbered after it and supersede it, so the GUI would
+            // read the device back before its own settings landed.
+            ConfigSource::Saved { .. } => self.chosen_haptics(&previous),
+            ConfigSource::Loaded => self.apply_changed_haptics(&previous),
+        };
         self.apply_changed_pointer_speeds(&previous);
         self.apply_enabled_os_layouts(&previous);
         let writes = changed_follower_cookies(
@@ -1708,24 +1715,26 @@ impl Orchestrator {
         }
     }
 
-    /// Push changed haptic settings to the online devices they belong to,
-    /// as [`Self::apply_changed_fn_locks`] does: an unrelated save writes
-    /// nothing. The settings app also writes directly through
-    /// [`SharedHandles::set_haptics`]; both writes are ordered per device.
-    /// Returns the route of every device whose settings changed, online or
-    /// not: the user chose its engine.
+    /// Push haptic settings a loaded file changed to the online devices they
+    /// belong to, as [`Self::apply_changed_fn_locks`] does: an unrelated edit
+    /// writes nothing. A save of the settings app writes nothing here: the
+    /// app writes the device itself through [`SharedHandles::set_haptics`].
+    /// Returns what [`Self::chosen_haptics`] returns.
     fn apply_changed_haptics(&self, previous: &Config) -> Vec<DeviceRoute> {
-        let mut chosen = Vec::new();
         for (dev, settings) in changed_haptics(previous, &self.config, &self.devices) {
-            let Some(route) = &dev.route else {
-                continue;
-            };
-            if dev.online {
+            if let Some(route) = dev.route.as_ref().filter(|_| dev.online) {
                 self.shared.write_haptics_in_background(route, settings);
             }
-            chosen.push(route.clone());
         }
-        chosen
+        self.chosen_haptics(previous)
+    }
+
+    /// The route of every device whose saved haptic settings changed since
+    /// `previous`, online or not: the user chose its engine.
+    fn chosen_haptics(&self, previous: &Config) -> Vec<DeviceRoute> {
+        changed_haptics(previous, &self.config, &self.devices)
+            .filter_map(|(dev, _)| dev.route.clone())
+            .collect()
     }
 
     /// End precision mode on every mouse whose speed, DPI or button
