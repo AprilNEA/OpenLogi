@@ -30,6 +30,7 @@ fn snapshot(receivers: Vec<ReceiverInfo>) -> AgentSnapshot {
             input_monitoring_granted: true,
             hid_open_failures: false,
             secure_input: openlogi_ipc::SecureInput::Off,
+            virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
         },
         inventory: receivers
             .into_iter()

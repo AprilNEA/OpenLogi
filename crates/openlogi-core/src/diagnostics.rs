@@ -144,6 +144,10 @@ pub struct AppInfo {
     pub accessibility_granted: Option<bool>,
     /// `None` when the agent status is unavailable.
     pub hook_installed: Option<bool>,
+    /// Whether synthesized keys type on the agent's macOS virtual HID
+    /// keyboard (`Some(false)`: they are posted as `CGEvent`s). `None` off
+    /// macOS, or when the agent status is unavailable.
+    pub virtual_keyboard: Option<bool>,
     /// Launch-at-login setting, `None` when unknown.
     pub launch_at_login: Option<bool>,
     /// Menu-bar/tray icon setting, `None` when unknown.
@@ -248,6 +252,17 @@ impl DiagnosticsReport {
             opt_state(a.accessibility_granted, "granted", "denied"),
             opt_state(a.hook_installed, "installed", "not installed"),
         );
+        if a.os == "macos" {
+            let _ = writeln!(
+                out,
+                "- Virtual keyboard: {}",
+                opt_state(
+                    a.virtual_keyboard,
+                    "active",
+                    "unavailable (keys posted as CGEvents)"
+                ),
+            );
+        }
         let _ = writeln!(
             out,
             "- Launch at login: {} · Menu bar: {} · Update check: {} · Update channel: {}",
@@ -534,6 +549,7 @@ mod tests {
             ui_language: None,
             accessibility_granted: Some(true),
             hook_installed: Some(true),
+            virtual_keyboard: Some(true),
             launch_at_login: Some(true),
             show_in_menu_bar: Some(true),
             check_for_updates: Some(false),
@@ -740,6 +756,7 @@ mod tests {
         report.app.inventory = None;
         report.app.accessibility_granted = None;
         report.app.hook_installed = None;
+        report.app.virtual_keyboard = None;
         report.app.launch_at_login = None;
         let md = report.to_markdown();
         assert!(md.contains("- Agent: not connected"));
@@ -750,6 +767,22 @@ mod tests {
             "an unreachable agent must not claim the permission was denied"
         );
         assert!(md.contains("Input hook: unknown"));
+        assert!(md.contains("- Virtual keyboard: unknown"));
+    }
+
+    #[test]
+    fn the_virtual_keyboard_line_is_macos_only() {
+        let mut report = sample();
+        assert!(report.to_markdown().contains("- Virtual keyboard: active"));
+        report.app.virtual_keyboard = Some(false);
+        assert!(
+            report
+                .to_markdown()
+                .contains("- Virtual keyboard: unavailable (keys posted as CGEvents)")
+        );
+        report.app.os = "linux".to_string();
+        report.app.virtual_keyboard = None;
+        assert!(!report.to_markdown().contains("Virtual keyboard"));
     }
 
     #[test]

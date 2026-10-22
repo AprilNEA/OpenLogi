@@ -211,6 +211,7 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
                 input_monitoring_granted: true,
                 hid_open_failures: false,
                 secure_input: openlogi_ipc::SecureInput::Off,
+                virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
             }));
             state
         });
@@ -1290,6 +1291,7 @@ fn status_with(secure_input: openlogi_ipc::SecureInput) -> openlogi_ipc::AgentSt
         input_monitoring_granted: true,
         hid_open_failures: false,
         secure_input,
+        virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
     }
 }
 

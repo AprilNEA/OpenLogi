@@ -149,21 +149,31 @@ impl VirtualKeyboard {
         tracing::info!("virtual HID keyboard installed; synthesized keys use it");
         Some(Self { id })
     }
+
+    /// Whether this installation's device still carries key synthesis. It
+    /// stops for good once the device rejects a report and is removed.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        holds(lock_slot().as_ref(), self.id)
+    }
 }
 
 impl Drop for VirtualKeyboard {
     fn drop(&mut self) {
         let mut slot = lock_slot();
-        if slot
-            .as_ref()
-            .is_some_and(|installed| installed.id == self.id)
-        {
+        if holds(slot.as_ref(), self.id) {
             // Dropping the keyboard under the lock releases its keys before
             // any other edge can see the slot empty.
             drop(slot.take());
             tracing::info!("virtual HID keyboard removed");
         }
     }
+}
+
+/// Whether `slot` holds the installation `id`. A device that failed and was
+/// replaced by a later installation is not that installation's.
+fn holds<S: Sink>(slot: Option<&Installed<S>>, id: u64) -> bool {
+    slot.is_some_and(|installed| installed.id == id)
 }
 
 /// Offer one edge of the key with virtual keycode `vk` to the installed

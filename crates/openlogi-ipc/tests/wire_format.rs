@@ -54,7 +54,7 @@ use openlogi_ipc::{
     ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange, LockKeyObservation,
     MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation, ObservedLight,
     PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig, SecureInput,
+    RingObservation, SavedConfig, SecureInput, VirtualKeyboardStatus,
 };
 use succession::{Compat, Run};
 
@@ -110,7 +110,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 38);
+    assert_eq!(PROTOCOL_VERSION, 39);
 }
 
 #[test]
@@ -519,8 +519,9 @@ fn agent_status() {
             id: "a".into(),
             display_name: "A".into(),
         })),
+        virtual_keyboard: VirtualKeyboardStatus::Active,
     };
-    assert_wire(&status, "010001010705302e362e360100010101610141");
+    assert_wire(&status, "010001010705302e362e36010001010161014102");
 
     assert_wire(&InventoryHealth::Scanning, "00");
     assert_wire(&InventoryHealth::Ready, "01");
@@ -528,6 +529,10 @@ fn agent_status() {
 
     assert_wire(&SecureInput::Off, "00");
     assert_wire(&SecureInput::On(None), "0100");
+
+    assert_wire(&VirtualKeyboardStatus::Unsupported, "00");
+    assert_wire(&VirtualKeyboardStatus::Unavailable, "01");
+    assert_wire(&VirtualKeyboardStatus::Active, "02");
 }
 
 #[test]
@@ -543,6 +548,7 @@ fn agent_snapshot() {
             input_monitoring_granted: true,
             hid_open_failures: false,
             secure_input: SecureInput::Off,
+            virtual_keyboard: VirtualKeyboardStatus::Unsupported,
         },
         inventory: Vec::new(),
         standalone: Vec::new(),
@@ -554,14 +560,14 @@ fn agent_snapshot() {
         // Pinned populated in `observed_light` below.
         lights: Vec::new(),
     };
-    assert_wire(&snapshot, "010001010705302e362e3601000000000000000000");
+    assert_wire(&snapshot, "010001010705302e362e360100000000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e3601000000000000000000");
+    assert_wire(&observed, "03010001010705302e362e360100000000000000000000");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:

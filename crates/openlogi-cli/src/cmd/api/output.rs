@@ -2,7 +2,7 @@
 
 use openlogi_core::hid::DeviceRoute;
 use openlogi_ipc::client::ConnectError;
-use openlogi_ipc::{AgentSnapshot, InventoryHealth};
+use openlogi_ipc::{AgentSnapshot, InventoryHealth, VirtualKeyboardStatus};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -64,6 +64,14 @@ pub(super) fn inventory_health(health: InventoryHealth) -> &'static str {
         InventoryHealth::Scanning => "scanning",
         InventoryHealth::Ready => "ready",
         InventoryHealth::Unavailable => "unavailable",
+    }
+}
+
+pub(super) fn virtual_keyboard(status: VirtualKeyboardStatus) -> &'static str {
+    match status {
+        VirtualKeyboardStatus::Unsupported => "unsupported",
+        VirtualKeyboardStatus::Unavailable => "unavailable",
+        VirtualKeyboardStatus::Active => "active",
     }
 }
 

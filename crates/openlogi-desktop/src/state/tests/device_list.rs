@@ -56,6 +56,7 @@ pub(crate) fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
             input_monitoring_granted: true,
             hid_open_failures: false,
             secure_input: openlogi_ipc::SecureInput::Off,
+            virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
         },
         inventory: profile.inventories.clone(),
         standalone: profile.standalone.clone(),

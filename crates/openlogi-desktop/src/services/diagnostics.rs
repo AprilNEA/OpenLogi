@@ -10,7 +10,7 @@ use openlogi_core::diagnostics::{
 };
 use openlogi_core::hid::DeviceRoute;
 use openlogi_core::update_feed::UpdateChannel;
-use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION};
+use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION, VirtualKeyboardStatus};
 
 use crate::services::assets::AssetResolver;
 use crate::state::{AppState, DpiLoad};
@@ -70,6 +70,7 @@ fn app_info(
         ui_language: state.and_then(AppState::language).map(str::to_string),
         accessibility_granted: status.map(|s| s.accessibility_granted),
         hook_installed: status.map(|s| s.hook_installed),
+        virtual_keyboard: status.and_then(|s| virtual_keyboard_state(s.virtual_keyboard)),
         launch_at_login: status.map(|s| s.launch_at_login),
         show_in_menu_bar: settings.map(|s| s.show_in_menu_bar),
         check_for_updates: settings.map(|s| s.check_for_updates),
@@ -86,6 +87,16 @@ fn inventory_state(health: InventoryHealth) -> InventoryState {
         InventoryHealth::Scanning => InventoryState::Scanning,
         InventoryHealth::Ready => InventoryState::Ready,
         InventoryHealth::Unavailable => InventoryState::Unavailable,
+    }
+}
+
+/// `None` where the platform has no virtual keyboard, so the report leaves
+/// the line out instead of calling it missing.
+const fn virtual_keyboard_state(status: VirtualKeyboardStatus) -> Option<bool> {
+    match status {
+        VirtualKeyboardStatus::Active => Some(true),
+        VirtualKeyboardStatus::Unavailable => Some(false),
+        VirtualKeyboardStatus::Unsupported => None,
     }
 }
 

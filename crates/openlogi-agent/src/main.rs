@@ -44,6 +44,7 @@ mod takeover;
 mod tray;
 #[cfg(target_os = "windows")]
 mod tray_windows;
+mod virtual_keyboard;
 
 use openlogi_core::config::Config;
 use tracing::{info, warn};

@@ -131,7 +131,10 @@ pub use succession::Identity;
 ///      that precision mode lights. `ReceiverSelector::ReceiverUid`
 ///      appended — a pairing target matched by receiver product ID and
 ///      unique ID, never falling back to another receiver.
-pub const PROTOCOL_VERSION: u32 = 38;
+/// v39: `AgentStatus::virtual_keyboard` and [`VirtualKeyboardStatus`]
+///      appended — whether the agent types synthesized keys on its macOS
+///      virtual HID keyboard.
+pub const PROTOCOL_VERSION: u32 = 39;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -186,6 +189,24 @@ pub enum SecureInput {
     On(Option<ForegroundApp>),
 }
 
+/// Whether the agent types synthesized keys on its virtual HID keyboard,
+/// "OpenLogi Virtual Keyboard". macOS handles keys from that device as keys
+/// from a USB keyboard; keys the agent posts as `CGEvent`s instead are
+/// ignored by some apps and system shortcuts. Variants are append-only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VirtualKeyboardStatus {
+    /// Linux and Windows, which inject keys through their own interfaces.
+    #[default]
+    Unsupported,
+    /// macOS without the device: the agent may not create one (a build
+    /// without the `com.apple.developer.hid.virtual.device` entitlement), is
+    /// not armed yet, or removed it after it rejected a report. Keys are
+    /// posted as `CGEvent`s.
+    Unavailable,
+    /// macOS, and synthesized keys type on the device.
+    Active,
+}
+
 /// Agent health the GUI surfaces: the Accessibility gate, whether the hook is
 /// live, the autostart toggle state, and enumeration progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +230,8 @@ pub struct AgentStatus {
     pub hid_open_failures: bool,
     /// See [`SecureInput`].
     pub secure_input: SecureInput,
+    /// See [`VirtualKeyboardStatus`].
+    pub virtual_keyboard: VirtualKeyboardStatus,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never

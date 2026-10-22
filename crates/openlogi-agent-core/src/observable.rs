@@ -26,7 +26,7 @@ use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
     OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
-    SecureInput,
+    SecureInput, VirtualKeyboardStatus,
 };
 use tokio::sync::watch;
 
@@ -66,6 +66,12 @@ impl ObservableState {
                     input_monitoring_granted: openlogi_hid::permissions::has_access(),
                     hid_open_failures: false,
                     secure_input: SecureInput::Off,
+                    // macOS has no device until the agent arms.
+                    virtual_keyboard: if cfg!(target_os = "macos") {
+                        VirtualKeyboardStatus::Unavailable
+                    } else {
+                        VirtualKeyboardStatus::Unsupported
+                    },
                 },
                 inventory: Vec::new(),
                 standalone: Vec::new(),
@@ -248,6 +254,17 @@ impl ObservableState {
         });
     }
 
+    /// Publish whether synthesized keys type on the virtual HID keyboard.
+    pub fn set_virtual_keyboard(&self, status: VirtualKeyboardStatus) {
+        self.update(|snapshot| {
+            if snapshot.status.virtual_keyboard == status {
+                return false;
+            }
+            snapshot.status.virtual_keyboard = status;
+            true
+        });
+    }
+
     /// Publish where the pairing session stands, or `None` for no session.
     ///
     /// A terminal phase is left in place on purpose: it is the session's result,
@@ -315,7 +332,7 @@ mod tests {
     use openlogi_core::brand::APP_ID;
     use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
     use openlogi_hid::DIRECT_DEVICE_INDEX;
-    use openlogi_ipc::{InventoryHealth, RECENT_APPS};
+    use openlogi_ipc::{InventoryHealth, RECENT_APPS, VirtualKeyboardStatus};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -491,6 +508,23 @@ mod tests {
             after,
             before + 1,
             "no intermediate generation may claim the hook without its permission"
+        );
+    }
+
+    #[test]
+    fn only_a_virtual_keyboard_change_moves_the_generation() {
+        let state = state();
+        state.set_virtual_keyboard(VirtualKeyboardStatus::Active);
+        let before = state.subscribe().borrow().generation;
+
+        state.set_virtual_keyboard(VirtualKeyboardStatus::Active);
+        assert_eq!(state.subscribe().borrow().generation, before);
+
+        state.set_virtual_keyboard(VirtualKeyboardStatus::Unavailable);
+        assert_eq!(state.subscribe().borrow().generation, before + 1);
+        assert_eq!(
+            state.snapshot().status.virtual_keyboard,
+            VirtualKeyboardStatus::Unavailable
         );
     }
 

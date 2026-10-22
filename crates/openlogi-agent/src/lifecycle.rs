@@ -47,6 +47,7 @@ use openlogi_ipc::ClientKind;
 use self::transition::{Replacement, WatcherFleet};
 use crate::shutdown::{self, ShutdownRequest, ShutdownRequests, ShutdownSignals};
 use crate::startup::{self, Core, InputServices};
+use crate::virtual_keyboard::VirtualKeyboard;
 use crate::{autostart, overlay, server};
 
 /// How long a dormant agent waits before leaving — generous next to the
@@ -227,8 +228,7 @@ impl Wanted {
         armed_session::record();
         overlay::spawn();
         prompt_missing_accessibility(capture_mouse_events);
-        #[cfg(target_os = "macos")]
-        let virtual_keyboard = openlogi_inject::VirtualKeyboard::install();
+        let virtual_keyboard = VirtualKeyboard::install();
 
         let Core {
             orchestrator,
@@ -240,6 +240,7 @@ impl Wanted {
             ring_haptics,
             demand,
         } = core;
+        observable.set_virtual_keyboard(virtual_keyboard.status());
         // Closing the channel turns post-arming declarations into no-ops in
         // the server's `declare_client` handler.
         drop(demand);
@@ -258,7 +259,6 @@ impl Wanted {
                 hook: None,
                 capture_mouse_events,
                 held_pointer: None,
-                #[cfg(target_os = "macos")]
                 virtual_keyboard,
             },
         }
@@ -293,10 +293,10 @@ struct Running {
     /// left the ring for another unidentifiable surface sends nothing more.
     held_pointer: Option<openlogi_hook::PointerContext>,
     /// The virtual HID keyboard synthesized keys type through, when this
-    /// build may create one; `None` leaves them on `CGEventPost`. The exit
-    /// path drops it only after the action workers that press keys stopped.
-    #[cfg(target_os = "macos")]
-    virtual_keyboard: Option<openlogi_inject::VirtualKeyboard>,
+    /// platform and build have one; without it macOS posts them as
+    /// `CGEvent`s. The exit path releases it only after the action workers
+    /// that press keys stopped.
+    virtual_keyboard: VirtualKeyboard,
 }
 
 impl Armed {
@@ -342,6 +342,14 @@ impl Armed {
                 }
                 Ok(()) = ring.changed() => {
                     running.apply_held_pointer().await;
+                }
+                () = running.virtual_keyboard.lost() => {
+                    info!("virtual HID keyboard is gone — reporting it unavailable");
+                    // Already removed: dropping the handle removes nothing.
+                    running.virtual_keyboard = VirtualKeyboard::default();
+                    running
+                        .observable
+                        .set_virtual_keyboard(running.virtual_keyboard.status());
                 }
                 else => break,
             }
@@ -774,8 +782,7 @@ impl Running {
         shutdown::release_hook_and_exit(
             self.hook.take(),
             &mut self.inputs,
-            #[cfg(target_os = "macos")]
-            self.virtual_keyboard.take(),
+            std::mem::take(&mut self.virtual_keyboard),
             reason,
             tray_guard,
         )

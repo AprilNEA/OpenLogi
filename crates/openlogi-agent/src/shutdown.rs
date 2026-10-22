@@ -10,6 +10,7 @@ use tracing::info;
 use tracing::warn;
 
 use crate::startup::InputServices;
+use crate::virtual_keyboard::VirtualKeyboard;
 
 /// A non-signal request for the process lifecycle owner.
 pub(crate) enum ShutdownRequest {
@@ -159,15 +160,14 @@ impl ShutdownSignals {
 pub(crate) fn release_hook_and_exit(
     hook: Option<Hook>,
     inputs: &mut InputServices,
-    #[cfg(target_os = "macos")] virtual_keyboard: Option<openlogi_inject::VirtualKeyboard>,
+    virtual_keyboard: VirtualKeyboard,
     reason: &str,
     _tray_guard: Option<oneshot::Sender<()>>,
 ) -> ! {
     info!(reason, "releasing the input hook and exiting");
     drop(hook);
     inputs.shutdown();
-    #[cfg(target_os = "macos")]
-    drop(virtual_keyboard);
+    virtual_keyboard.release();
     #[expect(
         clippy::exit,
         reason = "a signalled shutdown must end the process, and the loop that observed it runs off the main thread"

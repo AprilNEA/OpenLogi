@@ -323,6 +323,7 @@ fn an_agent_snapshot_keeps_the_changes_it_reports() {
             input_monitoring_granted: true,
             hid_open_failures: false,
             secure_input: openlogi_ipc::SecureInput::Off,
+            virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
         },
         inventory: Vec::new(),
         standalone: vec![light.clone()],

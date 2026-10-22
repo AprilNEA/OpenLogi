@@ -5,7 +5,7 @@ use core_graphics::event::CGEventFlags;
 
 use super::{
     Installed, KEY_SLOTS, Keyboard, LEFT_COMMAND, LEFT_CONTROL, LEFT_OPTION, LEFT_SHIFT, Offer,
-    PRODUCT, Pressed, REPORT_DESCRIPTOR, REPORT_LEN, Report, Routed, SendError, Sink,
+    PRODUCT, Pressed, REPORT_DESCRIPTOR, REPORT_LEN, Report, Routed, SendError, Sink, holds,
     is_virtual_keyboard_product, modifier_bits, modifier_flags, offer, repress_edges,
 };
 use crate::inject::KeyPhase;
@@ -247,6 +247,25 @@ fn a_failed_up_edge_counts_as_released_by_the_removal() {
         Offer::routed(true)
     );
     assert!(slot.is_none());
+}
+
+#[test]
+fn an_installation_stops_holding_the_slot_once_its_device_fails() {
+    let recorder = Recorder::failing_from(1);
+    let mut slot = Some(installed(&recorder));
+    assert!(holds(slot.as_ref(), 0));
+    assert!(
+        !holds(slot.as_ref(), 1),
+        "another installation's device is not this one's"
+    );
+
+    assert!(offer(&mut slot, |keyboard| keyboard.edge(KEY_C, KeyPhase::Down)).carried);
+    assert!(holds(slot.as_ref(), 0));
+    let _ = offer(&mut slot, |keyboard| keyboard.edge(KEY_V, KeyPhase::Down));
+    assert!(
+        !holds(slot.as_ref(), 0),
+        "a removed device no longer carries keys"
+    );
 }
 
 /// Holds Command and Left Arrow as a held chord does, through a device that
