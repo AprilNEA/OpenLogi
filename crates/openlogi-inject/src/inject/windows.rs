@@ -49,20 +49,14 @@ const VK_MEDIA_NEXT_TRACK: u16 = 0xB0;
 const VK_MEDIA_PREV_TRACK: u16 = 0xB1;
 const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
 
-// The rest of the extended keys, from WinUser.h. The file codes virtual
-// keys as plain numbers, like the VK_* constants above.
+// The rest of the extended keys the Windows backend can produce, from
+// WinUser.h. The file codes virtual keys as plain numbers, like the VK_*
+// constants above.
 const VK_PRIOR: u16 = 0x21;
 const VK_NEXT: u16 = 0x22;
 const VK_END: u16 = 0x23;
 const VK_HOME: u16 = 0x24;
-const VK_INSERT: u16 = 0x2D;
 const VK_DELETE: u16 = 0x2E;
-const VK_DIVIDE: u16 = 0x6F;
-const VK_NUMLOCK: u16 = 0x90;
-const VK_APPS: u16 = 0x5D;
-const VK_RCONTROL: u16 = 0xA3;
-const VK_RMENU: u16 = 0xA5;
-const VK_RWIN: u16 = 0x5C;
 
 // XBUTTON1/XBUTTON2 from WinUser.h — windows-sys puts them behind the
 // Win32_UI_WindowsAndMessaging feature; not worth enabling for two
@@ -343,7 +337,7 @@ fn send_inputs(inputs: &[INPUT]) {
     }
 }
 
-/// Virtual keys whose scan code needs the extended (`0xE0`) prefix.
+/// Whether `vk` needs the extended-key flag and a scan code.
 ///
 /// The dedicated arrow and editing clusters share their scan codes with
 /// the numeric keypad, so a scan code on its own is ambiguous: `0x4d` is
@@ -351,44 +345,46 @@ fn send_inputs(inputs: &[INPUT]) {
 /// tells the two apart with the extended prefix, so an injected key has to
 /// carry the prefix too.
 ///
-/// Without the prefix the injected key is ambiguous: Windows cannot tell it
-/// apart from the keypad key that shares its scan code, and an injected
-/// scan code without the prefix is the keypad key that arrives
-/// (`VK_NUMPAD6` and a `6`). Either way Windows applies the classic "Shift
-/// temporarily cancels Num Lock" behaviour: with Num Lock on, `Shift+Right`
-/// arrives as a bare `Right` and the Shift modifier is lost (#1895).
-const EXTENDED_KEYS: &[u16] = &[
-    VK_LEFT,
-    VK_UP,
-    VK_RIGHT,
-    VK_DOWN,
-    VK_HOME,
-    VK_END,
-    VK_PRIOR,
-    VK_NEXT,
-    VK_INSERT,
-    VK_DELETE,
-    VK_DIVIDE,
-    VK_NUMLOCK,
-    VK_SNAPSHOT,
-    VK_APPS,
-    VK_LWIN,
-    VK_RCONTROL,
-    VK_RMENU,
-    VK_RWIN,
-];
-
-/// Whether `vk` needs the extended-key flag and a scan code.
+/// The set is the extended keys this backend can actually produce: the
+/// navigation and editing cluster (the HID usage table maps `0x4a..=0x52`
+/// onto them) and the left Windows key (`NativeAction::LaunchpadShow`,
+/// and the `Super` modifier of a custom shortcut). Keys the backend
+/// cannot reach are left out on purpose — flagging a key nobody injects
+/// only widens the blast radius.
+///
+/// `VK_SNAPSHOT` is deliberately absent. A physical Print Screen key
+/// sends `E0 37`, but `MapVirtualKeyW` answers `0x54` for it, a scan
+/// code no keyboard sends; injecting that would put a code into the
+/// system that the hardware never produces. Print Screen therefore keeps
+/// the plain virtual-key injection it has always had.
+///
+/// The `match` keeps the set in one place: adding a virtual key to the
+/// Windows backend means adding an arm here, and a renamed constant
+/// breaks the build instead of silently dropping the flag.
 fn is_extended_key(vk: u16) -> bool {
-    EXTENDED_KEYS.contains(&vk)
+    matches!(
+        vk,
+        VK_LEFT
+            | VK_UP
+            | VK_RIGHT
+            | VK_DOWN
+            | VK_HOME
+            | VK_END
+            | VK_PRIOR
+            | VK_NEXT
+            | VK_DELETE
+            | VK_LWIN
+    )
 }
 
 /// The scan code Windows expects for `vk`, or 0 when the layout has none.
 ///
 /// `MapVirtualKeyW` is the documented way to translate a virtual key into a
-/// scan code. Every key in [`EXTENDED_KEYS`] has one on the layouts Windows
-/// ships (`VK_INSERT` is `0x52`, `VK_RCONTROL` is `0x1d`, …), so the scan
-/// code and the extended flag always travel together.
+/// scan code. It reads the calling thread's keyboard layout, but every key
+/// [`is_extended_key`] flags belongs to the non-printable cluster, whose
+/// scan codes are the hardware ones on every layout: measured identical on
+/// `00000804` (zh-CN) and `00000409` (en-US) — `VK_RIGHT` is `0x4d`,
+/// `VK_HOME` is `0x47`, `VK_LWIN` is `0x5b`.
 fn scan_code(vk: u16) -> u16 {
     // SAFETY: `MapVirtualKeyW` is a pure lookup with no preconditions.
     let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) };
@@ -404,6 +400,13 @@ fn key_input(vk: u16, key_up: bool) -> INPUT {
     // so. `wVk` stays set as well: Windows uses `wVk` when `wScan` is
     // 0, and the pair is unambiguous for the keys that have a scan
     // code of their own.
+    //
+    // Without the prefix Windows cannot tell the dedicated arrow cluster
+    // from the keypad keys that share its scan codes, and answers the
+    // ambiguous key with its "Shift temporarily cancels Num Lock"
+    // behaviour: with Num Lock on, the Shift is released around the
+    // arrow, so an injected `Shift+Right` arrives as a bare `Right`
+    // (#1895).
     let scan = if is_extended_key(vk) {
         flags |= KEYEVENTF_EXTENDEDKEY;
         scan_code(vk)
@@ -455,14 +458,22 @@ mod tests {
     use openlogi_core::binding::Shortcut;
 
     use super::{
-        EXTENDED_KEYS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VK_BROWSER_BACK, VK_BROWSER_FORWARD,
-        VK_DELETE, VK_DOWN, VK_HOME, VK_LEFT, VK_LWIN, VK_NUMLOCK, VK_RIGHT, VK_SHIFT, VK_UP,
-        combo, is_extended_key, key_input, scan_code, send_inputs,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+        VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_LEFT, VK_LWIN,
+        VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_UP, combo, is_extended_key, key_input, scan_code,
+        send_inputs,
     };
 
-    /// The left Shift key as the keyboard hook reports it: Windows splits
-    /// the generic `VK_SHIFT` into the left and the right one.
+    /// The Shift keys as the keyboard hook reports them: Windows splits
+    /// the generic `VK_SHIFT` into the left and the right one, and an
+    /// injected generic Shift arrives as the left one.
     const VK_LSHIFT: u16 = 0xA0;
+    const VK_RSHIFT: u16 = 0xA1;
+
+    /// Num Lock, from WinUser.h. The backend never injects it in
+    /// production; the regression test needs it to put the machine in the
+    /// state the bug needs.
+    const VK_NUMLOCK: u16 = 0x90;
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
     /// edit to the table can't silently change what Ctrl+C sends.
@@ -513,25 +524,58 @@ mod tests {
         }
     }
 
-    /// The keys Windows delivers from the numeric keypad instead of the
-    /// navigation cluster must carry the extended flag, or `Shift+Right`
-    /// loses its Shift whenever Num Lock is on (#1895).
+    /// The extended keys this backend injects, with the scan code each one
+    /// has to carry.
+    ///
+    /// The flag only means something next to a scan code, and the scan code
+    /// is what tells the dedicated cluster apart from the keypad keys that
+    /// share its codes. The expected codes are the hardware ones (scancode
+    /// set 1), and they are what `MapVirtualKeyW` answers on every layout
+    /// this backend can run on: measured identical on `00000804` (zh-CN)
+    /// and `00000409` (en-US).
+    const EXTENDED_KEYS_AND_THEIR_SCAN_CODES: &[(u16, u16)] = &[
+        (VK_LEFT, 0x4B),
+        (VK_UP, 0x48),
+        (VK_RIGHT, 0x4D),
+        (VK_DOWN, 0x50),
+        (VK_HOME, 0x47),
+        (VK_END, 0x4F),
+        (VK_PRIOR, 0x49),
+        (VK_NEXT, 0x51),
+        (VK_DELETE, 0x53),
+        (VK_LWIN, 0x5B),
+    ];
+
+    /// Every extended key has to be flagged and to carry the scan code of
+    /// the hardware key it stands for. A key missing from
+    /// `is_extended_key` loses its Shift whenever Num Lock is on (#1895);
+    /// a key carrying the wrong scan code is read as a different key
+    /// entirely.
     #[test]
-    fn navigation_keys_are_flagged_extended() {
-        for vk in [VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_HOME, VK_DELETE] {
+    fn extended_keys_carry_their_hardware_scan_code() {
+        for &(vk, expected_scan) in EXTENDED_KEYS_AND_THEIR_SCAN_CODES {
             assert!(
                 is_extended_key(vk),
-                "virtual key {vk:#x} must be treated as an extended key"
+                "virtual key {vk:#x} has to be treated as an extended key"
+            );
+            assert_eq!(
+                scan_code(vk),
+                expected_scan,
+                "virtual key {vk:#x} has to resolve to its hardware scan code"
+            );
+            // SAFETY: `key_input` fully initialises the `INPUT` it returns,
+            // so reading the `ki` arm of the union is well-defined.
+            let ki = unsafe { key_input(vk, false).Anonymous.ki };
+            assert_ne!(
+                ki.dwFlags & KEYEVENTF_EXTENDEDKEY,
+                0,
+                "virtual key {vk:#x} must set KEYEVENTF_EXTENDEDKEY"
+            );
+            assert_eq!(
+                ki.wScan, expected_scan,
+                "virtual key {vk:#x} must carry its scan code"
             );
         }
-    }
-
-    /// A plain key must not be flagged: marking `A` extended would make
-    /// Windows read it as a keypad key.
-    #[test]
-    fn plain_keys_are_not_extended() {
-        assert!(!is_extended_key(u16::from(b'B')));
-        assert!(!is_extended_key(super::VK_SHIFT));
     }
 
     /// The extended flag has to be set on both edges of the key press,
@@ -552,10 +596,7 @@ mod tests {
             "extended key press must set KEYEVENTF_EXTENDEDKEY"
         );
         assert_eq!(down_ki.dwFlags & KEYEVENTF_KEYUP, 0);
-        assert_ne!(
-            down_ki.wScan, 0,
-            "an extended key with a scan code must carry it"
-        );
+        assert_eq!(down_ki.wScan, 0x4D);
 
         assert_ne!(
             up_ki.dwFlags & KEYEVENTF_EXTENDEDKEY,
@@ -564,20 +605,6 @@ mod tests {
         );
         assert_ne!(up_ki.dwFlags & KEYEVENTF_KEYUP, 0);
         assert_eq!(up_ki.wScan, down_ki.wScan);
-    }
-
-    /// Every extended key has to resolve to a scan code, because the
-    /// extended flag only means something next to one: without a scan code
-    /// Windows falls back to the virtual key and the prefix is lost.
-    #[test]
-    fn extended_keys_all_have_a_scan_code() {
-        for vk in EXTENDED_KEYS {
-            assert_ne!(
-                scan_code(*vk),
-                0,
-                "extended key {vk:#x} has no scan code to pair the flag with"
-            );
-        }
     }
 
     /// A plain key must not be flagged and must not carry a scan code:
@@ -591,27 +618,6 @@ mod tests {
         assert_eq!(ki.dwFlags & KEYEVENTF_EXTENDEDKEY, 0);
     }
 
-    /// The extended-key list must not contain duplicates: a duplicate
-    /// would only mean a slower lookup, but a stale entry left behind
-    /// after a rename would silently mis-flag a key.
-    #[test]
-    fn extended_key_list_has_no_duplicates() {
-        let mut sorted = EXTENDED_KEYS.to_vec();
-        sorted.sort_unstable();
-        let before = sorted.len();
-        sorted.dedup();
-        assert_eq!(sorted.len(), before, "EXTENDED_KEYS contains a duplicate");
-    }
-
-    /// The left Windows key is an extended key as well — a physical
-    /// keyboard sends it with the `0xe0` prefix — and it is the one
-    /// extended key the Windows backend injects on its own
-    /// (`NativeAction::LaunchpadShow`).
-    #[test]
-    fn windows_key_is_flagged_extended() {
-        assert!(is_extended_key(VK_LWIN));
-    }
-
     /// One key event as the system-wide keyboard hook saw it.
     #[derive(Clone, Copy, Debug)]
     struct Observed {
@@ -619,7 +625,6 @@ mod tests {
         scan: u32,
         flags: u32,
         up: bool,
-        shift_down: bool,
     }
 
     /// The key events the hook saw, in arrival order.
@@ -635,16 +640,13 @@ mod tests {
             // a `KBDLLHOOKSTRUCT` that stays valid for the duration of the
             // call.
             let data = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-            // SAFETY: `GetKeyState` takes a virtual-key code and has no other
-            // precondition.
-            let shift_down =
-                (unsafe { GetKeyState(i32::from(VK_SHIFT)) }.cast_unsigned() & 0x8000) != 0;
             let observed = Observed {
                 vk: data.vkCode,
-                scan: data.scanCode,
+                // The hook encodes the `0xe0` prefix in bit `0x200` of the
+                // scan code; only the scan code itself is compared here.
+                scan: data.scanCode & 0xFF,
                 flags: data.flags,
                 up: wparam == WM_KEYUP as WPARAM,
-                shift_down,
             };
             if let Ok(mut events) = OBSERVED.lock() {
                 events.push(observed);
@@ -668,8 +670,45 @@ mod tests {
         }
     }
 
+    /// Whether the event is one of the Shift keys.
+    ///
+    /// Windows splits the generic `VK_SHIFT` into the left and the right
+    /// one, and an injected generic Shift arrives as the left one, so the
+    /// check has to cover all three. The hook reports `vkCode` as a `u32`,
+    /// which is why the codes are spelled here and not taken from the
+    /// `u16` constants.
+    fn is_shift(vk: u32) -> bool {
+        vk == u32::from(VK_SHIFT) || vk == u32::from(VK_LSHIFT) || vk == u32::from(VK_RSHIFT)
+    }
+
+    /// Whether the Shift modifier was down when `events[index]` arrived.
+    ///
+    /// The state comes from the observed key events, not from
+    /// `GetKeyState`: the high-order bit of that call reports the calling
+    /// thread's input queue, and the test thread owns no focused window,
+    /// so it does not follow an injected Shift.
+    fn shift_down_at(events: &[Observed], index: usize) -> bool {
+        let mut downs = 0usize;
+        let mut ups = 0usize;
+        for event in &events[..index] {
+            if is_shift(event.vk) {
+                if event.up {
+                    ups += 1;
+                } else {
+                    downs += 1;
+                }
+            }
+        }
+        downs > ups
+    }
+
     /// Whether Num Lock is on — the state the "Shift cancels Num Lock"
     /// behaviour depends on.
+    ///
+    /// The low-order bit of `GetKeyState` is the toggle state, which the
+    /// system keeps globally; the high-order bit is the calling thread's
+    /// input queue, which is why it cannot be used to read the Shift
+    /// modifier.
     fn num_lock_on() -> bool {
         // SAFETY: `GetKeyState` takes a virtual-key code and has no other
         // precondition.
@@ -689,6 +728,54 @@ mod tests {
         original
     }
 
+    /// The pre-fix form of `key_input`: the virtual key alone, with no scan
+    /// code and no extended flag. The regression test injects it as the
+    /// control, so the guard below is not vacuous.
+    fn pre_fix_key_input(vk: u16, key_up: bool) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: if key_up { KEYEVENTF_KEYUP } else { 0 },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    /// Inject `Shift+Right` with the given key builder and return the key
+    /// events the hook saw.
+    fn inject_shift_right(build: fn(u16, bool) -> INPUT) -> Vec<Observed> {
+        OBSERVED.lock().expect("event log poisoned").clear();
+        send_inputs(&[build(VK_SHIFT, false), build(VK_RIGHT, false)]);
+        for _ in 0..200 {
+            pump_messages();
+            let seen = OBSERVED.lock().expect("event log poisoned");
+            if seen
+                .iter()
+                .any(|event| event.vk == u32::from(VK_RIGHT) && !event.up)
+            {
+                break;
+            }
+            drop(seen);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Let the modifiers go again.
+        send_inputs(&[build(VK_RIGHT, true), build(VK_SHIFT, true)]);
+        OBSERVED.lock().expect("event log poisoned").clone()
+    }
+
+    /// The index of the injected arrow's key-down in `events`.
+    fn arrow_index(events: &[Observed]) -> usize {
+        events
+            .iter()
+            .position(|event| event.vk == u32::from(VK_RIGHT) && !event.up)
+            .expect("the injected arrow is not in the key event log")
+    }
+
     /// The end-to-end guard for #1895: an injected `Shift+Right` has to
     /// reach the application with the Shift modifier still down.
     ///
@@ -699,10 +786,16 @@ mod tests {
     /// the system-wide keyboard hook, which sees injected keys whether or
     /// not an application window has focus.
     ///
-    /// It switches Num Lock on (the behaviour only shows with Num Lock on)
-    /// and puts it back afterwards; the injected keys reach whichever
-    /// window has focus.
+    /// The pre-fix injection runs first, as the control: that form has to
+    /// lose the Shift, which is what gives the assertion below its
+    /// meaning. If Windows ever stops cancelling the Shift around an
+    /// unidentified key, the control fails and the guard needs a rethink.
+    ///
+    /// The test switches Num Lock on (the behaviour only shows with Num
+    /// Lock on) and puts it back afterwards; the injected keys reach
+    /// whichever window has focus.
     #[test]
+    #[ignore = "sends real keystrokes to the focused window and toggles Num Lock; requires explicit interactive execution"]
     fn extended_key_keeps_the_shift_modifier() {
         let original_num_lock = set_num_lock(true);
 
@@ -713,32 +806,32 @@ mod tests {
         };
         assert!(!hook.is_null(), "could not install the keyboard hook");
 
-        OBSERVED.lock().expect("event log poisoned").clear();
-        send_inputs(&[key_input(VK_SHIFT, false), key_input(VK_RIGHT, false)]);
+        let control = inject_shift_right(pre_fix_key_input);
+        let fixed = inject_shift_right(key_input);
 
-        let mut arrow = None;
-        for _ in 0..200 {
-            pump_messages();
-            {
-                let events = OBSERVED.lock().expect("event log poisoned");
-                arrow = events
-                    .iter()
-                    .find(|event| event.vk == u32::from(VK_RIGHT) && !event.up)
-                    .copied();
-            }
-            if arrow.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        // Let the modifiers go again, then drop the hook.
-        send_inputs(&[key_input(VK_RIGHT, true), key_input(VK_SHIFT, true)]);
+        // Drop the hook.
         // SAFETY: `hook` came from `SetWindowsHookExW` and is removed once.
         unsafe { UnhookWindowsHookEx(hook) };
         set_num_lock(original_num_lock);
 
-        let arrow = arrow.expect("the injected arrow never reached the keyboard hook");
+        // The control: the pre-fix injection loses the Shift around the
+        // arrow.
+        let control_arrow = arrow_index(&control);
+        assert!(
+            !shift_down_at(&control, control_arrow),
+            "the pre-fix injection is expected to lose the shift modifier; if \
+             Windows no longer cancels the shift around a key it cannot \
+             identify, this control has to go: {control:?}"
+        );
+
+        // The guard: the shipped injection keeps it. This is the assertion
+        // that fails when the extended flag goes away.
+        let fixed_arrow = arrow_index(&fixed);
+        assert!(
+            shift_down_at(&fixed, fixed_arrow),
+            "the shift modifier has to still be down when the arrow arrives: {fixed:?}"
+        );
+        let arrow = fixed[fixed_arrow];
         assert_ne!(
             arrow.flags & LLKHF_INJECTED,
             0,
@@ -753,24 +846,6 @@ mod tests {
             arrow.scan,
             u32::from(scan_code(VK_RIGHT)),
             "the arrow has to carry its scan code"
-        );
-        assert!(
-            arrow.shift_down,
-            "the shift modifier has to still be down when the arrow arrives"
-        );
-
-        let events = OBSERVED.lock().expect("event log poisoned").clone();
-        let arrow_index = events
-            .iter()
-            .position(|event| event.vk == u32::from(VK_RIGHT) && !event.up)
-            .expect("the injected arrow must be in the log");
-        let shift_ups_before_arrow = events[..arrow_index]
-            .iter()
-            .filter(|event| event.vk == u32::from(VK_LSHIFT) && event.up)
-            .count();
-        assert_eq!(
-            shift_ups_before_arrow, 0,
-            "Windows released the shift modifier around the arrow: {events:?}"
         );
     }
 }
