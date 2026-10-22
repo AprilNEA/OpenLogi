@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     Background, Context, Hsla, InteractiveElement, IntoElement, ParentElement, PathBuilder, Pixels,
     Point, SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, div,
-    linear_color_stop, linear_gradient, point, px, svg,
+    linear_color_stop, linear_gradient, point, prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingPresentation;
@@ -23,6 +23,9 @@ use crate::session;
 
 const PILL_W: f32 = 132.0;
 const PILL_H: f32 = 34.0;
+/// Width of the hovered slot's full caption under the hub: the widest strip
+/// that clears the left and right pills.
+const LABEL_W: f32 = 230.0;
 const HOVER_RING: f32 = 64.0;
 const RADIUS: f32 = 190.0;
 const ENTER_SECS: f32 = 0.294;
@@ -36,6 +39,7 @@ const EXIT: Duration = Duration::from_millis(196);
 
 const GLYPH: Hsla = neutral(0.98, 1.0);
 const INK: Hsla = neutral(0.08, 1.0);
+const LABEL: Hsla = neutral(0.94, 1.0);
 const CANCEL_GLYPH: Hsla = neutral(0.84, 1.0);
 
 const fn neutral(lightness: f32, alpha: f32) -> Hsla {
@@ -151,6 +155,10 @@ impl RingView {
             .zip(self.skin.hover_t)
             .filter_map(|(slot, hover_t)| slot_element(self, slot, hover_t, cx))
             .collect::<Vec<_>>();
+        let hovered_caption = self
+            .hovered
+            .and_then(|slot| self.invocation.slots.get(&slot))
+            .map(slot_caption);
 
         div()
             .id("ring-skin")
@@ -170,8 +178,26 @@ impl RingView {
                 reduce,
             ))
             .children(slots)
+            .when_some(hovered_caption, |panel, caption| {
+                panel.child(hovered_label(caption))
+            })
             .child(cancel_control(cx))
     }
+}
+
+/// The hovered slot's whole caption, under the hub. A pill truncates a long
+/// label, and user-authored labels can differ only at their end, so hovering
+/// must still show all of it.
+fn hovered_label(caption: SharedString) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(px(WINDOW_SIZE / 2.0 - LABEL_W / 2.0))
+        .top(px(WINDOW_SIZE / 2.0 + 34.0))
+        .w(px(LABEL_W))
+        .text_center()
+        .text_sm()
+        .text_color(LABEL)
+        .child(caption)
 }
 
 fn slot_element(
