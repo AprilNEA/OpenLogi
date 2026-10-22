@@ -17,7 +17,9 @@ ignores:
   - "**/tests/**"
 rule:
   all:
-    - kind: string_literal
+    - any:
+        - kind: string_literal
+        - kind: raw_string_literal
     - regex: 'channels/'
     - not:
         inside:

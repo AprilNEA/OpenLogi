@@ -2,9 +2,10 @@
 //!
 //! The host serves one directory per [`UpdateChannel`]. The app reads the
 //! built-in engine's manifest from it, packaging stamps the Sparkle feed URL
-//! from it, and the release workflow publishes both into it. Every one of them
-//! derives the location here, so the file an installed app reads and the file
-//! a release uploads cannot drift apart.
+//! from it, and xtask writes both feeds for it. All of them derive the
+//! location here, so the URL an installed app reads and the feed xtask writes
+//! for that URL cannot drift apart. The release workflow's upload
+//! destinations (`release.yml`) still spell the layout themselves.
 
 /// A release channel: the set of releases an installation is offered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +25,9 @@ impl UpdateChannel {
     }
 
     /// URL of this channel's directory on the update host at `base_url`.
-    /// Every feed of the channel is a file directly inside it.
+    /// Every feed of the channel is a file directly inside it. Trailing
+    /// slashes on `base_url` are dropped, so `https://host/` and
+    /// `https://host` name the same directory.
     #[must_use]
     pub fn dir_url(self, base_url: &str) -> String {
         format!(
