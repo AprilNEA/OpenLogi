@@ -450,6 +450,14 @@ impl SharedHandles {
     }
 }
 
+/// What a config reload left for its caller.
+struct Reloaded {
+    /// One write per online light whose settings changed.
+    lights: Vec<LightWrite>,
+    /// The routes of the devices whose saved haptic settings changed.
+    haptics_chosen: Vec<DeviceRoute>,
+}
+
 /// Owns the config + device selection and keeps [`SharedHandles`] in sync.
 pub struct Orchestrator {
     config: Config,
@@ -1561,27 +1569,39 @@ impl Orchestrator {
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     /// The file is one the agent did not see saved, as at startup or after a
     /// hand edit (see [`ConfigSource::Loaded`]).
-    pub fn reload_config(&mut self, config: Config) {
-        self.reload_from(config, ConfigSource::Loaded);
+    ///
+    /// Returns the routes of the devices whose saved haptic settings the
+    /// reload changed: the user chose their engine, so an Actions Ring
+    /// session must not hand it back.
+    #[must_use]
+    pub fn reload_config(&mut self, config: Config) -> Vec<DeviceRoute> {
+        self.reload_from(config, ConfigSource::Loaded)
     }
 
     /// [`Self::reload_config`] after the GUI saved `saved`, with `config`
     /// read from a file at revision `read`. A file still at the revision the
     /// GUI wrote is its save; another was edited since, and loads as
     /// [`Self::reload_config`] loads it (see [`ConfigSource::of_saved`]).
+    /// Returns what [`Self::reload_config`] returns.
+    #[must_use]
     pub fn reload_saved_config(
         &mut self,
         config: Config,
         read: ConfigRevision,
         saved: &SavedConfig,
-    ) {
-        self.reload_from(config, ConfigSource::of_saved(read, saved));
+    ) -> Vec<DeviceRoute> {
+        self.reload_from(config, ConfigSource::of_saved(read, saved))
     }
 
     /// Replace the config from `source` and write each light it changed.
-    fn reload_from(&mut self, config: Config, source: ConfigSource<'_>) {
-        let writes = self.replace_config_from(config, source);
-        self.write_lights(writes);
+    /// Returns the routes whose saved haptic settings changed.
+    fn reload_from(&mut self, config: Config, source: ConfigSource<'_>) -> Vec<DeviceRoute> {
+        let Reloaded {
+            lights,
+            haptics_chosen,
+        } = self.replace_config_from(config, source);
+        self.write_lights(lights);
+        haptics_chosen
     }
 
     fn write_lights(&self, writes: Vec<LightWrite>) {
@@ -1599,15 +1619,17 @@ impl Orchestrator {
     #[cfg(test)]
     fn replace_config(&mut self, config: Config) -> Vec<LightWrite> {
         self.replace_config_from(config, ConfigSource::Loaded)
+            .lights
     }
 
     /// [`Self::replace_config`] for [`Self::reload_saved_config`].
     #[cfg(test)]
     fn replace_saved_config(&mut self, config: Config, chosen: &[ChosenLight]) -> Vec<LightWrite> {
         self.replace_config_from(config, ConfigSource::Saved { chosen })
+            .lights
     }
 
-    fn replace_config_from(&mut self, config: Config, source: ConfigSource<'_>) -> Vec<LightWrite> {
+    fn replace_config_from(&mut self, config: Config, source: ConfigSource<'_>) -> Reloaded {
         let previous_lights = self.effective_online_lights();
         let previous = std::mem::replace(&mut self.config, config);
         self.forget_saved_light_changes(&previous, source);
@@ -1636,7 +1658,7 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
-        self.apply_changed_haptics(&previous);
+        let haptics_chosen = self.apply_changed_haptics(&previous);
         self.apply_changed_pointer_speeds(&previous);
         self.apply_enabled_os_layouts(&previous);
         let writes = changed_follower_cookies(
@@ -1646,7 +1668,10 @@ impl Orchestrator {
             &mut self.follower_cookies(),
         );
         self.write_follower_cookies(writes);
-        self.changed_lights(&previous_lights)
+        Reloaded {
+            lights: self.changed_lights(&previous_lights),
+            haptics_chosen,
+        }
     }
 
     /// Put each keyboard whose "keep OS layout" just took effect — turned on,
@@ -1687,12 +1712,20 @@ impl Orchestrator {
     /// as [`Self::apply_changed_fn_locks`] does: an unrelated save writes
     /// nothing. The settings app also writes directly through
     /// [`SharedHandles::set_haptics`]; both writes are ordered per device.
-    fn apply_changed_haptics(&self, previous: &Config) {
+    /// Returns the route of every device whose settings changed, online or
+    /// not: the user chose its engine.
+    fn apply_changed_haptics(&self, previous: &Config) -> Vec<DeviceRoute> {
+        let mut chosen = Vec::new();
         for (dev, settings) in changed_haptics(previous, &self.config, &self.devices) {
-            if let Some(route) = &dev.route {
+            let Some(route) = &dev.route else {
+                continue;
+            };
+            if dev.online {
                 self.shared.write_haptics_in_background(route, settings);
             }
+            chosen.push(route.clone());
         }
+        chosen
     }
 
     /// End precision mode on every mouse whose speed, DPI or button

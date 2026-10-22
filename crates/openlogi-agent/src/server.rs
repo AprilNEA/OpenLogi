@@ -113,13 +113,16 @@ impl AgentServer {
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
                 let language = config.app_settings.language.clone();
-                match saved {
+                let haptics_chosen = match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
                     Some(saved) => self.orchestrator.lock().await.reload_saved_config(
                         config,
                         file.revision(),
                         &saved,
                     ),
+                };
+                for route in haptics_chosen {
+                    self.ring_haptics.user_chose_haptics(route);
                 }
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
@@ -357,6 +360,9 @@ impl Agent for AgentServer {
         settings: HapticSettings,
         preview: bool,
     ) -> Result<HapticSettings, WriteError> {
+        // The user chose this engine whether or not the write lands; the
+        // agent writes the saved settings again when the device reconnects.
+        self.ring_haptics.user_chose_haptics(route.clone());
         let applied = self.shared.set_haptics(&route, settings).await?;
         if previews(preview, applied) {
             let shared = self.shared.clone();
@@ -566,6 +572,9 @@ struct SessionNews {
     opened: Option<(u64, DeviceRoute, RingHaptics)>,
     /// The newest session that closed.
     closed: Option<u64>,
+    /// Devices whose haptic engine the user set since the worker last
+    /// looked.
+    user_chose: Vec<DeviceRoute>,
     /// Hand every engine back now, then answer here.
     hand_back: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -959,6 +968,11 @@ impl RingHapticPlayer {
                         }
                     }
                 }
+                // After the arming above, so a session armed in this same
+                // turn owes nothing on a device the user just set.
+                for route in &news.user_chose {
+                    ledger.user_chose(route);
+                }
                 if let Some(session) = news.closed {
                     ledger.closed(session, Instant::now());
                 }
@@ -1006,6 +1020,14 @@ impl RingHapticPlayer {
             let mut sessions = self.sessions();
             sessions.news.closed = sessions.news.closed.max(Some(session));
         }
+        let _ = self.closed.send(());
+    }
+
+    /// Report that the user set the haptic engine of the device on `route`,
+    /// from the settings app or a changed `config.toml`: no ring session
+    /// hands that engine back.
+    pub fn user_chose_haptics(&self, route: DeviceRoute) {
+        self.sessions().news.user_chose.push(route);
         let _ = self.closed.send(());
     }
 

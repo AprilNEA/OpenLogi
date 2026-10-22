@@ -716,7 +716,7 @@ fn a_gui_save_keeps_the_newer_change_on_a_light_that_went_offline() {
         revision: ConfigRevision::of("the GUI's save"),
         chosen: Vec::new(),
     };
-    orch.reload_saved_config(
+    let _ = orch.reload_saved_config(
         config_with(settings(true, 50, 4000)),
         saved.revision,
         &saved,
@@ -744,7 +744,7 @@ fn a_file_edited_after_a_gui_save_loads_as_a_hand_edit() {
         revision: ConfigRevision::of("the GUI's save"),
         chosen: Vec::new(),
     };
-    orch.reload_saved_config(
+    let _ = orch.reload_saved_config(
         config_with(settings(true, 50, 4000)),
         ConfigRevision::of("the hand edit"),
         &saved,

@@ -105,6 +105,13 @@ impl<R> RestoreLedger<R> {
         }
     }
 
+    /// The user set the haptic engine of the device on `route` in OpenLogi:
+    /// the engine is theirs now, so nothing is handed back on it, even when
+    /// the settings they chose equal what arming left.
+    pub(super) fn user_chose(&mut self, route: &DeviceRoute) {
+        self.owed.retain(|owed| owed.route != *route);
+    }
+
     /// When the next restore is due, or `None` when nothing is owed.
     pub(super) fn next_due(&self) -> Option<Instant> {
         self.owed.iter().map(|owed| owed.due).min()
@@ -181,6 +188,40 @@ mod tests {
         std::iter::from_fn(|| ledger.take_due(now))
             .map(|owed| (owed.route, owed.restore))
             .collect()
+    }
+
+    /// The user saves exactly the configuration arming left while the ring
+    /// is open. The restore would find the device unchanged and turn the
+    /// engine off, so the user's choice drops it: the session ends and the
+    /// engine stays on.
+    #[test]
+    fn a_users_haptic_choice_during_a_session_keeps_the_engine_on() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.opened(1, mouse(), Some(7), start);
+        ledger.opened(2, other_mouse(), Some(9), start);
+        ledger.user_chose(&mouse());
+        ledger.closed(2, start + Duration::from_secs(1));
+        ledger.leaving(start + Duration::from_secs(2));
+        assert_eq!(
+            due(&mut ledger, start + Duration::from_secs(2)),
+            [(other_mouse(), 9)],
+            "only the device the user did not set is handed back"
+        );
+        assert_eq!(ledger.next_due(), None);
+    }
+
+    /// A restore waiting to retry on a device that was away is dropped too.
+    #[test]
+    fn a_users_haptic_choice_cancels_a_pending_retry() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.opened(1, mouse(), Some(7), start);
+        ledger.closed(1, start);
+        let owed = ledger.take_due(start).expect("owed at the close");
+        ledger.retry(owed, start);
+        ledger.user_chose(&mouse());
+        assert_eq!(ledger.next_due(), None);
     }
 
     #[test]

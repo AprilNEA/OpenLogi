@@ -63,7 +63,7 @@ fn every_inventory_mutator_republishes_what_the_ipc_server_answers() {
 
     let mut config = Config::default();
     config.app_settings.launch_at_login = true;
-    orch.reload_config(config);
+    let _ = orch.reload_config(config);
     assert!(observable.snapshot().status.launch_at_login);
 }
 

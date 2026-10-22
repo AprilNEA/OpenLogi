@@ -793,7 +793,7 @@ fn reload_writes_only_changed_haptics() {
         haptic_device("a", 1, true),
         haptic_device("b", 2, true),
         haptic_device("c", 3, true),
-        // Offline: written when it reconnects instead.
+        // Offline: written when it reconnects, but chosen all the same.
         haptic_device("d", 4, false),
     ];
     let written: Vec<_> = changed_haptics(&previous, &config, &devices)
@@ -801,8 +801,12 @@ fn reload_writes_only_changed_haptics() {
         .collect();
     assert_eq!(
         written,
-        [("a", haptics(false, 60)), ("c", haptics(true, 25))],
-        "an unchanged device and an offline one are left alone"
+        [
+            ("a", haptics(false, 60)),
+            ("c", haptics(true, 25)),
+            ("d", haptics(true, 25))
+        ],
+        "an unchanged device is left alone"
     );
 }
 
@@ -825,4 +829,20 @@ fn ring_session_has_no_haptic_route_when_engine_off() {
     let spec = orch.action_ring_session(Some("a")).expect("the ring opens");
     assert_eq!(spec.haptic_route, orch.devices[0].route);
     assert_eq!(spec.haptic_engine, RingHaptics::Owned);
+}
+
+/// A reload names the devices whose saved haptics changed, so the agent can
+/// tell the Actions Ring the user chose their engine; an unrelated reload
+/// names none.
+#[test]
+fn reload_names_the_devices_whose_haptics_the_user_chose() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![haptic_device("a", 1, false)];
+    let mut config = Config::default();
+    config.set_haptics("a", haptics(true, 60));
+    assert_eq!(
+        orch.reload_config(config.clone()),
+        [orch.devices[0].route.clone().expect("a Bolt route")]
+    );
+    assert!(orch.reload_config(config).is_empty());
 }

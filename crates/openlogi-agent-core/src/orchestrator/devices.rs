@@ -120,15 +120,15 @@ pub(super) fn configured_haptics(config: &Config, dev: &AgentDevice) -> Option<H
         .flatten()
 }
 
-/// The online devices whose saved haptic settings differ between `previous`
-/// and `config`, with the settings to write. Clearing the setting writes
-/// nothing: the device keeps what it has.
+/// The devices whose saved haptic settings differ between `previous` and
+/// `config`, online or not, with the settings to write. Clearing the setting
+/// writes nothing: the device keeps what it has.
 pub(super) fn changed_haptics<'a>(
     previous: &'a Config,
     config: &'a Config,
     devices: &'a [AgentDevice],
 ) -> impl Iterator<Item = (&'a AgentDevice, HapticSettings)> {
-    devices.iter().filter(|dev| dev.online).filter_map(|dev| {
+    devices.iter().filter_map(|dev| {
         let settings = configured_haptics(config, dev)?;
         (configured_haptics(previous, dev) != Some(settings)).then_some((dev, settings))
     })

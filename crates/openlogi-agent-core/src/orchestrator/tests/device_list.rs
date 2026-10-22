@@ -335,6 +335,6 @@ fn a_link_removed_after_the_keyboard_left_is_still_cleared() {
         false,
     );
     orchestrator.refresh_inventory(std::slice::from_ref(&mouse_inventory), &[], false);
-    orchestrator.reload_config(Config::default());
+    let _ = orchestrator.reload_config(Config::default());
     assert_eq!(orchestrator.follower_cookies().held_for(mouse), [byte]);
 }
