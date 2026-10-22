@@ -2,9 +2,10 @@
 //! installers compare.
 //!
 //! release-plz tags a stable release `vX.Y.Z`. A beta is tagged
-//! `vX.Y.Z-beta.N`: `X.Y.Z` is the stable release it leads to, and `N` counts
-//! the commits since the stable release before it, so a later beta has a
-//! larger `N`. Every command that reads a release tag parses it here.
+//! `vX.Y.Z-beta.N` on `master`, without a version bump: `X.Y.Z` is the stable
+//! release it leads to, and `N` counts the commits since the stable release
+//! before it, so a later beta has a larger `N`. Every command that reads a
+//! release tag parses it here.
 
 use std::fmt;
 use std::str::FromStr;
@@ -93,6 +94,18 @@ impl ReleaseTag {
             tag: tag.clone(),
             version,
         }))
+    }
+
+    /// The workspace version the tagged commit carries. A stable tag is on
+    /// release-plz's version bump, so it is the tag's own version. A beta tags
+    /// `master` between releases, so it is `base`'s, the stable release the
+    /// beta follows (from [`Self::beta_base`]); the beta's own version is
+    /// stamped for its build only.
+    pub(crate) fn tagged_workspace_version<'a>(
+        &'a self,
+        base: Option<&'a BetaBase>,
+    ) -> &'a Version {
+        base.map_or(&self.version, |base| &base.version)
     }
 
     /// `N` of a beta tag; `None` for a stable tag. `N` is at least 1: Sparkle

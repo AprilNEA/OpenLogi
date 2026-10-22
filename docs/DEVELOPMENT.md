@@ -559,7 +559,10 @@ go to `/releases/<tag>/` with the DMGs; their metadata stays out of R2.
 ### Release versions
 
 Every tag run starts with `cargo xtask release version`. It reads the tag and
-fails unless the tagged commit's workspace version is the tag's version. It
+checks the workspace version of the tagged commit. A stable tag is on
+release-plz's version bump, so the workspace version must be the tag's
+version. A beta tags `master` between releases without a version bump, so the
+workspace version must be the stable release the beta follows. The command
 prints three values for the build:
 
 | Output | Stable `v0.8.17` | Beta `v0.8.17-beta.12` |

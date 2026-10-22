@@ -22,10 +22,10 @@ pub(crate) struct Args {
 /// Print the tag's `channel`, `version` and `build_version` as `key=value`
 /// lines, and append them to the step's GitHub Actions outputs.
 ///
-/// Fails unless `HEAD` is the tagged commit and its workspace version is the
-/// tag's version, so every build of the tag reports the version it names. A
-/// beta's number must also be the count of commits from the stable release
-/// before it.
+/// Fails unless `HEAD` is the tagged commit and carries the workspace version
+/// [`ReleaseTag::tagged_workspace_version`] names: a stable tag's own version,
+/// or for a beta the stable release it follows. A beta's number must also be
+/// the count of commits from that stable release.
 pub(crate) fn run(args: &Args) -> Result<()> {
     let sh = Shell::new()?;
     let root = PathBuf::from(cmd!(sh, "git rev-parse --show-toplevel").quiet().read()?);
@@ -45,13 +45,6 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         tagged == head,
         "{tag} is {tagged}, but HEAD is {head}; check the tag out first"
     );
-    let workspace = workspace_package(&root)?.version;
-    ensure!(
-        workspace == tag.version().to_string(),
-        "{tag} names version {}, but its workspace version is {workspace}",
-        tag.version()
-    );
-
     let merged: Vec<String> = cmd!(sh, "git tag --merged {name} --list v*")
         .quiet()
         .read()?
@@ -59,6 +52,13 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .map(str::to_owned)
         .collect();
     let base = tag.beta_base(&merged)?;
+    let workspace = workspace_package(&root)?.version;
+    let expected = tag.tagged_workspace_version(base.as_ref());
+    ensure!(
+        workspace == expected.to_string(),
+        "{tag} needs workspace version {expected} on the tagged commit, but it is {workspace}"
+    );
+
     let beta = match &base {
         Some(base) => {
             let range = format!("{}..{name}", base.tag);
