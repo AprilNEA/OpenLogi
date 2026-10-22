@@ -229,6 +229,9 @@ pub struct AppSettings {
     /// continuous pixel input is never scaled.
     #[serde(default)]
     pub vertical_scroll_sensitivity: VerticalScrollSensitivity,
+    /// Magic Mouse–style momentum for a smoothed main wheel. Off by default.
+    #[serde(default)]
+    pub momentum_scrolling: MomentumScrolling,
     /// Which app icon the user picked. Applied at launch, and whenever it
     /// changes, by whichever process owns a surface showing one — on macOS the
     /// GUI hands the choice to the Dock and writes it onto the bundle (so the
@@ -499,6 +502,7 @@ impl Default for AppSettings {
             capture_mouse_events: true,
             smooth_scroll: false,
             vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
+            momentum_scrolling: MomentumScrolling::default(),
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,
@@ -514,6 +518,87 @@ impl Default for AppSettings {
             low_battery_notifications: true,
             lock_key_notifications: true,
             animate_desktop_switch: true,
+        }
+    }
+}
+
+/// Magic Mouse–style momentum scrolling for a mouse whose main wheel OpenLogi
+/// smooths (its per-device Smooth wheel switch).
+///
+/// Once SmartShift lets the wheel spin freely, the page glides with the
+/// wheel's speed instead of stepping notch by notch, and stops the moment a
+/// finger stops the wheel. Ratchet scrolling stays notch by notch. Values are
+/// clamped into their ranges where they are used, so a hand-edited config
+/// cannot push the agent outside them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MomentumScrolling {
+    /// Whether momentum scrolling is on. **Off by default.**
+    pub enabled: bool,
+    /// Glide speed, in pixels per second while the wheel spins at 100
+    /// notches per second.
+    pub glide_speed: u16,
+    /// How much faster a hard flick glides than a gentle one: the exponent,
+    /// in tenths, applied to the wheel's speed.
+    pub response: u8,
+    /// How long the glide coasts once the wheel slows: the time constant of
+    /// its decay, in milliseconds. 0 follows the wheel exactly.
+    pub glide_ms: u16,
+    /// How quickly the glide slows down on its own, even while the wheel
+    /// keeps spinning, in percent of the strongest friction; 0 lets the glide
+    /// follow the wheel for as long as it turns.
+    pub friction: u8,
+    /// Speed-up per repeated flick onto a still-running glide, in percent
+    /// (135 = ×1.35 per flick, capped at ×3); 100 turns it off.
+    pub repeat_boost: u16,
+    /// How far one wheel notch scrolls, in reference pixels. macOS receives
+    /// pixel events; other platforms scale native wheel ticks relative to the
+    /// default distance, leaving their final pixel distance to the application.
+    pub pixels_per_notch: u16,
+    /// How long after the wheel stops a single step the other way is held
+    /// back as the wheel springing back, in milliseconds; 0 is off.
+    pub spring_back_ms: u16,
+}
+
+impl MomentumScrolling {
+    /// Selectable glide speeds, px/s.
+    pub const GLIDE_SPEED_MIN: u16 = 200;
+    /// See [`Self::GLIDE_SPEED_MIN`].
+    pub const GLIDE_SPEED_MAX: u16 = 6000;
+    /// Selectable responses, tenths of an exponent.
+    pub const RESPONSE_MIN: u8 = 10;
+    /// See [`Self::RESPONSE_MIN`].
+    pub const RESPONSE_MAX: u8 = 30;
+    /// Longest selectable glide, ms.
+    pub const GLIDE_MS_MAX: u16 = 1000;
+    /// Largest selectable repeat speed-up, percent.
+    pub const REPEAT_BOOST_MAX: u16 = 200;
+    /// Selectable pixels per notch.
+    pub const PIXELS_PER_NOTCH_MIN: u16 = 10;
+    /// See [`Self::PIXELS_PER_NOTCH_MIN`].
+    pub const PIXELS_PER_NOTCH_MAX: u16 = 80;
+    /// Longest selectable spring-back guard, ms.
+    pub const SPRING_BACK_MS_MAX: u16 = 300;
+    /// Strongest selectable friction, percent.
+    pub const FRICTION_MAX: u8 = 100;
+}
+
+impl Default for MomentumScrolling {
+    fn default() -> Self {
+        // Tuned by hand on an MX Master 4 against a Magic Mouse.
+        Self {
+            enabled: false,
+            glide_speed: 2000,
+            response: 20,
+            // A little longer than Apple's trackpad momentum, which decays
+            // with τ ≈ 206 ms mid-glide (WebKit's `MomentumEventDispatcher`):
+            // light friction already shortens the glide.
+            glide_ms: 300,
+            friction: 10,
+            repeat_boost: 135,
+            // About what a line event scrolls in a native macOS view.
+            pixels_per_notch: 28,
+            spring_back_ms: 100,
         }
     }
 }
@@ -866,6 +951,23 @@ mod tests {
         assert_eq!(
             ThumbwheelSensitivity::from_rounded(f32::INFINITY),
             ThumbwheelSensitivity::MAX
+        );
+    }
+
+    #[test]
+    fn momentum_scrolling_is_off_and_defaulted_in_older_configs() {
+        let settings: AppSettings = toml::from_str("smooth_scroll = true").expect("parse");
+        assert_eq!(settings.momentum_scrolling, MomentumScrolling::default());
+        assert!(!settings.momentum_scrolling.enabled);
+
+        let settings: AppSettings =
+            toml::from_str("[momentum_scrolling]\nenabled = true\nglide_speed = 2800")
+                .expect("parse");
+        assert!(settings.momentum_scrolling.enabled);
+        assert_eq!(settings.momentum_scrolling.glide_speed, 2800);
+        assert_eq!(
+            settings.momentum_scrolling.glide_ms,
+            MomentumScrolling::default().glide_ms
         );
     }
 
