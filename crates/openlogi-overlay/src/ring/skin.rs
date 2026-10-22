@@ -25,9 +25,9 @@ const PILL_W: f32 = 132.0;
 const PILL_H: f32 = 34.0;
 /// Width of the hovered slot's full caption under the hub: the widest strip
 /// that clears the left and right pills.
-const LABEL_W: f32 = 230.0;
+const LABEL_W: f32 = 176.0;
 const HOVER_RING: f32 = 64.0;
-const RADIUS: f32 = 190.0;
+const RADIUS: f32 = 160.0;
 const ENTER_SECS: f32 = 0.294;
 const EXIT_SECS: f32 = 0.196;
 const HOVER_TAU: f32 = 0.09;
