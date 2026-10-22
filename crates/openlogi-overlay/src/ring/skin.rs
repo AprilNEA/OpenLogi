@@ -23,10 +23,13 @@ use crate::session;
 
 const PILL_W: f32 = 132.0;
 const PILL_H: f32 = 34.0;
-/// Width the hub grows to while it shows the hovered slot's full caption: the
-/// widest capsule that clears the left and right pills.
-const LABEL_W: f32 = 176.0;
+/// The hub at rest: the cancel button.
 const HUB: f32 = 48.0;
+/// The hub open: the circle that carries the hovered slot's full caption.
+/// Clears every pill at the 160 px slot radius.
+const HUB_OPEN: f32 = 136.0;
+/// How fast the hub opens and closes.
+const HUB_TAU: f32 = 0.12;
 const HOVER_RING: f32 = 64.0;
 const RADIUS: f32 = 160.0;
 const ENTER_SECS: f32 = 0.294;
@@ -54,6 +57,8 @@ const fn neutral(lightness: f32, alpha: f32) -> Hsla {
 /// Hover, arc, and enter/exit clocks for one open ring.
 pub(crate) struct Motion {
     hover_t: [f32; 8],
+    /// 0 with the hub at rest, 1 fully open around a caption.
+    hub_t: f32,
     arc_angle: f32,
     born: Instant,
     last_tick: Instant,
@@ -65,6 +70,7 @@ impl Default for Motion {
         let now = Instant::now();
         Self {
             hover_t: [0.0; 8],
+            hub_t: 0.0,
             arc_angle: 0.0,
             born: now,
             last_tick: now,
@@ -95,6 +101,12 @@ impl Motion {
                 smooth_towards(self.hover_t[index], target, dt, HOVER_TAU)
             };
         }
+        let hub_target = if hovered.is_some() { 1.0 } else { 0.0 };
+        self.hub_t = if reduce {
+            hub_target
+        } else {
+            smooth_towards(self.hub_t, hub_target, dt, HUB_TAU)
+        };
         let heading = hovered.map(slot_heading);
         self.arc_angle = if reduce {
             heading.unwrap_or(self.arc_angle)
@@ -178,7 +190,7 @@ impl RingView {
                 reduce,
             ))
             .children(slots)
-            .child(cancel_control(hovered_caption, cx))
+            .child(cancel_control(hovered_caption, self.skin.hub_t, cx))
     }
 }
 
@@ -246,19 +258,24 @@ fn slot_element(
     )
 }
 
-/// The hub: the cancel button, which widens into a capsule carrying the
-/// hovered slot's whole caption. A pill truncates a long label, and
-/// user-authored labels can differ only at their end, so hovering must still
-/// show all of it; the hub is the one spot every slot is equidistant from.
-fn cancel_control(caption: Option<SharedString>, cx: &mut Context<RingView>) -> impl IntoElement {
-    let width = if caption.is_some() { LABEL_W } else { HUB };
+/// The hub: the cancel button, which opens into a larger circle carrying the
+/// hovered slot's whole caption and closes again when nothing is hovered.
+/// A pill truncates a long label, and user-authored labels can differ only
+/// at their end, so hovering must still show all of it; the hub is the one
+/// spot every slot is equidistant from. `hub_t` is how far open it is.
+fn cancel_control(
+    caption: Option<SharedString>,
+    hub_t: f32,
+    cx: &mut Context<RingView>,
+) -> impl IntoElement {
+    let open = ease_out_cubic(hub_t);
+    let size = HUB + (HUB_OPEN - HUB) * open;
     div()
         .id("ring-cancel")
         .absolute()
-        .left(px(WINDOW_SIZE / 2.0 - width / 2.0))
-        .top(px(WINDOW_SIZE / 2.0 - HUB / 2.0))
-        .w(px(width))
-        .h(px(HUB))
+        .left(px(WINDOW_SIZE / 2.0 - size / 2.0))
+        .top(px(WINDOW_SIZE / 2.0 - size / 2.0))
+        .size(px(size))
         .flex()
         .items_center()
         .justify_center()
@@ -280,15 +297,24 @@ fn cancel_control(caption: Option<SharedString>, cx: &mut Context<RingView>) -> 
                 .text_color(GLYPH)
         })
         .map(|hub| match caption {
+            // The caption fades in as the circle opens; the cross fades back
+            // as it closes, so neither shows at a size it does not fit.
             Some(caption) => hub.child(
                 div()
-                    .px(px(12.0))
+                    .w(px(HUB_OPEN - 28.0))
                     .text_sm()
                     .text_center()
                     .text_color(GLYPH)
+                    .opacity(open)
                     .child(caption),
             ),
-            None => hub.child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none()),
+            None => hub.child(
+                svg()
+                    .path(RING_CANCEL_ICON)
+                    .size(px(20.0))
+                    .flex_none()
+                    .opacity(1.0 - open),
+            ),
         })
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
