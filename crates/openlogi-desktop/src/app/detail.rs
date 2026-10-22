@@ -445,35 +445,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         },
     });
     let smooth_wheel = AppState::try_read(cx).is_some_and(AppState::current_smooth_wheel);
-    let inversion_description = inversion_description(inversion_supported, inversion_is_software);
-    let inversion_row = h_flex()
-        .justify_between()
-        .items_center()
-        .gap_4()
-        .child(
-            v_flex()
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(pal.text_primary)
-                        .child(tr!("pointer.invert_scroll_direction")),
-                )
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(inversion_description),
-                ),
-        )
-        .child(
-            Toggle::new("invert-scroll-toggle")
-                .selected(inverted)
-                .disabled(!inversion_supported)
-                .label((!inversion_supported).then(|| tr!("common.unavailable")))
-                .on_change(|inverted, _window, cx| {
-                    AppState::apply(cx, |state| state.commit_invert_scroll(*inverted));
-                }),
-        );
+    let inversion_row = inversion_row(pal, inverted, inversion_supported, inversion_is_software);
     let resolution_description = match hires {
         HiresWheel::Here => match resolution {
             None => tr!("pointer.wheel_resolution_device_default_description"),
@@ -523,6 +495,29 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
 /// control's reasons for being unavailable, since both need `0x2121` on this
 /// link. A smooth wheel that is already on stays switchable, so a setting made
 /// on another link can always be turned off from here.
+/// The scroll-inversion row. Built on `toggle_row`, so its caption wraps
+/// instead of pushing the switch out of a half-width card.
+fn inversion_row(
+    pal: Palette,
+    inverted: bool,
+    supported: bool,
+    is_software: bool,
+) -> impl IntoElement {
+    toggle_row(
+        "invert-scroll-row",
+        pal,
+        tr!("pointer.invert_scroll_direction"),
+        inversion_description(supported, is_software),
+        Toggle::new("invert-scroll-toggle")
+            .selected(inverted)
+            .disabled(!supported)
+            .label((!supported).then(|| tr!("common.unavailable")))
+            .on_change(|inverted, _window, cx| {
+                AppState::apply(cx, |state| state.commit_invert_scroll(*inverted));
+            }),
+    )
+}
+
 fn smooth_wheel_row(pal: Palette, smooth_wheel: bool, hires: HiresWheel) -> impl IntoElement {
     let available = hires == HiresWheel::Here || smooth_wheel;
     toggle_row(
@@ -1022,7 +1017,8 @@ mod tests {
     use openlogi_core::config::Config;
 
     use super::{
-        HiresWheel, device_enabled_row, elided_key, smooth_wheel_caption, smooth_wheel_row,
+        HiresWheel, device_enabled_row, elided_key, inversion_row, smooth_wheel_caption,
+        smooth_wheel_row,
     };
     use crate::services::assets::AssetResolver;
     use crate::services::i18n::LOCALE_LOCK;
@@ -1063,6 +1059,40 @@ mod tests {
             row.size.width <= px(360.),
             "row {row:?} must fit its 360px host"
         );
+        assert!(
+            switch.left() >= row.left() && switch.right() <= row.right(),
+            "switch {switch:?} must sit inside its row {row:?}"
+        );
+    }
+
+    /// Hosts the scroll-inversion row at a card-like width.
+    struct InversionRowHost;
+
+    impl Render for InversionRowHost {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(360.))
+                .child(inversion_row(theme::palette(cx), true, true, true))
+        }
+    }
+
+    #[gpui::test]
+    fn the_inversion_switch_stays_inside_a_half_width_card(cx: &mut TestAppContext) {
+        // Greek carries the longest caption; it must wrap rather than push the
+        // switch out of the card, as it did beside the Haptics card.
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("el");
+        cx.update(gpui_component::init);
+        let (_view, cx) = cx.add_window_view(|_, _| InversionRowHost);
+        cx.simulate_resize(size(px(800.), px(600.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx
+            .debug_bounds("invert-scroll-row")
+            .expect("the row renders");
+        let switch = cx
+            .debug_bounds("invert-scroll-row-control")
+            .expect("the row renders its switch");
+        assert!(row.size.width <= px(360.), "row {row:?} must fit its host");
         assert!(
             switch.left() >= row.left() && switch.right() <= row.right(),
             "switch {switch:?} must sit inside its row {row:?}"
