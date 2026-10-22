@@ -26,8 +26,8 @@ env:
 jobs:
   # What the tag says (channel, version, build version), checked against the
   # tagged commit before anything builds: `release version` fails unless the
-  # workspace version is the tag's. Tag runs only; a branch dispatch builds
-  # without a build version.
+  # workspace version is the tag's (stable) or the stable release the beta
+  # follows. Tag runs only; a branch dispatch builds without a build version.
   version:
     name: Release version
     if: ${{ github.ref_type == 'tag' }}

@@ -40,8 +40,9 @@ devenv shell -- cargo run -p xtask -- <command>
 - `release sparkle-deltas` — make verified Sparkle deltas from the newest
   earlier releases to a stapled DMG, with the metadata `release appcast` reads.
 - `release version` — print a release tag's channel, version and build
-  version as GitHub Actions outputs, after checking that the tagged commit's
-  workspace version is the tag's.
+  version as GitHub Actions outputs, after checking the tagged commit's
+  workspace version: the tag's for a stable tag, and the stable release it
+  follows for a beta.
 
 ### Bundle identity
 

@@ -66,8 +66,9 @@ impl ReleaseTag {
         }
     }
 
-    /// The release version, `X.Y.Z` or `X.Y.Z-beta.N`. The workspace version
-    /// of the tagged commit equals it.
+    /// The release version the tag names, `X.Y.Z` or `X.Y.Z-beta.N`. The
+    /// tagged commit's workspace version is
+    /// [`Self::tagged_workspace_version`], which differs for a beta.
     pub(crate) fn version(&self) -> &Version {
         &self.version
     }
