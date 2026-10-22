@@ -130,10 +130,17 @@ ${truncate(commits, { length: 80_000, omission: "\n\n[truncated]" })}
 `;
 
 /** Log why the LLM notes were skipped. Inside Actions the line is a warning
- * annotation, so it shows on the run summary instead of only in the step log. */
+ * annotation, so it shows on the run summary instead of only in the step log.
+ * The annotation ends at the first raw newline, so `%`, CR and LF are escaped
+ * as the workflow command format requires. */
 function warnUnavailable(reason: string) {
-  const prefix = process.env.GITHUB_ACTIONS === "true" ? "::warning title=Release notes::" : "";
-  console.warn(`${prefix}Codex release notes unavailable: ${reason}`);
+  const message = `Codex release notes unavailable: ${reason}`;
+  if (process.env.GITHUB_ACTIONS !== "true") {
+    console.warn(message);
+    return;
+  }
+  const escaped = message.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+  console.warn(`::warning title=Release notes::${escaped}`);
 }
 
 /** The expiry of a ChatGPT sign-in token, or `undefined` when `token` is not a
