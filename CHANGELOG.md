@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.17] - 2026-10-22
+
+### Added
+
+- *(agent)* report whether the virtual HID keyboard carries keys ([#1991](https://github.com/AprilNEA/OpenLogi/pull/1991))
+- *(device)* recognize the Logitech G600 as a standalone mouse ([#1961](https://github.com/AprilNEA/OpenLogi/pull/1961))
+- *(desktop)* let users follow the beta update channel ([#1980](https://github.com/AprilNEA/OpenLogi/pull/1980))
+- *(xtask)* read the release channel and build version from the tag ([#1978](https://github.com/AprilNEA/OpenLogi/pull/1978))
+
+### Fixed
+
+- *(gui)* preserve long-press actions when editing a button action ([#1876](https://github.com/AprilNEA/OpenLogi/pull/1876))
+- *(hid)* keep long-only HID++ collections long-only on Windows ([#1983](https://github.com/AprilNEA/OpenLogi/pull/1983))
+- *(device)* stop a cached probe from hiding a dead direct channel ([#1979](https://github.com/AprilNEA/OpenLogi/pull/1979))
+- *(hook)* log both windows when the pointer gate rejects a keyboard action ([#1966](https://github.com/AprilNEA/OpenLogi/pull/1966))
+- *(release)* load only the Codex fields 1Password holds and surface why notes fall back ([#1987](https://github.com/AprilNEA/OpenLogi/pull/1987))
+- *(macos)* switch Spaces through the user's shortcut so the Dock slides ([#1847](https://github.com/AprilNEA/OpenLogi/pull/1847))
+- *(macos)* carry integer wheel ticks on synthetic line scroll events ([#1969](https://github.com/AprilNEA/OpenLogi/pull/1969))
+- *(hid)* read whole Bolt slot names, from 0x0005 or both codename chunks ([#1962](https://github.com/AprilNEA/OpenLogi/pull/1962))
+- *(linux)* stop counting our own pass-through mouse in the input access probe ([#1971](https://github.com/AprilNEA/OpenLogi/pull/1971))
+
 ## [0.8.16] - 2026-10-21
 
 ### Highlights
