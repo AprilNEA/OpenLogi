@@ -41,8 +41,8 @@
 use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, LightCommand, PointerSpeed,
-    ReportRateInfo, WriteError,
+    BacklightState, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, HapticSettings, LightCommand,
+    PointerSpeed, ReportRateInfo, WriteError,
 };
 use openlogi_ipc::SavedConfig;
 use openlogi_ipc::client::{self, ConnectError};
@@ -67,10 +67,10 @@ use request::LinkLost;
 pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts,
-    ReadFnLock, ReadPointerSpeed, ReadReportRate, ReadSmartShift, ReloadConfig,
-    RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight,
-    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing,
-    UnpairDevice,
+    ReadFnLock, ReadHaptics, ReadPointerSpeed, ReadReportRate, ReadSmartShift, ReloadConfig,
+    RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetHaptics,
+    SetLight, SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift,
+    StartPairing, UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -124,6 +124,15 @@ pub enum GuiUpdate {
         key: DeviceKey,
         /// The echoed state, or why the write did not land.
         result: Result<FnLockState, WriteError>,
+    },
+    /// What a device reports after a haptic-settings write the GUI asked
+    /// for: the settings it took, or the typed refusal. Answers
+    /// [`SetHaptics`].
+    HapticsWritten {
+        /// The device that was written.
+        key: DeviceKey,
+        /// The echoed settings, or why the write did not land.
+        result: Result<HapticSettings, WriteError>,
     },
     /// What a mouse reports after a report-rate write the GUI asked for: the
     /// rate it took, or the typed refusal. Answers [`SetReportRate`].

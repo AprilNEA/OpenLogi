@@ -455,8 +455,8 @@ fn mode_pill(label: SharedString, selected: bool, status: SmartShiftStatus) -> i
         })
 }
 
-/// A greyed bar standing in for the slider when sensitivity isn't adjustable.
-fn disabled_track(pal: Palette) -> gpui::Div {
+/// A greyed bar standing in for a slider whose value isn't adjustable now.
+pub(super) fn disabled_track(pal: Palette) -> gpui::Div {
     div().w_full().h(px(6.)).rounded_full().bg(pal.border)
 }
 

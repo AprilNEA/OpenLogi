@@ -32,8 +32,8 @@ pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
-    BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, PointerSpeedLoad, ReportRateLoad,
-    SmartShiftLoad,
+    BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, HapticsLoad, PointerSpeedLoad,
+    ReportRateLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -78,6 +78,7 @@ mod dpi;
 mod easy_switch;
 mod events;
 mod fn_lock;
+mod haptics;
 mod inventory;
 mod light;
 mod lighting;
@@ -230,6 +231,7 @@ impl AppState {
             state.load_current_fn_lock(cx);
             state.load_current_report_rate(cx);
             state.load_current_pointer_speed(cx);
+            state.load_current_haptics(cx);
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);
         });
