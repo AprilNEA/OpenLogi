@@ -485,9 +485,14 @@ secret `OP_R2_SECRET_ITEM`. The item must contain:
 - `CLOUDFLARE_R2_ACCESS_KEY_ID` — R2 S3 access key.
 - `CLOUDFLARE_R2_SECRET_ACCESS_KEY` — R2 S3 secret key.
 
-The workflow uploads immutable artifacts under `/releases/<tag>/` and only the
-channel files under `/channels/stable/` — `latest.json` and the two appcasts —
-are mutable. They are uploaded after the artifacts they point at.
+The workflow uploads immutable artifacts under `/releases/<tag>/`. Only the
+channel files are mutable: `latest.json` and the two appcasts under
+`/channels/stable/`, and `latest.json` under `/channels/beta/`. They are
+uploaded after the artifacts they point at, and only a stable release moves
+them. Until beta releases publish their own, a stable release writes the same
+`latest.json` to both channels, so the newest release on the beta channel is
+the newest stable one. Publish jobs run one at a time (the `release-publish`
+concurrency group), so two tags never interleave these writes.
 
 Generate the Sparkle key pair once, with the `generate_keys` tool from the
 [Sparkle release](https://github.com/sparkle-project/Sparkle/releases) xtask
@@ -504,7 +509,7 @@ it shipped with. Rotating it means shipping a bundle with the new key that is
 still signed with the old one, or relying on Sparkle's fallback to the DMG's
 Developer ID signature.
 
-After a complete Linux release is published, the workflow dispatches
+After a complete Linux stable release is published, the workflow dispatches
 `publish-openlogi-installer` with the tag to `openlogi-org/get`. That repository
 downloads `install.sh`, `install.sh.minisig`, and `SHA256SUMS` from the published
 GitHub Release, verifies both the exact checksum and minisign signature, and
@@ -584,9 +589,14 @@ count of commits from that stable release to the beta
 `release version` fails if the tag's number is a different count.
 
 Only `vX.Y.Z` and `vX.Y.Z-beta.N` are release tags.
-`xtask/src/support/release_tag.rs` owns the syntax and the encoding. The
-release workflow still publishes stable releases only, and it stops a beta tag
-before the build.
+`xtask/src/support/release_tag.rs` owns the syntax and the encoding.
+
+The publish side follows the channel. A beta becomes a GitHub prerelease and
+never the latest release. It leaves the channel files, the installer site and
+the Homebrew cask as they are. A stable release's notes compare with the
+previous stable tag, so they cover its betas too; a beta's notes compare with
+the tag just before it. The release workflow still stops a beta tag before the
+build, until the beta feeds exist.
 
 ## Crowdin translation sync
 

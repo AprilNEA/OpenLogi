@@ -23,6 +23,10 @@ const repo = owner && repoName ? { owner, repo: repoName } : undefined;
 const fullRepoName = repo ? `${repo.owner}/${repo.repo}` : undefined;
 const octokit = new Octokit({ auth: process.env.GH_TOKEN || process.env.GITHUB_TOKEN });
 
+// A stable release's notes cover everything since the previous stable release,
+// betas included, so a stable tag skips pre-release tags. A beta compares with
+// the tag just before it, beta or stable.
+const stableTag = semver.prerelease(tag) === null;
 const previousTag = options.previousTag ?? (repo ? await octokit.paginate(octokit.rest.repos.listTags, {
   owner: repo.owner,
   repo: repo.repo,
@@ -30,7 +34,8 @@ const previousTag = options.previousTag ?? (repo ? await octokit.paginate(octoki
 })
   .then((tags) => tags
     .map(({ name }) => name)
-    .filter((candidate) => semver.valid(candidate) && semver.lt(candidate, tag))
+    .filter((candidate) => semver.valid(candidate) && semver.lt(candidate, tag)
+      && (!stableTag || semver.prerelease(candidate) === null))
     .sort(semver.rcompare)[0] ?? "")
   .catch((error) => {
     console.warn(error.message);

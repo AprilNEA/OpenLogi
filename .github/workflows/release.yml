@@ -6,9 +6,9 @@ on:
       - "v*"
   # Manual, publish-free full build: produces the signed/notarized DMGs and
   # the signed exes as run artifacts. Everything publish-side (GitHub
-  # Release, R2 / channels/stable/latest.json, homebrew-tap) is tag-gated
+  # Release, R2 / channels/*, the installer site, homebrew-tap) is tag-gated
   # below, so a branch dispatch cannot create a release named after the
-  # branch, overwrite the updater channel, or ping the tap. Do NOT dispatch
+  # branch, overwrite an updater channel, or ping the tap. Do NOT dispatch
   # on an existing v* tag — that re-enters the full publish path against an
   # immutable release.
   workflow_dispatch:
@@ -60,8 +60,9 @@ jobs:
       - name: Read the release version
         id: version
         run: cargo xtask release version --tag "$GITHUB_REF_NAME"
-      # A beta tag parses, but publish cannot route it to a beta channel yet:
-      # fail here, before anything is built or signed.
+      # A beta tag parses, and publish keeps a beta off the stable side
+      # effects, but no beta feed can carry it yet (the appcasts take stable
+      # releases only): fail here, before anything is built or signed.
       - name: Refuse a channel publish cannot route
         if: ${{ steps.version.outputs.channel != 'stable' }}
         env:
@@ -157,7 +158,7 @@ jobs:
   publish:
     name: Publish release
     runs-on: ubuntu-latest
-    needs: [build, release-notes]
+    needs: [version, build, release-notes]
     # Wait for the Windows jobs (so the successful .zip/.msi set can be attached)
     # but do NOT let their failure block the macOS release. `!cancelled()` removes
     # the implicit "all needs succeeded" gate, so the required deps are checked
@@ -171,9 +172,19 @@ jobs:
     # by build.yml's `results` job — the reusable-workflow job result aggregates
     # all legs, so gating on it would let a failed Windows/Linux leg block the
     # macOS release. The Windows/Linux legs stay best-effort (pattern download).
-    if: ${{ github.ref_type == 'tag' && !cancelled() && needs.build.outputs.macos_result == 'success' && needs.release-notes.result == 'success' }}
+    if: ${{ github.ref_type == 'tag' && !cancelled() && needs.version.result == 'success' && needs.build.outputs.macos_result == 'success' && needs.release-notes.result == 'success' }}
+    # The channel files on R2 are shared by every release. One publish at a
+    # time keeps two tags from interleaving their writes. GitHub keeps one
+    # waiting publish per group: a third tag cancels the waiting one, which
+    # then needs a manual re-run.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
     permissions:
       contents: write
+    env:
+      # stable or beta, from the `version` job.
+      RELEASE_CHANNEL: ${{ needs.version.outputs.channel }}
     outputs:
       installer_published: ${{ steps.artifacts.outputs.installer }}
     steps:
@@ -416,7 +427,6 @@ jobs:
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           release_prefix="s3://${R2_BUCKET}/releases/${GITHUB_REF_NAME}"
-          channel_manifest="s3://${R2_BUCKET}/channels/stable/latest.json"
 
           # latest.json carries the Windows msi/zip entries; the client
           # downloads the msi and installs it via gpui-updater's staged
@@ -433,10 +443,20 @@ jobs:
             --cache-control "public, max-age=31536000, immutable" \
             --endpoint-url "$endpoint"
 
-          aws s3 cp dist/latest.json "$channel_manifest" \
-            --content-type "application/json" \
-            --cache-control "no-cache" \
-            --endpoint-url "$endpoint"
+          # Only a stable release moves the channel files for now. Until beta
+          # releases publish their own, the newest release on the beta channel
+          # is the newest stable one, so the same latest.json goes to both.
+          # The app does not read the manifest's `channel` field.
+          if [ "$RELEASE_CHANNEL" != stable ]; then
+            echo "::notice::$GITHUB_REF_NAME is a $RELEASE_CHANNEL release; the channel files stay as they are"
+            exit 0
+          fi
+          for channel in stable beta; do
+            aws s3 cp dist/latest.json "s3://${R2_BUCKET}/channels/${channel}/latest.json" \
+              --content-type "application/json" \
+              --cache-control "no-cache" \
+              --endpoint-url "$endpoint"
+          done
 
           # Bundles that embed Sparkle read one feed per architecture; older
           # bundles keep reading latest.json above, and update into a Sparkle
@@ -450,16 +470,22 @@ jobs:
             --cache-control "no-cache" \
             --endpoint-url "$endpoint"
 
-      # Create the draft, upload assets to it, then publish — all in one step.
-      # `draft` is omitted, so for a non-prerelease softprops creates the release as
-      # a draft, uploads every file, and only then flips it to published. That keeps
-      # the release mutable for the whole upload, which is what avoids the "immutable
-      # release" rejection. latest.json is intentionally not attached — it lives in
-      # R2 only; RELEASE_NOTES.md is kept outside dist for the same reason.
+      # Create the draft, upload assets to it, then publish. For a stable
+      # release, `draft` is false, so softprops creates the release as a
+      # draft, uploads every file, and only then flips it to published. That
+      # keeps the release mutable for the whole upload, which is what avoids
+      # the "immutable release" rejection. A beta is a prerelease, and
+      # softprops publishes a prerelease before its upload unless `draft` is
+      # true: a beta stays a draft here, and the next step publishes it.
+      # latest.json is intentionally not attached — it lives in R2 only;
+      # RELEASE_NOTES.md is kept outside dist for the same reason.
       - name: Publish GitHub Release with assets
         uses: softprops/action-gh-release@v3
         with:
           body_path: .release/RELEASE_NOTES.md
+          draft: ${{ env.RELEASE_CHANNEL != 'stable' }}
+          prerelease: ${{ env.RELEASE_CHANNEL != 'stable' }}
+          make_latest: ${{ env.RELEASE_CHANNEL == 'stable' }}
           files: |
             ${{ steps.artifacts.outputs.installer == 'true' && 'dist/install.sh' || '' }}
             dist/*.dmg
@@ -473,11 +499,18 @@ jobs:
             ${{ steps.artifacts.outputs.flatpak == 'true' && 'dist/*.flatpak' || '' }}
           fail_on_unmatched_files: true
 
+      - name: Publish the prerelease
+        if: ${{ env.RELEASE_CHANNEL != 'stable' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+
+  # The installer site and `openlogi@latest` serve the newest stable release.
   installer-site:
     name: Dispatch installer site update
     runs-on: ubuntu-latest
-    needs: publish
-    if: ${{ needs.publish.outputs.installer_published == 'true' }}
+    needs: [version, publish]
+    if: ${{ needs.version.outputs.channel == 'stable' && needs.publish.outputs.installer_published == 'true' }}
     permissions:
       contents: read
     steps:
@@ -505,7 +538,8 @@ jobs:
   homebrew-tap:
     name: Dispatch homebrew-tap update
     runs-on: ubuntu-latest
-    needs: publish
+    needs: [version, publish]
+    if: ${{ needs.version.outputs.channel == 'stable' }}
     permissions:
       contents: read
     steps:
