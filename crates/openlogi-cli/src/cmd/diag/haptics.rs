@@ -55,7 +55,7 @@ pub async fn run(args: HapticsArgs) -> Result<()> {
     let (route, name) = select_device(args.device.as_deref(), &[0x19b0]).await?;
     println!("device: {name} ({route})");
 
-    let report = openlogi_hid::read_haptics(&route)
+    let mut report = openlogi_hid::read_haptics(&route)
         .await
         .context("read haptic feature")?;
     print_report(&report);
@@ -66,7 +66,8 @@ pub async fn run(args: HapticsArgs) -> Result<()> {
         intensity: args.intensity.and_then(HapticIntensity::new),
     };
     if change != HapticChange::default() {
-        write_change(&route, change).await?;
+        // Plays below judge the engine by what the device now reports.
+        report.configuration = write_change(&route, change).await?;
     }
     if let Some(play) = args.play.as_deref() {
         play_waveforms(&route, &report, play).await?;
@@ -87,7 +88,8 @@ pub async fn run(args: HapticsArgs) -> Result<()> {
 }
 
 /// Write `change`, then check the device reports every field it asked for.
-async fn write_change(route: &DeviceRoute, change: HapticChange) -> Result<()> {
+/// Returns the configuration the device reports after the write.
+async fn write_change(route: &DeviceRoute, change: HapticChange) -> Result<HapticConfiguration> {
     let applied = openlogi_hid::set_haptics(route, change)
         .await
         .context("write haptic configuration")?;
@@ -124,7 +126,7 @@ async fn write_change(route: &DeviceRoute, change: HapticChange) -> Result<()> {
         ));
     }
     println!("✓ haptic configuration applied");
-    Ok(())
+    Ok(applied)
 }
 
 async fn play_waveforms(route: &DeviceRoute, report: &HapticReport, play: &str) -> Result<()> {
@@ -141,7 +143,7 @@ async fn play_waveforms(route: &DeviceRoute, report: &HapticReport, play: &str) 
         .flags
         .contains(HapticConfigFlags::ENABLED)
     {
-        println!("  note: the haptic engine is off; plays may be accepted but not felt");
+        println!("  note: the haptic engine is off; the device may refuse or not play waveforms");
     }
     for (position, waveform) in waveforms.iter().enumerate() {
         if position > 0 {
