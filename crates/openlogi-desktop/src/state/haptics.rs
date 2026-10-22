@@ -38,6 +38,14 @@ impl AppState {
             .and_then(|key| self.config.haptics(key))
     }
 
+    /// Whether the user silenced the active device's haptic engine in
+    /// OpenLogi, which silences its Actions Ring too.
+    #[must_use]
+    pub fn current_haptics_silenced(&self) -> bool {
+        self.current_haptics_setting()
+            .is_some_and(HapticSettings::is_silent)
+    }
+
     /// What is known of the active device's haptic reading.
     #[must_use]
     pub fn current_haptics_load(&self) -> HapticsLoad {

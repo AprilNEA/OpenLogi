@@ -85,6 +85,19 @@ fn commit_haptics_is_inert_on_a_device_without_haptics() {
     assert!(drain(&mut receiver).is_empty());
 }
 
+#[test]
+fn a_silenced_engine_silences_the_ring_toggle() {
+    let mut config = Config::ephemeral();
+    let (state, _receiver) = mouse_state(true, config.clone());
+    assert!(!state.current_haptics_silenced(), "nothing saved");
+    config.set_haptics(KNOWN_MOUSE_KEY, settings(true, 0));
+    let (state, _receiver) = mouse_state(true, config.clone());
+    assert!(state.current_haptics_silenced(), "zero intensity");
+    config.set_haptics(KNOWN_MOUSE_KEY, settings(false, 60));
+    let (state, _receiver) = mouse_state(true, config);
+    assert!(state.current_haptics_silenced(), "engine off");
+}
+
 /// Answer the haptics read the state has queued. Every other read is left
 /// unanswered.
 pub(crate) fn answer_haptics_read(
