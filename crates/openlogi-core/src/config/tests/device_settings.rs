@@ -1,6 +1,7 @@
-//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, the smooth wheel, keeping the OS layout, the report rate, and the stored bindings.
+//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, the smooth wheel, keeping the OS layout, the report rate, haptics, and the stored bindings.
 
 use super::*;
+use crate::hid::{HapticIntensity, HapticSettings};
 
 #[test]
 fn dpi_roundtrips_per_device() {
@@ -367,4 +368,91 @@ fn a_saved_report_rate_survives_route_adoption() {
         config.report_rate("unit:a393cae0"),
         Some(ReportRate::new(500))
     );
+}
+
+fn haptic_settings(enabled: bool, intensity: u8) -> HapticSettings {
+    HapticSettings {
+        enabled,
+        power_save: true,
+        intensity: HapticIntensity::try_new(intensity).expect("in range"),
+    }
+}
+
+#[test]
+fn haptics_absent_stays_out_of_config_toml() {
+    let mut cfg = Config::default();
+    cfg.set_fn_lock("2b042", true);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(
+        !body.contains("haptics"),
+        "unset haptics are omitted: {body}"
+    );
+    assert_eq!(write_and_read(&cfg).haptics("2b042"), None);
+}
+
+#[test]
+fn haptics_roundtrips() {
+    let mut cfg = Config::default();
+    let settings = haptic_settings(true, 63);
+    cfg.set_haptics("2b042", settings);
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(
+        toml.contains("intensity = 63"),
+        "the intensity is stored as a plain percentage: {toml}"
+    );
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.haptics("2b042"), Some(settings));
+    assert_eq!(restored.haptics("absent"), None);
+}
+
+#[test]
+fn haptics_intensity_above_100_is_rejected() {
+    let table = |intensity: u8| {
+        format!(
+            "schema_version = {SCHEMA_VERSION}\n[devices.2b042.haptics]\n\
+             enabled = true\npower_save = false\nintensity = {intensity}\n"
+        )
+    };
+    let error = toml::from_str::<Config>(&table(101))
+        .expect_err("an intensity above 100 does not load")
+        .to_string();
+    assert!(
+        error.contains("intensity"),
+        "refused for the intensity: {error}"
+    );
+    let config: Config = toml::from_str(&table(100)).expect("100 is the highest intensity");
+    assert_eq!(
+        config.haptics("2b042"),
+        Some(haptic_settings_without_power_save(100))
+    );
+}
+
+fn haptic_settings_without_power_save(intensity: u8) -> HapticSettings {
+    HapticSettings {
+        power_save: false,
+        ..haptic_settings(true, intensity)
+    }
+}
+
+#[test]
+fn ring_haptic_engine_off_when_user_disables_engine() {
+    let mut cfg = Config::default();
+    cfg.set_haptics("2b042", haptic_settings(false, 60));
+    assert_eq!(cfg.ring_haptic_engine("2b042"), RingHaptics::Off);
+    // Zero intensity silences the engine as surely as turning it off.
+    cfg.set_haptics("2b042", haptic_settings(true, 0));
+    assert_eq!(cfg.ring_haptic_engine("2b042"), RingHaptics::Off);
+    cfg.set_haptics("2b042", haptic_settings(true, 60));
+    assert_eq!(cfg.ring_haptic_engine("2b042"), RingHaptics::Owned);
+    // The ring's own toggle still wins over an engine that is on.
+    cfg.set_action_ring_haptics("2b042", false);
+    assert_eq!(cfg.ring_haptic_engine("2b042"), RingHaptics::Off);
+}
+
+#[test]
+fn ring_haptic_engine_borrows_when_unset() {
+    let mut cfg = Config::default();
+    assert_eq!(cfg.ring_haptic_engine("2b042"), RingHaptics::Borrow);
+    cfg.set_action_ring_haptics("2b042", false);
+    assert_eq!(cfg.ring_haptic_engine("2b042"), RingHaptics::Off);
 }

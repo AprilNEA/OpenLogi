@@ -13,7 +13,7 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::{Dpi, PointerSpeed, ReportRate};
+use crate::hid::{Dpi, HapticSettings, PointerSpeed, ReportRate};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -313,6 +313,13 @@ pub struct DeviceConfig {
     /// leave the mouse's speed alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer_speed: Option<PointerSpeed>,
+    /// Haptic feedback (HID++ `0x19b0`): the firmware engine, battery-saving
+    /// haptics, and the intensity. Device-wide, so not a link override. The
+    /// agent writes it when a reload changes it and re-applies it when the
+    /// device reconnects, like [`Self::fn_lock`]. `None` means "never set —
+    /// leave the device's haptics alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub haptics: Option<HapticSettings>,
 }
 
 impl DeviceConfig {
@@ -417,6 +424,7 @@ impl Default for DeviceConfig {
             keep_os_layout: None,
             report_rate: None,
             pointer_speed: None,
+            haptics: None,
         }
     }
 }
@@ -545,6 +553,8 @@ struct RawDeviceConfig {
     report_rate: Option<ReportRate>,
     #[serde(default)]
     pointer_speed: Option<PointerSpeed>,
+    #[serde(default)]
+    haptics: Option<HapticSettings>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -609,6 +619,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             keep_os_layout: raw.keep_os_layout,
             report_rate: raw.report_rate,
             pointer_speed: raw.pointer_speed,
+            haptics: raw.haptics,
         }
     }
 }
