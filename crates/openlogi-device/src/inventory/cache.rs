@@ -5,7 +5,9 @@ use hidpp::channel::HidppChannel;
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
-use super::features::{BatteryProbe, BatteryRead, ProbedFeatures, probe_features, read_battery};
+use super::features::{
+    BatteryProbe, BatteryRead, ProbedFeatures, Refresh, probe_features, read_battery,
+};
 use crate::backend::NodeId;
 
 /// How long a device's probe is reused before a fresh read.
@@ -248,10 +250,16 @@ async fn probe_or_reuse_registered(
             };
         }
         // Re-probe failed: don't cache the failure. Fall back to the last-known
-        // data so a transient glitch doesn't drop the device or its battery.
+        // data so a transient glitch doesn't drop the device or its battery,
+        // but mark it as a stand-in: read as a live answer, it would report an
+        // unreachable device healthy.
         // No battery re-read either — the device just proved unresponsive.
         return match cached {
-            Some(c) => (c.probe.clone(), seen(id)),
+            Some(c) => {
+                let mut last_known = c.probe.clone();
+                last_known.refresh = Refresh::Failed;
+                (last_known, seen(id))
+            }
             None => (fresh, seen(id)),
         };
     }

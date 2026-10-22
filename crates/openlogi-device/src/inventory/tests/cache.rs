@@ -280,3 +280,83 @@ async fn a_duplicate_candidate_opens_only_one_channel() {
         "a duplicate candidate must only ever open one live channel"
     );
 }
+
+/// A backend whose single node opens into a channel that still reports itself
+/// connected but rejects every write: a handle that looks alive yet can no
+/// longer reach the device.
+struct RejectingWritesBackend {
+    node: NodeInfo,
+}
+
+#[hidpp::async_trait]
+impl crate::backend::HidBackend for RejectingWritesBackend {
+    async fn enumerate(&self) -> Result<Vec<NodeInfo>, crate::backend::BackendError> {
+        Ok(vec![self.node.clone()])
+    }
+
+    async fn enumerate_hidpp(&self) -> Result<Vec<NodeInfo>, crate::backend::BackendError> {
+        self.enumerate().await
+    }
+
+    async fn open_hidpp(
+        &self,
+        _node: &NodeInfo,
+    ) -> Result<Option<Arc<hidpp::channel::HidppChannel>>, crate::backend::BackendError> {
+        let (raw, _) = ScriptedRawHidChannel::with_failing_writes(|_| None, |_| true);
+        Ok(Some(scripted_channel(raw).await))
+    }
+
+    async fn open_raw_writer(
+        &self,
+        _node: &NodeInfo,
+    ) -> Result<Box<dyn crate::backend::RawWriter>, crate::backend::BackendError> {
+        Err(crate::backend::BackendError::Backend(
+            "rejecting-writes test backend has no raw writer".into(),
+        ))
+    }
+
+    fn watch(&self) -> Result<crate::backend::HotplugStream, crate::backend::BackendError> {
+        Ok(Box::new(futures_lite::stream::empty()))
+    }
+}
+
+/// A stale direct-device probe whose refresh fails is a failed probe, not a
+/// cache hit. Serving the cached answer in its place reports an unreachable
+/// channel healthy, so the ledger never retires it and the device stays dead
+/// until the agent restarts. A silent device takes the same branch once its
+/// request times out; rejected writes reach it without waiting.
+#[tokio::test]
+async fn a_failed_direct_reprobe_retires_the_channel() {
+    let info = scripted_node_info("unreachable-direct");
+    let node = info.id.clone();
+    let backend = Arc::new(RejectingWritesBackend { node: info });
+    let mut enumerator = Enumerator::with_backend(backend);
+    let mut last_good = cache_entry();
+    last_good.probe.capabilities = Some(Capabilities {
+        pointer: true,
+        ..Capabilities::default()
+    });
+    last_good.probed_at = Instant::now()
+        .checked_sub(REFRESH_INTERVAL + Duration::from_nanos(1))
+        .expect("the refresh interval fits the monotonic clock");
+    enumerator
+        .cache
+        .insert(CacheKey::Direct(node.clone()), last_good);
+
+    enumerator
+        .enumerate()
+        .await
+        .expect("a failed reprobe still settles");
+    assert!(
+        !enumerator.channels.is_retiring(&node),
+        "one failed reprobe is not yet evidence of a dead channel"
+    );
+    enumerator
+        .enumerate()
+        .await
+        .expect("a failed reprobe still settles");
+    assert!(
+        enumerator.channels.is_retiring(&node),
+        "a second failed reprobe must retire the channel so it reopens"
+    );
+}

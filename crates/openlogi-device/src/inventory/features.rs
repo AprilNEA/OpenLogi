@@ -68,6 +68,24 @@ pub(super) struct ProbedFeatures {
     /// [`BatteryRead`]; `true` implies `battery` is `None`.
     #[serde(skip)]
     pub(super) unlinked: bool,
+    /// Whether these fields answer for the device now. Only the cache marks a
+    /// stand-in, so this is never persisted.
+    #[serde(skip)]
+    pub(super) refresh: Refresh,
+}
+
+/// Whether a probe's data is the device's answer or the cache's stand-in for
+/// a refresh that just failed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Refresh {
+    /// The data comes from a feature walk the device completed: this one, or
+    /// the one behind a cache entry that is still fresh.
+    #[default]
+    Answered,
+    /// A due refresh failed, so the cache's last-known answer stands in.
+    /// Callers keep publishing its identity, but must not take it as evidence
+    /// that the device is reachable.
+    Failed,
 }
 
 /// What one battery read learned about the device.
@@ -363,6 +381,7 @@ pub(super) async fn probe_features(
             identity_incomplete,
             capabilities_incomplete,
             unlinked: false,
+            refresh: Refresh::Answered,
         },
         battery_probe,
         event_features,
