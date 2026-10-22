@@ -226,6 +226,60 @@ fn custom_action_fires_on_threshold_then_respects_its_cooldown() {
 }
 
 #[test]
+fn a_continuous_spin_fires_a_custom_action_once_until_the_wheel_pauses() {
+    let mut direction = WheelDirection::default();
+    let start = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::MAX);
+    let report_gap = Duration::from_millis(20);
+
+    assert_eq!(
+        direction.advance(&Action::NextTab, 1, scale, start),
+        WheelOutput::FireAction(1)
+    );
+    let spin_end = start + report_gap * 30;
+    let refires = (1..=30)
+        .filter(|&i| {
+            direction.advance(&Action::NextTab, 1, scale, start + report_gap * i)
+                != WheelOutput::Idle
+        })
+        .count();
+    assert_eq!(
+        refires, 0,
+        "a spin longer than the cooldown must not refire"
+    );
+    assert_eq!(
+        direction.advance(&Action::NextTab, 1, scale, spin_end + ACTION_COOLDOWN),
+        WheelOutput::FireAction(1),
+        "a pause as long as the cooldown re-arms the action"
+    );
+}
+
+#[test]
+fn a_flick_after_a_pause_accumulates_to_the_threshold_again() {
+    let mut direction = WheelDirection::default();
+    let start = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+    let report_gap = Duration::from_millis(20);
+
+    assert_eq!(
+        direction.advance(&Action::NextTab, threshold, scale, start),
+        WheelOutput::FireAction(1)
+    );
+    let flick = start + Duration::from_secs(1);
+    let fires = (0..threshold.cast_unsigned())
+        .filter(|&i| {
+            direction.advance(&Action::NextTab, 1, scale, flick + report_gap * i)
+                != WheelOutput::Idle
+        })
+        .count();
+    assert_eq!(
+        fires, 1,
+        "a second flick of one increment per report must fire once"
+    );
+}
+
+#[test]
 fn custom_binding_changes_discard_progress_and_cooldown() {
     let mut direction = WheelDirection::default();
     let now = Instant::now();
