@@ -4,10 +4,13 @@
 //! and `release appcast` writes the feed that URL names; both derive it here,
 //! so the feed an installed app reads and the file a release uploads cannot
 //! drift apart. `release latest-json` writes the built-in engine's manifest
-//! into the same channel.
+//! into the same channel. The channel's directory on the host is
+//! [`UpdateChannel`]'s, which the app reads its manifest from as well.
+
+use openlogi_core::update_feed::UpdateChannel;
 
 /// The channel every release publishes to.
-pub(crate) const CHANNEL: &str = "stable";
+pub(crate) const CHANNEL: UpdateChannel = UpdateChannel::Stable;
 
 /// The variable the update host is read from, by every command that builds
 /// or publishes a feed on it.
@@ -69,11 +72,7 @@ impl MacArch {
 /// URL of the Sparkle feed `arch`'s bundles read from the update host at
 /// `base_url`.
 pub(crate) fn appcast_url(base_url: &str, arch: MacArch) -> String {
-    format!(
-        "{}/channels/{CHANNEL}/{}",
-        base_url.trim_end_matches('/'),
-        arch.appcast_file_name()
-    )
+    format!("{}/{}", CHANNEL.dir_url(base_url), arch.appcast_file_name())
 }
 
 #[cfg(test)]

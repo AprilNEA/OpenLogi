@@ -35,5 +35,6 @@ pub mod paths;
 pub mod scroll;
 #[cfg(feature = "fs")]
 pub mod single_instance;
+pub mod update_feed;
 #[cfg(feature = "worker")]
 pub mod worker;

@@ -97,7 +97,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         app_id: APP_ID,
         version,
         tag: args.tag.clone(),
-        channel: CHANNEL,
+        channel: CHANNEL.as_str(),
         published_at: OffsetDateTime::from(SystemTime::now())
             .format(&Rfc3339)
             .context("could not format current timestamp")?,

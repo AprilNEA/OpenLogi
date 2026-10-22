@@ -264,7 +264,7 @@ fn appcast(feed_url: &str, item: AppcastItem) -> String {
     Appcast::new("OpenLogi", feed_url)
         .description(format!(
             "OpenLogi updates ({} channel)",
-            update_feed::CHANNEL
+            update_feed::CHANNEL.as_str()
         ))
         .item(item)
         .render()

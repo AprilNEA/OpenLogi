@@ -39,20 +39,33 @@ use gpui_updater::{
 };
 use gpui_updater_sparkle::{SparkleDriver, SparkleOptions, StagedUpdatePolicy};
 use openlogi_core::config::AppSettings;
+use openlogi_core::update_feed::UpdateChannel;
 
 use crate::state::AppState;
 
-const MANIFEST_URL: &str = match option_env!("OPENLOGI_UPDATE_MANIFEST_URL") {
-    Some(url) => url,
-    None => "https://updates.openlogi.org/channels/stable/latest.json",
+/// The update host, embedded at build time by the release workflow. A build
+/// without one reads the official host. So does a build with an empty one,
+/// which is what an unsigned CI build gets.
+const UPDATE_BASE_URL: &str = match option_env!("OPENLOGI_UPDATE_BASE_URL") {
+    Some(url) if !url.is_empty() => url,
+    _ => "https://updates.openlogi.org",
 };
+
+/// The channel the built-in engine reads its manifest from.
+const CHANNEL: UpdateChannel = UpdateChannel::Stable;
+
+/// URL of the built-in engine's manifest on the compiled update host.
+fn manifest_url() -> String {
+    CHANNEL.manifest_url(UPDATE_BASE_URL)
+}
 
 /// Host of the compiled update manifest URL, without credentials or path data.
 ///
 /// The release bundle's Sparkle feed (`SUFeedURL`) lives on the same host:
-/// `xtask macos package` derives both from `OPENLOGI_UPDATE_BASE_URL`.
+/// the app and `xtask macos package` both read it from
+/// `OPENLOGI_UPDATE_BASE_URL`.
 pub(crate) fn manifest_host() -> Result<String, url::ParseError> {
-    manifest_host_from_url(MANIFEST_URL)
+    manifest_host_from_url(&manifest_url())
 }
 
 fn manifest_host_from_url(manifest_url: &str) -> Result<String, url::ParseError> {
@@ -97,7 +110,7 @@ pub fn new_entity(cx: &mut App) -> Entity<Updater> {
 }
 
 fn engine_updater(cx: &mut Context<Updater>) -> Updater {
-    let source = StaticManifestSource::new(MANIFEST_URL)
+    let source = StaticManifestSource::new(manifest_url())
         .os(std::env::consts::OS)
         .arch(release_arch())
         .format(release_format());

@@ -423,9 +423,10 @@ updater manifest at:
 ${OPENLOGI_UPDATE_BASE_URL}/channels/stable/latest.json
 ```
 
-The app embeds that manifest URL at build time via
-`OPENLOGI_UPDATE_MANIFEST_URL`, derived from `OPENLOGI_UPDATE_BASE_URL` in the
-release workflow. Release builds also embed `OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`
+The app embeds the update host at build time via `OPENLOGI_UPDATE_BASE_URL`
+(unset or empty means `https://updates.openlogi.org`) and derives the manifest
+URL from it with `openlogi_core::update_feed`, the module that owns the
+channel layout on the host. Release builds also embed `OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`
 and run with `Verification::Strict`: an update is installed only if the manifest
 asset carries a minisign signature that verifies against that key, plus a
 matching SHA-256. A build without the key embedded (local/dev) fails closed —
