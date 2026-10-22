@@ -15,10 +15,9 @@ use gpui::{
 use gpui_component::{Disableable as _, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::hid::{HapticIntensity, HapticLevels, HapticSettings};
 
-use super::smartshift::disabled_track;
 use crate::state::{AppState, DeviceKey, HapticsLoad, StateEvent, StateEvents};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::components::{Toggle, toggle_row};
+use crate::ui::components::{Toggle, disabled_track, toggle_row};
 use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};

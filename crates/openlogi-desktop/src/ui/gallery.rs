@@ -23,7 +23,9 @@ use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
 use super::commit_slider::{CommitSlider, SliderRange};
-use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle, toggle_row};
+use super::components::{
+    MenuRow, PanelCard, PresetChip, ProfileTab, Toggle, disabled_track, toggle_row,
+};
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
 
 const TITLE: &str = "OpenLogi Component Gallery";
@@ -392,7 +394,14 @@ impl ComponentGallery {
                             self.slider.shown(self.slider_committed),
                             self.slider_committed
                         )),
-                ),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child("disabled_track"),
+                )
+                .child(disabled_track(pal)),
             pal,
         )
     }

@@ -243,6 +243,12 @@ pub(crate) fn toggle_row(
         )
 }
 
+/// A greyed bar standing in for a slider whose value is not adjustable now,
+/// such as SmartShift's sensitivity outside ratchet mode.
+pub(crate) fn disabled_track(pal: theme::Palette) -> gpui::Div {
+    div().w_full().h(px(6.)).rounded_full().bg(pal.border)
+}
+
 /// A titled card used by device-detail panels.
 #[derive(IntoElement)]
 pub(crate) struct PanelCard {
