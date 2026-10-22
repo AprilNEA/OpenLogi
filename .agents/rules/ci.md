@@ -221,8 +221,8 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | rustdoc / moved trait impls / hidpp derive | `rustdoc` |
 | `crates/openlogi-ipc/**` or wire types | `cargo test -p openlogi-ipc --test wire_format` |
 | `crates/openlogi-ui/locales/**` | `cargo test -p openlogi-ui locale`; also `cargo test -p openlogi-desktop i18n` when binary wiring or desktop resolution changed |
-| `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `cd packaging && nix fmt -- --check ../devenv.nix` and `devenv --no-tui shell -- true` |
-| `flake.nix` / `packaging/flake.*` / `packaging/linux/**` | Nix CI: `cd packaging && nix fmt -- --check flake.nix linux/package.nix linux/nixos-module.nix ../flake.nix ../devenv.nix`, `nix flake check ./packaging --all-systems --no-build --show-trace`, and, for the deprecated root alias, `nix flake check --all-systems --no-build --no-write-lock-file` |
+| `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `(cd packaging && nix fmt -- --check ../devenv.nix)` and `devenv --no-tui shell -- true` |
+| `flake.nix` / `packaging/flake.*` / `packaging/linux/**` | Nix CI: `(cd packaging && nix fmt -- --check flake.nix linux/package.nix linux/nixos-module.nix ../flake.nix ../devenv.nix)`, `nix flake check ./packaging --all-systems --no-build --show-trace`, and, for the deprecated root alias, `nix flake check --all-systems --no-build --no-write-lock-file` |
 | `xtask/src/commands/lint/**` | `cargo test -p xtask lint::` and `cargo xtask lint sweep-allows`; the PR runs Stale allows on all three hosts |
 | `xtask/**` / `packaging/**` | unsigned `cargo xtask` package for that platform; the Build workflow is not part of `cargo xtask ci` |
 
