@@ -1,5 +1,8 @@
 //! Windows helpers for synthesising OS-level input events via `SendInput`.
-#![expect(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
+#![expect(
+    unsafe_code,
+    reason = "SendInput and the low-level keyboard hook are the Win32 APIs for synthetic input and for watching it"
+)]
 
 use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
@@ -341,15 +344,18 @@ fn send_inputs(inputs: &[INPUT]) {
     }
 }
 
-/// Virtual keys that live on the *extended* part of the keyboard, i.e.
-/// the keys the numeric keypad shares a physical position with.
+/// Virtual keys whose scan code needs the extended (`0xE0`) prefix.
 ///
-/// Without `KEYEVENTF_EXTENDEDKEY` (and the matching scan code), an
-/// injected `VK_RIGHT` is delivered as the numeric-keypad `Num 6`, and
-/// Windows applies the classic "Shift temporarily cancels Num Lock"
-/// behaviour: with Num Lock on, `Shift+Right` arrives as plain `Right`
-/// and the Shift modifier is lost. Physical keyboards mark these keys
-/// with the extended bit, so injection has to do the same.
+/// The dedicated arrow and editing clusters share their scan codes with
+/// the numeric keypad, so a scan code on its own is ambiguous: `0x4d` is
+/// both the dedicated Right arrow and the keypad's 6. A physical keyboard
+/// tells the two apart with the extended prefix, so an injected key has to
+/// carry the prefix too.
+///
+/// Without it Windows reads the injected key as the keypad one and applies
+/// the classic "Shift temporarily cancels Num Lock" behaviour: with Num Lock
+/// on, `Shift+Right` arrives as a bare `Right` and the Shift modifier is
+/// lost (#1895).
 const EXTENDED_KEYS: &[u16] = &[
     VK_LEFT,
     VK_UP,
@@ -365,6 +371,7 @@ const EXTENDED_KEYS: &[u16] = &[
     VK_NUMLOCK,
     VK_SNAPSHOT,
     VK_APPS,
+    VK_LWIN,
     VK_RCONTROL,
     VK_RMENU,
     VK_RWIN,
@@ -375,13 +382,12 @@ fn is_extended_key(vk: u16) -> bool {
     EXTENDED_KEYS.contains(&vk)
 }
 
-/// The scan code Windows expects for `vk`, or 0 when it has none.
+/// The scan code Windows expects for `vk`, or 0 when the layout has none.
 ///
-/// `MapVirtualKeyW` is the documented way to translate a virtual key
-/// into a scan code; it returns 0 for keys that have no scan code of
-/// their own (for example `VK_INSERT` and `VK_RCONTROL`), in which case
-/// the virtual key alone still identifies the key and the extended flag
-/// is enough to keep it off the numeric keypad.
+/// `MapVirtualKeyW` is the documented way to translate a virtual key into a
+/// scan code. Every key in [`EXTENDED_KEYS`] has one on the layouts Windows
+/// ships (`VK_INSERT` is `0x52`, `VK_RCONTROL` is `0x1d`, …), so the scan
+/// code and the extended flag always travel together.
 fn scan_code(vk: u16) -> u16 {
     // SAFETY: `MapVirtualKeyW` is a pure lookup with no preconditions.
     let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) };
@@ -435,12 +441,27 @@ fn mouse_input(flags: u32, data: i32) -> INPUT {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, DispatchMessageW, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
+        LLKHF_INJECTED, MSG, PM_REMOVE, PeekMessageW, SetWindowsHookExW, TranslateMessage,
+        UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+    };
+
     use openlogi_core::binding::Shortcut;
 
     use super::{
         EXTENDED_KEYS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VK_BROWSER_BACK, VK_BROWSER_FORWARD,
-        VK_DELETE, VK_DOWN, VK_HOME, VK_LEFT, VK_RIGHT, VK_UP, combo, is_extended_key, key_input,
+        VK_DELETE, VK_DOWN, VK_HOME, VK_LEFT, VK_LWIN, VK_NUMLOCK, VK_RIGHT, VK_SHIFT, VK_UP,
+        combo, is_extended_key, key_input, scan_code, send_inputs,
     };
+
+    /// The left Shift key as the keyboard hook reports it: Windows splits
+    /// the generic `VK_SHIFT` into the left and the right one.
+    const VK_LSHIFT: u16 = 0xA0;
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
     /// edit to the table can't silently change what Ctrl+C sends.
@@ -544,8 +565,22 @@ mod tests {
         assert_eq!(up_ki.wScan, down_ki.wScan);
     }
 
-    /// A key with no scan code of its own still needs the extended
-    /// flag, and must not carry a stale scan code.
+    /// Every extended key has to resolve to a scan code, because the
+    /// extended flag only means something next to one: without a scan code
+    /// Windows falls back to the virtual key and the prefix is lost.
+    #[test]
+    fn extended_keys_all_have_a_scan_code() {
+        for vk in EXTENDED_KEYS {
+            assert_ne!(
+                scan_code(*vk),
+                0,
+                "extended key {vk:#x} has no scan code to pair the flag with"
+            );
+        }
+    }
+
+    /// A plain key must not be flagged and must not carry a scan code:
+    /// marking `B` extended would make Windows read it as a keypad key.
     #[test]
     fn key_input_leaves_plain_keys_alone() {
         // SAFETY: `key_input` fully initialises the `INPUT` it returns.
@@ -565,5 +600,175 @@ mod tests {
         let before = sorted.len();
         sorted.dedup();
         assert_eq!(sorted.len(), before, "EXTENDED_KEYS contains a duplicate");
+    }
+
+    /// The left Windows key is an extended key as well — a physical
+    /// keyboard sends it with the `0xe0` prefix — and it is the one
+    /// extended key the Windows backend injects on its own
+    /// (`NativeAction::LaunchpadShow`).
+    #[test]
+    fn windows_key_is_flagged_extended() {
+        assert!(is_extended_key(VK_LWIN));
+    }
+
+    /// One key event as the system-wide keyboard hook saw it.
+    #[derive(Clone, Copy, Debug)]
+    struct Observed {
+        vk: u32,
+        scan: u32,
+        flags: u32,
+        up: bool,
+        shift_down: bool,
+    }
+
+    /// The key events the hook saw, in arrival order.
+    static OBSERVED: Mutex<Vec<Observed>> = Mutex::new(Vec::new());
+
+    /// Windows' low-level keyboard hook: the only way to watch an injected
+    /// key without an application window in the way.
+    unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code == HC_ACTION as i32
+            && (wparam == WM_KEYDOWN as WPARAM || wparam == WM_KEYUP as WPARAM)
+        {
+            // SAFETY: for a keyboard hook with `HC_ACTION`, `lparam` points at
+            // a `KBDLLHOOKSTRUCT` that stays valid for the duration of the
+            // call.
+            let data = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+            // SAFETY: `GetKeyState` takes a virtual-key code and has no other
+            // precondition.
+            let shift_down = (unsafe { GetKeyState(i32::from(VK_SHIFT)) } as u16 & 0x8000) != 0;
+            let observed = Observed {
+                vk: data.vkCode,
+                scan: data.scanCode,
+                flags: data.flags,
+                up: wparam == WM_KEYUP as WPARAM,
+                shift_down,
+            };
+            if let Ok(mut events) = OBSERVED.lock() {
+                events.push(observed);
+            }
+        }
+        // SAFETY: a null hook handle is what the API expects for a low-level
+        // hook.
+        unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+    }
+
+    /// Drain the message queue so the hook callback runs.
+    fn pump_messages() {
+        let mut msg = MSG::default();
+        // SAFETY: `PeekMessageW` fills `msg` when it returns true.
+        while unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+            // SAFETY: both calls take the message `PeekMessageW` just filled in.
+            unsafe {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+
+    /// Whether Num Lock is on — the state the "Shift cancels Num Lock"
+    /// behaviour depends on.
+    fn num_lock_on() -> bool {
+        // SAFETY: `GetKeyState` takes a virtual-key code and has no other
+        // precondition.
+        (unsafe { GetKeyState(i32::from(VK_NUMLOCK)) } as u16 & 1) != 0
+    }
+
+    /// Put Num Lock where the test needs it and hand the original state
+    /// back, so the test leaves the machine the way it found it.
+    fn set_num_lock(on: bool) -> bool {
+        let original = num_lock_on();
+        if original == on {
+            return original;
+        }
+        send_inputs(&[key_input(VK_NUMLOCK, false), key_input(VK_NUMLOCK, true)]);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(num_lock_on(), on, "could not switch Num Lock");
+        original
+    }
+
+    /// The end-to-end guard for #1895: an injected `Shift+Right` has to
+    /// reach the application with the Shift modifier still down.
+    ///
+    /// Windows releases the Shift around a key it cannot identify by scan
+    /// code — the "Shift temporarily cancels Num Lock" behaviour — so the
+    /// arrow has to carry the extended prefix the dedicated arrow cluster
+    /// sends. The test drives the crate's own injection path and watches
+    /// the system-wide keyboard hook, which sees injected keys whether or
+    /// not an application window has focus.
+    ///
+    /// It switches Num Lock on (the behaviour only shows with Num Lock on)
+    /// and puts it back afterwards; the injected keys reach whichever
+    /// window has focus.
+    #[test]
+    fn extended_key_keeps_the_shift_modifier() {
+        let original_num_lock = set_num_lock(true);
+
+        // SAFETY: `SetWindowsHookExW` with a null module handle installs a
+        // low-level hook whose callback lives in this process.
+        let hook = unsafe {
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), std::ptr::null_mut(), 0)
+        };
+        assert!(!hook.is_null(), "could not install the keyboard hook");
+
+        OBSERVED.lock().expect("event log poisoned").clear();
+        send_inputs(&[key_input(VK_SHIFT, false), key_input(VK_RIGHT, false)]);
+
+        let mut arrow = None;
+        for _ in 0..200 {
+            pump_messages();
+            {
+                let events = OBSERVED.lock().expect("event log poisoned");
+                arrow = events
+                    .iter()
+                    .find(|event| event.vk == u32::from(VK_RIGHT) && !event.up)
+                    .copied();
+            }
+            if arrow.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Let the modifiers go again, then drop the hook.
+        send_inputs(&[key_input(VK_RIGHT, true), key_input(VK_SHIFT, true)]);
+        // SAFETY: `hook` came from `SetWindowsHookExW` and is removed once.
+        unsafe { UnhookWindowsHookEx(hook) };
+        set_num_lock(original_num_lock);
+
+        let arrow = arrow.expect("the injected arrow never reached the keyboard hook");
+        assert_ne!(
+            arrow.flags & LLKHF_INJECTED,
+            0,
+            "the arrow has to be the injected one"
+        );
+        assert_ne!(
+            arrow.flags & LLKHF_EXTENDED,
+            0,
+            "the arrow has to carry the extended bit, or Windows reads it as a keypad key"
+        );
+        assert_eq!(
+            arrow.scan,
+            u32::from(scan_code(VK_RIGHT)),
+            "the arrow has to carry its scan code"
+        );
+        assert!(
+            arrow.shift_down,
+            "the shift modifier has to still be down when the arrow arrives"
+        );
+
+        let events = OBSERVED.lock().expect("event log poisoned").clone();
+        let arrow_index = events
+            .iter()
+            .position(|event| event.vk == u32::from(VK_RIGHT) && !event.up)
+            .expect("the injected arrow must be in the log");
+        let shift_ups_before_arrow = events[..arrow_index]
+            .iter()
+            .filter(|event| event.vk == u32::from(VK_LSHIFT) && event.up)
+            .count();
+        assert_eq!(
+            shift_ups_before_arrow, 0,
+            "Windows released the shift modifier around the arrow: {events:?}"
+        );
     }
 }
