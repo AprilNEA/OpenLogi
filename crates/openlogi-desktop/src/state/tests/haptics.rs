@@ -186,3 +186,91 @@ fn written_echo_replaces_shown_value(cx: &mut gpui::TestAppContext) {
         "the levels come from the read"
     );
 }
+
+/// The haptic mouse on a Bolt receiver slot, online or asleep.
+fn mouse_on_receiver(online: bool) -> DeviceInventory {
+    let mut inventory = mouse_inventory(true);
+    inventory.receiver = ReceiverInfo {
+        name: "Bolt Receiver".to_string(),
+        vendor_id: 0x046d,
+        product_id: 0xc548,
+        unique_id: Some("82839805".to_string()),
+    };
+    inventory.paired[0].slot = 1;
+    inventory.paired[0].online = online;
+    inventory
+}
+
+fn refresh(cx: &mut gpui::TestAppContext, inventory: DeviceInventory) {
+    cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            let resolver = AssetResolver::new();
+            let _ = state.refresh_inventories(&[inventory], &[], &resolver, &[]);
+        });
+    });
+    cx.run_until_parked();
+}
+
+fn reads_haptics(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> bool {
+    drain(receiver)
+        .iter()
+        .any(|command| matches!(command, Command::ReadHaptics(_)))
+}
+
+fn reading(settings: HapticSettings) -> HapticReading {
+    HapticReading {
+        settings,
+        levels: HapticLevels::Any,
+        default_intensity: 60,
+    }
+}
+
+/// The agent writes saved haptic settings last in its reconnect reapply, so
+/// a read on reconnect could answer with what the mouse held while away. The
+/// saved settings are shown instead, and nothing is read.
+#[gpui::test]
+fn a_reconnect_shows_the_saved_settings_the_agent_writes(cx: &mut gpui::TestAppContext) {
+    let mut config = Config::ephemeral();
+    config.set_haptics(KNOWN_MOUSE_KEY, settings(true, 40));
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories: &[mouse_on_receiver(true)],
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+    install(state, cx);
+    // The mouse holds other settings than the saved ones, as after a write
+    // it refused.
+    answer_haptics_read(&mut receiver, reading(settings(true, 60)));
+    cx.run_until_parked();
+    assert_eq!(shown(cx), Some(settings(true, 60)));
+
+    refresh(cx, mouse_on_receiver(false));
+    refresh(cx, mouse_on_receiver(true));
+
+    assert!(
+        !reads_haptics(&mut receiver),
+        "no read races the agent's reapply"
+    );
+    assert_eq!(shown(cx), Some(settings(true, 40)));
+}
+
+/// With nothing saved the agent writes no haptics on reconnect, so the mouse
+/// is read again: it may have been changed while away.
+#[gpui::test]
+fn a_reconnect_without_saved_settings_reads_the_mouse(cx: &mut gpui::TestAppContext) {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories: &[mouse_on_receiver(true)],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+    install(state, cx);
+    answer_haptics_read(&mut receiver, reading(settings(true, 60)));
+    cx.run_until_parked();
+
+    refresh(cx, mouse_on_receiver(false));
+    refresh(cx, mouse_on_receiver(true));
+
+    assert!(reads_haptics(&mut receiver), "the mouse is read again");
+}

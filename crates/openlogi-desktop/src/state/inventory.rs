@@ -173,9 +173,8 @@ impl AppState {
         }
         for key in &reconnected {
             self.pointer_speed_reconnected(key);
-            // The agent writes the saved haptic settings again on reconnect.
-            self.pointer.reads.refresh_haptics(key);
         }
+        self.haptics_reconnected(&reconnected);
         let present: HashSet<_> = self
             .devices
             .records
