@@ -627,7 +627,7 @@ mod tests {
     /// Windows' low-level keyboard hook: the only way to watch an injected
     /// key without an application window in the way.
     unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code == HC_ACTION as i32
+        if code == HC_ACTION.cast_signed()
             && (wparam == WM_KEYDOWN as WPARAM || wparam == WM_KEYUP as WPARAM)
         {
             // SAFETY: for a keyboard hook with `HC_ACTION`, `lparam` points at
@@ -636,7 +636,8 @@ mod tests {
             let data = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
             // SAFETY: `GetKeyState` takes a virtual-key code and has no other
             // precondition.
-            let shift_down = (unsafe { GetKeyState(i32::from(VK_SHIFT)) } as u16 & 0x8000) != 0;
+            let shift_down =
+                (unsafe { GetKeyState(i32::from(VK_SHIFT)) }.cast_unsigned() & 0x8000) != 0;
             let observed = Observed {
                 vk: data.vkCode,
                 scan: data.scanCode,
@@ -657,11 +658,11 @@ mod tests {
     fn pump_messages() {
         let mut msg = MSG::default();
         // SAFETY: `PeekMessageW` fills `msg` when it returns true.
-        while unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+        while unsafe { PeekMessageW(&raw mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
             // SAFETY: both calls take the message `PeekMessageW` just filled in.
             unsafe {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+                TranslateMessage(&raw const msg);
+                DispatchMessageW(&raw const msg);
             }
         }
     }
@@ -671,7 +672,7 @@ mod tests {
     fn num_lock_on() -> bool {
         // SAFETY: `GetKeyState` takes a virtual-key code and has no other
         // precondition.
-        (unsafe { GetKeyState(i32::from(VK_NUMLOCK)) } as u16 & 1) != 0
+        (unsafe { GetKeyState(i32::from(VK_NUMLOCK)) }.cast_unsigned() & 1) != 0
     }
 
     /// Put Num Lock where the test needs it and hand the original state
