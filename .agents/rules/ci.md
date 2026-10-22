@@ -221,8 +221,8 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | rustdoc / moved trait impls / hidpp derive | `rustdoc` |
 | `crates/openlogi-ipc/**` or wire types | `cargo test -p openlogi-ipc --test wire_format` |
 | `crates/openlogi-ui/locales/**` | `cargo test -p openlogi-ui locale`; also `cargo test -p openlogi-desktop i18n` when binary wiring or desktop resolution changed |
-| `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `nix fmt -- --check devenv.nix` and `devenv --no-tui shell -- true` |
-| `flake.nix` / `flake.lock` / `packaging/linux/**` | Nix CI: `nix fmt -- --check flake.nix devenv.nix packaging/linux/package.nix packaging/linux/nixos-module.nix` and `nix flake check --all-systems --no-build --show-trace` |
+| `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `cd packaging && nix fmt -- --check ../devenv.nix` and `devenv --no-tui shell -- true` |
+| `flake.nix` / `packaging/flake.*` / `packaging/linux/**` | Nix CI: `cd packaging && nix fmt -- --check flake.nix linux/package.nix linux/nixos-module.nix ../flake.nix ../devenv.nix`, `nix flake check ./packaging --all-systems --no-build --show-trace`, and, for the deprecated root alias, `nix flake check --all-systems --no-build --no-write-lock-file` |
 | `xtask/src/commands/lint/**` | `cargo test -p xtask lint::` and `cargo xtask lint sweep-allows`; the PR runs Stale allows on all three hosts |
 | `xtask/**` / `packaging/**` | unsigned `cargo xtask` package for that platform; the Build workflow is not part of `cargo xtask ci` |
 
@@ -232,7 +232,8 @@ Not part of `ci.yml`, not in the default run:
 
 - **Nix CI** (path-filtered): evaluate + format, then `nix build` the package on
   x86_64-linux and aarch64-linux. Local: the `nix fmt` / `nix flake check`
-  commands above; a full `nix build` matches the build job on Linux.
+  commands above; a full `nix build ./packaging#openlogi` matches the build job
+  on Linux. `nix fmt` takes no Flake argument, so it runs from `packaging/`.
 - **devenv CI** (path-filtered): format `devenv.nix` and `devenv --no-tui shell -- true`.
 - **Build**: unsigned installers on every PR. Run the matching `cargo xtask`
   package command only when the diff touches packaging.
