@@ -6,6 +6,10 @@ devenv.local.yaml
 # direnv
 .direnv
 
+# The root flake.nix is a deprecated alias for packaging/. Nix writes a lock for
+# it on local use; packaging/flake.lock is the one that pins the inputs.
+/flake.lock
+
 # Added by cargo
 
 /target
