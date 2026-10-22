@@ -50,8 +50,8 @@ pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use haptic::{
     HapticChange, HapticReport, HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on,
-    get_playing_haptic, play_haptic, play_haptic_on, read_haptics, restore_haptics_on, set_haptics,
-    stop_haptic,
+    get_playing_haptic, play_haptic, play_haptic_on, read_haptics, read_haptics_on,
+    restore_haptics_on, set_haptics, set_haptics_on, stop_haptic,
 };
 pub use hidpp::feature::haptic_feedback::{
     HapticCapabilities, HapticCapabilityFlags, HapticConfigFlags, HapticConfiguration,
