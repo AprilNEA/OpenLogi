@@ -26,8 +26,9 @@ use openlogi_device::backlight::{BacklightChange, BacklightState};
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticChange, HapticConfiguration,
+    HapticPlayReply, HapticReport, HapticWaveform, LightingMethod, LitraModel, PointerScaling,
+    ReprogControlEntry, ScrollResolution, ScrollWheelMode, WaveformRunningStatus,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -207,8 +208,37 @@ pub async fn set_keyboard_color_with(
 }
 
 /// Play a haptic waveform on the device `route` reaches.
-pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Result<(), WriteError> {
+pub async fn play_haptic(
+    route: &DeviceRoute,
+    waveform: HapticWaveform,
+) -> Result<HapticPlayReply, WriteError> {
     device::play_haptic(&*native_backend(), route, waveform).await
+}
+
+/// Read the haptic capabilities, configuration, and status of the device
+/// `route` reaches.
+pub async fn read_haptics(route: &DeviceRoute) -> Result<HapticReport, WriteError> {
+    device::read_haptics(&*native_backend(), route).await
+}
+
+/// Apply a haptic configuration change to the device `route` reaches.
+pub async fn set_haptics(
+    route: &DeviceRoute,
+    change: HapticChange,
+) -> Result<HapticConfiguration, WriteError> {
+    device::set_haptics(&*native_backend(), route, change).await
+}
+
+/// Stop the haptic waveform playing on the device `route` reaches.
+pub async fn stop_haptic(route: &DeviceRoute) -> Result<WaveformRunningStatus, WriteError> {
+    device::stop_haptic(&*native_backend(), route).await
+}
+
+/// Read which haptic waveform the device `route` reaches is playing.
+pub async fn get_playing_haptic(
+    route: &DeviceRoute,
+) -> Result<(u8, WaveformRunningStatus), WriteError> {
+    device::get_playing_haptic(&*native_backend(), route).await
 }
 
 /// Apply a light command to the Litra `route` reaches, returning the state

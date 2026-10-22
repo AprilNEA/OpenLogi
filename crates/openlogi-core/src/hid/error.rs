@@ -208,6 +208,15 @@ pub enum WriteError {
         /// The name the device reports afterwards, if any.
         actual: Option<String>,
     },
+    /// A haptic write asked for an intensity outside the levels the
+    /// device's `0x19b0` capabilities accept.
+    ///
+    /// Nothing was written. Appended last — variant order is wire format.
+    #[error("device does not accept haptic intensity {requested}%")]
+    HapticIntensityUnsupported {
+        /// The intensity percentage that was refused.
+        requested: u8,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -273,6 +282,12 @@ pub enum HidppOperation {
     /// Light or darken the `0x1300` DPI LED. Appended last — variant order
     /// is wire format.
     WriteLed,
+    /// Read the `0x19b0` haptic capabilities, configuration, and status.
+    /// Appended last — variant order is wire format.
+    ReadHaptics,
+    /// Write the `0x19b0` haptic configuration. Appended last — variant
+    /// order is wire format.
+    WriteHaptics,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

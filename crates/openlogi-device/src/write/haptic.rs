@@ -8,8 +8,9 @@ use hidpp::{
         CreatableFeature,
         device_information::DeviceInformationFeature,
         haptic_feedback::{
-            HapticConfigFlags, HapticConfiguration, HapticFeedbackFeature, HapticStatus,
-            HapticWaveform, SupportedWaveforms,
+            HapticCapabilities, HapticConfigFlags, HapticConfiguration, HapticFeedbackFeature,
+            HapticIntensity, HapticPlayReply, HapticStatus, HapticWaveform, SupportedWaveforms,
+            WaveformRunningStatus,
         },
     },
 };
@@ -413,6 +414,7 @@ pub async fn play_haptic_on(
     if let Some(haptics) = cached_feature(channel, index) {
         haptics.check(waveform)?;
         if haptics.feature.play(waveform).await.is_ok() {
+            // The reply is advisory: the agent's plays are fire-and-forget.
             return Ok(());
         }
         clear_cached_location();
@@ -420,27 +422,177 @@ pub async fn play_haptic_on(
     let haptics = open_haptics(channel, index).await?;
     store_cached_location(channel, index, &haptics);
     haptics.check(waveform)?;
-    haptics.feature.play(waveform).await.map_err(|error| {
-        clear_cached_location();
-        classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
-    })
+    haptics
+        .feature
+        .play(waveform)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            clear_cached_location();
+            classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })
 }
 
-/// Play a waveform immediately by route. A waveform the device does not
-/// advertise fails with [`WriteError::HapticWaveformUnsupported`], and a play
-/// while the device reports a non-zero haptic status with
-/// [`WriteError::HapticsUnavailable`], before anything is sent.
+/// Play a waveform immediately by route, returning the device's reply. A
+/// waveform the device does not advertise fails with
+/// [`WriteError::HapticWaveformUnsupported`], and a play while the device
+/// reports a non-zero haptic status with [`WriteError::HapticsUnavailable`],
+/// before anything is sent.
 pub async fn play_haptic(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
     waveform: HapticWaveform,
-) -> Result<(), WriteError> {
+) -> Result<HapticPlayReply, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
         let haptics = open_haptics(&channel, index).await?;
         haptics.check(waveform)?;
         haptics.feature.play(waveform).await.map_err(|error| {
             classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })
+    })
+    .await
+}
+
+/// Everything a device reports about its haptic feature, read in one open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HapticReport {
+    /// The function-0 capabilities.
+    pub capabilities: HapticCapabilities,
+    /// The function-1 configuration.
+    pub configuration: HapticConfiguration,
+    /// The function-3 haptic status.
+    pub status: HapticStatus,
+}
+
+/// Read the haptic capabilities, configuration, and status by route.
+///
+/// Unlike the advisory status read before a play, every read here must
+/// answer: a diagnostic that hid an unanswered function would report a
+/// device it never heard from.
+pub async fn read_haptics(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<HapticReport, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let classify = |error| {
+            classify_hidpp_error(
+                error,
+                HidppOperation::ReadHaptics,
+                HapticFeedbackFeature::ID,
+            )
+        };
+        let mut device = open_device(&channel, index).await?;
+        let (feature, _) = resolve_feature(&mut device).await?;
+        Ok(HapticReport {
+            capabilities: feature.get_capabilities().await.map_err(classify)?,
+            configuration: feature.get_configuration().await.map_err(classify)?,
+            status: feature.get_haptic_status().await.map_err(classify)?,
+        })
+    })
+    .await
+}
+
+/// A haptic configuration edit. `None` keeps what the device reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HapticChange {
+    /// Turn the firmware haptic engine on or off.
+    pub enabled: Option<bool>,
+    /// Turn battery-saving haptics on or off.
+    pub power_save: Option<bool>,
+    /// The new intensity percentage.
+    pub intensity: Option<HapticIntensity>,
+}
+
+/// Apply `change` to the device's haptic configuration by route, returning
+/// the configuration the device reports after the write.
+///
+/// The configuration is read first and edited, so unnamed flag bits are
+/// written back as read. Logi Options+ instead rebuilds the flag byte from
+/// its two settings, dropping any other bit. An intensity outside the
+/// levels the capabilities accept fails with
+/// [`WriteError::HapticIntensityUnsupported`] before anything is written.
+pub async fn set_haptics(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    change: HapticChange,
+) -> Result<HapticConfiguration, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        change_haptics_on_channel(&channel, index, change).await
+    })
+    .await
+}
+
+async fn change_haptics_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    change: HapticChange,
+) -> Result<HapticConfiguration, WriteError> {
+    let classify = |error| {
+        classify_hidpp_error(
+            error,
+            HidppOperation::WriteHaptics,
+            HapticFeedbackFeature::ID,
+        )
+    };
+    let mut device = open_device(channel, index).await?;
+    let (feature, _) = resolve_feature(&mut device).await?;
+    if let Some(intensity) = change.intensity {
+        let capabilities = feature.get_capabilities().await.map_err(classify)?;
+        if !capabilities.levels.accepts(intensity) {
+            return Err(WriteError::HapticIntensityUnsupported {
+                requested: intensity.get(),
+            });
+        }
+    }
+    let config = feature.get_configuration().await.map_err(classify)?;
+    let mut flags = config.flags;
+    if let Some(enabled) = change.enabled {
+        flags.set(HapticConfigFlags::ENABLED, enabled);
+    }
+    if let Some(power_save) = change.power_save {
+        flags.set(HapticConfigFlags::POWER_SAVE, power_save);
+    }
+    feature
+        .set_configuration(flags, change.intensity.unwrap_or(config.intensity))
+        .await
+        .map_err(classify)
+}
+
+/// Stop the waveform playing now by route. Returns what was running.
+pub async fn stop_haptic(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<WaveformRunningStatus, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = open_device(&channel, index).await?;
+        let (feature, _) = resolve_feature(&mut device).await?;
+        feature.stop().await.map_err(|error| {
+            classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })
+    })
+    .await
+}
+
+/// Read which waveform is playing by route: the raw waveform ID and its
+/// running status.
+pub async fn get_playing_haptic(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<(u8, WaveformRunningStatus), WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = open_device(&channel, index).await?;
+        let (feature, _) = resolve_feature(&mut device).await?;
+        feature.get_playing().await.map_err(|error| {
+            classify_hidpp_error(
+                error,
+                HidppOperation::ReadHaptics,
+                HapticFeedbackFeature::ID,
+            )
         })
     })
     .await
@@ -1126,5 +1278,39 @@ mod tests {
         );
         assert_eq!(plays(&handle), vec![4, 4]);
         clear_cached_location();
+    }
+
+    #[tokio::test]
+    async fn a_haptic_change_edits_only_the_fields_it_names() {
+        // Engine on with an unnamed bit, intensity 45, as a device reports it.
+        let (raw, handle) = stateful_haptics([0x81, 45, 0], |_| {}, RING_WAVEFORMS);
+        let shared = shared_channel(raw).await;
+        let applied = change_haptics_on_channel(
+            shared.channel(),
+            shared.device_index(),
+            HapticChange {
+                power_save: Some(true),
+                intensity: HapticIntensity::new(63),
+                ..HapticChange::default()
+            },
+        )
+        .await
+        .expect("the scripted device accepts the write");
+        assert_eq!(config_writes(&handle), vec![[0x83, 63, 0]]);
+        assert_eq!(applied.flags.bits(), 0x83, "the unnamed bit survives");
+        assert_eq!(applied.intensity.get(), 63);
+
+        let applied = change_haptics_on_channel(
+            shared.channel(),
+            shared.device_index(),
+            HapticChange {
+                enabled: Some(false),
+                ..HapticChange::default()
+            },
+        )
+        .await
+        .expect("the scripted device accepts the write");
+        assert_eq!(config_writes(&handle).last(), Some(&[0x82, 63, 0]));
+        assert_eq!(applied.intensity.get(), 63, "intensity is kept as read");
     }
 }

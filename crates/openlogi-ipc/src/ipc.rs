@@ -134,7 +134,10 @@ pub use succession::Identity;
 /// v39: `AgentStatus::virtual_keyboard` and [`VirtualKeyboardStatus`]
 ///      appended — whether the agent types synthesized keys on its macOS
 ///      virtual HID keyboard.
-pub const PROTOCOL_VERSION: u32 = 39;
+/// v40: `HidppOperation::{ReadHaptics, WriteHaptics}` and
+///      `WriteError::HapticIntensityUnsupported` appended — the `0x19b0`
+///      haptic configuration reads and writes.
+pub const PROTOCOL_VERSION: u32 = 40;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

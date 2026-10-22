@@ -49,10 +49,15 @@ pub use easy_switch::{
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use haptic::{
-    HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic, play_haptic_on,
-    restore_haptics_on,
+    HapticChange, HapticReport, HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on,
+    get_playing_haptic, play_haptic, play_haptic_on, read_haptics, restore_haptics_on, set_haptics,
+    stop_haptic,
 };
-pub use hidpp::feature::haptic_feedback::HapticWaveform;
+pub use hidpp::feature::haptic_feedback::{
+    HapticCapabilities, HapticCapabilityFlags, HapticConfigFlags, HapticConfiguration,
+    HapticIntensity, HapticLevels, HapticPlayReply, HapticStatus, HapticWaveform,
+    SupportedWaveforms, WaveformRunningStatus,
+};
 pub use hidpp::feature::multi_platform::OsMask;
 pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,
