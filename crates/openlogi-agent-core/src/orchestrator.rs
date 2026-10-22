@@ -18,13 +18,15 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
-    AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
+    AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, RingHaptics,
+    canonical_device_key,
 };
 use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
     LightState, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
+use openlogi_core::hid::HapticSettings;
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, HidppOperation, HostOs,
@@ -67,11 +69,11 @@ use devices::reapply_targets;
 use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, assignments_changed,
-    build_devices, changed_follower_cookies, config_keeps_os_layout, configured_dpi,
-    configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
-    keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
-    plan_reapply, reconnect_follower_cookies, saved_speed, settings_moved, stable_id,
-    wheel_inverted,
+    build_devices, changed_follower_cookies, changed_haptics, config_keeps_os_layout,
+    configured_dpi, configured_haptics, configured_report_rate, configured_wheel_mode,
+    host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts,
+    os_layout_appeared, pick_current, plan_reapply, reconnect_follower_cookies, saved_speed,
+    settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -164,6 +166,8 @@ pub struct SharedHandles {
     /// Precision mode of the mice whose speed `0x2205` scales, and the order
     /// of every path's pointer-speed writes.
     pointer_speeds: Arc<PointerSpeeds>,
+    /// Orders every path's haptic-settings writes per device.
+    haptics_order: WriteOrder,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
@@ -269,6 +273,32 @@ impl SharedHandles {
                 &ticket,
                 |c| async move { openlogi_hid::set_report_rate_on(&c, rate).await },
                 |c| async move { openlogi_hid::get_report_rate_info_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write haptic `settings` to the device at `route` and return what it
+    /// reports after the write. Each write sets every setting, so only the
+    /// newest one matters: when a newer haptic write for the device is
+    /// requested before this one gets its turn, this one reads the device
+    /// instead. Waiting for the turn does not count against the write's
+    /// deadline.
+    pub async fn set_haptics(
+        &self,
+        route: &DeviceRoute,
+        settings: HapticSettings,
+    ) -> Result<HapticSettings, WriteError> {
+        let ticket = self.haptics_order.request(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteHaptics,
+                &ticket,
+                |c| async move { openlogi_hid::set_haptics_on(&c, settings).await },
+                |c| async move {
+                    openlogi_hid::read_haptics_on(&c)
+                        .await
+                        .map(|reading| reading.settings)
+                },
             )
             .await
     }
@@ -397,6 +427,16 @@ impl SharedHandles {
         if let Some(refresh) = refresh.as_ref() {
             refresh.request_receiver_rescan();
         }
+    }
+
+    /// [`Self::set_haptics`] without waiting, for the config-reload path;
+    /// the outcome is logged.
+    fn write_haptics_in_background(&self, route: &DeviceRoute, settings: HapticSettings) {
+        crate::hardware::write_haptics_in_background(
+            self.device(route),
+            self.haptics_order.request(route),
+            settings,
+        );
     }
 
     /// [`Self::set_fn_lock`] without waiting, for the config-reload and
@@ -553,6 +593,7 @@ impl Orchestrator {
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
             pointer_speeds: Arc::default(),
+            haptics_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
@@ -1168,12 +1209,14 @@ impl Orchestrator {
             smartshift: device
                 .and_then(|d| d.effective_smartshift(&route_key))
                 .map(openlogi_hid::SmartShiftStatus::from),
+            haptics: configured_haptics(&self.config, dev),
         };
         if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
                 settings,
                 &self.shared.report_rate_order,
+                &self.shared.haptics_order,
                 &self.shared.capture_plans,
             );
         }
@@ -1392,8 +1435,9 @@ impl Orchestrator {
         if layout.slots.is_empty() {
             return None;
         }
+        let haptic_engine = self.config.ring_haptic_engine(key);
         let haptic_route = (device.online
-            && ring.haptics
+            && haptic_engine != RingHaptics::Off
             && device
                 .capabilities
                 .is_some_and(|capabilities| capabilities.haptic_feedback))
@@ -1402,6 +1446,7 @@ impl Orchestrator {
         Some(ActionRingSessionSpec {
             device_key: key.to_owned(),
             haptic_route,
+            haptic_engine,
             layout,
             language: self.config.app_settings.language.clone(),
         })
@@ -1591,6 +1636,7 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_changed_haptics(&previous);
         self.apply_changed_pointer_speeds(&previous);
         self.apply_enabled_os_layouts(&previous);
         let writes = changed_follower_cookies(
@@ -1633,6 +1679,18 @@ impl Orchestrator {
             }
             if let Some(fn_lock) = fn_lock {
                 self.shared.write_fn_lock_in_background(&route, fn_lock);
+            }
+        }
+    }
+
+    /// Push changed haptic settings to the online devices they belong to,
+    /// as [`Self::apply_changed_fn_locks`] does: an unrelated save writes
+    /// nothing. The settings app also writes directly through
+    /// [`SharedHandles::set_haptics`]; both writes are ordered per device.
+    fn apply_changed_haptics(&self, previous: &Config) {
+        for (dev, settings) in changed_haptics(previous, &self.config, &self.devices) {
+            if let Some(route) = &dev.route {
+                self.shared.write_haptics_in_background(route, settings);
             }
         }
     }

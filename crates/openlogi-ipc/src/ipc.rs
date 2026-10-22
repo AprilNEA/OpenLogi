@@ -20,8 +20,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    HapticReading, HapticSettings, LightCommand, PairingError, PasskeyMethod, PointerSpeed,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -136,7 +136,10 @@ pub use succession::Identity;
 ///      virtual HID keyboard.
 /// v40: `HidppOperation::{ReadHaptics, WriteHaptics}` and
 ///      `WriteError::HapticIntensityUnsupported` appended — the `0x19b0`
-///      haptic configuration reads and writes.
+///      haptic configuration reads and writes. `Agent::{read_haptics,
+///      set_haptics}`, [`HapticReading`], [`HapticSettings`] and
+///      `HapticLevels` appended — the per-device haptic engine, power save
+///      and intensity read and set from the settings app.
 pub const PROTOCOL_VERSION: u32 = 40;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -896,4 +899,20 @@ pub trait Agent {
         route: DeviceRoute,
         speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError>;
+
+    /// Read the haptic feedback settings of the device on `route` (HID++
+    /// `0x19b0`), the intensities it accepts, and its factory intensity.
+    async fn read_haptics(route: DeviceRoute) -> Result<HapticReading, WriteError>;
+    /// Write the haptic feedback settings of the device on `route` now and
+    /// answer with what it reports after the write. An intensity the device
+    /// does not accept is refused with
+    /// [`WriteError::HapticIntensityUnsupported`] before anything is
+    /// written. With `preview`, the device then plays one short waveform at
+    /// the new settings, unless they are silent; a preview that does not
+    /// play does not fail the write.
+    async fn set_haptics(
+        route: DeviceRoute,
+        settings: HapticSettings,
+        preview: bool,
+    ) -> Result<HapticSettings, WriteError>;
 }

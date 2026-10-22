@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::{Action, ActionRingIcon, ActionRingLayout, ActionRingSlot};
+use openlogi_core::config::RingHaptics;
 use openlogi_hid::DeviceRoute;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, Generation, OBSERVE_HOLD,
@@ -44,6 +45,8 @@ pub struct ActionRingSessionSpec {
     pub device_key: String,
     /// HID++ route used for feedback when both config and capabilities allow it.
     pub haptic_route: Option<DeviceRoute>,
+    /// How the session treats the device's firmware haptic engine.
+    pub haptic_engine: RingHaptics,
     /// Exact layout the agent will execute for this session.
     pub layout: ActionRingLayout,
     /// Configured UI locale, or `None` to follow the overlay host's system locale.
@@ -318,6 +321,7 @@ mod tests {
         ActionRingSessionSpec {
             device_key: "mouse-a".to_string(),
             haptic_route: None,
+            haptic_engine: RingHaptics::Borrow,
             layout: ActionRingConfig::default().default,
             language: None,
         }

@@ -53,6 +53,7 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
     PairedDevice, StandaloneDevice, prettify_codename,
 };
+use openlogi_core::hid::{HapticReading, HapticSettings};
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
@@ -975,6 +976,28 @@ impl Agent for MockAgent {
         *stored = speed;
         info!(%route, %speed, "set_pointer_speed");
         Ok(speed)
+    }
+    async fn read_haptics(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<HapticReading, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.haptics, &route, 0x19b0).copied()
+    }
+    async fn set_haptics(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        settings: HapticSettings,
+        preview: bool,
+    ) -> Result<HapticSettings, WriteError> {
+        let mut state = self.state.lock().await;
+        let device = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut device.haptics, &route, 0x19b0)?;
+        stored.settings = settings;
+        info!(%route, ?settings, preview, "set_haptics");
+        Ok(settings)
     }
     async fn set_backlight(
         self,

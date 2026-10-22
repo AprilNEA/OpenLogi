@@ -9,9 +9,9 @@ use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Dpi,
-    DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, HostConnection, LightCommand,
-    PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus,
+    DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, HapticReading, HapticSettings,
+    HostConnection, LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -45,6 +45,7 @@ enum ReadFamily {
     ReportRate,
     EasySwitch,
     PointerSpeed,
+    Haptics,
 }
 
 #[derive(Clone)]
@@ -213,6 +214,27 @@ impl Agent for TestAgent {
         _speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError> {
         unreachable!("profile capture must never write the pointer speed")
+    }
+    async fn read_haptics(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<HapticReading, WriteError> {
+        self.read(
+            ReadFamily::Haptics,
+            &route,
+            |settings| &settings.haptics,
+            0x19b0,
+        )
+    }
+    async fn set_haptics(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _settings: HapticSettings,
+        _preview: bool,
+    ) -> Result<HapticSettings, WriteError> {
+        unreachable!("profile capture must never write haptics")
     }
     async fn set_backlight(
         self,
@@ -542,6 +564,7 @@ async fn receiver_capture_uses_agent_reads_and_writes_validated_profile_only() {
             ReadFamily::Wheel,
             // A mouse has no `0x1982`, so its backlight is recorded
             // unsupported without asking the agent.
+            ReadFamily::Haptics,
             ReadFamily::Smartshift,
         ]
     );

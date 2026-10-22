@@ -720,3 +720,34 @@ async fn easy_switch_names_are_kept_and_rejected_renames_change_nothing() {
         })
     );
 }
+
+#[tokio::test]
+async fn mock_haptics_write_reads_back() {
+    use openlogi_core::hid::{HapticIntensity, HapticLevels, HapticSettings};
+
+    let agent = MockAgent::new(test_state());
+    let reading = agent
+        .clone()
+        .read_haptics(tarpc::context::current(), mouse_route())
+        .await
+        .expect("the mouse exposes haptics");
+    assert_eq!(reading.levels, HapticLevels::Any);
+    let wanted = HapticSettings {
+        enabled: false,
+        power_save: true,
+        intensity: HapticIntensity::try_new(35).expect("in range"),
+    };
+    let applied = agent
+        .clone()
+        .set_haptics(tarpc::context::current(), mouse_route(), wanted, true)
+        .await
+        .expect("the write succeeds");
+    assert_eq!(applied, wanted);
+    let read_back = agent
+        .clone()
+        .read_haptics(tarpc::context::current(), mouse_route())
+        .await
+        .expect("the mouse reads back");
+    assert_eq!(read_back.settings, wanted);
+    assert_eq!(read_back.default_intensity, reading.default_intensity);
+}

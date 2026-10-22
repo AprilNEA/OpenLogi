@@ -746,3 +746,83 @@ fn keyboard_spec_never_diverts_reserved_controls() {
         BTreeMap::from([(0x010a, ButtonId::control(0x010a))])
     );
 }
+
+fn haptic_device(key: &str, slot: u8, online: bool) -> AgentDevice {
+    AgentDevice {
+        capabilities: Some(Capabilities {
+            haptic_feedback: true,
+            ..Capabilities::default()
+        }),
+        ..dev(key, slot, online)
+    }
+}
+
+fn haptics(enabled: bool, intensity: u8) -> openlogi_core::hid::HapticSettings {
+    openlogi_core::hid::HapticSettings {
+        enabled,
+        power_save: false,
+        intensity: openlogi_core::hid::HapticIntensity::try_new(intensity).expect("in range"),
+    }
+}
+
+#[test]
+fn reapply_carries_haptics_only_to_a_device_with_the_feature() {
+    let mut config = Config::default();
+    let mut device = haptic_device("a", 1, true);
+    // Nothing saved: the device keeps its own settings.
+    assert_eq!(configured_haptics(&config, &device), None);
+    config.set_haptics("a", haptics(true, 40));
+    assert_eq!(
+        configured_haptics(&config, &device),
+        Some(haptics(true, 40))
+    );
+    device.capabilities = Some(Capabilities::default());
+    assert_eq!(configured_haptics(&config, &device), None);
+}
+
+#[test]
+fn reload_writes_only_changed_haptics() {
+    let mut previous = Config::default();
+    previous.set_haptics("a", haptics(true, 60));
+    previous.set_haptics("b", haptics(true, 60));
+    let mut config = previous.clone();
+    config.set_haptics("a", haptics(false, 60));
+    config.set_haptics("c", haptics(true, 25));
+    config.set_haptics("d", haptics(true, 25));
+    let devices = [
+        haptic_device("a", 1, true),
+        haptic_device("b", 2, true),
+        haptic_device("c", 3, true),
+        // Offline: written when it reconnects instead.
+        haptic_device("d", 4, false),
+    ];
+    let written: Vec<_> = changed_haptics(&previous, &config, &devices)
+        .map(|(dev, settings)| (dev.config_key.as_str(), settings))
+        .collect();
+    assert_eq!(
+        written,
+        [("a", haptics(false, 60)), ("c", haptics(true, 25))],
+        "an unchanged device and an offline one are left alone"
+    );
+}
+
+#[test]
+fn ring_session_has_no_haptic_route_when_engine_off() {
+    use openlogi_core::config::RingHaptics;
+
+    let mut config = Config::default();
+    config.set_haptics("a", haptics(false, 60));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![haptic_device("a", 1, true)];
+    let spec = orch.action_ring_session(Some("a")).expect("the ring opens");
+    assert_eq!(spec.haptic_route, None, "a silenced engine plays nothing");
+    assert_eq!(spec.haptic_engine, RingHaptics::Off);
+
+    let mut config = Config::default();
+    config.set_haptics("a", haptics(true, 60));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![haptic_device("a", 1, true)];
+    let spec = orch.action_ring_session(Some("a")).expect("the ring opens");
+    assert_eq!(spec.haptic_route, orch.devices[0].route);
+    assert_eq!(spec.haptic_engine, RingHaptics::Owned);
+}

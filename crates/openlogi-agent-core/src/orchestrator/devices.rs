@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
+use openlogi_core::hid::HapticSettings;
 use openlogi_hid::session::gesture::MainWheelDivert;
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, LeadCookie, ReportRate};
 
@@ -108,6 +109,29 @@ pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Opti
         .is_some_and(|caps| caps.report_rate)
         .then(|| config.report_rate(&dev.config_key))
         .flatten()
+}
+
+/// The saved haptic settings to push to `dev`: only to a device with the
+/// haptic feature, as for [`configured_report_rate`].
+pub(super) fn configured_haptics(config: &Config, dev: &AgentDevice) -> Option<HapticSettings> {
+    dev.capabilities
+        .is_some_and(|caps| caps.haptic_feedback)
+        .then(|| config.haptics(&dev.config_key))
+        .flatten()
+}
+
+/// The online devices whose saved haptic settings differ between `previous`
+/// and `config`, with the settings to write. Clearing the setting writes
+/// nothing: the device keeps what it has.
+pub(super) fn changed_haptics<'a>(
+    previous: &'a Config,
+    config: &'a Config,
+    devices: &'a [AgentDevice],
+) -> impl Iterator<Item = (&'a AgentDevice, HapticSettings)> {
+    devices.iter().filter(|dev| dev.online).filter_map(|dev| {
+        let settings = configured_haptics(config, dev)?;
+        (configured_haptics(previous, dev) != Some(settings)).then_some((dev, settings))
+    })
 }
 
 /// How precision mode sets `dev`'s speed, with the value saved for it, or

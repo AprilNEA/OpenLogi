@@ -332,6 +332,13 @@ async fn capture_hidpp_settings(
         || agent::call(client.read_pointer_speed(context::current(), source_route.clone())),
     )
     .await?;
+    let haptics = gated_read(
+        "haptics",
+        device.online,
+        capabilities.haptic_feedback,
+        || agent::call(client.read_haptics(context::current(), source_route.clone())),
+    )
+    .await?;
 
     Ok(ProfileDeviceSettings {
         route: profile_route,
@@ -343,6 +350,7 @@ async fn capture_hidpp_settings(
         report_rate,
         easy_switch,
         pointer_speed,
+        haptics,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
@@ -422,6 +430,7 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         report_rate: ProfileSetting::Unsupported,
         easy_switch: ProfileSetting::Unsupported,
         pointer_speed: ProfileSetting::Unsupported,
+        haptics: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };

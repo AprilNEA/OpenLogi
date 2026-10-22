@@ -1080,3 +1080,42 @@ fn pointer_speed_and_precision_mode() {
     // Appended at the end of `Action`, so every earlier index is unchanged.
     assert_wire(&Action::TogglePrecisionMode, "36");
 }
+
+#[test]
+fn haptic_settings_requests_and_payloads() {
+    use openlogi_core::hid::{HapticIntensity, HapticLevels, HapticReading, HapticSettings};
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "F00DCAFE".into(),
+        slot: 1,
+    };
+    let settings = HapticSettings {
+        enabled: true,
+        power_save: false,
+        intensity: HapticIntensity::try_new(60).expect("in range"),
+    };
+    assert_wire(&settings, "01003c");
+    assert_wire(
+        &AgentRequest::ReadHaptics {
+            route: route.clone(),
+        },
+        "2a0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetHaptics {
+            route,
+            settings,
+            preview: true,
+        },
+        "2b000846303044434146450101003c01",
+    );
+    assert_wire(&HapticLevels::Any, "00");
+    assert_wire(&HapticLevels::Quarters, "01");
+    assert_wire(&HapticLevels::Other(7), "0207");
+    let reading: Result<HapticReading, WriteError> = Ok(HapticReading {
+        settings,
+        levels: HapticLevels::Quarters,
+        default_intensity: 60,
+    });
+    assert_wire(&reading, "0001003c013c");
+    assert_wire(&Ok::<HapticSettings, WriteError>(settings), "0001003c");
+}
