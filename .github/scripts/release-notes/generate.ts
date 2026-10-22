@@ -129,24 +129,53 @@ Commit details:
 ${truncate(commits, { length: 80_000, omission: "\n\n[truncated]" })}
 `;
 
+/** Log why the LLM notes were skipped. Inside Actions the line is a warning
+ * annotation, so it shows on the run summary instead of only in the step log. */
+function warnUnavailable(reason: string) {
+  const prefix = process.env.GITHUB_ACTIONS === "true" ? "::warning title=Release notes::" : "";
+  console.warn(`${prefix}Codex release notes unavailable: ${reason}`);
+}
+
+/** The expiry of a ChatGPT sign-in token, or `undefined` when `token` is not a
+ * JWT (an OpenAI API key) or carries no `exp` claim. */
+function jwtExpiry(token: string): Date | undefined {
+  const parts = token.split(".");
+  if (parts.length !== 3) return undefined;
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    return typeof claims.exp === "number" ? new Date(claims.exp * 1000) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 let notes = "";
 const codexAccessToken = process.env.CODEX_ACCESS_TOKEN || process.env.OPENAI_API_KEY;
-if (codexAccessToken) {
+// A ChatGPT sign-in token is a JWT and talks to the Codex backend; any other
+// credential is an OpenAI API key and talks to the OpenAI API.
+const chatgptToken = codexAccessToken?.split(".").length === 3;
+const expiry = codexAccessToken ? jwtExpiry(codexAccessToken) : undefined;
+if (!codexAccessToken) {
+  warnUnavailable("CODEX_ACCESS_TOKEN is not set");
+} else if (expiry && expiry.getTime() <= Date.now()) {
+  warnUnavailable(`the ChatGPT token in CODEX_ACCESS_TOKEN expired on ${expiry.toISOString()}; replace it`);
+} else {
   try {
     const response = await new OpenAI({
       apiKey: codexAccessToken,
-      baseURL: process.env.CODEX_ENDPOINT || "https://chatgpt.com/backend-api/codex",
-      defaultHeaders: process.env.CHATGPT_USERNAME ? { "ChatGPT-Account-ID": process.env.CHATGPT_USERNAME } : undefined,
+      baseURL: process.env.CODEX_ENDPOINT
+        || (chatgptToken ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1"),
+      defaultHeaders: chatgptToken && process.env.CHATGPT_USERNAME
+        ? { "ChatGPT-Account-ID": process.env.CHATGPT_USERNAME }
+        : undefined,
     }).responses.create({
       model: process.env.CODEX_MODEL || "gpt-5.5",
       input: prompt,
     });
     notes = response.output_text ?? "";
   } catch (error) {
-    console.warn(`Codex release notes unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    warnUnavailable(error instanceof Error ? error.message : String(error));
   }
-} else {
-  console.warn("Codex release notes unavailable: CODEX_ACCESS_TOKEN is not set");
 }
 
 if (!notes.trim()) {
