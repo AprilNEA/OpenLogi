@@ -97,6 +97,24 @@ impl ReleaseTag {
         }))
     }
 
+    /// The release tag this release's notes compare with: the newest release
+    /// tag in `merged_tags`, the tags reachable from this one, that is older
+    /// than this one. A stable release skips betas, so its notes cover every
+    /// change since the stable release before it; a beta compares with the
+    /// release just before it, beta or stable. Tags that are not release tags
+    /// are skipped. `None` when no older release tag is reachable.
+    pub(crate) fn notes_base<'a>(&self, merged_tags: &'a [String]) -> Option<&'a str> {
+        merged_tags
+            .iter()
+            .filter_map(|merged| Some((Self::parse(merged).ok()?, merged.as_str())))
+            .filter(|(merged, _)| merged.version < self.version)
+            .filter(|(merged, _)| {
+                self.channel() == UpdateChannel::Beta || merged.channel() == UpdateChannel::Stable
+            })
+            .max_by(|(left, _), (right, _)| left.version.cmp(&right.version))
+            .map(|(_, tag)| tag)
+    }
+
     /// The workspace version the tagged commit carries. A stable tag is on
     /// release-plz's version bump, so it is the tag's own version. A beta tags
     /// `master` between releases, so it is `base`'s, the stable release the

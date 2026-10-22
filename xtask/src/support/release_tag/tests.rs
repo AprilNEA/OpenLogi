@@ -217,3 +217,52 @@ fn a_build_version_is_only_numeric_fields() {
         assert!(text.parse::<BuildVersion>().is_err(), "{text:?} parsed");
     }
 }
+
+#[test]
+fn a_stable_release_notes_compare_with_the_stable_release_before_it() {
+    let merged = tags(&[
+        "v0.8.15",
+        "v0.8.16",
+        "v0.8.17-beta.3",
+        "v0.8.17-beta.12",
+        "v0.8.17",
+    ]);
+    let base = |tag: &str| ReleaseTag::parse(tag).unwrap().notes_base(&merged);
+    assert_eq!(
+        base("v0.8.17"),
+        Some("v0.8.16"),
+        "a stable release skips its betas"
+    );
+    assert_eq!(base("v0.8.16"), Some("v0.8.15"));
+    assert_eq!(
+        base("v0.8.15"),
+        None,
+        "the first release has nothing to compare with"
+    );
+}
+
+#[test]
+fn a_beta_notes_compare_with_the_release_just_before_it() {
+    let merged = tags(&["v0.8.16", "v0.8.17-beta.3", "v0.8.17-beta.12", "v0.8.17"]);
+    let base = |tag: &str| ReleaseTag::parse(tag).unwrap().notes_base(&merged);
+    assert_eq!(
+        base("v0.8.17-beta.12"),
+        Some("v0.8.17-beta.3"),
+        "beta numbers compare as numbers, not text"
+    );
+    assert_eq!(base("v0.8.17-beta.3"), Some("v0.8.16"));
+    assert_eq!(base("v0.8.18-beta.2"), Some("v0.8.17"));
+}
+
+#[test]
+fn release_notes_skip_tags_that_are_not_release_tags() {
+    let merged = tags(&[
+        "v0.8.16",
+        "v0.8.17-rc.1",
+        "v0.8.17+build.1",
+        "vnext",
+        "0.8.17",
+    ]);
+    let base = ReleaseTag::parse("v0.8.18").unwrap().notes_base(&merged);
+    assert_eq!(base, Some("v0.8.16"));
+}

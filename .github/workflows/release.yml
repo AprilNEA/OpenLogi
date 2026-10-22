@@ -38,6 +38,7 @@ jobs:
       channel: ${{ steps.version.outputs.channel }}
       version: ${{ steps.version.outputs.version }}
       build_version: ${{ steps.version.outputs.build_version }}
+      previous_tag: ${{ steps.version.outputs.previous_tag }}
     steps:
       # Full history with tags: a beta's build version counts from the stable
       # release tag before it.
@@ -94,7 +95,10 @@ jobs:
   release-notes:
     name: Generate release notes
     # Tag runs only: the generator diffs from the previous tag, and its only
-    # consumer (publish) is tag-gated too.
+    # consumer (publish) is tag-gated too. `release version` picks that tag:
+    # for a stable release the stable release before it, so the notes cover
+    # its betas.
+    needs: version
     if: ${{ github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
     permissions:
@@ -144,10 +148,13 @@ jobs:
           CHATGPT_USERNAME: ${{ steps.release_notes_config.outputs.CHATGPT_USERNAME }}
           CODEX_ENDPOINT: ${{ steps.release_notes_config.outputs.CODEX_ENDPOINT }}
           GH_TOKEN: ${{ steps.release_notes_app_token.outputs.token }}
+          PREVIOUS_TAG: ${{ needs.version.outputs.previous_tag }}
         run: |
           set -euo pipefail
+          # An empty tag (the first release) compares with nothing.
           node .github/scripts/release-notes/generate.ts \
             --tag "$GITHUB_REF_NAME" \
+            --previous-tag "$PREVIOUS_TAG" \
             --output .release/RELEASE_NOTES.md
 
       - uses: actions/upload-artifact@v7
@@ -174,12 +181,13 @@ jobs:
     # macOS release. The Windows/Linux legs stay best-effort (pattern download).
     if: ${{ github.ref_type == 'tag' && !cancelled() && needs.version.result == 'success' && needs.build.outputs.macos_result == 'success' && needs.release-notes.result == 'success' }}
     # The channel files on R2 are shared by every release. One publish at a
-    # time keeps two tags from interleaving their writes. GitHub keeps one
-    # waiting publish per group: a third tag cancels the waiting one, which
-    # then needs a manual re-run.
+    # time keeps two tags from interleaving their writes. `queue: max` keeps
+    # every waiting publish (up to 100) instead of only the newest one;
+    # waiting publishes start in the order they began to wait.
     concurrency:
       group: release-publish
       cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
     env:

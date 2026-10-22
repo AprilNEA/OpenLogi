@@ -148,7 +148,7 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 |---|---|---|
 | `rustfmt` | `cargo fmt --all -- --check` | any |
 | `typos` | `typos --config .config/typos.toml .` | any (needs `typos`; included in the devenv shell) |
-| `ast-grep` | `ast-grep scan` | any (needs `ast-grep`; included in the devenv shell). The single-source-of-truth guards stored with their owners and registered in root `sgconfig.yml` |
+| `ast-grep` | `ast-grep scan`, then `ast-grep scan .github` | any (needs `ast-grep`; included in the devenv shell). The single-source-of-truth guards stored with their owners and registered in root `sgconfig.yml` |
 | `publish closure` | `cargo xtask release check-publish` | any |
 | `shell` | `git ls-files -z \| xargs -0 shfmt -f` piped into `xargs shellcheck` and `xargs shfmt -d` | any (needs `shellcheck` + `shfmt`; both are in the devenv shell) |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | **Linux** is the CI job. Host clippy on macOS/Windows compiles a different `cfg` |
@@ -179,6 +179,7 @@ Load the [ast-grep skill](../skills/ast-grep/SKILL.md) for structural searches, 
 - Register each rule directory in the root `sgconfig.yml`. Keep one project config. Rule `files` and `ignores` selectors are relative to that project root, not the YAML file.
 - Preserve unique rule IDs and name the owner in the diagnostic. For the consolidation trigger, follow [Single source of truth](../../AGENTS.md#single-source-of-truth).
 - Choose traversal depth for the intended relationship. Use `stopBy: end` only when the rule must search all ancestors or descendants.
+- `ast-grep scan` skips hidden directories. A rule over `.github` (workflows, release scripts) runs in CI and `cargo xtask ci ast-grep` only through their explicit `ast-grep scan .github`; the prek hook passes staged files by name, which ast-grep scans even under `.github`. Check such a rule with `ast-grep scan .github`.
 - Run `ast-grep scan` from the repository root after a rule or config change. The current tree must pass. Verify that the prohibited copy fails, the owner passes, and unrelated code passes. Use the pre-consolidation commit or a temporary fixture tree. Include a consumer in another crate when the guard applies across crates; `ast-grep test` snippets alone do not prove path selectors.
 - When moving rules, compare rule IDs and contents before and after. Confirm that `ast-grep scan --inspect summary` loads every rule, then repeat the path checks above. Keep rule-directory ownership in `.github/CODEOWNERS`.
 

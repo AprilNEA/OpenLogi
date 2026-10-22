@@ -492,7 +492,11 @@ uploaded after the artifacts they point at, and only a stable release moves
 them. Until beta releases publish their own, a stable release writes the same
 `latest.json` to both channels, so the newest release on the beta channel is
 the newest stable one. Publish jobs run one at a time (the `release-publish`
-concurrency group), so two tags never interleave these writes.
+concurrency group), so two tags never interleave these writes. Waiting publish
+jobs queue (`queue: max`) instead of replacing each other, and start in the
+order they began to wait. A publish re-run for an older stable tag moves the
+channel files and the latest GitHub Release back to that tag. Before you re-run
+one, check that no newer stable tag has published.
 
 Generate the Sparkle key pair once, with the `generate_keys` tool from the
 [Sparkle release](https://github.com/sparkle-project/Sparkle/releases) xtask
@@ -595,8 +599,9 @@ The publish side follows the channel. A beta becomes a GitHub prerelease and
 never the latest release. It leaves the channel files, the installer site and
 the Homebrew cask as they are. A stable release's notes compare with the
 previous stable tag, so they cover its betas too; a beta's notes compare with
-the tag just before it. The release workflow still stops a beta tag before the
-build, until the beta feeds exist.
+the tag just before it. `cargo xtask release version` picks that tag and prints
+it as `previous_tag`; the release-notes generator only uses it. The release
+workflow still stops a beta tag before the build, until the beta feeds exist.
 
 ## Crowdin translation sync
 

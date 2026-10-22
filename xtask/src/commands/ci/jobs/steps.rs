@@ -185,12 +185,19 @@ fn typos(job: Job) -> Plan {
 }
 
 /// Scan the whole tree with the single-source-of-truth guards stored with their owners.
-/// Root `sgconfig.yml` registers the rule directories.
+/// Root `sgconfig.yml` registers the rule directories. `ast-grep scan` skips
+/// hidden directories, so `.github` is scanned by name.
 fn ast_grep(job: Job) -> Plan {
     if !command_exists("ast-grep") {
         return Plan::skip(job, "needs ast-grep (included in the devenv shell)");
     }
-    Plan::run(job, [Step::new("ast-grep").args(["scan"])])
+    Plan::run(
+        job,
+        [
+            Step::new("ast-grep").args(["scan"]),
+            Step::new("ast-grep").args(["scan", ".github"]),
+        ],
+    )
 }
 
 /// shellcheck and shfmt over every tracked shell script.

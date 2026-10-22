@@ -1,0 +1,19 @@
+# Owner: xtask's `support::release_tag` — which channel a release tag belongs
+# to.
+id: xtask-release-tag-owner-workflows
+language: yaml
+severity: error
+message: Release channels are decided by xtask's support::release_tag; read the `version` job's `channel` output instead of matching `-beta` in a workflow.
+note: |
+  `cargo xtask release version` parses the tag once and prints its channel.
+  A workflow that matched `-beta` in the tag would be a second parser.
+  See "Single source of truth" in AGENTS.md.
+files:
+  - .github/workflows/**
+rule:
+  regex: "-beta"
+  any:
+    - kind: string_scalar
+    - kind: single_quote_scalar
+    - kind: double_quote_scalar
+    - kind: block_scalar

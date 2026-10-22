@@ -39,10 +39,10 @@ devenv shell -- cargo run -p xtask -- <command>
   Sparkle's EdDSA key and write one appcast per architecture.
 - `release sparkle-deltas` — make verified Sparkle deltas from the newest
   earlier releases to a stapled DMG, with the metadata `release appcast` reads.
-- `release version` — print a release tag's channel, version and build
-  version as GitHub Actions outputs, after checking the tagged commit's
-  workspace version: the tag's for a stable tag, and the stable release it
-  follows for a beta.
+- `release version` — print a release tag's channel, version, build version
+  and the previous tag its release notes compare with as GitHub Actions
+  outputs, after checking the tagged commit's workspace version: the tag's for
+  a stable tag, and the stable release it follows for a beta.
 
 ### Bundle identity
 
