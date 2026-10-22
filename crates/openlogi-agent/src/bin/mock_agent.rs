@@ -697,6 +697,7 @@ fn agent_status() -> AgentStatus {
         input_monitoring_granted: true,
         hid_open_failures: false,
         secure_input: openlogi_ipc::SecureInput::Off,
+        battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
     }
 }
 

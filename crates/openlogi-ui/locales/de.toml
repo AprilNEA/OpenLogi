@@ -85,6 +85,18 @@ animate_desktop_switch = "Schreibtischwechsel animieren"
 animate_desktop_switch_description = "Vorheriger Schreibtisch und Nächster Schreibtisch gleiten wie beim Streichen mit drei Fingern zum benachbarten Schreibtisch. Ausschalten, um sofort zu wechseln."
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Akkus im macOS-Widget anzeigen"
+description = "Experimentell. Zeigt Mäuse und Tastaturen mit Bolt oder Unifying im macOS-Widget „Batterien“. Kann nach einem macOS-Update ausfallen."
+starting = "Wird gestartet"
+waiting = "Warte auf OpenLogi-Agent"
+active_singular = "Aktiv · %{count} Gerät"
+active_plural = "Aktiv · %{count} Geräte"
+empty = "Noch keine Maus oder Tastatur über Bolt oder Unifying hat einen Akkustand in Prozent gemeldet. Bluetooth-Geräte zeigt macOS selbst an."
+unavailable = "Auf dieser macOS-Version nicht verfügbar"
+failed_singular = "Akkuaktualisierung fehlgeschlagen · %{count} Gerät veröffentlicht"
+failed_plural = "Akkuaktualisierung fehlgeschlagen · %{count} Geräte veröffentlicht"
+
 [device]
 no_devices_connected = "Kein Gerät verbunden"
 devices = "Geräte"

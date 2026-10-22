@@ -413,6 +413,8 @@ impl SharedHandles {
 /// Owns the config + device selection and keeps [`SharedHandles`] in sync.
 pub struct Orchestrator {
     config: Config,
+    /// Wakes runtime integrations after a configuration has been adopted.
+    config_changes: watch::Sender<()>,
     devices: Vec<AgentDevice>,
     current: usize,
     current_app: Option<String>,
@@ -560,6 +562,7 @@ impl Orchestrator {
         };
         let orch = Self {
             config,
+            config_changes: watch::channel(()).0,
             devices: Vec::new(),
             current: 0,
             current_app: None,
@@ -1513,6 +1516,18 @@ impl Orchestrator {
         previous != self.mouse_context().1
     }
 
+    /// Borrow the live agent config (custom names, settings).
+    #[must_use]
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Subscribe to adopted configuration changes, including custom device names.
+    #[must_use]
+    pub fn subscribe_config_changes(&self) -> watch::Receiver<()> {
+        self.config_changes.subscribe()
+    }
+
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     /// The file is one the agent did not see saved, as at startup or after a
     /// hand edit (see [`ConfigSource::Loaded`]).
@@ -1600,6 +1615,7 @@ impl Orchestrator {
             &mut self.follower_cookies(),
         );
         self.write_follower_cookies(writes);
+        self.config_changes.send_replace(());
         self.changed_lights(&previous_lights)
     }
 

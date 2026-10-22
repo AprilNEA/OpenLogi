@@ -85,6 +85,18 @@ animate_desktop_switch = "デスクトップ切り替えのアニメーション
 animate_desktop_switch_description = "「前のデスクトップ」と「次のデスクトップ」で、3本指スワイプのように隣のデスクトップへスライドします。オフにするとすぐに切り替わります。"
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Show batteries in macOS widget"
+description = "Experimental. Shows Bolt and Unifying mice and keyboards in the macOS Batteries widget. May stop working after a macOS update."
+starting = "Starting"
+waiting = "Waiting for OpenLogi agent"
+active_singular = "Active · %{count} device"
+active_plural = "Active · %{count} devices"
+empty = "No Bolt or Unifying mouse or keyboard has reported a battery percentage yet. macOS shows Bluetooth devices itself."
+unavailable = "Unavailable on this version of macOS"
+failed_singular = "Battery updates failed · %{count} device published"
+failed_plural = "Battery updates failed · %{count} devices published"
+
 [device]
 no_devices_connected = "デバイスが接続されていません"
 devices = "デバイス"

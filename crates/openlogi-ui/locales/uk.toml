@@ -85,6 +85,18 @@ animate_desktop_switch = "Анімувати перемикання робочи
 animate_desktop_switch_description = "«Попередній робочий стіл» і «Наступний робочий стіл» плавно переходять на сусідній стіл, як під час змахування трьома пальцями. Вимкніть, щоб перемикатися одразу."
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Show batteries in macOS widget"
+description = "Experimental. Shows Bolt and Unifying mice and keyboards in the macOS Batteries widget. May stop working after a macOS update."
+starting = "Starting"
+waiting = "Waiting for OpenLogi agent"
+active_singular = "Active · %{count} device"
+active_plural = "Active · %{count} devices"
+empty = "No Bolt or Unifying mouse or keyboard has reported a battery percentage yet. macOS shows Bluetooth devices itself."
+unavailable = "Unavailable on this version of macOS"
+failed_singular = "Battery updates failed · %{count} device published"
+failed_plural = "Battery updates failed · %{count} devices published"
+
 [device]
 no_devices_connected = "Пристрої не підключено"
 devices = "Пристрої"

@@ -16,7 +16,8 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::device::{
-    BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
+    BatteryInfo, BatteryWidgetStatus, ChangedOnLight, DeviceInventory, DeviceKind, LightState,
+    LockKey, StandaloneDevice,
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
@@ -131,7 +132,8 @@ pub use succession::Identity;
 ///      that precision mode lights. `ReceiverSelector::ReceiverUid`
 ///      appended — a pairing target matched by receiver product ID and
 ///      unique ID, never falling back to another receiver.
-pub const PROTOCOL_VERSION: u32 = 38;
+/// v39: `AgentStatus::battery_widget` appended.
+pub const PROTOCOL_VERSION: u32 = 39;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -209,6 +211,8 @@ pub struct AgentStatus {
     pub hid_open_failures: bool,
     /// See [`SecureInput`].
     pub secure_input: SecureInput,
+    /// Experimental macOS battery publisher state, including partial failures.
+    pub battery_widget: BatteryWidgetStatus,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never

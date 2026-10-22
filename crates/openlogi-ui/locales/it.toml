@@ -85,6 +85,18 @@ animate_desktop_switch = "Anima il cambio di scrivania"
 animate_desktop_switch_description = "Scrivania precedente e Scrivania successiva scorrono verso la scrivania adiacente, come uno scorrimento a tre dita. Disattiva per cambiare all'istante."
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Show batteries in macOS widget"
+description = "Experimental. Shows Bolt and Unifying mice and keyboards in the macOS Batteries widget. May stop working after a macOS update."
+starting = "Starting"
+waiting = "Waiting for OpenLogi agent"
+active_singular = "Active · %{count} device"
+active_plural = "Active · %{count} devices"
+empty = "No Bolt or Unifying mouse or keyboard has reported a battery percentage yet. macOS shows Bluetooth devices itself."
+unavailable = "Unavailable on this version of macOS"
+failed_singular = "Battery updates failed · %{count} device published"
+failed_plural = "Battery updates failed · %{count} devices published"
+
 [device]
 no_devices_connected = "Nessun dispositivo connesso"
 devices = "Dispositivi"
