@@ -1,6 +1,6 @@
 //! The ring itself: the GPUI view, and the window it is drawn in.
 //!
-//! Where a client can place its own windows, the window is the ring: a 360×360
+//! Where a client can place its own windows, the window is the ring: a 480×480
 //! panel centred on the cursor and clamped to its display. Wayland allows
 //! neither half of that, so there each display gets a window covering it and
 //! the same panel is drawn at the pointer, in the one window that heard it last.
@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use crate::ipc::OverlayCommand;
 use crate::session::{self, ClickAwaySession, ShowingRing};
 
-pub(crate) const WINDOW_SIZE: f32 = 560.0;
+pub(crate) const WINDOW_SIZE: f32 = 480.0;
 /// Identifies the ring's windows to the compositor, whatever kind they are.
 pub(crate) const RING_APP_ID: &str = "openlogi-action-ring";
 
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn a_window_sized_ring_fills_its_window() {
         assert_eq!(
-            panel_origin(Placement::Window, None, Size::new(px(560.0), px(560.0))),
+            panel_origin(Placement::Window, None, Size::new(px(480.0), px(480.0))),
             Some(Point::default())
         );
     }
@@ -287,7 +287,7 @@ mod tests {
                 Some(point(px(900.0), px(500.0))),
                 Size::new(px(1920.0), px(1080.0))
             ),
-            Some(point(px(620.0), px(220.0)))
+            Some(point(px(660.0), px(260.0)))
         );
     }
 
@@ -299,7 +299,7 @@ mod tests {
                 Some(point(px(4.0), px(1076.0))),
                 Size::new(px(1920.0), px(1080.0))
             ),
-            Some(point(px(0.0), px(520.0)))
+            Some(point(px(0.0), px(600.0)))
         );
     }
 
