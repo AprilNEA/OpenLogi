@@ -22,11 +22,14 @@ use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
+use crate::dpi::DpiBeforeShift;
 use crate::hardware::{
-    DeviceAccess, toggle_smartshift_in_background, write_pointer_speed_in_background,
+    DeviceAccess, restore_dpi_in_background, toggle_smartshift_in_background,
+    write_pointer_speed_in_background,
 };
 use crate::pointer_speed::{PrecisionPress, SpeedWrite};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
+use openlogi_hid::{DeviceRoute, Dpi};
 
 /// Application identity captured with a physical press and retained through
 /// asynchronous button dispatch.
@@ -126,6 +129,11 @@ impl ActionExecutor {
     /// Write `write` in the background, and settle the restore it carries
     /// once it lands.
     fn write_speed(&self, write: SpeedWrite) {
+        self.write_speed_reading(write, None);
+    }
+
+    /// [`Self::write_speed`], first reading the sensor DPI into `before`.
+    fn write_speed_reading(&self, write: SpeedWrite, before: Option<DpiBeforeShift>) {
         let speeds = Arc::clone(&self.pointer_speeds);
         let SpeedWrite {
             route,
@@ -134,11 +142,29 @@ impl ActionExecutor {
             restore,
             led,
         } = write;
-        write_pointer_speed_in_background(self.access.op(&route), ticket, target, led, move || {
-            if let Some(restore) = restore {
-                speeds.restored(&restore);
+        write_pointer_speed_in_background(
+            self.access.op(&route),
+            ticket,
+            target,
+            led,
+            before,
+            move || {
+                if let Some(restore) = restore {
+                    speeds.restored(&restore);
+                }
+            },
+        );
+    }
+
+    /// Step `device_key`'s DPI presets one up or down, without wrapping.
+    fn step_dpi(&self, device_key: Option<&str>, up: bool) -> Option<(Dpi, Option<DeviceRoute>)> {
+        match self.dpi_cycle.write() {
+            Ok(mut guard) => guard.state_for(device_key).and_then(|state| state.step(up)),
+            Err(e) => {
+                warn!(error = %e, "dpi_cycle lock poisoned — step skipped");
+                None
             }
-        });
+        }
     }
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
@@ -182,6 +208,9 @@ impl ActionExecutor {
                         None
                     }
                 }
+            }
+            Action::NextDpiPreset | Action::PreviousDpiPreset => {
+                self.step_dpi(device_key, matches!(action, Action::NextDpiPreset))
             }
             Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
                 Ok(mut guard) => guard
@@ -250,7 +279,13 @@ impl ActionExecutor {
             } else {
                 debug!(%dpi, "no target device — DPI write skipped");
             }
-        } else if matches!(action, Action::CycleDpiPresets | Action::SetDpiPreset(_)) {
+        } else if matches!(
+            action,
+            Action::CycleDpiPresets
+                | Action::SetDpiPreset(_)
+                | Action::NextDpiPreset
+                | Action::PreviousDpiPreset
+        ) {
             info!(
                 action = %action.label(),
                 "no DPI presets configured for active device — press ignored"
@@ -259,9 +294,102 @@ impl ActionExecutor {
     }
 }
 
+/// Held DPI-shift presses per device.
+///
+/// Releasing the last one returns to the DPI config or an action last set, so
+/// a preset picked during the hold stays. When OpenLogi never set one, it
+/// returns to the DPI read from the mouse before the shift.
+#[derive(Default)]
+struct HeldDpiShifts {
+    by_press: HashMap<PressToken, String>,
+    by_device: HashMap<String, HeldDpiShift>,
+    before: HashMap<String, DpiBeforeShift>,
+}
+
+struct HeldDpiShift {
+    presses: usize,
+    key: String,
+    route: DeviceRoute,
+    before: DpiBeforeShift,
+}
+
+impl HeldDpiShift {
+    /// None while precision mode, turned on during the hold, owns the speed;
+    /// the reading goes too, as the end of precision mode sets the DPI.
+    fn restore_to(&self, cycles: &DpiCycles, speeds: &PointerSpeeds) -> Option<Dpi> {
+        if speeds.precision(&self.key) {
+            self.before.clear();
+            return None;
+        }
+        cycles.current(&self.key).or_else(|| self.before.get())
+    }
+}
+
+impl HeldDpiShifts {
+    fn start(&mut self, executor: &ActionExecutor, press: &PressToken, device_key: Option<&str>) {
+        if self.by_press.contains_key(press) {
+            return;
+        }
+        let shift = executor.dpi_cycle.read().ok().and_then(|cycles| {
+            let (key, low, route) = cycles.target_for_shift(device_key)?;
+            Some((key.to_owned(), low, route, cycles.current(key)))
+        });
+        let Some((key, low, route, current)) = shift else {
+            debug!("no DPI presets or target — DPI shift ignored");
+            return;
+        };
+        let device = route.to_string();
+        self.by_press.insert(press.clone(), device.clone());
+        if let Some(held) = self.by_device.get_mut(&device) {
+            held.presses += 1;
+            return;
+        }
+        info!(%low, "DPI shift held");
+        let before = self.before.entry(device.clone()).or_default().clone();
+        executor.write_speed_reading(
+            executor.pointer_speeds.preset_write(&route, low),
+            current.is_none().then(|| before.clone()),
+        );
+        self.by_device.insert(
+            device,
+            HeldDpiShift {
+                presses: 1,
+                key,
+                route,
+                before,
+            },
+        );
+    }
+
+    fn end(&mut self, executor: &ActionExecutor, press: &PressToken) {
+        let Some(device) = self.by_press.remove(press) else {
+            return;
+        };
+        let Some(held) = self.by_device.get_mut(&device) else {
+            return;
+        };
+        held.presses -= 1;
+        if held.presses > 0 {
+            return;
+        }
+        let Some(held) = self.by_device.remove(&device) else {
+            return;
+        };
+        let cycles = Arc::clone(&executor.dpi_cycle);
+        let speeds = Arc::clone(&executor.pointer_speeds);
+        restore_dpi_in_background(
+            executor.access.op(&held.route),
+            executor.pointer_speeds.ticket(&held.route),
+            held.before.clone(),
+            move || held.restore_to(&*cycles.read().ok()?, &speeds),
+        );
+    }
+}
+
 struct ButtonEventHandler {
     executor: ActionExecutor,
     held: HeldShortcuts,
+    held_dpi: HeldDpiShifts,
 }
 
 impl ButtonEventHandler {
@@ -269,6 +397,7 @@ impl ButtonEventHandler {
         Self {
             executor,
             held: HeldShortcuts::default(),
+            held_dpi: HeldDpiShifts::default(),
         }
     }
 
@@ -284,6 +413,7 @@ impl ButtonEventHandler {
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
                 self.held.end(press.token());
+                self.held_dpi.end(&self.executor, press.token());
                 if let EndReason::Canceled(reason) = reason {
                     match press.control() {
                         PressControl::Button(button) => {
@@ -306,6 +436,10 @@ impl ButtonEventHandler {
         target: ActionDispatchTarget,
     ) {
         if action.held_chord().is_some() && target.resolve(action).is_none() {
+            return;
+        }
+        if matches!(action, Action::DpiShift) {
+            self.held_dpi.start(&self.executor, press, device_key);
             return;
         }
         if !self.held.start(press, action) {
@@ -677,6 +811,7 @@ mod tests {
                 index: 0,
                 target: Some(route),
                 capabilities: None,
+                ..DpiCycleState::default()
             },
         );
         executor.dpi_cycle = Arc::new(RwLock::new(cycles));
@@ -718,6 +853,7 @@ mod tests {
                 index: 0,
                 target: Some(route),
                 capabilities: None,
+                ..DpiCycleState::default()
             },
         );
         executor.dpi_cycle = Arc::new(RwLock::new(cycles));
@@ -772,6 +908,122 @@ mod tests {
 
         assert!(!held.start(&press, &Action::Copy));
         held.end(&press);
+    }
+
+    /// An executor for one mouse with presets and no reachable device.
+    fn dpi_shift_executor(current: Option<Dpi>) -> ActionExecutor {
+        let mut cycles = DpiCycles::default();
+        cycles.by_key.insert(
+            "mouse".into(),
+            DpiCycleState {
+                presets: vec![Dpi::new(400), Dpi::new(1600)],
+                target: Some(DeviceRoute::Bolt {
+                    receiver_uid: "AA00".into(),
+                    slot: 1,
+                }),
+                current,
+                ..DpiCycleState::default()
+            },
+        );
+        let mut executor = executor_with(Arc::default());
+        executor.dpi_cycle = Arc::new(RwLock::new(cycles));
+        executor
+    }
+
+    #[test]
+    fn dpi_shift_ends_only_with_the_last_held_press() {
+        let executor = dpi_shift_executor(Some(Dpi::new(1200)));
+        let (first, second) = (
+            PressToken::hook_for_test(1, ButtonId::G6),
+            PressToken::hook_for_test(2, ButtonId::G7),
+        );
+        let mut held = HeldDpiShifts::default();
+        held.start(&executor, &first, Some("mouse"));
+        held.start(&executor, &second, Some("mouse"));
+        held.end(&executor, &first);
+        assert_eq!(held.by_device.values().next().map(|h| h.presses), Some(1));
+        held.end(&executor, &second);
+        assert!(held.by_device.is_empty() && held.by_press.is_empty());
+    }
+
+    /// A press right after a release can supersede the pending restore while
+    /// the sensor is still at the shifted DPI, so it must not read again.
+    #[test]
+    fn dpi_shift_keeps_its_reading_until_a_restore_is_written() {
+        let executor = dpi_shift_executor(None);
+        let (first, second) = (
+            PressToken::hook_for_test(1, ButtonId::G6),
+            PressToken::hook_for_test(2, ButtonId::G6),
+        );
+        let mut held = HeldDpiShifts::default();
+        held.start(&executor, &first, Some("mouse"));
+        let before = held.by_device.values().next().unwrap().before.clone();
+        before.set(Dpi::new(1200));
+        held.end(&executor, &first);
+
+        held.start(&executor, &second, Some("mouse"));
+        let again = &held.by_device.values().next().unwrap().before;
+        assert_eq!(again.get(), Some(Dpi::new(1200)));
+        before.clear();
+        assert_eq!(again.get(), None, "a written restore forgets the reading");
+    }
+
+    #[test]
+    fn dpi_shift_returns_to_the_dpi_last_set_or_else_the_one_it_read() {
+        let mut cycles = DpiCycles::default();
+        cycles.by_key.insert(
+            "mouse".into(),
+            DpiCycleState {
+                presets: vec![Dpi::new(400), Dpi::new(1600)],
+                ..DpiCycleState::default()
+            },
+        );
+        let held = held_shift();
+        let speeds = PointerSpeeds::default();
+        // Never set and not read yet: a preset is not the DPI to return to.
+        assert_eq!(held.restore_to(&cycles, &speeds), None);
+        held.before.set(Dpi::new(1200));
+        assert_eq!(held.restore_to(&cycles, &speeds), Some(Dpi::new(1200)));
+        // A preset picked during the hold stays after release.
+        cycles.state_for(Some("mouse")).unwrap().step(true);
+        assert_eq!(held.restore_to(&cycles, &speeds), Some(Dpi::new(1600)));
+    }
+
+    /// A shift on "mouse" at a Bolt route, with nothing read yet.
+    fn held_shift() -> HeldDpiShift {
+        HeldDpiShift {
+            presses: 1,
+            key: "mouse".into(),
+            route: DeviceRoute::Bolt {
+                receiver_uid: "AA00".into(),
+                slot: 1,
+            },
+            before: DpiBeforeShift::default(),
+        }
+    }
+
+    /// Precision mode turned on during the hold owns the speed, so the
+    /// release leaves the mouse at the precision DPI and forgets its reading.
+    #[test]
+    fn dpi_shift_release_leaves_precision_mode_alone() {
+        let held = held_shift();
+        let speeds = PointerSpeeds::default();
+        speeds.publish(
+            None,
+            [crate::pointer_speed::SpeedMouse {
+                key: "mouse".to_string(),
+                route: held.route.clone(),
+                saved: crate::pointer_speed::SavedSpeed::Dpi(Some(Dpi::new(1600))),
+            }],
+        );
+        let (on, _) = speeds
+            .toggle_precision(Some("mouse"), PrecisionPress::Assigned)
+            .expect("a DPI mouse toggles precision mode");
+        assert!(on);
+        held.before.set(Dpi::new(1200));
+        let cycles = DpiCycles::default();
+        assert_eq!(held.restore_to(&cycles, &speeds), None);
+        assert_eq!(held.before.get(), None);
     }
 
     #[test]

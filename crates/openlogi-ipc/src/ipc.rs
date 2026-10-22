@@ -20,8 +20,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    LightCommand, OnboardState, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector,
+    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -131,6 +131,11 @@ pub use succession::Identity;
 ///      that precision mode lights. `ReceiverSelector::ReceiverUid`
 ///      appended — a pairing target matched by receiver product ID and
 ///      unique ID, never falling back to another receiver.
+///      `Capabilities::{onboard_profiles, button_spy}`, the `NextDpiPreset`,
+///      `PreviousDpiPreset`, `DpiShift` and `GShift` actions,
+///      `Agent::read_onboard`, `HidppOperation::ReadOnboard` and
+///      `PairingFailure::ReceiverFull` appended — G-series onboard memory,
+///      host mode and G-Shift.
 pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -406,6 +411,8 @@ pub enum PairingFailure {
     UnknownDevice,
     /// There is no pairing session to receive this command.
     NoActiveSession,
+    /// The receiver has no free slot.
+    ReceiverFull,
 }
 
 /// Immediate command-acceptance failure for pairing RPCs.
@@ -461,6 +468,7 @@ impl From<PairingError> for PairingFailure {
             PairingError::MalformedNotification(what) => Self::Hid {
                 message: format!("malformed pairing notification ({what})"),
             },
+            PairingError::ReceiverFull => Self::ReceiverFull,
         }
     }
 }
@@ -870,4 +878,7 @@ pub trait Agent {
         route: DeviceRoute,
         speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError>;
+
+    /// Read a G-series mouse's onboard memory.
+    async fn read_onboard(route: DeviceRoute) -> Result<OnboardState, WriteError>;
 }

@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Binding, ButtonId};
+use openlogi_core::binding::{Binding, ButtonId, GamingLayout};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
     AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
@@ -40,6 +40,7 @@ use tracing::{debug, info, warn};
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    shift_bindings_for,
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
@@ -47,7 +48,9 @@ use crate::hardware::{
 };
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
-use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
+use crate::pointer_speed::{
+    AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedTarget, SpeedWrite,
+};
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
@@ -647,6 +650,7 @@ impl Orchestrator {
         let mut gestures = oshook_gestures_for(&self.config, key, app);
         if cfg!(target_os = "macos")
             && let Some(key) = key
+            && !self.is_spy_only(key)
         {
             for button in hidpp_side_gesture_maps_for(&self.config, key, app)
                 .keys()
@@ -660,13 +664,32 @@ impl Orchestrator {
                 gestures.remove(button);
             }
         }
+        let shift_bindings = key
+            .map(|key| shift_bindings_for(&self.config, key))
+            .unwrap_or_default();
         HookMaps {
             bindings,
             gestures,
             pointer_target,
             selected_device: key.map(str::to_owned),
+            shift_bindings,
             ..HookMaps::default()
         }
+    }
+
+    /// Whether `key` is a G-series mouse: one with a layout, or any other
+    /// without ReprogControls. It has no `0x1b04` raw XY, so its gesture
+    /// buttons stay with the OS hook.
+    fn is_spy_only(&self, key: &str) -> bool {
+        self.devices
+            .iter()
+            .find(|dev| dev.config_key == key)
+            .is_some_and(|dev| {
+                GamingLayout::for_model_key(&dev.model_key).is_some()
+                    || dev
+                        .capabilities
+                        .is_some_and(|capabilities| capabilities.no_button_diversion())
+            })
     }
 
     /// Publish hook maps while preserving thumb-wheel polarities learned from
@@ -678,6 +701,7 @@ impl Orchestrator {
             Ok(mut current) => {
                 maps.thumbwheel_positive_is_forward =
                     std::mem::take(&mut current.thumbwheel_positive_is_forward);
+                maps.shift_held = std::mem::take(&mut current.shift_held);
                 *current = maps;
             }
             Err(error) => {
@@ -831,18 +855,34 @@ impl Orchestrator {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            let presets = self.config.dpi_presets(&dev.config_key);
+            let mut presets = self.config.dpi_presets(&dev.config_key);
+            if presets.is_empty()
+                && let Some(layout) = GamingLayout::for_model_key(&dev.model_key)
+            {
+                presets = layout
+                    .stock_dpi_presets
+                    .iter()
+                    .copied()
+                    .map(Dpi::new)
+                    .collect();
+            }
+            let committed = configured_dpi(&self.config, dev);
             let previous = guard
                 .by_key
                 .get(&dev.config_key)
-                .filter(|state| state.presets == presets);
+                .filter(|state| state.committed == committed);
+            let current = previous.map_or(committed, |state| state.current);
+            let nearest = current.and_then(|dpi| crate::dpi::nearest_preset(&presets, dpi));
+            let same_presets = previous.filter(|state| state.presets == presets);
             by_key.insert(
                 dev.config_key.clone(),
                 DpiCycleState {
-                    index: previous.map_or(0, |state| state.index),
-                    capabilities: previous.and_then(|state| state.capabilities.clone()),
+                    index: same_presets.map_or_else(|| nearest.unwrap_or(0), |state| state.index),
+                    capabilities: same_presets.and_then(|state| state.capabilities.clone()),
                     presets,
                     target: Some(route),
+                    current,
+                    committed,
                 },
             );
         }
@@ -918,6 +958,8 @@ impl Orchestrator {
             plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
             plan.target.spec.divert_main_wheel =
                 main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
+            let mut plan =
+                plan.with_onboard(&self.config, GamingLayout::for_model_key(&dev.model_key));
             if let Some(keyboard) = keyboard
                 .as_ref()
                 .filter(|keyboard| keyboard.route == plan.target.route)
@@ -1169,6 +1211,20 @@ impl Orchestrator {
                 .and_then(|d| d.effective_smartshift(&route_key))
                 .map(openlogi_hid::SmartShiftStatus::from),
         };
+        // The saved DPI goes out with the speed write on a DPI mouse.
+        let written_dpi =
+            settings
+                .dpi
+                .or_else(|| match speed_write.as_ref().map(|write| &write.target) {
+                    Some(SpeedTarget::Dpi(openlogi_hid::DpiTarget::Value(dpi))) => Some(*dpi),
+                    _ => None,
+                });
+        if let Some(dpi) = written_dpi
+            && let Ok(mut cycles) = self.shared.dpi_cycle.write()
+            && let Some(state) = cycles.by_key.get_mut(key)
+        {
+            state.reapplied(dpi);
+        }
         if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
@@ -1674,6 +1730,7 @@ impl Orchestrator {
             ticket,
             target,
             led,
+            None,
             move || {
                 if let Some(restore) = restore {
                     speeds.restored(&restore);

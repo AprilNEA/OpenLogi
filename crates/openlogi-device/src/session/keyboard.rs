@@ -200,7 +200,7 @@ impl ArmedCapture for ArmedKeys {
         }
     }
 
-    async fn rearm(&self) {
+    async fn rearm(&self) -> bool {
         for &reporting in &self.reporting {
             if let Err(e) = self
                 .controls
@@ -214,6 +214,7 @@ impl ArmedCapture for ArmedKeys {
                 );
             }
         }
+        true
     }
 
     fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
@@ -230,6 +231,7 @@ impl ArmedCapture for ArmedKeys {
         PendingCaptureRestore::new(
             retired,
             ReprogRestore::new(feature_index, self.reporting),
+            None,
             None,
             None,
         )
