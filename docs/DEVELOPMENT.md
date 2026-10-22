@@ -574,7 +574,9 @@ beta's build version is the stable release before it plus a fourth field, the
 beta number. So it ranks above that release and below the next one. Windows
 Installer ignores the fourth field, so the MSI allows same-version upgrades.
 
-The beta number is the count of commits from that stable release to the beta
+The stable release before a beta is the newest stable tag reachable from the
+beta tag, and the beta's version must be above it. The beta number is the
+count of commits from that stable release to the beta
 (`git rev-list --count`), so it is at least 1 and grows with `master`.
 `release version` fails if the tag's number is a different count.
 
