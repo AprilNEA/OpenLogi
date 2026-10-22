@@ -24,6 +24,16 @@ use crate::ipc::OverlayCommand;
 use crate::session::{self, ClickAwaySession, ShowingRing};
 
 pub(crate) const WINDOW_SIZE: f32 = 480.0;
+
+/// The ring's edge on a display that may be shorter than it: [`WINDOW_SIZE`],
+/// or the display's shorter side when that is smaller. A 1280×720 display at
+/// 200% is 360 logical pixels tall, and a 480 px ring anchored to its top
+/// would put the bottom slot off screen; the skin scales its layout to
+/// whatever edge this returns. Every placement path and the panel itself
+/// size the ring through this one decision.
+pub(crate) fn panel_edge(available: Size<Pixels>) -> Pixels {
+    px(WINDOW_SIZE).min(available.width.min(available.height))
+}
 /// Identifies the ring's windows to the compositor, whatever kind they are.
 pub(crate) const RING_APP_ID: &str = "openlogi-action-ring";
 
@@ -149,12 +159,14 @@ impl Render for RingView {
             .pointer
             .read(cx)
             .center_in(window.window_handle().window_id());
-        let panel = panel_origin(placement, center, window.viewport_size()).map(|origin| {
+        let viewport = window.viewport_size();
+        let edge = panel_edge(viewport);
+        let panel = panel_origin(placement, center, viewport).map(|origin| {
             div()
                 .absolute()
                 .left(origin.x)
                 .top(origin.y)
-                .child(self.skinned_panel(cx))
+                .child(self.skinned_panel(edge, cx))
         });
 
         div()
@@ -210,7 +222,8 @@ fn panel_origin(
         Placement::Window => return Some(Point::default()),
         Placement::AtPointer => center?,
     };
-    let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
+    let edge = panel_edge(viewport);
+    let size = Size::new(edge, edge);
     Some(clamp_window_origin(
         point(center.x - size.width / 2.0, center.y - size.height / 2.0),
         size,
@@ -300,6 +313,27 @@ mod tests {
                 Size::new(px(1920.0), px(1080.0))
             ),
             Some(point(px(0.0), px(600.0)))
+        );
+    }
+
+    #[test]
+    fn a_display_shorter_than_the_ring_shrinks_the_panel_to_its_short_side() {
+        // 1280×720 at 200%: 640×360 logical. The panel becomes 360 px and
+        // sits flush with the top and bottom edges instead of overhanging.
+        let viewport = Size::new(px(640.0), px(360.0));
+        assert_eq!(panel_edge(viewport), px(360.0));
+        assert_eq!(
+            panel_origin(
+                Placement::AtPointer,
+                Some(point(px(320.0), px(180.0))),
+                viewport
+            ),
+            Some(point(px(140.0), px(0.0)))
+        );
+        assert_eq!(
+            panel_edge(Size::new(px(1920.0), px(1080.0))),
+            px(WINDOW_SIZE),
+            "a display taller than the ring leaves it at full size"
         );
     }
 

@@ -156,16 +156,24 @@ impl RingView {
 
     /// The fixed square panel both placements anchor. It takes the background
     /// click itself so the stock root handler never closes without the exit.
-    pub(super) fn skinned_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The panel, `edge` pixels square (see [`super::panel_edge`]). Below
+    /// [`WINDOW_SIZE`] the whole layout scales down with it: slot radius,
+    /// pills, hub and the ambient field alike.
+    pub(super) fn skinned_panel(
+        &mut self,
+        edge: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let now = Instant::now();
         let reduce = cx.reduce_motion();
         self.skin.advance(self.hovered, now, reduce);
         let presence = self.skin.presence(now, reduce);
         let elapsed = self.skin.elapsed(now);
+        let layout = Layout::fitting(edge);
         let slots = ActionRingSlot::ALL
             .into_iter()
             .zip(self.skin.hover_t)
-            .filter_map(|(slot, hover_t)| slot_element(self, slot, hover_t, cx))
+            .filter_map(|(slot, hover_t)| slot_element(self, slot, hover_t, layout, cx))
             .collect::<Vec<_>>();
         let hovered_caption = self
             .hovered
@@ -175,7 +183,7 @@ impl RingView {
         div()
             .id("ring-skin")
             .relative()
-            .size(px(WINDOW_SIZE))
+            .size(px(layout.edge))
             .opacity(presence.opacity)
             .on_click(cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
@@ -184,13 +192,54 @@ impl RingView {
             }))
             .child(ambient_field(
                 elapsed,
-                presence.scale,
+                presence.scale * layout.fit,
                 self.skin.hover_t,
                 self.skin.arc_angle,
                 reduce,
             ))
             .children(slots)
-            .child(cancel_control(hovered_caption, self.skin.hub_t, cx))
+            .child(cancel_control(hovered_caption, self.skin.hub_t, layout, cx))
+    }
+}
+
+/// The panel's edge and how far the layout is scaled down to fit it. `fit`
+/// is 1 on every display at least [`WINDOW_SIZE`] tall and wide, so the
+/// geometry below is exactly the designed one there.
+#[derive(Clone, Copy)]
+struct Layout {
+    edge: f32,
+    fit: f32,
+}
+
+impl Layout {
+    fn fitting(edge: Pixels) -> Self {
+        let edge = f32::from(edge).min(WINDOW_SIZE);
+        Self {
+            edge,
+            fit: edge / WINDOW_SIZE,
+        }
+    }
+
+    /// The designed geometry, for tests that aim at it.
+    #[cfg(test)]
+    const fn full() -> Self {
+        Self {
+            edge: WINDOW_SIZE,
+            fit: 1.0,
+        }
+    }
+
+    /// Top-left of `slot`'s pill.
+    fn slot_origin(self, slot: ActionRingSlot) -> (f32, f32) {
+        let (x, y) = slot.unit_offset();
+        (
+            self.edge / 2.0 + x * RADIUS * self.fit - self.pill_width() / 2.0,
+            self.edge / 2.0 + y * RADIUS * self.fit - PILL_H / 2.0,
+        )
+    }
+
+    fn pill_width(self) -> f32 {
+        PILL_W * self.fit
     }
 }
 
@@ -198,6 +247,7 @@ fn slot_element(
     view: &RingView,
     slot: ActionRingSlot,
     hover_t: f32,
+    layout: Layout,
     cx: &mut Context<RingView>,
 ) -> Option<gpui::AnyElement> {
     let presentation = view.invocation.slots.get(&slot)?;
@@ -207,7 +257,7 @@ fn slot_element(
     // bubbles in and out around them, but a target the user is already moving
     // towards must not shift under the pointer, and a pointer that lands on a
     // slot while the ring is still opening must hover it.
-    let (left, top) = slot_origin(slot, WINDOW_SIZE, RADIUS);
+    let (left, top) = layout.slot_origin(slot);
     let session_id = view.invocation.session_id;
     let ink = lerp_hsla(GLYPH, INK, hover_t);
     Some(
@@ -216,7 +266,7 @@ fn slot_element(
             .absolute()
             .left(px(left))
             .top(px(top))
-            .w(px(PILL_W))
+            .w(px(layout.pill_width()))
             .h(px(PILL_H))
             .flex()
             .flex_row()
@@ -234,7 +284,13 @@ fn slot_element(
                     .flex_none()
                     .text_color(ink),
             )
-            .child(div().w(px(92.0)).text_xs().truncate().child(caption))
+            .child(
+                div()
+                    .w(px(layout.pill_width() - 40.0))
+                    .text_xs()
+                    .truncate()
+                    .child(caption),
+            )
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 if this.is_closing() {
                     return;
@@ -266,15 +322,16 @@ fn slot_element(
 fn cancel_control(
     caption: Option<SharedString>,
     hub_t: f32,
+    layout: Layout,
     cx: &mut Context<RingView>,
 ) -> impl IntoElement {
     let open = ease_out_cubic(hub_t);
-    let size = HUB + (HUB_OPEN - HUB) * open;
+    let size = (HUB + (HUB_OPEN - HUB) * open) * layout.fit;
     div()
         .id("ring-cancel")
         .absolute()
-        .left(px(WINDOW_SIZE / 2.0 - size / 2.0))
-        .top(px(WINDOW_SIZE / 2.0 - size / 2.0))
+        .left(px(layout.edge / 2.0 - size / 2.0))
+        .top(px(layout.edge / 2.0 - size / 2.0))
         .size(px(size))
         .flex()
         .items_center()
@@ -301,7 +358,7 @@ fn cancel_control(
             // as it closes, so neither shows at a size it does not fit.
             Some(caption) => hub.child(
                 div()
-                    .w(px(HUB_OPEN - 28.0))
+                    .w(px((HUB_OPEN - 28.0) * layout.fit))
                     .text_sm()
                     .text_center()
                     .text_color(GLYPH)
@@ -408,19 +465,12 @@ fn slot_caption(presentation: &ActionRingPresentation) -> SharedString {
     SharedString::from(label)
 }
 
-/// Centre of `slot`'s pill within the panel, for tests that aim the pointer at it.
+/// Centre of `slot`'s pill within a full-size panel, for tests that aim the
+/// pointer at it.
 #[cfg(test)]
 pub(super) fn slot_center(slot: ActionRingSlot) -> (f32, f32) {
-    let (left, top) = slot_origin(slot, WINDOW_SIZE, RADIUS);
+    let (left, top) = Layout::full().slot_origin(slot);
     (left + PILL_W / 2.0, top + PILL_H / 2.0)
-}
-
-fn slot_origin(slot: ActionRingSlot, canvas: f32, radius: f32) -> (f32, f32) {
-    let (x, y) = slot.unit_offset();
-    (
-        canvas / 2.0 + x * radius - PILL_W / 2.0,
-        canvas / 2.0 + y * radius - PILL_H / 2.0,
-    )
 }
 
 fn ambient_field(
@@ -810,10 +860,33 @@ mod tests {
     fn command_slots_are_pills_that_overflow_the_hover_ring() {
         const { assert!(PILL_W > HOVER_RING) };
         const { assert!(PILL_H < HOVER_RING) };
-        let origin = slot_origin(ActionRingSlot::Right, WINDOW_SIZE, RADIUS);
+        let origin = Layout::full().slot_origin(ActionRingSlot::Right);
         let (cx, cy) = (origin.0 + PILL_W / 2.0, origin.1 + PILL_H / 2.0);
         assert!((cx - (WINDOW_SIZE / 2.0 + RADIUS)).abs() < 0.01);
         assert!((cy - WINDOW_SIZE / 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_short_panel_scales_the_slot_ring_and_keeps_every_pill_inside() {
+        // 1280×720 at 200%: a 360 px panel, three quarters of the design.
+        let layout = Layout::fitting(px(360.0));
+        assert!((layout.fit - 0.75).abs() < 0.001);
+        let full = Layout::fitting(px(1080.0));
+        assert!(
+            (full.fit - 1.0).abs() < 0.001,
+            "a tall display keeps the design size"
+        );
+        for slot in ActionRingSlot::ALL {
+            let (left, top) = layout.slot_origin(slot);
+            assert!(
+                left >= 0.0 && left + layout.pill_width() <= layout.edge,
+                "{slot:?}"
+            );
+            assert!(top >= 0.0 && top + PILL_H <= layout.edge, "{slot:?}");
+        }
+        let (left, top) = layout.slot_origin(ActionRingSlot::Bottom);
+        assert!((top + PILL_H / 2.0 - (180.0 + 120.0)).abs() < 0.01);
+        assert!((left + layout.pill_width() / 2.0 - 180.0).abs() < 0.01);
     }
 
     #[test]
