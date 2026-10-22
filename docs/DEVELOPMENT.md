@@ -574,6 +574,10 @@ beta's build version is the stable release before it plus a fourth field, the
 beta number. So it ranks above that release and below the next one. Windows
 Installer ignores the fourth field, so the MSI allows same-version upgrades.
 
+The beta number is the count of commits from that stable release to the beta
+(`git rev-list --count`), so it is at least 1 and grows with `master`.
+`release version` fails if the tag's number is a different count.
+
 Only `vX.Y.Z` and `vX.Y.Z-beta.N` are release tags.
 `xtask/src/support/release_tag.rs` owns the syntax and the encoding. The
 release workflow still publishes stable releases only, and it stops a beta tag

@@ -42,7 +42,7 @@ impl ReleaseTag {
         let parsed = Self { version };
         ensure!(
             parsed.version.pre.is_empty() || parsed.beta_number().is_some(),
-            "release tag {tag:?} is a pre-release other than `beta.N`"
+            "release tag {tag:?} is a pre-release other than `beta.N` with N at least 1"
         );
         Ok(parsed)
     }
@@ -71,14 +71,47 @@ impl ReleaseTag {
         &self.version
     }
 
-    /// `N` of a beta tag; `None` for a stable tag.
+    /// For a beta, the stable release it follows: the newest stable release
+    /// tag in `merged_tags`, the tags reachable from the beta. `None` for a
+    /// stable tag.
+    pub(crate) fn beta_base(&self, merged_tags: &[String]) -> Result<Option<BetaBase>> {
+        if self.beta_number().is_none() {
+            return Ok(None);
+        }
+        let (version, tag) = merged_tags
+            .iter()
+            .filter_map(|merged| Some((Self::stable_version(merged)?, merged)))
+            .max()
+            .with_context(|| {
+                format!("no stable release tag is reachable from {self}; a beta follows one")
+            })?;
+        ensure!(
+            version < self.version,
+            "{self} does not lead past {tag}, the stable release before it"
+        );
+        Ok(Some(BetaBase {
+            tag: tag.clone(),
+            version,
+        }))
+    }
+
+    /// `N` of a beta tag; `None` for a stable tag. `N` is at least 1: Sparkle
+    /// pads a missing field with 0, so `B.0` would equal `B`.
     fn beta_number(&self) -> Option<u64> {
         let number = self.version.pre.as_str().strip_prefix(BETA_PREFIX)?;
         if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
-        number.parse().ok()
+        number.parse().ok().filter(|number| *number >= 1)
     }
+}
+
+/// The stable release a beta follows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BetaBase {
+    /// Its tag, for example `v0.8.16`.
+    pub(crate) tag: String,
+    version: Version,
 }
 
 impl fmt::Display for ReleaseTag {
@@ -110,30 +143,34 @@ pub(crate) struct BuildVersion {
 const MSI_FIELD_LIMITS: [u64; 4] = [255, 255, 65_535, 65_535];
 
 impl BuildVersion {
-    /// The build version of `tag`. For a beta, `merged_tags` lists the tags
-    /// reachable from it; the newest stable release among them is `B`.
-    pub(crate) fn of(tag: &ReleaseTag, merged_tags: &[String]) -> Result<Self> {
-        let build = match tag.beta_number() {
-            None => Self {
+    /// The build version of `tag`. A beta also needs `beta`: the stable
+    /// release it follows, from [`ReleaseTag::beta_base`], and the number of
+    /// commits from that release to the beta, which `N` must equal.
+    pub(crate) fn of(tag: &ReleaseTag, beta: Option<(&BetaBase, u64)>) -> Result<Self> {
+        let build = match (tag.beta_number(), beta) {
+            (None, None) => Self {
                 base: numeric_fields(tag.version()),
                 beta: None,
             },
-            Some(number) => {
-                let base = merged_tags
-                    .iter()
-                    .filter_map(|merged| ReleaseTag::stable_version(merged))
-                    .max()
-                    .with_context(|| {
-                        format!("no stable release tag is reachable from {tag}; a beta follows one")
-                    })?;
+            (Some(number), Some((base, commits))) => {
                 ensure!(
-                    &base < tag.version(),
-                    "{tag} does not lead past v{base}, the stable release before it"
+                    number == commits,
+                    "{tag} has beta number {number}, but {commits} commits lead from {} to it; a beta's number is that count",
+                    base.tag
                 );
                 Self {
-                    base: numeric_fields(&base),
+                    base: numeric_fields(&base.version),
                     beta: Some(number),
                 }
+            }
+            (None, Some((base, _))) => {
+                bail!(
+                    "{tag} is a stable release, so it does not follow {}",
+                    base.tag
+                )
+            }
+            (Some(_), None) => {
+                bail!("{tag} is a beta; its build version needs the stable release before it")
             }
         };
         build.check_msi_limits()?;
@@ -176,7 +213,8 @@ impl FromStr for BuildVersion {
     type Err = anyhow::Error;
 
     /// Parse a build version as [`fmt::Display`] writes it: three or four
-    /// numeric fields without leading zeros, within the MSI limits.
+    /// numeric fields without leading zeros, within the MSI limits, and a
+    /// fourth field of at least 1.
     fn from_str(text: &str) -> Result<Self> {
         let fields = text
             .split('.')
@@ -197,10 +235,14 @@ impl FromStr for BuildVersion {
                 base: [major, minor, patch],
                 beta: None,
             },
-            [major, minor, patch, beta] => Self {
-                base: [major, minor, patch],
-                beta: Some(beta),
-            },
+            [major, minor, patch, beta] => {
+                // Sparkle pads a missing field with 0, so `B.0` would equal `B`.
+                ensure!(beta >= 1, "build version {text:?} has a fourth field of 0");
+                Self {
+                    base: [major, minor, patch],
+                    beta: Some(beta),
+                }
+            }
             _ => bail!("build version {text:?} does not have three or four fields"),
         };
         build.check_msi_limits()?;

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use clap::Parser;
 use xshell::{Shell, cmd};
 
@@ -23,7 +23,9 @@ pub(crate) struct Args {
 /// lines, and append them to the step's GitHub Actions outputs.
 ///
 /// Fails unless `HEAD` is the tagged commit and its workspace version is the
-/// tag's version, so every build of the tag reports the version it names.
+/// tag's version, so every build of the tag reports the version it names. A
+/// beta's number must also be the count of commits from the stable release
+/// before it.
 pub(crate) fn run(args: &Args) -> Result<()> {
     let sh = Shell::new()?;
     let root = PathBuf::from(cmd!(sh, "git rev-parse --show-toplevel").quiet().read()?);
@@ -56,7 +58,20 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .lines()
         .map(str::to_owned)
         .collect();
-    let build = BuildVersion::of(&tag, &merged)?.to_string();
+    let base = tag.beta_base(&merged)?;
+    let beta = match &base {
+        Some(base) => {
+            let range = format!("{}..{name}", base.tag);
+            let count = cmd!(sh, "git rev-list --count {range}").quiet().read()?;
+            let commits: u64 = count
+                .trim()
+                .parse()
+                .with_context(|| format!("`git rev-list --count {range}` printed {count:?}"))?;
+            Some((base, commits))
+        }
+        None => None,
+    };
+    let build = BuildVersion::of(&tag, beta)?.to_string();
     let version = tag.version().to_string();
     let outputs = [
         ("channel", tag.channel().as_str()),
