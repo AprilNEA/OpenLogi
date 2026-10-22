@@ -27,10 +27,11 @@ impl UpdateChannel {
     pub const ALL: [Self; 2] = [Self::Stable, Self::Beta];
 
     /// The channel an installation follows: `chosen`, the one the user picked,
-    /// or else the channel of `running_version`. A pre-release such as
-    /// `0.8.17-beta.12` follows beta, so a beta keeps updating to newer betas
-    /// until its user picks stable. Every reader of the channel decides it
-    /// here.
+    /// or else the channel of `running_version`. Without a pick, a pre-release
+    /// such as `0.8.17-beta.12` follows beta and a final release follows
+    /// stable, so an unpicked beta that updates to a final release follows
+    /// stable from then on. A picked channel stays until the user changes it.
+    /// Every reader of the channel decides it here.
     #[must_use]
     pub fn followed(chosen: Option<Self>, running_version: &str) -> Self {
         chosen.unwrap_or_else(|| Self::of_version(running_version))
