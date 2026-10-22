@@ -60,6 +60,7 @@ pub(super) fn main_wheel_divert(
     Some(MainWheelDivert {
         resolution,
         inverted,
+        high_resolution: false,
     })
 }
 
