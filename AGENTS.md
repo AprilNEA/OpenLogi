@@ -189,7 +189,7 @@ never re-run a failed release job or re-dispatch on an existing tag.
 ## Maintaining agent guidance
 
 - Keep one source for each instruction. `AGENTS.md` owns global guidance;
-  `CLAUDE.md` imports it. Shared rule files live in `.agents/rules/`;
+  `.claude/CLAUDE.md` imports it. Shared rule files live in `.agents/rules/`;
   `.claude/rules` is only a relative symlink to that directory. Edit and link
   the canonical files. Keep crate-specific contracts in their own `AGENTS.md`
   and task procedures in skills. Link shared skills instead of copying them.

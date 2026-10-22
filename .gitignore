@@ -44,8 +44,10 @@ devenv.local.yaml
 .worktrees/
 
 # Claude Code worktrees, transcripts, local settings — per-developer state.
-# Track only the rules symlink here; shared rule files live in .agents/rules/.
+# Track only CLAUDE.md (it imports AGENTS.md) and the rules symlink here; shared
+# rule files live in .agents/rules/.
 /.claude/*
+!/.claude/CLAUDE.md
 !/.claude/rules
 # Project skills are named explicitly and tracked; everything else under
 # .claude/skills/ is the per-developer symlink farm into .agents/skills/.

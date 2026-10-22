@@ -214,8 +214,9 @@ Crate-specific contracts stay in each crate's `AGENTS.md`; task workflows stay
 in `.agents/skills/`. No rule generator or install step is required.
 
 The root [AGENTS.md](../AGENTS.md) holds global instructions and the rule index.
-`CLAUDE.md` imports only that entrypoint. Claude Code discovers `.md` rules
-through `.claude/rules` and uses their `paths` metadata for conditional loading.
+`.claude/CLAUDE.md` imports only that entrypoint. Claude Code discovers `.md`
+rules through `.claude/rules` and uses their `paths` metadata for conditional
+loading.
 Other clients must follow the index; `.agents/rules/` is not a universal
 automatic discovery path. Keep the index as ordinary Markdown links: importing
 every rule from the root would load unrelated guidance into Claude's context.
