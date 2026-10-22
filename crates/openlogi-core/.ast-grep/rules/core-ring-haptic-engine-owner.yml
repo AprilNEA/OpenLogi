@@ -1,29 +1,39 @@
 # Owner: openlogi_core::config::Config::ring_haptic_engine — how an Actions
 # Ring session treats the firmware haptic engine, from the ring's haptics
-# toggle and the user's haptic settings.
+# toggle (ActionRingConfig::haptics) and the user's haptic settings.
 id: core-ring-haptic-engine-owner
 language: rust
 severity: error
-message: Ask Config::ring_haptic_engine (or Config::haptics for the settings themselves) instead of reading a `haptics` field here.
+message: Ask Config::ring_haptic_engine instead of reading ActionRingConfig::haptics here.
 note: |
   The ring's haptics toggle alone no longer decides whether a session plays:
   an engine the user silenced (HapticSettings::is_silent) silences the ring
-  too, and an engine the user turned on is not handed back. See "Single
-  source of truth" in AGENTS.md.
+  too, and an engine the user turned on is not handed back. This guards the
+  ring config's `haptics` field — read through a ring receiver (`ring`,
+  `action_ring(..)`) or destructured from ActionRingConfig — not other
+  `haptics` fields such as VolatileMouseSettings'. See "Single source of
+  truth" in AGENTS.md.
 files:
   - crates/openlogi-agent-core/**/*.rs
   - crates/openlogi-agent/**/*.rs
-ignores:
-  # The mock agent serves fixture profiles, whose `haptics` is a read state,
-  # not a setting.
-  - crates/openlogi-agent/src/bin/**
 rule:
-  kind: field_expression
-  has:
-    field: field
-    regex: '^haptics$'
-  # A call such as `config.haptics(key)` is the owner's accessor, not a field.
-  not:
-    inside:
-      kind: call_expression
-      field: function
+  any:
+    # `ring.haptics`, `config.action_ring(key).haptics`, `device.action_ring.haptics`.
+    - kind: field_expression
+      all:
+        - has:
+            field: field
+            regex: '^haptics$'
+        - has:
+            field: value
+            regex: '(?i)ring'
+    # `let ActionRingConfig { haptics, .. } = ring;`
+    - kind: struct_pattern
+      all:
+        - has:
+            field: type
+            regex: 'ActionRingConfig$'
+        - has:
+            stopBy: end
+            kind: field_pattern
+            regex: '^haptics\b'
