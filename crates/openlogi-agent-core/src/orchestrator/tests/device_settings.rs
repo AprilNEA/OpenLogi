@@ -861,7 +861,10 @@ async fn a_gui_save_leaves_the_haptics_write_to_the_gui() {
     config.set_haptics("a", haptics(true, 60));
 
     let gui_write = orch.shared.haptics_order.request(&route);
-    let _ = orch.replace_saved_config(config.clone(), &[]);
+    assert!(
+        orch.replace_saved_config(config.clone(), &[]).is_empty(),
+        "the save changes no light"
+    );
     assert!(
         gui_write
             .write_or(|| async { true }, || async { false })
@@ -873,7 +876,11 @@ async fn a_gui_save_leaves_the_haptics_write_to_the_gui() {
     let mut orch = orchestrator(Config::default());
     orch.devices = vec![haptic_device("a", 1, true)];
     let gui_write = orch.shared.haptics_order.request(&route);
-    let _ = orch.replace_config(config);
+    assert_eq!(
+        orch.reload_config(config),
+        [route],
+        "the hand edit chose the mouse's engine"
+    );
     assert!(
         !gui_write
             .write_or(|| async { true }, || async { false })

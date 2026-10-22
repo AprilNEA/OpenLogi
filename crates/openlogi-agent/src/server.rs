@@ -1126,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_plays_square_only_when_enabled() {
+    fn preview_only_for_audible_settings() {
         let settings = |enabled, intensity| HapticSettings {
             enabled,
             power_save: false,
