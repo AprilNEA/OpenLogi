@@ -189,6 +189,7 @@ fn published_plans_divert_the_main_wheel_only_while_the_hook_runs() {
         Some(openlogi_hid::session::gesture::MainWheelDivert {
             resolution: None,
             inverted: None,
+            high_resolution: false,
         })
     );
     orch.set_os_mouse_hook_available(false);
