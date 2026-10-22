@@ -265,6 +265,7 @@ mod tests {
                     model_info: Some(model.clone()),
                     // A live reading at snapshot time.
                     battery: Some(BatteryInfo {
+                        freshness: openlogi_core::device::BatteryFreshness::Current,
                         percentage: Some(55),
                         level: BatteryLevel::Good,
                         status: BatteryStatus::Discharging,

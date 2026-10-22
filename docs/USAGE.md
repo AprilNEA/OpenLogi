@@ -96,9 +96,14 @@ contain hardware identity information: keep them local and redact before sharing
 
 `name`, `battery`, and measured `capabilities` may be null; null does not mean
 zero charge or an unsupported feature. Battery objects contain `percentage`,
-`level`, and `status` (for example `charging` or `discharging`). `percentage`
-is null when the device has no state-of-charge gauge and reports only a level,
-or when the reading carries no charge figure; read `level` in that case.
+`level`, `status` (for example `charging` or `discharging`), and `freshness`.
+`percentage` is null when the device has no state-of-charge gauge and reports
+only a level, or when the reading carries no charge figure; read `level` in
+that case. `freshness` is `current` for a reading from this inventory pass,
+`cached` for a last-good reading replayed after an unavailable read or offline
+probe, and `held_percentage` when charging is current but the percentage is
+held from before charging. Cached and held percentages are not current charge
+measurements.
 Capabilities are the agent's measured feature flags, not guesses based on
 device kind.
 Not every readable setting has an inventory flag; a setting read can return

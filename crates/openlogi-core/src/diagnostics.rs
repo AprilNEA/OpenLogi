@@ -567,6 +567,7 @@ mod tests {
                     connection: ConnectionKind::BoltReceiver,
                     online: true,
                     battery: Some(BatteryInfo {
+                        freshness: crate::device::BatteryFreshness::Current,
                         percentage: Some(80),
                         level: BatteryLevel::Good,
                         status: BatteryStatus::Discharging,
@@ -669,6 +670,7 @@ mod tests {
     fn a_level_only_battery_does_not_render_as_zero_percent() {
         let mut report = sample();
         report.devices[0].battery = Some(BatteryInfo {
+            freshness: crate::device::BatteryFreshness::Current,
             percentage: None,
             level: BatteryLevel::Good,
             status: BatteryStatus::Discharging,

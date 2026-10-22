@@ -481,6 +481,7 @@ impl State {
             name: mouse.codename.as_deref().map(prettify_codename),
             kind: mouse.kind,
             battery: BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: Some(15),
                 level: BatteryLevel::Low,
                 status: BatteryStatus::Discharging,
@@ -617,6 +618,7 @@ impl State {
             kind: DeviceKind::Keyboard,
             online: true,
             battery: Some(BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: Some(90),
                 level: BatteryLevel::Full,
                 status: BatteryStatus::Discharging,
@@ -669,6 +671,7 @@ fn draining_battery(elapsed: Duration) -> BatteryInfo {
     let drained = u8::try_from(elapsed.as_secs() / 60 % 61).unwrap_or(0);
     let percentage = 80 - drained;
     BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage: Some(percentage),
         level: match percentage {
             0..=10 => BatteryLevel::Critical,
@@ -750,6 +753,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         pairing: state.phase.clone(),
         foreground: state.foreground(),
         lights: Vec::new(),
+        device_selection: None,
     }
 }
 
@@ -1145,6 +1149,8 @@ impl Agent for MockAgent {
         }
         None
     }
+
+    async fn acknowledge_device_selection(self, _: Context, _: openlogi_ipc::DeviceSelection) {}
 
     async fn snapshot(self, _: Context) -> AgentSnapshot {
         snapshot_of(&*self.state.lock().await)

@@ -1,22 +1,15 @@
-# Owner: openlogi_core::device::BatteryInfo::needs_attention — whether a
-# battery reading needs the user's attention (a discharging battery at 20% or
-# less, or a low/critical level on a device without a percentage). The
-# settings app's warning tone and caption and the agent's low-battery notice
-# all ask it, so a device the app shows as low is the device the overlay
-# announces.
+# Owner: openlogi_core::device::BatteryInfo methods in core/battery.rs.
+# Every battery cue shares the attention policy. Overlay notices may reset on
+# charging; persistent OS alerts require a measured recovery. Both decisions
+# stay in the same owner so consumers cannot recreate their thresholds.
 id: core-battery-attention-owner
 language: rust
 severity: error
-message: Whether a battery reading needs attention is openlogi_core::device::BatteryInfo::needs_attention's; call it instead of comparing a battery percentage or matching the low battery levels here.
-note: |
-  The rule lived in the settings app (ui/battery.rs) until the agent needed
-  it for its low-battery notice. A second threshold would let the overlay
-  announce a battery the app does not show as low, or stay quiet about one it
-  does. See "Single source of truth" in AGENTS.md.
+message: Use BatteryInfo::severity, needs_attention, rearms_warning or rearms_overlay_notice; core/battery.rs owns battery policy.
 files:
   - crates/**/*.rs
 ignores:
-  - crates/openlogi-core/src/device.rs
+  - crates/openlogi-core/src/battery.rs
   - "**/tests.rs"
   - "**/tests/**"
 rule:
@@ -28,3 +21,5 @@ rule:
         - regex: 'BatteryLevel::Critical\b'
     - kind: binary_expression
       regex: '\bpercentage\s*<=?\s*[0-9A-Z]'
+    - kind: binary_expression
+      regex: '\b(percentage|charge)\s*(<=|<|>=|>)\s*(10|20|25|30|[A-Z][A-Z0-9_]*)\b'

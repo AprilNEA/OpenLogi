@@ -131,7 +131,10 @@ pub use succession::Identity;
 ///      that precision mode lights. `ReceiverSelector::ReceiverUid`
 ///      appended — a pairing target matched by receiver product ID and
 ///      unique ID, never falling back to another receiver.
-pub const PROTOCOL_VERSION: u32 = 38;
+/// v39: `BatteryInfo::freshness`, `AgentSnapshot::device_selection`, and
+///      `Agent::acknowledge_device_selection` appended for battery freshness
+///      and retained, acknowledged tray navigation.
+pub const PROTOCOL_VERSION: u32 = 39;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -233,6 +236,8 @@ pub struct AgentSnapshot {
     /// light reached only through its raw report reads nothing back and is
     /// not listed.
     pub lights: Vec<ObservedLight>,
+    /// Most recent unacknowledged tray request, retained across GUI launches.
+    pub device_selection: Option<DeviceSelection>,
 }
 
 /// A standalone light as it reported itself to the agent.
@@ -273,6 +278,17 @@ pub struct SavedConfig {
     pub revision: ConfigRevision,
     /// The controls of lights the user set in the save without a write.
     pub chosen: Vec<ChosenLight>,
+}
+
+/// A tray click addressed to one physical device and one agent publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSelection {
+    /// Agent run, preventing a delayed acknowledgement from clearing a new run's request.
+    pub agent: Identity,
+    /// Publication generation, also distinguishing repeated clicks on the same device.
+    pub request_id: u64,
+    /// Agent-supplied navigation key matching the GUI's device record.
+    pub device_key: String,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -870,4 +886,7 @@ pub trait Agent {
         route: DeviceRoute,
         speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError>;
+
+    /// Acknowledge only the exact device selection the GUI has displayed.
+    async fn acknowledge_device_selection(request: DeviceSelection);
 }

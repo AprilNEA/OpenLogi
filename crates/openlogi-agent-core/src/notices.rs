@@ -12,16 +12,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
+use openlogi_core::device::BatteryInfo;
 use openlogi_ipc::{Generation, Notice, NoticeKind, NoticeObservation, OBSERVE_HOLD};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
 /// How long a notice shows.
 pub const NOTICE_LIFETIME: Duration = Duration::from_secs(8);
-
-/// A charge at or above which a battery that was low counts as charged again.
-const RECHARGED_PERCENT: u8 = 30;
 
 struct Posted {
     notice: Notice,
@@ -162,25 +159,10 @@ impl LowBatteryWatch {
     /// announced, so the first low reading after the notices are back on
     /// announces it. A reading that needs attention is never a recharge.
     pub fn observe_muted(&mut self, device: &str, battery: &BatteryInfo) {
-        if recharged(battery) {
+        if battery.rearms_overlay_notice() {
             self.announced.remove(device);
         }
     }
-}
-
-/// Whether a battery has been charged since it was low: it is charging now,
-/// it reads [`RECHARGED_PERCENT`] or more, or, without a percentage, its level
-/// is good or full again.
-fn recharged(battery: &BatteryInfo) -> bool {
-    let charging = matches!(
-        battery.status,
-        BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
-    );
-    charging
-        || battery.percentage.map_or_else(
-            || matches!(battery.level, BatteryLevel::Good | BatteryLevel::Full),
-            |charge| charge >= RECHARGED_PERCENT,
-        )
 }
 
 #[cfg(test)]

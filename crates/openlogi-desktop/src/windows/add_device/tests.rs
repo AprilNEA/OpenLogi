@@ -43,6 +43,7 @@ fn snapshot(receivers: Vec<ReceiverInfo>) -> AgentSnapshot {
         pairing: None,
         foreground: ForegroundApps::default(),
         lights: Vec::new(),
+        device_selection: None,
     }
 }
 

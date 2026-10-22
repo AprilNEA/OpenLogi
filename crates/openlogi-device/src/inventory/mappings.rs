@@ -245,6 +245,7 @@ pub(crate) fn legacy_battery_info(
         _ => (Some(discharge_level), level_of(discharge_level)),
     };
     BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage,
         level,
         status,

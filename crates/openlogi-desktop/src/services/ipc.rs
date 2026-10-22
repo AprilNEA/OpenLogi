@@ -62,6 +62,8 @@ pub use launch::mark_suite_quitting;
 use launch::spawn_agent;
 use link::Link;
 use reflex::SpawnReflex;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub use request::AcknowledgeDeviceSelection;
 use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
@@ -286,13 +288,13 @@ async fn observe_loop(
     let mut retry = ticker(RECONNECT_DELAY);
     loop {
         let woken = tokio::select! {
-            observed = link.observed() => Woken::Observed(observed),
+            observed = link.observed() => Woken::Observed(observed.map(|snapshot| snapshot.map(Box::new))),
             cmd = cmd_rx.recv() => Woken::Command(cmd),
             _ = retry.tick(), if link.is_down() => Woken::Reconnect,
         };
         match woken {
             Woken::Observed(Ok(Some(snapshot))) => {
-                let _ = update_tx.send(GuiUpdate::Snapshot(snapshot));
+                let _ = update_tx.send(GuiUpdate::Snapshot(*snapshot));
             }
             // The agent's heartbeat, or a stale reply: the window is current.
             Woken::Observed(Ok(None)) => {}
@@ -403,7 +405,7 @@ impl OwedReloads {
 /// Why [`observe_loop`] woke up.
 enum Woken {
     /// The observe call answered, or its connection dropped.
-    Observed(Result<Option<AgentSnapshot>, RpcError>),
+    Observed(Result<Option<Box<AgentSnapshot>>, RpcError>),
     /// A device command, or `None` once the GUI drops the sender.
     Command(Option<Command>),
     /// Time to try connecting again.
@@ -836,6 +838,7 @@ mod tests {
             pairing: None,
             foreground: ForegroundApps::default(),
             lights: Vec::new(),
+            device_selection: None,
         }
     }
 

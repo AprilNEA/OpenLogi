@@ -292,6 +292,20 @@ pub enum BatteryStatus {
     Unknown,
 }
 
+/// Whether the current inventory pass read the battery or replayed cached data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatteryFreshness {
+    /// The battery was read during the current probe.
+    #[default]
+    Current,
+    /// The last successful reading, retained after a failed read or offline probe.
+    Cached,
+    /// Charging was read now, but firmware supplied no percentage; the stored
+    /// percentage is a pre-charge value retained for the existing device UI.
+    HeldPercentage,
+}
+
 /// Battery snapshot for one paired device, as last polled over HID++.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatteryInfo {
@@ -307,29 +321,9 @@ pub struct BatteryInfo {
     pub level: BatteryLevel,
     /// Charging state at poll time.
     pub status: BatteryStatus,
-}
-
-/// The charge at or below which a discharging battery needs attention.
-const LOW_BATTERY_PERCENT: u8 = 20;
-
-impl BatteryInfo {
-    /// Whether this reading should draw the user's attention: a discharging
-    /// battery at 20% or less, or, on a device that reports no percentage, at
-    /// the firmware's low or critical level.
-    ///
-    /// Every low-battery cue asks this one rule: the settings app's warning
-    /// tone and caption, and the agent's low-battery notice.
-    #[must_use]
-    pub fn needs_attention(&self) -> bool {
-        let low = match self.percentage {
-            Some(percentage) => percentage <= LOW_BATTERY_PERCENT,
-            None => matches!(self.level, BatteryLevel::Low | BatteryLevel::Critical),
-        };
-        low && !matches!(
-            self.status,
-            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
-        )
-    }
+    /// Distinguishes a fresh reading from the last-good replay used by the GUI.
+    #[serde(default)]
+    pub freshness: BatteryFreshness,
 }
 
 /// Tidy a device name reported over HID++ for display.
@@ -657,6 +651,7 @@ mod tests {
     #[test]
     fn a_low_discharging_battery_needs_attention() {
         let battery = |percentage, level, status| BatteryInfo {
+            freshness: crate::device::BatteryFreshness::Current,
             percentage,
             level,
             status,
@@ -713,6 +708,7 @@ mod tests {
                 kind: DeviceKind::Mouse,
                 online: true,
                 battery: Some(BatteryInfo {
+                    freshness: crate::device::BatteryFreshness::Current,
                     percentage: Some(battery_percentage),
                     level: BatteryLevel::Good,
                     status: BatteryStatus::Discharging,
