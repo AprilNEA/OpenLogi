@@ -19,7 +19,8 @@ different level opts out **in source** (the `openlogi-hook` platform modules car
 with local overrides. `openlogi-hidpp` inherits the table like everything else, hard
 fork or not.
 
-Workspace-wide clippy *configuration* lives in `clippy.toml` at the root. It currently
+Workspace-wide clippy *configuration* lives in `.cargo/clippy.toml`, which
+`.cargo/config.toml` hands to Clippy through `CLIPPY_CONF_DIR`. It currently
 carries `allow-unwrap-in-tests` / `allow-expect-in-tests`, so test code never needs to
 restate that exemption by hand.
 
@@ -35,14 +36,14 @@ changes day to day:
 - Every `unsafe` block needs a `// SAFETY:` comment saying why it is sound.
 - `assert!(r.is_ok())` / `assert!(r.is_err())` are rejected — unwrap the `Result` (in a
   test module that already allows it) or give the assertion a message.
-- Tests use `expect`/`unwrap` freely: `clippy.toml` exempts `#[cfg(test)]` modules and
-  `#[test]` functions, so **do not** add a suppression for it. The one shape clippy
-  cannot see is a free helper in a `tests/` integration file, outside any `#[test]` fn —
-  that file needs a `#![expect(clippy::expect_used, reason = "…")]`. Never route around
-  the lint with `unwrap_or_else(|e| panic!("…: {e}"))` — that is the same panic with the
-  check switched off. The one honest use of that form is a *dynamic* panic message,
-  where `expect` would need a `format!` that allocates on the happy path
-  (`expect_fun_call`).
+- Tests use `expect`/`unwrap` freely: `.cargo/clippy.toml` exempts `#[cfg(test)]`
+  modules and `#[test]` functions, so **do not** add a suppression for it. The one
+  shape clippy cannot see is a free helper in a `tests/` integration file, outside any
+  `#[test]` fn — that file needs a `#![expect(clippy::expect_used, reason = "…")]`.
+  Never route around the lint with `unwrap_or_else(|e| panic!("…: {e}"))` — that is
+  the same panic with the check switched off. The one honest use of that form is a
+  *dynamic* panic message, where `expect` would need a `format!` that allocates on the
+  happy path (`expect_fun_call`).
 - A test module gated on more than `test` needs stacked attributes (`#[cfg(test)]` then
   `#[cfg(unix)]`), not `#[cfg(all(test, unix))]`, which clippy reads as a test outside a
   test module. Integration tests under `tests/` carry a file-level

@@ -68,7 +68,6 @@ jobs:
               - 'rust-toolchain.toml'
               - 'rustfmt.toml'
               - '.rustfmt.toml'
-              - 'clippy.toml'
               - 'prek.toml'
               - 'sgconfig.yml'
               - 'release-plz.toml'

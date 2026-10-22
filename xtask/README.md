@@ -203,7 +203,7 @@ xtask/
 Unit tests are a sibling file throughout this crate: `foo.rs` declares
 `#[cfg(test)] mod tests;` and the tests live in `foo/tests.rs`. That keeps a
 module's source to what it does, and the `#[cfg(test)]` on the declaration is
-what carries the `clippy.toml` unwrap/expect exemption into the file — a test
+what carries the Clippy unwrap/expect test exemption into the file — a test
 helper outside any `#[test]` fn still gets it. Note that `include_str!` in such
 a file resolves relative to `foo/`, one level deeper than the module it came
 from.
