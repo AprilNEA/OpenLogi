@@ -70,16 +70,17 @@ roll back an otherwise successful package installation.
 
 ## NixOS
 
-The repository Flake provides a package and a NixOS module for x86_64 and
-aarch64 Linux. Importing the module is preferred over adding the package to
-`environment.systemPackages` by itself: the module also registers the udev
-rules required for device access and manages the agent's user service.
+The Flake in the repository's `packaging/` directory provides a package and a
+NixOS module for x86_64 and aarch64 Linux. Importing the module is preferred
+over adding the package to `environment.systemPackages` by itself: the module
+also registers the udev rules required for device access and manages the
+agent's user service.
 
 ```nix
 {
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.openlogi = {
-    url = "github:AprilNEA/OpenLogi";
+    url = "github:AprilNEA/OpenLogi?dir=packaging";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -108,8 +109,13 @@ rules without automatically starting the agent. It remains available as
 For a build without installing the module:
 
 ```sh
-nix build github:AprilNEA/OpenLogi#openlogi
+nix build 'github:AprilNEA/OpenLogi?dir=packaging#openlogi'
 ```
+
+Earlier versions of this guide used `github:AprilNEA/OpenLogi` without
+`?dir=packaging`. That URL now points to a deprecated alias: it needs Nix 2.26
+or newer, prints a warning on every evaluation, and will be removed in a later
+release. Add `?dir=packaging` to the input URL to move off it.
 
 ## Flatpak
 

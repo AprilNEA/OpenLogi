@@ -66,18 +66,25 @@ expose `libSystem` the way Apple's real linker wants.
 
 ### Nix package
 
-The root Flake exposes native `x86_64-linux` and `aarch64-linux` packages plus
-the NixOS module. It is separate from the devenv shell:
+The Flake in `packaging/` exposes native `x86_64-linux` and `aarch64-linux`
+packages plus the NixOS module. It is separate from the devenv shell. Nix only
+looks for a Flake in the working directory and its parents, so name it from the
+repository root:
 
 ```sh
-nix flake check --all-systems --no-build  # evaluate every output
-nix build .#openlogi                      # build + test this host's package
-nix run .#openlogi -- list                # run the packaged CLI
+nix flake check ./packaging --all-systems --no-build  # evaluate every output
+nix build ./packaging#openlogi                        # build + test this host's package
+nix run ./packaging#openlogi -- list                  # run the packaged CLI
 ```
 
 The package expression and NixOS module live beside the other Linux packaging
 inputs in `packaging/linux/`. `nix fmt` formats all Nix expressions through the
-Flake's pinned formatter.
+Flake's pinned formatter. It takes no Flake argument, so run it from
+`packaging/`.
+
+The root `flake.nix` is a deprecated alias for existing
+`github:AprilNEA/OpenLogi` inputs. It has no committed lock file, prints a
+warning on every evaluation, and will be removed in a later release.
 
 ### Dev app bundle (macOS)
 
