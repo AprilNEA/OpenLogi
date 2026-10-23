@@ -2,6 +2,7 @@
 //! way the GUI carousel is, then diffed across ticks into the volatile-settings
 //! re-apply plan, the host-switch links, and the follower cookie writes.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
@@ -278,6 +279,46 @@ pub(super) fn build_devices(
             .then_with(|| a.model_key.cmp(&b.model_key))
     });
     devices
+}
+
+/// Count one more settings change the agent made on `route` itself.
+pub(super) fn bump_settings_epoch(epochs: &mut Vec<(DeviceRoute, u64)>, route: &DeviceRoute) {
+    match epochs.iter_mut().find(|(known, _)| known == route) {
+        Some((_, epoch)) => *epoch = epoch.wrapping_add(1),
+        None => epochs.push((route.clone(), 1)),
+    }
+}
+
+/// The inventory clients see: each paired device's reported settings revision
+/// plus the agent's own changes on its route. Agent decisions keep the raw
+/// snapshot, whose revision only a device report moves.
+pub(super) fn published_inventories<'a>(
+    inventories: &'a [DeviceInventory],
+    epochs: &[(DeviceRoute, u64)],
+) -> Cow<'a, [DeviceInventory]> {
+    if epochs.is_empty() {
+        return Cow::Borrowed(inventories);
+    }
+    Cow::Owned(
+        inventories
+            .iter()
+            .map(|inventory| {
+                let mut published = inventory.clone();
+                for paired in &mut published.paired {
+                    let epoch = DeviceRoute::for_slot(inventory, paired.slot).and_then(|route| {
+                        epochs
+                            .iter()
+                            .find(|(known, _)| *known == route)
+                            .map(|(_, epoch)| *epoch)
+                    });
+                    if let Some(epoch) = epoch {
+                        paired.settings_revision = paired.settings_revision.wrapping_add(epoch);
+                    }
+                }
+                published
+            })
+            .collect(),
+    )
 }
 
 pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec<HostSwitchLink> {

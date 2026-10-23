@@ -400,6 +400,69 @@ async fn successful_successor_retires_abandoned_request_recovery() {
     keyboard.assert_writes(&[0x81, 0x80, 0x80]);
 }
 
+/// A recovery changes the keyboard without a `0x4521` report. The published
+/// settings revision must move once the restoring write holds its turn, so a
+/// client that read the abandoned mask reads again and sees the restored one.
+#[tokio::test]
+async fn recovery_moves_the_published_settings_revision() {
+    use std::time::Duration;
+
+    let (mut orchestrator, keyboard, inventory) = settled_keyboard().await;
+    let shared = orchestrator.shared();
+    let (refresh, requested) =
+        crate::watchers::inventory::InventoryRefresh::test_settings_confirmation();
+    shared.publish_inventory_refresh(refresh);
+    let readback = keyboard.hold_write_readback();
+    let writer = shared.clone();
+    let route = keyboard.route.clone();
+    let abandoned = tokio::spawn(async move {
+        writer
+            .set_disable_keys(&route, DisableKeysMask::EMPTY)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), readback.request_written())
+        .await
+        .expect("abandoned write reached hardware");
+    abandoned.abort();
+    assert!(abandoned.await.expect_err("cancelled").is_cancelled());
+    readback.release();
+    tokio::time::timeout(Duration::from_secs(2), requested)
+        .await
+        .expect("abandoned request schedules confirmation");
+    assert_eq!(keyboard.disabled.load(Ordering::SeqCst), 0x80);
+
+    let revision = |orchestrator: &Orchestrator| {
+        orchestrator.observable.snapshot().inventory[0].paired[0].settings_revision
+    };
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    let before = revision(&orchestrator);
+    orchestrator.refresh_inventory_for_settings_confirmation(
+        std::slice::from_ref(&inventory),
+        &[],
+        false,
+    );
+    assert!(
+        revision(&orchestrator) > before,
+        "a started recovery must ask clients to read again"
+    );
+    assert_eq!(
+        orchestrator.devices[0].settings_revision, 0,
+        "agent decisions keep the device-reported revision"
+    );
+    let state = tokio::time::timeout(
+        Duration::from_secs(2),
+        shared.read_disable_keys(&keyboard.route),
+    )
+    .await
+    .expect("read finishes")
+    .expect("read after recovery");
+    assert_eq!(
+        state.disabled.bits(),
+        0x81,
+        "the read waits for the restoring write"
+    );
+}
+
 #[tokio::test]
 async fn retired_policy_cannot_be_recovered_by_late_manual_cancellation() {
     use std::time::Duration;

@@ -67,12 +67,12 @@ use devices::reapply_targets;
 use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, assignments_changed,
-    build_devices, carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
-    config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_disabled_keys_recovery,
-    plan_reapply, reconnect_follower_cookies, same_device_lifecycle, saved_speed, settings_moved,
-    stable_id, wheel_inverted,
+    build_devices, bump_settings_epoch, carry_lifecycle_budgets, changed_follower_cookies,
+    changed_force_sensing, config_keeps_os_layout, configured_dpi, configured_force_sensing,
+    configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
+    keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
+    plan_disabled_keys_recovery, plan_reapply, published_inventories, reconnect_follower_cookies,
+    same_device_lifecycle, saved_speed, settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -538,6 +538,11 @@ pub struct Orchestrator {
     /// Disable Keys request needs bounded recovery. This plan excludes volatile
     /// settings that are unrelated to the manual request.
     disabled_keys_recovery: BTreeMap<DeviceStableId, u8>,
+    /// Disable Keys recoveries started on each route, added to the published
+    /// [`PairedDevice::settings_revision`](openlogi_core::device::PairedDevice::settings_revision).
+    /// A recovery changes the keyboard without a `0x4521` report, so a client
+    /// that read the abandoned mask needs this move to read again.
+    settings_epochs: Vec<(DeviceRoute, u64)>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
     camera_active: Option<bool>,
@@ -673,6 +678,7 @@ impl Orchestrator {
             hid_open_failures: false,
             reapply_followup: BTreeMap::new(),
             disabled_keys_recovery: BTreeMap::new(),
+            settings_epochs: Vec::new(),
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
             light_states: BTreeMap::new(),
@@ -1172,12 +1178,22 @@ impl Orchestrator {
         for &idx in &targets {
             self.reapply_volatile_settings(&devices[idx], &devices);
         }
+        let mut recovery_started = false;
         for idx in disabled_keys_targets {
-            if !targets.contains(&idx)
-                && let Some(route) = &devices[idx].route
-            {
+            let Some(route) = &devices[idx].route else {
+                continue;
+            };
+            // A volatile reapply above already queued this keyboard's write.
+            if !targets.contains(&idx) {
                 let _ = self.shared.reapply_disabled_keys(route);
             }
+            bump_settings_epoch(&mut self.settings_epochs, route);
+            recovery_started = true;
+        }
+        // Each recovery write above already holds its place in the keyboard's
+        // queue, so a client's next read waits for it and sees the result.
+        if recovery_started {
+            self.publish_inventory();
         }
         for dev in &devices {
             if dev.online
@@ -1593,8 +1609,9 @@ impl Orchestrator {
     /// Republish the device facts the GUI observes, reading the one field that
     /// holds them so this can never disagree with the `inventory` /
     /// `standalone` / `inventory_health` accessors. Called by every mutator
-    /// that touches the `inventory` field, and it clones only when something
-    /// actually changed.
+    /// that touches the `inventory` field, and after a Disable Keys recovery
+    /// starts. It clones to add recovery epochs, and otherwise only when
+    /// something actually changed.
     fn publish_inventory(&self) {
         let health = self.inventory_health();
         match &self.inventory {
@@ -1602,9 +1619,10 @@ impl Orchestrator {
                 inventories,
                 standalone,
             } => {
+                let inventories = published_inventories(inventories, &self.settings_epochs);
                 self.observable.set_inventory(
                     health,
-                    inventories,
+                    &inventories,
                     standalone,
                     self.hid_open_failures,
                 );
