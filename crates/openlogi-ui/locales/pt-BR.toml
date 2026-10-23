@@ -203,6 +203,7 @@ preparing = "Verificando o dispositivo…"
 transferring = "Instalando firmware · %{percent}%"
 activity_log = "Registro de atividades (UTC)"
 activity_error = "Erro: %{message}"
+activity_warning = "Aviso: %{message}"
 activity_device = "Dispositivo: %{name} · %{family} · firmware %{version}"
 activity_url = "URL do pacote: %{url}"
 activity_downloaded = "Firmware %{version} baixado e verificado."
@@ -225,6 +226,8 @@ unsupported = "Este dispositivo ou esta conexão não oferece suporte a atualiza
 device_refused = "O dispositivo recusou a atualização. Feche outros programas de gerenciamento do dispositivo e tente novamente."
 interrupted = "A atualização foi interrompida. Mantenha o dispositivo ativo e reconecte-o para verificar a versão do firmware."
 not_activated = "Não foi possível confirmar o novo firmware após a reinicialização. Reconecte o dispositivo para verificar a versão do firmware."
+warning_erased_bank = "O banco de firmware %{bank} está vazio após uma atualização interrompida. O banco inteiro será regravado; o firmware em execução não é alterado."
+warning_unfinished_transfer = "O banco de firmware %{bank} contém uma atualização anterior inacabada. Ela será descartada e a transferência recomeça do início."
 
 [profiles]
 remove_all_profiles = "Delete all app settings"

@@ -81,7 +81,11 @@ check the progress of the job that may exist. Snapshots do not carry physical id
 new agent run leaves historical jobs unbound. An unbound active job still
 blocks another installation.
 Repeated identical phases do not add entries. Errors have an explicit error
-label and use the theme's danger color. New entries follow the bottom unless
+label and use the theme's danger color. Damage an earlier, interrupted update
+left on the target bank is logged as a warning in the theme's warning color,
+before any DFU command, together with the action this run takes: a blank bank
+is rewritten in full, and an unfinished transfer is discarded and restarted
+from the first block. The update continues after a warning. New entries follow the bottom unless
 the user has scrolled up to read earlier activity. GPUI Kit's `MessageScroller`
 owns native tail following and nested wheel routing. The fixed viewport is
 12.6 rem high, and measured rows own vertical insets so padding is included in
@@ -128,7 +132,12 @@ states; they do not exercise hardware or make network requests.
    waiting for ownership; do not open a competing connection. Re-read the device and
    require the admitted route and unit ID before any DFU start. A replacement
    device on the same route is refused. Require exactly two application banks
-   with one active, and choose the other.
+   with one active, and choose the other. The inactive bank must report the
+   running firmware line or an all-zero record. An interrupted transfer leaves
+   that blank record: an MX Master 4 stopped mid-transfer over Bluetooth on
+   2026-10-23 reported it for entity 1 while it kept running 27.3.19 from
+   entity 2. Refusing it would block every retry. An inactive bank that reports
+   a different firmware line is refused.
    Require known battery percentage of at least 30%, a Good/Full battery level
    and an accepted battery status. Require resumable and forcible `0x00D1`
    capabilities and a status for the selected entity. A state left by an

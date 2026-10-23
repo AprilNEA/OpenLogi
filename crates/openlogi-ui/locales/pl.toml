@@ -203,6 +203,7 @@ preparing = "Sprawdzanie urządzenia…"
 transferring = "Instalowanie oprogramowania układowego · %{percent}%"
 activity_log = "Dziennik aktywności (UTC)"
 activity_error = "Błąd: %{message}"
+activity_warning = "Ostrzeżenie: %{message}"
 activity_device = "Urządzenie: %{name} · %{family} · wersja %{version}"
 activity_url = "URL pakietu: %{url}"
 activity_downloaded = "Pobrano i zweryfikowano oprogramowanie układowe %{version}."
@@ -225,6 +226,8 @@ unsupported = "To urządzenie lub połączenie nie obsługuje aktualizacji oprog
 device_refused = "Urządzenie odrzuciło aktualizację. Zamknij inne programy do obsługi urządzenia i spróbuj ponownie."
 interrupted = "Aktualizacja została zatrzymana. Nie usypiaj urządzenia i połącz je ponownie, aby sprawdzić wersję oprogramowania układowego."
 not_activated = "Nie udało się potwierdzić nowego oprogramowania układowego po ponownym uruchomieniu. Połącz urządzenie ponownie, aby sprawdzić wersję oprogramowania układowego."
+warning_erased_bank = "Bank oprogramowania sprzętowego %{bank} jest pusty po przerwanej aktualizacji. Cały bank zostanie zapisany ponownie; działające oprogramowanie nie zostanie naruszone."
+warning_unfinished_transfer = "Bank oprogramowania sprzętowego %{bank} zawiera niedokończoną wcześniejszą aktualizację. Zostanie ona odrzucona, a transfer rozpocznie się od początku."
 
 [profiles]
 remove_all_profiles = "Delete all app settings"

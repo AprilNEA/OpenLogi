@@ -203,6 +203,7 @@ preparing = "Kontrola zařízení…"
 transferring = "Instalace firmwaru · %{percent}%"
 activity_log = "Protokol aktivit (UTC)"
 activity_error = "Chyba: %{message}"
+activity_warning = "Upozornění: %{message}"
 activity_device = "Zařízení: %{name} · %{family} · firmware %{version}"
 activity_url = "URL balíčku: %{url}"
 activity_downloaded = "Firmware %{version} byl stažen a ověřen."
@@ -225,6 +226,8 @@ unsupported = "Toto zařízení nebo připojení nepodporuje aktualizace firmwar
 device_refused = "Zařízení aktualizaci odmítlo. Zavřete ostatní software pro zařízení a zkuste to znovu."
 interrupted = "Aktualizace se zastavila. Udržujte zařízení vzhůru a znovu ho připojte pro kontrolu verze firmwaru."
 not_activated = "Po restartu se nepodařilo potvrdit nový firmware. Znovu zařízení připojte pro kontrolu verze firmwaru."
+warning_erased_bank = "Banka firmwaru %{bank} je po přerušené aktualizaci prázdná. Celá banka se zapíše znovu; běžící firmware zůstane nedotčen."
+warning_unfinished_transfer = "Banka firmwaru %{bank} obsahuje nedokončenou dřívější aktualizaci. Zahodí se a přenos začne znovu od začátku."
 
 [profiles]
 remove_all_profiles = "Odstranit všechna nastavení aplikace"

@@ -34,7 +34,7 @@ pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use firmware::{
     FirmwareBatteryCharge, FirmwareOffer, FirmwareRequest, FirmwareStatus, FirmwareUpdate,
     FirmwareUpdateEvent, FirmwareUpdateFailure, FirmwareUpdatePhase, FirmwareUpdateRefusal,
-    FirmwareUpdateSource, FirmwareVersion,
+    FirmwareUpdateSource, FirmwareUpdateWarning, FirmwareVersion,
 };
 pub use fn_lock::FnLockState;
 pub use force_sensing::ForceSensingInfo;

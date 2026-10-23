@@ -153,7 +153,9 @@ pub use succession::Identity;
 ///      the requester's admission identity, timestamped activity history,
 ///      approved package provenance, and
 ///      `HidppOperation::{ReadFirmware, WriteFirmware}` and
-///      `WriteError::FirmwareUpdateInProgress` appended.
+///      `WriteError::FirmwareUpdateInProgress` appended, and
+///      `FirmwareUpdatePhase::Warning` appended for damage an interrupted
+///      update left behind.
 pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the

@@ -203,6 +203,7 @@ preparing = "Vérification de l’appareil…"
 transferring = "Installation du micrologiciel · %{percent}%"
 activity_log = "Journal d’activité (UTC)"
 activity_error = "Erreur : %{message}"
+activity_warning = "Avertissement : %{message}"
 activity_device = "Appareil : %{name} · %{family} · micrologiciel %{version}"
 activity_url = "URL du paquet : %{url}"
 activity_downloaded = "Micrologiciel %{version} téléchargé et vérifié."
@@ -225,6 +226,8 @@ unsupported = "Cet appareil ou cette connexion ne prend pas en charge les mises 
 device_refused = "L’appareil a refusé la mise à jour. Fermez les autres logiciels de gestion de l’appareil et réessayez."
 interrupted = "La mise à jour s’est arrêtée. Maintenez l’appareil éveillé et reconnectez-le pour vérifier la version de son micrologiciel."
 not_activated = "Impossible de confirmer le nouveau micrologiciel après le redémarrage. Reconnectez l’appareil pour vérifier la version de son micrologiciel."
+warning_erased_bank = "La banque de firmware %{bank} est vide après une mise à jour interrompue. La banque entière est réécrite ; le firmware en cours n'est pas modifié."
+warning_unfinished_transfer = "La banque de firmware %{bank} contient une mise à jour précédente inachevée. Elle est abandonnée et le transfert reprend depuis le début."
 
 [profiles]
 remove_all_profiles = "Delete all app settings"

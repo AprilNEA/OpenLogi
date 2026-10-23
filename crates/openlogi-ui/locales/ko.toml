@@ -203,6 +203,7 @@ preparing = "장치 확인 중…"
 transferring = "펌웨어 설치 중 · %{percent}%"
 activity_log = "활동 로그 (UTC)"
 activity_error = "오류: %{message}"
+activity_warning = "경고: %{message}"
 activity_device = "장치: %{name} · %{family} · 펌웨어 %{version}"
 activity_url = "패키지 URL: %{url}"
 activity_downloaded = "펌웨어 %{version} 다운로드 및 검증이 완료되었습니다."
@@ -225,6 +226,8 @@ unsupported = "이 장치 또는 연결은 펌웨어 업데이트를 지원하�
 device_refused = "장치가 업데이트를 거부했습니다. 다른 장치 관리 소프트웨어를 종료하고 다시 시도하세요."
 interrupted = "업데이트가 중지되었습니다. 장치가 절전 모드로 전환되지 않도록 하고 다시 연결하여 펌웨어 버전을 확인하세요."
 not_activated = "다시 시작한 후 새 펌웨어를 확인하지 못했습니다. 장치를 다시 연결하여 펌웨어 버전을 확인하세요."
+warning_erased_bank = "중단된 업데이트로 펌웨어 뱅크 %{bank}이(가) 비어 있습니다. 뱅크 전체를 다시 씁니다. 실행 중인 펌웨어는 건드리지 않습니다."
+warning_unfinished_transfer = "펌웨어 뱅크 %{bank}에 이전의 완료되지 않은 업데이트가 남아 있습니다. 이를 버리고 전송을 처음부터 다시 시작합니다."
 
 [profiles]
 remove_all_profiles = "Delete all app settings"

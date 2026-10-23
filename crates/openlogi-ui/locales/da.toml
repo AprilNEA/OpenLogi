@@ -203,6 +203,7 @@ preparing = "Kontrollerer enheden…"
 transferring = "Installerer firmware · %{percent}%"
 activity_log = "Aktivitetslog (UTC)"
 activity_error = "Fejl: %{message}"
+activity_warning = "Advarsel: %{message}"
 activity_device = "Enhed: %{name} · %{family} · firmware %{version}"
 activity_url = "Pakkens URL: %{url}"
 activity_downloaded = "Firmware %{version} er downloadet og kontrolleret."
@@ -225,6 +226,8 @@ unsupported = "Denne enhed eller forbindelse understøtter ikke firmwareopdateri
 device_refused = "Enheden afviste opdateringen. Luk anden software til enheden, og prøv igen."
 interrupted = "Opdateringen stoppede. Hold enheden vågen, og tilslut den igen for at kontrollere firmwareversionen."
 not_activated = "Kunne ikke bekræfte den nye firmware efter genstart. Tilslut enheden igen for at kontrollere firmwareversionen."
+warning_erased_bank = "Firmwarebank %{bank} er tom efter en afbrudt opdatering. Hele banken skrives igen; den kørende firmware berøres ikke."
+warning_unfinished_transfer = "Firmwarebank %{bank} indeholder en ufærdig tidligere opdatering. Den kasseres, og overførslen starter forfra."
 
 [profiles]
 remove_all_profiles = "Delete all app settings"
