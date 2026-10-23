@@ -8,8 +8,9 @@
 //! has no TTY for a password prompt, so `pkexec` is the GUI equivalent). This
 //! never runs on its own — only from an explicit "Install Update" click.
 
+use std::ffi::OsStr;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpui_updater::Version;
 use sha2::{Digest as _, Sha256};
@@ -112,48 +113,87 @@ pub fn find_checksum<'a>(sha256sums: &'a str, package_name: &str) -> Option<&'a 
     })
 }
 
-/// Runs an external command and reports whether it exited successfully,
-/// injectable so verification logic is testable without spawning real
-/// processes (`minisign` is not guaranteed to be installed, and the real
-/// package-manager commands must never run outside a real install).
-pub trait CommandRunner {
-    fn run(&self, program: &str, args: &[String]) -> Result<bool, String>;
-}
-
-/// The real runner, used outside tests.
-pub struct SystemCommandRunner;
-
-impl CommandRunner for SystemCommandRunner {
-    fn run(&self, program: &str, args: &[String]) -> Result<bool, String> {
-        std::process::Command::new(program)
-            .args(args)
-            .status()
-            .map(|status| status.success())
-            .map_err(|error| format!("failed to run {program}: {error}"))
+/// Refuse `version` unless it is strictly newer than `current`, so a validly
+/// signed but older release can never be installed over this one.
+pub fn ensure_newer(version: &Version, current: &Version) -> Result<(), String> {
+    if version > current {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing to install {version}: not newer than the running {current}"
+        ))
     }
 }
 
-/// Verify `package_path`'s minisign signature against the embedded public key,
-/// exactly as `install.sh` runs `minisign -V -P "$MINISIGN_PUBLIC_KEY" -m
-/// "$PACKAGE_PATH" -x "$SIGNATURE_PATH"`.
+/// Verify `package_bytes` against the `.minisig` text with the embedded public
+/// key, as `install.sh`'s `minisign -V` does, and require the signed trusted
+/// comment to name `package_name`. The release pipeline signs with minisign's
+/// default trusted comment (`timestamp:…\tfile:<name>\thashed`), so this binds
+/// the signature to that exact, versioned filename.
 pub fn verify_minisign(
-    runner: &dyn CommandRunner,
-    package_path: &Path,
-    signature_path: &Path,
+    package_bytes: &[u8],
+    signature: &str,
+    package_name: &str,
 ) -> Result<(), String> {
-    let args = vec![
-        "-V".to_string(),
-        "-P".to_string(),
-        MINISIGN_PUBLIC_KEY.to_string(),
-        "-m".to_string(),
-        package_path.display().to_string(),
-        "-x".to_string(),
-        signature_path.display().to_string(),
-    ];
-    if runner.run("minisign", &args)? {
-        Ok(())
-    } else {
-        Err("minisign signature verification failed".to_string())
+    let signature = minisign_verify::Signature::decode(signature)
+        .map_err(|error| format!("invalid minisign signature: {error}"))?;
+    let public_key = minisign_verify::PublicKey::from_base64(MINISIGN_PUBLIC_KEY)
+        .map_err(|error| format!("invalid minisign public key: {error}"))?;
+    public_key
+        .verify(package_bytes, &signature, false)
+        .map_err(|error| format!("minisign signature verification failed: {error}"))?;
+    if !trusted_comment_names(signature.trusted_comment(), package_name) {
+        return Err(format!("minisign signature is not for {package_name}"));
+    }
+    Ok(())
+}
+
+/// Whether a minisign trusted comment carries a `file:<package_name>` field.
+fn trusted_comment_names(trusted_comment: &str, package_name: &str) -> bool {
+    trusted_comment
+        .split('\t')
+        .any(|field| field.strip_prefix("file:") == Some(package_name))
+}
+
+/// The first executable named `program` in the `PATH`-style list `path`.
+fn find_on_path(program: &str, path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| is_executable(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Check, before anything is downloaded, that `pkexec` and the package
+/// manager the install runs are on `path` (normally `$PATH`), so a missing
+/// tool is an actionable message instead of a failure after the download.
+pub fn require_install_tools(source: LinuxPackage, path: &OsStr) -> Result<(), String> {
+    for program in ["pkexec", install_program(source)] {
+        if find_on_path(program, path).is_none() {
+            return Err(format!(
+                "{program} was not found on PATH; install it to update from the app \
+                 (pkexec is provided by polkit)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn install_program(source: LinuxPackage) -> &'static str {
+    match source {
+        LinuxPackage::Deb => "apt-get",
+        LinuxPackage::Rpm => "rpm",
+        LinuxPackage::Arch => "pacman",
     }
 }
 
@@ -166,12 +206,16 @@ pub fn verify_minisign(
 /// falls back to, valid on every RPM-based host since `rpm` always underlies
 /// `dnf`/`zypper`/`yum`.
 fn install_command(source: LinuxPackage, package_path: &Path) -> Vec<String> {
-    let path = package_path.display().to_string();
-    match source {
-        LinuxPackage::Deb => vec!["apt-get".into(), "install".into(), "-y".into(), path],
-        LinuxPackage::Rpm => vec!["rpm".into(), "-Uvh".into(), path],
-        LinuxPackage::Arch => vec!["pacman".into(), "-U".into(), "--noconfirm".into(), path],
-    }
+    let args: &[&str] = match source {
+        LinuxPackage::Deb => &["install", "-y"],
+        LinuxPackage::Rpm => &["-Uvh"],
+        LinuxPackage::Arch => &["-U", "--noconfirm"],
+    };
+    std::iter::once(install_program(source))
+        .chain(args.iter().copied())
+        .map(String::from)
+        .chain([package_path.display().to_string()])
+        .collect()
 }
 
 /// [`install_command`], wrapped in `pkexec` for the privilege escalation a GUI
@@ -184,8 +228,6 @@ pub fn pkexec_install_command(source: LinuxPackage, package_path: &Path) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-
     use super::*;
 
     fn assets() -> Vec<ReleaseAsset> {
@@ -264,48 +306,75 @@ mod tests {
         assert_eq!(find_checksum(sums, "nonexistent.deb"), None);
     }
 
-    struct FakeRunner {
-        succeeds: bool,
-        seen: RefCell<Option<(String, Vec<String>)>>,
-    }
+    /// A real release signature, for `openlogi-v0.8.17-linux-amd64.deb`.
+    const V0_8_17_DEB_MINISIG: &str = "untrusted comment: signature from minisign secret key
+RURRkFtw+rqkvbEQzNdKwxbny5Z1fl9AFFrQx14DUIwV8T8oJcVn4xHQKn2lgbJalOoCwR3oZ2bnLN9lNQNgXRA2+MbO+8Dehwg=
+trusted comment: timestamp:1792704533\tfile:openlogi-v0.8.17-linux-amd64.deb\thashed
+fpTEZT3hEgq9Dt80RpQtQU7Kff+YNjzVBoMwk+p2H11ji5iYFgTNrNdjVH9RPoDeKf6JZXmNZhwvKmApHQQICw==
+";
 
-    impl CommandRunner for FakeRunner {
-        fn run(&self, program: &str, args: &[String]) -> Result<bool, String> {
-            *self.seen.borrow_mut() = Some((program.to_string(), args.to_vec()));
-            Ok(self.succeeds)
-        }
+    #[test]
+    fn minisign_rejects_bytes_the_release_signature_does_not_cover() {
+        let name = "openlogi-v0.8.17-linux-amd64.deb";
+        let error = verify_minisign(b"not the package", V0_8_17_DEB_MINISIG, name).unwrap_err();
+        assert!(error.contains("verification failed"), "{error}");
+        assert!(verify_minisign(b"x", "garbage", name).is_err());
     }
 
     #[test]
-    fn minisign_verification_reports_the_fake_runners_outcome() {
-        let package_path = Path::new("/tmp/openlogi.deb");
-        let signature_path = Path::new("/tmp/openlogi.deb.minisig");
+    fn trusted_comment_must_name_the_exact_package() {
+        let comment = "timestamp:1792704533\tfile:openlogi-v0.8.17-linux-amd64.deb\thashed";
+        assert!(trusted_comment_names(
+            comment,
+            "openlogi-v0.8.17-linux-amd64.deb"
+        ));
+        assert!(!trusted_comment_names(
+            comment,
+            "openlogi-v0.8.16-linux-amd64.deb"
+        ));
+        assert!(!trusted_comment_names(
+            comment,
+            "openlogi-v0.8.17-linux-amd64"
+        ));
+        assert!(!trusted_comment_names(
+            "timestamp:1",
+            "openlogi-v0.8.17-linux-amd64.deb"
+        ));
+    }
 
-        let ok_runner = FakeRunner {
-            succeeds: true,
-            seen: RefCell::new(None),
-        };
-        verify_minisign(&ok_runner, package_path, signature_path).unwrap();
-        let (program, args) = ok_runner.seen.into_inner().unwrap();
-        assert_eq!(program, "minisign");
-        assert_eq!(
-            args,
-            vec![
-                "-V",
-                "-P",
-                MINISIGN_PUBLIC_KEY,
-                "-m",
-                "/tmp/openlogi.deb",
-                "-x",
-                "/tmp/openlogi.deb.minisig",
-            ]
-        );
+    #[test]
+    fn only_a_strictly_newer_version_may_install() {
+        let current = Version::parse("0.8.17").unwrap();
+        ensure_newer(&Version::parse("0.8.18").unwrap(), &current).unwrap();
+        ensure_newer(&current, &current).unwrap_err();
+        ensure_newer(&Version::parse("0.8.16").unwrap(), &current).unwrap_err();
+        ensure_newer(&Version::parse("0.8.17-beta.1").unwrap(), &current).unwrap_err();
+    }
 
-        let failing_runner = FakeRunner {
-            succeeds: false,
-            seen: RefCell::new(None),
+    #[cfg(unix)]
+    #[test]
+    fn install_tools_are_looked_up_on_the_given_path_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().as_os_str();
+        let add = |name: &str, mode: u32| {
+            let file = dir.path().join(name);
+            std::fs::write(&file, "").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
         };
-        assert!(verify_minisign(&failing_runner, package_path, signature_path).is_err());
+
+        let error = require_install_tools(LinuxPackage::Deb, path).unwrap_err();
+        assert!(error.starts_with("pkexec was not found"), "{error}");
+
+        add("pkexec", 0o755);
+        add("apt-get", 0o644);
+        let error = require_install_tools(LinuxPackage::Deb, path).unwrap_err();
+        assert!(error.starts_with("apt-get was not found"), "{error}");
+
+        add("apt-get", 0o755);
+        require_install_tools(LinuxPackage::Deb, path).unwrap();
+        require_install_tools(LinuxPackage::Rpm, path).unwrap_err();
     }
 
     #[test]
