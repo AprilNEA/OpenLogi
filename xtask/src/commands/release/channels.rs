@@ -15,18 +15,29 @@
 //!   beta is newer. Sparkle offers the beta item only to apps that allow the
 //!   beta channel.
 //!
-//! "Newer" is Sparkle's order of build versions, which follows the commits: a
-//! beta is newer than a stable release only when it was cut after it. A beta
-//! numbered past a stable release but cut before it (the release PR's version
-//! went down in between) is older, and the stable release has its changes.
+//! "Newer" is the order of build versions, which follows the commits: a beta
+//! is newer than a stable release only when it was cut after it. Sparkle and
+//! Windows Installer compare build versions too. The built-in update engine
+//! compares release versions instead, and the two orders differ only for a
+//! beta numbered past a stable release but cut before it (the release PR's
+//! version went down in between). That beta is older, and the stable release
+//! has its changes: Sparkle moves a Mac on the beta to the stable release,
+//! while the built-in engine, which never offers a lower version, keeps the
+//! beta until a release numbered past it. [`select`] warns when this happens.
 //!
 //! Items are copied from the records byte for byte, so their signatures stay
 //! the ones `release appcast` made. The files are recomputed from every record
 //! each time, so a release that publishes out of order still leaves each
 //! channel on its newest release.
 //!
+//! A record's manifest is uploaded after its appcasts, so a record directory
+//! counts once it has its manifest. One without is an upload that stopped
+//! part way; it is skipped, so it cannot block later releases. A record with
+//! its manifest but a file missing or wrong is an error.
+//!
 //! Records began after `v0.8.17`. Until a stable release has one, the stable
 //! channel's current files stand in as the newest stable release's record.
+//! Once one does, those files are not read.
 
 use std::path::{Path, PathBuf};
 
@@ -105,6 +116,10 @@ struct Outcome {
     beta_changed: bool,
 }
 
+/// Compose and write the channel files, then report what each channel
+/// offers in the step's outputs. The outputs come last: when writing them
+/// fails, the files are written but the step fails, and the publish job
+/// uploads nothing.
 pub(crate) fn run(args: &Args) -> Result<()> {
     let outcome = write_channels(args)?;
     println!("stable channel: {}", outcome.stable_tag);
@@ -140,7 +155,10 @@ fn write_channels(args: &Args) -> Result<Outcome> {
         "{} has no record of {tag}; upload the release's record before composing the channels",
         args.mirror.display()
     );
-    if let Some(stand_in) = stable_stand_in(&args.mirror, &records)? {
+    let has_stable_record = records
+        .iter()
+        .any(|record| record.tag.channel() == UpdateChannel::Stable);
+    if !has_stable_record && let Some(stand_in) = stable_stand_in(&args.mirror)? {
         records.push(stand_in);
     }
     let selection = select(&records)?;
@@ -159,8 +177,9 @@ fn write_channels(args: &Args) -> Result<Outcome> {
 }
 
 /// Every release record in `mirror`, oldest first. A release without a
-/// record directory predates records and is skipped; a record missing a file
-/// is an error.
+/// record directory predates records and is skipped, and so is one whose
+/// record has no manifest yet: its upload stopped before the manifest, which
+/// goes last. A record with its manifest but missing a file is an error.
 fn read_records(mirror: &Path) -> Result<Vec<Record>> {
     let releases = mirror.join(update_feed::RELEASES_DIR);
     if !releases.is_dir() {
@@ -169,7 +188,15 @@ fn read_records(mirror: &Path) -> Result<Vec<Record>> {
     let mut records = Vec::new();
     for entry in fs_err::read_dir(&releases)? {
         let entry = entry?;
-        if !entry.path().join(update_feed::RECORD_DIR_NAME).is_dir() {
+        let record_dir = entry.path().join(update_feed::RECORD_DIR_NAME);
+        if !record_dir.is_dir() {
+            continue;
+        }
+        if !record_dir.join(MANIFEST_FILE_NAME).is_file() {
+            eprintln!(
+                "skipping {}: it has no {MANIFEST_FILE_NAME}, so its upload stopped part way",
+                record_dir.display()
+            );
             continue;
         }
         let name = entry.file_name();
@@ -226,11 +253,11 @@ fn read_record(dir: &Path, tag: ReleaseTag) -> Result<Record> {
     })
 }
 
-/// The newest stable release's record when that release predates records:
-/// the stable channel's current files. `None` when the stable channel has no
-/// manifest, or its release has a record. A beta item composed into the
-/// stable feed beside the release's is not part of it.
-fn stable_stand_in(mirror: &Path, records: &[Record]) -> Result<Option<Record>> {
+/// The newest stable release's record while no stable release has one: the
+/// stable channel's current files. `None` when the stable channel has no
+/// manifest. A beta item composed into the stable feed beside the release's
+/// is not part of it.
+fn stable_stand_in(mirror: &Path) -> Result<Option<Record>> {
     let dir = mirror.join(UpdateChannel::Stable.dir());
     let manifest_path = dir.join(MANIFEST_FILE_NAME);
     if !manifest_path.is_file() {
@@ -239,9 +266,6 @@ fn stable_stand_in(mirror: &Path, records: &[Record]) -> Result<Option<Record>> 
     let (manifest, manifest_text) = read_manifest(&manifest_path)?;
     let tag = ReleaseTag::parse(&manifest.tag)
         .with_context(|| format!("{} names no release tag", manifest_path.display()))?;
-    if records.iter().any(|record| record.tag == tag) {
-        return Ok(None);
-    }
     ensure!(
         tag.channel() == UpdateChannel::Stable,
         "{} offers {tag}, which is not a stable release",
@@ -315,8 +339,9 @@ fn select(records: &[Record]) -> Result<Selection<'_>> {
         && skipped.tag.version() > stable.tag.version()
     {
         eprintln!(
-            "{} is numbered past {}, but was cut before it (build {} < {}); the beta channel offers {}",
-            skipped.tag, stable.tag, skipped.build, stable.build, stable.tag
+            "{} is numbered past {}, but was cut before it (build {} < {}); the beta channel offers {}. \
+             Apps on {} that update with the built-in engine stay on it until a release numbered past it",
+            skipped.tag, stable.tag, skipped.build, stable.build, stable.tag, skipped.tag
         );
     }
     Ok(Selection { stable, beta })
@@ -410,6 +435,10 @@ fn check_feed(feed: &str, offered: &[&Record]) -> Result<()> {
     Ok(())
 }
 
+/// Write `files` under `output_dir`, all or none: they go into a scratch
+/// directory beside it, which becomes `output_dir` once every file is
+/// written. A failure removes the scratch directory and leaves `output_dir`
+/// as it was.
 fn write_files(output_dir: &Path, files: &[ChannelFile]) -> Result<()> {
     if output_dir.exists() {
         ensure!(
@@ -418,13 +447,35 @@ fn write_files(output_dir: &Path, files: &[ChannelFile]) -> Result<()> {
             output_dir.display()
         );
     }
+    let parent = match output_dir.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    fs_err::create_dir_all(parent)?;
+    let scratch = tempfile::Builder::new()
+        .prefix(".channels-")
+        .tempdir_in(parent)
+        .with_context(|| {
+            format!(
+                "could not create a scratch directory in {}",
+                parent.display()
+            )
+        })?;
     for file in files {
-        let path = output_dir.join(&file.path);
-        if let Some(parent) = path.parent() {
-            fs_err::create_dir_all(parent)?;
+        let path = scratch.path().join(&file.path);
+        if let Some(dir) = path.parent() {
+            fs_err::create_dir_all(dir)?;
         }
         fs_err::write(&path, &file.contents)?;
-        println!("{}", path.display());
+    }
+    if output_dir.exists() {
+        fs_err::remove_dir(output_dir)?;
+    }
+    fs_err::rename(scratch.path(), output_dir)?;
+    // The directory is `output_dir` now; there is nothing left to remove.
+    let _ = scratch.keep();
+    for file in files {
+        println!("{}", output_dir.join(&file.path).display());
     }
     Ok(())
 }

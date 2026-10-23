@@ -19,11 +19,16 @@ records (`cargo xtask release channels`).
   in which tags published. A failed publish would leave it wrong until someone
   repaired it by hand. Composing from the records gives the same files in any
   order.
-- **Newest by build version, not by tag version.** Sparkle and Windows
-  Installer compare build versions. A beta's build version is the stable
-  release it was cut from, plus its beta number. So the channels agree with
-  what installed apps accept. A beta numbered past a stable release but cut
-  before it is older, and the beta channel offers the stable release.
+- **Newest by build version, not by tag version.** A beta's build version is
+  the stable release it was cut from, plus its beta number, so build order
+  follows the commits. Sparkle and Windows Installer compare build versions.
+  The built-in update engine compares release versions, and never offers a
+  lower one. The two orders differ only for a beta numbered past a stable
+  release but cut before it, when the release PR's version went down in
+  between. That beta is older, and the beta channel offers the stable
+  release: Sparkle moves a Mac on the beta to it, while the built-in engine
+  keeps the beta until a release numbered past it. `release channels` warns
+  when this happens.
 - **Items copied byte for byte.** The composer never signs. The EdDSA
   signatures stay the ones `release appcast` made, and the private key stays
   in that one step.
@@ -34,7 +39,12 @@ records (`cargo xtask release channels`).
 - **The bucket lists the releases, not GitHub Releases.** The updater can offer
   only what is on R2, and reading R2 needs no GitHub token. Releases up to
   `v0.8.17` have no record. Until a stable release has one, the current stable
-  channel files stand in for it.
+  channel files stand in for it; after that they are not read.
+- **A record counts once its manifest is up.** A record's appcasts upload
+  first and its `latest.json` last. A record directory without `latest.json`
+  is an upload that stopped part way, and the composer skips it, so it cannot
+  block later releases. A record with its manifest but a file missing or
+  wrong is an error.
 
 ## 2026-10: The mock agent's console drives the agent's own indicator state
 

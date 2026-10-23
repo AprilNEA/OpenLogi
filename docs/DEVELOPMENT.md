@@ -467,7 +467,11 @@ Sparkle keeps reading the stable appcasts below and, on `beta`, also offers
 their items tagged `<sparkle:channel>beta</sparkle:channel>`. The beta
 channel's `latest.json` offers the newest beta when it is newer than the
 newest stable release, and that stable release otherwise. So an app on `beta`
-gets every stable release too.
+gets every stable release too, with one exception: the engine compares
+release versions and never offers a lower one, so an app on a beta numbered
+past a later stable release (the release PR's version went down after the
+beta) stays on the beta until a release numbered past it. Sparkle compares
+build versions and moves it to the stable release.
 
 ### macOS: Sparkle
 
@@ -533,9 +537,12 @@ record is up, `cargo xtask release channels` composes them from every record
 on R2, and they go up last. Each channel offers its newest release in
 Sparkle's order of build versions, whatever order the tags published in.
 Items are copied from the records byte for byte, so their signatures are the
-ones `release appcast` made. Records began after `v0.8.17`; until a stable
-release has one, the current stable channel files stand in for it. Publish
-jobs run one at a time (the `release-publish`
+ones `release appcast` made. A record's appcasts go up before its
+`latest.json`, and a record counts only once its `latest.json` is up, so an
+upload that stops part way is skipped rather than blocking later releases.
+Records began after `v0.8.17`; until a stable release has one, the current
+stable channel files stand in for it, and after that they are not read.
+Publish jobs run one at a time (the `release-publish`
 concurrency group), so two tags never interleave these writes. Up to 100
 waiting publish jobs queue (`queue: max`) instead of replacing each other, and
 start in the order they began to wait. The queue only keeps writes apart: it

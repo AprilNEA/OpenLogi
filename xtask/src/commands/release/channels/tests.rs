@@ -4,7 +4,7 @@ use gpui_updater_release::{Appcast, AppcastItem, Enclosure};
 use openlogi_core::update_feed::{MANIFEST_FILE_NAME, UpdateChannel};
 use strum::VariantArray as _;
 
-use super::{Args, Outcome, feed_items, write_channels};
+use super::{Args, ChannelFile, Outcome, feed_items, write_channels, write_files};
 use crate::commands::release::latest_json::Manifest;
 use crate::support::update_feed::{MacArch, appcast_url};
 
@@ -287,7 +287,9 @@ fn a_beta_older_than_the_newest_stable_release_leaves_the_feeds() {
 #[test]
 fn a_beta_cut_before_the_stable_release_is_older_whatever_its_number() {
     // Tagged 0.9.0-beta.5 while the release PR said 0.9.0; the release PR then
-    // went back to 0.8.19, which shipped from a later commit.
+    // went back to 0.8.19, which shipped from a later commit. Sparkle moves a
+    // Mac on the beta to 0.8.19 by build; the built-in engine, comparing
+    // versions, keeps 0.9.0-beta.5 until a release numbered past it.
     let mirror = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
     record(mirror.path(), "v0.8.18", "0.8.18");
@@ -375,6 +377,75 @@ fn a_stable_record_replaces_the_stand_in() {
     );
 }
 
+#[test]
+fn once_a_stable_release_has_a_record_the_old_channel_files_are_not_read() {
+    // v0.8.18's record is up, but its publish stopped before the channel files,
+    // which still offer v0.8.17, however they look.
+    let broken: [(&str, Break); 3] = [
+        ("a manifest that does not parse", |dir| {
+            write(&dir.join(MANIFEST_FILE_NAME), "{broken");
+        }),
+        ("an appcast missing", |dir| {
+            fs_err::remove_file(dir.join("appcast-x86_64.xml")).unwrap();
+        }),
+        ("no stable channel at all", |dir| {
+            fs_err::remove_dir_all(dir).unwrap();
+        }),
+    ];
+    for (case, breaks) in broken {
+        let mirror = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        legacy_stable_channel(mirror.path(), "v0.8.17", None);
+        breaks(&mirror.path().join("channels/stable"));
+        record(mirror.path(), "v0.8.18", "0.8.18");
+        record(mirror.path(), "v0.8.19-beta.2", "0.8.18.2");
+
+        let done = write_channels(&args(mirror.path(), out.path(), "v0.8.19-beta.2"))
+            .unwrap_or_else(|error| panic!("{case}: {error:#}"));
+
+        assert_eq!(done, outcome("v0.8.18", "v0.8.19-beta.2", true), "{case}");
+    }
+}
+
+#[test]
+fn an_upload_that_stopped_before_its_manifest_is_skipped() {
+    // Each record's manifest goes up last. These two uploads stopped part way:
+    // a beta with both appcasts, a stable release with one.
+    let mirror = tempfile::tempdir().unwrap();
+    record(mirror.path(), "v0.8.18", "0.8.18");
+    record(mirror.path(), "v0.8.19-beta.2", "0.8.18.2");
+    record(mirror.path(), "v0.8.19", "0.8.19");
+    let feed = |tag: &str| mirror.path().join("releases").join(tag).join("feed");
+    fs_err::remove_file(feed("v0.8.19-beta.2").join(MANIFEST_FILE_NAME)).unwrap();
+    fs_err::remove_file(feed("v0.8.19").join(MANIFEST_FILE_NAME)).unwrap();
+    fs_err::remove_file(feed("v0.8.19").join("appcast-arm64.xml")).unwrap();
+    record(mirror.path(), "v0.8.20-beta.1", "0.8.19.1");
+
+    let out = tempfile::tempdir().unwrap();
+    let done = write_channels(&args(mirror.path(), out.path(), "v0.8.20-beta.1")).unwrap();
+
+    assert_eq!(done, outcome("v0.8.18", "v0.8.20-beta.1", true));
+    let error = error(mirror.path(), "v0.8.19-beta.2");
+    assert!(
+        error.contains("no record of v0.8.19-beta.2"),
+        "the stopped release itself cannot compose: {error}"
+    );
+}
+
+#[test]
+fn betas_of_one_build_rank_by_version() {
+    // One commit tagged for two release PR versions.
+    let mirror = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    record(mirror.path(), "v0.8.18", "0.8.18");
+    record(mirror.path(), "v0.9.0-beta.4", "0.8.18.4");
+    record(mirror.path(), "v0.8.19-beta.4", "0.8.18.4");
+
+    let done = write_channels(&args(mirror.path(), out.path(), "v0.8.19-beta.4")).unwrap();
+
+    assert_eq!(done.beta_tag, "v0.9.0-beta.4");
+}
+
 fn error(mirror: &Path, tag: &str) -> String {
     let out = tempfile::tempdir().unwrap();
     let error = write_channels(&args(mirror, out.path(), tag)).unwrap_err();
@@ -442,6 +513,31 @@ fn a_broken_record_stops_the_composition() {
         let error = error(mirror.path(), "v0.8.18");
         assert!(error.contains(says), "{says}: {error}");
     }
+}
+
+#[test]
+fn a_write_that_fails_leaves_nothing_behind() {
+    let out = tempfile::tempdir().unwrap();
+    let stage = out.path().join("stage");
+    let files = [
+        ChannelFile {
+            path: "channels/stable/latest.json".into(),
+            contents: "{}".into(),
+        },
+        ChannelFile {
+            // No file system takes a NUL in a name.
+            path: "channels/stable/appcast-arm64\0.xml".into(),
+            contents: "<rss/>".into(),
+        },
+    ];
+
+    write_files(&stage, &files).unwrap_err();
+
+    let left: Vec<_> = fs_err::read_dir(out.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(left.is_empty(), "left behind: {left:?}");
 }
 
 #[test]

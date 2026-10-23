@@ -416,8 +416,11 @@ jobs:
             --endpoint-url "$endpoint"
 
           # The release's feed record, after the artifacts it points at. It
-          # never changes, like them.
-          for type in json:application/json xml:application/xml; do
+          # never changes, like them. Its manifest goes last: `release
+          # channels` counts a record only once its manifest is up, so an
+          # upload that stops part way is skipped instead of blocking every
+          # later release.
+          for type in xml:application/xml json:application/json; do
             aws s3 cp .release/stage/ "s3://${R2_BUCKET}/" \
               --recursive \
               --exclude "*" \
