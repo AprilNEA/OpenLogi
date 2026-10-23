@@ -1036,3 +1036,74 @@ async fn disable_keys_write_mismatch_is_retained_and_reported() {
         0xa0
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn firmware_job_survives_the_request_and_finishes_in_the_snapshot() {
+    use openlogi_core::hid::{FirmwareOffer, FirmwareUpdatePhase, FirmwareUpdateRefusal};
+    let server = MockAgent::new(demo_state());
+    let route = mouse_route();
+    assert!(matches!(
+        server
+            .clone()
+            .firmware_status(tarpc::context::current(), route.clone())
+            .await
+            .unwrap()
+            .offer,
+        FirmwareOffer::Available(_)
+    ));
+    server
+        .clone()
+        .start_firmware_update(tarpc::context::current(), route.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        server
+            .clone()
+            .start_firmware_update(tarpc::context::current(), route.clone())
+            .await,
+        Err(FirmwareUpdateRefusal::Busy)
+    );
+    for _ in 0..6 {
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    let finished = server.current().await.snapshot.firmware_update.unwrap();
+    assert_eq!(finished.phase, FirmwareUpdatePhase::Succeeded);
+    assert_eq!(finished.events.len(), 15);
+    assert_eq!(finished.source.as_ref().unwrap().device_name, "MX Master 4");
+    assert_eq!(
+        finished.events.first().unwrap().phase,
+        FirmwareUpdatePhase::Downloading
+    );
+    assert_eq!(
+        finished.events.last().unwrap().phase,
+        FirmwareUpdatePhase::Succeeded
+    );
+    assert_eq!(
+        server
+            .clone()
+            .firmware_status(tarpc::context::current(), route.clone())
+            .await
+            .unwrap()
+            .offer,
+        FirmwareOffer::UpToDate
+    );
+    let previous_id = server.current().await.snapshot.firmware_update.unwrap().id;
+    server
+        .clone()
+        .start_firmware_update(tarpc::context::current(), route.clone())
+        .await
+        .unwrap();
+    assert!(server.current().await.snapshot.firmware_update.unwrap().id > previous_id);
+    assert_eq!(
+        server
+            .clone()
+            .firmware_status(tarpc::context::current(), route)
+            .await
+            .unwrap()
+            .offer,
+        FirmwareOffer::UpToDate,
+        "reinstalling does not revert the reported running version"
+    );
+}

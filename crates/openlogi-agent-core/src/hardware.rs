@@ -347,6 +347,37 @@ impl DeviceOp {
         .await
     }
 
+    /// Hold sole receiver access and this transport's turn for a firmware
+    /// transaction. Resolve after both waits, so queued work never pins a
+    /// retired channel. The updater owns request deadlines and cooperatively
+    /// observes the device-I/O gate between commands; it must finish an
+    /// in-flight native write before releasing these leases.
+    pub async fn firmware<F, Fut, T>(
+        self,
+        work: F,
+    ) -> Result<T, openlogi_core::hid::FirmwareUpdateFailure>
+    where
+        F: FnOnce(SharedChannel) -> Fut,
+        Fut: Future<Output = Result<T, openlogi_core::hid::FirmwareUpdateFailure>>,
+    {
+        use openlogi_core::hid::FirmwareUpdateFailure;
+
+        if !self.access.device_io.allows_io() {
+            return Err(FirmwareUpdateFailure::Device(WriteError::DeviceNotFound));
+        }
+        let turn = self.access.transport_turns.turn_for(&self.route);
+        let _lease = self
+            .access
+            .receiver_access
+            .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::FirmwareUpdate)
+            .await;
+        let _turn = turn.lock().await;
+        let shared = self
+            .resolve()
+            .map_err(|_| FirmwareUpdateFailure::Device(WriteError::DeviceNotFound))?;
+        work(shared).await
+    }
+
     /// [`Self::run`] for a write ordered by `ticket`: lease the receiver,
     /// wait for the device's earlier writes of the same setting, then resolve
     /// the channel and give `write` — or `superseded`, when a newer write was
@@ -2338,6 +2369,59 @@ mod tests {
         })
         .await
         .expect("the reapply thread reaches the transport queue");
+    }
+
+    #[tokio::test]
+    async fn firmware_waits_for_capture_and_blocks_ordinary_writes_until_cleanup() {
+        let published = publish_direct_mouse().await;
+        let receiver_access = ReceiverAccess::default();
+        let access = DeviceAccess {
+            channel: Arc::new(RwLock::new(None)),
+            registry: published.registry.clone(),
+            receiver_access: receiver_access.clone(),
+            device_io: published.device_io.clone(),
+            transport_turns: TransportTurns::default(),
+        };
+        let capture = receiver_access.try_acquire_for_session().unwrap();
+        let mut requests = receiver_access.subscribe_requests();
+        let (started_tx, mut started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let firmware = tokio::spawn(access.op(&published.route).firmware(|_channel| async move {
+            started_tx.send(()).unwrap();
+            finish_rx.await.unwrap();
+            Ok(())
+        }));
+        requests.changed().await.unwrap();
+        assert!(
+            requests
+                .borrow()
+                .requested(crate::receiver_access::ExclusiveAccessReason::FirmwareUpdate)
+        );
+        assert!(
+            started_rx.try_recv().is_err(),
+            "capture still owns its lease"
+        );
+        assert!(receiver_access.try_acquire_for_session().is_none());
+        drop(capture);
+        started_rx.await.unwrap();
+        let (write_tx, mut write_rx) = tokio::sync::oneshot::channel();
+        let write = tokio::spawn(access.op(&published.route).run(
+            HidppOperation::WriteDpi,
+            |_channel| async move {
+                write_tx.send(()).unwrap();
+                Ok(())
+            },
+        ));
+        tokio::task::yield_now().await;
+        assert!(
+            write_rx.try_recv().is_err(),
+            "firmware owns the receiver until cleanup"
+        );
+        finish_tx.send(()).unwrap();
+        firmware.await.unwrap().unwrap();
+        write_rx.await.unwrap();
+        write.await.unwrap().unwrap();
+        assert!(!receiver_access.exclusive_requested());
     }
 
     /// The timeout every [`DeviceOp::run`] call relies on: a write that never

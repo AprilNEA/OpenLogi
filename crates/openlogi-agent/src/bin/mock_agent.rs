@@ -401,6 +401,8 @@ struct State {
     phase: Option<PairingPhase>,
     /// Id handed to the next pairing session; only ever increases.
     next_pairing_id: u64,
+    firmware_update: Option<openlogi_core::hid::FirmwareUpdate>,
+    installed_firmware: Vec<DeviceRoute>,
     clock: MockClock,
     /// Battery readings the console set, reported over the profile's.
     battery_overrides: Vec<(DeviceRoute, BatteryInfo)>,
@@ -443,6 +445,8 @@ impl State {
             pairing_updates: None,
             phase: None,
             next_pairing_id: 0,
+            firmware_update: None,
+            installed_firmware: Vec::new(),
             clock,
             battery_overrides: Vec::new(),
             faults: Vec::new(),
@@ -978,6 +982,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         pairing: state.phase.clone(),
         foreground: state.foreground(),
         lights: Vec::new(),
+        firmware_update: state.firmware_update.clone(),
     }
 }
 
@@ -1188,6 +1193,121 @@ impl Agent for MockAgent {
         info!(%route, %rate, "set_report_rate");
         Ok(stored.clone())
     }
+    async fn firmware_status(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::FirmwareStatus, WriteError> {
+        use openlogi_core::hid::{FirmwareOffer, FirmwareStatus, FirmwareVersion};
+        let state = self.state.lock().await;
+        state.settings_for(&route)?;
+        if !state.clock.is_demo() {
+            return Err(WriteError::FeatureUnsupported {
+                feature_hex: 0x0003,
+            });
+        }
+        let target = FirmwareVersion {
+            number: 27,
+            revision: 3,
+            build: 19,
+        };
+        let updated = state.installed_firmware.contains(&route);
+        Ok(FirmwareStatus {
+            running: if updated {
+                target
+            } else {
+                FirmwareVersion {
+                    number: 27,
+                    revision: 1,
+                    build: 16,
+                }
+            },
+            offer: if updated {
+                FirmwareOffer::UpToDate
+            } else {
+                FirmwareOffer::Available(target)
+            },
+        })
+    }
+
+    async fn start_firmware_update(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<(), openlogi_core::hid::FirmwareUpdateRefusal> {
+        use openlogi_core::hid::{
+            FirmwareUpdate, FirmwareUpdatePhase, FirmwareUpdateRefusal, FirmwareVersion,
+        };
+        {
+            let mut state = self.state.lock().await;
+            if state
+                .firmware_update
+                .as_ref()
+                .is_some_and(|update| !update.phase.is_finished())
+            {
+                return Err(FirmwareUpdateRefusal::Busy);
+            }
+            state
+                .settings_for(&route)
+                .map_err(|_| FirmwareUpdateRefusal::DeviceNotFound)?;
+            if !state.clock.is_demo() {
+                return Err(FirmwareUpdateRefusal::NoUpdate);
+            }
+            let id = state
+                .firmware_update
+                .as_ref()
+                .map_or(1, |update| update.id + 1);
+            let update = FirmwareUpdate {
+                source: openlogi_device_registry::firmware::latest_release("RBM", 27, 0xb042)
+                    .map(Into::into),
+                events: Vec::new(),
+                id,
+                route,
+                target: FirmwareVersion {
+                    number: 27,
+                    revision: 3,
+                    build: 19,
+                },
+                phase: FirmwareUpdatePhase::Downloading,
+            };
+            openlogi_agent_core::firmware::record_progress(&mut state.firmware_update, update);
+        }
+        tokio::spawn(async move {
+            for phase in [
+                FirmwareUpdatePhase::Preparing,
+                FirmwareUpdatePhase::Transferring { percent: 25 },
+                FirmwareUpdatePhase::Transferring { percent: 75 },
+                FirmwareUpdatePhase::Transferring { percent: 100 },
+                FirmwareUpdatePhase::Restarting,
+                FirmwareUpdatePhase::Succeeded,
+            ] {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let mut state = self.state.lock().await;
+                let completed = if let Some(update) = &state.firmware_update {
+                    let next = FirmwareUpdate {
+                        phase,
+                        ..update.clone()
+                    };
+                    let completed =
+                        (next.phase == FirmwareUpdatePhase::Succeeded).then(|| next.route.clone());
+                    openlogi_agent_core::firmware::record_progress(
+                        &mut state.firmware_update,
+                        next,
+                    );
+                    completed
+                } else {
+                    None
+                };
+                if let Some(route) = completed
+                    && !state.installed_firmware.contains(&route)
+                {
+                    state.installed_firmware.push(route);
+                }
+            }
+        });
+        Ok(())
+    }
+
     async fn read_pointer_speed(
         self,
         _: Context,

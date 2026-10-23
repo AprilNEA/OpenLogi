@@ -20,9 +20,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PairingError, PasskeyMethod,
-    PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
-    WriteError,
+    EasySwitchHosts, FirmwareStatus, FirmwareUpdate, FirmwareUpdateRefusal, FnLockState,
+    ForceSensingInfo, LightCommand, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector,
+    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -152,7 +152,11 @@ pub use succession::Identity;
 ///      offers, and `BacklightState::duration` and
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
 ///      timer, five-second steps up to two hours.
-pub const PROTOCOL_VERSION: u32 = 41;
+/// v42: firmware status/start methods and `AgentSnapshot::firmware_update`
+///      appended for official device firmware updates, with job identity,
+///      timestamped activity history, approved package provenance, and
+///      `HidppOperation::{ReadFirmware, WriteFirmware}` appended.
+pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -274,6 +278,8 @@ pub struct AgentSnapshot {
     /// light reached only through its raw report reads nothing back and is
     /// not listed.
     pub lights: Vec<ObservedLight>,
+    /// The active or most recent device firmware update.
+    pub firmware_update: Option<FirmwareUpdate>,
 }
 
 /// A standalone light as it reported itself to the agent.
@@ -953,4 +959,9 @@ pub trait Agent {
     async fn reload_saved_config_with_verdict(
         saved: SavedConfig,
     ) -> Result<SavedConfigVerdict, ConfigReloadError>;
+    /// Read the running application firmware and the newest supported official release.
+    async fn firmware_status(route: DeviceRoute) -> Result<FirmwareStatus, WriteError>;
+    /// Admit an update to the newest supported official release. Progress survives
+    /// client disconnects in [`AgentSnapshot::firmware_update`].
+    async fn start_firmware_update(route: DeviceRoute) -> Result<(), FirmwareUpdateRefusal>;
 }

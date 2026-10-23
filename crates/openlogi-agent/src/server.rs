@@ -56,6 +56,7 @@ pub struct AgentServer {
     /// per request: reads take no orchestrator lock and no permission syscall.
     pub observable: Arc<ObservableState>,
     pub pairing: Arc<PairingManager>,
+    pub(crate) firmware: Arc<crate::firmware::FirmwareManager>,
     pub event_monitor: SharedEventMonitor,
     pub action_ring: Arc<ActionRingManager>,
     pub dispatcher: ActionDispatcher,
@@ -83,6 +84,10 @@ impl AgentServer {
         dispatcher: ActionDispatcher,
         backlight_overlay: BacklightOverlayManager,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
+        let firmware = Arc::new(crate::firmware::FirmwareManager::new(
+            shared.clone(),
+            Arc::clone(&observable),
+        ));
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
         let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
         (
@@ -91,6 +96,7 @@ impl AgentServer {
                 shared,
                 observable,
                 pairing,
+                firmware,
                 event_monitor,
                 action_ring,
                 dispatcher,
@@ -348,6 +354,22 @@ impl Agent for AgentServer {
     ) -> Result<ReportRateInfo, WriteError> {
         self.shared.set_report_rate(&route, rate).await
     }
+    async fn firmware_status(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::FirmwareStatus, WriteError> {
+        self.firmware.status(&route).await
+    }
+
+    async fn start_firmware_update(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<(), openlogi_core::hid::FirmwareUpdateRefusal> {
+        self.firmware.start(route).await
+    }
+
     async fn read_pointer_speed(
         self,
         _: Context,
