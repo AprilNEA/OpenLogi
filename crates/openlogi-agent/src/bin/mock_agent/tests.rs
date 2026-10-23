@@ -1129,3 +1129,10 @@ async fn firmware_job_survives_the_request_and_finishes_in_the_snapshot() {
         "reinstalling does not revert the reported running version"
     );
 }
+
+#[test]
+fn the_scripted_mouse_installs_only_its_own_catalog_release() {
+    let (prefix, number, product_id) = MOCK_FIRMWARE;
+    let release = mock_release().expect("the catalog carries the scripted mouse's release");
+    assert!(release.fits(prefix, number, product_id));
+}
