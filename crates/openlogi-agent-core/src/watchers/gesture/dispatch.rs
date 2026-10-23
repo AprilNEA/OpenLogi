@@ -306,7 +306,14 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonUp(button) => {
-                let frames = self.spaces.end(session, button, Instant::now());
+                // A press a binding or profile reload invalidated must not
+                // finish a switch on release, even with no motion since the
+                // reload to cancel it: spring its transition back instead.
+                let frames = if self.press_is_live(session, button) {
+                    self.spaces.end(session, button, Instant::now())
+                } else {
+                    self.spaces.cancel(session, button)
+                };
                 self.post_space_frames(key, button, &frames);
                 self.outputs.actions.try_hidpp_button_up(session, button);
                 self.held_presses.end(session, button);
