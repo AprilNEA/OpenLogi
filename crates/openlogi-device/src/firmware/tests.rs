@@ -38,6 +38,10 @@ enum Fault {
     DropStartReply,
     StartNotAccepted,
     StartWrongEntity,
+    /// Answers the HID++ 2.0 ping like a HID++ 1.0 device.
+    Hidpp10,
+    /// Reports no application entity as running.
+    NoActiveApplication,
 }
 
 #[derive(Default)]
@@ -83,7 +87,10 @@ impl Hardware {
                 payload[5] = revision;
                 payload[7] = build;
             }
-            payload[8] = u8::from(entity == if self.applied { target } else { active });
+            payload[8] = u8::from(
+                self.fault != Fault::NoActiveApplication
+                    && entity == if self.applied { target } else { active },
+            );
             payload[9..11].copy_from_slice(
                 &(if self.fault == Fault::WrongModel {
                     0xb034_u16
@@ -115,6 +122,11 @@ impl Hardware {
     fn respond(&mut self, request: &[u8]) -> Option<Vec<u8>> {
         if request.len() < 7 {
             return None;
+        }
+        if self.fault == Fault::Hidpp10 && (request[2], request[3] >> 4) == (0, 1) {
+            // HID++ 1.0 error report: sub-id 0x8f, our feature index and
+            // function/software byte echoed, then "invalid sub-id".
+            return Some(vec![0x10, request[1], 0x8f, 0x00, request[3], 0x01, 0x00]);
         }
         let mut payload = [0; 16];
         match (request[2], request[3] >> 4) {
@@ -577,4 +589,21 @@ async fn newer_than_catalog_is_not_installable_and_never_downgrades() {
     let state = hardware.lock().unwrap();
     assert_eq!(state.start_count, 0);
     assert!(!state.applied);
+}
+
+#[tokio::test]
+async fn devices_without_a_readable_firmware_table_are_unsupported_not_unreachable() {
+    for fault in [Fault::Hidpp10, Fault::NoActiveApplication] {
+        let (shared, _) = hardware(Hardware {
+            fault,
+            ..Hardware::default()
+        })
+        .await;
+        assert!(matches!(
+            get_firmware_status_on(&shared).await,
+            Err(WriteError::FeatureUnsupported {
+                feature_hex: 0x0003
+            })
+        ));
+    }
 }
