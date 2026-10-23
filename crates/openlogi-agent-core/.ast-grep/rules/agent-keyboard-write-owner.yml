@@ -7,6 +7,7 @@ message: Route keyboard setting writes through SharedHandles so manual, reload a
 note: |
   PR #993 allowed stale reconnect writes to replace a successful manual choice.
   Only the ordered foreground and background writers may call the device setters.
+  The write-through variants keep native completion ownership in the same owner.
 files:
   - crates/openlogi-agent-core/**/*.rs
   - crates/openlogi-agent/**/*.rs
@@ -19,4 +20,4 @@ rule:
     - kind: call_expression
     - has:
         field: function
-        regex: '(^|::)set_(disable_keys|fn_lock)(_on)?$'
+        regex: '(^|::)set_(disable_keys|fn_lock)(_write_through)?(_on)?$'
