@@ -650,13 +650,28 @@ checks the workspace version of the tagged commit. A stable tag is on
 release-plz's version bump, so the workspace version must be the tag's
 version. A beta tags `master` between releases without a version bump, so the
 workspace version must be the stable release the beta follows. The command
-prints three values for the build:
+prints these values for the build:
 
 | Output | Stable `v0.8.17` | Beta `v0.8.17-beta.12` |
 | --- | --- | --- |
 | `channel` | `stable` | `beta` |
 | `version` | `0.8.17` | `0.8.17-beta.12` |
 | `build_version` | `0.8.17` | `0.8.16.12` |
+| `stamp_version` | empty | `0.8.17-beta.12` |
+
+A beta builds at its own version. Before anything compiles, each build leg
+runs `cargo xtask release stamp-version --version <stamp_version>`. It writes
+the version into `[workspace.package]`, into every internal dependency
+requirement on the old version, and into the workspace crates in
+`Cargo.lock`, and commits nothing. So `CARGO_PKG_VERSION` is the beta's
+version everywhere: the update engine's current version, the About page,
+diagnostics, `CFBundleShortVersionString`, the Linux packages and the
+AppStream release. nfpm writes a pre-release as `0.8.17~beta.12` in the deb
+and rpm and as `0.8.17beta.12` in the Arch package, and each sorts below
+`0.8.17`. The Windows executables' `FILEVERSION` keeps only the first three
+fields (`0.8.17.0`). A stable tag's `stamp_version` is empty, and its legs
+skip the step. The command fails on a requirement it would not write itself,
+such as `0.8`, and writes nothing then.
 
 Sparkle and Windows Installer order releases by `build_version`. The macOS
 bundles carry it as `CFBundleVersion`, and the MSI as its `ProductVersion`. A

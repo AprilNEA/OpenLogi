@@ -43,6 +43,7 @@ sysinfo = { version = "0.38.4", default-features = false, features = ["system"] 
 tempfile = "3.27.0"
 time = { version = "0.3", features = ["formatting"] }
 toml.workspace = true
+toml_edit = "0.22"
 which = "8.0.4"
 xshell = "0.2.7"
 

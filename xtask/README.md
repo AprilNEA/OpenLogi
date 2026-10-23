@@ -45,10 +45,14 @@ devenv shell -- cargo run -p xtask -- <command>
 - `release sparkle-deltas` — make verified Sparkle deltas from the newest
   earlier stable releases to a stable release's stapled DMG, with the metadata
   `release appcast` reads. A beta gets none.
-- `release version` — print a release tag's channel, version, build version
-  and the previous tag its release notes compare with as GitHub Actions
-  outputs, after checking the tagged commit's workspace version: the tag's for
-  a stable tag, and the stable release it follows for a beta.
+- `release stamp-version` — write a version into the workspace manifests and
+  the workspace crates in `Cargo.lock` before a build, uncommitted, so a beta
+  builds at its own version.
+- `release version` — print a release tag's channel, version, build version,
+  the version its build stamps (empty for a stable tag) and the previous tag
+  its release notes compare with as GitHub Actions outputs, after checking the
+  tagged commit's workspace version: the tag's for a stable tag, and the
+  stable release it follows for a beta.
 
 ### Bundle identity
 
@@ -211,6 +215,8 @@ xtask/
         latest_json/tests.rs
         sparkle_deltas.rs
         sparkle_deltas/tests.rs
+        stamp_version.rs     # a beta's version, written into the workspace
+        stamp_version/tests.rs
         version.rs           # a release tag's channel, version and build version
     icon.rs                  # the icon set, and the pipeline a platform implements
     icon/

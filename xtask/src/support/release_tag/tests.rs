@@ -141,6 +141,24 @@ fn a_beta_tags_the_workspace_version_of_the_stable_release_it_follows() {
 }
 
 #[test]
+fn only_a_beta_build_stamps_its_own_version() {
+    let merged = tags(&["v0.8.16"]);
+    let stable = ReleaseTag::parse("v0.8.17").unwrap();
+    assert_eq!(
+        stable.stamp_version(stable.beta_base(&merged).unwrap().as_ref()),
+        None
+    );
+    let beta = ReleaseTag::parse("v0.8.17-beta.12").unwrap();
+    let base = beta.beta_base(&merged).unwrap();
+    assert_eq!(
+        beta.stamp_version(base.as_ref())
+            .map(Version::to_string)
+            .as_deref(),
+        Some("0.8.17-beta.12")
+    );
+}
+
+#[test]
 fn a_beta_needs_a_stable_release_before_it() {
     let error = build_version("v0.1.0-beta.1", &["v0.1.0-beta.1"], 1).unwrap_err();
     assert!(error.to_string().contains("no stable release"), "{error}");

@@ -5,6 +5,7 @@ pub(crate) mod check_publish;
 pub(crate) mod checkout_version_bump;
 pub(crate) mod latest_json;
 pub(crate) mod sparkle_deltas;
+pub(crate) mod stamp_version;
 pub(crate) mod version;
 
 use anyhow::Result;
@@ -26,8 +27,11 @@ pub(crate) enum Command {
     LatestJson(latest_json::Args),
     /// Make verified Sparkle deltas from the newest earlier releases to a stapled DMG.
     SparkleDeltas(sparkle_deltas::Args),
-    /// Print a release tag's channel, version and build version, checked
-    /// against the tagged commit.
+    /// Give the workspace a release's version before it builds: a beta's own
+    /// version over the stable release its tagged commit carries.
+    StampVersion(stamp_version::Args),
+    /// Print a release tag's channel, version, build version and the version
+    /// its build stamps, checked against the tagged commit.
     Version(version::Args),
 }
 
@@ -40,6 +44,7 @@ pub(crate) fn run(command: Command) -> Result<()> {
         Command::CheckoutVersionBump => checkout_version_bump::run(),
         Command::LatestJson(args) => latest_json::run(&args),
         Command::SparkleDeltas(args) => sparkle_deltas::run(&args),
+        Command::StampVersion(args) => stamp_version::run(&args),
         Command::Version(args) => version::run(&args),
     }
 }

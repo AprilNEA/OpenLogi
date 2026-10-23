@@ -22,6 +22,15 @@ on:
         type: string
         required: false
         default: ""
+      stamp_version:
+        description: >-
+          The version a beta builds at, as `cargo xtask release version` prints
+          it. Each leg stamps it into the workspace before anything compiles.
+          Empty for a stable release, which builds at the workspace version,
+          and for a build that is not a release.
+        type: string
+        required: false
+        default: ""
     outputs:
       # The caller's publish gate ships the macOS DMG even when a Windows/Linux
       # leg failed, so it needs each leg's result — a single reusable-workflow
@@ -252,6 +261,16 @@ jobs:
         with:
           p12-file-base64: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE }}
           p12-password: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE_PASSWORD }}
+
+      # A beta builds at its own version, so its bundles, packages and
+      # update engine all report it. `cargo xtask release stamp-version`
+      # writes it into the workspace manifests and Cargo.lock, uncommitted.
+      - name: Stamp the release version
+        if: ${{ inputs.stamp_version }}
+        shell: bash
+        env:
+          STAMP_VERSION: ${{ inputs.stamp_version }}
+        run: cargo run -q -p xtask -- release stamp-version --version "$STAMP_VERSION"
 
       - name: Build and package OpenLogi
         env:
@@ -572,6 +591,16 @@ jobs:
           set -euo pipefail
           : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in the R2 1Password item}"
           : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in the R2 1Password item}"
+
+      # A beta builds at its own version, so its bundles, packages and
+      # update engine all report it. `cargo xtask release stamp-version`
+      # writes it into the workspace manifests and Cargo.lock, uncommitted.
+      - name: Stamp the release version
+        if: ${{ inputs.stamp_version }}
+        shell: bash
+        env:
+          STAMP_VERSION: ${{ inputs.stamp_version }}
+        run: cargo run -q -p xtask -- release stamp-version --version "$STAMP_VERSION"
 
       # The CLI ships inside the same zip and MSI rather than as a separate
       # artifact, so job and artifact names carry no GUI qualifier. The GUI is
@@ -971,6 +1000,16 @@ jobs:
           echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c
           sudo dpkg -i /tmp/nfpm.deb
 
+      # A beta builds at its own version, so its bundles, packages and
+      # update engine all report it. `cargo xtask release stamp-version`
+      # writes it into the workspace manifests and Cargo.lock, uncommitted.
+      - name: Stamp the release version
+        if: ${{ inputs.stamp_version }}
+        shell: bash
+        env:
+          STAMP_VERSION: ${{ inputs.stamp_version }}
+        run: cargo run -q -p xtask -- release stamp-version --version "$STAMP_VERSION"
+
       - name: Build and package
         run: cargo run -p xtask -- linux package
 
@@ -1076,6 +1115,19 @@ jobs:
             "org.freedesktop.Platform//${RUNTIME_VERSION}" \
             "org.freedesktop.Sdk//${RUNTIME_VERSION}" \
             "org.freedesktop.Sdk.Extension.llvm20//${RUNTIME_VERSION}"
+
+      # A beta builds at its own version, so its bundles, packages and
+      # update engine all report it. `cargo xtask release stamp-version`
+      # writes it into the workspace manifests and Cargo.lock, uncommitted.
+      # The AppStream stamp below reads the version back, so this goes first.
+      # This leg sets up no toolchain: rustup on the runner installs the one
+      # rust-toolchain.toml names. The bundle's sources skip target/.
+      - name: Stamp the release version
+        if: ${{ inputs.stamp_version }}
+        shell: bash
+        env:
+          STAMP_VERSION: ${{ inputs.stamp_version }}
+        run: cargo run -q -p xtask -- release stamp-version --version "$STAMP_VERSION"
 
       # AppStream is what software centres read, and a stale <release> would
       # advertise a version the bundle is not. Both values come from the tree

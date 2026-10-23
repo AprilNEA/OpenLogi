@@ -38,6 +38,7 @@ jobs:
       channel: ${{ steps.version.outputs.channel }}
       version: ${{ steps.version.outputs.version }}
       build_version: ${{ steps.version.outputs.build_version }}
+      stamp_version: ${{ steps.version.outputs.stamp_version }}
       previous_tag: ${{ steps.version.outputs.previous_tag }}
     steps:
       # Full history with tags: a beta's build version counts from the stable
@@ -61,19 +62,6 @@ jobs:
       - name: Read the release version
         id: version
         run: cargo xtask release version --tag "$GITHUB_REF_NAME"
-      # Publish can route a beta: it writes the beta's feed record and
-      # composes the beta channel from it. A beta's build still carries the
-      # workspace version, which is the stable release it follows, so its
-      # built-in update engine would take the beta's own release for an
-      # update. Until betas build at their own version, fail here, before
-      # anything is built or signed.
-      - name: Refuse a channel publish cannot route
-        if: ${{ steps.version.outputs.channel != 'stable' }}
-        env:
-          CHANNEL: ${{ steps.version.outputs.channel }}
-        run: |
-          echo "::error::$GITHUB_REF_NAME is a $CHANNEL release; this workflow publishes stable releases only"
-          exit 1
 
   # Build (and sign/notarize) every platform's installers. The build matrix
   # lives in a reusable workflow so PRs / manual dispatches can build the same
@@ -94,6 +82,8 @@ jobs:
     with:
       sign: true
       build_version: ${{ needs.version.outputs.build_version }}
+      # Empty for a stable release; a beta builds at its own version.
+      stamp_version: ${{ needs.version.outputs.stamp_version }}
 
   publish:
     name: Publish release

@@ -10595,6 +10595,7 @@ dependencies = [
  "tempfile",
  "time",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
  "which 8.0.4",
  "xshell",
 ]

@@ -127,6 +127,15 @@ impl ReleaseTag {
         base.map_or(&self.version, |base| &base.version)
     }
 
+    /// The version a build of this tag stamps into the workspace before it
+    /// compiles, with `release stamp-version`; `None` when the tagged commit
+    /// already carries the tag's own version. A beta's tagged commit carries
+    /// the stable release it follows, so its build stamps the beta's version,
+    /// and every `CARGO_PKG_VERSION` in it reports the beta.
+    pub(crate) fn stamp_version<'a>(&'a self, base: Option<&'a BetaBase>) -> Option<&'a Version> {
+        (self.tagged_workspace_version(base) != &self.version).then_some(&self.version)
+    }
+
     /// `N` of a beta tag; `None` for a stable tag. `N` is at least 1: Sparkle
     /// pads a missing field with 0, so `B.0` would equal `B`.
     fn beta_number(&self) -> Option<u64> {
