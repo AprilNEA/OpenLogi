@@ -4,6 +4,42 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: The mock agent's console drives the agent's own indicator state
+
+`openlogi-agent-mock` reads one command per stdin line while the GUI and
+overlay stay connected. A developer can then see a low battery, an offline or
+failing device, a lock-key or backlight indicator, or an agent restart with no
+hardware. Logi Options+ 2.8 has comparable hooks in its agent: a simulated
+device on its HID write path and a fake battery feature. OpenLogi puts the
+same kind of control in its separate mock binary, so the agent ships none.
+
+- **The agent's state machines, not copies.** A battery reading goes through
+  `LowBatteryWatch::take_reading`, a lock key through
+  `LockKeyIndicator::announce`, and a backlight level through
+  `BacklightOverlayManager`. The orchestrator uses the same calls, so the
+  user's settings, the once-per-discharge rule, and the 1.5-second lifetime
+  behave as they do in the agent. `take_reading` and `announce` replace the
+  separate public calls that the orchestrator used to sequence by itself, so
+  no caller can skip the settings check.
+- **Words for people, values for tests.** Tests build `Command` values and
+  call `MockAgent::apply` with explicit `AppSettings`. No test reads a config
+  file or depends on the command words.
+- **A thread of its own for stdin.** Tokio's `stdin` reads on the blocking
+  pool and cannot cancel the read, so it can hold up runtime shutdown. A std
+  thread reads the lines and one task applies them in order. When stdin
+  closes, the console stops and the mock keeps serving.
+- **Semantic state only.** The console changes what the IPC contract already
+  exposes. It does not model HID channels, reports, or barriers. Those stay
+  the Phase 4 replay scenarios in
+  [MOCK_DEVICE_TESTING.md](MOCK_DEVICE_TESTING.md#phase-4-lifecycle-and-fault-scenarios).
+- **`disconnect` closes connections, not the process.** Each connection
+  waits on a shared signal beside its requests. The overlay's agent-lost path
+  and the GUI's reconnect can then be tried without losing the mock's state.
+
+Verified with unit tests of every command and an in-memory connection that
+`disconnect` closes, and by piping commands into the built binary on macOS.
+Nobody has watched the GUI or the overlay follow the console yet.
+
 ## 2026-10: An animated desktop switch types the user's Space shortcut first
 
 0.8.16 shipped the timed DockSwipe slide of the next entry. Users on macOS

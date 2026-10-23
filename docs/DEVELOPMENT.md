@@ -167,6 +167,24 @@ flow (discovery → passkey → paired). Its agent version carries a `-mock` suf
 so a mock session is identifiable in the UI. It is a dev tool only and is never
 bundled.
 
+While the mock runs, type a command in its terminal and press Enter to change
+what it reports. `help` lists the commands, and `devices` numbers the devices
+that the other commands address:
+
+```text
+devices              # 1 is the online Bolt mouse in the built-in script
+battery 1 5          # it reads 5% and the overlay shows a low-battery notice
+offline 1            # it goes offline; reads and writes fail
+fail 3 error         # the keyboard stays online, but every request fails
+lock caps on         # the overlay shows the Caps Lock indicator
+backlight 2 4        # the overlay shows backlight level 2 of 4
+disconnect           # every client loses its connection and reconnects
+```
+
+The low-battery notice and the lock-key indicator follow the notification
+switches in Settings, as they do with the real agent. `advance <seconds>` moves
+time only in a `--fixture` run.
+
 The proposed architecture for recorded device profiles, raw HID++ replay, and
 deterministic hardware scenarios is documented in
 [Mock device and hardware record/replay architecture](MOCK_DEVICE_TESTING.md).

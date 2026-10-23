@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use openlogi_core::config::AppSettings;
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
 use openlogi_ipc::{NoticeKind, OBSERVE_HOLD};
 
@@ -128,6 +129,31 @@ fn a_low_reading_while_muted_is_not_counted_as_announced() {
     watch.observe_muted("mouse", &discharging(15));
     assert!(watch.observe("mouse", &discharging(15)));
     assert!(!watch.observe("mouse", &discharging(14)));
+}
+
+#[test]
+fn a_reading_is_announced_only_while_the_user_wants_the_notices() {
+    let on = AppSettings::default();
+    assert!(
+        on.low_battery_notifications,
+        "the notices are on by default"
+    );
+    let off = AppSettings {
+        low_battery_notifications: false,
+        ..AppSettings::default()
+    };
+    let mut watch = LowBatteryWatch::default();
+    assert!(!watch.take_reading(&off, "mouse", &discharging(15)));
+    assert!(
+        watch.take_reading(&on, "mouse", &discharging(15)),
+        "a discharge first seen muted is announced once the notices are on"
+    );
+    assert!(!watch.take_reading(&on, "mouse", &discharging(14)));
+    assert!(!watch.take_reading(&off, "mouse", &discharging(80)));
+    assert!(
+        watch.take_reading(&on, "mouse", &discharging(15)),
+        "a recharge while muted ends the discharge"
+    );
 }
 
 #[tokio::test(start_paused = true)]

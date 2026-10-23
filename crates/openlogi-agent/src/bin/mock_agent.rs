@@ -34,6 +34,11 @@
 //!   toggles behave like a live device.
 //! - `start_pairing` runs a scripted Bolt flow: discovery → passkey → paired,
 //!   and the paired keyboard joins the inventory.
+//!
+//! While it runs, the mock reads one console command per stdin line (`help`
+//! lists them) and changes what it reports: a device's battery, link, or
+//! failing reads and writes; a lock-key or backlight indicator; frozen test
+//! time; or every client connection, dropped as an agent restart drops them.
 
 use std::ffi::OsString;
 use std::fs;
@@ -44,11 +49,12 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
+use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::lock_keys::LockKeyIndicator;
-use openlogi_agent_core::notices::NoticeBoard;
+use openlogi_agent_core::notices::{LowBatteryWatch, NoticeBoard};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_core::config::{Config, Lighting};
+use openlogi_core::config::{AppSettings, Config, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
     PairedDevice, StandaloneDevice, prettify_codename,
@@ -71,13 +77,16 @@ use openlogi_ipc::{
 use succession::Compat;
 use tarpc::context::Context;
 use tarpc::server::{BaseChannel, Channel as _};
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{Mutex, watch};
 use tracing::{info, warn};
 
+#[path = "mock_agent/control.rs"]
+mod control;
 #[path = "mock_agent/profile.rs"]
 mod profile;
 
+use control::Fault;
 use profile::{built_in_profile, parse_profile, unsupported_settings, validate_light_command};
 
 /// Unique ID of the scripted Bolt receiver; Bolt routes are matched against it.
@@ -164,7 +173,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(serve(MockAgent::new(state))) {
+    let served = runtime.block_on(async {
+        let agent = MockAgent::new(state);
+        control::spawn_console(agent.clone());
+        serve(agent).await
+    });
+    match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             warn!(error = %e, "could not bind the IPC socket");
@@ -258,13 +272,15 @@ async fn serve_on(
         };
         let server = server.clone();
         let channel = BaseChannel::with_defaults(transport::wrap(stream));
-        tokio::spawn(
-            channel
-                .execute(server.serve())
-                .for_each(|response| async move {
-                    tokio::spawn(response);
-                }),
-        );
+        tokio::spawn(async move {
+            let requests =
+                channel
+                    .execute(server.clone().serve())
+                    .for_each(|response| async move {
+                        tokio::spawn(response);
+                    });
+            server.hold_connection(requests).await;
+        });
     }
 }
 
@@ -288,12 +304,17 @@ impl MockClock {
         matches!(self, Self::Demo(_))
     }
 
-    #[cfg(test)]
-    fn advance(&mut self, duration: Duration) {
+    /// Move frozen test time forward. Demo time follows the wall clock and
+    /// cannot be moved.
+    fn advance(&mut self, duration: Duration) -> Result<(), String> {
         let Self::Test(elapsed) = self else {
-            panic!("only frozen test time can be advanced logically");
+            return Err(
+                "demo time follows the wall clock; start the mock with --fixture to move time"
+                    .to_owned(),
+            );
         };
         *elapsed += duration;
+        Ok(())
     }
 }
 
@@ -331,6 +352,13 @@ struct State {
     /// Id handed to the next pairing session; only ever increases.
     next_pairing_id: u64,
     clock: MockClock,
+    /// Battery readings the console set, reported over the profile's.
+    battery_overrides: Vec<(DeviceRoute, BatteryInfo)>,
+    /// Devices the console made fail every read and write while online.
+    faults: Vec<(DeviceRoute, Fault)>,
+    /// Which batteries the console's readings have announced, as the agent
+    /// keeps it.
+    low_battery: LowBatteryWatch,
 }
 
 impl State {
@@ -353,6 +381,9 @@ impl State {
             phase: None,
             next_pairing_id: 0,
             clock,
+            battery_overrides: Vec::new(),
+            faults: Vec::new(),
+            low_battery: LowBatteryWatch::default(),
         })
     }
 
@@ -512,6 +543,18 @@ impl State {
         {
             receiver.paired.extend_from_slice(&self.paired_extra);
         }
+        for inventory in &mut inventories {
+            let routes = slot_routes(inventory);
+            for (device, route) in inventory.paired.iter_mut().zip(routes) {
+                if let Some((_, battery)) = self
+                    .battery_overrides
+                    .iter()
+                    .find(|(overridden, _)| Some(overridden) == route.as_ref())
+                {
+                    device.battery = Some(battery.clone());
+                }
+            }
+        }
         inventories
     }
 
@@ -520,7 +563,7 @@ impl State {
     }
 
     fn settings_for(&self, route: &DeviceRoute) -> Result<&ProfileDeviceSettings, WriteError> {
-        self.require_online(route)?;
+        self.require_reachable(route)?;
         self.profile
             .settings
             .iter()
@@ -532,7 +575,7 @@ impl State {
         &mut self,
         route: &DeviceRoute,
     ) -> Result<&mut ProfileDeviceSettings, WriteError> {
-        self.require_online(route)?;
+        self.require_reachable(route)?;
         self.profile
             .settings
             .iter_mut()
@@ -540,47 +583,90 @@ impl State {
             .ok_or(WriteError::DeviceNotFound)
     }
 
-    fn require_online(&self, route: &DeviceRoute) -> Result<(), WriteError> {
-        match self.route_online(route) {
-            Some(true) => Ok(()),
-            Some(false) => Err(WriteError::DeviceUnreachable {
+    /// Whether `route` answers: it is online, and the console has not made it
+    /// fail.
+    fn require_reachable(&self, route: &DeviceRoute) -> Result<(), WriteError> {
+        match self
+            .targets()
+            .into_iter()
+            .find(|target| target.route == *route)
+        {
+            Some(target) if !target.online => Err(WriteError::DeviceUnreachable {
                 index: route.device_index(),
             }),
+            Some(_) => match self.faults.iter().find(|(failing, _)| failing == route) {
+                Some((_, fault)) => Err(fault.error(route)),
+                None => Ok(()),
+            },
             None => Err(WriteError::DeviceNotFound),
         }
     }
 
-    fn route_online(&self, route: &DeviceRoute) -> Option<bool> {
+    /// Every device a client sees, paired ones first, in the order the
+    /// console numbers them.
+    fn targets(&self) -> Vec<Target> {
+        let mut targets = Vec::new();
+        for inventory in self.render_inventory() {
+            for device in &inventory.paired {
+                let Some(route) = DeviceRoute::for_slot(&inventory, device.slot) else {
+                    continue;
+                };
+                targets.push(Target {
+                    route,
+                    name: device.codename.as_deref().map(prettify_codename),
+                    kind: device.kind,
+                    online: device.online,
+                    battery: device.battery.clone(),
+                    paired: true,
+                });
+            }
+        }
+        targets.extend(self.profile.standalone.iter().map(|device| Target {
+            route: device.route(),
+            name: Some(device.display_name.clone()),
+            kind: device.kind,
+            online: device.online,
+            battery: None,
+            paired: false,
+        }));
+        targets
+    }
+
+    /// The online flag of the device `route` names, wherever the profile or
+    /// pairing keeps it.
+    fn online_mut(&mut self, route: &DeviceRoute) -> Option<&mut bool> {
+        if let Some(device) = self.paired_extra.iter_mut().find(|device| {
+            *route
+                == DeviceRoute::Bolt {
+                    receiver_uid: RECEIVER_UID.to_string(),
+                    slot: device.slot,
+                }
+        }) {
+            return Some(&mut device.online);
+        }
+        for inventory in &mut self.profile.inventories {
+            let routes = slot_routes(inventory);
+            if let Some((device, _)) = inventory
+                .paired
+                .iter_mut()
+                .zip(routes)
+                .find(|(_, paired)| paired.as_ref() == Some(route))
+            {
+                return Some(&mut device.online);
+            }
+        }
         self.profile
-            .inventories
-            .iter()
-            .find_map(|inventory| {
-                inventory.paired.iter().find_map(|device| {
-                    (DeviceRoute::for_slot(inventory, device.slot).as_ref() == Some(route))
-                        .then_some(device.online)
-                })
-            })
-            .or_else(|| {
-                self.paired_extra.iter().find_map(|device| {
-                    (route
-                        == &DeviceRoute::Bolt {
-                            receiver_uid: RECEIVER_UID.to_string(),
-                            slot: device.slot,
-                        })
-                        .then_some(device.online)
-                })
-            })
-            .or_else(|| {
-                self.profile
-                    .standalone
-                    .iter()
-                    .find_map(|device| (device.route() == *route).then_some(device.online))
-            })
+            .standalone
+            .iter_mut()
+            .find(|device| device.route() == *route)
+            .map(|device| &mut device.online)
     }
 
     #[cfg(test)]
     fn advance_test_time(&mut self, duration: Duration) {
-        self.clock.advance(duration);
+        self.clock
+            .advance(duration)
+            .expect("tests advance frozen test time only");
     }
 
     /// Drop the paired device `route` names, as its receiver does on unpair.
@@ -602,6 +688,9 @@ impl State {
         if names(Some(RECEIVER_UID)) {
             self.paired_extra.retain(|device| device.slot != *slot);
         }
+        self.battery_overrides
+            .retain(|(overridden, _)| overridden != route);
+        self.faults.retain(|(failing, _)| failing != route);
         Ok(())
     }
 
@@ -633,6 +722,26 @@ impl State {
             }));
         slot
     }
+}
+
+/// The route of each device `inventory` pairs, in its order.
+fn slot_routes(inventory: &DeviceInventory) -> Vec<Option<DeviceRoute>> {
+    inventory
+        .paired
+        .iter()
+        .map(|device| DeviceRoute::for_slot(inventory, device.slot))
+        .collect()
+}
+
+/// A device as a client sees it, which console commands address by number.
+struct Target {
+    route: DeviceRoute,
+    name: Option<String>,
+    kind: DeviceKind,
+    online: bool,
+    battery: Option<BatteryInfo>,
+    /// Whether a receiver pairs it, so that it reports a battery.
+    paired: bool,
 }
 
 fn profile_value<'a, T>(
@@ -667,7 +776,12 @@ fn profile_value_mut<'a, T>(
 /// 20%, then back to 80%, with the coarse level tracking the percentage.
 fn draining_battery(elapsed: Duration) -> BatteryInfo {
     let drained = u8::try_from(elapsed.as_secs() / 60 % 61).unwrap_or(0);
-    let percentage = 80 - drained;
+    battery_at(80 - drained, BatteryStatus::Discharging)
+}
+
+/// A battery reading `percentage`, with the coarse level a device reports
+/// beside it.
+fn battery_at(percentage: u8, status: BatteryStatus) -> BatteryInfo {
     BatteryInfo {
         percentage: Some(percentage),
         level: match percentage {
@@ -675,8 +789,20 @@ fn draining_battery(elapsed: Duration) -> BatteryInfo {
             11..=25 => BatteryLevel::Low,
             _ => BatteryLevel::Good,
         },
-        status: BatteryStatus::Discharging,
+        status,
     }
+}
+
+/// The user's settings from the config file, as the agent applies them; the
+/// defaults when the file cannot be read.
+fn app_settings() -> AppSettings {
+    Config::load_or_default().map_or_else(
+        |error| {
+            warn!(%error, "could not read the config; using the default settings");
+            AppSettings::default()
+        },
+        |config| config.app_settings,
+    )
 }
 
 /// `launch_at_login` mirrors the config file so the Settings toggle round-trips
@@ -712,6 +838,14 @@ struct MockAgent {
     notices: Arc<NoticeBoard>,
     /// The lock-key indicator the overlay shows, ended as the agent ends it.
     lock_keys: LockKeyIndicator,
+    /// The backlight indicator the overlay shows, ended as the agent ends it.
+    backlight: BacklightOverlayManager,
+    /// Signalled by the console to close every open client connection. Each
+    /// connection holds one receiver.
+    disconnects: Arc<watch::Sender<()>>,
+    /// Where the console and the demo read the user's settings: the config
+    /// file, as the agent reads it. Tests set their own.
+    settings: fn() -> AppSettings,
 }
 
 impl MockAgent {
@@ -720,11 +854,27 @@ impl MockAgent {
             generation: 1,
             snapshot: snapshot_of(&state),
         };
+        let (disconnects, _) = watch::channel(());
         Self {
             state: Arc::new(Mutex::new(state)),
             served: Arc::new(Mutex::new(served)),
             notices: Arc::new(NoticeBoard::default()),
             lock_keys: LockKeyIndicator::default(),
+            backlight: BacklightOverlayManager::default(),
+            disconnects: Arc::new(disconnects),
+            settings: app_settings,
+        }
+    }
+
+    /// Serve one client connection until the client closes it, or until the
+    /// console disconnects every client, as an agent restart does. Dropping
+    /// `connection` closes its transport.
+    async fn hold_connection(&self, connection: impl Future<Output = ()>) {
+        let mut disconnects = self.disconnects.subscribe();
+        tokio::select! {
+            () = connection => {}
+            // The sender lives as long as `self`, so `changed` cannot fail.
+            _ = disconnects.changed() => info!("closed a client connection"),
         }
     }
 
@@ -806,14 +956,8 @@ impl Agent for MockAgent {
         }
     }
 
-    async fn observe_backlight(self, _: Context, _since: Generation) -> BacklightObservation {
-        tokio::time::sleep(OBSERVE_HOLD).await;
-        BacklightObservation {
-            generation: 1,
-            current_level: 0,
-            levels: 0,
-            visible: false,
-        }
+    async fn observe_backlight(self, _: Context, since: Generation) -> BacklightObservation {
+        self.backlight.observe(since).await
     }
 
     async fn action_ring_hover(
@@ -1041,13 +1185,14 @@ impl Agent for MockAgent {
         // A demo turns Caps Lock on for the overlay's first look, so the
         // indicator can be seen without a keyboard.
         if since == 0 && self.state.lock().await.clock.is_demo() {
-            self.lock_keys.show(
+            let shown = self.lock_keys.announce(
                 LockKeyChange {
                     key: LockKey::CapsLock,
                     engaged: true,
                 },
-                None,
+                &(self.settings)(),
             );
+            info!(shown, "demo Caps Lock for the overlay's first look");
         }
         self.lock_keys.observe(since).await
     }
