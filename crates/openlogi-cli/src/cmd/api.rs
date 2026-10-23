@@ -501,7 +501,8 @@ impl From<WriteError> for ApiError {
             WriteError::DpiUnsupported { .. }
             | WriteError::ReportRateUnsupported { .. }
             | WriteError::HostSlotEmpty { .. }
-            | WriteError::HostNameRejected { .. } => "invalid_value",
+            | WriteError::HostNameRejected { .. }
+            | WriteError::HapticIntensityUnsupported { .. } => "invalid_value",
             WriteError::DpiNotApplied { .. }
             | WriteError::ReportRateNotApplied { .. }
             | WriteError::HostNameNotApplied { .. } => "readback_mismatch",

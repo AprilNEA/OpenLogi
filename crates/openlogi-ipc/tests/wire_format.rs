@@ -110,7 +110,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 39);
+    assert_eq!(PROTOCOL_VERSION, 40);
 }
 
 #[test]
@@ -999,6 +999,8 @@ fn easy_switch_hosts_and_errors() {
     assert_wire(&HidppOperation::ReadHosts, "15");
     assert_wire(&HidppOperation::RenameHost, "16");
     assert_wire(&HidppOperation::WriteLed, "17");
+    assert_wire(&HidppOperation::ReadHaptics, "18");
+    assert_wire(&HidppOperation::WriteHaptics, "19");
     assert_wire(&WriteError::HostRenameUnsupported, "16");
     assert_wire(&WriteError::HostSlotEmpty { slot: 2 }, "1702");
     assert_wire(&WriteError::HostNameRejected { max_len: 24 }, "1818");
@@ -1008,6 +1010,10 @@ fn easy_switch_hosts_and_errors() {
             actual: Some("Old".into()),
         },
         "19044465736b01034f6c64",
+    );
+    assert_wire(
+        &WriteError::HapticIntensityUnsupported { requested: 63 },
+        "1a3f",
     );
 }
 
