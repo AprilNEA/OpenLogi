@@ -164,7 +164,10 @@ states; they do not exercise hardware or make network requests.
 6. **Activate only after completion.** After this run has transferred and had
    every packet acknowledged, send `ApplyDfu(entity, 0x02)`. This command causes
    a restart and does not echo a response. Drain the native write rather than
-   treating the missing echo as a reason to resend it.
+   treating the missing echo as a reason to resend it. A failed apply write is
+   an unknown outcome, not a failure: the device reboots as soon as it accepts
+   the command, and a link that drops with it (typically Bluetooth) fails the
+   write even when the new image is running. The restart check decides.
 7. **Reconnect and verify.** Release the old channel and request inventory
    reconciliation. For up to 90 seconds, check the route, device unit ID,
    application PID, active target bank and exact target version. Publish success

@@ -27,6 +27,7 @@ use openlogi_core::hid::{
     FirmwareUpdatePhase, FirmwareVersion,
 };
 use openlogi_device_registry::firmware::{FirmwareRelease, latest_release};
+use tracing::warn;
 
 use crate::{
     DeviceRoute, SharedChannel,
@@ -386,6 +387,10 @@ impl PreparedFirmwareUpdate {
     /// was acknowledged. The caller must drive this future to completion and
     /// retain its I/O lease; cancellation is cooperative between native writes.
     /// `should_stop` prevents the next command, including activation.
+    ///
+    /// Success means activation was requested, not that it happened: only
+    /// [`PendingFirmwareActivation::verify_on`] establishes what the device
+    /// runs afterwards.
     pub async fn install(
         self,
         mut progress: impl FnMut(FirmwareUpdatePhase),
@@ -478,10 +483,13 @@ impl PreparedFirmwareUpdate {
         // Report restart before sending the write: the device can disappear as
         // soon as it accepts apply and never echoes a response.
         progress(FirmwareUpdatePhase::Restarting);
-        self.feature
-            .apply_dfu(self.image.entity)
-            .await
-            .map_err(update_error)?;
+        if let Err(error) = self.feature.apply_dfu(self.image.entity).await {
+            // A device that accepts apply reboots at once, and a link that
+            // drops with it (typically Bluetooth) fails the write even though
+            // the device may already run the new image. The outcome is
+            // unknown, so the restart check decides it.
+            warn!(%error, "firmware apply write failed; verifying the restart");
+        }
         Ok(self.pending)
     }
 
