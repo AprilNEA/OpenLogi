@@ -337,6 +337,7 @@
   const aiLabel = document.getElementById("aiLabel");
   const tip     = document.getElementById("tip");
   const hintEl  = document.getElementById("hint");
+  aiLayer.inert = true;
 
   const STAGE_W = 1160, STAGE_H = 560;
   const CX = STAGE_W / 2, CY = STAGE_H / 2;   // 580, 280
@@ -344,7 +345,7 @@
   const PROV_R = 108;                         // provider arc, anchored on the AI slot
   const PROV_ANGLES = [-55, 0, 55];           // degrees, from +x axis
 
-  const state = { open: false, mode: "ring", hovered: null, active: 1, aiTimer: 0, aiCooldown: 0, outTimer: 0, closeTimer: 0 };
+  const state = { open: false, mode: "ring", hovered: null, active: 1, aiTimer: 0, aiCooldown: 0, outTimer: 0, closeTimer: 0, aiFocusTimer: 0 };
   let keyboardMode = false;
   document.addEventListener("keydown", () => { keyboardMode = true; }, true);
   document.addEventListener("pointerdown", () => { keyboardMode = false; }, true);
@@ -581,18 +582,28 @@
   function expandAI() {
     if (!state.open || state.mode === "ai") return;
     clearTimeout(state.aiTimer);
+    clearTimeout(state.aiFocusTimer);
+    state.aiFocusTimer = 0;
     hideTip();
     state.mode = "ai";
+    aiLayer.inert = false;
     stage.classList.add("ai");
     ring.classList.add("is-ai");
     hintEl.textContent = "1–3 · ← → · Enter · Esc back";
     setActiveProvider(state.active);
     haptic("expand");
-    setTimeout(() => provEls[state.active].el.focus({ preventScroll: true }), 300);
+    state.aiFocusTimer = setTimeout(() => {
+      state.aiFocusTimer = 0;
+      if (state.mode !== "ai") return;
+      provEls[state.active].el.focus({ preventScroll: true });
+    }, 300);
   }
 
   function collapseAI() {
     if (state.mode !== "ai") return;
+    clearTimeout(state.aiFocusTimer);
+    state.aiFocusTimer = 0;
+    aiLayer.inert = true;
     cancelOutside();
     hideTip();
     state.mode = "ring";
@@ -668,6 +679,9 @@
 
   function close(after) {
     clearTimeout(state.closeTimer);
+    clearTimeout(state.aiFocusTimer);
+    state.aiFocusTimer = 0;
+    aiLayer.inert = true;
     state.open = false;
     state.mode = "ring";
     clearTimeout(state.aiTimer);
