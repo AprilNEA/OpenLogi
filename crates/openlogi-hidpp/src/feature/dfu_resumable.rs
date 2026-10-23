@@ -111,7 +111,8 @@ impl DfuResumableFeature {
         let own = self.endpoint.chan.request_sw_ids();
         // Registered before the write: the read loop dispatches reports in
         // arrival order, so the broadcasts seen after this command's own reply
-        // are exactly the ones the device sent after answering it.
+        // are exactly the ones the device sent after answering it. The channel
+        // never hands it a reply that answered an earlier same-header command.
         let listener = self.endpoint.chan.add_msg_listener_guarded({
             let replied = Arc::clone(&replied);
             move |raw, matched| {
@@ -334,7 +335,7 @@ mod tests {
     use super::*;
     use crate::{
         channel::{
-            HidppMessage,
+            ChannelObservation, HidppChannel, HidppMessage,
             mock::{MockRawHidChannel, MockRawHidHandle, channel_with_reader},
         },
         feature::CreatableFeature,
@@ -445,6 +446,71 @@ mod tests {
             assert_eq!(
                 reply.next_broadcast().await.unwrap().status,
                 DfuStatus::TransferReady { block: 1 }
+            );
+        });
+    }
+
+    /// A packet command sent while the read loop is still dispatching the
+    /// previous packet's reply — same header — does not take that reply for
+    /// its own, so a broadcast before its own reply cannot end its wait.
+    #[test]
+    fn a_follow_up_command_does_not_inherit_the_previous_reply() {
+        futures::executor::block_on(async {
+            // Holds the read loop after it resolves the first command, until
+            // the follow-up command has registered its listener and written.
+            let (written_follow_up, gate) = std::sync::mpsc::channel::<()>();
+            let gate = std::sync::Mutex::new(Some(gate));
+            let observer = move |observation: ChannelObservation| {
+                if let ChannelObservation::IncomingReport {
+                    request_id: Some(_),
+                    ..
+                } = observation
+                    && let Some(gate) = gate.lock().unwrap().take()
+                {
+                    let _ = gate.recv_timeout(Duration::from_secs(1));
+                }
+            };
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = HidppChannel::from_raw_channel_with_observer(raw, Arc::new(observer))
+                .await
+                .unwrap();
+            let feature = DfuResumableFeature::new(Arc::new(channel), 3, 8);
+
+            handle.park_writes();
+            let first = feature.transfer_dfu_data([0; DFU_PACKET_LEN]);
+            let device = async {
+                written(&handle, 1).await;
+                handle.queue_response(status(written_header(&handle, 0), &[1, 0x06, 0, 0, 0, 1]));
+                handle.release_writes();
+            };
+            let (first, ()) = futures::join!(first, device);
+            assert_eq!(
+                first.unwrap().report.status,
+                DfuStatus::PacketAck { next_packet: 1 }
+            );
+
+            handle.park_writes();
+            let follow_up = feature.transfer_dfu_data([1; DFU_PACKET_LEN]);
+            let device = async {
+                written(&handle, 2).await;
+                assert_eq!(written_header(&handle, 1), written_header(&handle, 0));
+                written_follow_up.send(()).unwrap();
+                // Sent before the follow-up's reply: it must not end its wait.
+                handle
+                    .send_incoming(status(header(), &[1, 0x02, 0x00, 0x07]))
+                    .await;
+                handle.queue_response(status(written_header(&handle, 1), &[1, 0x03, 0x00, 0x10]));
+                handle.release_writes();
+            };
+            let (reply, ()) = futures::join!(follow_up, device);
+            let reply = reply.unwrap();
+            assert_eq!(
+                reply.report.status,
+                DfuStatus::TransferWait { delay_ms: 16 }
+            );
+            assert!(
+                reply.broadcasts.try_recv().is_err(),
+                "a broadcast from before the reply cannot end its wait"
             );
         });
     }

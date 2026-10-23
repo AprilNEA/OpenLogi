@@ -440,3 +440,50 @@ fn same_header_requests_are_answered_in_order() {
         assert_pending_empty(&channel);
     });
 }
+
+/// A listener registered after a reply answered its request never sees that
+/// reply, even when the requester registers it before the read loop has
+/// dispatched the reply to listeners. A same-header follow-up command
+/// (`DfuResumable` sends one per packet) would otherwise take the previous
+/// reply for its own and treat earlier broadcasts as later ones.
+#[test]
+fn a_listener_registered_after_a_reply_never_sees_it() {
+    futures::executor::block_on(async {
+        // Holds the read loop between resolving the request and dispatching
+        // its reply until the follow-up listener is registered.
+        let (registered, gate) = std::sync::mpsc::channel::<()>();
+        let gate = Mutex::new(Some(gate));
+        let observer = move |observation: ChannelObservation| {
+            if let ChannelObservation::IncomingReport {
+                request_id: Some(_),
+                ..
+            } = observation
+                && let Some(gate) = gate.lock().unwrap().take()
+            {
+                let _ = gate.recv_timeout(Duration::from_secs(1));
+            }
+        };
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = HidppChannel::from_raw_channel_with_observer(raw, Arc::new(observer))
+            .await
+            .unwrap();
+        let reply = short_msg(0x41);
+        handle.queue_response(reply);
+
+        assert_eq!(
+            channel.send(short_msg(0x40), |_| true).await.unwrap(),
+            reply
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _listener = channel.add_msg_listener_guarded({
+            let events = Arc::clone(&events);
+            move |msg, matched| events.lock().unwrap().push((msg, matched))
+        });
+        registered.send(()).unwrap();
+
+        let later = short_msg(0x42);
+        handle.send_incoming(later).await;
+        wait_for_event_count(&events, 1).await;
+        assert_eq!(*events.lock().unwrap(), [(later, false)]);
+    });
+}
