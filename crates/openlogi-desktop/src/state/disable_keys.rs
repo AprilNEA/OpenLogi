@@ -218,7 +218,7 @@ impl AppState {
     pub(crate) fn apply_disable_keys_reload_result(
         &mut self,
         context: DisableKeysRequestContext,
-        result: Result<(), openlogi_ipc::ConfigReloadError>,
+        result: Result<openlogi_ipc::SavedConfigVerdict, openlogi_ipc::ConfigReloadError>,
     ) -> StateEvents {
         let events = StateEvents::from(StateEvent::DisableKeysChanged(context.key.clone()));
         let current = match self.disable_keys_status(&context.key) {
@@ -233,18 +233,36 @@ impl AppState {
         ) {
             return StateEvents::none();
         }
-        let state = self
-            .devices
-            .sessions
-            .entry(context.key.clone())
-            .or_default();
         match result {
-            Ok(()) => {
+            Ok(openlogi_ipc::SavedConfigVerdict::Accepted) => {
+                let state = self
+                    .devices
+                    .sessions
+                    .entry(context.key.clone())
+                    .or_default();
                 state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
                 state.disable_keys.error = None;
             }
+            Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave) => {
+                let _ = self.config.apply_reload_result(Ok(()));
+                let config_events = self.reconcile_external_config();
+                self.disable_keys_reads.reconcile_after_write(&context.key);
+                let state = self
+                    .devices
+                    .sessions
+                    .entry(context.key.clone())
+                    .or_default();
+                state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
+                state.disable_keys.error = None;
+                return events.and(config_events);
+            }
             Err(error) => {
                 warn!(error = %error.message, key = %context.key, "could not reload disabled keys");
+                let state = self
+                    .devices
+                    .sessions
+                    .entry(context.key.clone())
+                    .or_default();
                 state.disable_keys.persistence =
                     DisableKeysPersistenceStatus::SavedNotReloaded(context);
                 state.disable_keys.error = Some(DisableKeysError::ReloadFailed);
@@ -774,6 +792,151 @@ mod tests {
         );
         assert_eq!(state.config.disabled_keys(key.as_str()), None);
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn settings_revision_invalidation_closes_the_ready_write_gate(cx: &mut gpui::TestAppContext) {
+        let mut inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
+        let (state, mut receiver, key) = test_state(
+            ConfigPersistence::MemoryOnly,
+            std::slice::from_ref(&inventory),
+        );
+        install_reads(state, cx);
+        let original = DisableKeysState {
+            supported: DisableKeysMask::CAPS_LOCK,
+            disabled: DisableKeysMask::EMPTY,
+        };
+        take_read(&mut receiver)
+            .reply
+            .send(Ok(original))
+            .expect("initial read");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).expect("state");
+            assert!(state.disable_keys_controls_enabled(&key));
+        });
+
+        inventory.paired[0].settings_revision = 1;
+        assert_eq!(
+            refresh_inventory(&inventory, cx),
+            [StateEvent::InventoryChanged]
+        );
+        let reread = take_read(&mut receiver);
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).expect("state");
+            assert!(matches!(state.disable_keys_load_for(&key), Load::Loading));
+            assert!(state.disable_keys_reads.confirmed(&key).is_none());
+            assert!(!state.disable_keys_controls_enabled(&key));
+        });
+
+        cx.update(|cx| AppState::update_disable_keys(cx, DisableKeysMask::CAPS_LOCK));
+        assert!(
+            receiver.try_recv().is_err(),
+            "the public write path must wait for the revision re-read"
+        );
+
+        reread.reply.send(Ok(original)).expect("revision re-read");
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn file_changed_after_save_reconciles_disable_keys_without_resaving(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary config directory");
+        let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+        Config::default()
+            .save_to_path(&path)
+            .expect("seed config file");
+        let (_, file) = ConfigFile::load_from_path(&path).expect("tracked config");
+        let inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
+        let (state, mut receiver, key) =
+            test_state(ConfigPersistence::UserFile(file), &[inventory]);
+        install_reads(state, cx);
+        let before = DisableKeysState {
+            supported: DisableKeysMask::CAPS_LOCK | DisableKeysMask::WINDOWS_COMMAND,
+            disabled: DisableKeysMask::EMPTY,
+        };
+        take_read(&mut receiver)
+            .reply
+            .send(Ok(before))
+            .expect("initial read");
+        cx.run_until_parked();
+        let context = cx.update(|cx| AppState::update(cx, |state, _| begin(state, &mut receiver)));
+        let written = DisableKeysState {
+            disabled: DisableKeysMask::CAPS_LOCK,
+            ..before
+        };
+        cx.update(|cx| {
+            AppState::update(cx, |state, _| {
+                assert_eq!(
+                    state.apply_disable_keys_write_result(context.clone(), Ok(written)),
+                    [StateEvent::DisableKeysChanged(key.clone())]
+                );
+            });
+        });
+        let reload_context = take_disable_keys_reload(&mut receiver);
+
+        let mut external = Config::load_from_path(&path).expect("external config");
+        external.keyboard.bindings.insert(
+            "f1".parse().expect("F-key trigger"),
+            openlogi_core::binding::Action::Paste,
+        );
+        external.set_disabled_keys(key.as_str(), BTreeSet::from([DisableKey::WindowsCommand]));
+        external.save_to_path(&path).expect("external edit");
+
+        let events = cx.update(|cx| {
+            AppState::update(cx, |state, _| {
+                state.apply_disable_keys_reload_result(
+                    reload_context,
+                    Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave),
+                )
+            })
+        });
+        assert_eq!(
+            events,
+            [
+                StateEvent::DisableKeysChanged(key.clone()),
+                StateEvent::SettingsChanged,
+                StateEvent::BindingsChanged(key.clone()),
+                StateEvent::DpiChanged(key.clone()),
+            ]
+        );
+        cx.run_until_parked();
+        let reread = take_read(&mut receiver);
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).expect("state");
+            assert_eq!(state.keyboard_bindings(), &external.keyboard.bindings);
+            assert_eq!(
+                state.config.disabled_keys(key.as_str()),
+                Some(&BTreeSet::from([DisableKey::WindowsCommand]))
+            );
+            assert_eq!(
+                state.disable_keys_status(&key),
+                Some(&DisableKeysPersistenceStatus::Idle)
+            );
+        });
+
+        let externally_confirmed = DisableKeysState {
+            disabled: DisableKeysMask::WINDOWS_COMMAND,
+            ..before
+        };
+        reread
+            .reply
+            .send(Ok(externally_confirmed))
+            .expect("external-state read");
+        cx.run_until_parked();
+        assert_eq!(
+            Config::load_from_path(&path)
+                .expect("external config remains on disk")
+                .disabled_keys(key.as_str()),
+            Some(&BTreeSet::from([DisableKey::WindowsCommand])),
+            "the stale Caps Lock choice must not be saved again"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "the external verdict only re-reads; it does not reload an old save"
+        );
     }
 
     #[gpui::test]

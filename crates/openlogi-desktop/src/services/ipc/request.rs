@@ -24,6 +24,7 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
+    SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context;
@@ -616,18 +617,20 @@ impl ReloadConfig {
 }
 
 impl Request for ReloadConfig {
-    type Answer = Result<(), ConfigReloadError>;
+    type Answer = Result<SavedConfigVerdict, ConfigReloadError>;
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         let saved = SavedConfig {
             revision: self.revision,
             chosen: self.chosen.clone(),
         };
-        client.reload_saved_config(context::current(), saved).await
+        client
+            .reload_saved_config_with_verdict(context::current(), saved)
+            .await
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
-        report_reload(self.contexts, outcome, updates);
+        report_saved_reload(self.contexts, outcome, updates);
     }
 }
 
@@ -645,15 +648,17 @@ impl Request for LoadConfig {
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
-        report_reload([ConfigReloadContext::General], outcome, updates);
+        if let Ok(result) = outcome {
+            let _ = updates.send(GuiUpdate::ConfigLoadResult { result });
+        }
     }
 }
 
 /// Report the agent's verdict on a held reload. A reload that did not happen
 /// is not one the agent refused, so it reports nothing.
-fn report_reload(
+fn report_saved_reload(
     contexts: impl IntoIterator<Item = ConfigReloadContext>,
-    outcome: Result<Result<(), ConfigReloadError>, Unavailable>,
+    outcome: Result<Result<SavedConfigVerdict, ConfigReloadError>, Unavailable>,
     updates: &UpdateSender,
 ) {
     if let Ok(verdict) = outcome {

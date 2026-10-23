@@ -171,6 +171,40 @@ impl Render for LoadHarness {
     }
 }
 
+struct OfflineLoadHarness {
+    load: DisableKeysLoad,
+}
+
+impl Render for OfflineLoadHarness {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(300.)).child(load_content(
+            self.load.clone(),
+            false,
+            true,
+            false,
+            None,
+            &DeviceKey::from("unit:01020304"),
+            theme::palette(cx),
+        ))
+    }
+}
+
+#[gpui::test]
+fn offline_unknown_and_loading_do_not_present_an_endless_spinner(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    for load in [DisableKeysLoad::Unknown, DisableKeysLoad::Loading] {
+        let (_, visual) = cx.add_window_view(|_, _| OfflineLoadHarness { load });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            visual
+                .debug_bounds("disable-keys-offline-unknown")
+                .is_some(),
+            "offline Unknown and Loading must render the existing offline status"
+        );
+    }
+}
+
 #[gpui::test]
 fn switch_focus_is_stable_but_not_shared_between_devices(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();

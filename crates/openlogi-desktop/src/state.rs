@@ -383,6 +383,28 @@ impl AppState {
         }
     }
 
+    /// Replace local projections after another writer replaced a GUI save.
+    /// The agent already applied that file, so this path never retries the
+    /// GUI's older save.
+    fn reconcile_external_config(&mut self) -> StateEvents {
+        let previous_language = self.config.app_settings.language.clone();
+        if let Err(error) = self.config.refresh_feature() {
+            warn!(%error, "could not reconcile externally edited configuration");
+            return StateEvents::none();
+        }
+        let language_changed = self.config.app_settings.language != previous_language;
+        self.restore_config_projections();
+        let events = StateEvents::from(StateEvent::SettingsChanged)
+            .and(self.for_current_device(StateEvent::BindingsChanged))
+            .and(self.for_current_device(StateEvent::DpiChanged));
+        if language_changed {
+            openlogi_core::locale::activate(self.config.app_settings.language.as_deref());
+            StateEvents::from(StateEvent::LanguageChanged).and(events)
+        } else {
+            events
+        }
+    }
+
     /// Current config failure, shown as a fail-closed whole-window notice.
     #[must_use]
     pub fn config_issue(&self) -> Option<&str> {
@@ -398,6 +420,28 @@ impl AppState {
             StateEvent::SettingsChanged.into()
         } else {
             StateEvents::none()
+        }
+    }
+
+    /// Apply the agent's acknowledgement of a GUI save.
+    pub fn apply_saved_config_reload_result(
+        &mut self,
+        result: Result<openlogi_ipc::SavedConfigVerdict, openlogi_ipc::ConfigReloadError>,
+    ) -> StateEvents {
+        match result {
+            Ok(openlogi_ipc::SavedConfigVerdict::Accepted) => {
+                self.apply_config_reload_result(Ok(()))
+            }
+            Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave) => {
+                let cleared_reload_error = self.config.apply_reload_result(Ok(()));
+                let events = self.reconcile_external_config();
+                if events.is_empty() && cleared_reload_error {
+                    StateEvent::SettingsChanged.into()
+                } else {
+                    events
+                }
+            }
+            Err(error) => self.apply_config_reload_result(Err(error)),
         }
     }
     /// A clone of the IPC command sender used by the state entity to issue

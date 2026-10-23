@@ -280,6 +280,54 @@ fn agent_reload_error_stays_visible_until_a_successful_confirmation() {
     assert_eq!(state.config_issue(), None);
 }
 
+#[test]
+fn file_changed_after_general_save_reconciles_external_settings_without_resaving() {
+    let directory = tempfile::tempdir().expect("temporary config directory");
+    let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+    let (config, file) = ConfigFile::load_from_path(&path).expect("tracked config");
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        persistence: ConfigPersistence::UserFile(file),
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::LoadConfig(_))
+    ));
+
+    assert_eq!(
+        state.commit_smooth_scroll(true),
+        [StateEvent::SettingsChanged]
+    );
+    assert!(state.app_settings().smooth_scroll);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+
+    let mut external = Config::load_from_path(&path).expect("external config");
+    external.app_settings.smooth_scroll = false;
+    external.app_settings.animate_desktop_switch = false;
+    external.save_to_path(&path).expect("external edit");
+
+    assert_eq!(
+        state.apply_saved_config_reload_result(Ok(
+            openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave,
+        )),
+        [StateEvent::SettingsChanged]
+    );
+    assert!(!state.app_settings().smooth_scroll);
+    assert!(!state.app_settings().animate_desktop_switch);
+    let persisted = Config::load_from_path(&path).expect("external config remains on disk");
+    assert!(!persisted.app_settings.smooth_scroll);
+    assert!(!persisted.app_settings.animate_desktop_switch);
+    assert!(
+        receiver.try_recv().is_err(),
+        "the external verdict must not enqueue a reload of the stale save"
+    );
+}
+
 /// Picking a channel in a user-edited file adds the `update_channel` line and
 /// keeps every other byte, comments included.
 #[test]

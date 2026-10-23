@@ -123,16 +123,19 @@ impl DisableKeysReads {
     /// Re-read after an unsolicited settings report. Invalidation fences any
     /// older fetch without retiring the route generation of an active write.
     pub(crate) fn revalidate_device_settings(&mut self, key: &DeviceKey) {
-        if self.reads.contains_key(key)
-            && let Some(client) = &self.client
-        {
-            client.invalidate(query_key(key));
-        }
+        self.invalidate_snapshot(key);
     }
 
     /// A failed write may already have changed hardware. Retire the old value
     /// and fence any in-flight read before allowing another edit.
     pub(crate) fn reconcile_after_write(&mut self, key: &DeviceKey) {
+        self.invalidate_snapshot(key);
+    }
+
+    /// Clear a stale snapshot before the active query obtains a new device
+    /// reading. Both an unsolicited revision and an unconfirmed write need
+    /// this same fail-closed transition.
+    fn invalidate_snapshot(&mut self, key: &DeviceKey) {
         self.confirmed.remove(key);
         if let Some(read) = self.reads.get_mut(key) {
             read.load = Load::Loading;

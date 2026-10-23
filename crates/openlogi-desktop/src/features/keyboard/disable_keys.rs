@@ -131,6 +131,11 @@ fn load_content(
     pal: Palette,
 ) -> gpui::AnyElement {
     match load {
+        DisableKeysLoad::Unknown | DisableKeysLoad::Loading if !online => {
+            status_line(tr!("device.offline"), pal)
+                .debug_selector(|| "disable-keys-offline-unknown".into())
+                .into_any_element()
+        }
         DisableKeysLoad::Unknown | DisableKeysLoad::Loading => {
             status_line(tr!("keyboard.loading_disabled_key_state"), pal).into_any_element()
         }

@@ -45,7 +45,9 @@ use openlogi_core::hid::{
     PointerSpeed, ReportRateInfo, WriteError,
 };
 use openlogi_ipc::client::{self, ConnectError};
-use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
+use openlogi_ipc::{
+    AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure, SavedConfigVerdict,
+};
 use tarpc::client::RpcError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -125,10 +127,14 @@ pub enum GuiUpdate {
         context: DisableKeysRequestContext,
         result: Result<DisableKeysState, WriteError>,
     },
-    /// Whether the agent adopted the config currently on disk.
+    /// Result of a plain config load, such as startup recovery.
+    ConfigLoadResult {
+        result: Result<(), ConfigReloadError>,
+    },
+    /// Whether the agent accepted the exact revision a GUI save wrote.
     ConfigReloadResult {
         context: ConfigReloadContext,
-        result: Result<(), ConfigReloadError>,
+        result: Result<SavedConfigVerdict, ConfigReloadError>,
     },
     /// The device's verdict on a DPI write the GUI asked for: taken, or the
     /// typed refusal. Answers [`SetDpi`].
@@ -469,7 +475,7 @@ mod tests {
     use openlogi_ipc::testing::in_memory_agent;
     use openlogi_ipc::{
         AgentRequest, AgentResponse, AgentStatus, ChosenLight, ForegroundApps, InventoryHealth,
-        Observation, PROTOCOL_VERSION, SavedConfig,
+        Observation, PROTOCOL_VERSION, SavedConfig, SavedConfigVerdict,
     };
     use tokio::sync::oneshot;
 
@@ -480,6 +486,8 @@ mod tests {
     enum OnReload {
         /// Adopt the config.
         Accept,
+        /// Reload an externally changed file instead of the GUI's saved text.
+        FileChangedAfterSave,
         /// Close the connection without answering, as a dying agent does.
         Vanish,
     }
@@ -506,13 +514,21 @@ mod tests {
                             AgentResponse::ReloadConfig(Ok(())),
                         )
                         .await),
-                        AgentRequest::ReloadSavedConfig { .. } => Ok(reload_answer(
-                            on_reload,
-                            &counted,
-                            &signal,
-                            AgentResponse::ReloadSavedConfig(Ok(())),
-                        )
-                        .await),
+                        AgentRequest::ReloadSavedConfigWithVerdict { .. } => {
+                            let verdict = match on_reload {
+                                OnReload::FileChangedAfterSave => {
+                                    SavedConfigVerdict::FileChangedAfterSave
+                                }
+                                OnReload::Accept | OnReload::Vanish => SavedConfigVerdict::Accepted,
+                            };
+                            Ok(reload_answer(
+                                on_reload,
+                                &counted,
+                                &signal,
+                                AgentResponse::ReloadSavedConfigWithVerdict(Ok(verdict)),
+                            )
+                            .await)
+                        }
                         AgentRequest::ReadDpi { .. } => {
                             Ok(AgentResponse::ReadDpi(Err(WriteError::AmbiguousRawDevice)))
                         }
@@ -536,7 +552,7 @@ mod tests {
     ) -> AgentResponse {
         counted.fetch_add(1, Ordering::SeqCst);
         match on_reload {
-            OnReload::Accept => accepted,
+            OnReload::Accept | OnReload::FileChangedAfterSave => accepted,
             OnReload::Vanish => {
                 signal.notify_one();
                 std::future::pending().await
@@ -587,17 +603,46 @@ mod tests {
         }
     }
 
-    /// The first reload verdict the loop reports; the other updates do not
-    /// matter to these tests.
-    async fn reload_verdict(
+    /// The first startup-load result the loop reports; the other updates do
+    /// not matter to these tests.
+    async fn config_load_result(
         updates: &mut mpsc::UnboundedReceiver<GuiUpdate>,
     ) -> Result<(), ConfigReloadError> {
+        loop {
+            match updates.recv().await {
+                Some(GuiUpdate::ConfigLoadResult { result }) => return result,
+                Some(_) => {}
+                None => panic!("the loop dropped its update channel"),
+            }
+        }
+    }
+
+    /// The first saved-reload verdict the loop reports for the general context.
+    async fn saved_reload_verdict(
+        updates: &mut mpsc::UnboundedReceiver<GuiUpdate>,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError> {
         loop {
             match updates.recv().await {
                 Some(GuiUpdate::ConfigReloadResult {
                     context: ConfigReloadContext::General,
                     result,
                 }) => return result,
+                Some(_) => {}
+                None => panic!("the loop dropped its update channel"),
+            }
+        }
+    }
+
+    /// The saved-reload verdict for one exact transaction context.
+    async fn saved_reload_verdict_for(
+        updates: &mut mpsc::UnboundedReceiver<GuiUpdate>,
+        expected: ConfigReloadContext,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError> {
+        loop {
+            match updates.recv().await {
+                Some(GuiUpdate::ConfigReloadResult { context, result }) if context == expected => {
+                    return result;
+                }
                 Some(_) => {}
                 None => panic!("the loop dropped its update channel"),
             }
@@ -620,7 +665,7 @@ mod tests {
             () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
-            verdict = reload_verdict(&mut updates) => verdict,
+            verdict = config_load_result(&mut updates) => verdict,
         };
 
         assert_eq!(
@@ -638,28 +683,72 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_reload_the_agent_took_down_with_it_reaches_its_successor() {
         // An agent that dies mid-reload has applied nothing. The reload stays
-        // owed and reaches the replacement, which answers for itself.
+        // owed and reaches the replacement with its owning transaction context.
         let (dying, dying_reloads) = scripted_agent(OnReload::Vanish);
         let (successor, successor_reloads) = scripted_agent(OnReload::Accept);
         let mut effects = ScriptedEffects::answering([Ok(dying), Ok(successor)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
-        commands.send(ReloadConfig::default().into()).unwrap();
+        let context = ConfigReloadContext::DisableKeys(DisableKeysRequestContext {
+            key: DeviceKey::from("keyboard"),
+            route: some_route(),
+            route_generation: 3,
+            request_id: 7,
+        });
+        commands
+            .send(
+                ReloadConfig {
+                    revision: ConfigRevision::of("saved"),
+                    contexts: vec![context.clone()],
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap();
 
         let verdict = tokio::select! {
             () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
-            verdict = reload_verdict(&mut updates) => verdict,
+            verdict = saved_reload_verdict_for(&mut updates, context) => verdict,
         };
 
         assert_eq!(
             verdict,
-            Ok(()),
+            Ok(SavedConfigVerdict::Accepted),
             "the lost attempt is never reported as a verdict"
         );
         assert_eq!(dying_reloads.load(Ordering::SeqCst), 1);
         assert_eq!(successor_reloads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn file_changed_after_save_reaches_the_general_context_over_ipc() {
+        // This exercises tarpc's generated request and response enums through
+        // the same in-memory transport that the production client loop uses.
+        let (agent, reloads) = scripted_agent(OnReload::FileChangedAfterSave);
+        let mut effects = ScriptedEffects::answering([Ok(agent)]);
+        let (update_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        commands
+            .send(
+                ReloadConfig {
+                    revision: ConfigRevision::of("saved by the GUI"),
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap();
+
+        let verdict = tokio::select! {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+                panic!("the loop ends only once the GUI hangs up")
+            }
+            verdict = saved_reload_verdict(&mut updates) => verdict,
+        };
+
+        assert_eq!(verdict, Ok(SavedConfigVerdict::FileChangedAfterSave));
+        assert_eq!(reloads.load(Ordering::SeqCst), 1, "delivered exactly once");
     }
 
     #[tokio::test(start_paused = true)]
@@ -676,9 +765,11 @@ mod tests {
                 let recorded = recorded.clone();
                 Box::pin(async move {
                     match request {
-                        AgentRequest::ReloadSavedConfig { saved } => {
+                        AgentRequest::ReloadSavedConfigWithVerdict { saved } => {
                             recorded.lock().unwrap().push(Some(saved));
-                            Ok(AgentResponse::ReloadSavedConfig(Ok(())))
+                            Ok(AgentResponse::ReloadSavedConfigWithVerdict(Ok(
+                                SavedConfigVerdict::Accepted,
+                            )))
                         }
                         AgentRequest::ReloadConfig {} => {
                             recorded.lock().unwrap().push(None);
@@ -730,17 +821,25 @@ mod tests {
                 panic!("the loop ends only once the GUI hangs up")
             }
             verdicts = async {
-                let owed = (reload_verdict(&mut updates).await, reload_verdict(&mut updates).await);
+                let owed = (
+                    saved_reload_verdict(&mut updates).await,
+                    config_load_result(&mut updates).await,
+                );
                 // A delivered reload is no longer owed: the next save goes
                 // out alone, and nothing follows it once the loop is idle.
                 commands.send(ReloadConfig::default().into()).unwrap();
-                let next = reload_verdict(&mut updates).await;
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let next = saved_reload_verdict(&mut updates).await;
                 (owed, next)
             } => verdicts,
         };
 
-        assert_eq!(verdicts, ((Ok(()), Ok(())), Ok(())));
+        assert_eq!(
+            verdicts,
+            (
+                (Ok(SavedConfigVerdict::Accepted), Ok(())),
+                Ok(SavedConfigVerdict::Accepted)
+            )
+        );
         assert_eq!(
             *seen.lock().unwrap(),
             [
@@ -845,17 +944,18 @@ mod tests {
             ]
         );
         let (updates, mut received) = mpsc::unbounded_channel();
-        request::Request::deliver(reload, Ok(Ok(())), &updates);
+        request::Request::deliver(reload, Ok(Ok(SavedConfigVerdict::Accepted)), &updates);
         assert!(
             matches!(received.try_recv(), Ok(GuiUpdate::ConfigReloadResult {
-            context: ConfigReloadContext::DisableKeys(actual), result: Ok(())
+            context: ConfigReloadContext::DisableKeys(actual),
+            result: Ok(SavedConfigVerdict::Accepted)
         }) if actual == context)
         );
         assert!(matches!(
             received.try_recv(),
             Ok(GuiUpdate::ConfigReloadResult {
                 context: ConfigReloadContext::General,
-                result: Ok(())
+                result: Ok(SavedConfigVerdict::Accepted)
             })
         ));
         assert!(

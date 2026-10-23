@@ -32,18 +32,23 @@ use crate::{app, windows};
 /// one thing here that still has to be asked on a timer.
 const CAMERA_SCAN_PERIOD: Duration = Duration::from_secs(2);
 
-/// Deliver a reload verdict only to the transaction that requested it.
-fn apply_config_reload(
+/// Deliver a saved-reload verdict only to the transaction that requested it.
+fn apply_saved_config_reload(
     context: ipc::ConfigReloadContext,
-    result: Result<(), openlogi_ipc::ConfigReloadError>,
+    result: Result<openlogi_ipc::SavedConfigVerdict, openlogi_ipc::ConfigReloadError>,
     cx: &mut gpui::App,
 ) {
     AppState::apply(cx, |state| match context {
-        ipc::ConfigReloadContext::General => state.apply_config_reload_result(result),
+        ipc::ConfigReloadContext::General => state.apply_saved_config_reload_result(result),
         ipc::ConfigReloadContext::DisableKeys(context) => {
             state.apply_disable_keys_reload_result(context, result)
         }
     });
+}
+
+/// Deliver a plain config-load result to the general configuration state.
+fn apply_config_load(result: Result<(), openlogi_ipc::ConfigReloadError>, cx: &mut gpui::App) {
+    AppState::apply(cx, |state| state.apply_config_reload_result(result));
 }
 
 /// What process startup hands the event loop.
@@ -306,8 +311,11 @@ impl Runtime {
             ipc::GuiUpdate::PairingCancelled => {
                 cx.update(windows::add_device::apply_cancelled);
             }
+            ipc::GuiUpdate::ConfigLoadResult { result } => {
+                cx.update(|cx| apply_config_load(result, cx));
+            }
             ipc::GuiUpdate::ConfigReloadResult { context, result } => {
-                cx.update(|cx| apply_config_reload(context, result, cx));
+                cx.update(|cx| apply_saved_config_reload(context, result, cx));
             }
             ipc::GuiUpdate::DpiWritten {
                 key,
