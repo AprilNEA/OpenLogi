@@ -11,7 +11,7 @@
 use std::{sync::Arc, time::Duration};
 
 use hidpp::{
-    device::Device,
+    device::{Device, DeviceError},
     feature::{
         CreatableFeature, EmittingFeature,
         device_information::{
@@ -90,9 +90,26 @@ fn update_error(error: Hidpp20Error) -> FirmwareUpdateFailure {
 async fn device_on(shared: &SharedChannel) -> Result<Device, WriteError> {
     Device::new(Arc::clone(shared.channel()), shared.device_index())
         .await
-        .map_err(|_| WriteError::DeviceUnreachable {
-            index: shared.device_index(),
+        .map_err(|error| match error {
+            // A HID++ 1.0 device has no `0x0003` firmware table to read; that
+            // is permanent, not a device that failed to answer.
+            DeviceError::UnsupportedProtocolVersion => WriteError::FeatureUnsupported {
+                feature_hex: DeviceInformationFeature::ID,
+            },
+            _ => WriteError::DeviceUnreachable {
+                index: shared.device_index(),
+            },
         })
+}
+
+/// The device answered, but its firmware table has no single running
+/// application: it does not describe firmware OpenLogi can show or update.
+/// Permanent for the device, so it is reported as unsupported rather than as
+/// a read that might succeed on retry.
+fn no_running_application() -> WriteError {
+    WriteError::FeatureUnsupported {
+        feature_hex: DeviceInformationFeature::ID,
+    }
 }
 
 async fn inspect(device: &mut Device) -> Result<Inspection, WriteError> {
@@ -102,10 +119,7 @@ async fn inspect(device: &mut Device) -> Result<Inspection, WriteError> {
         .await
         .map_err(|error| read_error(error, DeviceInformationFeature::ID))?;
     if info.entity_count == 0 || info.entity_count > 16 {
-        return Err(WriteError::UnsupportedResponse {
-            operation: HidppOperation::ReadFirmware,
-            feature_hex: DeviceInformationFeature::ID,
-        });
+        return Err(no_running_application());
     }
     let mut applications = Vec::new();
     for index in 0..info.entity_count {
@@ -121,18 +135,12 @@ async fn inspect(device: &mut Device) -> Result<Inspection, WriteError> {
         .iter()
         .filter(|(_, application)| application.active);
     let Some((index, running)) = active.next() else {
-        return Err(WriteError::UnsupportedResponse {
-            operation: HidppOperation::ReadFirmware,
-            feature_hex: DeviceInformationFeature::ID,
-        });
+        return Err(no_running_application());
     };
     let index = *index;
     let running = running.clone();
     if active.next().is_some() {
-        return Err(WriteError::UnsupportedResponse {
-            operation: HidppOperation::ReadFirmware,
-            feature_hex: DeviceInformationFeature::ID,
-        });
+        return Err(no_running_application());
     }
     Ok(Inspection {
         unit_id: info.unit_id,
