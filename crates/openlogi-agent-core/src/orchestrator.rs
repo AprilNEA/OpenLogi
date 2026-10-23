@@ -70,8 +70,8 @@ use devices::{
     build_devices, changed_follower_cookies, config_keeps_os_layout, configured_dpi,
     configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
     keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
-    plan_disabled_keys_recovery, plan_reapply, reconnect_follower_cookies, saved_speed,
-    settings_moved, stable_id, wheel_inverted,
+    plan_disabled_keys_recovery, plan_reapply, reconnect_follower_cookies, same_device_lifecycle,
+    saved_speed, settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -413,6 +413,22 @@ impl SharedHandles {
             });
         crate::hardware::write_manual_disable_keys(self.keyboard_device(route), pending, desired)?
             .wait()
+            .await
+    }
+
+    /// Read after previously admitted Disable Keys workers finish, including
+    /// background policy writes queued by config reload. This does not create
+    /// a new user intent or block independent routes/settings.
+    pub async fn read_disable_keys(
+        &self,
+        route: &DeviceRoute,
+    ) -> Result<openlogi_hid::DisableKeysState, WriteError> {
+        let reservation = self.disabled_keys_order.reserve(route);
+        reservation.wait().await;
+        self.keyboard_device(route)
+            .run(HidppOperation::ReadDisableKeys, |channel| async move {
+                openlogi_hid::get_disable_keys_on(&channel).await
+            })
             .await
     }
 
@@ -1055,11 +1071,7 @@ impl Orchestrator {
         // remain in inventory still observe config changes without doing I/O.
         for old in &self.devices {
             if let Some(route) = &old.route
-                && !devices.iter().any(|dev| {
-                    dev.route.as_ref() == Some(route)
-                        && DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id)
-                            == DeviceIdentity::from_parts(old.serial.as_deref(), old.unit_id)
-                })
+                && !devices.iter().any(|dev| same_device_lifecycle(old, dev))
             {
                 self.shared.disabled_keys_order.retire(route);
                 self.disabled_keys_recovery.remove(&stable_id(old));

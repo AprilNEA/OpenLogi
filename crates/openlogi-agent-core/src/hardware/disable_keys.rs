@@ -42,6 +42,25 @@ impl Drop for RequesterCancellation {
     }
 }
 
+/// Native completion is not requester acceptance. An unconsumed message owns
+/// the pending intent so cancelling a buffered success still requests recovery.
+struct Completion {
+    outcome: Result<DisableKeysState, WriteError>,
+    pending: Option<PendingWrite<Option<DisableKeysMask>>>,
+}
+
+impl Completion {
+    fn accept(self) -> Result<DisableKeysState, WriteError> {
+        let state = self.outcome?;
+        if self.pending.is_some_and(|pending| !pending.confirm()) {
+            return Err(WriteError::WriteSuperseded {
+                operation: HidppOperation::WriteDisableKeys,
+            });
+        }
+        Ok(state)
+    }
+}
+
 /// A Disable Keys worker that owns the setting and transport turns through a
 /// native HID write. Dropping the requester handle never aborts device I/O
 /// already in progress.
@@ -49,7 +68,7 @@ impl Drop for RequesterCancellation {
 pub(crate) struct DisableKeysJob {
     cancellation: RequesterCancellation,
     started: oneshot::Receiver<()>,
-    result: oneshot::Receiver<Result<DisableKeysState, WriteError>>,
+    result: oneshot::Receiver<Completion>,
     worker: JoinHandle<()>,
 }
 
@@ -66,6 +85,7 @@ impl DisableKeysJob {
             .await
             .map_err(|_| timed_out())?
             .map_err(|_| WriteError::AgentUnavailable)?
+            .accept()
     }
 
     /// Continue the completion owner in the background and return its worker
@@ -84,20 +104,7 @@ pub(crate) fn write_manual_disable_keys(
     desired: DisableKeysMask,
 ) -> Result<DisableKeysJob, WriteError> {
     let ticket = pending.ticket();
-    spawn_disable_keys(
-        op,
-        ticket,
-        desired,
-        move |outcome, cancelled| match outcome {
-            Ok(state) if !cancelled && pending.confirm() => Ok(state),
-            Ok(_) if cancelled => Err(timed_out()),
-            Ok(_) => Err(WriteError::WriteSuperseded {
-                operation: HidppOperation::WriteDisableKeys,
-            }),
-            Err(error) => Err(error),
-        },
-        |_| {},
-    )
+    spawn_disable_keys(op, ticket, desired, Some(pending), |_| {})
 }
 
 /// Re-apply a saved Disable Keys policy without giving it newer intent than a
@@ -109,23 +116,17 @@ pub(crate) fn write_disabled_keys_in_background(
     desired: DisableKeysMask,
 ) -> Option<JoinHandle<()>> {
     let index = op.route.device_index();
-    match spawn_disable_keys(
-        op,
-        ticket,
-        desired,
-        |outcome, _| outcome,
-        move |outcome| match outcome {
-            Ok(state) => debug!(
-                index,
-                disabled = state.disabled.bits(),
-                "disabled keys written"
-            ),
-            Err(WriteError::WriteSuperseded { .. }) => {
-                debug!(index, "Disable Keys write superseded")
-            }
-            Err(error) => warn!(index, ?error, "Disable Keys write failed"),
-        },
-    ) {
+    match spawn_disable_keys(op, ticket, desired, None, move |outcome| match outcome {
+        Ok(state) => debug!(
+            index,
+            disabled = state.disabled.bits(),
+            "disabled keys written"
+        ),
+        Err(WriteError::WriteSuperseded { .. }) => {
+            debug!(index, "Disable Keys write superseded");
+        }
+        Err(error) => warn!(index, ?error, "Disable Keys write failed"),
+    }) {
         Ok(job) => Some(job.detach()),
         Err(error) => {
             debug!(index, ?error, "Disable Keys background write skipped");
@@ -134,17 +135,14 @@ pub(crate) fn write_disabled_keys_in_background(
     }
 }
 
-fn spawn_disable_keys<Complete, Log>(
+fn spawn_disable_keys<Log>(
     op: DeviceOp,
     ticket: WriteTicket<Option<DisableKeysMask>>,
     desired: DisableKeysMask,
-    complete: Complete,
+    pending: Option<PendingWrite<Option<DisableKeysMask>>>,
     log: Log,
 ) -> Result<DisableKeysJob, WriteError>
 where
-    Complete: FnOnce(Result<DisableKeysState, WriteError>, bool) -> Result<DisableKeysState, WriteError>
-        + Send
-        + 'static,
     Log: FnOnce(&Result<DisableKeysState, WriteError>) + Send + 'static,
 {
     // Reject a missing route synchronously, but resolve again only after the
@@ -152,6 +150,9 @@ where
     drop(op.resolve()?);
 
     let transport = op.access.transport_turns.turn_for(&op.route);
+    // Published synchronously: a reread issued after reload must not overtake
+    // this worker just because its OS thread has not started polling yet.
+    let reservation = ticket.reserve();
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker_cancelled = Arc::clone(&cancelled);
     let (sender, result) = oneshot::channel();
@@ -162,8 +163,11 @@ where
             let outcome = match openlogi_core::worker::runtime() {
                 Ok(runtime) => {
                     let write_cancelled = Arc::clone(&worker_cancelled);
-                    let outcome = runtime.block_on(async move {
+                    runtime.block_on(async move {
+                        reservation.wait().await;
+                        let _reservation = reservation;
                         let io = &op;
+                        let admitted = &ticket;
                         ticket
                             .write_or(
                                 async {
@@ -172,15 +176,27 @@ where
                                     (lease, turn)
                                 },
                                 || async move {
-                                    if write_cancelled.load(Ordering::Acquire) {
-                                        return Err(timed_out());
-                                    }
-                                    if !io.access.device_io.allows_io() {
-                                        return Err(WriteError::DeviceNotFound);
-                                    }
+                                    let check = || {
+                                        if write_cancelled.load(Ordering::Acquire) {
+                                            return Err(timed_out());
+                                        }
+                                        if !io.access.device_io.allows_io() {
+                                            return Err(WriteError::DeviceNotFound);
+                                        }
+                                        if !admitted.is_current() {
+                                            return Err(WriteError::WriteSuperseded {
+                                                operation: HidppOperation::WriteDisableKeys,
+                                            });
+                                        }
+                                        Ok(())
+                                    };
+                                    check()?;
                                     let shared = io.resolve()?;
                                     let _ = started_sender.send(());
-                                    openlogi_hid::set_disable_keys_on(&shared, desired).await
+                                    openlogi_hid::set_disable_keys_write_through_on(
+                                        &shared, desired, check,
+                                    )
+                                    .await
                                 },
                                 || async {
                                     Err(WriteError::WriteSuperseded {
@@ -189,16 +205,17 @@ where
                                 },
                             )
                             .await
-                    });
-                    complete(outcome, worker_cancelled.load(Ordering::Acquire))
+                    })
                 }
                 Err(error) => Err(WriteError::RuntimeInit {
                     message: error.to_string(),
                 }),
             };
             log(&outcome);
-            // The requester can leave before native write completion.
-            let _ = sender.send(outcome);
+            // Ownership travels with the result: dropping an unconsumed
+            // message or failing to send it releases the pending intent only
+            // after native I/O drained, without accepting an unsaved choice.
+            let _ = sender.send(Completion { outcome, pending });
         })
         .map_err(|error| {
             WriteError::Hid(format!("could not start Disable Keys worker: {error}"))
@@ -217,3 +234,6 @@ fn timed_out() -> WriteError {
         operation: HidppOperation::WriteDisableKeys,
     }
 }
+
+#[cfg(test)]
+mod tests;

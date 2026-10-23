@@ -59,11 +59,24 @@ impl<T> Queue<T> {
 /// which finished (were dropped) before an earlier ticket did.
 #[derive(Default)]
 struct Finished {
+    issued: u64,
     through: u64,
     early: BTreeSet<u64>,
 }
 
 impl<T> Queue<T> {
+    fn reserve(self: &Arc<Self>) -> Arc<ReservedTurn<T>> {
+        let number = {
+            let mut finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
+            finished.issued += 1;
+            finished.issued
+        };
+        Arc::new(ReservedTurn {
+            queue: Arc::clone(self),
+            number,
+        })
+    }
+
     fn finish(&self, number: u64) {
         {
             // Two integers and a set of them: a panic mid-update leaves at
@@ -115,10 +128,16 @@ pub(crate) struct WriteTicket<T = ()> {
     queue: Arc<Queue<T>>,
     number: u64,
     // Only request-ordered writes retire a sequence slot; policy retries reuse an intent.
-    _completion: Option<Arc<TicketLifetime<T>>>,
+    completion: Option<Arc<ReservedTurn<T>>>,
 }
 
 impl<T: Clone + Default + Eq> WriteOrder<T> {
+    /// Reserve I/O order without publishing a new setting intent. Reads use
+    /// this to wait for policy workers already queued by a config reload.
+    pub(crate) fn reserve(&self, route: &DeviceRoute) -> Arc<ReservedTurn<T>> {
+        self.queue(route).reserve()
+    }
+
     fn queue(&self, route: &DeviceRoute) -> Arc<Queue<T>> {
         Arc::clone(
             self.0
@@ -142,7 +161,7 @@ impl<T: Clone + Default + Eq> WriteOrder<T> {
         WriteTicket {
             queue,
             number,
-            _completion: None,
+            completion: None,
         }
     }
 
@@ -216,7 +235,7 @@ impl<T: Clone + Default + Eq> WriteOrder<T> {
             WriteTicket {
                 queue,
                 number: intent.number,
-                _completion: None,
+                completion: None,
             },
         ))
     }
@@ -256,7 +275,7 @@ impl<T: Clone + Default + Eq> WriteOrder<T> {
             ticket: WriteTicket {
                 queue,
                 number: intent.number,
-                _completion: None,
+                completion: None,
             },
             intent,
             abandoned: None,
@@ -265,6 +284,11 @@ impl<T: Clone + Default + Eq> WriteOrder<T> {
 }
 
 impl<T> WriteTicket<T> {
+    /// Reserve before dispatching a worker, not when its thread gets polled.
+    pub(crate) fn reserve(&self) -> Arc<ReservedTurn<T>> {
+        self.queue.reserve()
+    }
+
     /// Earlier writes finish before a current ticket can start HID I/O.
     #[cfg(test)]
     pub(crate) async fn turn(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
@@ -310,28 +334,36 @@ impl<V> WriteTicket<V> {
     where
         Write: Future<Output = T>,
     {
-        loop {
-            let advanced = self.queue.advanced.notified();
-            let mut advanced = std::pin::pin!(advanced);
-            // Registered before the check, so a ticket finishing between the
-            // check and the wait still wakes this one.
-            advanced.as_mut().enable();
-            if self.queue.is_turn_of(self.number) {
-                break;
-            }
-            advanced.await;
+        if let Some(turn) = &self.completion {
+            turn.wait().await;
         }
         write().await
     }
 }
 
 /// Completes a strictly ordered slot only when its final handle is dropped.
-struct TicketLifetime<T> {
+pub(crate) struct ReservedTurn<T> {
     queue: Arc<Queue<T>>,
     number: u64,
 }
 
-impl<T> Drop for TicketLifetime<T> {
+impl<T> ReservedTurn<T> {
+    /// Wait until all earlier reservations have drained or been dropped.
+    /// Hold this reservation until the operation, including native I/O, ends.
+    pub(crate) async fn wait(&self) {
+        loop {
+            let advanced = self.queue.advanced.notified();
+            let mut advanced = std::pin::pin!(advanced);
+            advanced.as_mut().enable();
+            if self.queue.is_turn_of(self.number) {
+                return;
+            }
+            advanced.await;
+        }
+    }
+}
+
+impl<T> Drop for ReservedTurn<T> {
     fn drop(&mut self) {
         self.queue.finish(self.number);
     }
@@ -343,10 +375,7 @@ impl WriteOrder {
     pub(crate) fn request(&self, route: &DeviceRoute) -> WriteTicket {
         let ticket = self.request_value(route, ());
         WriteTicket {
-            _completion: Some(Arc::new(TicketLifetime {
-                queue: Arc::clone(&ticket.queue),
-                number: ticket.number,
-            })),
+            completion: Some(ticket.reserve()),
             ..ticket
         }
     }
@@ -414,6 +443,54 @@ mod tests {
             receiver_uid: "receiver".into(),
             slot,
         }
+    }
+
+    #[tokio::test]
+    async fn read_reservations_wait_for_dispatched_writes_without_new_intent() {
+        let order = WriteOrder::default();
+        order.sync_policy(&route(1), Some(false));
+        let (_, ticket) = order.policy(&route(1)).unwrap();
+        let dispatched = ticket.reserve();
+        // The worker has not polled yet, but its place is already published.
+        let reader = order.reserve(&route(1));
+        assert!(
+            futures_lite::future::poll_once(reader.wait())
+                .await
+                .is_none()
+        );
+        let other = order.reserve(&route(2));
+        assert!(
+            futures_lite::future::poll_once(other.wait())
+                .await
+                .is_some()
+        );
+        assert!(ticket.is_current(), "a read must not become a write intent");
+        drop(dispatched);
+        reader.wait().await;
+        assert!(ticket.is_current());
+    }
+
+    #[tokio::test]
+    async fn cancelled_reservations_do_not_strand_later_reads_or_writes() {
+        let order = WriteOrder::default();
+        order.sync_policy(&route(1), Some(false));
+        let first = order.reserve(&route(1));
+        let cancelled = order.reserve(&route(1));
+        let pending = order.begin(&route(1), Some(true));
+        let writer = pending.ticket().reserve();
+        let last = order.reserve(&route(1));
+        drop(cancelled);
+        assert!(
+            futures_lite::future::poll_once(writer.wait())
+                .await
+                .is_none()
+        );
+        drop(first);
+        writer.wait().await;
+        assert!(futures_lite::future::poll_once(last.wait()).await.is_none());
+        drop(writer);
+        last.wait().await;
+        assert!(pending.confirm());
     }
 
     #[tokio::test]

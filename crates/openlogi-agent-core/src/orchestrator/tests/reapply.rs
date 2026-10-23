@@ -4,6 +4,194 @@ use super::*;
 use std::collections::BTreeMap;
 
 #[test]
+fn regression_reapply_budget_does_not_transfer_to_replacement_in_same_slot() {
+    let previous = [AgentDevice {
+        unit_id: [1, 2, 3, 4],
+        ..dev("legacy-slot", 1, true)
+    }];
+    let replacement = [AgentDevice {
+        unit_id: [5, 6, 7, 8],
+        ..dev("legacy-slot", 1, true)
+    }];
+    let (_, mut followup) = plan_reapply(&[], &previous, &BTreeMap::new(), None, false);
+    (_, followup) = plan_reapply(&previous, &previous, &followup, None, true);
+    assert_eq!(followup.get(&stable_id(&previous[0])), Some(&3));
+    let (targets, followup) = plan_reapply(&previous, &replacement, &followup, None, false);
+    assert_eq!(
+        targets,
+        [0],
+        "replacement must receive its own first-sighting apply"
+    );
+    assert_eq!(
+        followup.get(&stable_id(&replacement[0])),
+        Some(&VOLATILE_REAPPLY_CONFIRM_RETRIES)
+    );
+}
+
+#[test]
+fn reapply_budget_survives_receiver_identity_enrichment() {
+    let unknown = dev("legacy-slot", 1, true);
+    let unit = AgentDevice {
+        unit_id: [1, 2, 3, 4],
+        ..dev("legacy-slot", 1, true)
+    };
+    let serial = AgentDevice {
+        serial: Some("KEYBOARD".into()),
+        unit_id: [1, 2, 3, 4],
+        ..dev("legacy-slot", 1, true)
+    };
+    let normalized_serial = AgentDevice {
+        serial: Some("keyboard".into()),
+        unit_id: [1, 2, 3, 4],
+        ..dev("serial:keyboard", 1, true)
+    };
+    for pair in [unknown, unit, serial, normalized_serial].windows(2) {
+        let previous = &pair[..1];
+        let next = &pair[1..];
+        let followup = BTreeMap::from([(stable_id(&previous[0]), 2)]);
+        let (targets, retained) = plan_reapply(previous, next, &followup, None, false);
+        assert!(
+            targets.is_empty(),
+            "identity enrichment is not a new arrival"
+        );
+        assert_eq!(
+            retained, followup,
+            "ordinary snapshots preserve the spent budget"
+        );
+        let (targets, retained) = plan_reapply(previous, next, &followup, None, true);
+        assert_eq!(targets, [0]);
+        assert_eq!(retained.get(&stable_id(&next[0])), Some(&1));
+    }
+}
+
+#[test]
+fn reapply_budget_restarts_when_a_serial_only_receiver_device_is_replaced() {
+    let previous = [AgentDevice {
+        serial: Some("keyboard-a".into()),
+        ..dev("legacy-slot", 1, true)
+    }];
+    let next = [AgentDevice {
+        serial: Some("keyboard-b".into()),
+        ..dev("legacy-slot", 1, true)
+    }];
+    let followup = BTreeMap::from([(stable_id(&previous[0]), 1)]);
+    let (targets, followup) = plan_reapply(&previous, &next, &followup, None, true);
+    assert_eq!(targets, [0]);
+    assert_eq!(
+        followup.get(&stable_id(&next[0])),
+        Some(&VOLATILE_REAPPLY_CONFIRM_RETRIES)
+    );
+}
+
+fn receiver_inventory(unit_id: [u8; 4]) -> DeviceInventory {
+    let mut inventory = direct_inventory(None, unit_id);
+    inventory.receiver.product_id = 0xc548;
+    inventory.receiver.unique_id = Some("AA00".into());
+    inventory.paired[0].slot = 1;
+    inventory.paired[0].kind = DeviceKind::Keyboard;
+    inventory
+}
+
+#[test]
+fn receiver_replacement_and_removal_retire_scoped_recovery_and_late_requests() {
+    use openlogi_hid::DisableKeysMask;
+
+    for replacement in [None, Some(receiver_inventory([5, 6, 7, 8]))] {
+        let mut orchestrator = orchestrator(Config::default());
+        let previous = [receiver_inventory([1, 2, 3, 4])];
+        orchestrator.refresh_inventory(&previous, &[], false);
+        let shared = orchestrator.shared();
+        let route = orchestrator.devices[0]
+            .route
+            .clone()
+            .expect("receiver route");
+        drop(
+            shared
+                .disabled_keys_order
+                .begin(&route, Some(DisableKeysMask::EMPTY)),
+        );
+        orchestrator.refresh_inventory(&previous, &[], false);
+        assert_eq!(orchestrator.disabled_keys_recovery.len(), 1);
+        let pending = shared
+            .disabled_keys_order
+            .begin(&route, Some(DisableKeysMask::CAPS_LOCK));
+        let ticket = pending.ticket();
+        let next: Vec<_> = replacement.into_iter().collect();
+        orchestrator.refresh_inventory(&next, &[], false);
+        assert!(
+            !ticket.is_current(),
+            "old request cannot write to the replacement"
+        );
+        assert!(orchestrator.disabled_keys_recovery.is_empty());
+        drop(pending);
+        orchestrator.refresh_inventory(&next, &[], false);
+        assert!(
+            orchestrator.disabled_keys_recovery.is_empty(),
+            "late cancellation cannot revive retired recovery"
+        );
+        if next.is_empty() {
+            assert!(orchestrator.reapply_followup.is_empty());
+            orchestrator.refresh_inventory(&previous, &[], false);
+        }
+        assert_eq!(
+            orchestrator
+                .reapply_followup
+                .get(&stable_id(&orchestrator.devices[0])),
+            Some(&VOLATILE_REAPPLY_CONFIRM_RETRIES)
+        );
+    }
+}
+
+#[test]
+fn receiver_identity_enrichment_preserves_requests_and_scoped_recovery() {
+    use openlogi_hid::DisableKeysMask;
+
+    let mut orchestrator = orchestrator(Config::default());
+    let mut inventory = receiver_inventory([0; 4]);
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    let shared = orchestrator.shared();
+    let route = orchestrator.devices[0]
+        .route
+        .clone()
+        .expect("receiver route");
+    let pending = shared
+        .disabled_keys_order
+        .begin(&route, Some(DisableKeysMask::EMPTY));
+    let ticket = pending.ticket();
+    inventory.paired[0]
+        .model_info
+        .as_mut()
+        .expect("model")
+        .unit_id = [1, 2, 3, 4];
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert!(
+        ticket.is_current(),
+        "learning the unit ID must not retire a request"
+    );
+    drop(pending);
+    orchestrator.refresh_inventory_for_settings_confirmation(
+        std::slice::from_ref(&inventory),
+        &[],
+        false,
+    );
+    let recovery = orchestrator.disabled_keys_recovery.clone();
+    assert_eq!(
+        recovery.get(&stable_id(&orchestrator.devices[0])),
+        Some(&(VOLATILE_REAPPLY_CONFIRM_RETRIES - 1))
+    );
+    inventory.paired[0]
+        .model_info
+        .as_mut()
+        .expect("model")
+        .serial_number = Some("keyboard".into());
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert_eq!(
+        orchestrator.disabled_keys_recovery, recovery,
+        "learning a serial keeps the remaining scoped budget"
+    );
+}
+
+#[test]
 fn reapply_targets_new_arrivals_and_transitions() {
     // First sighting of an online device → re-apply.
     assert_eq!(reapply_targets(&[], &[dev("a", 1, true)], false), vec![0]);

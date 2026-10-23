@@ -43,6 +43,7 @@ pub use diagnostics::{
 };
 pub use disable_keys::{
     get_disable_keys, get_disable_keys_on, set_disable_keys, set_disable_keys_on,
+    set_disable_keys_write_through_on,
 };
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, DpiTarget, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi,
@@ -128,12 +129,31 @@ pub(crate) async fn open_feature_with_version<F: CreatableFeature + 'static>(
         .root()
         .get_feature(F::ID)
         .await
-        .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, F::ID))?
-        .ok_or(WriteError::FeatureUnsupported { feature_hex: F::ID })?;
+        .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, F::ID))?;
+    register_feature::<F>(device, info)
+}
+
+/// Eligibility and wrapper registration have one owner for both I/O lifetimes.
+fn register_feature<F: CreatableFeature + 'static>(
+    device: &mut Device,
+    info: Option<hidpp::feature::root::FeatureInformation>,
+) -> Result<(Arc<F>, u8), WriteError> {
+    let info = info.ok_or(WriteError::FeatureUnsupported { feature_hex: F::ID })?;
     if F::ID == DisableKeysFeature::ID && !info.typ.is_end_user_configurable() {
         return Err(WriteError::FeatureUnsupported { feature_hex: F::ID });
     }
     Ok((device.add_feature::<F>(info.index), info.version))
+}
+
+async fn open_feature_write_through<F: CreatableFeature + 'static>(
+    device: &mut Device,
+) -> Result<Arc<F>, WriteError> {
+    let info = device
+        .root()
+        .get_feature_write_through(F::ID)
+        .await
+        .map_err(|error| classify_hidpp_error(error, HidppOperation::ResolveFeature, F::ID))?;
+    register_feature::<F>(device, info).map(|(feature, _)| feature)
 }
 
 /// Boilerplate-eater: open the channel that reaches `route`, then run `f` once

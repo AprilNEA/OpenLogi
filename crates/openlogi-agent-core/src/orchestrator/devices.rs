@@ -574,12 +574,34 @@ pub(super) fn stable_id(dev: &AgentDevice) -> DeviceStableId {
     )
 }
 
+/// Whether two snapshots still describe the same device lifecycle. Receiver
+/// slots can be reused by another physical device without changing their
+/// stable ID. Missing identity fields are not replacement evidence: a later
+/// probe can enrich them while requests and confirmation budgets remain live.
+pub(super) fn same_device_lifecycle(previous: &AgentDevice, next: &AgentDevice) -> bool {
+    if stable_id(previous) != stable_id(next)
+        || previous.route != next.route
+        || (previous.unit_id != [0; 4]
+            && next.unit_id != [0; 4]
+            && previous.unit_id != next.unit_id)
+    {
+        return false;
+    }
+    match (
+        DeviceIdentity::from_parts(previous.serial.as_deref(), previous.unit_id),
+        DeviceIdentity::from_parts(next.serial.as_deref(), next.unit_id),
+    ) {
+        (DeviceIdentity::Serial(previous), DeviceIdentity::Serial(next)) => previous == next,
+        _ => true,
+    }
+}
+
 /// Indices into `next` of devices whose volatile settings need re-applying:
 /// a device whose stable identity is newly present (a first sighting, or a
 /// replug that re-enumerated under a new identity — e.g. a Bolt device that
 /// moved slots), or an offline→online transition (a reconnect after device
 /// sleep); plus — after a system wake — every online device. Devices are
-/// matched across ticks by [`stable_id`]. Offline devices are never targeted
+/// matched across ticks by [`same_device_lifecycle`]. Offline devices are never targeted
 /// (the write would just time out); they re-apply on their own transition.
 pub(super) fn reapply_targets(
     prev: &[AgentDevice],
@@ -593,8 +615,7 @@ pub(super) fn reapply_targets(
             if reapply_all {
                 return true;
             }
-            let id = stable_id(dev);
-            match prev.iter().find(|p| stable_id(p) == id) {
+            match prev.iter().find(|p| same_device_lifecycle(p, dev)) {
                 // A new identity (first sighting, or a replug under a new
                 // route/slot) needs a fresh apply; a known one only when it has
                 // just come back online.
@@ -715,7 +736,7 @@ pub(super) fn plan_reapply(
         .iter()
         .filter_map(|&idx| {
             let id = stable_id(&next[idx]);
-            let new_identity = !prev.iter().any(|p| stable_id(p) == id);
+            let new_identity = !prev.iter().any(|p| same_device_lifecycle(p, &next[idx]));
             let budget = if new_identity {
                 VOLATILE_REAPPLY_CONFIRM_RETRIES
             } else if let Some(forced) = forced {
@@ -726,11 +747,15 @@ pub(super) fn plan_reapply(
             // A new trigger can land mid-run (a reconnect while the boot
             // confirmations are still draining) — keep the larger of the
             // fresh budget and what this pass would have drained to.
-            let carried = followup.get(&id).map_or(0, |remaining| {
-                remaining.saturating_sub(u8::from(confirm_followup))
-            });
+            let carried = if new_identity {
+                0
+            } else {
+                followup.get(&id).map_or(0, |remaining| {
+                    remaining.saturating_sub(u8::from(confirm_followup))
+                })
+            };
             let budget = budget.max(carried);
-            (budget > 0).then(|| (id, budget))
+            (budget > 0).then_some((id, budget))
         })
         .collect();
     for (idx, dev) in next.iter().enumerate() {

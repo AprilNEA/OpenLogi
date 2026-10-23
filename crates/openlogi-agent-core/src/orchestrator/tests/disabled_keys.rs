@@ -426,6 +426,9 @@ async fn cancelled_or_failed_manual_request_releases_saved_policy() {
     let shared = orchestrator(Config::default()).shared();
     let keyboard = Keyboard::publish(&shared).await;
     keyboard.configure(&shared);
+    let (refresh, abandoned) =
+        crate::watchers::inventory::InventoryRefresh::test_settings_confirmation();
+    shared.publish_inventory_refresh(refresh);
     let lease = shared
         .receiver_access
         .acquire_exclusive(ExclusiveAccessReason::Pairing)
@@ -436,6 +439,11 @@ async fn cancelled_or_failed_manual_request_releases_saved_policy() {
         assert!(futures_lite::future::poll_once(&mut manual).await.is_none());
     }
     drop(lease);
+    // Dropping the RPC signals cancellation, not native-owner completion.
+    // Production recovery is requested only after the worker releases intent.
+    tokio::time::timeout(std::time::Duration::from_secs(2), abandoned)
+        .await
+        .expect("cancelled worker released its pending intent");
     finish(shared.reapply_disabled_keys(&keyboard.route)).await;
     // Unsupported known/unknown bits fail before any write and release priority.
     let error = shared
@@ -476,6 +484,13 @@ async fn a_superseded_completion_does_not_strand_policy_when_its_successor_fails
         tokio::time::timeout(Duration::from_secs(2), readback.request_written())
             .await
             .expect("first request reached readback");
+        // Keep the cancelled successor in preflight; otherwise its detached
+        // worker can mutate before the test gets to drop the requester.
+        let cancelled_preflight = successor.is_none().then(|| {
+            keyboard
+                .reports
+                .hold_next_response(RequestMatch::Hidpp20, &[0x10, 0xff, 0, 0x10, 0, 0, 0])
+        });
         let mut second = Box::pin(shared.set_disable_keys(
             &keyboard.route,
             DisableKeysMask::from_bits_retain(successor.unwrap_or(0x00)),
@@ -489,7 +504,20 @@ async fn a_superseded_completion_does_not_strand_policy_when_its_successor_fails
             }
         );
         match successor {
-            None => drop(second),
+            None => {
+                let preflight = cancelled_preflight.unwrap();
+                tokio::time::timeout(Duration::from_secs(2), preflight.request_written())
+                    .await
+                    .expect("successor reached preflight");
+                let (refresh, abandoned) =
+                    crate::watchers::inventory::InventoryRefresh::test_settings_confirmation();
+                shared.publish_inventory_refresh(refresh);
+                drop(second);
+                preflight.release();
+                tokio::time::timeout(Duration::from_secs(2), abandoned)
+                    .await
+                    .expect("successor released its pending intent");
+            }
             Some(0x40) => assert!(matches!(
                 second.await.expect_err("unsupported mask"),
                 WriteError::UnsupportedMask { .. }

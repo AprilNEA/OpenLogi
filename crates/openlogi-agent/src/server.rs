@@ -14,7 +14,6 @@ use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
-use openlogi_agent_core::hardware;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
@@ -161,10 +160,6 @@ fn saved_config_verdict(saved: &SavedConfig, revision: ConfigRevision) -> SavedC
     }
 }
 
-fn disable_keys_device(shared: &SharedHandles, route: &DeviceRoute) -> hardware::DeviceOp {
-    shared.keyboard_device(route)
-}
-
 #[expect(
     clippy::unused_async_trait_impl,
     reason = "the handlers that only read cached state need no await, but the RPC \
@@ -288,11 +283,7 @@ impl Agent for AgentServer {
         _: Context,
         route: DeviceRoute,
     ) -> Result<openlogi_hid::DisableKeysState, WriteError> {
-        disable_keys_device(&self.shared, &route)
-            .run(HidppOperation::ReadDisableKeys, |channel| async move {
-                openlogi_hid::get_disable_keys_on(&channel).await
-            })
-            .await
+        self.shared.read_disable_keys(&route).await
     }
 
     async fn set_fn_lock(
@@ -1079,10 +1070,7 @@ mod tests {
         ARM_BUDGET, Budget, HapticBreaker, PLAY_BUDGET, PlayOutcome, RESTORE_BUDGET, WriteError,
         haptic_restore, is_worth_retrying,
     };
-    use super::{
-        DeviceRoute, HidppOperation, ObservableState, Orchestrator, disable_keys_device,
-        saved_config_verdict,
-    };
+    use super::{DeviceRoute, ObservableState, Orchestrator, saved_config_verdict};
     use openlogi_core::config::{Config, ConfigFile};
     use openlogi_device::test_support::publish_scripted_channel;
     use openlogi_ipc::{SavedConfig, SavedConfigVerdict};
@@ -1177,10 +1165,8 @@ mod tests {
             .write()
             .unwrap_or_else(PoisonError::into_inner) = Some(keyboard);
 
-        let state = disable_keys_device(&shared, &route)
-            .run(HidppOperation::ReadDisableKeys, |channel| async move {
-                openlogi_hid::get_disable_keys_on(&channel).await
-            })
+        let state = shared
+            .read_disable_keys(&route)
             .await
             .expect("real-server Disable Keys read");
 
