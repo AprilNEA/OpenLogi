@@ -414,3 +414,81 @@ fn a_reconnect_clears_a_refusal_and_reads_the_device_again(cx: &mut gpui::TestAp
         "the reconnect reads the device again"
     );
 }
+
+#[gpui::test]
+fn a_reset_writes_the_default_the_device_reported(cx: &mut gpui::TestAppContext) {
+    let moved = ForceSensingInfo {
+        current: 6000,
+        ..PANEL
+    };
+    let (key, mut receiver) = installed(moved, cx);
+    assert_eq!(
+        with_state(cx, |state| state.current_force_sensing_reset()),
+        Some(PANEL.default)
+    );
+
+    let events = with_state(cx, AppState::reset_force_sensing);
+
+    assert_eq!(events, [StateEvent::ForceSensingChanged(key.clone())]);
+    let commands = drain(&mut receiver);
+    assert_eq!(
+        force_writes(&commands)
+            .into_iter()
+            .map(|(_, force)| force)
+            .collect::<Vec<_>>(),
+        [PANEL.default]
+    );
+    let write = the_write(&commands);
+    assert_eq!(
+        with_state(cx, |state| state.current_force_sensing_reset()),
+        None,
+        "the slider sits on the default at once"
+    );
+
+    let _ = with_state(cx, |state| {
+        state.apply_force_sensing_written(&key, write, PANEL.default, Ok(PANEL))
+    });
+    assert_eq!(
+        saved(cx),
+        Some(PANEL.default),
+        "a confirmed reset is saved like a release"
+    );
+}
+
+#[gpui::test]
+fn nothing_resets_at_the_default_or_without_a_changeable_reading(cx: &mut gpui::TestAppContext) {
+    let (_, mut receiver) = installed(PANEL, cx);
+    assert_eq!(
+        with_state(cx, |state| state.current_force_sensing_reset()),
+        None,
+        "the force already sits at the default"
+    );
+    let _ = with_state(cx, AppState::reset_force_sensing);
+    assert!(force_writes(&drain(&mut receiver)).is_empty());
+
+    let unchangeable = ForceSensingInfo {
+        changeable: false,
+        current: 6000,
+        ..PANEL
+    };
+    let (_, mut receiver) = installed(unchangeable, cx);
+    assert_eq!(
+        with_state(cx, |state| state.current_force_sensing_reset()),
+        None
+    );
+    let _ = with_state(cx, AppState::reset_force_sensing);
+    assert!(force_writes(&drain(&mut receiver)).is_empty());
+}
+
+#[gpui::test]
+fn nothing_resets_while_the_reading_is_on_its_way(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = mouse_state(true, Config::ephemeral());
+    install(state, cx);
+    assert!(matches!(current_load(cx), Load::Loading | Load::Unknown));
+    assert_eq!(
+        with_state(cx, |state| state.current_force_sensing_reset()),
+        None
+    );
+    let _ = with_state(cx, AppState::reset_force_sensing);
+    assert!(force_writes(&drain(&mut receiver)).is_empty());
+}

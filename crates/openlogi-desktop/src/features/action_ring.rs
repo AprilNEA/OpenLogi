@@ -2,7 +2,6 @@
 
 mod action_icons;
 mod editor;
-mod force_sensing;
 
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
@@ -21,7 +20,6 @@ use openlogi_ui::action_icons::RING_CANCEL_ICON;
 
 use self::action_icons::action_icon_path;
 use self::editor::{PowerUserInputs, action_library};
-use self::force_sensing::{ForceSensingFacts, ForceSensingSlider, force_sensing_row};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::state::{AppState, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
@@ -38,22 +36,15 @@ pub struct ActionRingPanel {
     applescript_input: Option<Entity<InputState>>,
     shell_command_input: Option<Entity<InputState>>,
     library_scroll: ScrollHandle,
-    /// The press-force slider of a device with a force-sensing button.
-    force_sensing: Option<ForceSensingSlider>,
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
 }
 
 impl ActionRingPanel {
-    /// Create the editor and repaint it after any config/device change or
-    /// press-force read.
+    /// Create the editor and repaint it after any config/device change.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = AppState::repaint_on(cx, |event| {
-            matches!(
-                event,
-                StateEvent::BindingsChanged(_) | StateEvent::ForceSensingChanged(_)
-            )
-        });
+        let state_obs =
+            AppState::repaint_on(cx, |event| matches!(event, StateEvent::BindingsChanged(_)));
         Self {
             focus_handle: cx.focus_handle(),
             selected_slot: ActionRingSlot::Top,
@@ -63,7 +54,6 @@ impl ActionRingPanel {
             applescript_input: None,
             shell_command_input: None,
             library_scroll: ScrollHandle::new(),
-            force_sensing: None,
             state_obs,
         }
     }
@@ -122,8 +112,6 @@ impl Render for ActionRingPanel {
             cx,
         );
         let power_user = self.power_user_inputs(window, cx);
-        let force_sensing = ForceSensingFacts::current(cx);
-        ForceSensingSlider::sync(&mut self.force_sensing, force_sensing.as_ref(), window, cx);
         let view = cx.entity();
 
         v_flex()
@@ -167,10 +155,6 @@ impl Render for ActionRingPanel {
             .when(haptics_supported, |panel| {
                 panel.child(haptics_row(ring.haptics, pal))
             })
-            .children(
-                force_sensing
-                    .map(|facts| force_sensing_row(facts, self.force_sensing.as_ref(), pal)),
-            )
     }
 }
 

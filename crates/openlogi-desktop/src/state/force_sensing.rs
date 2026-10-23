@@ -106,6 +106,40 @@ impl AppState {
         events
     }
 
+    /// The force a reset puts the active device back to: the out-of-box
+    /// force its reading reports. `None` while there is no changeable
+    /// reading, or when the force already sits there.
+    #[must_use]
+    pub fn current_force_sensing_reset(&self) -> Option<u16> {
+        if !self.current_force_sensing_supported() {
+            return None;
+        }
+        match self.current_force_sensing_load() {
+            ForceSensingLoad::Ready(info)
+                if info.changeable && info.clamp(info.current) != info.clamp(info.default) =>
+            {
+                Some(info.default)
+            }
+            ForceSensingLoad::Ready(_)
+            | ForceSensingLoad::Unknown
+            | ForceSensingLoad::Loading
+            | ForceSensingLoad::Failed(_)
+            | ForceSensingLoad::Unsupported(_) => None,
+        }
+    }
+
+    /// Put the active device's press force back to its out-of-box force.
+    /// The force-sensing feature has no reset command, so this is a
+    /// [`Self::commit_force_sensing`] of the reported default, numbered,
+    /// read back and saved like a slider release. No-op while
+    /// [`Self::current_force_sensing_reset`] is `None`.
+    pub fn reset_force_sensing(&mut self) -> StateEvents {
+        match self.current_force_sensing_reset() {
+            Some(force) => self.commit_force_sensing(force),
+            None => StateEvents::none(),
+        }
+    }
+
     /// The device's answer to the [`Self::commit_force_sensing`] write
     /// numbered `write`, which asked for `force`.
     ///
