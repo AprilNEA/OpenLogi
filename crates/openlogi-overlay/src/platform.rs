@@ -1,6 +1,8 @@
 //! Native window policy for the standalone overlay: the Actions Ring and its
 //! notices.
 
+use gpui::{AppContext as _, AsyncApp};
+
 #[cfg(not(target_os = "windows"))]
 mod placement;
 // Keep Windows geometry tests runnable on the host; only native.rs needs Win32.
@@ -180,28 +182,79 @@ pub fn watch_clicks_outside(_on_mouse_down: impl Fn() + 'static) -> Option<Click
     None
 }
 
-/// Whether the host OS asks for reduced UI motion. The overlay calls this on
-/// every ring open. macOS and Windows read the live setting; Linux answers from
-/// its last background read without blocking (see `gnome_motion`).
+/// Cached reduced-motion reads across ring opens.
+#[derive(Debug, Default)]
+pub struct MotionPreference {
+    last_known: Option<bool>,
+}
+
+impl MotionPreference {
+    /// Merge a fresh OS read into the cache and return the GPUI `reduce_motion`
+    /// flag to apply.
+    ///
+    /// A successful read wins and is remembered. When the read fails or times
+    /// out, the last known value is used; with no prior value, motion stays on
+    /// (`false`).
+    #[must_use]
+    pub fn resolve(&mut self, read: Option<bool>) -> bool {
+        if let Some(reduced) = read {
+            self.last_known = Some(reduced);
+            reduced
+        } else {
+            self.last_known.unwrap_or(false)
+        }
+    }
+}
+
+/// Read the host OS reduced-motion preference once.
+///
+/// Returns `Some(true)` when reduced motion is requested, `Some(false)` when
+/// full motion is requested, and `None` when the preference could not be read.
+///
+/// On Linux this may block the calling thread for up to [`MOTION_QUERY_TIMEOUT`];
+/// call it from a background thread (see [`apply_motion_preference`]).
 #[must_use]
-pub fn prefers_reduced_motion() -> bool {
+#[cfg_attr(
+    target_os = "macos",
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "macOS always returns a live preference; other platforms use None for read failure"
+    )
+)]
+pub fn read_reduced_motion() -> Option<bool> {
     #[cfg(target_os = "macos")]
     {
-        objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+        Some(objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion())
     }
     #[cfg(target_os = "windows")]
     {
-        client_area_animation_enabled().is_some_and(|enabled| !enabled)
+        client_area_animation_enabled().map(|enabled| !enabled)
     }
     #[cfg(target_os = "linux")]
     {
-        gnome_motion::refresh();
-        gnome_motion::reduced()
+        use std::process::Command;
+
+        let mut command = Command::new("gsettings");
+        command.args(["get", "org.gnome.desktop.interface", "enable-animations"]);
+        read_bool_command(command, MOTION_QUERY_TIMEOUT).map(|enabled| !enabled)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        false
+        None
     }
+}
+
+/// Run `read` off the UI thread, merge it into `preference`, and apply GPUI's
+/// `reduce_motion` before the ring's entrance animation starts.
+pub async fn apply_motion_preference(
+    cx: &mut AsyncApp,
+    preference: &mut MotionPreference,
+    read: impl FnOnce() -> Option<bool> + Send + 'static,
+) -> bool {
+    let fresh = cx.background_spawn(async move { read() }).await;
+    let reduced = preference.resolve(fresh);
+    cx.update(|cx| cx.set_reduce_motion(reduced));
+    reduced
 }
 
 #[cfg(target_os = "windows")]
@@ -225,55 +278,7 @@ fn client_area_animation_enabled() -> Option<bool> {
     Some(enabled != 0)
 }
 
-/// GNOME's `enable-animations`, read by `gsettings` off the UI thread. Each
-/// call to [`prefers_reduced_motion`] starts one background read (at most one
-/// at a time) and answers from the last value read, so a changed setting
-/// applies from the next open and a slow `gsettings` never stalls a window.
-/// No answer yet, no GNOME, or no `gsettings`: motion stays on.
-#[cfg(target_os = "linux")]
-mod gnome_motion {
-    use std::process::Command;
-    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-
-    const UNKNOWN: u8 = 0;
-    const ANIMATIONS_ON: u8 = 1;
-    const ANIMATIONS_OFF: u8 = 2;
-
-    static LAST: AtomicU8 = AtomicU8::new(UNKNOWN);
-    static READING: AtomicBool = AtomicBool::new(false);
-
-    pub(super) fn reduced() -> bool {
-        LAST.load(Ordering::Relaxed) == ANIMATIONS_OFF
-    }
-
-    pub(super) fn refresh() {
-        if READING.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let spawned = std::thread::Builder::new()
-            .name("gnome-motion".into())
-            .spawn(|| {
-                let mut command = Command::new("gsettings");
-                command.args(["get", "org.gnome.desktop.interface", "enable-animations"]);
-                if let Some(enabled) =
-                    super::read_bool_command(command, super::MOTION_QUERY_TIMEOUT)
-                {
-                    let value = if enabled {
-                        ANIMATIONS_ON
-                    } else {
-                        ANIMATIONS_OFF
-                    };
-                    LAST.store(value, Ordering::Relaxed);
-                }
-                READING.store(false, Ordering::Release);
-            });
-        if spawned.is_err() {
-            READING.store(false, Ordering::Release);
-        }
-    }
-}
-
-/// How long a background `gsettings` read may run before it is killed.
+/// How long a `gsettings` read may run before it is killed.
 #[cfg(any(target_os = "linux", all(test, unix)))]
 const MOTION_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -330,9 +335,66 @@ mod reduced_motion_tests {
     #[cfg(unix)]
     use std::time::{Duration, Instant};
 
+    use gpui::TestAppContext;
+
     use super::parse_gsettings_bool;
     #[cfg(unix)]
     use super::{MOTION_QUERY_TIMEOUT, read_bool_command};
+    use super::{MotionPreference, apply_motion_preference};
+
+    #[test]
+    fn motion_preference_unknown_defaults_to_motion_on() {
+        let mut preference = MotionPreference::default();
+        assert!(!preference.resolve(None));
+    }
+
+    #[test]
+    fn motion_preference_tracks_on_then_off_between_opens() {
+        let mut preference = MotionPreference::default();
+        assert!(!preference.resolve(Some(false)));
+        assert!(preference.resolve(Some(true)));
+    }
+
+    #[test]
+    fn motion_preference_failed_read_keeps_last_known() {
+        let mut preference = MotionPreference::default();
+        assert!(!preference.resolve(Some(false)));
+        assert!(!preference.resolve(None));
+        assert!(preference.resolve(Some(true)));
+        assert!(preference.resolve(None));
+    }
+
+    #[gpui::test]
+    async fn apply_motion_preference_tracks_changes_between_opens(cx: &mut TestAppContext) {
+        cx.spawn(|mut async_cx| async move {
+            let mut preference = MotionPreference::default();
+            let reduced =
+                apply_motion_preference(&mut async_cx, &mut preference, || Some(false)).await;
+            assert!(!reduced);
+            async_cx.update(|cx| assert!(!cx.reduce_motion()));
+            let reduced =
+                apply_motion_preference(&mut async_cx, &mut preference, || Some(true)).await;
+            assert!(reduced);
+            async_cx.update(|cx| assert!(cx.reduce_motion()));
+        })
+        .await;
+    }
+
+    #[gpui::test]
+    async fn apply_motion_preference_unknown_then_reduced(cx: &mut TestAppContext) {
+        cx.spawn(|mut async_cx| async move {
+            let mut preference = MotionPreference::default();
+            let reduced = apply_motion_preference(&mut async_cx, &mut preference, || None).await;
+            assert!(!reduced);
+            async_cx.update(|cx| assert!(!cx.reduce_motion()));
+            assert!(!preference.resolve(None));
+            let reduced =
+                apply_motion_preference(&mut async_cx, &mut preference, || Some(true)).await;
+            assert!(reduced);
+            async_cx.update(|cx| assert!(cx.reduce_motion()));
+        })
+        .await;
+    }
 
     #[test]
     fn gsettings_booleans_parse_and_anything_else_is_no_signal() {

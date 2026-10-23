@@ -32,12 +32,13 @@ overlay only reports `Hover`, `Activate` and `Cancel`.
 - Hover inverts the slot to a near-black fill; the accent is no longer spent on
   a transient hover.
 - Entrance motion: slots travel from the hub to their positions together and
-  the panel fades in. On each open the overlay reads the OS reduced-motion
-  preference (macOS Reduce Motion, Windows client-area animation setting, Linux
-  GNOME `enable-animations` when available, read by a bounded background
-  `gsettings` query so it never blocks the UI) and passes it to GPUI's
-  `reduce_motion`, so `with_animation` renders one static frame when motion is
-  reduced.
+  the panel fades in. Before each ring opens the overlay reads the OS
+  reduced-motion preference off the UI thread (macOS Reduce Motion, Windows
+  client-area animation setting, Linux GNOME `enable-animations` via
+  `gsettings` bounded to 200 ms), applies it to GPUI's `reduce_motion` before
+  the entrance animation starts, and uses the last known value when a read
+  fails or times out (motion on when none is known yet), so `with_animation`
+  renders one static frame when motion is reduced.
 
 The close animation is not implemented: the overlay hides the window as soon as
 the agent dismisses the session, so animating the exit would mean delaying
@@ -170,10 +171,13 @@ is, and which actions carry a submenu.
   the session dismisses on hover.
 - **Wayland.** There the window already covers the display, so growing it is a
   no-op; the arc placement logic still has to clamp.
-- **Reduced motion.** The overlay reads the OS preference per platform (macOS
-  Reduce Motion, Windows client-area animation setting, Linux GNOME
-  `enable-animations` or no signal) on each ring open and forwards it to GPUI's
-  `reduce_motion` so entrance animations collapse to a single static frame.
+- **Reduced motion.** Before each ring opens the overlay reads the OS
+  preference off the UI thread (macOS Reduce Motion, Windows client-area
+  animation, Linux GNOME `enable-animations` via `gsettings` bounded to 200 ms)
+  and applies it to GPUI `reduce_motion` before the entrance animation starts.
+  A failed or timed-out read uses the last known value, or motion on when none
+  is known yet, so entrance animations collapse to a single static frame when
+  reduced motion is active.
 - **Submenu ownership.** The overlay holds the expanded state because it is
   presentation; the agent remains the only owner of executable actions. If a
   submenu should survive a snapshot refresh, the expanded slot has to move into

@@ -37,7 +37,7 @@ use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::notice::NoticeShelf;
-use crate::platform::RingPlacement;
+use crate::platform::{MotionPreference, RingPlacement, apply_motion_preference};
 use crate::ring::{RingPointer, RingView};
 use crate::session::{
     ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
@@ -74,9 +74,6 @@ fn main() -> Result<()> {
         // Reapply the helper policy after that reset, without constructing
         // NSApplication before GPUI has installed its subclass.
         platform::configure_application();
-        // Prime the motion preference: on Linux the first read runs in the
-        // background, so start it before the first ring opens.
-        let _ = platform::prefers_reduced_motion();
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         let shelf = Rc::new(RefCell::new(NoticeShelf::default()));
@@ -100,6 +97,7 @@ fn main() -> Result<()> {
         })
         .detach();
         cx.spawn(async move |cx| {
+            let mut motion = MotionPreference::default();
             while let Some(observed) = invocations.recv().await {
                 // No ring is what a dismissal looks like: close whatever is
                 // showing and open nothing. The agent has already forgotten the
@@ -109,8 +107,8 @@ fn main() -> Result<()> {
                     continue;
                 };
                 openlogi_core::locale::activate(invocation.language.as_deref());
+                apply_motion_preference(cx, &mut motion, platform::read_reduced_motion).await;
                 cx.update(|cx| {
-                    cx.set_reduce_motion(platform::prefers_reduced_motion());
                     close_all_ring_windows(cx);
                     #[cfg_attr(
                         windows,
