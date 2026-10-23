@@ -180,8 +180,9 @@ pub fn watch_clicks_outside(_on_mouse_down: impl Fn() + 'static) -> Option<Click
     None
 }
 
-/// Whether the host OS asks for reduced UI motion. Never cached: the overlay
-/// calls this on every ring open, so a changed setting applies to the next one.
+/// Whether the host OS asks for reduced UI motion. The overlay calls this on
+/// every ring open. macOS and Windows read the live setting; Linux answers from
+/// its last background read without blocking (see `gnome_motion`).
 #[must_use]
 pub fn prefers_reduced_motion() -> bool {
     #[cfg(target_os = "macos")]
@@ -206,9 +207,8 @@ pub fn prefers_reduced_motion() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        // Read on every open so a changed setting applies to the next ring. No
-        // GNOME setting (other desktops, no gsettings): keep motion on.
-        gnome_animations_enabled() == Some(false)
+        gnome_motion::refresh();
+        gnome_motion::reduced()
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
@@ -216,18 +216,91 @@ pub fn prefers_reduced_motion() -> bool {
     }
 }
 
+/// GNOME's `enable-animations`, read by `gsettings` off the UI thread. Each
+/// call to [`prefers_reduced_motion`] starts one background read (at most one
+/// at a time) and answers from the last value read, so a changed setting
+/// applies from the next open and a slow `gsettings` never stalls a window.
+/// No answer yet, no GNOME, or no `gsettings`: motion stays on.
 #[cfg(target_os = "linux")]
-fn gnome_animations_enabled() -> Option<bool> {
+mod gnome_motion {
     use std::process::Command;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-    let output = Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.interface", "enable-animations"])
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
-            parse_gsettings_bool(&String::from_utf8_lossy(&out.stdout))
+    const UNKNOWN: u8 = 0;
+    const ANIMATIONS_ON: u8 = 1;
+    const ANIMATIONS_OFF: u8 = 2;
+
+    static LAST: AtomicU8 = AtomicU8::new(UNKNOWN);
+    static READING: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn reduced() -> bool {
+        LAST.load(Ordering::Relaxed) == ANIMATIONS_OFF
+    }
+
+    pub(super) fn refresh() {
+        if READING.swap(true, Ordering::AcqRel) {
+            return;
         }
-        _ => None,
+        let spawned = std::thread::Builder::new()
+            .name("gnome-motion".into())
+            .spawn(|| {
+                let mut command = Command::new("gsettings");
+                command.args(["get", "org.gnome.desktop.interface", "enable-animations"]);
+                if let Some(enabled) =
+                    super::read_bool_command(command, super::MOTION_QUERY_TIMEOUT)
+                {
+                    let value = if enabled {
+                        ANIMATIONS_ON
+                    } else {
+                        ANIMATIONS_OFF
+                    };
+                    LAST.store(value, Ordering::Relaxed);
+                }
+                READING.store(false, Ordering::Release);
+            });
+        if spawned.is_err() {
+            READING.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// How long a background `gsettings` read may run before it is killed.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+const MOTION_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Run `command` and parse its stdout as a `gsettings` boolean, killing it if
+/// it has not exited within `timeout`. Blocks the calling (background) thread.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn read_bool_command(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<bool> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let mut stdout = String::new();
+                child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+                return parse_gsettings_bool(&stdout);
+            }
+            Ok(Some(_)) => return None,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
     }
 }
 
@@ -243,7 +316,14 @@ fn parse_gsettings_bool(stdout: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod reduced_motion_tests {
+    #[cfg(unix)]
+    use std::process::Command;
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
+
     use super::parse_gsettings_bool;
+    #[cfg(unix)]
+    use super::{MOTION_QUERY_TIMEOUT, read_bool_command};
 
     #[test]
     fn gsettings_booleans_parse_and_anything_else_is_no_signal() {
@@ -251,6 +331,27 @@ mod reduced_motion_tests {
         assert_eq!(parse_gsettings_bool("false\n"), Some(false));
         assert_eq!(parse_gsettings_bool(""), None);
         assert_eq!(parse_gsettings_bool("No such schema\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_motion_query_returns_its_parsed_answer() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo false"]);
+        assert_eq!(
+            read_bool_command(command, Duration::from_secs(5)),
+            Some(false)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_motion_query_is_killed_at_its_timeout() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5; echo false"]);
+        let started = Instant::now();
+        assert_eq!(read_bool_command(command, MOTION_QUERY_TIMEOUT), None);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }
 

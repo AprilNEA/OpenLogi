@@ -74,6 +74,9 @@ fn main() -> Result<()> {
         // Reapply the helper policy after that reset, without constructing
         // NSApplication before GPUI has installed its subclass.
         platform::configure_application();
+        // Prime the motion preference: on Linux the first read runs in the
+        // background, so start it before the first ring opens.
+        let _ = platform::prefers_reduced_motion();
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         let shelf = Rc::new(RefCell::new(NoticeShelf::default()));

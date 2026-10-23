@@ -34,7 +34,8 @@ overlay only reports `Hover`, `Activate` and `Cancel`.
 - Entrance motion: slots travel from the hub to their positions together and
   the panel fades in. On each open the overlay reads the OS reduced-motion
   preference (macOS Reduce Motion, Windows client-area animation setting, Linux
-  GNOME `enable-animations` when available) and passes it to GPUI's
+  GNOME `enable-animations` when available, read by a bounded background
+  `gsettings` query so it never blocks the UI) and passes it to GPUI's
   `reduce_motion`, so `with_animation` renders one static frame when motion is
   reduced.
 
