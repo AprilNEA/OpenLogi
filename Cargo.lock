@@ -5756,6 +5756,7 @@ version = "0.8.17"
 dependencies = [
  "futures-concurrency",
  "futures-lite",
+ "hex",
  "openlogi-core",
  "openlogi-device-registry",
  "openlogi-fixture",
