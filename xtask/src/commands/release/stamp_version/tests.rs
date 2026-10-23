@@ -3,7 +3,9 @@ use std::process::Command;
 
 use semver::Version;
 
-use super::{Member, Stamped, stamp};
+use xshell::Shell;
+
+use super::{Member, Stamped, stamp, stamp_checked};
 
 const ROOT: &str = r#"[workspace]
 members = ["app", "core"]
@@ -151,7 +153,7 @@ fn a_requirement_release_plz_would_not_write_stops_the_stamp() {
 
     let error = format!("{error:#}");
     assert!(
-        error.contains("the requirement on core is \"0.8\""),
+        error.contains("the requirement on core (shared) is \"0.8\""),
         "{error}"
     );
     assert!(error.contains("[dependencies]"), "{error}");
@@ -180,4 +182,163 @@ fn a_lock_file_missing_a_workspace_crate_stops_the_stamp() {
         "{error:#}"
     );
     assert_eq!(read(&root.path().join("Cargo.toml")), ROOT);
+}
+
+/// A registry crate can share a workspace crate's name and even its version.
+/// It is a dependency by name only, so neither its requirement nor its lock
+/// entry moves.
+#[test]
+fn a_registry_crate_with_a_workspace_crates_name_keeps_its_version() {
+    let root = tempfile::tempdir().unwrap();
+    let members = workspace(root.path(), APP);
+    // Added after the lock file, which offline cargo could not resolve.
+    let registry = r#"upstream = { package = "core", version = "0.8.17" }"#;
+    let app_path = root.path().join("app/Cargo.toml");
+    let app = read(&app_path).replace(
+        "[dev-dependencies]",
+        &format!("{registry}\n\n[dev-dependencies]"),
+    );
+    write(&app_path, &app);
+    let lock_path = root.path().join("Cargo.lock");
+    let source = r#"source = "registry+https://github.com/rust-lang/crates.io-index""#;
+    let lock = format!(
+        "{}\n[[package]]\nname = \"core\"\nversion = \"0.8.17\"\n{source}\n",
+        read(&lock_path).replace(
+            "\"core\",\n]",
+            "\"core 0.8.17\",\n \"core 0.8.17 (registry+https://github.com/rust-lang/crates.io-index)\",\n]"
+        )
+    );
+    write(&lock_path, &lock);
+
+    let stamped = stamp(root.path(), &members, &version("0.8.18-beta.3")).unwrap();
+
+    assert_eq!(
+        stamped,
+        Stamped::Changed {
+            from: version("0.8.17"),
+            requirements: 3,
+            locked: 2,
+        }
+    );
+    let app = read(&app_path);
+    assert!(app.contains(registry), "{app}");
+    let lock = read(&lock_path);
+    assert!(
+        lock.contains(&format!("name = \"core\"\nversion = \"0.8.17\"\n{source}")),
+        "{lock}"
+    );
+    assert!(
+        lock.contains("\"core 0.8.17 (registry+https://github.com/rust-lang/crates.io-index)\""),
+        "{lock}"
+    );
+    assert!(lock.contains("\"core 0.8.18-beta.3\""), "{lock}");
+}
+
+/// A `[patch]` that points at a workspace crate names its version, which
+/// must follow; a patch from elsewhere keeps its own.
+#[test]
+fn a_patch_on_a_workspace_crate_moves_with_it() {
+    let root = tempfile::tempdir().unwrap();
+    let members = workspace(root.path(), APP);
+    let patches = r#"
+[patch.crates-io]
+core = { path = "core", version = "0.8.17" }
+elsewhere = { git = "https://example.com/elsewhere", version = "0.8.17" }
+"#;
+    let manifest_path = root.path().join("Cargo.toml");
+    write(&manifest_path, &format!("{ROOT}{patches}"));
+
+    let stamped = stamp(root.path(), &members, &version("0.8.18-beta.3")).unwrap();
+
+    assert_eq!(
+        stamped,
+        Stamped::Changed {
+            from: version("0.8.17"),
+            requirements: 4,
+            locked: 2,
+        }
+    );
+    let manifest = read(&manifest_path);
+    assert!(
+        manifest.contains(r#"core = { path = "core", version = "0.8.18-beta.3" }"#),
+        "{manifest}"
+    );
+    assert!(
+        manifest.contains(
+            r#"elsewhere = { git = "https://example.com/elsewhere", version = "0.8.17" }"#
+        ),
+        "{manifest}"
+    );
+}
+
+fn offline_shell() -> Shell {
+    let sh = Shell::new().unwrap();
+    sh.set_var("CARGO_NET_OFFLINE", "true");
+    sh
+}
+
+#[test]
+fn a_checked_stamp_resolves_as_a_locked_build_would() {
+    let root = tempfile::tempdir().unwrap();
+    let members = workspace(root.path(), APP);
+
+    let stamped = stamp_checked(
+        &offline_shell(),
+        root.path(),
+        &members,
+        &version("0.8.18-beta.3"),
+    )
+    .unwrap();
+
+    assert!(matches!(stamped, Stamped::Changed { .. }), "{stamped:?}");
+    assert!(read(&root.path().join("Cargo.lock")).contains("0.8.18-beta.3"));
+}
+
+/// The check runs after every file is written. When the tree does not
+/// resolve, each file goes back to its bytes from before.
+#[test]
+fn a_stamp_that_does_not_resolve_puts_every_file_back() {
+    let root = tempfile::tempdir().unwrap();
+    let members = workspace(root.path(), APP);
+    // A path dependency the lock file has never seen: `--locked` refuses to
+    // add it, so the stamped tree fails the check.
+    write(
+        &root.path().join("helper/Cargo.toml"),
+        "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&root.path().join("helper/src/lib.rs"), "");
+    let app_path = root.path().join("app/Cargo.toml");
+    let app = read(&app_path).replace(
+        "[dev-dependencies]",
+        "helper = { path = \"../helper\" }\n\n[dev-dependencies]",
+    );
+    write(&app_path, &app);
+    let files = [
+        "Cargo.toml",
+        "Cargo.lock",
+        "app/Cargo.toml",
+        "core/Cargo.toml",
+    ];
+    let before: Vec<String> = files
+        .iter()
+        .map(|file| read(&root.path().join(file)))
+        .collect();
+
+    let error = stamp_checked(
+        &offline_shell(),
+        root.path(),
+        &members,
+        &version("0.8.18-beta.3"),
+    )
+    .unwrap_err();
+
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("does not resolve with `--locked`"),
+        "{error}"
+    );
+    assert!(error.contains("the tree is as it was"), "{error}");
+    for (file, before) in files.iter().zip(&before) {
+        assert_eq!(&read(&root.path().join(file)), before, "{file}");
+    }
 }

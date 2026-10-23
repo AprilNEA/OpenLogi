@@ -7,9 +7,12 @@
 //! with the channel's, and every `CARGO_PKG_VERSION` (the About page,
 //! diagnostics, the Windows version resource, the Linux packages, the
 //! AppStream release) shows it. This rewrites what release-plz's bump would:
-//! `[workspace.package].version`, every requirement on a workspace crate,
-//! and the workspace crates' entries in `Cargo.lock`, so a `--locked` build
-//! still resolves. Nothing else in the tree changes.
+//! `[workspace.package].version`, the `version` of every path dependency and
+//! `[patch]` entry that points at a workspace crate, and the workspace
+//! crates' entries in `Cargo.lock`. A dependency is a workspace crate's by
+//! its `path`, not its name, so a registry or git crate of the same name is
+//! left alone. Nothing else in the tree changes, and the stamped tree must
+//! resolve as a `--locked` build would before the command succeeds.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,8 +68,7 @@ struct MetadataPackage {
     manifest_path: PathBuf,
 }
 
-/// Stamp `--version` into the workspace, then check with `cargo metadata`
-/// that every workspace crate reports it.
+/// Stamp `--version` into the workspace and check the result.
 pub(crate) fn run(args: &Args) -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
@@ -78,11 +80,8 @@ pub(crate) fn run(args: &Args) -> Result<()> {
             manifest: package.manifest_path,
         })
         .collect::<Vec<_>>();
-    match stamp(&root, &members, &args.version)? {
-        Stamped::Unchanged => {
-            println!("the workspace is already at {}", args.version);
-            return Ok(());
-        }
+    match stamp_checked(&sh, &root, &members, &args.version)? {
+        Stamped::Unchanged => println!("the workspace is already at {}", args.version),
         Stamped::Changed {
             from,
             requirements,
@@ -92,15 +91,6 @@ pub(crate) fn run(args: &Args) -> Result<()> {
              {locked} Cargo.lock entries",
             args.version
         ),
-    }
-    let expected = args.version.to_string();
-    for package in workspace_crates(&sh)? {
-        ensure!(
-            package.version == expected,
-            "{} reports {} after stamping {expected}",
-            package.name,
-            package.version
-        );
     }
     Ok(())
 }
@@ -116,9 +106,92 @@ fn workspace_crates(sh: &Shell) -> Result<Vec<MetadataPackage>> {
     Ok(metadata.packages)
 }
 
+/// [`stamp`], then [`check`] the tree. If either fails, every file the stamp
+/// may have written goes back to its bytes from before, so a failed stamp
+/// leaves the tree as it found it.
+pub(crate) fn stamp_checked(
+    sh: &Shell,
+    root: &Path,
+    members: &[Member],
+    version: &Version,
+) -> Result<Stamped> {
+    let mut files: BTreeSet<PathBuf> = members
+        .iter()
+        .map(|member| member.manifest.clone())
+        .collect();
+    files.insert(root.join("Cargo.toml"));
+    files.insert(root.join("Cargo.lock"));
+    let before = files
+        .into_iter()
+        .map(|path| Ok((fs_err::read(&path)?, path)))
+        .collect::<Result<Vec<_>>>()?;
+    let stamped = stamp(root, members, version).and_then(|stamped| {
+        check(sh, root, members, version)?;
+        Ok(stamped)
+    });
+    let Err(error) = stamped else {
+        return stamped;
+    };
+    for (bytes, path) in &before {
+        let restored = match fs_err::read(path) {
+            Ok(now) if &now == bytes => Ok(()),
+            _ => fs_err::write(path, bytes),
+        };
+        if let Err(restore) = restored {
+            return Err(error.context(format!(
+                "stamping {version} failed, and so did restoring {}: {restore}",
+                path.display()
+            )));
+        }
+    }
+    Err(error.context(format!("stamping {version} failed; the tree is as it was")))
+}
+
+/// Resolve the tree under `root` as a `--locked` build would, and require
+/// every one of `members` to report `version`.
+///
+/// `cargo metadata` without `--no-deps` resolves every dependency against
+/// `Cargo.lock` and fails if the lock would have to change, so it also
+/// catches a requirement or `[patch]` the stamp left behind.
+fn check(sh: &Shell, root: &Path, members: &[Member], version: &Version) -> Result<()> {
+    let _root = sh.push_dir(root);
+    let json = cmd!(sh, "cargo metadata --locked --format-version 1")
+        .quiet()
+        .read()
+        .context("the stamped tree does not resolve with `--locked`")?;
+    let metadata: Metadata =
+        serde_json::from_str(&json).context("parsing `cargo metadata` output")?;
+    let mut unchecked: BTreeMap<PathBuf, &str> = BTreeMap::new();
+    for member in members {
+        unchecked.insert(fs_err::canonicalize(&member.manifest)?, &member.name);
+    }
+    let expected = version.to_string();
+    for package in &metadata.packages {
+        let Ok(manifest) = fs_err::canonicalize(&package.manifest_path) else {
+            continue;
+        };
+        if unchecked.remove(&manifest).is_some() {
+            ensure!(
+                package.version == expected,
+                "{} reports {} after stamping {expected}",
+                package.name,
+                package.version
+            );
+        }
+    }
+    ensure!(
+        unchecked.is_empty(),
+        "`cargo metadata` does not list {:?}",
+        unchecked.into_values().collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
 /// Stamp `version` into the workspace under `root`, whose crates are
 /// `members`. Every edit is made in memory first, so a manifest that does not
-/// look as expected fails the stamp before any file is written.
+/// look as expected fails the stamp before any file is written. The writes
+/// themselves are one file at a time; [`stamp_checked`] undoes them if one
+/// fails.
 pub(crate) fn stamp(root: &Path, members: &[Member], version: &Version) -> Result<Stamped> {
     let root_manifest = root.join("Cargo.toml");
     let mut root_doc = read(&root_manifest)?;
@@ -133,8 +206,17 @@ pub(crate) fn stamp(root: &Path, members: &[Member], version: &Version) -> Resul
     }
     let (from_text, to_text) = (from.to_string(), version.to_string());
     let names: BTreeSet<&str> = members.iter().map(|member| member.name.as_str()).collect();
+    let mut dirs = BTreeMap::new();
+    for member in members {
+        let dir = member
+            .manifest
+            .parent()
+            .with_context(|| format!("{} has no directory", member.manifest.display()))?;
+        dirs.insert(fs_err::canonicalize(dir)?, member.name.as_str());
+    }
     let rename = Rename {
         names: &names,
+        dirs: &dirs,
         from: &from_text,
         to: &to_text,
     };
@@ -145,9 +227,18 @@ pub(crate) fn stamp(root: &Path, members: &[Member], version: &Version) -> Resul
         .get_mut("dependencies")
         .and_then(Item::as_table_like_mut)
     {
-        requirements += rename.requirements(table).with_context(|| {
+        requirements += rename.requirements(table, root).with_context(|| {
             format!("in [workspace.dependencies] of {}", root_manifest.display())
         })?;
+    }
+    if let Some(patches) = root_doc.get_mut("patch").and_then(Item::as_table_like_mut) {
+        for (source, table) in patches.iter_mut() {
+            if let Some(table) = table.as_table_like_mut() {
+                requirements += rename.requirements(table, root).with_context(|| {
+                    format!("in [patch.{}] of {}", source.get(), root_manifest.display())
+                })?;
+            }
+        }
     }
 
     let mut docs: BTreeMap<PathBuf, DocumentMut> = BTreeMap::new();
@@ -158,8 +249,9 @@ pub(crate) fn stamp(root: &Path, members: &[Member], version: &Version) -> Resul
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(read(path)?),
         };
+        let dir = path.parent().unwrap_or(root);
         requirements += rename
-            .member(doc)
+            .member(doc, dir)
             .with_context(|| format!("in {}", path.display()))?;
     }
 
@@ -202,10 +294,12 @@ fn workspace_version(doc: &DocumentMut) -> Result<Version> {
     Version::parse(text).with_context(|| format!("{text:?} is not a semver version"))
 }
 
-/// One stamp: the workspace crates' names and the version moving `from` →
-/// `to`, both as written in the manifests.
+/// One stamp: the workspace crates' names and directories, and the version
+/// moving `from` → `to`, both as written in the manifests.
 struct Rename<'a> {
     names: &'a BTreeSet<&'a str>,
+    /// Each workspace crate's directory, canonical, and its package name.
+    dirs: &'a BTreeMap<PathBuf, &'a str>,
     from: &'a str,
     to: &'a str,
 }
@@ -216,8 +310,9 @@ const DEPENDENCY_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build
 impl Rename<'_> {
     /// A crate's own version, if it does not inherit the workspace's, and
     /// its requirements on workspace crates, in every dependency table
-    /// including the `[target.*]` ones.
-    fn member(&self, doc: &mut DocumentMut) -> Result<usize> {
+    /// including the `[target.*]` ones. `dir` is the crate's directory, which
+    /// its dependency paths are relative to.
+    fn member(&self, doc: &mut DocumentMut, dir: &Path) -> Result<usize> {
         if let Some(own) = doc
             .get_mut("package")
             .and_then(|package| package.get_mut("version"))
@@ -229,7 +324,7 @@ impl Rename<'_> {
         for name in DEPENDENCY_TABLES {
             if let Some(table) = doc.get_mut(name).and_then(Item::as_table_like_mut) {
                 requirements += self
-                    .requirements(table)
+                    .requirements(table, dir)
                     .with_context(|| format!("in [{name}]"))?;
             }
         }
@@ -243,7 +338,7 @@ impl Rename<'_> {
                         target_table.get_mut(name).and_then(Item::as_table_like_mut)
                     {
                         requirements += self
-                            .requirements(table)
+                            .requirements(table, dir)
                             .with_context(|| format!("in [target.{target}.{name}]"))?;
                     }
                 }
@@ -252,29 +347,29 @@ impl Rename<'_> {
         Ok(requirements)
     }
 
-    /// The `version` requirement of each dependency on a workspace crate in
-    /// `table`. A crate is matched by its package name, so a renamed
-    /// dependency (`package = "…"`) counts. One that inherits from
-    /// `[workspace.dependencies]` or names no version has nothing to stamp.
-    fn requirements(&self, table: &mut dyn TableLike) -> Result<usize> {
+    /// The `version` requirement of each entry in `table` whose `path`,
+    /// relative to `dir`, is a workspace crate's directory. The path decides,
+    /// not the name: a bare `"1.0"` or an entry without `path` is a registry
+    /// or git crate even when a workspace crate has its name. An entry that
+    /// inherits from `[workspace.dependencies]` or names no version has
+    /// nothing to stamp.
+    fn requirements(&self, table: &mut dyn TableLike, dir: &Path) -> Result<usize> {
         let mut requirements = 0;
         for (key, item) in table.iter_mut() {
-            let package = item
-                .get("package")
-                .and_then(Item::as_str)
-                .unwrap_or_else(|| key.get())
-                .to_owned();
-            if !self.names.contains(package.as_str()) {
+            let Some(entry) = item.as_table_like_mut() else {
                 continue;
-            }
-            let label = format!("the requirement on {package}");
-            if item.is_str() {
-                self.version(item, &label)?;
-                requirements += 1;
-            } else if let Some(version) = item
-                .as_table_like_mut()
-                .and_then(|dep| dep.get_mut("version"))
-            {
+            };
+            let Some(path) = entry.get("path").and_then(Item::as_str) else {
+                continue;
+            };
+            let Some(package) = fs_err::canonicalize(dir.join(path))
+                .ok()
+                .and_then(|path| self.dirs.get(&path))
+            else {
+                continue;
+            };
+            if let Some(version) = entry.get_mut("version") {
+                let label = format!("the requirement on {package} ({})", key.get());
                 self.version(version, &label)?;
                 requirements += 1;
             }

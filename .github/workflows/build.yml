@@ -62,10 +62,12 @@ on:
         description: Sign and notarize (needs the release-environment secrets).
         type: boolean
         default: false
-      # A dry run of a beta's build before the tag exists.
+      # A dry run of a beta's build before the tag exists. Unsigned only: a
+      # signed bundle also needs the beta's numeric build version, which only
+      # `release version` on a tag supplies (see the should-build job).
       stamp_version:
         description: >-
-          Build at this version, as a beta tag would (for example
+          Build unsigned at this version, as a beta tag would (for example
           0.8.18-beta.1). Empty builds at the workspace version.
         type: string
         required: false
@@ -92,7 +94,8 @@ env:
   SCCACHE_GHA_ENABLED: "true"
   # PR merge refs and release tags cannot warm another ref. Only dispatches
   # and other branch-scoped runs write reusable compiler objects. A stamped
-  # version's objects serve no other build, so a stamped dispatch only reads.
+  # dispatch compiles the workspace crates at a version no other build uses,
+  # so it only reads.
   SCCACHE_GHA_RW_MODE: ${{ (github.event_name != 'pull_request' && github.ref_type != 'tag' && !inputs.stamp_version) && 'READ_WRITE' || 'READ_ONLY' }}
 
 jobs:
@@ -105,6 +108,17 @@ jobs:
     outputs:
       run: ${{ steps.gate.outputs.run }}
     steps:
+      # Sparkle orders updates by CFBundleVersion, which falls back to the
+      # stamped version without a build version. It reads `0.8.18-beta.1` as
+      # `0.8.18`, so a signed tester build would never update to a later beta.
+      # A tag always passes both; a dispatch can only pass the stamp.
+      - name: Refuse a signed stamp without its build version
+        if: ${{ inputs.sign && inputs.stamp_version != '' && inputs.build_version == '' }}
+        env:
+          STAMP_VERSION: ${{ inputs.stamp_version }}
+        run: |
+          echo "::error::A signed build at ${STAMP_VERSION} needs the beta's build version, which only a beta tag supplies. Dispatch a stamped build unsigned." >&2
+          exit 1
       - id: gate
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -999,11 +1013,12 @@ jobs:
           # libxkbcommon-x11-dev / libwayland-dev / libx11-xcb-dev, so every
           # tagged Linux build failed to link (`-lxkbcommon-x11`) and took the
           # whole GitHub Release down with it.
+          # `zstd` lets `linux package` read the Arch package's .PKGINFO back.
           sudo apt-get install -y \
             libudev-dev \
             gcc g++ clang libfontconfig-dev libwayland-dev \
             libxkbcommon-x11-dev libx11-xcb-dev \
-            libssl-dev libzstd-dev pkg-config
+            libssl-dev libzstd-dev pkg-config zstd
           curl -fsSLo /tmp/nfpm.deb \
             "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${NFPM_ARCH}.deb"
           echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c
@@ -1129,12 +1144,17 @@ jobs:
       # update engine all report it. `cargo xtask release stamp-version`
       # writes it into the workspace manifests and Cargo.lock, uncommitted.
       # The AppStream stamp below reads the version back, so this goes first.
-      # This leg sets up no toolchain: rustup on the runner installs the one
-      # rust-toolchain.toml names. The bundle's sources skip target/.
+      # The bundle itself builds inside the Flatpak SDK; only this step
+      # compiles on the runner, so only a stamped run sets up a toolchain.
+      # This leg runs no sccache action, so the workflow's sccache wrapper is
+      # switched off here. The bundle's sources skip target/.
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ inputs.stamp_version }}
       - name: Stamp the release version
         if: ${{ inputs.stamp_version }}
         shell: bash
         env:
+          RUSTC_WRAPPER: ""
           STAMP_VERSION: ${{ inputs.stamp_version }}
         run: cargo run -q -p xtask -- release stamp-version --version "$STAMP_VERSION"
 
