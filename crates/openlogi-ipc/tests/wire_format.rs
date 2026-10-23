@@ -1275,6 +1275,8 @@ fn firmware_status_failures_and_refusals() {
     assert_wire(&FirmwareUpdateRefusal::Busy, "00");
     assert_wire(&FirmwareUpdateRefusal::NoUpdate, "01");
     assert_wire(&FirmwareUpdateRefusal::DeviceNotFound, "02");
+    assert_wire(&FirmwareUpdateRefusal::Unreadable, "03");
+    assert_wire(&FirmwareUpdateRefusal::Stopping, "04");
 }
 
 #[test]

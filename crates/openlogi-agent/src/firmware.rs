@@ -64,7 +64,7 @@ impl FirmwareManager {
     ) -> Result<(), FirmwareUpdateRefusal> {
         let admission = admit(&self.admission)?;
         if *self.stopping.borrow() {
-            return Err(FirmwareUpdateRefusal::Busy);
+            return Err(FirmwareUpdateRefusal::Stopping);
         }
         let target = self
             .shared
@@ -73,10 +73,10 @@ impl FirmwareManager {
                 firmware::update_target_on(&channel).await
             })
             .await
-            .map_err(|_| FirmwareUpdateRefusal::DeviceNotFound)?
+            .map_err(|error| refusal(&error))?
             .ok_or(FirmwareUpdateRefusal::NoUpdate)?;
         if *self.stopping.borrow() {
-            return Err(FirmwareUpdateRefusal::Busy);
+            return Err(FirmwareUpdateRefusal::Stopping);
         }
         let job = Job {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
@@ -142,6 +142,19 @@ impl FirmwareManager {
         phase: FirmwareUpdatePhase,
     ) {
         publish(&self.observable, job, route, release, phase);
+    }
+}
+
+/// Why a failed target read refuses admission. Only a device that is gone is
+/// "not connected"; one that cannot report firmware has no update, and any
+/// other failure means the device is there but did not answer the check.
+fn refusal(error: &WriteError) -> FirmwareUpdateRefusal {
+    match error {
+        WriteError::DeviceNotFound | WriteError::DeviceUnreachable { .. } => {
+            FirmwareUpdateRefusal::DeviceNotFound
+        }
+        WriteError::FeatureUnsupported { .. } => FirmwareUpdateRefusal::NoUpdate,
+        _ => FirmwareUpdateRefusal::Unreadable,
     }
 }
 
@@ -259,6 +272,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_failed_target_read_names_why_admission_was_refused() {
+        for (error, expected) in [
+            (
+                WriteError::DeviceNotFound,
+                FirmwareUpdateRefusal::DeviceNotFound,
+            ),
+            (
+                WriteError::DeviceUnreachable { index: 2 },
+                FirmwareUpdateRefusal::DeviceNotFound,
+            ),
+            (
+                WriteError::FeatureUnsupported {
+                    feature_hex: 0x0003,
+                },
+                FirmwareUpdateRefusal::NoUpdate,
+            ),
+            (
+                WriteError::RequestTimedOut {
+                    operation: HidppOperation::ReadFirmware,
+                },
+                FirmwareUpdateRefusal::Unreadable,
+            ),
+        ] {
+            assert_eq!(refusal(&error), expected, "{error:?}");
+        }
+    }
+
+    #[test]
     fn admission_stays_busy_until_the_job_releases_ownership() {
         let slot = Arc::new(Mutex::new(()));
         let admitted = admit(&slot).unwrap();
@@ -300,7 +341,7 @@ mod tests {
         stop.await.unwrap();
         assert_eq!(
             manager.start(route.clone(), FirmwareRequest(1)).await,
-            Err(FirmwareUpdateRefusal::Busy)
+            Err(FirmwareUpdateRefusal::Stopping)
         );
         manager.resume();
         assert_eq!(

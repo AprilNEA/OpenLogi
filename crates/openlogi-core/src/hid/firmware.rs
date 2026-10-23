@@ -278,6 +278,13 @@ pub enum FirmwareUpdateRefusal {
     /// The device is not connected.
     #[error("the device is not connected")]
     DeviceNotFound,
+    /// The device is connected, but its firmware could not be read to check
+    /// the update.
+    #[error("the device's firmware could not be read")]
+    Unreadable,
+    /// The agent is shutting down or replacing itself and admits no job.
+    #[error("the agent is stopping")]
+    Stopping,
 }
 
 #[cfg(test)]

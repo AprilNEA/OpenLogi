@@ -451,6 +451,12 @@ fn start_failure_text(error: &FirmwareStartFailure) -> SharedString {
         FirmwareStartFailure::Refused(FirmwareUpdateRefusal::DeviceNotFound) => {
             tr!("firmware.offline")
         }
+        FirmwareStartFailure::Refused(FirmwareUpdateRefusal::Unreadable) => {
+            tr!("firmware.read_failed")
+        }
+        FirmwareStartFailure::Refused(FirmwareUpdateRefusal::Stopping) => {
+            tr!("firmware.agent_stopping")
+        }
     }
 }
 
