@@ -24,9 +24,11 @@ pub enum FirmwareBatteryCharge {
     /// A valid percentage meets the minimum and the device reports a
     /// comfortable level.
     Sufficient,
-    /// A valid percentage is below the minimum, or the device itself reports
-    /// a low or critical level.
-    Low,
+    /// A valid percentage is below the minimum.
+    BelowMinimum,
+    /// The percentage meets the minimum, but the device itself reports a low
+    /// or critical level.
+    LevelLow,
     /// No valid percentage or level is available yet.
     Unknown,
 }
@@ -38,8 +40,8 @@ impl FirmwareBatteryCharge {
         match (percentage, level) {
             (None, _) | (_, BatteryLevel::Unknown) => Self::Unknown,
             (Some(percent), _) if percent > 100 => Self::Unknown,
-            (Some(percent), _) if percent < Self::minimum_percent() => Self::Low,
-            (Some(_), BatteryLevel::Critical | BatteryLevel::Low) => Self::Low,
+            (Some(percent), _) if percent < Self::minimum_percent() => Self::BelowMinimum,
+            (Some(_), BatteryLevel::Critical | BatteryLevel::Low) => Self::LevelLow,
             (Some(_), BatteryLevel::Good | BatteryLevel::Full) => Self::Sufficient,
         }
     }
@@ -314,8 +316,10 @@ mod tests {
                 );
                 let expected = if level == BatteryLevel::Unknown || percent > 100 {
                     FirmwareBatteryCharge::Unknown
-                } else if percent < 30 || !comfortable {
-                    FirmwareBatteryCharge::Low
+                } else if percent < 30 {
+                    FirmwareBatteryCharge::BelowMinimum
+                } else if !comfortable {
+                    FirmwareBatteryCharge::LevelLow
                 } else {
                     FirmwareBatteryCharge::Sufficient
                 };

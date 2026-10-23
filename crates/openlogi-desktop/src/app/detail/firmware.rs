@@ -441,9 +441,10 @@ fn failure_text(error: &FirmwareUpdateFailure) -> SharedString {
 
 fn start_failure_text(error: &FirmwareStartFailure) -> SharedString {
     match error {
-        FirmwareStartFailure::NotSent | FirmwareStartFailure::Unavailable => {
-            tr!("firmware.agent_unavailable")
-        }
+        // Never reached the agent: nothing to check, only to resubmit.
+        FirmwareStartFailure::NotSent => tr!("firmware.not_requested"),
+        // The agent may have started a job whose progress is worth checking.
+        FirmwareStartFailure::Unavailable => tr!("firmware.agent_unavailable"),
         FirmwareStartFailure::Refused(FirmwareUpdateRefusal::Busy) => {
             tr!("firmware.another_update")
         }
@@ -460,6 +461,27 @@ fn start_failure_text(error: &FirmwareStartFailure) -> SharedString {
     }
 }
 
+/// Why the confirmation blocks installation, as the user's next step, and the
+/// selector naming that reason for tests.
+fn charge_warning(charge: FirmwareBatteryCharge) -> Option<(SharedString, &'static str)> {
+    let minimum = FirmwareBatteryCharge::minimum_percent();
+    match charge {
+        FirmwareBatteryCharge::BelowMinimum => Some((
+            tr!("firmware.battery_below_minimum", minimum => minimum),
+            "firmware-battery-warning-minimum",
+        )),
+        FirmwareBatteryCharge::LevelLow => Some((
+            tr!("firmware.battery_level_low", minimum => minimum),
+            "firmware-battery-warning-level",
+        )),
+        FirmwareBatteryCharge::Unknown => Some((
+            tr!("firmware.battery_unknown"),
+            "firmware-battery-warning-unknown",
+        )),
+        FirmwareBatteryCharge::Sufficient => None,
+    }
+}
+
 fn open_update_confirmation(
     window: &mut Window,
     cx: &mut App,
@@ -471,11 +493,7 @@ fn open_update_confirmation(
     window.open_alert_dialog(cx, move |alert, _, cx| {
         let charge = AppState::try_read(cx)
             .map_or(FirmwareBatteryCharge::Unknown, |state| state.firmware_battery_charge(&key));
-        let warning = match charge {
-            FirmwareBatteryCharge::Low => Some(tr!("firmware.battery_below_minimum", minimum => FirmwareBatteryCharge::minimum_percent())),
-            FirmwareBatteryCharge::Unknown => Some(tr!("firmware.battery_unknown")),
-            FirmwareBatteryCharge::Sufficient => None,
-        };
+        let warning = charge_warning(charge);
         alert
             .title(match installation {
                 FirmwareInstallation::Update(_) => tr!("firmware.confirm_title", name => name.clone(), version => target.to_string()),
@@ -495,11 +513,11 @@ fn open_update_confirmation(
                 v_flex()
                     .w_full()
                     .gap_3()
-                    .when_some(warning, |column, warning| column.child(
+                    .when_some(warning, |column, (warning, reason)| column.child(
                         div()
                             .debug_selector(|| "firmware-battery-warning".into())
                             .text_color(cx.theme().danger)
-                            .child(warning),
+                            .child(div().debug_selector(|| reason.into()).child(warning)),
                     ))
                     .child(
                         DialogFooter::new()
@@ -854,11 +872,19 @@ mod tests {
     }
 
     fn set_charge(cx: &mut VisualTestContext, percentage: Option<u8>) {
+        set_battery(cx, percentage, openlogi_core::device::BatteryLevel::Good);
+    }
+
+    fn set_battery(
+        cx: &mut VisualTestContext,
+        percentage: Option<u8>,
+        level: openlogi_core::device::BatteryLevel,
+    ) {
         cx.update(|_, cx| {
             let mut inventory = crate::state::tests::direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
             inventory.paired[0].battery = Some(openlogi_core::device::BatteryInfo {
                 percentage,
-                level: openlogi_core::device::BatteryLevel::Good,
+                level,
                 status: openlogi_core::device::BatteryStatus::Discharging,
             });
             AppState::apply(cx, |state| {
@@ -898,6 +924,46 @@ mod tests {
         cx.simulate_keystrokes("escape");
         redraw(cx);
         assert!(cx.debug_bounds("firmware-confirmation").is_none());
+    }
+
+    #[gpui::test]
+    fn firmware_confirmation_blocks_a_low_battery_level_above_the_minimum_charge(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let (cx, mut received) = draw(cx);
+        set_battery(cx, Some(45), openlogi_core::device::BatteryLevel::Low);
+        update_button(cx);
+        assert!(
+            cx.debug_bounds("firmware-battery-warning-level").is_some(),
+            "the warning names the battery level, not the percentage"
+        );
+        assert!(
+            cx.debug_bounds("firmware-battery-warning-minimum")
+                .is_none()
+        );
+        assert_eq!(
+            charge_warning(FirmwareBatteryCharge::LevelLow).map(|(text, _)| text),
+            Some(
+                "The device reports a low battery level. Charge it to at least 30% and until it \
+                 no longer reports a low level before installing firmware."
+                    .into()
+            )
+        );
+        let install = cx.debug_bounds("firmware-confirm-install").unwrap();
+        cx.simulate_click(install.center(), Modifiers::none());
+        redraw(cx);
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        assert!(
+            received.try_recv().is_err(),
+            "a low level blocks installation"
+        );
+        assert!(cx.debug_bounds("firmware-confirmation").is_some());
+
+        set_battery(cx, Some(45), openlogi_core::device::BatteryLevel::Good);
+        assert!(cx.debug_bounds("firmware-battery-warning").is_none());
     }
 
     #[gpui::test]
@@ -1071,5 +1137,44 @@ mod tests {
             start_failure_text(&FirmwareStartFailure::Refused(FirmwareUpdateRefusal::Busy)),
             "Another firmware update is in progress."
         );
+    }
+
+    #[test]
+    fn unsent_and_unanswered_starts_name_different_next_steps() {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        assert_eq!(
+            start_failure_text(&FirmwareStartFailure::NotSent),
+            "No update was requested because the agent couldn't be reached. Reconnect, then \
+             start the update again."
+        );
+        assert_eq!(
+            start_failure_text(&FirmwareStartFailure::Unavailable),
+            "Couldn't confirm that the update started. Reconnect to the agent to check its \
+             progress."
+        );
+    }
+
+    #[test]
+    fn each_charge_reason_has_its_own_recovery_instruction() {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let text = |charge| charge_warning(charge).map(|(text, _)| text.to_string());
+        assert_eq!(
+            text(FirmwareBatteryCharge::BelowMinimum).as_deref(),
+            Some("Battery charge is below 30%. Charge the device before installing firmware.")
+        );
+        assert!(
+            text(FirmwareBatteryCharge::LevelLow)
+                .is_some_and(|text| text.contains("30%") && text.contains("low battery level"))
+        );
+        assert_eq!(
+            text(FirmwareBatteryCharge::Unknown).as_deref(),
+            Some(
+                "Battery charge is unavailable. Wait for a battery reading before installing \
+                 firmware."
+            )
+        );
+        assert_eq!(text(FirmwareBatteryCharge::Sufficient), None);
     }
 }

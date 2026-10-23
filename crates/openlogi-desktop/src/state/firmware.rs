@@ -889,7 +889,7 @@ pub(crate) mod tests {
         while received.try_recv().is_ok() {}
         assert_eq!(
             state.firmware_battery_charge(&key),
-            FirmwareBatteryCharge::Low,
+            FirmwareBatteryCharge::LevelLow,
             "the device preflight would refuse this reading"
         );
         assert!(state.start_firmware_update(&key, target()).is_empty());

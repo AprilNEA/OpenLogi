@@ -50,7 +50,9 @@ or IPC connection.
 
 The installation confirmation shows a red warning above its buttons and disables
 installation when the reported charge is below 30% or unavailable, or when the
-device reports a low or critical battery level. It updates with battery
+device reports a low or critical battery level. Each reason has its own
+recovery instruction: charge to 30%, keep charging until the device no longer
+reports a low level, or wait for a battery reading. It updates with battery
 snapshots while open, and submission checks the current reading again. The
 shared `FirmwareBatteryCharge::from_reading` policy owns this charge-and-level
 decision for both the dialog and device preflight; preflight still reads and
@@ -73,7 +75,9 @@ same agent and binds when its job appears. An admitted request's reply names
 its job id; if a later job replaces that job before the GUI sees it, the wait
 ends instead of holding the firmware actions. A request that was never sent, or
 that the agent refused, cannot start a job; it is dropped on reconnect and can
-never bind one. Snapshots do not carry physical identity, so a cold GUI or a
+never bind one. An unsent request tells the user that no update was requested
+and to reconnect and start it again; a lost reply tells them to reconnect and
+check the progress of the job that may exist. Snapshots do not carry physical identity, so a cold GUI or a
 new agent run leaves historical jobs unbound. An unbound active job still
 blocks another installation.
 Repeated identical phases do not add entries. Errors have an explicit error
