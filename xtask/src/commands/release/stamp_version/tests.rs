@@ -5,7 +5,7 @@ use semver::Version;
 
 use xshell::Shell;
 
-use super::{Member, Stamped, stamp, stamp_checked};
+use super::{Member, Stamped, restore, stamp, stamp_checked};
 
 const ROOT: &str = r#"[workspace]
 members = ["app", "core"]
@@ -341,4 +341,88 @@ fn a_stamp_that_does_not_resolve_puts_every_file_back() {
     for (file, before) in files.iter().zip(&before) {
         assert_eq!(&read(&root.path().join(file)), before, "{file}");
     }
+}
+
+/// A root that is also a package is one manifest, whatever its path's
+/// spelling. Both the workspace version and the root's own dependency on a
+/// member move, and neither write undoes the other.
+#[test]
+fn a_root_manifest_spelled_two_ways_gets_both_edits() {
+    let root = tempfile::tempdir().unwrap();
+    let manifest = r#"[workspace]
+members = ["core"]
+resolver = "3"
+
+[workspace.package]
+version = "0.8.17"
+edition = "2024"
+
+[package]
+name = "root"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+core = { path = "core", version = "0.8.17" }
+"#;
+    write(&root.path().join("Cargo.toml"), manifest);
+    write(&root.path().join("src/lib.rs"), "");
+    write(&root.path().join("core/Cargo.toml"), CORE);
+    write(&root.path().join("core/src/lib.rs"), "");
+    let output = cargo(root.path(), &["generate-lockfile", "--offline"]);
+    assert!(output.status.success(), "{output:?}");
+    // The same file as `<root>/Cargo.toml`, by another path.
+    let members = vec![
+        Member {
+            name: "root".into(),
+            manifest: root.path().join("core/../Cargo.toml"),
+        },
+        Member {
+            name: "core".into(),
+            manifest: root.path().join("core/Cargo.toml"),
+        },
+    ];
+
+    let stamped = stamp_checked(
+        &offline_shell(),
+        root.path(),
+        &members,
+        &version("0.8.18-beta.3"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        stamped,
+        Stamped::Changed {
+            from: version("0.8.17"),
+            requirements: 1,
+            locked: 2,
+        }
+    );
+    assert_eq!(
+        read(&root.path().join("Cargo.toml")),
+        manifest.replace("0.8.17", "0.8.18-beta.3")
+    );
+}
+
+/// Restoring goes on past a file it cannot write, and names that file.
+#[test]
+fn a_file_that_cannot_be_restored_does_not_stop_the_others() {
+    let root = tempfile::tempdir().unwrap();
+    // Its directory is gone, so writing it back fails.
+    let lost = root.path().join("gone/Cargo.toml");
+    let kept = root.path().join("kept/Cargo.toml");
+    write(&kept, "stamped");
+
+    let failed = restore(&[
+        (b"before".to_vec(), lost.clone()),
+        (b"before".to_vec(), kept.clone()),
+    ]);
+
+    assert_eq!(read(&kept), "before");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0].contains(&lost.display().to_string()),
+        "{failed:?}"
+    );
 }

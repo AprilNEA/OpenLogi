@@ -123,10 +123,11 @@ ships its own DMG. `release appcast` and `release channels` write those feeds
 from the same module, so the URL a bundle reads and the file a release
 uploads cannot drift apart. The module also owns where a release's files and
 feed record live on the update host.
-Sparkle orders releases by `CFBundleVersion`, so every bundle carries the
-release's build version there (`--build-version`, from `release version`) and
-the crate version in `CFBundleShortVersionString`. A stable release's build
-version is its version; `support/release_tag.rs` owns the encoding.
+Sparkle orders releases by `CFBundleVersion`. When supplied, `--build-version`
+(from `release version`) sets `CFBundleVersion`; otherwise it uses the crate
+version. `CFBundleShortVersionString` always uses the crate version. A stable
+release's build version is its version; `support/release_tag.rs` owns the
+encoding.
 Signing re-signs Sparkle's `Autoupdate`, `Updater.app` and the framework, inside
 out, before the app seals them. Without the key the bundle has no Sparkle and
 the app updates through its built-in engine; PR builds and unsigned

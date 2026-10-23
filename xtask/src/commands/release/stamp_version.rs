@@ -106,21 +106,24 @@ fn workspace_crates(sh: &Shell) -> Result<Vec<MetadataPackage>> {
     Ok(metadata.packages)
 }
 
-/// [`stamp`], then [`check`] the tree. If either fails, every file the stamp
-/// may have written goes back to its bytes from before, so a failed stamp
-/// leaves the tree as it found it.
+/// [`stamp`], then [`check`] the tree. If either fails, it tries to put every
+/// file the stamp may have written back to its bytes from before, and names
+/// each file it could not restore. Restoring is a second round of writes, so
+/// a disk that failed the stamp can fail it too.
 pub(crate) fn stamp_checked(
     sh: &Shell,
     root: &Path,
     members: &[Member],
     version: &Version,
 ) -> Result<Stamped> {
-    let mut files: BTreeSet<PathBuf> = members
+    let mut files: BTreeSet<PathBuf> = BTreeSet::new();
+    for path in members
         .iter()
         .map(|member| member.manifest.clone())
-        .collect();
-    files.insert(root.join("Cargo.toml"));
-    files.insert(root.join("Cargo.lock"));
+        .chain([root.join("Cargo.toml"), root.join("Cargo.lock")])
+    {
+        files.insert(fs_err::canonicalize(path)?);
+    }
     let before = files
         .into_iter()
         .map(|path| Ok((fs_err::read(&path)?, path)))
@@ -132,27 +135,42 @@ pub(crate) fn stamp_checked(
     let Err(error) = stamped else {
         return stamped;
     };
-    for (bytes, path) in &before {
-        let restored = match fs_err::read(path) {
-            Ok(now) if &now == bytes => Ok(()),
-            _ => fs_err::write(path, bytes),
-        };
-        if let Err(restore) = restored {
-            return Err(error.context(format!(
-                "stamping {version} failed, and so did restoring {}: {restore}",
-                path.display()
-            )));
-        }
+    let failed = restore(&before);
+    if failed.is_empty() {
+        return Err(error.context(format!("stamping {version} failed; the tree is as it was")));
     }
-    Err(error.context(format!("stamping {version} failed; the tree is as it was")))
+    Err(error.context(format!(
+        "stamping {version} failed, and {} of its files could not be restored: {}",
+        failed.len(),
+        failed.join("; ")
+    )))
+}
+
+/// Write each file back to its bytes, unless it already has them. A file that
+/// cannot be written does not stop the others; the errors come back, one per
+/// file.
+fn restore(files: &[(Vec<u8>, PathBuf)]) -> Vec<String> {
+    files
+        .iter()
+        .filter_map(|(bytes, path)| {
+            let restored = match fs_err::read(path) {
+                Ok(now) if &now == bytes => Ok(()),
+                _ => fs_err::write(path, bytes),
+            };
+            restored.err().map(|error| error.to_string())
+        })
+        .collect()
 }
 
 /// Resolve the tree under `root` as a `--locked` build would, and require
 /// every one of `members` to report `version`.
 ///
 /// `cargo metadata` without `--no-deps` resolves every dependency against
-/// `Cargo.lock` and fails if the lock would have to change, so it also
-/// catches a requirement or `[patch]` the stamp left behind.
+/// `Cargo.lock` and fails if the lock would have to change. So it catches a
+/// lock entry or `[patch]` the stamp left behind, and a requirement the new
+/// version does not meet. A requirement the new version still meets, such as
+/// `0.8.18-beta.1` for `0.8.18-beta.2`, resolves; [`stamp`] rewrites those
+/// itself, editing each manifest once.
 fn check(sh: &Shell, root: &Path, members: &[Member], version: &Version) -> Result<()> {
     let _root = sh.push_dir(root);
     let json = cmd!(sh, "cargo metadata --locked --format-version 1")
@@ -189,9 +207,11 @@ fn check(sh: &Shell, root: &Path, members: &[Member], version: &Version) -> Resu
 
 /// Stamp `version` into the workspace under `root`, whose crates are
 /// `members`. Every edit is made in memory first, so a manifest that does not
-/// look as expected fails the stamp before any file is written. The writes
-/// themselves are one file at a time; [`stamp_checked`] undoes them if one
-/// fails.
+/// look as expected fails the stamp before any file is written. A manifest is
+/// one file however its path is spelled: the root's own manifest can also be
+/// a member's, so edits are kept by canonical path and each file is written
+/// once. The writes themselves are one file at a time; [`stamp_checked`] tries
+/// to undo them if one fails.
 pub(crate) fn stamp(root: &Path, members: &[Member], version: &Version) -> Result<Stamped> {
     let root_manifest = root.join("Cargo.toml");
     let mut root_doc = read(&root_manifest)?;
@@ -242,10 +262,10 @@ pub(crate) fn stamp(root: &Path, members: &[Member], version: &Version) -> Resul
     }
 
     let mut docs: BTreeMap<PathBuf, DocumentMut> = BTreeMap::new();
-    docs.insert(root_manifest.clone(), root_doc);
+    docs.insert(fs_err::canonicalize(&root_manifest)?, root_doc);
     for member in members {
         let path = &member.manifest;
-        let doc = match docs.entry(path.clone()) {
+        let doc = match docs.entry(fs_err::canonicalize(path)?) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(read(path)?),
         };

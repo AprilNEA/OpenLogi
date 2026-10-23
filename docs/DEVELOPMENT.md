@@ -667,9 +667,11 @@ dependency and `[patch]` entry that points at a workspace crate, and into the
 workspace crates in `Cargo.lock`, and commits nothing. A dependency belongs
 to the workspace by its `path`, so a registry or git crate with a workspace
 crate's name keeps its requirement. The command fails on a requirement it
-would not write itself, such as `0.8`, before it writes anything. After it
-writes, the tree must resolve with `cargo metadata --locked`; if that fails,
-it puts every file back. That run compiles xtask at the old version, but
+would not write itself, such as `0.8`, before it writes anything. After
+writing, the command requires full `cargo metadata --locked` resolution and
+the requested version on every workspace crate. On failure, it tries to
+restore every file it may have written and names each file it could not
+restore. That run compiles xtask at the old version, but
 everything the leg builds after it, xtask included, sees the beta's
 `CARGO_PKG_VERSION`: the update engine's current version, the About page,
 diagnostics, `CFBundleShortVersionString`, the Linux packages and the
@@ -690,8 +692,10 @@ so a signed stamp without a build version fails before anything builds.
 Sparkle and Windows Installer order releases by `build_version`. The macOS
 bundles carry it as `CFBundleVersion`, and the MSI as its `ProductVersion`. A
 beta's build version is the stable release before it plus a fourth field, the
-beta number. So it ranks above that release and below the next one. Windows
-Installer ignores the fourth field, so the MSI allows same-version upgrades.
+beta number. Sparkle ranks it above the stable release before it and below
+the next stable release. Windows Installer ignores the fourth field, so it
+treats the beta and that stable release as the same version, and the MSI
+allows same-version upgrades.
 
 The stable release before a beta is the newest stable tag reachable from the
 beta tag, and the beta's version must be above it. The beta number is the
@@ -704,13 +708,16 @@ Only `vX.Y.Z` and `vX.Y.Z-beta.N` are release tags.
 
 The publish side follows the channel. A beta becomes a GitHub prerelease and
 never the latest release. It leaves the installer site and the Homebrew cask
-as they are. Its publish composes the channel files too: the beta channel
-offers the newest beta above the newest stable release, normally this one,
-and the appcasts gain that beta's item, which only apps on `beta` see. The
-stable channel's `latest.json` keeps its bytes.
+as they are. Publishing recomposes the channel files in build-version order.
+The beta channel offers the beta with the highest build version if it is
+above the newest stable release's; otherwise it offers that stable release.
+The appcasts contain the stable item and any beta item the beta channel
+offers, and only apps on `beta` receive the beta item. The stable channel's
+`latest.json` keeps its bytes.
 
 A stable release's notes compare with the previous stable tag, so they cover
-its betas too; a beta's notes compare with the tag just before it.
+its betas too. A beta's notes compare with the highest-version release tag
+below it that its commit can reach, betas included.
 `cargo xtask release version` picks that tag and prints it as
 `previous_tag`; publish passes it to GitHub's release-notes API.
 

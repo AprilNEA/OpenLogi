@@ -25,8 +25,10 @@ on:
       stamp_version:
         description: >-
           The version a beta builds at, as `cargo xtask release version` prints
-          it. Each leg stamps it into the workspace before anything compiles.
-          Empty for a stable release, which builds at the workspace version,
+          it. The Rust-building legs stamp it into the workspace before they
+          build deliverables; the stamp command itself first compiles xtask at
+          the source tree's version. Empty for a stable release, which builds
+          at the workspace version,
           and for a build that is not a release.
         type: string
         required: false
@@ -93,9 +95,9 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
   # PR merge refs and release tags cannot warm another ref. Only dispatches
-  # and other branch-scoped runs write reusable compiler objects. A stamped
-  # dispatch compiles the workspace crates at a version no other build uses,
-  # so it only reads.
+  # and other branch-scoped runs write reusable compiler objects. Stamped
+  # workspace objects depend on the stamped version, so a stamped dispatch
+  # only reads; objects for unchanged third-party crates stay reusable.
   SCCACHE_GHA_RW_MODE: ${{ (github.event_name != 'pull_request' && github.ref_type != 'tag' && !inputs.stamp_version) && 'READ_WRITE' || 'READ_ONLY' }}
 
 jobs:
@@ -110,7 +112,8 @@ jobs:
     steps:
       # Sparkle orders updates by CFBundleVersion, which falls back to the
       # stamped version without a build version. It reads `0.8.18-beta.1` as
-      # `0.8.18`, so a signed tester build would never update to a later beta.
+      # `0.8.18`, so a signed tester build could not update through Sparkle to
+      # a later beta whose build version is below that, such as `0.8.17.N`.
       # A tag always passes both; a dispatch can only pass the stamp.
       - name: Refuse a signed stamp without its build version
         if: ${{ inputs.sign && inputs.stamp_version != '' && inputs.build_version == '' }}
