@@ -56,7 +56,7 @@ use agent::AgentSession;
 use bindings::BindingState;
 use device_store::DeviceStore;
 pub(crate) use devices::camera_model_info;
-pub(crate) use disable_keys::DisableKeysPersistenceStatus;
+pub(crate) use disable_keys::{DisableKeysError, DisableKeysPersistenceStatus};
 use light::LightSession;
 use pointer::PointerState;
 

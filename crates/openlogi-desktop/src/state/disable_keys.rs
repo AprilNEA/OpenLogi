@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use gpui::{App, Context};
 use openlogi_core::config::DisableKey;
 use openlogi_core::hid::{DisableKeysMask, DisableKeysState, WriteError};
+use tracing::warn;
 
 use crate::services::ipc::{DisableKeysRequestContext, ReloadConfig, SetDisableKeys};
 
@@ -32,11 +33,22 @@ pub(crate) enum DisableKeysPersistenceStatus {
     SavedNotReloadedDetached(DisableKeysRecoveryToken),
 }
 
+/// Recoverable failure category; the panel localizes it at render time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DisableKeysError {
+    AgentUnavailable,
+    ConnectionChanged,
+    WriteFailed,
+    SaveFailed,
+    RefreshFailed,
+    ReloadFailed,
+}
+
 /// Per-device Disable Keys transaction state.
 #[derive(Debug, Default)]
 pub(super) struct DisableKeysDeviceState {
     pub(super) persistence: DisableKeysPersistenceStatus,
-    pub(super) error: Option<String>,
+    pub(super) error: Option<DisableKeysError>,
 }
 
 impl AppState {
@@ -46,10 +58,13 @@ impl AppState {
         generation: u64,
         load: DisableKeysLoad,
     ) -> StateEvents {
-        self.disable_keys_reads
-            .update(key, generation, load)
-            .then_some(StateEvent::DisableKeysChanged(key.clone()))
-            .into()
+        if !self.disable_keys_reads.update(key, generation, load) {
+            return StateEvents::none();
+        }
+        if let Load::Failed(error) | Load::Unsupported(error) = self.disable_keys_reads.load(key) {
+            warn!(%error, %key, "could not read disabled keys");
+        }
+        StateEvent::DisableKeysChanged(key.clone()).into()
     }
 
     pub(super) fn load_current_disable_keys(&mut self, cx: &mut Context<Self>) {
@@ -123,7 +138,7 @@ impl AppState {
         if !self.send_ipc(SetDisableKeys { context, desired }) {
             let state = self.devices.sessions.entry(key.clone()).or_default();
             state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
-            state.disable_keys.error = Some("agent is unavailable".into());
+            state.disable_keys.error = Some(DisableKeysError::AgentUnavailable);
         }
         Some(key)
     }
@@ -150,10 +165,11 @@ impl AppState {
         let result = match result {
             Ok(confirmed) => confirmed,
             Err(error) => {
+                warn!(%error, %key, "disabled keys write was not confirmed");
                 self.disable_keys_reads.reconcile_after_write(&key);
                 let state = self.devices.sessions.entry(key).or_default();
                 state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
-                state.disable_keys.error = Some(error.to_string());
+                state.disable_keys.error = Some(DisableKeysError::WriteFailed);
                 return events;
             }
         };
@@ -163,6 +179,7 @@ impl AppState {
         self.config
             .edit(|config| config.set_disabled_keys(key.as_str(), known));
         if let Err(error) = self.config.persist_feature("disabled keys") {
+            warn!(%error, %key, "could not save disabled keys");
             let state = self.devices.sessions.entry(key.clone()).or_default();
             state.disable_keys.persistence = DisableKeysPersistenceStatus::AppliedNotSaved {
                 recovery: DisableKeysRecoveryToken {
@@ -171,7 +188,7 @@ impl AppState {
                 },
                 confirmed: result,
             };
-            state.disable_keys.error = Some(error);
+            state.disable_keys.error = Some(DisableKeysError::SaveFailed);
             return events;
         }
 
@@ -194,7 +211,7 @@ impl AppState {
             let state = self.devices.sessions.entry(key).or_default();
             state.disable_keys.persistence =
                 DisableKeysPersistenceStatus::SavedNotReloaded(context);
-            state.disable_keys.error = Some("agent is unavailable".into());
+            state.disable_keys.error = Some(DisableKeysError::AgentUnavailable);
         }
     }
 
@@ -227,9 +244,10 @@ impl AppState {
                 state.disable_keys.error = None;
             }
             Err(error) => {
+                warn!(error = %error.message, key = %context.key, "could not reload disabled keys");
                 state.disable_keys.persistence =
                     DisableKeysPersistenceStatus::SavedNotReloaded(context);
-                state.disable_keys.error = Some(error.message);
+                state.disable_keys.error = Some(DisableKeysError::ReloadFailed);
             }
         }
         events
@@ -245,12 +263,13 @@ impl AppState {
         };
         let events = StateEvents::from(StateEvent::DisableKeysChanged(key.clone()));
         if let Err(error) = self.config.refresh_feature() {
+            warn!(%error, %key, "could not refresh configuration before disabled keys recovery");
             self.devices
                 .sessions
                 .entry(key.clone())
                 .or_default()
                 .disable_keys
-                .error = Some(error);
+                .error = Some(DisableKeysError::RefreshFailed);
             return events;
         }
         // Refresh adopts the whole file, including unrelated external edits.
@@ -265,12 +284,13 @@ impl AppState {
         self.config
             .edit(|config| config.set_disabled_keys(recovery.key.as_str(), known));
         if let Err(error) = self.config.persist_feature("disabled keys recovery") {
+            warn!(%error, %key, "could not save disabled keys recovery");
             self.devices
                 .sessions
                 .entry(key.clone())
                 .or_default()
                 .disable_keys
-                .error = Some(error);
+                .error = Some(DisableKeysError::SaveFailed);
             return events;
         }
 
@@ -340,8 +360,7 @@ impl AppState {
         match state.disable_keys.persistence.clone() {
             DisableKeysPersistenceStatus::Applying(_) => {
                 state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
-                state.disable_keys.error =
-                    Some("device connection changed while applying; read the device again".into());
+                state.disable_keys.error = Some(DisableKeysError::ConnectionChanged);
             }
             DisableKeysPersistenceStatus::AwaitingReload(context)
             | DisableKeysPersistenceStatus::SavedNotReloaded(context) => {
@@ -373,11 +392,11 @@ impl AppState {
             .map(|state| &state.disable_keys.persistence)
     }
 
-    pub(crate) fn disable_keys_error(&self, key: &DeviceKey) -> Option<&str> {
+    pub(crate) fn disable_keys_error(&self, key: &DeviceKey) -> Option<DisableKeysError> {
         self.devices
             .sessions
             .get(key)
-            .and_then(|state| state.disable_keys.error.as_deref())
+            .and_then(|state| state.disable_keys.error)
     }
 
     pub(crate) fn disable_keys_controls_enabled(&self, key: &DeviceKey) -> bool {
@@ -1353,7 +1372,10 @@ mod tests {
             state.disable_keys_status(&key),
             Some(DisableKeysPersistenceStatus::SavedNotReloaded(_))
         ));
-        assert_eq!(state.disable_keys_error(&key), Some("agent is unavailable"));
+        assert_eq!(
+            state.disable_keys_error(&key),
+            Some(DisableKeysError::AgentUnavailable)
+        );
     }
 
     #[test]
@@ -1397,7 +1419,10 @@ mod tests {
             state.disable_keys_status(&key),
             Some(DisableKeysPersistenceStatus::SavedNotReloaded(_))
         ));
-        assert_eq!(state.disable_keys_error(&key), Some("agent is unavailable"));
+        assert_eq!(
+            state.disable_keys_error(&key),
+            Some(DisableKeysError::AgentUnavailable)
+        );
         assert_eq!(
             ConfigFile::load_from_path(&path)
                 .expect("saved config")

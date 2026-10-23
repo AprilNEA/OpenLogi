@@ -245,6 +245,12 @@ write. Save Retry rereads the configuration to preserve external edits and
 refreshes the app's settings and binding displays from that revision, even if
 the subsequent save must be retried again.
 
+Recovery stays inside the device card, using the same status and retry controls
+as other device settings. Messages follow the selected interface language;
+technical read, write, and configuration errors are recorded in the app logs.
+Switches and recovery actions retain identity per physical device, not per
+translated label or connection route.
+
 The agent reapplies a managed device's configured policy on initial discovery,
 reconnect, and wake, with bounded delayed confirmation attempts. If an
 unconfirmed manual write may have changed hardware, it schedules restoration
