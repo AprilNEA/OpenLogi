@@ -237,6 +237,9 @@ pub struct SetForceSensing {
     pub route: DeviceRoute,
     pub force: u16,
     pub key: DeviceKey,
+    /// The number the state gave this write, returned with the answer so it
+    /// is matched to the write it answers.
+    pub write: u64,
 }
 
 impl Request for SetForceSensing {
@@ -251,6 +254,8 @@ impl Request for SetForceSensing {
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         let _ = updates.send(GuiUpdate::ForceSensingWritten {
             key: self.key,
+            write: self.write,
+            force: self.force,
             result: or_unavailable(outcome),
         });
     }

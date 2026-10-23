@@ -8,11 +8,11 @@
 //! *setting* is `config.toml`'s per-device `force_sensing`, which the agent
 //! writes again when the device reconnects.
 //!
-//! A release of the slider writes the device through the agent. The answer
-//! is the device's read-back: the slider moves to it and the confirmed force
-//! is saved, so a refused write never becomes the setting. A refusal sends
-//! the query back to the device and marks it refused until the next write
-//! lands or the device reconnects.
+//! A release of the slider writes the device through the agent. Only the
+//! answer to the newest write counts: when the device reads back the force
+//! that write asked for, it is saved, so a refused or superseded write never
+//! becomes the setting. A refusal sends the query back to the device and
+//! marks it refused until the next write lands or the device reconnects.
 
 use openlogi_core::hid::{ForceSensingInfo, WriteError};
 use tracing::{debug, warn};
@@ -55,8 +55,9 @@ impl AppState {
     /// Write `force`, clamped into the range the device reported, to the
     /// active device through the agent. The slider shows it at once; the
     /// device's read-back arrives as [`Self::apply_force_sensing_written`],
-    /// which saves it. No-op unless the device is online and its last
-    /// reading says the force may change.
+    /// which saves it if this is still the newest write and the device took
+    /// the force. No-op unless the device has a route and its last reading
+    /// says the force may change.
     pub fn commit_force_sensing(&mut self, force: u16) -> StateEvents {
         let events = self.for_current_device(StateEvent::ForceSensingChanged);
         if !self.current_force_sensing_supported() {
@@ -91,25 +92,52 @@ impl AppState {
                 ..info
             },
         );
-        self.send_ipc(crate::services::ipc::SetForceSensing { route, force, key });
+        let write = self.pointer.next_force_sensing_write;
+        self.pointer.next_force_sensing_write = write.saturating_add(1);
+        self.pointer
+            .pending_force_sensing_writes
+            .insert(key.clone(), write);
+        self.send_ipc(crate::services::ipc::SetForceSensing {
+            route,
+            force,
+            key,
+            write,
+        });
         events
     }
 
-    /// The device's answer to a [`Self::commit_force_sensing`] write: show
-    /// and save the force it read back, or — when it refused or could not be
-    /// reached — ask it again so the optimistic value does not stand in for
-    /// its own, and mark it refused for
+    /// The device's answer to the [`Self::commit_force_sensing`] write
+    /// numbered `write`, which asked for `force`.
+    ///
+    /// Only the newest write's answer counts; an older one changes nothing,
+    /// so the slider stays on the newer release. The agent answers a write
+    /// that a newer one superseded before its turn with a plain read, so an
+    /// `Ok` is saved only when the device reads back `force`; any other
+    /// reading is shown and nothing is saved. When the device refused or
+    /// could not be reached, it is asked again so the optimistic value does
+    /// not stand in for its own, and marked refused for
     /// [`Self::current_force_sensing_refused`].
     pub fn apply_force_sensing_written(
         &mut self,
         key: &DeviceKey,
+        write: u64,
+        force: u16,
         result: Result<ForceSensingInfo, WriteError>,
     ) -> StateEvents {
+        if self.pointer.pending_force_sensing_writes.get(key) != Some(&write) {
+            debug!(key = %key, write, force, "a newer press-force write is pending — ignoring this answer");
+            return StateEvents::none();
+        }
+        self.pointer.pending_force_sensing_writes.remove(key);
         match result {
             Ok(info) => {
                 self.pointer.refused_force_sensing.remove(key);
                 self.pointer.reads.set_force_sensing_ready(key, info);
-                self.save_force_sensing(key, info.current);
+                if info.current == force {
+                    self.save_force_sensing(key, force);
+                } else {
+                    debug!(key = %key, requested = force, actual = info.current, "the device runs another press force — not saving the request");
+                }
             }
             Err(error) => {
                 warn!(%error, key = %key, "press-force write did not land — re-reading the device");

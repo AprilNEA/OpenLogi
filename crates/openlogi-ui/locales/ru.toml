@@ -645,6 +645,7 @@ press_force_description = "Насколько сильно нужно нажат
 press_force_light = "Лёгкое"
 press_force_firm = "Твёрдое"
 press_force_not_applied = "Панель не приняла эту силу."
+reading_press_force = "Чтение силы нажатия…"
 couldnt_read_press_force_click_to_retry = "Не удалось прочитать силу нажатия. Нажмите, чтобы повторить."
 clear_slot = "Очистить позицию"
 empty_slot = "Пустая позиция"

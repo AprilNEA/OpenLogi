@@ -3,7 +3,7 @@
 use super::{
     AgentDevice, FollowerCookieState, FollowerCookieWrite, InventoryHealth, Orchestrator,
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, changed_follower_cookies,
+    any_device_needs_capture_rearm, build_devices, changed_follower_cookies, changed_force_sensing,
     configured_force_sensing, configured_report_rate, configured_wheel_mode, desktop_switch,
     host_switch_links, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts,
     os_layout_appeared, pick_current, plan_reapply, reapply_targets, reconnect_follower_cookies,

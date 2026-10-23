@@ -645,6 +645,7 @@ press_force_description = "A força necessária para pressionar o painel e clica
 press_force_light = "Leve"
 press_force_firm = "Firme"
 press_force_not_applied = "O painel não aceitou esta força."
+reading_press_force = "Lendo a força do clique…"
 couldnt_read_press_force_click_to_retry = "Não foi possível ler a força do clique. Clique para tentar novamente."
 clear_slot = "Limpar posição"
 empty_slot = "Posição vazia"

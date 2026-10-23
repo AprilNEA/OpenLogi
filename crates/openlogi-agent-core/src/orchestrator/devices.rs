@@ -120,6 +120,27 @@ pub(super) fn configured_force_sensing(config: &Config, dev: &AgentDevice) -> Op
         .flatten()
 }
 
+/// The press-force writes a config reload owes: each online, enabled device
+/// whose saved force differs from `previous`'s, with the force to write. A
+/// removed force writes nothing — the device keeps the force it has — and a
+/// disabled device is left alone, as pointer speed leaves it.
+pub(super) fn changed_force_sensing(
+    previous: &Config,
+    config: &Config,
+    devices: &[AgentDevice],
+) -> Vec<(DeviceRoute, u16)> {
+    devices
+        .iter()
+        .filter(|dev| dev.online && config.device_enabled(&dev.config_key))
+        .filter_map(|dev| {
+            let force = configured_force_sensing(config, dev)?;
+            (Some(force) != configured_force_sensing(previous, dev))
+                .then(|| Some((dev.route.clone()?, force)))
+                .flatten()
+        })
+        .collect()
+}
+
 /// How precision mode sets `dev`'s speed, with the value saved for it, or
 /// `None` when OpenLogi does not set its speed. A mouse with sensor DPI is a
 /// DPI mouse; [`Capabilities::pointer_scaling`] is never set on one.

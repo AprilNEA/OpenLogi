@@ -4,9 +4,11 @@
 //! its force, such as the MX Master 4, gets a slider from "Light" to "Firm"
 //! over the range the device reports. The force has no unit a user could
 //! read, so the slider shows no number. A release goes through
-//! [`AppState::commit_force_sensing`], which writes the device; its read-back
-//! moves the slider and is saved. When the device refuses the write, a note
-//! under the slider says so.
+//! [`AppState::commit_force_sensing`], which writes the device; the newest
+//! write's read-back moves the slider and is saved when it is the force asked
+//! for. When the device refuses the write, a note under the slider says so.
+//! While the reading is on its way, the row says so in place of the slider,
+//! as the pointer-speed row does.
 
 use gpui::{
     AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
@@ -16,7 +18,7 @@ use openlogi_core::hid::ForceSensingInfo;
 
 use crate::state::{AppState, DeviceKey, ForceSensingLoad};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::status::retry_line;
+use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{Palette, Typography as _};
 
 /// What the row needs about the selected device.
@@ -29,8 +31,9 @@ pub(super) struct ForceSensingFacts {
 
 impl ForceSensingFacts {
     /// The selected device's facts, or `None` when the row must not show:
-    /// nothing is selected, the device has no force-sensing button, it is
-    /// offline, or its reading has not said the force may change.
+    /// nothing is selected, the device has no force-sensing button whose
+    /// force its probe found changeable, it has no route to write through,
+    /// or its reading says the force may not change.
     pub(super) fn current(cx: &App) -> Option<Self> {
         let state = AppState::try_read(cx)?;
         if !state.current_force_sensing_supported() {
@@ -39,14 +42,7 @@ impl ForceSensingFacts {
         let record = state.current_record()?;
         record.route.as_ref()?;
         let load = state.current_force_sensing_load();
-        let shows = match &load {
-            ForceSensingLoad::Ready(info) => info.changeable,
-            ForceSensingLoad::Failed(_) => true,
-            ForceSensingLoad::Unknown
-            | ForceSensingLoad::Loading
-            | ForceSensingLoad::Unsupported(_) => false,
-        };
-        shows.then(|| Self {
+        row_shows(&load).then(|| Self {
             key: record.device_key(),
             load,
             refused: state.current_force_sensing_refused(),
@@ -64,6 +60,17 @@ impl ForceSensingFacts {
             | ForceSensingLoad::Failed(_)
             | ForceSensingLoad::Unsupported(_) => None,
         }
+    }
+}
+
+/// Whether the row shows for a device whose probe found its force
+/// changeable. Only a reading that says otherwise hides it; a reading on its
+/// way, including a retry after a failure, keeps the row in place.
+fn row_shows(load: &ForceSensingLoad) -> bool {
+    match load {
+        ForceSensingLoad::Ready(info) => info.changeable,
+        ForceSensingLoad::Unknown | ForceSensingLoad::Loading | ForceSensingLoad::Failed(_) => true,
+        ForceSensingLoad::Unsupported(_) => false,
     }
 }
 
@@ -118,15 +125,16 @@ impl ForceSensingSlider {
 }
 
 /// The row: the title and what the setting does, then the slider between
-/// its "Light" and "Firm" ends, or a retry line when the read failed.
+/// its "Light" and "Firm" ends, a status line while the reading is on its
+/// way, or a retry line when the read failed.
 pub(super) fn force_sensing_row(
     facts: ForceSensingFacts,
     slider: Option<&ForceSensingSlider>,
     pal: Palette,
 ) -> AnyElement {
-    let ForceSensingFacts { key, refused, .. } = facts;
-    let body = match slider {
-        Some(slider) => h_flex()
+    let ForceSensingFacts { key, load, refused } = facts;
+    let body = match (slider, load) {
+        (Some(slider), _) => h_flex()
             .w_full()
             .items_center()
             .gap_3()
@@ -148,14 +156,22 @@ pub(super) fn force_sensing_row(
                     .child(tr!("action_ring.press_force_firm")),
             )
             .into_any_element(),
-        // Only a failed read shows the row without a slider.
-        None => retry_line(
+        (None, ForceSensingLoad::Failed(_)) => retry_line(
             "force-sensing-retry",
             tr!("action_ring.couldnt_read_press_force_click_to_retry"),
             pal,
             move |cx| AppState::apply(cx, |state| state.retry_force_sensing_read(&key)),
         )
         .into_any_element(),
+        // A retry clears the failure, so the row keeps its place and says
+        // the device is being read.
+        (
+            None,
+            ForceSensingLoad::Unknown
+            | ForceSensingLoad::Loading
+            | ForceSensingLoad::Ready(_)
+            | ForceSensingLoad::Unsupported(_),
+        ) => status_line(tr!("action_ring.reading_press_force"), pal).into_any_element(),
     };
     v_flex()
         .gap_2()
@@ -275,17 +291,28 @@ mod tests {
 
     #[gpui::test]
     fn a_device_reading_that_moves_reseats_the_thumb(cx: &mut TestAppContext) {
-        let (panel, cx, _receiver) = panel(PANEL, cx);
+        let (panel, cx, mut receiver) = panel(PANEL, cx);
         let key = cx.update(|_, cx| {
             AppState::try_read(cx)
                 .and_then(|state| state.current_record().map(DeviceRecord::device_key))
                 .expect("the mouse is selected")
         });
+        cx.update(|_, cx| AppState::apply(cx, |state| state.commit_force_sensing(6000)));
+        let write = std::iter::from_fn(|| receiver.try_recv().ok())
+            .find_map(|command| match command {
+                Command::SetForceSensing(SetForceSensing { write, .. }) => Some(write),
+                _ => None,
+            })
+            .expect("the release writes the device");
 
+        // A newer write at the agent took the turn, so this one read the
+        // device instead.
         cx.update(|_, cx| {
             AppState::apply(cx, |state| {
                 state.apply_force_sensing_written(
                     &key,
+                    write,
+                    6000,
                     Ok(ForceSensingInfo {
                         current: 4500,
                         ..PANEL
@@ -299,5 +326,33 @@ mod tests {
             let row = panel.force_sensing.as_ref().expect("the row");
             assert_eq!(row.slider.value(cx), 4500);
         });
+    }
+
+    /// A retry turns a failed read back into a loading one; the row stays,
+    /// so the retry line becomes a reading line in place.
+    #[test]
+    fn only_a_reading_that_rules_the_force_out_hides_the_row() {
+        use std::sync::Arc;
+
+        use super::row_shows;
+        use crate::state::ForceSensingLoad;
+
+        let unchangeable = ForceSensingInfo {
+            changeable: false,
+            ..PANEL
+        };
+        for (load, shows) in [
+            (ForceSensingLoad::Unknown, true),
+            (ForceSensingLoad::Loading, true),
+            (ForceSensingLoad::Failed("unreachable".to_string()), true),
+            (ForceSensingLoad::Ready(Arc::new(PANEL)), true),
+            (ForceSensingLoad::Ready(Arc::new(unchangeable)), false),
+            (
+                ForceSensingLoad::Unsupported("no 0x19c0".to_string()),
+                false,
+            ),
+        ] {
+            assert_eq!(row_shows(&load), shows, "{load:?}");
+        }
     }
 }

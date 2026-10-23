@@ -1,5 +1,6 @@
-//! Press force: a release writes the device through the agent, and the force
-//! the device reads back is shown and saved.
+//! Press force: a release writes the device through the agent, and the
+//! newest write's read-back is shown, and saved when it is the force asked
+//! for.
 
 use super::fn_lock::drain;
 use super::*;
@@ -70,6 +71,31 @@ fn force_writes(commands: &[Command]) -> Vec<(DeviceRoute, u16)> {
         .collect()
 }
 
+/// The number of the one press-force write among `commands`.
+fn the_write(commands: &[Command]) -> u64 {
+    let writes: Vec<u64> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::SetForceSensing(SetForceSensing { write, .. }) => Some(*write),
+            _ => None,
+        })
+        .collect();
+    let [write] = writes.as_slice() else {
+        panic!("expected one press-force write, got {writes:?}");
+    };
+    *write
+}
+
+/// Release the slider at `force` and return the number of the write it sent.
+fn release(
+    cx: &mut gpui::TestAppContext,
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    force: u16,
+) -> u64 {
+    let _ = with_state(cx, |state| state.commit_force_sensing(force));
+    the_write(&drain(receiver))
+}
+
 fn reloads(commands: &[Command]) -> usize {
     commands
         .iter()
@@ -134,6 +160,7 @@ fn a_release_writes_the_device_and_saves_the_force_it_reads_back(cx: &mut gpui::
     let [(_, 6000)] = force_writes(&commands).as_slice() else {
         panic!("expected one press-force write of 6000");
     };
+    let write = the_write(&commands);
     assert_eq!(
         reloads(&commands),
         0,
@@ -149,18 +176,17 @@ fn a_release_writes_the_device_and_saves_the_force_it_reads_back(cx: &mut gpui::
         "the slider stays where it was released"
     );
 
-    // The device keeps a force near the one asked for.
     let confirmed = ForceSensingInfo {
-        current: 5998,
+        current: 6000,
         ..PANEL
     };
     let events = with_state(cx, |state| {
-        state.apply_force_sensing_written(&key, Ok(confirmed))
+        state.apply_force_sensing_written(&key, write, 6000, Ok(confirmed))
     });
 
     assert_eq!(events, [StateEvent::ForceSensingChanged(key)]);
     assert_eq!(current_load(cx), Load::Ready(Arc::new(confirmed)));
-    assert_eq!(saved(cx), Some(5998));
+    assert_eq!(saved(cx), Some(6000));
     assert_eq!(
         reloads(&drain(&mut receiver)),
         1,
@@ -215,11 +241,10 @@ fn a_device_without_a_force_sensing_button_is_neither_read_nor_written() {
 #[gpui::test]
 fn a_refusal_reads_the_device_again_and_saves_nothing(cx: &mut gpui::TestAppContext) {
     let (key, mut receiver) = installed(PANEL, cx);
-    let _ = with_state(cx, |state| state.commit_force_sensing(6000));
-    drain(&mut receiver);
+    let write = release(cx, &mut receiver, 6000);
 
     let events = with_state(cx, |state| {
-        state.apply_force_sensing_written(&key, Err(WriteError::AgentUnavailable))
+        state.apply_force_sensing_written(&key, write, 6000, Err(WriteError::AgentUnavailable))
     });
     cx.run_until_parked();
 
@@ -235,10 +260,102 @@ fn a_refusal_reads_the_device_again_and_saves_nothing(cx: &mut gpui::TestAppCont
     );
 
     // A write that lands clears the mark.
+    let write = release(cx, &mut receiver, 6000);
     let _ = with_state(cx, |state| {
-        state.apply_force_sensing_written(&key, Ok(PANEL))
+        state.apply_force_sensing_written(
+            &key,
+            write,
+            6000,
+            Ok(ForceSensingInfo {
+                current: 6000,
+                ..PANEL
+            }),
+        )
     });
     assert!(!refused(cx));
+    assert_eq!(saved(cx), Some(6000));
+}
+
+/// The agent answers a write a newer one superseded before its turn with a
+/// plain read. That answer must neither save nor move the slider off the
+/// newer release; only the newest write's answer counts.
+#[gpui::test]
+fn an_answer_to_a_superseded_write_neither_saves_nor_moves_the_slider(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (key, mut receiver) = installed(PANEL, cx);
+    let older = release(cx, &mut receiver, 6000);
+    let newer = release(cx, &mut receiver, 5500);
+    let pending = Load::Ready(Arc::new(ForceSensingInfo {
+        current: 5500,
+        ..PANEL
+    }));
+
+    // The superseded write read the device, which still ran its old force.
+    let events = with_state(cx, |state| {
+        state.apply_force_sensing_written(&key, older, 6000, Ok(PANEL))
+    });
+    assert!(events.is_empty(), "an older answer announces nothing");
+    assert_eq!(
+        current_load(cx),
+        pending,
+        "the slider stays on the newer release"
+    );
+    assert_eq!(saved(cx), None);
+
+    // Even an older answer that happens to read back its own force.
+    let _ = with_state(cx, |state| {
+        state.apply_force_sensing_written(
+            &key,
+            older,
+            6000,
+            Ok(ForceSensingInfo {
+                current: 6000,
+                ..PANEL
+            }),
+        )
+    });
+    assert_eq!(current_load(cx), pending);
+    assert_eq!(saved(cx), None);
+
+    // Nor does an older failure mark the newer write refused.
+    let _ = with_state(cx, |state| {
+        state.apply_force_sensing_written(&key, older, 6000, Err(WriteError::AgentUnavailable))
+    });
+    assert!(!refused(cx));
+    assert_eq!(reloads(&drain(&mut receiver)), 0, "nothing was saved");
+
+    let landed = ForceSensingInfo {
+        current: 5500,
+        ..PANEL
+    };
+    let _ = with_state(cx, |state| {
+        state.apply_force_sensing_written(&key, newer, 5500, Ok(landed))
+    });
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(landed)));
+    assert_eq!(saved(cx), Some(5500), "the newest write's answer saves");
+    assert_eq!(reloads(&drain(&mut receiver)), 1);
+}
+
+/// The newest write itself can be superseded at the agent, by the reconnect
+/// or config-reload write. Its answer then reads a force nobody asked the
+/// slider for: shown, because it is the device's, but not saved.
+#[gpui::test]
+fn a_newest_answer_reading_another_force_is_shown_but_not_saved(cx: &mut gpui::TestAppContext) {
+    let (key, mut receiver) = installed(PANEL, cx);
+    let write = release(cx, &mut receiver, 6000);
+
+    let reading = ForceSensingInfo {
+        current: 4500,
+        ..PANEL
+    };
+    let _ = with_state(cx, |state| {
+        state.apply_force_sensing_written(&key, write, 6000, Ok(reading))
+    });
+
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(reading)));
+    assert_eq!(saved(cx), None);
+    assert_eq!(reloads(&drain(&mut receiver)), 0);
 }
 
 /// The agent writes the saved force again when the device reconnects, so a
@@ -274,8 +391,9 @@ fn a_reconnect_clears_a_refusal_and_reads_the_device_again(cx: &mut gpui::TestAp
     install(state, cx);
     let route = answer_force_read(&mut receiver, PANEL);
     cx.run_until_parked();
+    let write = release(cx, &mut receiver, 6000);
     let _ = with_state(cx, |state| {
-        state.apply_force_sensing_written(&key, Err(WriteError::AgentUnavailable))
+        state.apply_force_sensing_written(&key, write, 6000, Err(WriteError::AgentUnavailable))
     });
     cx.run_until_parked();
     answer_force_read(&mut receiver, PANEL);

@@ -150,7 +150,12 @@ pub enum GuiUpdate {
     ForceSensingWritten {
         /// The device that was written.
         key: DeviceKey,
-        /// The read-back, or why the write did not land.
+        /// Which write this answers: [`SetForceSensing::write`].
+        write: u64,
+        /// The force that was written: [`SetForceSensing::force`].
+        force: u16,
+        /// The read-back, or why the write did not land. A write the agent
+        /// superseded before its turn answers with a plain read.
         result: Result<ForceSensingInfo, WriteError>,
     },
     /// What a keyboard reports after a backlight change the GUI asked for:

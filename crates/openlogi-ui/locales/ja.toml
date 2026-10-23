@@ -645,6 +645,7 @@ press_force_description = "パネルをクリックするのに必要な押す�
 press_force_light = "軽い"
 press_force_firm = "硬い"
 press_force_not_applied = "パネルはこの押下圧を受け付けませんでした。"
+reading_press_force = "押下圧を読み取り中…"
 couldnt_read_press_force_click_to_retry = "押下圧を読み取れませんでした。クリックして再試行してください。"
 clear_slot = "スロットをクリア"
 empty_slot = "空のスロット"

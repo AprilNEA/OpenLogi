@@ -645,6 +645,7 @@ press_force_description = "패널을 클릭하려면 얼마나 세게 눌러야 
 press_force_light = "가볍게"
 press_force_firm = "단단하게"
 press_force_not_applied = "패널이 이 힘을 받지 않았습니다."
+reading_press_force = "누르는 힘 읽는 중…"
 couldnt_read_press_force_click_to_retry = "누르는 힘을 읽지 못했습니다. 클릭하여 다시 시도하세요."
 clear_slot = "슬롯 지우기"
 empty_slot = "빈 슬롯"

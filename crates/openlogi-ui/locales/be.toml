@@ -645,6 +645,7 @@ press_force_description = "Наколькі моцна трэба націсну
 press_force_light = "Лёгка"
 press_force_firm = "Цвёрда"
 press_force_not_applied = "Панэль не прыняла гэтую сілу."
+reading_press_force = "Чытанне сілы націску…"
 couldnt_read_press_force_click_to_retry = "Не ўдалося прачытаць сілу націску. Націсніце, каб паўтарыць."
 clear_slot = "Ачысціць слот"
 empty_slot = "Пусты слот"

@@ -325,9 +325,16 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_pointer_speed_written(&key, result));
                 });
             }
-            ipc::GuiUpdate::ForceSensingWritten { key, result } => {
+            ipc::GuiUpdate::ForceSensingWritten {
+                key,
+                write,
+                force,
+                result,
+            } => {
                 cx.update(|cx| {
-                    AppState::apply(cx, |state| state.apply_force_sensing_written(&key, result));
+                    AppState::apply(cx, |state| {
+                        state.apply_force_sensing_written(&key, write, force, result)
+                    });
                 });
             }
             ipc::GuiUpdate::BacklightWritten {

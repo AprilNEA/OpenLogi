@@ -645,6 +645,7 @@ press_force_description = "Hvor hårdt du skal trykke på panelet for at klikke.
 press_force_light = "Let"
 press_force_firm = "Fast"
 press_force_not_applied = "Panelet tog ikke imod denne styrke."
+reading_press_force = "Aflæser trykstyrke…"
 couldnt_read_press_force_click_to_retry = "Trykstyrken kunne ikke aflæses. Klik for at prøve igen."
 clear_slot = "Ryd plads"
 empty_slot = "Tom plads"

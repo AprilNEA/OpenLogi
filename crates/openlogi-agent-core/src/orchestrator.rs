@@ -67,11 +67,11 @@ use devices::reapply_targets;
 use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, assignments_changed,
-    build_devices, changed_follower_cookies, config_keeps_os_layout, configured_dpi,
-    configured_force_sensing, configured_report_rate, configured_wheel_mode, host_switch_links,
-    is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared,
-    pick_current, plan_reapply, reconnect_follower_cookies, saved_speed, settings_moved, stable_id,
-    wheel_inverted,
+    build_devices, changed_follower_cookies, changed_force_sensing, config_keeps_os_layout,
+    configured_dpi, configured_force_sensing, configured_report_rate, configured_wheel_mode,
+    host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts,
+    os_layout_appeared, pick_current, plan_reapply, reconnect_follower_cookies, saved_speed,
+    settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -317,7 +317,8 @@ impl SharedHandles {
     /// Write `force` to the force-sensing button of the device at `route`
     /// and return what it reads back. When a newer press-force write for the
     /// device is requested before this one gets its turn, this one reads the
-    /// device instead of writing a force that is about to be replaced.
+    /// device instead of writing a force that is about to be replaced; its
+    /// `Ok` then carries the device's force, which need not be `force`.
     /// Waiting for the turn does not count against the write's deadline.
     pub async fn set_force_sensing(
         &self,
@@ -1670,24 +1671,14 @@ impl Orchestrator {
         }
     }
 
-    /// Push a changed press force to the online force-sensing device it
-    /// belongs to. Only the values that differ from `previous` are written,
-    /// as for [`Self::apply_changed_fn_locks`], and a removed value writes
-    /// nothing: the device keeps the force it has. The GUI also writes
-    /// directly through [`SharedHandles::set_force_sensing`]; both writes are
-    /// ordered per device, so the newest request is the one that stays.
+    /// Push a changed press force to the online, enabled force-sensing
+    /// device it belongs to — [`changed_force_sensing`] picks the writes. The
+    /// GUI also writes directly through [`SharedHandles::set_force_sensing`];
+    /// both writes are ordered per device, so the newest request is the one
+    /// that stays.
     fn apply_changed_force_sensing(&self, previous: &Config) {
-        for dev in self.devices.iter().filter(|dev| dev.online) {
-            let Some(route) = dev.route.clone() else {
-                continue;
-            };
-            let force = configured_force_sensing(&self.config, dev);
-            if force == configured_force_sensing(previous, dev) {
-                continue;
-            }
-            if let Some(force) = force {
-                self.shared.write_force_sensing_in_background(&route, force);
-            }
+        for (route, force) in changed_force_sensing(previous, &self.config, &self.devices) {
+            self.shared.write_force_sensing_in_background(&route, force);
         }
     }
 
