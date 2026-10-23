@@ -12,7 +12,8 @@ use crate::backend::{BackendError, HidBackend, HotplugEvent, HotplugStream, Node
 use super::ReplayError;
 use super::barrier::{ReplayResponseBarrier, ResponseGates, WriteCompletionGates};
 use super::channel::{
-    CassetteState, ReplayCompletion, ReplayRawHidChannel, ReplayRawWriter, ReplayRawWriterHandle,
+    CassetteState, ReplayChannelParts, ReplayCompletion, ReplayRawHidChannel, ReplayRawWriter,
+    ReplayRawWriterHandle,
 };
 
 /// Whether an OS HID node appears in enumeration snapshots.
@@ -615,16 +616,16 @@ impl HidBackend for ReplayBackend {
             let connected = Arc::new(AtomicBool::new(
                 channel.connection == ChannelConnection::Connected,
             ));
-            let raw = ReplayRawHidChannel::from_parts(
+            let raw = ReplayRawHidChannel::from_parts(ReplayChannelParts {
                 vendor_id,
                 product_id,
-                channel.report_support,
-                Arc::clone(&channel.cassette),
-                Arc::clone(&channel.written),
-                Arc::clone(&connected),
-                Arc::clone(&channel.response_gates),
-                Arc::clone(&channel.write_completion_gates),
-            );
+                report_support: channel.report_support,
+                cassette: Arc::clone(&channel.cassette),
+                written: Arc::clone(&channel.written),
+                connected: Arc::clone(&connected),
+                response_gates: Arc::clone(&channel.response_gates),
+                write_completion_gates: Arc::clone(&channel.write_completion_gates),
+            });
             channel.lifetimes.push(ChannelLifetime {
                 connected: Arc::downgrade(&connected),
                 incoming: raw.incoming_sender(),

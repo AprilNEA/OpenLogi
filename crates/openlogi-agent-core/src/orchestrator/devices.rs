@@ -2,7 +2,7 @@
 //! way the GUI carousel is, then diffed across ticks into the volatile-settings
 //! re-apply plan, the host-switch links, and the follower cookie writes.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};

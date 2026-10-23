@@ -359,6 +359,18 @@ impl ReplayChannelHandle {
     }
 }
 
+/// Shared cassette state and transport metadata for one channel lifetime.
+pub(super) struct ReplayChannelParts {
+    pub(super) vendor_id: u16,
+    pub(super) product_id: u16,
+    pub(super) report_support: ReportSupport,
+    pub(super) cassette: Arc<CassetteState>,
+    pub(super) written: Arc<Mutex<Vec<Vec<u8>>>>,
+    pub(super) connected: Arc<AtomicBool>,
+    pub(super) response_gates: Arc<ResponseGates>,
+    pub(super) write_completion_gates: Arc<WriteCompletionGates>,
+}
+
 /// A strict cassette-backed implementation of the production raw HID contract.
 pub struct ReplayRawHidChannel {
     vendor_id: u16,
@@ -388,16 +400,16 @@ impl ReplayRawHidChannel {
         let connected = Arc::new(AtomicBool::new(true));
         let response_gates = Arc::new(ResponseGates::default());
         let write_completion_gates = Arc::new(WriteCompletionGates::default());
-        let channel = Self::from_parts(
+        let channel = Self::from_parts(ReplayChannelParts {
             vendor_id,
             product_id,
             report_support,
-            Arc::clone(&cassette),
-            Arc::clone(&written),
-            Arc::clone(&connected),
-            Arc::clone(&response_gates),
-            Arc::clone(&write_completion_gates),
-        );
+            cassette: Arc::clone(&cassette),
+            written: Arc::clone(&written),
+            connected: Arc::clone(&connected),
+            response_gates: Arc::clone(&response_gates),
+            write_completion_gates: Arc::clone(&write_completion_gates),
+        });
         let handle = ReplayChannelHandle::from_parts(
             cassette,
             written,
@@ -408,16 +420,17 @@ impl ReplayRawHidChannel {
         Ok((channel, handle))
     }
 
-    pub(super) fn from_parts(
-        vendor_id: u16,
-        product_id: u16,
-        report_support: ReportSupport,
-        cassette: Arc<CassetteState>,
-        written: Arc<Mutex<Vec<Vec<u8>>>>,
-        connected: Arc<AtomicBool>,
-        response_gates: Arc<ResponseGates>,
-        write_completion_gates: Arc<WriteCompletionGates>,
-    ) -> Self {
+    pub(super) fn from_parts(parts: ReplayChannelParts) -> Self {
+        let ReplayChannelParts {
+            vendor_id,
+            product_id,
+            report_support,
+            cassette,
+            written,
+            connected,
+            response_gates,
+            write_completion_gates,
+        } = parts;
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         Self {
             vendor_id,

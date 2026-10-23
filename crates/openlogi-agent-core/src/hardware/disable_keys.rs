@@ -163,20 +163,22 @@ where
                 Ok(runtime) => {
                     let write_cancelled = Arc::clone(&worker_cancelled);
                     let outcome = runtime.block_on(async move {
+                        let io = &op;
                         ticket
                             .write_or(
-                                transport.lock(),
+                                async {
+                                    let lease = io.access.receiver_access.acquire_for_io().await;
+                                    let turn = transport.lock().await;
+                                    (lease, turn)
+                                },
                                 || async move {
                                     if write_cancelled.load(Ordering::Acquire) {
                                         return Err(timed_out());
                                     }
-                                    let _lease = op.access.receiver_access.acquire_for_io().await;
-                                    if !op.access.device_io.allows_io()
-                                        || write_cancelled.load(Ordering::Acquire)
-                                    {
+                                    if !io.access.device_io.allows_io() {
                                         return Err(WriteError::DeviceNotFound);
                                     }
-                                    let shared = op.resolve()?;
+                                    let shared = io.resolve()?;
                                     let _ = started_sender.send(());
                                     openlogi_hid::set_disable_keys_on(&shared, desired).await
                                 },

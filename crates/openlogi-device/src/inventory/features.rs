@@ -266,6 +266,17 @@ async fn read_marketing_identity(
     (kind, name)
 }
 
+fn derive_capabilities(
+    features: &[hidpp::feature::FeatureInformation],
+    ids: &[u16],
+) -> Capabilities {
+    let mut capabilities = Capabilities::from_feature_ids(ids);
+    capabilities.disable_keys = features.iter().any(|feature| {
+        feature.id == DisableKeysFeature::ID && feature.typ.is_end_user_configurable()
+    });
+    capabilities
+}
+
 /// Read device identity and capabilities through one HID++ session for `slot`.
 /// Reuse the enumerated feature table to derive [`Capabilities`] without
 /// another round-trip.
@@ -306,11 +317,7 @@ pub(super) async fn probe_features(
                 subscriptions.register_device(slot, event_features);
             }
             probe_haptic_controls = ids.contains(&0x19b0) || ids.contains(&0x19c0);
-            let mut capabilities = Capabilities::from_feature_ids(&ids);
-            capabilities.disable_keys = features.iter().any(|feature| {
-                feature.id == DisableKeysFeature::ID && feature.typ.is_end_user_configurable()
-            });
-            Some(capabilities)
+            Some(derive_capabilities(&features, &ids))
         }
         Ok(None) => None,
         Err(e) => {
