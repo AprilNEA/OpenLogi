@@ -59,6 +59,7 @@ impl AppState {
         resolver: &AssetResolver,
         cameras: &[Camera],
     ) -> SnapshotChanges {
+        let firmware = self.observe_firmware(snapshot.firmware_update.clone());
         let inventory_ready = snapshot.status.inventory == InventoryHealth::Ready;
         // Merge only completed enumerations. A scanning agent serves an empty
         // pre-enumeration list, which must not burn the GUI's miss grace or
@@ -77,6 +78,7 @@ impl AppState {
             self.store_inventory_snapshot(&snapshot.inventory);
         }
 
+        let firmware = firmware.and(self.bind_firmware_device());
         let agent = self.set_agent_link(AgentLink::Ready(snapshot.status.clone()));
         let camera = self.set_camera_active(snapshot.camera_active);
         let foreground = self.set_foreground(snapshot.foreground.clone());
@@ -84,7 +86,12 @@ impl AppState {
 
         SnapshotChanges {
             inventory_ready,
-            events: inventory.and(agent).and(camera).and(foreground).and(lights),
+            events: firmware
+                .and(inventory)
+                .and(agent)
+                .and(camera)
+                .and(foreground)
+                .and(lights),
         }
     }
 

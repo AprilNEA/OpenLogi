@@ -20,6 +20,8 @@ use crate::services::ipc::UnpairFailure;
 pub(crate) enum StateEvent {
     /// Agent connection or permission state changed.
     AgentChanged,
+    /// Firmware status or update progress changed.
+    FirmwareChanged,
     /// The foreground application or recent-application list changed.
     ForegroundChanged,
     /// Cached diagnostics/event-monitor data changed.
@@ -106,6 +108,7 @@ impl StateEvent {
             | Self::LightingChanged(key)
             | Self::DeviceConfigChanged(key) => Some(key),
             Self::AgentChanged
+            | Self::FirmwareChanged
             | Self::ForegroundChanged
             | Self::DiagnosticsChanged
             | Self::InventoryChanged
@@ -243,6 +246,7 @@ impl AppState {
             StateEvent::DeviceRemovalFailed { .. }
             | StateEvent::StalePairingRemovalFailed { .. } => false,
             StateEvent::AgentChanged
+            | StateEvent::FirmwareChanged
             | StateEvent::ForegroundChanged
             | StateEvent::DiagnosticsChanged
             | StateEvent::BindingsChanged(_)

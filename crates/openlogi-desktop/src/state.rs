@@ -29,6 +29,7 @@ pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
 pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
+pub(crate) use firmware::FirmwareStartFailure;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
@@ -81,6 +82,7 @@ mod disable_keys;
 mod dpi;
 mod easy_switch;
 mod events;
+mod firmware;
 mod fn_lock;
 mod force_sensing;
 mod inventory;
@@ -194,6 +196,7 @@ pub struct AppState {
     next_disable_keys_request_id: u64,
     /// Standalone-light sequencing and aggregate camera activity.
     lights: LightSession,
+    firmware: firmware::FirmwareSession,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
@@ -244,6 +247,7 @@ impl AppState {
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);
             state.load_current_disable_keys(cx);
+            state.load_current_firmware();
         });
     }
 
@@ -302,6 +306,7 @@ impl AppState {
             lights: LightSession::default(),
             disable_keys_reads: DisableKeysReads::default(),
             next_disable_keys_request_id: 0,
+            firmware: firmware::FirmwareSession::default(),
             ipc_commands,
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,

@@ -173,6 +173,7 @@ impl AppState {
         self.devices.replace(merged_list, new_index);
         for key in &rerouted {
             self.pointer.reads.remove(key);
+            self.firmware.invalidate(key);
             if let Some(entry) = self.devices.sessions.get_mut(key) {
                 entry.smartshift.reset();
             }
@@ -185,6 +186,7 @@ impl AppState {
         for key in &reconnected {
             self.pointer_speed_reconnected(key);
             self.force_sensing_reconnected(key);
+            self.firmware.invalidate(key);
         }
         for key in &disable_keys_invalidated {
             self.invalidate_disable_keys(key);
@@ -200,6 +202,7 @@ impl AppState {
             .retain_present(|key| present.contains(key));
         self.disable_keys_reads
             .retain_present(|key| present.contains(key));
+        self.firmware.retain_present(|key| present.contains(key));
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
         // tracks the now-current device rather than the old one.
@@ -224,7 +227,19 @@ impl AppState {
         for previous in &self.devices.records {
             let inv = previous.inventory_key();
             let key = previous.device_key();
-            if let Some(record) = by_key.remove(&inv) {
+            if let Some(mut record) = by_key.remove(&inv) {
+                // Config-only placeholders lose their live route during a
+                // reboot. The latest update still identifies that route; keep
+                // its progress or terminal result attached to the offline card.
+                if !record.online
+                    && record.route.is_none()
+                    && let Some(route) = previous
+                        .route
+                        .as_ref()
+                        .filter(|route| self.firmware.references_route(route, &key))
+                {
+                    record.route = Some(route.clone());
+                }
                 clear_inventory_misses(&mut self.devices.sessions, &key);
                 merged.push(record);
                 continue;
@@ -263,10 +278,15 @@ impl AppState {
                 continue;
             }
 
-            let entry = self.devices.sessions.entry(key).or_default();
+            let entry = self.devices.sessions.entry(key.clone()).or_default();
             entry.inventory_misses = entry.inventory_misses.saturating_add(1);
             let misses = entry.inventory_misses;
-            if misses <= INVENTORY_MISS_GRACE {
+            if misses <= INVENTORY_MISS_GRACE
+                || previous
+                    .route
+                    .as_ref()
+                    .is_some_and(|route| self.firmware.protects_route(route, &key))
+            {
                 debug!(
                     key = %inv,
                     misses,
@@ -657,6 +677,7 @@ impl super::AppState {
         self.devices.replace(records, selected);
         self.devices.sessions.remove(&device_key);
         self.pointer.reads.remove(&device_key);
+        self.firmware.invalidate(&device_key);
         StateEvent::InventoryChanged.into()
     }
 }

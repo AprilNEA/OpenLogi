@@ -44,6 +44,7 @@ use crate::ui::theme::{
 
 mod backlight;
 mod easy_switch;
+mod firmware;
 
 const CAMERA_PREVIEW_W: Rems = rems(32.125);
 const CAMERA_CONTROLS_W: Rems = rems(31.25);
@@ -276,11 +277,12 @@ fn tab_body(
     v_flex()
         .flex_1()
         .w_full()
+        .min_w_0()
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
         .p(SCREEN_PAD.rems())
-        .child(div().w_full().max_w(width.rems()).child(content))
+        .child(div().w_full().min_w_0().max_w(width.rems()).child(content))
 }
 
 /// Keys tab: the function-row remapper for a keyboard.
@@ -703,6 +705,11 @@ fn device_tab(
             .children(easy_switch::easy_switch_card(
                 easy_switch::EasySwitchFacts::current(cx),
                 pal,
+            ))
+            .children(firmware::firmware_card(
+                firmware::FirmwareFacts::current(cx),
+                pal,
+                cx,
             ))
             .child(configuration_card(pal, cx))
             .children(show_disable_keys.then(|| disable_keys_panel.clone())),
