@@ -62,6 +62,7 @@ fn commit_haptics_persists_and_sends() {
             settings: written,
             preview,
             key: written_key,
+            ..
         }),
     ] = commands.as_slice()
     else {
@@ -161,6 +162,13 @@ fn written_echo_replaces_shown_value(cx: &mut gpui::TestAppContext) {
         })
     });
     assert_eq!(shown(cx), Some(settings(true, 30)));
+    let write = drain(&mut receiver)
+        .into_iter()
+        .find_map(|command| match command {
+            Command::SetHaptics(SetHaptics { write, .. }) => Some(write),
+            _ => None,
+        })
+        .expect("the change writes the device");
 
     // The device kept power save on: its echo is what the controls show.
     let echoed = HapticSettings {
@@ -168,7 +176,9 @@ fn written_echo_replaces_shown_value(cx: &mut gpui::TestAppContext) {
         ..settings(true, 30)
     };
     let events = cx.update(|cx| {
-        AppState::update(cx, |state, _| state.apply_haptics_written(&key, Ok(echoed)))
+        AppState::update(cx, |state, _| {
+            state.apply_haptics_written(&key, write, Ok(echoed))
+        })
     });
     assert_eq!(events, [StateEvent::HapticsChanged(key.clone())]);
     assert_eq!(shown(cx), Some(echoed));
@@ -273,4 +283,46 @@ fn a_reconnect_without_saved_settings_reads_the_mouse(cx: &mut gpui::TestAppCont
     refresh(cx, mouse_on_receiver(true));
 
     assert!(reads_haptics(&mut receiver), "the mouse is read again");
+}
+
+/// Two changes in a row: the first write's answer arrives after the second
+/// change, and must not bring the first settings back, or the next switch
+/// would write them again.
+#[gpui::test]
+fn an_older_answer_does_not_undo_a_newer_change(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = mouse_state(true, Config::ephemeral());
+    let key = state.current_record().expect("mouse").device_key();
+    install(state, cx);
+    answer_haptics_read(&mut receiver, reading(settings(true, 60)));
+    cx.run_until_parked();
+
+    let _ = cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            let _ = state.commit_haptics(settings(true, 30), true);
+            state.commit_haptics(settings(true, 80), true)
+        })
+    });
+    let writes: Vec<_> = drain(&mut receiver)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::SetHaptics(write) => Some(write),
+            _ => None,
+        })
+        .collect();
+    let [first, second] = writes.as_slice() else {
+        panic!("two haptics writes");
+    };
+    assert_eq!(first.settings, settings(true, 30));
+    assert_eq!(second.settings, settings(true, 80));
+
+    let _ = cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            state.apply_haptics_written(&key, first.write, Ok(settings(true, 30)))
+        })
+    });
+    assert_eq!(
+        shown(cx),
+        Some(settings(true, 80)),
+        "the older answer leaves the newer change shown"
+    );
 }

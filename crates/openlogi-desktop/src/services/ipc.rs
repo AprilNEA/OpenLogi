@@ -131,6 +131,8 @@ pub enum GuiUpdate {
     HapticsWritten {
         /// The device that was written.
         key: DeviceKey,
+        /// Which write this answers: [`SetHaptics::write`].
+        write: u64,
         /// The echoed settings, or why the write did not land.
         result: Result<HapticSettings, WriteError>,
     },

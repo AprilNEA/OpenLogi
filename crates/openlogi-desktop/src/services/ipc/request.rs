@@ -188,6 +188,9 @@ pub struct SetHaptics {
     pub settings: HapticSettings,
     pub preview: bool,
     pub key: DeviceKey,
+    /// The number the state gave this write, returned with the answer so it
+    /// is matched to the write it answers.
+    pub write: u64,
 }
 
 impl Request for SetHaptics {
@@ -207,6 +210,7 @@ impl Request for SetHaptics {
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         let _ = updates.send(GuiUpdate::HapticsWritten {
             key: self.key,
+            write: self.write,
             result: or_unavailable(outcome),
         });
     }

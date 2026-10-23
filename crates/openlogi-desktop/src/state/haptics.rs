@@ -101,11 +101,17 @@ impl AppState {
             return events;
         };
         self.pointer.reads.set_haptics_ready(&device_key, settings);
+        let write = self.pointer.next_haptics_write;
+        self.pointer.next_haptics_write = write.saturating_add(1);
+        self.pointer
+            .pending_haptics_writes
+            .insert(device_key.clone(), write);
         self.send_ipc(crate::services::ipc::SetHaptics {
             route,
             settings,
             preview,
             key: device_key,
+            write,
         });
         events
     }
@@ -113,11 +119,20 @@ impl AppState {
     /// The device's answer to a [`Self::commit_haptics`] write: show the
     /// echoed settings, or — when the device refused or could not be reached
     /// — ask it again so the optimistic settings do not stand in for its own.
+    ///
+    /// Only the newest write's answer counts, as for DPI: an older one would
+    /// show settings the user has since changed, and the next switch would
+    /// write them back.
     pub fn apply_haptics_written(
         &mut self,
         key: &DeviceKey,
+        write: u64,
         result: Result<HapticSettings, WriteError>,
     ) -> StateEvents {
+        if self.pointer.pending_haptics_writes.get(key) != Some(&write) {
+            return StateEvents::none();
+        }
+        self.pointer.pending_haptics_writes.remove(key);
         match result {
             Ok(settings) => self.pointer.reads.set_haptics_ready(key, settings),
             Err(error) => {
