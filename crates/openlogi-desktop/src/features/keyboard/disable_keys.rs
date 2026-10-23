@@ -80,7 +80,6 @@ fn recovery_content(
                     retry_line(
                         device_control_id(key, "save-retry"),
                         tr!("keyboard.save_retry"),
-                        pal,
                         {
                             let key = key.clone();
                             move |cx| AppState::retry_disable_keys_save(cx, &key)
@@ -102,7 +101,6 @@ fn recovery_content(
                     retry_line(
                         device_control_id(key, "reload-retry"),
                         tr!("keyboard.reload_retry"),
-                        pal,
                         {
                             let key = key.clone();
                             move |cx| {
@@ -138,15 +136,10 @@ fn load_content(
         }
         DisableKeysLoad::Failed(_) => {
             let message = tr!("keyboard.could_not_read_disabled_keys");
-            retry_line(
-                device_control_id(key, "read-retry"),
-                message.clone(),
-                pal,
-                {
-                    let key = key.clone();
-                    move |cx| AppState::retry_disable_keys_read(cx, key.clone())
-                },
-            )
+            retry_line(device_control_id(key, "read-retry"), message.clone(), {
+                let key = key.clone();
+                move |cx| AppState::retry_disable_keys_read(cx, key.clone())
+            })
             .debug_selector(move || format!("disable-keys-read-retry:{message}"))
             .into_any_element()
         }

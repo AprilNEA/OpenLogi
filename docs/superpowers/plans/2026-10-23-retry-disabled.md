@@ -8,18 +8,18 @@
 
 ## Chunk 1: Fix and verify
 
-- [ ] Add red rendered-style test in `src/ui/status/tests.rs` with stock text
+- [x] Add red rendered-style test in `src/ui/status/tests.rs` with stock text
   Button comparison in both themes. Run desktop `ui::status::` tests with
   `--features gpui_platform/runtime_shaders`.
-- [ ] Remove explicit foreground and palette argument in `src/ui/status.rs`;
+- [x] Remove explicit foreground and palette argument in `src/ui/status.rs`;
   update all `retry_line` callers and add enabled/disabled gallery entries.
-- [ ] Cover Enter/Space enabled and disabled callbacks; add production-panel
+- [x] Cover Enter/Space enabled and disabled callbacks; add production-panel
   Save Retry tests for pointer/Enter/Space under a temporary config conflict.
-- [ ] Run focused status/Disable Keys/gallery tests and independent review.
-- [ ] With `CARGO_TARGET_DIR=/private/tmp/openlogi-pr993-target` and
+- [x] Run focused status/Disable Keys/gallery tests and independent review.
+- [x] With `CARGO_TARGET_DIR=/private/tmp/openlogi-pr993-target` and
   `RUSTFLAGS='-D warnings'`, run fmt, workspace all-targets Clippy, workspace
   tests and all-targets tests (GUI commands use runtime_shaders).
-- [ ] Run non-GUI rustdoc with warnings denied and the repository's standard
+- [x] Run non-GUI rustdoc with warnings denied and the repository's standard
   UI/desktop/overlay/agent exclusions; run `cargo xtask ci typos ast-grep`.
 - [ ] Inspect staged diff, unchanged schema/dependencies and remote SHA; commit,
   push normally, and verify published SHA. Preserve unrelated drafts.

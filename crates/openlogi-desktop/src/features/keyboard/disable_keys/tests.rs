@@ -1,7 +1,10 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
-use gpui::{AppContext as _, Modifiers, TestAppContext, point, px};
-use openlogi_core::config::Config;
+use gpui::{
+    AppContext as _, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, TestAppContext, point,
+    px,
+};
+use openlogi_core::config::{Config, ConfigFile};
 use openlogi_core::device::{Capabilities, DeviceKind};
 use openlogi_core::hid::DisableKeysState;
 
@@ -31,6 +34,14 @@ fn supported_rows_are_exact_and_platform_system_key_is_stable() {
 }
 
 fn install_keyboard(cx: &mut TestAppContext) -> tokio::sync::mpsc::UnboundedReceiver<Command> {
+    install_keyboard_with_config(cx, Config::ephemeral(), ConfigPersistence::MemoryOnly)
+}
+
+fn install_keyboard_with_config(
+    cx: &mut TestAppContext,
+    config: Config,
+    persistence: ConfigPersistence,
+) -> tokio::sync::mpsc::UnboundedReceiver<Command> {
     cx.update(|cx| {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut inventory = crate::state::tests::direct_inventory([1, 2, 3, 4]);
@@ -43,12 +54,12 @@ fn install_keyboard(cx: &mut TestAppContext) -> tokio::sync::mpsc::UnboundedRece
         let client = swr_core::SwrClient::builder().build(runtime.clone());
         let state = cx.new(|_| {
             let mut state = AppState::new(Sources {
-                config: Config::ephemeral(),
+                config,
                 inventories: &[inventory],
                 standalone: &[],
                 resolver: &AssetResolver::new(),
                 cameras: &[],
-                persistence: ConfigPersistence::MemoryOnly,
+                persistence,
                 ipc_commands: sender,
             });
             state.connect_device_reads(client, runtime);
@@ -299,6 +310,118 @@ fn take_reload(
         panic!("expected Disable Keys reload context");
     };
     context
+}
+
+struct PanelHarness(Entity<DisableKeysPanel>);
+
+impl Render for PanelHarness {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().tab_group().w(px(600.)).child(self.0.clone())
+    }
+}
+
+fn exercise_save_retry(cx: &mut TestAppContext, keypress: Option<&str>) {
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+    Config::default().save_to_path(&path).unwrap();
+    let (config, file) = ConfigFile::load_from_path(&path).unwrap();
+    let mut receiver = install_keyboard_with_config(cx, config, ConfigPersistence::UserFile(file));
+    let _other_requests = answer_initial_read(&mut receiver, cx);
+    cx.update(|cx| AppState::update_disable_keys(cx, DisableKeysMask::CAPS_LOCK));
+    let Command::SetDisableKeys(write) = receiver.try_recv().unwrap() else {
+        panic!("expected initial hardware write");
+    };
+    let key = write.context.key.clone();
+
+    // A real concurrent file edit makes the confirmed hardware write fail to
+    // persist. The rendered Save Retry must merge it, not repeat the HID write.
+    let mut external = Config::load_from_path(&path).unwrap();
+    external.keyboard.bindings.insert(
+        "f1".parse().unwrap(),
+        openlogi_core::binding::Action::TypeText("external binding".into()),
+    );
+    external.save_to_path(&path).unwrap();
+    cx.update(|cx| {
+        AppState::apply(cx, |state| {
+            state.apply_disable_keys_write_result(
+                write.context,
+                Ok(DisableKeysState {
+                    supported: DisableKeysMask::CAPS_LOCK,
+                    disabled: DisableKeysMask::CAPS_LOCK,
+                }),
+            )
+        });
+    });
+    cx.read(|cx| {
+        assert!(matches!(
+            AppState::try_read(cx).unwrap().disable_keys_status(&key),
+            Some(DisableKeysPersistenceStatus::AppliedNotSaved { .. })
+        ));
+    });
+    assert!(receiver.try_recv().is_err());
+    let (_, visual) = cx.add_window_view(|_, cx| PanelHarness(cx.new(DisableKeysPanel::new)));
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let button = visual
+        .debug_bounds("disable-keys-save-retry")
+        .expect("live Save Retry button");
+    if let Some(keypress) = keypress {
+        visual.update(|window, cx| {
+            window.focus_next(cx);
+            assert!(window.focused(cx).is_some());
+            window.draw(cx).clear(cx);
+        });
+        let keystroke = Keystroke::parse(keypress).unwrap();
+        visual.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        visual.simulate_event(KeyUpEvent { keystroke });
+    } else {
+        visual.simulate_click(button.center(), Modifiers::default());
+    }
+    let reload = take_reload(&mut receiver);
+    assert_eq!(reload.key, key);
+    assert!(
+        receiver.try_recv().is_err(),
+        "Save Retry must not repeat a hardware write"
+    );
+    let saved = Config::load_from_path(&path).unwrap();
+    assert_eq!(
+        saved.disabled_keys(key.as_str()),
+        Some(&BTreeSet::from([DisableKey::CapsLock]))
+    );
+    assert_eq!(saved.keyboard.bindings, external.keyboard.bindings);
+    visual.read(|cx| {
+        let state = AppState::try_read(cx).unwrap();
+        assert_eq!(state.keyboard_bindings(), &external.keyboard.bindings);
+        assert!(matches!(
+            state.disable_keys_status(&key),
+            Some(DisableKeysPersistenceStatus::AwaitingReload(_))
+        ));
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        visual.debug_bounds("disable-keys-save-retry").is_none(),
+        "successful save must remove the retry action"
+    );
+}
+
+#[gpui::test]
+fn save_retry_click_preserves_external_binding_without_second_write(cx: &mut TestAppContext) {
+    exercise_save_retry(cx, None);
+}
+
+#[gpui::test]
+fn save_retry_enter_preserves_external_binding_without_second_write(cx: &mut TestAppContext) {
+    exercise_save_retry(cx, Some("enter"));
+}
+
+#[gpui::test]
+fn save_retry_space_preserves_external_binding_without_second_write(cx: &mut TestAppContext) {
+    exercise_save_retry(cx, Some("space"));
 }
 
 #[gpui::test]

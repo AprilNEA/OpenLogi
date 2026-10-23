@@ -70,7 +70,6 @@ pub(super) fn report_rate_section(
         ReportRateLoad::Failed(_) => retry_line(
             "report-rate-retry",
             tr!("pointer.couldnt_read_report_rate_click_to_retry"),
-            pal,
             move |cx| AppState::apply(cx, |state| state.retry_report_rate_read(&key)),
         )
         .into_any_element(),
