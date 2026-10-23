@@ -39,10 +39,12 @@ be copied manually to the generated physical keys. Pre-v7 thumb-wheel scroll
 pairs on the old defaults are migrated in both device and per-application
 profiles so they keep their native direction. v9 adds the `[apps]` alias table;
 v8 files load unchanged.
+v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
+header before parsing its fields. A v9 file without the policy still loads.
 
 ## Shape
 
-`schema_version` is required and currently `9`. `selected_device` is an
+`schema_version` is required and currently `10`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
