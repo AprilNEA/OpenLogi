@@ -671,7 +671,9 @@ and rpm and as `0.8.17beta.12` in the Arch package, and each sorts below
 `0.8.17`. The Windows executables' `FILEVERSION` keeps only the first three
 fields (`0.8.17.0`). A stable tag's `stamp_version` is empty, and its legs
 skip the step. The command fails on a requirement it would not write itself,
-such as `0.8`, and writes nothing then.
+such as `0.8`, and writes nothing then. To try a beta's build before its tag
+exists, dispatch the Build workflow on the branch with `stamp_version` set.
+It builds unsigned unless `sign` is set, and publishes nothing.
 
 Sparkle and Windows Installer order releases by `build_version`. The macOS
 bundles carry it as `CFBundleVersion`, and the MSI as its `ProductVersion`. A

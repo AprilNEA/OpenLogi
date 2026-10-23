@@ -62,6 +62,14 @@ on:
         description: Sign and notarize (needs the release-environment secrets).
         type: boolean
         default: false
+      # A dry run of a beta's build before the tag exists.
+      stamp_version:
+        description: >-
+          Build at this version, as a beta tag would (for example
+          0.8.18-beta.1). Empty builds at the workspace version.
+        type: string
+        required: false
+        default: ""
 
 concurrency:
   # PR number keeps the group stable across open/sync/label/close — on a
@@ -83,8 +91,9 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
   # PR merge refs and release tags cannot warm another ref. Only dispatches
-  # and other branch-scoped runs write reusable compiler objects.
-  SCCACHE_GHA_RW_MODE: ${{ (github.event_name != 'pull_request' && github.ref_type != 'tag') && 'READ_WRITE' || 'READ_ONLY' }}
+  # and other branch-scoped runs write reusable compiler objects. A stamped
+  # version's objects serve no other build, so a stamped dispatch only reads.
+  SCCACHE_GHA_RW_MODE: ${{ (github.event_name != 'pull_request' && github.ref_type != 'tag' && !inputs.stamp_version) && 'READ_WRITE' || 'READ_ONLY' }}
 
 jobs:
   # Opt-in gate for PR builds. Non-PR triggers (workflow_call / dispatch)
