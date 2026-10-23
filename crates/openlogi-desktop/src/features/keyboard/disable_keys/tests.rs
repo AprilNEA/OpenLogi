@@ -33,6 +33,26 @@ fn supported_rows_are_exact_and_platform_system_key_is_stable() {
     assert!(!key_label(DisableKey::WindowsCommand).is_empty());
 }
 
+#[test]
+fn switch_name_states_that_on_disables_the_key() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    let _restore = RestoreLocale(rust_i18n::locale().to_string());
+    rust_i18n::set_locale("en");
+    assert_eq!(
+        switch_label(DisableKey::CapsLock).as_ref(),
+        "Disable Caps Lock"
+    );
+    assert_ne!(
+        switch_label(DisableKey::NumLock),
+        key_label(DisableKey::NumLock)
+    );
+    rust_i18n::set_locale("ru");
+    assert_eq!(
+        switch_label(DisableKey::Insert).as_ref(),
+        "Отключить Insert"
+    );
+}
+
 fn install_keyboard(cx: &mut TestAppContext) -> tokio::sync::mpsc::UnboundedReceiver<Command> {
     install_keyboard_with_config(cx, Config::ephemeral(), ConfigPersistence::MemoryOnly)
 }

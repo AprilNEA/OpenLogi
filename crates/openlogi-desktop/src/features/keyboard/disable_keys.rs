@@ -185,7 +185,7 @@ fn load_content(
                         .child(div().text_body().child(key_label(known_key)))
                         .child(
                             Switch::new((device_control_id(key, "key"), bit.bits().to_string()))
-                                .accessibility_label(key_label(known_key))
+                                .accessibility_label(switch_label(known_key))
                                 .checked(checked)
                                 .disabled(!enabled)
                                 .on_click(move |_, _, cx| {
@@ -260,6 +260,12 @@ fn key_label(key: DisableKey) -> gpui::SharedString {
         DisableKey::WindowsCommand if cfg!(target_os = "macos") => tr!("keyboard.command"),
         DisableKey::WindowsCommand => tr!("keyboard.windows"),
     }
+}
+
+/// Screen-reader name of a key's switch. The switch is on when the key is
+/// disabled, so the name states the action instead of only the key.
+fn switch_label(key: DisableKey) -> gpui::SharedString {
+    tr!("keyboard.disable_key_switch", name => key_label(key).to_string())
 }
 
 #[cfg(test)]
