@@ -63,6 +63,22 @@ impl<'a> Transfer<'a> {
         if report.entity != self.image.entity {
             return Err(protocol("status names a different firmware bank"));
         }
+        // Every packet must be acknowledged in this run, so the first status
+        // must ask for block zero. Anything further along is an earlier run's
+        // leftover, whose bytes nothing proves came from this image.
+        if self.sent.is_none()
+            && matches!(
+                report.status,
+                DfuStatus::TransferReady { block: 1.. }
+                    | DfuStatus::PacketAck { .. }
+                    | DfuStatus::TransferComplete
+                    | DfuStatus::ApplyPending
+            )
+        {
+            return Err(protocol(
+                "device kept an earlier transfer instead of restarting from the first block",
+            ));
+        }
         let (block, packet) = match report.status {
             DfuStatus::TransferReady { block } => {
                 let block = usize::from(block);
@@ -246,6 +262,30 @@ mod tests {
                 .unwrap(),
             TransferAction::Complete
         ));
+    }
+
+    #[test]
+    fn an_earlier_runs_leftover_position_is_never_resumed() {
+        let image = image();
+        for status in [
+            DfuStatus::PacketAck { next_packet: 1 },
+            DfuStatus::TransferReady { block: 1 },
+            DfuStatus::TransferComplete,
+            DfuStatus::ApplyPending,
+        ] {
+            for recovering in [false, true] {
+                let mut transfer = Transfer::new(&image);
+                assert!(
+                    matches!(
+                        transfer.accept(report(status), recovering),
+                        Err(FirmwareUpdateFailure::Protocol(message))
+                            if message.contains("earlier transfer")
+                    ),
+                    "{status:?} must not resume"
+                );
+                assert_eq!(transfer.percent(), 0);
+            }
+        }
     }
 
     #[test]

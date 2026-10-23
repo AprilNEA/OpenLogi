@@ -131,14 +131,21 @@ states; they do not exercise hardware or make network requests.
    with one active, and choose the other.
    Require known battery percentage of at least 30%, a Good/Full battery level
    and an accepted battery status. Require resumable and forcible `0x00D1`
-   capabilities, and `NotStarted` for the selected entity. An unknown staged
-   update is refused.
-5. **Start and transfer.** Start with the target entity and image magic. Send
-   raw 16-byte packets according to the device's Ready/Ack/Wait replies.
-   If the start response is lost, query status within the same admitted
-   transaction instead of issuing another start. Only the expected entity at
-   block zero may begin transfer; `NotStarted` and other initial states fail
-   without activation.
+   capabilities and a status for the selected entity. A state left by an
+   interrupted run (sleep, agent restart, timeout, protocol error) does not
+   block a retry, but it is never trusted: nothing proves its bytes came from
+   this package, so it is neither resumed nor applied.
+5. **Start and transfer.** Start with the target entity and image magic, also
+   over a leftover state, so the transfer restarts from scratch on the
+   inactive bank. Send raw 16-byte packets according to the device's
+   Ready/Ack/Wait replies. Only the expected entity at block zero may begin
+   transfer: a start reply that continues an earlier run (a later block, a
+   packet acknowledgement, `TransferComplete`, `ApplyPending`) fails without
+   sending a packet or activating, as do `NotStarted` and waits. If the start
+   response is lost, query status within the same admitted transaction instead
+   of issuing another start; after an interruption that query cannot tell this
+   restart from the leftover state, so the attempt fails closed and the next
+   one starts again.
    The transfer state machine rejects unexpected entities, acknowledgements,
    skipped blocks and rewinds. A recovery query may request a retry of the exact
    packet whose write failed; ordinary replies must still advance. Wait for
@@ -148,10 +155,10 @@ states; they do not exercise hardware or make network requests.
    Decode status from the actual wire payload: Ready and Wait require four
    bytes, and PacketAck requires six. Short responses fail as unsupported;
    truncated events are dropped before missing fields can become zeroes.
-6. **Activate only after completion.** After the complete transfer is confirmed,
-   send `ApplyDfu(entity, 0x02)`. This command causes a restart and does not echo
-   a response. Drain the native write rather than treating the missing echo as
-   a reason to resend it.
+6. **Activate only after completion.** After this run has transferred and had
+   every packet acknowledged, send `ApplyDfu(entity, 0x02)`. This command causes
+   a restart and does not echo a response. Drain the native write rather than
+   treating the missing echo as a reason to resend it.
 7. **Reconnect and verify.** Release the old channel and request inventory
    reconciliation. For up to 90 seconds, check the route, device unit ID,
    application PID, active target bank and exact target version. Publish success

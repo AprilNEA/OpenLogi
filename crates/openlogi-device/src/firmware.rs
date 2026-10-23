@@ -233,6 +233,8 @@ pub async fn update_target_on(
 /// feature listeners; consuming it is the only path to activation.
 pub struct PreparedFirmwareUpdate {
     feature: Arc<DfuResumableFeature>,
+    /// Preflight found an earlier run's transfer state for the target bank.
+    interrupted: bool,
     image: FirmwareImage,
     pending: PendingFirmwareActivation,
 }
@@ -312,13 +314,18 @@ pub async fn prepare_update_on(
         return Err(FirmwareUpdateFailure::Unsupported);
     }
     let initial = feature.get_dfu_status(entity).await.map_err(update_error)?;
-    if initial.entity != entity || initial.status != DfuStatus::NotStarted {
+    if initial.entity != entity {
         return Err(FirmwareUpdateFailure::Protocol(
-            "an unknown staged update is already present".into(),
+            "status names a different firmware bank".into(),
         ));
     }
+    // An interrupted run (sleep, agent restart, timeout, protocol error) can
+    // leave any transfer state behind. Nothing proves its bytes came from this
+    // package, so it is never resumed or applied: install restarts the
+    // transfer and must send every packet itself.
     Ok(PreparedFirmwareUpdate {
         feature,
+        interrupted: initial.status != DfuStatus::NotStarted,
         image: image.clone(),
         pending: PendingFirmwareActivation {
             route: target.route,
@@ -392,6 +399,13 @@ impl PreparedFirmwareUpdate {
             .await
         {
             Ok(report) => (report, false),
+            // After an interruption, a status query cannot tell this run's
+            // restart apart from the state the earlier run left behind.
+            Err(Hidpp20Error::Channel(_)) if self.interrupted => {
+                return Err(FirmwareUpdateFailure::Protocol(
+                    "restarting an interrupted update was not confirmed".into(),
+                ));
+            }
             Err(Hidpp20Error::Channel(_)) => {
                 // A start may have reached the device despite a lost reply.
                 // Keep this admission and query; never blindly start again.
