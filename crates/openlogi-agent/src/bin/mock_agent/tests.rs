@@ -1053,13 +1053,21 @@ async fn firmware_job_survives_the_request_and_finishes_in_the_snapshot() {
     ));
     server
         .clone()
-        .start_firmware_update(tarpc::context::current(), route.clone())
+        .start_firmware_update(
+            tarpc::context::current(),
+            route.clone(),
+            openlogi_core::hid::FirmwareRequest(7),
+        )
         .await
         .unwrap();
     assert_eq!(
         server
             .clone()
-            .start_firmware_update(tarpc::context::current(), route.clone())
+            .start_firmware_update(
+                tarpc::context::current(),
+                route.clone(),
+                openlogi_core::hid::FirmwareRequest(7),
+            )
             .await,
         Err(FirmwareUpdateRefusal::Busy)
     );
@@ -1070,6 +1078,11 @@ async fn firmware_job_survives_the_request_and_finishes_in_the_snapshot() {
     }
     let finished = server.current().await.snapshot.firmware_update.unwrap();
     assert_eq!(finished.phase, FirmwareUpdatePhase::Succeeded);
+    assert_eq!(
+        finished.request,
+        openlogi_core::hid::FirmwareRequest(7),
+        "the job names the request that started it"
+    );
     assert_eq!(finished.events.len(), 15);
     assert_eq!(finished.source.as_ref().unwrap().device_name, "MX Master 4");
     assert_eq!(
@@ -1092,7 +1105,11 @@ async fn firmware_job_survives_the_request_and_finishes_in_the_snapshot() {
     let previous_id = server.current().await.snapshot.firmware_update.unwrap().id;
     server
         .clone()
-        .start_firmware_update(tarpc::context::current(), route.clone())
+        .start_firmware_update(
+            tarpc::context::current(),
+            route.clone(),
+            openlogi_core::hid::FirmwareRequest(7),
+        )
         .await
         .unwrap();
     assert!(server.current().await.snapshot.firmware_update.unwrap().id > previous_id);

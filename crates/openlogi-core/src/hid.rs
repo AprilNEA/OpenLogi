@@ -33,9 +33,9 @@ pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use easy_switch::{EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use firmware::{
-    FirmwareBatteryCharge, FirmwareOffer, FirmwareStatus, FirmwareUpdate, FirmwareUpdateEvent,
-    FirmwareUpdateFailure, FirmwareUpdatePhase, FirmwareUpdateRefusal, FirmwareUpdateSource,
-    FirmwareVersion,
+    FirmwareBatteryCharge, FirmwareOffer, FirmwareRequest, FirmwareStatus, FirmwareUpdate,
+    FirmwareUpdateEvent, FirmwareUpdateFailure, FirmwareUpdatePhase, FirmwareUpdateRefusal,
+    FirmwareUpdateSource, FirmwareVersion,
 };
 pub use fn_lock::FnLockState;
 pub use force_sensing::ForceSensingInfo;

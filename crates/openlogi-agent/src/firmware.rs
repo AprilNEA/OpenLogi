@@ -12,14 +12,21 @@ use std::time::Duration;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::SharedHandles;
 use openlogi_core::hid::{
-    DeviceRoute, FirmwareStatus, FirmwareUpdate, FirmwareUpdateFailure, FirmwareUpdatePhase,
-    FirmwareUpdateRefusal, FirmwareVersion, HidppOperation, WriteError,
+    DeviceRoute, FirmwareRequest, FirmwareStatus, FirmwareUpdate, FirmwareUpdateFailure,
+    FirmwareUpdatePhase, FirmwareUpdateRefusal, FirmwareVersion, HidppOperation, WriteError,
 };
 use openlogi_device::firmware;
 use openlogi_device_registry::firmware::FirmwareRelease;
 use tokio::sync::{Mutex, OwnedMutexGuard, watch};
 
 const RESTART_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// One admitted job: the agent's number for it and the request that started it.
+#[derive(Clone, Copy)]
+struct Job {
+    id: u64,
+    request: FirmwareRequest,
+}
 
 /// Admits one firmware job at a time and publishes its complete lifecycle.
 pub(crate) struct FirmwareManager {
@@ -53,6 +60,7 @@ impl FirmwareManager {
     pub(crate) async fn start(
         self: &Arc<Self>,
         route: DeviceRoute,
+        request: FirmwareRequest,
     ) -> Result<(), FirmwareUpdateRefusal> {
         let admission = admit(&self.admission)?;
         if *self.stopping.borrow() {
@@ -70,21 +78,24 @@ impl FirmwareManager {
         if *self.stopping.borrow() {
             return Err(FirmwareUpdateRefusal::Busy);
         }
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let job = Job {
+            id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            request,
+        };
         let release = target.release();
-        self.publish(id, &route, release, FirmwareUpdatePhase::Downloading);
+        self.publish(job, &route, release, FirmwareUpdatePhase::Downloading);
         // Ownership moves to the agent before acknowledging admission. Client
         // cancellation/disconnect cannot cancel a flash transaction.
         let manager = Arc::clone(self);
         tokio::spawn(async move {
-            manager.run(id, route, target, admission).await;
+            manager.run(job, route, target, admission).await;
         });
         Ok(())
     }
 
     async fn run(
         &self,
-        id: u64,
+        job: Job,
         route: DeviceRoute,
         target: firmware::FirmwareUpdateTarget,
         _admission: OwnedMutexGuard<()>,
@@ -97,7 +108,7 @@ impl FirmwareManager {
         let worker_route = route.clone();
         let stopping = self.stopping.subscribe();
         let result = tokio::spawn(async move {
-            run_update(shared, observable, id, worker_route, target, stopping).await
+            run_update(shared, observable, job, worker_route, target, stopping).await
         })
         .await
         .unwrap_or_else(|error| Err(FirmwareUpdateFailure::Protocol(error.to_string())));
@@ -108,7 +119,7 @@ impl FirmwareManager {
                 FirmwareUpdatePhase::Failed(error)
             }
         };
-        self.publish(id, &route, release, phase);
+        self.publish(job, &route, release, phase);
     }
 
     /// Refuse new jobs and wait for cooperative stop, native-write completion,
@@ -125,12 +136,12 @@ impl FirmwareManager {
 
     fn publish(
         &self,
-        id: u64,
+        job: Job,
         route: &DeviceRoute,
         release: &FirmwareRelease,
         phase: FirmwareUpdatePhase,
     ) {
-        publish(&self.observable, id, route, release, phase);
+        publish(&self.observable, job, route, release, phase);
     }
 }
 
@@ -142,7 +153,7 @@ fn admit(admission: &Arc<Mutex<()>>) -> Result<OwnedMutexGuard<()>, FirmwareUpda
 
 fn publish(
     observable: &ObservableState,
-    id: u64,
+    job: Job,
     route: &DeviceRoute,
     release: &FirmwareRelease,
     phase: FirmwareUpdatePhase,
@@ -150,7 +161,8 @@ fn publish(
     observable.set_firmware_update(FirmwareUpdate {
         source: Some(release.into()),
         events: Vec::new(),
-        id,
+        id: job.id,
+        request: job.request,
         route: route.clone(),
         target: FirmwareVersion {
             number: release.number,
@@ -164,7 +176,7 @@ fn publish(
 async fn run_update(
     shared: SharedHandles,
     observable: Arc<ObservableState>,
-    id: u64,
+    job: Job,
     route: DeviceRoute,
     target: firmware::FirmwareUpdateTarget,
     mut stopping: watch::Receiver<bool>,
@@ -180,7 +192,7 @@ async fn run_update(
     };
     publish(
         &observable,
-        id,
+        job,
         &route,
         release,
         FirmwareUpdatePhase::Preparing,
@@ -195,7 +207,7 @@ async fn run_update(
             let prepared = firmware::prepare_update_on(&channel, target, &package).await?;
             prepared
                 .install(
-                    |phase| publish(&progress, id, &progress_route, release, phase),
+                    |phase| publish(&progress, job, &progress_route, release, phase),
                     || !gate.allows_io() || *transfer_stop.borrow(),
                 )
                 .await
@@ -204,7 +216,7 @@ async fn run_update(
     // The old feature/channel is gone before inventory is asked to reconnect.
     publish(
         &observable,
-        id,
+        job,
         &route,
         release,
         FirmwareUpdatePhase::Restarting,
@@ -285,18 +297,18 @@ mod tests {
             slot: 1,
         };
         assert_eq!(
-            manager.start(route.clone()).await,
+            manager.start(route.clone(), FirmwareRequest(1)).await,
             Err(FirmwareUpdateRefusal::Busy)
         );
         drop(job);
         stop.await.unwrap();
         assert_eq!(
-            manager.start(route.clone()).await,
+            manager.start(route.clone(), FirmwareRequest(1)).await,
             Err(FirmwareUpdateRefusal::Busy)
         );
         manager.resume();
         assert_eq!(
-            manager.start(route).await,
+            manager.start(route, FirmwareRequest(1)).await,
             Err(FirmwareUpdateRefusal::DeviceNotFound)
         );
     }

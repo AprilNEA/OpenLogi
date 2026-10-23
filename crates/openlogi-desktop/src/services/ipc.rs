@@ -113,7 +113,7 @@ pub enum GuiUpdate {
     FirmwareStarted {
         key: DeviceKey,
         route: DeviceRoute,
-        flight: u64,
+        request: openlogi_core::hid::FirmwareRequest,
         result: Result<(), crate::state::FirmwareStartFailure>,
     },
     /// The agent's state, as of a generation this client had not seen.
@@ -1144,7 +1144,7 @@ pub(crate) mod tests {
                 assert!(received.try_recv().is_err(), "one result per recipient");
             }
             let (updates, mut received) = mpsc::unbounded_channel();
-            request::Request::deliver(reload, Err(request::Unavailable), &updates);
+            request::Request::deliver(reload, Err(request::Unavailable::Lost), &updates);
             assert!(
                 received.try_recv().is_err(),
                 "transport failure must not acknowledge any save"

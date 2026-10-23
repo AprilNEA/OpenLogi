@@ -366,8 +366,9 @@ impl Agent for AgentServer {
         self,
         _: Context,
         route: DeviceRoute,
+        request: openlogi_core::hid::FirmwareRequest,
     ) -> Result<(), openlogi_core::hid::FirmwareUpdateRefusal> {
-        self.firmware.start(route).await
+        self.firmware.start(route, request).await
     }
 
     async fn read_pointer_speed(

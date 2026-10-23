@@ -61,12 +61,17 @@ entry. Transfer history advances in 10% milestones; live progress keeps its full
 percentage precision. The agent retains up to 128 entries in the
 job snapshot, including terminal failures. A GUI session retains its known
 physical-device binding across reconnects to the same agent.
-Pending local admissions also retain their device key if the connection drops
-before the first job snapshot or admission reply arrives. An unavailable reply
-is uncertain; a definite refusal cannot bind a later job. Snapshots do not
-carry physical identity, so a cold GUI or a new agent run leaves historical
-jobs unbound instead of assigning their progress to a device by route alone.
-An unbound active job still blocks another installation.
+
+Each admission carries a random `FirmwareRequest` chosen by the GUI, and the
+agent stores it in the job it starts. The GUI binds a job to a device only
+through that request, never by route: another client's job, or a different
+physical device on the same route, stays unbound. An admission whose reply was
+lost in transit may still have started a job, so it survives reconnects to the
+same agent and binds when its job appears. A request that was never sent, or
+that the agent refused, cannot start a job; it is dropped on reconnect and can
+never bind one. Snapshots do not carry physical identity, so a cold GUI or a
+new agent run leaves historical jobs unbound. An unbound active job still
+blocks another installation.
 Repeated identical phases do not add entries. Errors have an explicit error
 label and use the theme's danger color. New entries follow the bottom unless
 the user has scrolled up to read earlier activity. GPUI Kit's `MessageScroller`

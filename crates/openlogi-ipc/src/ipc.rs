@@ -20,9 +20,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FirmwareStatus, FirmwareUpdate, FirmwareUpdateRefusal, FnLockState,
-    ForceSensingInfo, LightCommand, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    EasySwitchHosts, FirmwareRequest, FirmwareStatus, FirmwareUpdate, FirmwareUpdateRefusal,
+    FnLockState, ForceSensingInfo, LightCommand, PairingError, PasskeyMethod, PointerSpeed,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -154,7 +154,8 @@ pub use succession::Identity;
 ///      timer, five-second steps up to two hours.
 /// v42: firmware status/start methods and `AgentSnapshot::firmware_update`
 ///      appended for official device firmware updates, with job identity,
-///      timestamped activity history, approved package provenance, and
+///      the requester's admission identity, timestamped activity history,
+///      approved package provenance, and
 ///      `HidppOperation::{ReadFirmware, WriteFirmware}` appended.
 pub const PROTOCOL_VERSION: u32 = 42;
 
@@ -962,6 +963,11 @@ pub trait Agent {
     /// Read the running application firmware and the newest supported official release.
     async fn firmware_status(route: DeviceRoute) -> Result<FirmwareStatus, WriteError>;
     /// Admit an update to the newest supported official release. Progress survives
-    /// client disconnects in [`AgentSnapshot::firmware_update`].
-    async fn start_firmware_update(route: DeviceRoute) -> Result<(), FirmwareUpdateRefusal>;
+    /// client disconnects in [`AgentSnapshot::firmware_update`], whose
+    /// `request` names the admitted request so the requester can recognize
+    /// its job even if this reply is lost.
+    async fn start_firmware_update(
+        route: DeviceRoute,
+        request: FirmwareRequest,
+    ) -> Result<(), FirmwareUpdateRefusal>;
 }

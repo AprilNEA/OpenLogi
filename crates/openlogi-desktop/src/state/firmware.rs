@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use openlogi_core::hid::{
-    DeviceRoute, FirmwareBatteryCharge, FirmwareStatus, FirmwareUpdate, FirmwareUpdateRefusal,
-    FirmwareVersion, WriteError,
+    DeviceRoute, FirmwareBatteryCharge, FirmwareRequest, FirmwareStatus, FirmwareUpdate,
+    FirmwareUpdateRefusal, FirmwareVersion, WriteError,
 };
 
 use super::{AgentLink, AppState, DeviceKey, Load, StateEvent, StateEvents};
@@ -13,7 +13,13 @@ use crate::services::ipc::{ReadFirmware, StartFirmwareUpdate};
 /// Why the agent did not acknowledge the update request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FirmwareStartFailure {
+    /// No agent connection: the request never left this GUI, so no job can
+    /// answer it.
+    NotSent,
+    /// The connection dropped before the answer: the agent may have admitted
+    /// the request, and its job would name the request.
     Unavailable,
+    /// The agent answered and did not admit the request.
     Refused(FirmwareUpdateRefusal),
 }
 
@@ -26,9 +32,23 @@ struct Reading {
 struct Start {
     key: DeviceKey,
     route: DeviceRoute,
-    flight: u64,
-    prior_job: Option<u64>,
+    /// Sent with the admission; the agent stores it in the job it starts.
+    request: FirmwareRequest,
     result: Result<(), FirmwareStartFailure>,
+}
+
+impl Start {
+    /// Whether the agent may have admitted this request: it is awaiting an
+    /// answer, or its answer was lost in transit.
+    fn may_have_started(&self) -> bool {
+        matches!(self.result, Ok(()) | Err(FirmwareStartFailure::Unavailable))
+    }
+
+    /// Whether `job` is the one this request started. A route alone never
+    /// decides this: another device or another client can reuse it.
+    fn started(&self, job: &FirmwareUpdate) -> bool {
+        self.may_have_started() && job.request == self.request && job.route == self.route
+    }
 }
 
 struct ObservedFirmware {
@@ -257,22 +277,20 @@ impl AppState {
         else {
             return StateEvents::none();
         };
-        let flight = self.firmware.flight();
-        let prior_job = self.firmware.observed.as_ref().map(|job| job.update.id);
+        let request = FirmwareRequest::generate();
         self.firmware.start = Some(Start {
             key: key.clone(),
             route: route.clone(),
-            flight,
-            prior_job,
+            request,
             result: Ok(()),
         });
         if !self.send_ipc(StartFirmwareUpdate {
             key: key.clone(),
             route,
-            flight,
+            request,
         }) && let Some(start) = &mut self.firmware.start
         {
-            start.result = Err(FirmwareStartFailure::Unavailable);
+            start.result = Err(FirmwareStartFailure::NotSent);
         }
         StateEvent::FirmwareChanged.into()
     }
@@ -282,12 +300,12 @@ impl AppState {
         &mut self,
         key: &DeviceKey,
         route: &DeviceRoute,
-        flight: u64,
+        request: FirmwareRequest,
         result: Result<(), FirmwareStartFailure>,
     ) -> StateEvents {
         let Some(start) =
             self.firmware.start.as_mut().filter(|start| {
-                start.key == *key && start.route == *route && start.flight == flight
+                start.key == *key && start.route == *route && start.request == request
             })
         else {
             return StateEvents::none();
@@ -312,36 +330,38 @@ impl AppState {
         if self.firmware.observed.as_ref().map(|job| &job.update) == update.as_ref() {
             return StateEvents::none();
         }
-        // A route does not identify a physical unit. Only retain an existing
-        // binding or the key captured by this GUI's own pending admission.
+        // A route does not identify a physical unit, and snapshots carry no
+        // physical identity. Only an existing binding of the same job, or this
+        // GUI's own admission named by the job's request, gives it a device.
         let key = update.as_ref().and_then(|update| {
             self.firmware
                 .observed
                 .as_ref()
                 .filter(|previous| {
-                    previous.update.id == update.id && previous.update.route == update.route
+                    previous.update.id == update.id
+                        && previous.update.request == update.request
+                        && previous.update.route == update.route
                 })
                 .and_then(|previous| previous.key.clone())
                 .or_else(|| {
                     self.firmware
                         .start
                         .as_ref()
-                        .filter(|start| {
-                            start.route == update.route
-                                && start.prior_job != Some(update.id)
-                                // A lost reply leaves admission uncertain;
-                                // an explicit refusal proves this is not our job.
-                                && !matches!(&start.result, Err(FirmwareStartFailure::Refused(_)))
-                        })
+                        .filter(|start| start.started(update))
                         .map(|start| start.key.clone())
                 })
         });
         if let Some(job) = &update {
+            // The admission's own job now carries its progress. Another
+            // request's job supersedes an admission that already failed: the
+            // snapshot holds only the latest job, so a lost-reply admission
+            // that was admitted earlier can no longer be seen. One still
+            // awaiting its answer stays pending.
             if self
                 .firmware
                 .start
                 .as_ref()
-                .is_some_and(|start| start.route == job.route && start.prior_job != Some(job.id))
+                .is_some_and(|start| start.started(job) || start.result.is_err())
             {
                 self.firmware.start = None;
             }
@@ -355,11 +375,22 @@ impl AppState {
         StateEvent::FirmwareChanged.into()
     }
 
-    /// Every connection fences old read flights. Pending admissions and bound
-    /// jobs survive reconnects to the same agent; a new agent resets both.
+    /// Every connection fences old read flights. Bound jobs and admissions
+    /// the agent may have taken survive reconnects to the same agent; an
+    /// unsent or refused admission cannot start a job and is dropped. A new
+    /// agent resets both.
     pub(crate) fn firmware_reconnected(&mut self, identity: openlogi_ipc::Identity) -> StateEvents {
         self.firmware.reads.clear();
-        if self.firmware.agent_identity != Some(identity) {
+        if self.firmware.agent_identity == Some(identity) {
+            if !self
+                .firmware
+                .start
+                .as_ref()
+                .is_some_and(Start::may_have_started)
+            {
+                self.firmware.start = None;
+            }
+        } else {
             self.firmware.start = None;
             self.firmware.observed = None;
         }
@@ -483,6 +514,40 @@ pub(crate) mod tests {
         (state, received)
     }
 
+    /// A job the agent started for `request`.
+    fn job(
+        request: FirmwareRequest,
+        id: u64,
+        route: &DeviceRoute,
+        phase: FirmwareUpdatePhase,
+    ) -> FirmwareUpdate {
+        FirmwareUpdate {
+            source: None,
+            events: Vec::new(),
+            id,
+            request,
+            route: route.clone(),
+            target: target(),
+            phase,
+        }
+    }
+
+    /// Admit an update for `key` and return the command the agent receives.
+    fn admit(
+        state: &mut AppState,
+        received: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+        key: &DeviceKey,
+    ) -> StartFirmwareUpdate {
+        assert!(!state.start_firmware_update(key, target()).is_empty());
+        let Command::StartFirmwareUpdate(start) = received.try_recv().unwrap() else {
+            panic!("start command");
+        };
+        start
+    }
+
+    /// Another client's request, which this GUI never sent.
+    const FOREIGN: FirmwareRequest = FirmwareRequest(0xf0f0);
+
     #[test]
     fn cold_start_and_new_agent_do_not_bind_history_to_a_replacement_on_the_same_route() {
         for phase in [
@@ -491,16 +556,10 @@ pub(crate) mod tests {
         ] {
             let (mut original, mut received) = state();
             let read = ready(&mut original, &mut received);
-            let job = FirmwareUpdate {
-                source: None,
-                events: Vec::new(),
-                id: 10,
-                route: read.route.clone(),
-                target: target(),
-                phase,
-            };
-            let _ = original.start_firmware_update(&read.key, target());
+            let start = admit(&mut original, &mut received, &read.key);
+            let job = job(start.request, 10, &read.route, phase);
             let _ = observe(&mut original, Some(job.clone()));
+            assert_eq!(original.current_firmware_update(), Some(&job));
             let replacement = direct_inventory([1, 2, 3, 4]);
             let (mut cold, _) = state();
             for app in [&mut cold, &mut original] {
@@ -539,18 +598,15 @@ pub(crate) mod tests {
         ] {
             let (mut state, mut received) = state();
             let read = ready(&mut state, &mut received);
-            let _ = state.start_firmware_update(&read.key, target());
-            let Command::StartFirmwareUpdate(start) = received.try_recv().unwrap() else {
-                panic!("start command");
-            };
+            let start = admit(&mut state, &mut received, &read.key);
             if let Some(answer) = before_reconnect {
                 let _ =
-                    state.apply_firmware_started(&start.key, &start.route, start.flight, answer);
+                    state.apply_firmware_started(&start.key, &start.route, start.request, answer);
             }
             let _ = state.firmware_reconnected(identity(1));
             if let Some(answer) = after_reconnect {
                 let _ =
-                    state.apply_firmware_started(&start.key, &start.route, start.flight, answer);
+                    state.apply_firmware_started(&start.key, &start.route, start.request, answer);
             }
             for phase in [
                 FirmwareUpdatePhase::Preparing,
@@ -558,15 +614,11 @@ pub(crate) mod tests {
                 FirmwareUpdatePhase::Succeeded,
             ] {
                 let job = FirmwareUpdate {
-                    source: None,
-                    id: 42,
-                    route: read.route.clone(),
-                    target: target(),
                     events: vec![openlogi_core::hid::FirmwareUpdateEvent {
                         timestamp_millis: 42_000,
                         phase: phase.clone(),
                     }],
-                    phase,
+                    ..job(start.request, 42, &read.route, phase)
                 };
                 let _ = observe(&mut state, Some(job.clone()));
                 assert_eq!(state.current_firmware_update(), Some(&job));
@@ -577,29 +629,100 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_unsent_or_unanswered_start_never_adopts_another_client_s_job_on_a_reused_route() {
+        for (failure, reconnect) in [
+            (FirmwareStartFailure::NotSent, true),
+            (FirmwareStartFailure::NotSent, false),
+            (FirmwareStartFailure::Unavailable, true),
+            (FirmwareStartFailure::Unavailable, false),
+        ] {
+            let (mut state, mut received) = state();
+            let read = ready(&mut state, &mut received);
+            let start = admit(&mut state, &mut received, &read.key);
+            let _ = state.apply_firmware_started(
+                &start.key,
+                &start.route,
+                start.request,
+                Err(failure.clone()),
+            );
+            if reconnect {
+                let _ = state.firmware_reconnected(identity(1));
+            }
+            // Another physical device now answers on the same route.
+            let mut replacement = direct_inventory([1, 2, 3, 4]);
+            replacement.paired[0].battery = state.current_record().unwrap().battery.clone();
+            let _ = state.refresh_inventories(&[replacement], &[], &AssetResolver::new(), &[]);
+            for phase in [
+                FirmwareUpdatePhase::Preparing,
+                FirmwareUpdatePhase::Transferring { percent: 50 },
+                FirmwareUpdatePhase::Succeeded,
+            ] {
+                let _ = observe(&mut state, Some(job(FOREIGN, 3, &read.route, phase)));
+                let observed = state.firmware.observed.as_ref().unwrap();
+                assert_eq!(
+                    observed.key, None,
+                    "{failure:?} (reconnect: {reconnect}) adopted another client's job"
+                );
+                assert!(!state.firmware.references_route(&read.route, &read.key));
+            }
+            assert!(
+                state.firmware.start.is_none(),
+                "the superseded admission is dropped"
+            );
+            let original = state
+                .devices
+                .records
+                .iter()
+                .position(|record| record.config_key == read.key.as_str())
+                .unwrap();
+            let _ = state.select_device(original);
+            assert!(state.current_firmware_update().is_none());
+        }
+    }
+
+    #[test]
+    fn an_unsent_start_does_not_survive_a_reconnect_but_an_unanswered_one_does() {
+        for (failure, survives) in [
+            (FirmwareStartFailure::NotSent, false),
+            (FirmwareStartFailure::Unavailable, true),
+            (
+                FirmwareStartFailure::Refused(FirmwareUpdateRefusal::Busy),
+                false,
+            ),
+        ] {
+            let (mut state, mut received) = state();
+            let read = ready(&mut state, &mut received);
+            let start = admit(&mut state, &mut received, &read.key);
+            let _ = state.apply_firmware_started(
+                &start.key,
+                &start.route,
+                start.request,
+                Err(failure.clone()),
+            );
+            let _ = state.firmware_reconnected(identity(1));
+            assert_eq!(state.firmware.start.is_some(), survives, "{failure:?}");
+        }
+    }
+
+    #[test]
     fn a_new_agent_cannot_inherit_a_pending_start_before_its_first_snapshot() {
         let (mut state, mut received) = state();
         let read = ready(&mut state, &mut received);
-        let _ = state.start_firmware_update(&read.key, target());
-        let Command::StartFirmwareUpdate(start) = received.try_recv().unwrap() else {
-            panic!("start command");
-        };
+        let start = admit(&mut state, &mut received, &read.key);
         let _ = state.firmware_reconnected(identity(2));
         assert!(
             state
-                .apply_firmware_started(&start.key, &start.route, start.flight, Ok(()))
+                .apply_firmware_started(&start.key, &start.route, start.request, Ok(()))
                 .is_empty()
         );
         let _ = observe(
             &mut state,
-            Some(FirmwareUpdate {
-                source: None,
-                events: vec![],
-                id: 42,
-                route: read.route,
-                target: target(),
-                phase: FirmwareUpdatePhase::Preparing,
-            }),
+            Some(job(
+                start.request,
+                42,
+                &read.route,
+                FirmwareUpdatePhase::Preparing,
+            )),
         );
         assert!(state.current_firmware_update().is_none());
     }
@@ -608,29 +731,49 @@ pub(crate) mod tests {
     fn reconnect_does_not_bind_a_definitively_refused_start() {
         let (mut state, mut received) = state();
         let read = ready(&mut state, &mut received);
-        let _ = state.start_firmware_update(&read.key, target());
-        let Command::StartFirmwareUpdate(start) = received.try_recv().unwrap() else {
-            panic!("start command");
-        };
+        let start = admit(&mut state, &mut received, &read.key);
         let _ = state.apply_firmware_started(
             &start.key,
             &start.route,
-            start.flight,
+            start.request,
             Err(FirmwareStartFailure::Refused(FirmwareUpdateRefusal::Busy)),
         );
         let _ = state.firmware_reconnected(identity(1));
         let _ = observe(
             &mut state,
-            Some(FirmwareUpdate {
-                source: None,
-                events: vec![],
-                id: 42,
-                route: read.route,
-                target: target(),
-                phase: FirmwareUpdatePhase::Preparing,
-            }),
+            Some(job(
+                start.request,
+                42,
+                &read.route,
+                FirmwareUpdatePhase::Preparing,
+            )),
         );
         assert!(state.current_firmware_update().is_none());
+    }
+
+    #[test]
+    fn a_job_for_another_request_does_not_finish_a_pending_admission() {
+        let (mut state, mut received) = state();
+        let read = ready(&mut state, &mut received);
+        let start = admit(&mut state, &mut received, &read.key);
+        let _ = observe(
+            &mut state,
+            Some(job(FOREIGN, 4, &read.route, FirmwareUpdatePhase::Preparing)),
+        );
+        assert!(state.current_firmware_update().is_none());
+        assert!(
+            state.current_firmware_starting(),
+            "the admission still awaits its answer"
+        );
+        let ours = job(
+            start.request,
+            5,
+            &read.route,
+            FirmwareUpdatePhase::Preparing,
+        );
+        let _ = observe(&mut state, Some(ours.clone()));
+        assert_eq!(state.current_firmware_update(), Some(&ours));
+        assert!(!state.current_firmware_starting());
     }
 
     #[test]
@@ -719,29 +862,24 @@ pub(crate) mod tests {
     fn observation_before_start_reply_wins_and_completion_refreshes_the_version() {
         let (mut state, mut received) = state();
         let read = ready(&mut state, &mut received);
-        assert!(!state.start_firmware_update(&read.key, target()).is_empty());
-        let Command::StartFirmwareUpdate(start) = received.try_recv().unwrap() else {
-            panic!("start command");
-        };
+        let start = admit(&mut state, &mut received, &read.key);
         assert!(
             state.start_firmware_update(&read.key, target()).is_empty(),
             "no duplicate submission"
         );
-        let job = FirmwareUpdate {
-            source: None,
-            events: Vec::new(),
-            id: 42,
-            route: read.route.clone(),
-            target: target(),
-            phase: FirmwareUpdatePhase::Restarting,
-        };
+        let job = job(
+            start.request,
+            42,
+            &read.route,
+            FirmwareUpdatePhase::Restarting,
+        );
         let _ = observe(&mut state, Some(job.clone()));
         assert!(
             state
                 .apply_firmware_started(
                     &start.key,
                     &start.route,
-                    start.flight,
+                    start.request,
                     Err(FirmwareStartFailure::Unavailable)
                 )
                 .is_empty(),
@@ -780,28 +918,21 @@ pub(crate) mod tests {
     fn an_old_terminal_cannot_finish_a_new_admission_and_start_failure_is_retryable() {
         let (mut state, mut received) = state();
         let read = ready(&mut state, &mut received);
-        let old = FirmwareUpdate {
-            source: None,
-            events: Vec::new(),
-            id: 5,
-            route: read.route.clone(),
-            target: target(),
-            phase: FirmwareUpdatePhase::Failed(
-                openlogi_core::hid::FirmwareUpdateFailure::Unsupported,
-            ),
-        };
+        let old = job(
+            FOREIGN,
+            5,
+            &read.route,
+            FirmwareUpdatePhase::Failed(openlogi_core::hid::FirmwareUpdateFailure::Unsupported),
+        );
         let _ = observe(&mut state, Some(old.clone()));
         let _ = ready(&mut state, &mut received);
-        let _ = state.start_firmware_update(&read.key, target());
-        let Command::StartFirmwareUpdate(start) = received.try_recv().unwrap() else {
-            panic!("start command");
-        };
+        let start = admit(&mut state, &mut received, &read.key);
         let _ = observe(&mut state, Some(old));
         assert!(state.current_firmware_starting());
         let _ = state.apply_firmware_started(
             &start.key,
             &start.route,
-            start.flight,
+            start.request,
             Err(FirmwareStartFailure::Refused(FirmwareUpdateRefusal::Busy)),
         );
         assert!(!state.current_firmware_starting());
@@ -816,15 +947,13 @@ pub(crate) mod tests {
     fn a_completed_job_stays_with_its_device_when_another_device_reuses_the_route() {
         let (mut state, mut received) = state();
         let read = ready(&mut state, &mut received);
-        let _ = state.start_firmware_update(&read.key, target());
-        let completed = FirmwareUpdate {
-            source: None,
-            events: Vec::new(),
-            id: 7,
-            route: read.route.clone(),
-            target: target(),
-            phase: FirmwareUpdatePhase::Succeeded,
-        };
+        let start = admit(&mut state, &mut received, &read.key);
+        let completed = job(
+            start.request,
+            7,
+            &read.route,
+            FirmwareUpdatePhase::Succeeded,
+        );
         let _ = observe(&mut state, Some(completed.clone()));
         let mut replacement = direct_inventory([1, 2, 3, 4]);
         replacement.paired[0].battery = state.current_record().unwrap().battery.clone();
@@ -847,21 +976,15 @@ pub(crate) mod tests {
             "same-agent reconnect keeps the old physical binding"
         );
         let replacement = ready(&mut state, &mut received);
-        assert!(
-            !state
-                .start_firmware_update(&replacement.key, target())
-                .is_empty()
-        );
+        let start = admit(&mut state, &mut received, &replacement.key);
         let _ = observe(
             &mut state,
-            Some(FirmwareUpdate {
-                source: None,
-                events: Vec::new(),
-                id: 8,
-                route: read.route,
-                target: target(),
-                phase: FirmwareUpdatePhase::Preparing,
-            }),
+            Some(job(
+                start.request,
+                8,
+                &read.route,
+                FirmwareUpdatePhase::Preparing,
+            )),
         );
         assert_eq!(
             state.current_firmware_update().unwrap().id,
@@ -874,17 +997,15 @@ pub(crate) mod tests {
     fn a_new_agent_run_resets_the_job_namespace_and_old_read_flights() {
         let (mut state, mut received) = state();
         let read = ready(&mut state, &mut received);
-        let _ = state.start_firmware_update(&read.key, target());
+        let start = admit(&mut state, &mut received, &read.key);
         let _ = observe(
             &mut state,
-            Some(FirmwareUpdate {
-                source: None,
-                events: Vec::new(),
-                id: 1,
-                route: read.route.clone(),
-                target: target(),
-                phase: FirmwareUpdatePhase::Preparing,
-            }),
+            Some(job(
+                start.request,
+                1,
+                &read.route,
+                FirmwareUpdatePhase::Preparing,
+            )),
         );
         assert!(state.current_firmware_update().is_some());
         let _ = state.firmware_reconnected(identity(2));
@@ -895,17 +1016,15 @@ pub(crate) mod tests {
                 .is_empty()
         );
         let _ = ready(&mut state, &mut received);
-        let _ = state.start_firmware_update(&read.key, target());
+        let start = admit(&mut state, &mut received, &read.key);
         let _ = observe(
             &mut state,
-            Some(FirmwareUpdate {
-                source: None,
-                events: Vec::new(),
-                id: 1,
-                route: read.route,
-                target: target(),
-                phase: FirmwareUpdatePhase::Preparing,
-            }),
+            Some(job(
+                start.request,
+                1,
+                &read.route,
+                FirmwareUpdatePhase::Preparing,
+            )),
         );
         assert!(
             state.current_firmware_update().is_some(),
@@ -917,17 +1036,15 @@ pub(crate) mod tests {
     fn restart_keeps_the_device_after_normal_inventory_miss_grace() {
         let (mut state, mut received) = state();
         let read = ready(&mut state, &mut received);
-        let _ = state.start_firmware_update(&read.key, target());
+        let start = admit(&mut state, &mut received, &read.key);
         let _ = observe(
             &mut state,
-            Some(FirmwareUpdate {
-                source: None,
-                events: Vec::new(),
-                id: 9,
-                route: read.route.clone(),
-                target: target(),
-                phase: FirmwareUpdatePhase::Restarting,
-            }),
+            Some(job(
+                start.request,
+                9,
+                &read.route,
+                FirmwareUpdatePhase::Restarting,
+            )),
         );
         let resolver = AssetResolver::new();
         for _ in 0..5 {
@@ -945,14 +1062,7 @@ pub(crate) mod tests {
             FirmwareUpdatePhase::Failed(openlogi_core::hid::FirmwareUpdateFailure::NotActivated);
         let _ = observe(
             &mut state,
-            Some(FirmwareUpdate {
-                source: None,
-                events: Vec::new(),
-                id: 9,
-                route: read.route.clone(),
-                target: target(),
-                phase: failed.clone(),
-            }),
+            Some(job(start.request, 9, &read.route, failed.clone())),
         );
         for _ in 0..5 {
             let _ = state.refresh_inventories(&[], &[], &resolver, &[]);

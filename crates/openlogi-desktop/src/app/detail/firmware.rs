@@ -441,7 +441,9 @@ fn failure_text(error: &FirmwareUpdateFailure) -> SharedString {
 
 fn start_failure_text(error: &FirmwareStartFailure) -> SharedString {
     match error {
-        FirmwareStartFailure::Unavailable => tr!("firmware.agent_unavailable"),
+        FirmwareStartFailure::NotSent | FirmwareStartFailure::Unavailable => {
+            tr!("firmware.agent_unavailable")
+        }
         FirmwareStartFailure::Refused(FirmwareUpdateRefusal::Busy) => {
             tr!("firmware.another_update")
         }
@@ -557,6 +559,7 @@ mod tests {
                 .map(|percent| FirmwareUpdatePhase::Transferring { percent }),
         );
         FirmwareUpdate {
+            request: openlogi_core::hid::FirmwareRequest(1),
             source: Some(FirmwareUpdateSource {
                 device_name: "MX Master 4".into(),
                 firmware_line: "RBM27".into(),

@@ -118,6 +118,31 @@ pub struct FirmwareUpdate {
     pub events: Vec<FirmwareUpdateEvent>,
     /// Approved package provenance retained with the job.
     pub source: Option<FirmwareUpdateSource>,
+    /// The admission request that started this job.
+    pub request: FirmwareRequest,
+}
+
+/// Names one firmware admission request.
+///
+/// The requester chooses it and the agent stores it in the job that request
+/// starts, so a client recognizes its own job even when the admission reply
+/// is lost. A route cannot do this: it names a connection slot, which another
+/// physical device or another client's request can reuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FirmwareRequest(pub u64);
+
+impl FirmwareRequest {
+    /// A fresh request identity, unpredictable across processes and distinct
+    /// within one.
+    #[must_use]
+    pub fn generate() -> Self {
+        use std::hash::{BuildHasher, RandomState};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static ISSUED: AtomicU64 = AtomicU64::new(0);
+        // `RandomState` keys come from the OS once per thread and advance per
+        // construction; the counter keeps two calls from hashing equal input.
+        Self(RandomState::new().hash_one(ISSUED.fetch_add(1, Ordering::Relaxed)))
+    }
 }
 
 /// Device family and package location selected by the agent's approved catalog.
@@ -277,5 +302,12 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn generated_requests_are_distinct() {
+        let issued: std::collections::HashSet<_> =
+            (0..1000).map(|_| FirmwareRequest::generate()).collect();
+        assert_eq!(issued.len(), 1000);
     }
 }

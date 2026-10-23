@@ -1234,6 +1234,7 @@ impl Agent for MockAgent {
         self,
         _: Context,
         route: DeviceRoute,
+        request: openlogi_core::hid::FirmwareRequest,
     ) -> Result<(), openlogi_core::hid::FirmwareUpdateRefusal> {
         use openlogi_core::hid::{
             FirmwareUpdate, FirmwareUpdatePhase, FirmwareUpdateRefusal, FirmwareVersion,
@@ -1262,6 +1263,7 @@ impl Agent for MockAgent {
                     .map(Into::into),
                 events: Vec::new(),
                 id,
+                request,
                 route,
                 target: FirmwareVersion {
                     number: 27,
