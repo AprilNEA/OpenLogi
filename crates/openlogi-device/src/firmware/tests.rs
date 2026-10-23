@@ -25,7 +25,6 @@ use std::sync::{
 enum Fault {
     #[default]
     None,
-    Staged,
     WrongModel,
     WrongUnit,
     EarlyComplete,
@@ -44,6 +43,22 @@ enum Fault {
     NoActiveApplication,
 }
 
+/// What an earlier, interrupted run left for the target bank, as the status
+/// bytes after the entity.
+#[derive(Clone, Copy)]
+struct Leftover {
+    status: [u8; 5],
+    /// `startDfu` continues this state instead of restarting at block zero.
+    start_resumes: bool,
+}
+
+const LEFTOVER_BLOCK_0: [u8; 5] = [0x02, 0, 0, 0, 0];
+const LEFTOVER_MID_BLOCK_0: [u8; 5] = [0x06, 0, 0, 0, 2];
+const LEFTOVER_MIDDLE_BLOCK: [u8; 5] = [0x02, 0, 7, 0, 0];
+const LEFTOVER_COMPLETE: [u8; 5] = [0x04, 0, 0, 0, 0];
+const LEFTOVER_APPLY_PENDING: [u8; 5] = [0x05, 0, 0, 0, 0];
+const LEFTOVER_ABORTED: [u8; 5] = [0x07, 0, 0, 0, 0];
+
 #[derive(Default)]
 struct Hardware {
     applied: bool,
@@ -51,6 +66,7 @@ struct Hardware {
     packet_attempts: usize,
     start_count: usize,
     started: bool,
+    leftover: Option<Leftover>,
     battery: Option<u8>,
     running_version: Option<(u8, u8)>,
     active_entity: Option<u8>,
@@ -108,6 +124,13 @@ impl Hardware {
         if self.fault == Fault::StartNotAccepted {
             return None;
         }
+        let resumed = self.leftover.filter(|leftover| leftover.start_resumes);
+        if resumed.is_none() {
+            // A restart discards whatever an earlier run transferred.
+            self.leftover = None;
+            self.packets = 0;
+            self.sent_bytes.clear();
+        }
         self.started = true;
         self.target_entity = Some(entity);
         if matches!(self.fault, Fault::DropStartReply | Fault::StartWrongEntity) {
@@ -115,7 +138,10 @@ impl Hardware {
         }
         let mut payload = [0; 16];
         payload[0] = entity;
-        payload[1] = 2;
+        match resumed {
+            Some(leftover) => payload[1..6].copy_from_slice(&leftover.status),
+            None => payload[1] = 2,
+        }
         Some(payload)
     }
 
@@ -161,14 +187,10 @@ impl Hardware {
                     payload[1] = 6;
                     payload[2..6]
                         .copy_from_slice(&u32::try_from(self.packets).unwrap().to_be_bytes());
+                } else if let Some(leftover) = self.leftover {
+                    payload[1..6].copy_from_slice(&leftover.status);
                 } else {
-                    payload[1] = if self.started {
-                        2
-                    } else if self.fault == Fault::Staged {
-                        5
-                    } else {
-                        1
-                    };
+                    payload[1] = if self.started { 2 } else { 1 };
                 }
                 if self.started && self.fault == Fault::StartWrongEntity {
                     payload[0] = 3 - request[4];
@@ -326,7 +348,7 @@ async fn reads_offer_transfers_exact_inactive_payload_and_verifies_activation() 
 }
 
 #[tokio::test]
-async fn preflight_refuses_low_battery_wrong_model_and_unknown_staged_image_without_starting() {
+async fn preflight_refuses_low_battery_and_wrong_model_without_starting() {
     for state in [
         Hardware {
             battery: Some(29),
@@ -334,10 +356,6 @@ async fn preflight_refuses_low_battery_wrong_model_and_unknown_staged_image_with
         },
         Hardware {
             fault: Fault::WrongModel,
-            ..Hardware::default()
-        },
-        Hardware {
-            fault: Fault::Staged,
             ..Hardware::default()
         },
     ] {
@@ -605,5 +623,149 @@ async fn devices_without_a_readable_firmware_table_are_unsupported_not_unreachab
                 feature_hex: 0x0003
             })
         ));
+    }
+}
+
+fn leftover(status: [u8; 5], start_resumes: bool) -> Hardware {
+    Hardware {
+        leftover: Some(Leftover {
+            status,
+            start_resumes,
+        }),
+        ..Hardware::default()
+    }
+}
+
+async fn update(
+    shared: &SharedChannel,
+) -> Result<PendingFirmwareActivation, FirmwareUpdateFailure> {
+    let target = update_target_on(shared).await.unwrap().unwrap();
+    prepare_update_on(shared, target, &package())
+        .await?
+        .install(|_| {}, || false)
+        .await
+}
+
+#[tokio::test]
+async fn an_interrupted_transfer_restarts_from_the_first_block_and_sends_every_packet() {
+    for state in [
+        leftover(LEFTOVER_BLOCK_0, false),
+        // Indistinguishable from a restart, and every packet is still sent.
+        leftover(LEFTOVER_BLOCK_0, true),
+        leftover(LEFTOVER_MID_BLOCK_0, false),
+        leftover(LEFTOVER_MIDDLE_BLOCK, false),
+        leftover(LEFTOVER_COMPLETE, false),
+        leftover(LEFTOVER_APPLY_PENDING, false),
+        leftover(LEFTOVER_ABORTED, false),
+    ] {
+        let status = state.leftover.unwrap().status;
+        let (shared, hardware) = hardware(state).await;
+        let target = update_target_on(&shared).await.unwrap().unwrap();
+        let prepared = prepare_update_on(&shared, target, &package())
+            .await
+            .unwrap_or_else(|error| panic!("{status:?} must not block a retry: {error:?}"));
+        assert_eq!(hardware.lock().unwrap().start_count, 0);
+        let pending = prepared.install(|_| {}, || false).await.unwrap();
+        pending.verify_on(&shared).await.unwrap();
+        let state = hardware.lock().unwrap();
+        assert_eq!(state.start_count, 1, "{status:?}");
+        assert_eq!(state.packets, 4, "{status:?}");
+        assert_eq!(
+            state.sent_bytes,
+            package().images[0].blocks[0],
+            "{status:?}"
+        );
+        assert!(state.applied, "{status:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_device_that_resumes_an_earlier_transfer_is_never_applied() {
+    for status in [
+        LEFTOVER_MID_BLOCK_0,
+        LEFTOVER_MIDDLE_BLOCK,
+        LEFTOVER_COMPLETE,
+        LEFTOVER_APPLY_PENDING,
+    ] {
+        let (shared, hardware) = hardware(leftover(status, true)).await;
+        let result = update(&shared).await;
+        assert!(
+            matches!(&result, Err(FirmwareUpdateFailure::Protocol(message)) if message.contains("earlier transfer")),
+            "{status:?}: {result:?}"
+        );
+        let state = hardware.lock().unwrap();
+        assert_eq!(state.start_count, 1);
+        assert_eq!(state.packet_attempts, 0, "{status:?}");
+        assert!(!state.applied, "{status:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_unconfirmed_restart_fails_closed_and_the_next_attempt_restarts() {
+    let mut state = leftover(LEFTOVER_MIDDLE_BLOCK, false);
+    state.fault = Fault::DropStartReply;
+    let (shared, hardware) = hardware(state).await;
+    assert!(matches!(
+        update(&shared).await,
+        Err(FirmwareUpdateFailure::Protocol(_))
+    ));
+    {
+        let state = hardware.lock().unwrap();
+        assert_eq!(
+            state.start_count, 1,
+            "a lost restart is never re-sent blindly"
+        );
+        assert_eq!(state.packet_attempts, 0);
+        assert!(!state.applied);
+    }
+    hardware.lock().unwrap().fault = Fault::None;
+    update(&shared)
+        .await
+        .unwrap()
+        .verify_on(&shared)
+        .await
+        .unwrap();
+    let state = hardware.lock().unwrap();
+    assert_eq!(state.start_count, 2);
+    assert_eq!(state.sent_bytes, package().images[0].blocks[0]);
+    assert!(state.applied);
+}
+
+/// Stops a run once it publishes `percent`, then retries on the same device.
+#[tokio::test]
+async fn a_retry_after_an_interrupted_run_transfers_everything_again() {
+    for percent in [0, 50, 100] {
+        let (shared, hardware) = hardware(Hardware::default()).await;
+        let target = update_target_on(&shared).await.unwrap().unwrap();
+        let stopped = AtomicBool::new(false);
+        let interrupted = prepare_update_on(&shared, target, &package())
+            .await
+            .unwrap()
+            .install(
+                |phase| {
+                    if phase == (FirmwareUpdatePhase::Transferring { percent }) {
+                        stopped.store(true, Ordering::SeqCst);
+                    }
+                },
+                || stopped.load(Ordering::SeqCst),
+            )
+            .await;
+        interrupted.unwrap_err();
+        assert!(!hardware.lock().unwrap().applied);
+
+        update(&shared)
+            .await
+            .unwrap()
+            .verify_on(&shared)
+            .await
+            .unwrap();
+        let state = hardware.lock().unwrap();
+        assert_eq!(state.start_count, 2, "after {percent}%");
+        assert_eq!(
+            state.sent_bytes,
+            package().images[0].blocks[0],
+            "after {percent}%"
+        );
+        assert!(state.applied, "after {percent}%");
     }
 }
