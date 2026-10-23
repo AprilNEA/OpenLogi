@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, Bounds, Context, Div, Entity, Hsla, InteractiveElement,
-    IntoElement, MouseMoveEvent, ParentElement, Pixels, Point, Render, Size,
+    IntoElement, MouseMoveEvent, ParentElement, Pixels, Point, Render, SharedString, Size,
     StatefulInteractiveElement as _, Styled, Subscription, Task, Window,
     WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions, div, ease_out_quint, point,
-    prelude::FluentBuilder as _, px, svg,
+    prelude::FluentBuilder as _, px, rems, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
@@ -45,8 +45,11 @@ const CANCEL_GLYPH: Hsla = neutral(0.82, 1.0);
 /// How long a slot must stay hovered before its tooltip appears, so sweeping
 /// across the ring does not flash labels.
 const TOOLTIP_DELAY: Duration = Duration::from_millis(100);
-const TOOLTIP_HEIGHT: f32 = 26.0;
 const TOOLTIP_GAP: f32 = 10.0;
+const TOOLTIP_PADDING_X: f32 = 14.0;
+const TOOLTIP_PADDING_Y: f32 = 5.0;
+const TOOLTIP_PANEL_INSET: f32 = 4.0;
+const TOOLTIP_MIN_WIDTH: f32 = 64.0;
 const SLOT_ENTER_MS: u64 = 340;
 
 const fn neutral(lightness: f32, alpha: f32) -> Hsla {
@@ -254,7 +257,7 @@ impl RingView {
     }
 
     /// The fixed 360×360 ring. Both placements anchor this same element.
-    fn panel(&self, cx: &mut Context<Self>) -> Div {
+    fn panel(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let session_id = self.invocation.session_id;
         let center_commands = self.commands.clone();
         let tooltip = self
@@ -273,23 +276,9 @@ impl RingView {
                     presentation.label.clone()
                 };
                 let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
-                // Approximate the pill from its text: GPUI cannot measure before
-                // layout, so keep it wide enough for the longest translated label
-                // and clamp it inside the panel either way.
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "label lengths are far below f32's exact integer range"
-                )]
-                let width = ((label.chars().count() as f32) * 7.5 + 28.0).clamp(64.0, 220.0);
-                let anchor = left + SLOT_SIZE / 2.0;
-                let above = top - TOOLTIP_HEIGHT - TOOLTIP_GAP;
-                let tip_top = if above >= 4.0 {
-                    above
-                } else {
-                    top + SLOT_SIZE + TOOLTIP_GAP
-                };
-                let tip_left = (anchor - width / 2.0).clamp(4.0, WINDOW_SIZE - width - 4.0);
-                Some((tip_left, tip_top, width, label))
+                let (text_width, line_height) = tooltip_text_metrics(window, &label);
+                let geom = tooltip_geometry(left, top, text_width, line_height, WINDOW_SIZE);
+                Some((geom, label))
             });
         let slots = ActionRingSlot::ALL
             .into_iter()
@@ -337,23 +326,24 @@ impl RingView {
                         session::dismiss_from_window(cx, window, session_id);
                     }),
             )
-            .when_some(tooltip, |ring, (left, top, width, label)| {
+            .when_some(tooltip, |ring, (geom, label)| {
                 ring.child(
                     div()
                         .absolute()
-                        .left(px(left))
-                        .top(px(top))
-                        .w(px(width))
-                        .h(px(TOOLTIP_HEIGHT))
+                        .left(px(geom.left))
+                        .top(px(geom.top))
+                        .w(px(geom.width))
+                        .h(px(geom.height))
                         .flex()
                         .items_center()
                         .justify_center()
+                        .px(px(TOOLTIP_PADDING_X))
                         .rounded_full()
                         .bg(TOOLTIP_BG)
                         .text_color(TOOLTIP_TEXT)
                         .text_sm()
                         .shadow_md()
-                        .child(label),
+                        .child(div().w(px(geom.text_width)).truncate().child(label)),
                 )
             })
     }
@@ -373,7 +363,7 @@ impl Render for RingView {
                 .absolute()
                 .left(origin.x)
                 .top(origin.y)
-                .child(self.panel(cx))
+                .child(self.panel(window, cx))
         });
 
         div()
@@ -435,6 +425,61 @@ fn panel_origin(
         size,
         Bounds::new(Point::default(), viewport),
     ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TooltipGeometry {
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+    pub text_width: f32,
+}
+
+pub(crate) fn tooltip_geometry(
+    slot_left: f32,
+    slot_top: f32,
+    measured_text_width: f32,
+    line_height: f32,
+    panel_size: f32,
+) -> TooltipGeometry {
+    let max_pill_width = panel_size - 2.0 * TOOLTIP_PANEL_INSET;
+    let natural_width = measured_text_width + 2.0 * TOOLTIP_PADDING_X;
+    let width = natural_width.clamp(TOOLTIP_MIN_WIDTH, max_pill_width);
+    let height = line_height + 2.0 * TOOLTIP_PADDING_Y;
+    let anchor = slot_left + SLOT_SIZE / 2.0;
+    let above = slot_top - height - TOOLTIP_GAP;
+    let top = if above >= TOOLTIP_PANEL_INSET {
+        above
+    } else {
+        slot_top + SLOT_SIZE + TOOLTIP_GAP
+    };
+    let left = (anchor - width / 2.0).clamp(
+        TOOLTIP_PANEL_INSET,
+        panel_size - width - TOOLTIP_PANEL_INSET,
+    );
+    let text_width = width - 2.0 * TOOLTIP_PADDING_X;
+    TooltipGeometry {
+        left,
+        top,
+        width,
+        height,
+        text_width,
+    }
+}
+
+fn tooltip_text_metrics(window: &Window, label: &str) -> (f32, f32) {
+    let mut style = window.text_style();
+    style.font_size = rems(0.875).into();
+    let font_size = style.font_size.to_pixels(window.rem_size());
+    let run = style.to_run(label.len());
+    let shaped =
+        window
+            .text_system()
+            .shape_line(SharedString::from(label), font_size, &[run], None);
+    let text_width: f32 = shaped.width().into();
+    let line_height: f32 = style.line_height_in_pixels(window.rem_size()).into();
+    (text_width, line_height)
 }
 
 pub(crate) fn clamp_window_origin(
@@ -688,5 +733,90 @@ mod tests {
             clamp_window_origin(desired, Size::new(px(400.0), px(400.0)), display),
             desired
         );
+    }
+
+    #[test]
+    fn a_long_tooltip_label_is_capped_inside_the_panel() {
+        let (left, top) = ActionRingSlot::Right.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let geom = tooltip_geometry(left, top, 500.0, 16.0, WINDOW_SIZE);
+        assert_eq!(geom.width, WINDOW_SIZE - 2.0 * TOOLTIP_PANEL_INSET);
+        assert!(geom.left + geom.width <= WINDOW_SIZE - TOOLTIP_PANEL_INSET);
+        assert!(geom.text_width < 500.0);
+    }
+
+    #[test]
+    fn a_top_slot_tooltip_flips_below_when_it_would_clip() {
+        let (left, top) = ActionRingSlot::Top.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let geom = tooltip_geometry(left, top, 40.0, 16.0, WINDOW_SIZE);
+        assert!(geom.top >= top + SLOT_SIZE + TOOLTIP_GAP - 0.01);
+    }
+
+    #[test]
+    fn side_slot_tooltips_stay_horizontally_inside_the_panel() {
+        let (left, top) = ActionRingSlot::Left.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let geom = tooltip_geometry(left, top, 200.0, 16.0, WINDOW_SIZE);
+        assert!(geom.left >= TOOLTIP_PANEL_INSET);
+        assert!(geom.left + geom.width <= WINDOW_SIZE - TOOLTIP_PANEL_INSET);
+        let (right_left, right_top) =
+            ActionRingSlot::Right.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let right = tooltip_geometry(right_left, right_top, 200.0, 16.0, WINDOW_SIZE);
+        assert!(right.left >= TOOLTIP_PANEL_INSET);
+        assert!(right.left + right.width <= WINDOW_SIZE - TOOLTIP_PANEL_INSET);
+    }
+
+    fn ring_window(cx: &mut TestAppContext) -> WindowHandle<RingView> {
+        let live = Arc::new(ClickAwaySession::new());
+        let (commands, _) = mpsc::unbounded_channel();
+        let pointer = cx.new(|_| RingPointer::default());
+        cx.add_window(|window, cx| {
+            RingView::new(
+                invocation(),
+                commands,
+                &live,
+                Placement::Window,
+                pointer,
+                window,
+                cx,
+            )
+        })
+    }
+
+    #[gpui::test]
+    fn a_long_cjk_tooltip_label_is_measured_and_truncated_inside_the_panel(
+        cx: &mut TestAppContext,
+    ) {
+        let window = ring_window(cx);
+        let label = "日本語のカスタムアクションラベル".repeat(4);
+        let (measured, line_height) = window
+            .update(cx, |_, window, _| tooltip_text_metrics(window, &label))
+            .unwrap();
+        assert!(measured > 0.0, "the text system measured the CJK label");
+        let (left, top) = ActionRingSlot::Left.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let geom = tooltip_geometry(left, top, measured, line_height, WINDOW_SIZE);
+        assert!(
+            geom.text_width < measured,
+            "a label wider than the panel gets a narrower, ellipsized text box"
+        );
+        assert!(geom.left >= TOOLTIP_PANEL_INSET);
+        assert!(geom.left + geom.width <= WINDOW_SIZE - TOOLTIP_PANEL_INSET);
+    }
+
+    #[gpui::test]
+    fn a_larger_rem_grows_the_measured_tooltip_text(cx: &mut TestAppContext) {
+        let window = ring_window(cx);
+        let default_width = window
+            .update(cx, |_, window, _| tooltip_text_metrics(window, "Copy").0)
+            .unwrap();
+        let (large_width, large_line_height) = window
+            .update(cx, |_, window, _| {
+                window.set_rem_size(px(24.0));
+                tooltip_text_metrics(window, "Copy")
+            })
+            .unwrap();
+        assert!(large_width > default_width);
+        let (left, top) = ActionRingSlot::Right.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let default_geom = tooltip_geometry(left, top, default_width, 16.0, WINDOW_SIZE);
+        let large_geom = tooltip_geometry(left, top, large_width, large_line_height, WINDOW_SIZE);
+        assert!(large_geom.width >= default_geom.width);
     }
 }
