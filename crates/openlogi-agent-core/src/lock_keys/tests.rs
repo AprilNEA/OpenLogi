@@ -144,14 +144,21 @@ async fn an_announced_change_shows_only_while_the_user_wants_the_indicator() {
     assert_eq!(shown.language.as_deref(), Some("fr"));
 }
 
-#[cfg(not(target_os = "windows"))]
 #[tokio::test(start_paused = true)]
-async fn a_key_this_platform_gives_no_indicator_is_not_announced() {
+async fn a_key_is_announced_only_where_the_platform_indicates_it() {
     let indicator = LockKeyIndicator::default();
     let num_lock = LockKeyChange {
         key: LockKey::NumLock,
         engaged: true,
     };
-    assert!(!indicator.announce(num_lock, &AppSettings::default()));
-    assert_eq!(indicator.published.borrow().shown, None);
+    // macOS gives Num Lock no indicator; Windows and Linux do.
+    let indicated = LockKey::NumLock.is_indicated_here();
+    assert_eq!(
+        indicator.announce(num_lock, &AppSettings::default()),
+        indicated
+    );
+    assert_eq!(
+        indicator.published.borrow().shown,
+        indicated.then_some(num_lock)
+    );
 }

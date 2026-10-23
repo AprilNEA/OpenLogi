@@ -529,6 +529,16 @@ async fn advance_moves_test_time_and_refuses_demo_time() {
         .expect("test time moves");
     assert_ne!(agent.current().await.snapshot.foreground, before);
 
+    let error = agent
+        .apply(Command::Advance(Duration::MAX), &AppSettings::default())
+        .await
+        .expect_err("test time cannot pass its range");
+    assert!(error.contains("range"), "{error}");
+    assert_eq!(
+        agent.state.lock().await.clock.elapsed(),
+        FOREGROUND_SWITCH_PERIOD
+    );
+
     let demo = MockAgent::new(demo_state());
     let error = demo
         .apply(

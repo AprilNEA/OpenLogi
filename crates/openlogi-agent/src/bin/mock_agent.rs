@@ -305,7 +305,7 @@ impl MockClock {
     }
 
     /// Move frozen test time forward. Demo time follows the wall clock and
-    /// cannot be moved.
+    /// cannot be moved, and a move past the clock's range leaves it as it is.
     fn advance(&mut self, duration: Duration) -> Result<(), String> {
         let Self::Test(elapsed) = self else {
             return Err(
@@ -313,7 +313,9 @@ impl MockClock {
                     .to_owned(),
             );
         };
-        *elapsed += duration;
+        *elapsed = elapsed
+            .checked_add(duration)
+            .ok_or_else(|| "test time would pass the clock's range".to_owned())?;
         Ok(())
     }
 }
