@@ -208,7 +208,9 @@ Common device fields are:
   differs from unit to unit (one MX Master 4 reports `4071..=6768` with a
   default of `5089`), so the agent clamps the value into the range the device
   reports, then writes it when the device connects; absent leaves the device's
-  own force, and the agent never writes one
+  own force, and the agent never writes one. The desktop app sets it with the
+  Press force slider on the Actions Ring tab, which saves the force the device
+  reads back
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or

@@ -173,6 +173,7 @@ impl AppState {
         }
         for key in &reconnected {
             self.pointer_speed_reconnected(key);
+            self.force_sensing_reconnected(key);
         }
         let present: HashSet<_> = self
             .devices

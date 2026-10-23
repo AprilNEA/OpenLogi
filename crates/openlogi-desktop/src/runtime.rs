@@ -257,6 +257,10 @@ impl Runtime {
     }
 
     /// One update from the agent.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per agent update, each handing it to its AppState owner"
+    )]
     fn on_agent_update(&mut self, update: ipc::GuiUpdate, cx: &AsyncApp) {
         match update {
             ipc::GuiUpdate::Snapshot(snapshot) => {
@@ -319,6 +323,11 @@ impl Runtime {
             ipc::GuiUpdate::PointerSpeedWritten { key, result } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| state.apply_pointer_speed_written(&key, result));
+                });
+            }
+            ipc::GuiUpdate::ForceSensingWritten { key, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_force_sensing_written(&key, result));
                 });
             }
             ipc::GuiUpdate::BacklightWritten {

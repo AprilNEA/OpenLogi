@@ -21,6 +21,9 @@ pub(super) struct PointerState {
     /// The mice whose last pointer-speed write the mouse refused or the agent
     /// could not deliver.
     pub(super) refused_pointer_speeds: HashSet<DeviceKey>,
+    /// The devices whose last press-force write the device refused or the
+    /// agent could not deliver.
+    pub(super) refused_force_sensing: HashSet<DeviceKey>,
 }
 
 impl Default for PointerState {
@@ -32,6 +35,7 @@ impl Default for PointerState {
             pending_dpi_writes: HashMap::new(),
             next_dpi_write: 0,
             refused_pointer_speeds: HashSet::new(),
+            refused_force_sensing: HashSet::new(),
         }
     }
 }

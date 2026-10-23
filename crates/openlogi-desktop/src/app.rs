@@ -370,6 +370,7 @@ impl AppView {
             StateEvent::SmartShiftChanged(_)
             | StateEvent::ReportRateChanged(_)
             | StateEvent::PointerSpeedChanged(_)
+            | StateEvent::ForceSensingChanged(_)
             | StateEvent::DeviceRemovalFailed { .. }
             | StateEvent::StalePairingRemovalFailed { .. }
             | StateEvent::CameraPermissionChanged
