@@ -34,20 +34,64 @@ struct Start {
     route: DeviceRoute,
     /// Sent with the admission; the agent stores it in the job it starts.
     request: FirmwareRequest,
-    result: Result<(), FirmwareStartFailure>,
+    admission: Admission,
+}
+
+/// Where this GUI's update request stands with the agent.
+enum Admission {
+    /// Sent; the agent has not answered yet.
+    Pending,
+    /// The agent admitted the request as job `job` of its current run.
+    Admitted { job: u64 },
+    /// No job was admitted, or the answer never arrived.
+    Failed(FirmwareStartFailure),
 }
 
 impl Start {
     /// Whether the agent may have admitted this request: it is awaiting an
-    /// answer, or its answer was lost in transit.
+    /// answer, admitted it, or its answer was lost in transit.
     fn may_have_started(&self) -> bool {
-        matches!(self.result, Ok(()) | Err(FirmwareStartFailure::Unavailable))
+        matches!(
+            self.admission,
+            Admission::Pending
+                | Admission::Admitted { .. }
+                | Admission::Failed(FirmwareStartFailure::Unavailable)
+        )
+    }
+
+    /// Whether the request still holds this GUI's firmware actions: it is
+    /// awaiting the agent's answer or its job's first snapshot.
+    fn in_flight(&self) -> bool {
+        matches!(
+            self.admission,
+            Admission::Pending | Admission::Admitted { .. }
+        )
+    }
+
+    fn failure(&self) -> Option<&FirmwareStartFailure> {
+        match &self.admission {
+            Admission::Failed(failure) => Some(failure),
+            Admission::Pending | Admission::Admitted { .. } => None,
+        }
     }
 
     /// Whether `job` is the one this request started. A route alone never
     /// decides this: another device or another client can reuse it.
     fn started(&self, job: &FirmwareUpdate) -> bool {
         self.may_have_started() && job.request == self.request && job.route == self.route
+    }
+
+    /// Whether `job`, another request's, ends this admission's wait. The
+    /// snapshot carries only the latest job, so once a later job replaces
+    /// the admitted one, its snapshot can never arrive. A failed admission's
+    /// message is superseded by any other job. One still awaiting its answer
+    /// stays pending: the snapshot may predate it.
+    fn superseded_by(&self, job: &FirmwareUpdate) -> bool {
+        match self.admission {
+            Admission::Pending => false,
+            Admission::Admitted { job: admitted } => job.id > admitted,
+            Admission::Failed(_) => true,
+        }
     }
 }
 
@@ -178,11 +222,7 @@ impl AppState {
             .observed
             .as_ref()
             .is_some_and(|job| !job.update.phase.is_finished())
-            || self
-                .firmware
-                .start
-                .as_ref()
-                .is_some_and(|start| start.result.is_ok())
+            || self.firmware.start.as_ref().is_some_and(Start::in_flight)
     }
 
     /// Whether the selected device is awaiting a new job snapshot.
@@ -190,7 +230,7 @@ impl AppState {
         self.firmware
             .start
             .as_ref()
-            .is_some_and(|start| self.is_current_device(&start.key) && start.result.is_ok())
+            .is_some_and(|start| self.is_current_device(&start.key) && start.in_flight())
     }
 
     /// The selected physical device's latest observed update.
@@ -215,9 +255,7 @@ impl AppState {
             .filter(|start| {
                 self.is_current_device(&start.key) && record.route.as_ref() == Some(&start.route)
             })?
-            .result
-            .as_ref()
-            .err()
+            .failure()
     }
 
     /// Retry the selected device's status when no update owns the transport.
@@ -287,7 +325,7 @@ impl AppState {
             key: key.clone(),
             route: route.clone(),
             request,
-            result: Ok(()),
+            admission: Admission::Pending,
         });
         if !self.send_ipc(StartFirmwareUpdate {
             key: key.clone(),
@@ -295,7 +333,7 @@ impl AppState {
             request,
         }) && let Some(start) = &mut self.firmware.start
         {
-            start.result = Err(FirmwareStartFailure::NotSent);
+            start.admission = Admission::Failed(FirmwareStartFailure::NotSent);
         }
         StateEvent::FirmwareChanged.into()
     }
@@ -306,7 +344,7 @@ impl AppState {
         key: &DeviceKey,
         route: &DeviceRoute,
         request: FirmwareRequest,
-        result: Result<(), FirmwareStartFailure>,
+        result: Result<u64, FirmwareStartFailure>,
     ) -> StateEvents {
         let Some(start) =
             self.firmware.start.as_mut().filter(|start| {
@@ -323,7 +361,10 @@ impl AppState {
                     | FirmwareUpdateRefusal::Unreadable
             ))
         );
-        start.result = result;
+        start.admission = match result {
+            Ok(job) => Admission::Admitted { job },
+            Err(failure) => Admission::Failed(failure),
+        };
         if refresh {
             self.firmware.invalidate(key);
             self.load_current_firmware();
@@ -359,16 +400,13 @@ impl AppState {
                 })
         });
         if let Some(job) = &update {
-            // The admission's own job now carries its progress. Another
-            // request's job supersedes an admission that already failed: the
-            // snapshot holds only the latest job, so a lost-reply admission
-            // that was admitted earlier can no longer be seen. One still
-            // awaiting its answer stays pending.
+            // The admission's own job now carries its progress; a later
+            // job ends a wait that can no longer be answered.
             if self
                 .firmware
                 .start
                 .as_ref()
-                .is_some_and(|start| start.started(job) || start.result.is_err())
+                .is_some_and(|start| start.started(job) || start.superseded_by(job))
             {
                 self.firmware.start = None;
             }
@@ -599,7 +637,7 @@ pub(crate) mod tests {
     fn same_agent_reconnect_before_first_snapshot_preserves_progress_and_history() {
         for (before_reconnect, after_reconnect) in [
             (None, None),
-            (Some(Ok(())), None),
+            (Some(Ok(42)), None),
             (Some(Err(FirmwareStartFailure::Unavailable)), None),
             (None, Some(Err(FirmwareStartFailure::Unavailable))),
         ] {
@@ -719,7 +757,7 @@ pub(crate) mod tests {
         let _ = state.firmware_reconnected(identity(2));
         assert!(
             state
-                .apply_firmware_started(&start.key, &start.route, start.request, Ok(()))
+                .apply_firmware_started(&start.key, &start.route, start.request, Ok(42))
                 .is_empty()
         );
         let _ = observe(
@@ -756,6 +794,60 @@ pub(crate) mod tests {
             )),
         );
         assert!(state.current_firmware_update().is_none());
+    }
+
+    #[test]
+    fn a_later_job_releases_an_admitted_start_whose_snapshot_was_missed() {
+        let (mut state, mut received) = state();
+        let read = ready(&mut state, &mut received);
+        let start = admit(&mut state, &mut received, &read.key);
+        let _ = state.apply_firmware_started(&start.key, &start.route, start.request, Ok(5));
+        assert!(state.current_firmware_starting());
+        // Job 5 ran and finished while this GUI was away; another client's
+        // job 6 replaced it in the snapshot.
+        let _ = state.firmware_reconnected(identity(1));
+        let _ = observe(
+            &mut state,
+            Some(job(FOREIGN, 6, &read.route, FirmwareUpdatePhase::Preparing)),
+        );
+        assert!(state.firmware.start.is_none());
+        assert!(!state.current_firmware_starting());
+        assert!(state.current_firmware_update().is_none());
+        assert!(
+            state.firmware_busy(),
+            "the other client's active job blocks"
+        );
+        let _ = observe(
+            &mut state,
+            Some(job(FOREIGN, 6, &read.route, FirmwareUpdatePhase::Succeeded)),
+        );
+        assert!(
+            !state.firmware_busy(),
+            "nothing stays held once it finishes"
+        );
+        let _ = ready(&mut state, &mut received);
+        let _ = admit(&mut state, &mut received, &read.key);
+    }
+
+    #[test]
+    fn an_older_job_does_not_release_an_admitted_start() {
+        let (mut state, mut received) = state();
+        let read = ready(&mut state, &mut received);
+        let start = admit(&mut state, &mut received, &read.key);
+        let _ = state.apply_firmware_started(&start.key, &start.route, start.request, Ok(5));
+        let _ = observe(
+            &mut state,
+            Some(job(FOREIGN, 4, &read.route, FirmwareUpdatePhase::Succeeded)),
+        );
+        assert!(state.current_firmware_starting());
+        let ours = job(
+            start.request,
+            5,
+            &read.route,
+            FirmwareUpdatePhase::Preparing,
+        );
+        let _ = observe(&mut state, Some(ours.clone()));
+        assert_eq!(state.current_firmware_update(), Some(&ours));
     }
 
     #[test]

@@ -1237,9 +1237,9 @@ impl Agent for MockAgent {
         _: Context,
         route: DeviceRoute,
         request: openlogi_core::hid::FirmwareRequest,
-    ) -> Result<(), openlogi_core::hid::FirmwareUpdateRefusal> {
+    ) -> Result<u64, openlogi_core::hid::FirmwareUpdateRefusal> {
         use openlogi_core::hid::{FirmwareUpdate, FirmwareUpdatePhase, FirmwareUpdateRefusal};
-        {
+        let id = {
             let mut state = self.state.lock().await;
             if state
                 .firmware_update
@@ -1268,7 +1268,8 @@ impl Agent for MockAgent {
                 phase: FirmwareUpdatePhase::Downloading,
             };
             openlogi_agent_core::firmware::record_progress(&mut state.firmware_update, update);
-        }
+            id
+        };
         tokio::spawn(async move {
             for phase in [
                 FirmwareUpdatePhase::Preparing,
@@ -1302,7 +1303,7 @@ impl Agent for MockAgent {
                 }
             }
         });
-        Ok(())
+        Ok(id)
     }
 
     async fn read_pointer_speed(

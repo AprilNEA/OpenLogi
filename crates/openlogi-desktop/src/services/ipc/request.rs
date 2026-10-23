@@ -650,7 +650,7 @@ pub struct StartFirmwareUpdate {
 }
 
 impl Request for StartFirmwareUpdate {
-    type Answer = Result<(), openlogi_core::hid::FirmwareUpdateRefusal>;
+    type Answer = Result<u64, openlogi_core::hid::FirmwareUpdateRefusal>;
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client

@@ -1282,7 +1282,8 @@ fn firmware_status_failures_and_refusals() {
 #[test]
 fn firmware_jobs_and_admission_requests() {
     use openlogi_core::hid::{
-        FirmwareRequest, FirmwareUpdate, FirmwareUpdateEvent, FirmwareUpdatePhase, FirmwareVersion,
+        FirmwareRequest, FirmwareUpdate, FirmwareUpdateEvent, FirmwareUpdatePhase,
+        FirmwareUpdateRefusal, FirmwareVersion,
     };
     let route = DeviceRoute::Bolt {
         receiver_uid: "R".into(),
@@ -1341,4 +1342,6 @@ fn firmware_jobs_and_admission_requests() {
         },
         "30000152012a",
     );
+    // The admission reply names the admitted job.
+    assert_wire(&Ok::<u64, FirmwareUpdateRefusal>(7), "0007");
 }
