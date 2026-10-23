@@ -10,7 +10,11 @@
 
 use std::sync::Arc;
 
-use hidpp::{channel::HidppChannel, device::Device, feature::CreatableFeature};
+use hidpp::{
+    channel::HidppChannel,
+    device::Device,
+    feature::{CreatableFeature, disable_keys::DisableKeysFeature},
+};
 
 use crate::backend::HidBackend;
 use crate::channel::route::{DeviceRoute, open_route_channel};
@@ -126,6 +130,9 @@ pub(crate) async fn open_feature_with_version<F: CreatableFeature + 'static>(
         .await
         .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, F::ID))?
         .ok_or(WriteError::FeatureUnsupported { feature_hex: F::ID })?;
+    if F::ID == DisableKeysFeature::ID && !info.typ.is_end_user_configurable() {
+        return Err(WriteError::FeatureUnsupported { feature_hex: F::ID });
+    }
     Ok((device.add_feature::<F>(info.index), info.version))
 }
 

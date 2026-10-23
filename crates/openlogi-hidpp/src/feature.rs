@@ -419,9 +419,21 @@ bitflags::bitflags! {
     }
 }
 
+impl FeatureType {
+    /// Whether end-user configuration software may manage a feature with these flags.
+    ///
+    /// The HID++ feature-type contract requires host software to ignore hidden
+    /// and engineering features. Other flags, including obsolete, do not make a
+    /// feature unavailable to existing user software.
+    #[must_use]
+    pub const fn is_end_user_configurable(self) -> bool {
+        !self.contains(Self::HIDDEN) && !self.contains(Self::ENGINEERING)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DecodeEvent, InboundReport, inbound_report};
+    use super::{DecodeEvent, FeatureType, InboundReport, inbound_report};
     use crate::{
         channel::{HidppMessage, RequestSwIds, SwIdPolicy},
         nibble::U4,
@@ -431,6 +443,14 @@ mod tests {
     /// The default policy's set: id `1` only.
     fn own() -> RequestSwIds {
         SwIdPolicy::default().request_sw_ids()
+    }
+
+    #[test]
+    fn hidden_and_engineering_features_are_not_end_user_configurable() {
+        for typ in [FeatureType::HIDDEN, FeatureType::ENGINEERING] {
+            assert!(!typ.is_end_user_configurable(), "{typ:?}");
+        }
+        assert!(FeatureType::OBSOLETE.is_end_user_configurable());
     }
 
     fn header(device_index: u8, feature_index: u8, function: u8, software: u8) -> MessageHeader {

@@ -11,6 +11,7 @@ use hidpp::{
         battery_voltage::BatteryVoltageFeature,
         device_information::{DeviceInformationFeature, DeviceTransport},
         device_type_and_name::DeviceTypeAndNameFeature,
+        disable_keys::DisableKeysFeature,
         gestures2::Gestures2Feature,
         multi_platform::{MultiPlatformCapabilities, MultiPlatformFeature},
         reprog_controls::{ReprogControlsFeature, control_ids},
@@ -305,7 +306,11 @@ pub(super) async fn probe_features(
                 subscriptions.register_device(slot, event_features);
             }
             probe_haptic_controls = ids.contains(&0x19b0) || ids.contains(&0x19c0);
-            Some(Capabilities::from_feature_ids(&ids))
+            let mut capabilities = Capabilities::from_feature_ids(&ids);
+            capabilities.disable_keys = features.iter().any(|feature| {
+                feature.id == DisableKeysFeature::ID && feature.typ.is_end_user_configurable()
+            });
+            Some(capabilities)
         }
         Ok(None) => None,
         Err(e) => {
@@ -537,9 +542,9 @@ async fn probe_extra_capabilities(
 #[cfg(test)]
 mod tests {
     use hidpp::feature::{
-        CreatableFeature as _, adc_measurement::AdcMeasurementFeature,
+        CreatableFeature as _, FeatureType, adc_measurement::AdcMeasurementFeature,
         battery_status::BatteryStatusFeature, battery_voltage::BatteryVoltageFeature,
-        unified_battery::UnifiedBatteryFeature,
+        disable_keys::DisableKeysFeature, unified_battery::UnifiedBatteryFeature,
     };
 
     use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
@@ -582,6 +587,48 @@ mod tests {
         });
         let channel = scripted_channel(raw).await;
         probe_features(&channel, 0xff, None).await.0
+    }
+
+    /// Probe a `DisableKeys` descriptor with the supplied feature-table flags.
+    async fn disable_keys_probe(typ: FeatureType) -> ProbedFeatures {
+        let features = [
+            (0x0001_u16, FeatureType::empty()),
+            (DisableKeysFeature::ID, typ),
+        ];
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => response[4] = 1,
+                (1, 0) => response[4] = u8::try_from(features.len()).unwrap(),
+                (1, 1) => {
+                    let (id, typ) = features[usize::from(request[4]) - 1];
+                    response[4..6].copy_from_slice(&id.to_be_bytes());
+                    response[6] = typ.bits();
+                }
+                _ => panic!("unexpected DisableKeys descriptor request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        probe_features(&channel, 0xff, None).await.0
+    }
+
+    #[tokio::test]
+    async fn disable_keys_capability_ignores_hidden_and_engineering_descriptors() {
+        for (typ, supported) in [
+            (FeatureType::empty(), true),
+            (FeatureType::HIDDEN, false),
+            (FeatureType::ENGINEERING, false),
+        ] {
+            let capabilities = disable_keys_probe(typ)
+                .await
+                .capabilities
+                .expect("feature table responded");
+            assert_eq!(capabilities.disable_keys, supported, "{typ:?}");
+        }
     }
 
     #[tokio::test]
