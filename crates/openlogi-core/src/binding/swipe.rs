@@ -28,11 +28,17 @@ pub const GESTURE_REPEAT_DISTANCE: i32 = 12 * GESTURE_SWIPE_THRESHOLD;
 /// How long the pointer must rest mid-hold to end a stroke: the next swipe then
 /// starts fresh and may repeat the last direction at the normal threshold.
 pub const GESTURE_REARM_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
-/// Minimum time a gesture button must be held before its travel can commit to a
-/// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
-/// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
+/// Time a gesture button must be held before travel short of
+/// [`GESTURE_FLICK_DISTANCE`] can commit to a swipe. Distinguishes a deliberate
+/// hold-and-swipe from a quick click whose cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
 /// pad and the OS-hook Back/Forward buttons).
 pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
+/// Dominant-axis travel that commits a swipe before [`GESTURE_HOLD_FOR_SWIPE`]
+/// has elapsed. A wrist flick on an MX Master 3S covers 800-1000 raw-XY units
+/// and is over, button released, in about 165 ms — its last report lands
+/// inside the hold gate, so without this it reads as a click. Travel this far
+/// is a swipe, not a click whose cursor drifted.
+pub const GESTURE_FLICK_DISTANCE: i32 = 6 * GESTURE_SWIPE_THRESHOLD;
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
 /// directional swipe, the instant it commits — or `None` while it's still too
@@ -85,7 +91,8 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 /// OS-hook Middle/Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
 /// button's hold accumulates travel; the instant the dominant axis commits a
 /// direction — after the button has been held [`GESTURE_HOLD_FOR_SWIPE`], so a
-/// quick click whose cursor drifted doesn't count — [`Self::accumulate`] returns
+/// quick click whose cursor drifted doesn't count, or sooner once travel reaches
+/// [`GESTURE_FLICK_DISTANCE`] — [`Self::accumulate`] returns
 /// that direction exactly once, like Logitech Options+. A hold that never
 /// commits is a plain click, reported by [`Self::end`].
 ///
@@ -141,8 +148,9 @@ impl SwipeAccumulator {
     }
 
     /// Feed a pointer-move / raw-XY delta into the current hold. Returns
-    /// `Some(direction)` the instant travel commits (only after the hold passes
-    /// [`GESTURE_HOLD_FOR_SWIPE`]), then restarts travel so the same hold can
+    /// `Some(direction)` the instant travel commits (once the hold passes
+    /// [`GESTURE_HOLD_FOR_SWIPE`], or earlier for travel of
+    /// [`GESTURE_FLICK_DISTANCE`]), then restarts travel so the same hold can
     /// commit again; `None` while still too short or not holding.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
         self.held_since?;
@@ -210,11 +218,15 @@ impl SwipeAccumulator {
                     self.dy = 0;
                     return Some(dir);
                 }
-                // Before any reversal this is the same stroke: drop it from
-                // the reversal travel below.
-                if reversal(dir, self.dx, self.dy) == 0 {
-                    return None;
-                }
+            }
+            // Before any reversal, a report that does not head back is the
+            // same stroke, already counted in `repeat`/`repeat_cross`: drop it
+            // from the reversal travel below. That includes a sideways-dominant
+            // report — a wrist flick ends in an arc, and summing only its
+            // sideways share (the along share is clamped away below) would
+            // commit a perpendicular swipe with no straightness check.
+            if a >= 0 && reversal(dir, self.dx, self.dy) == 0 {
+                return None;
             }
         }
         self.dx = self.dx.saturating_add(dx);
@@ -232,7 +244,11 @@ impl SwipeAccumulator {
         let held_long_enough = self
             .held_since
             .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
-        if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
+        let flick =
+            self.dx.saturating_abs().max(self.dy.saturating_abs()) >= GESTURE_FLICK_DISTANCE;
+        if (held_long_enough || flick)
+            && let Some(dir) = detect_swipe(self.dx, self.dy)
+        {
             self.fired = true;
             self.last = Some(dir);
             self.repeat = 0;
@@ -624,6 +640,23 @@ mod tests {
     }
 
     #[test]
+    fn accumulator_arc_at_the_end_of_a_swipe_does_not_turn() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        // A leftward wrist flick whose tail curves upward: once Left commits,
+        // the arc's sideways-dominant reports must not add up to Up.
+        assert_eq!(acc.accumulate(-40, -5), None);
+        assert_eq!(acc.accumulate(-60, -10), Some(GestureDirection::Left));
+        for (dx, dy) in [(-50, -20), (-20, -30), (-10, -30), (-5, -25), (0, -20)] {
+            assert_eq!(acc.accumulate(dx, dy), None, "arc report ({dx}, {dy})");
+        }
+        // Heading back still reverses at the normal threshold.
+        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
+    }
+
+    #[test]
     fn accumulator_net_zero_wobble_after_a_swipe_never_fires() {
         let mut acc = SwipeAccumulator::default();
         acc.begin();
@@ -646,6 +679,59 @@ mod tests {
         // Once held long enough, the next delta commits.
         acc.backdate_hold_for_test();
         assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0).is_some());
+    }
+
+    #[test]
+    fn accumulator_commits_a_fast_flick_inside_the_hold_gate() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin(); // held_since = now: the hold gate is not satisfied
+        // Drift short of the flick distance is still held back...
+        assert_eq!(acc.accumulate(GESTURE_FLICK_DISTANCE - 1, 0), None);
+        // ...but a straight flick that reaches it commits at once.
+        assert_eq!(acc.accumulate(1, 0), Some(GestureDirection::Right));
+        assert!(!acc.end(), "a flick is not a click");
+
+        // A diagonal flick is still not a swipe.
+        acc.begin();
+        assert_eq!(
+            acc.accumulate(GESTURE_FLICK_DISTANCE, GESTURE_FLICK_DISTANCE),
+            None
+        );
+        assert!(acc.end(), "an uncommitted hold is a click");
+    }
+
+    #[test]
+    fn accumulator_recorded_mx_master_3s_wrist_flick_is_a_swipe() {
+        // Raw-XY reports of a rightward wrist flick on an MX Master 3S,
+        // released 165 ms after the press: every report lands inside
+        // the hold gate, which used to turn it into a click.
+        let reports = [
+            (23, 2),
+            (14, 1),
+            (26, 1),
+            (32, 0),
+            (35, 0),
+            (46, 0),
+            (93, 0),
+            (60, -1),
+            (63, -1),
+            (56, -2),
+            (71, -4),
+            (61, -3),
+            (63, -4),
+            (72, -4),
+            (62, -4),
+            (63, -4),
+            (54, -4),
+        ];
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        let fired: Vec<_> = reports
+            .into_iter()
+            .filter_map(|(dx, dy)| acc.accumulate(dx, dy))
+            .collect();
+        assert_eq!(fired, [GestureDirection::Right]);
+        assert!(!acc.end(), "the flick is not a click");
     }
 
     #[test]
