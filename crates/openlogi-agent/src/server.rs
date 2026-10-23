@@ -567,24 +567,24 @@ struct Sessions {
     paused: bool,
 }
 
-/// Run `arm` unless the user has set the marked device's haptic engine
-/// since `mark` was taken.
+/// Run `write` unless the user has set the marked device's haptic engine
+/// since `mark` was taken: `Ok(None)` then, with nothing written. Arming and
+/// restoring both go through this one rule.
 ///
 /// The caller runs this inside the device's transport turn, the boundary the
 /// user's haptics writes also pass. Each is counted in `choices` before it is
 /// numbered (`SharedHandles::set_haptics`, and a reload's write), so either
-/// the count has moved here and arming writes nothing, or the user's write
+/// the count has moved here and the ring writes nothing, or the user's write
 /// waits for this turn and lands after it.
-async fn arm_unless_chosen<T, E>(
+async fn unless_user_chose<T, E>(
     choices: &HapticChoices,
     mark: &ChoiceMark,
-    arm: impl Future<Output = Result<Option<T>, E>>,
+    write: impl Future<Output = Result<T, E>>,
 ) -> Result<Option<T>, E> {
     if !choices.unchanged_since(mark) {
-        debug!("the user set the haptic engine since the ring opened — not arming it");
         return Ok(None);
     }
-    arm.await
+    write.await.map(Some)
 }
 
 /// What the trigger and the IPC handlers have reported about ring sessions
@@ -663,8 +663,9 @@ async fn arm_firmware_haptics(
             shared
                 .device(route)
                 .run(HidppOperation::PlayHaptic, |c| async move {
-                    arm_unless_chosen(choices, mark, openlogi_hid::ensure_haptics_armed_on(&c))
+                    unless_user_chose(choices, mark, openlogi_hid::ensure_haptics_armed_on(&c))
                         .await
+                        .map(Option::flatten)
                 }),
         )
         .await
@@ -732,31 +733,47 @@ enum RestoreAttempt {
 }
 
 /// Hand the engine that `restore` proves OpenLogi turned on back to off,
-/// within [`RESTORE_BUDGET`].
+/// within [`RESTORE_BUDGET`], unless the user has set it since the session
+/// that armed it opened (`mark`).
 async fn restore_firmware_haptics(
     shared: &SharedHandles,
     route: &DeviceRoute,
     restore: HapticRestore,
+    choices: &HapticChoices,
+    mark: &ChoiceMark,
 ) -> RestoreAttempt {
-    match tokio::time::timeout(
-        RESTORE_BUDGET,
-        shared
-            .device(route)
-            .run(HidppOperation::PlayHaptic, |c| async move {
-                openlogi_hid::restore_haptics_on(&c, restore).await
-            }),
+    restore_attempt(
+        tokio::time::timeout(
+            RESTORE_BUDGET,
+            shared
+                .device(route)
+                .run(HidppOperation::PlayHaptic, |c| async move {
+                    unless_user_chose(choices, mark, openlogi_hid::restore_haptics_on(&c, restore))
+                        .await
+                }),
+        )
+        .await,
     )
-    .await
-    {
-        Ok(Ok(HapticRestoreOutcome::Restored)) => {
+}
+
+/// What one restore attempt came to.
+fn restore_attempt(
+    result: Result<Result<Option<HapticRestoreOutcome>, WriteError>, tokio::time::error::Elapsed>,
+) -> RestoreAttempt {
+    match result {
+        Ok(Ok(None)) => {
+            debug!("the user set the haptic engine since arming — left as chosen");
+            RestoreAttempt::Settled
+        }
+        Ok(Ok(Some(HapticRestoreOutcome::Restored))) => {
             info!("firmware haptics turned back off after the Actions Ring session");
             RestoreAttempt::Settled
         }
-        Ok(Ok(HapticRestoreOutcome::Superseded)) => {
+        Ok(Ok(Some(HapticRestoreOutcome::Superseded))) => {
             debug!("firmware haptic configuration changed since arming — left as found");
             RestoreAttempt::Settled
         }
-        Ok(Ok(HapticRestoreOutcome::OtherDevice)) => {
+        Ok(Ok(Some(HapticRestoreOutcome::OtherDevice))) => {
             debug!("another device answers where haptics were armed — left as found");
             RestoreAttempt::Settled
         }
@@ -983,7 +1000,12 @@ impl RingHapticPlayer {
                         engine,
                         arm_firmware_haptics(&shared, &route, &worker_choices, &mark).await,
                     );
-                    ledger.opened(session, route, restore, Instant::now());
+                    ledger.opened(
+                        session,
+                        route,
+                        restore.map(|restore| (restore, mark)),
+                        Instant::now(),
+                    );
                 }
                 // Plays before closes: a session's last buzz is queued before
                 // its close, so it plays before the engine is handed back.
@@ -1014,7 +1036,15 @@ impl RingHapticPlayer {
                     ledger.leaving(Instant::now());
                 }
                 while let Some(owed) = ledger.take_due(Instant::now()) {
-                    if restore_firmware_haptics(&shared, &owed.route, owed.restore).await
+                    let (restore, mark) = &owed.restore;
+                    if restore_firmware_haptics(
+                        &shared,
+                        &owed.route,
+                        *restore,
+                        &worker_choices,
+                        mark,
+                    )
+                    .await
                         == RestoreAttempt::Unreached
                     {
                         ledger.retry(owed, Instant::now());
@@ -1062,7 +1092,7 @@ impl RingHapticPlayer {
     /// Report that the user set the haptic engine of the device on `route`,
     /// from the settings app or a changed `config.toml`: no ring session
     /// hands that engine back. Arming is kept from undoing the choice where
-    /// the write is numbered (see [`arm_unless_chosen`]).
+    /// the write is numbered (see [`unless_user_chose`]).
     pub fn user_chose_haptics(&self, route: DeviceRoute) {
         self.sessions().news.user_chose.push(route);
         let _ = self.closed.send(());
@@ -1181,7 +1211,7 @@ mod tests {
         };
         let mark = choices.mark(&mouse);
         let unchosen: Result<Option<u8>, ()> =
-            super::arm_unless_chosen(&choices, &mark, async { Ok(Some(7)) }).await;
+            super::unless_user_chose(&choices, &mark, async { Ok(7) }).await;
         assert_eq!(unchosen, Ok(Some(7)), "nothing chosen: arming runs");
 
         // The settings app writes the user's choice; no device answers here.
@@ -1189,11 +1219,55 @@ mod tests {
             .shared()
             .set_haptics(&mouse, config.haptics("a").expect("saved"))
             .await;
-        let chosen: Result<Option<u8>, ()> = super::arm_unless_chosen(&choices, &mark, async {
+        let chosen: Result<Option<u8>, ()> = super::unless_user_chose(&choices, &mark, async {
             panic!("arming must not run after the user's choice")
         })
         .await;
         assert_eq!(chosen, Ok(None));
+    }
+
+    /// A session borrowed the engine and owes it back. While it is open the
+    /// user saves the engine on, exactly as arming left it, through a config
+    /// reload. When the session ends, the restore must not turn it off.
+    #[tokio::test]
+    async fn a_saved_engine_choice_during_a_session_keeps_the_restore_off() {
+        let profile: openlogi_fixture::DeviceProfile =
+            serde_json::from_str(openlogi_fixture::CANONICAL_DEVICE_PROFILE_JSON)
+                .expect("canonical profile parses");
+        let mut orch = openlogi_agent_core::orchestrator::Orchestrator::new(
+            openlogi_core::config::Config::default(),
+            std::sync::Arc::new(openlogi_agent_core::observable::ObservableState::new(
+                "test".to_owned(),
+            )),
+        );
+        orch.refresh_inventory(&profile.inventories, &[], false);
+        let session = orch.action_ring_session(None).expect("the ring opens");
+        assert_eq!(session.haptic_engine, RingHaptics::Borrow);
+        let route = session.haptic_route.expect("the mouse gives feedback");
+        let choices = orch.shared().haptic_choices();
+        // What `begin_session` notes for the session.
+        let mark = choices.mark(&route);
+
+        let mut config = openlogi_core::config::Config::default();
+        config.set_haptics(
+            &session.device_key,
+            HapticSettings {
+                enabled: true,
+                power_save: false,
+                intensity: HapticIntensity::try_new(60).expect("in range"),
+            },
+        );
+        assert_eq!(orch.reload_config(config), [route]);
+
+        // The session closes; its restore runs in the device's turn.
+        let restored = super::unless_user_chose(&choices, &mark, async {
+            panic!("the restore must not turn the user's engine off")
+        })
+        .await;
+        assert_eq!(
+            super::restore_attempt(Ok(restored)),
+            super::RestoreAttempt::Settled
+        );
     }
 
     #[test]
