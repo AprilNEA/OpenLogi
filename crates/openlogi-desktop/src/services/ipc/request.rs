@@ -607,6 +607,62 @@ impl Request for ReadEasySwitchHosts {
     }
 }
 
+/// Read the running application firmware and supported official update.
+pub struct ReadFirmware {
+    pub route: DeviceRoute,
+    pub key: DeviceKey,
+    pub flight: u64,
+}
+
+impl Request for ReadFirmware {
+    type Answer = Result<openlogi_core::hid::FirmwareStatus, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .firmware_status(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::FirmwareRead {
+            key: self.key,
+            route: self.route,
+            flight: self.flight,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Ask the agent to admit an update; subsequent progress is observed state.
+pub struct StartFirmwareUpdate {
+    pub route: DeviceRoute,
+    pub key: DeviceKey,
+    pub flight: u64,
+}
+
+impl Request for StartFirmwareUpdate {
+    type Answer = Result<(), openlogi_core::hid::FirmwareUpdateRefusal>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .start_firmware_update(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        use crate::state::FirmwareStartFailure;
+        let result = outcome
+            .map_err(|_| FirmwareStartFailure::Unavailable)
+            .and_then(|result| result.map_err(FirmwareStartFailure::Refused));
+        let _ = updates.send(GuiUpdate::FirmwareStarted {
+            key: self.key,
+            route: self.route,
+            flight: self.flight,
+            result,
+        });
+    }
+}
+
 /// Read a keyboard's Fn-lock state; the answer goes back over `reply`.
 pub struct ReadFnLock {
     pub route: DeviceRoute,
@@ -966,6 +1022,8 @@ macro_rules! commands {
 }
 
 commands! {
+    ReadFirmware,
+    StartFirmwareUpdate,
     SetDpi,
     SetLighting,
     SetLight,

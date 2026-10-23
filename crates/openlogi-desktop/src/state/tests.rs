@@ -45,6 +45,10 @@ use super::{
     Load, Sources, StateEvent,
 };
 
+pub(crate) use super::firmware::tests::{
+    ready_current_state as firmware_current_state, ready_state as firmware_ready_state,
+};
+
 mod asset_targets;
 mod backlight;
 mod bindings;

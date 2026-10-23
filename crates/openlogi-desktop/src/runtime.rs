@@ -285,9 +285,36 @@ impl Runtime {
     )]
     fn on_agent_update(&mut self, update: ipc::GuiUpdate, cx: &AsyncApp) {
         match update {
+            ipc::GuiUpdate::Connected(identity) => {
+                cx.update(|cx| AppState::apply(cx, |state| state.firmware_reconnected(identity)));
+            }
+            ipc::GuiUpdate::FirmwareRead {
+                key,
+                route,
+                flight,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_firmware_read(&key, &route, flight, result)
+                    });
+                });
+            }
+            ipc::GuiUpdate::FirmwareStarted {
+                key,
+                route,
+                flight,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_firmware_started(&key, &route, flight, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::Snapshot(snapshot) => {
                 self.apply_snapshot(&snapshot, cx);
-                self.snapshot = Some(snapshot);
+                self.snapshot = Some(*snapshot);
             }
             ipc::GuiUpdate::Unreachable => {
                 cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));

@@ -340,6 +340,7 @@ impl AppView {
         };
         match event {
             StateEvent::AgentChanged
+            | StateEvent::FirmwareChanged
             | StateEvent::InventoryChanged
             | StateEvent::DeviceSelected(_) => true,
             StateEvent::ForegroundChanged => !on_home,

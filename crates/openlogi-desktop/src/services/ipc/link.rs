@@ -165,8 +165,16 @@ impl Link {
         if let Self::Down(down) = self {
             match effects.connect().await {
                 Ok(client) => {
+                    let identity = match client.identity(tarpc::context::current()).await {
+                        Ok(identity) => identity,
+                        Err(error) => {
+                            debug!(%error, "could not identify the connected agent");
+                            return None;
+                        }
+                    };
                     debug!("connected to agent IPC socket");
                     *self = Self::Up(Observer::state(client));
+                    let _ = updates.send(GuiUpdate::Connected(identity));
                 }
                 Err(error) => {
                     if let Some(notice) = down.connect_failed(&error) {
