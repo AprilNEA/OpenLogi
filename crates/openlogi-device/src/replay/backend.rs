@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use crate::backend::{BackendError, HidBackend, HotplugEvent, HotplugStream, NodeId, NodeInfo};
 
 use super::ReplayError;
-use super::barrier::{ReplayResponseBarrier, ResponseGates};
+use super::barrier::{ReplayResponseBarrier, ResponseGates, WriteCompletionGates};
 use super::channel::{
     CassetteState, ReplayCompletion, ReplayRawHidChannel, ReplayRawWriter, ReplayRawWriterHandle,
 };
@@ -134,6 +134,7 @@ struct ChannelRuntime {
     connection: ChannelConnection,
     cassette: Arc<CassetteState>,
     response_gates: Arc<ResponseGates>,
+    write_completion_gates: Arc<WriteCompletionGates>,
     written: Arc<Mutex<Vec<Vec<u8>>>>,
     lifetimes: Vec<ChannelLifetime>,
     open_count: usize,
@@ -427,6 +428,7 @@ fn build_channels(
                     connection: channel.connection,
                     cassette: CassetteState::new(cassette)?,
                     response_gates: Arc::new(ResponseGates::default()),
+                    write_completion_gates: Arc::new(WriteCompletionGates::default()),
                     written: Arc::new(Mutex::new(Vec::new())),
                     lifetimes: Vec::new(),
                     open_count: 0,
@@ -621,6 +623,7 @@ impl HidBackend for ReplayBackend {
                 Arc::clone(&channel.written),
                 Arc::clone(&connected),
                 Arc::clone(&channel.response_gates),
+                Arc::clone(&channel.write_completion_gates),
             );
             channel.lifetimes.push(ChannelLifetime {
                 connected: Arc::downgrade(&connected),

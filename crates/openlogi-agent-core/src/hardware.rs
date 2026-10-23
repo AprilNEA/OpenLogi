@@ -38,11 +38,13 @@ use crate::pointer_speed::SpeedTarget;
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
+mod disable_keys;
 mod light;
 mod rgb_control;
 mod write_order;
 
 pub use context::HardwareContext;
+pub(crate) use disable_keys::{write_disabled_keys_in_background, write_manual_disable_keys};
 pub(crate) use write_order::{WriteOrder, WriteTicket};
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
@@ -680,47 +682,6 @@ fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
             None
         }
     }
-}
-
-/// Re-apply a saved Disable Keys intent without making its retry newer than
-/// the user's pending or confirmed choice. The returned worker allows tests
-/// to await completion without a timing guess.
-pub(crate) fn write_disabled_keys_in_background(
-    op: DeviceOp,
-    ticket: WriteTicket<Option<DisableKeysMask>>,
-    desired: DisableKeysMask,
-) -> Option<std::thread::JoinHandle<()>> {
-    let index = op.route.device_index();
-    let turn = op.access.transport_turns.turn_for(&op.route);
-    op.spawn_leased_write(
-        "Disable Keys write",
-        None,
-        move |op| async move {
-            within_turn(
-                &ticket,
-                &turn,
-                || async {
-                    let shared = op.resolve()?;
-                    openlogi_hid::set_disable_keys_on(&shared, desired)
-                        .await
-                        .map(Some)
-                },
-                || async { Ok(None) },
-            )
-            .await
-        },
-        move |result| {
-            log_outcome(index, "Disable Keys write", result, |state| {
-                if let Some(state) = state {
-                    debug!(
-                        index,
-                        disabled = state.disabled.bits(),
-                        "disabled keys written"
-                    );
-                }
-            });
-        },
-    )
 }
 
 /// Spawn an OS thread that toggles SmartShift (free ↔ ratchet) on `op`'s

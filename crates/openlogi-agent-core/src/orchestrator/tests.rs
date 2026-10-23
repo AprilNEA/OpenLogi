@@ -32,6 +32,7 @@ mod camera;
 mod capture_plans;
 mod device_list;
 mod device_settings;
+mod disable_keys_native_write;
 mod disabled_keys;
 mod light_changes;
 mod light_reload;

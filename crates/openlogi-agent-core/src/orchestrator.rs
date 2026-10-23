@@ -411,26 +411,8 @@ impl SharedHandles {
                     refresh.request_settings_confirmation();
                 }
             });
-        let ticket = pending.ticket();
-        self.keyboard_device(route)
-            .run_in_turn(
-                HidppOperation::WriteDisableKeys,
-                &ticket,
-                |channel| async move {
-                    let state = openlogi_hid::set_disable_keys_on(&channel, desired).await?;
-                    if !pending.confirm() {
-                        return Err(WriteError::WriteSuperseded {
-                            operation: HidppOperation::WriteDisableKeys,
-                        });
-                    }
-                    Ok(state)
-                },
-                |_| async {
-                    Err(WriteError::WriteSuperseded {
-                        operation: HidppOperation::WriteDisableKeys,
-                    })
-                },
-            )
+        crate::hardware::write_manual_disable_keys(self.keyboard_device(route), pending, desired)?
+            .wait()
             .await
     }
 

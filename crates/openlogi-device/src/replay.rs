@@ -17,7 +17,7 @@ pub use backend::{
     ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReceiverLinkState,
     ReceiverSlot, ReceiverSlotState, ReplayBackend, ReplayChannel, ReplayNode, ReplayTopology,
 };
-pub use barrier::ReplayResponseBarrier;
+pub use barrier::{ReplayResponseBarrier, ReplayWriteBarrier};
 pub use channel::{
     ReplayChannelHandle, ReplayCompletion, ReplayMismatch, ReplayRawHidChannel, ReplayRawWriter,
     ReplayRawWriterHandle,

@@ -74,7 +74,7 @@ impl DisableKeysFeature {
     ) -> Result<DisableableKeys, Hidpp20Error> {
         let payload = self
             .endpoint
-            .call(2, [keys.bits(), 0, 0])
+            .call_echoed_write_through(2, [keys.bits(), 0, 0])
             .await?
             .extend_payload();
         Ok(DisableableKeys::from_bits_retain(payload[0]))
