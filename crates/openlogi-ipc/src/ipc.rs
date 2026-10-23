@@ -156,7 +156,8 @@ pub use succession::Identity;
 ///      appended for official device firmware updates, with job identity,
 ///      the requester's admission identity, timestamped activity history,
 ///      approved package provenance, and
-///      `HidppOperation::{ReadFirmware, WriteFirmware}` appended.
+///      `HidppOperation::{ReadFirmware, WriteFirmware}` and
+///      `WriteError::FirmwareUpdateInProgress` appended.
 pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the

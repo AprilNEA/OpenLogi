@@ -258,6 +258,10 @@ pub enum WriteError {
         /// Operation whose result must not be persisted by its caller.
         operation: HidppOperation,
     },
+    /// A firmware update owns the device connections; settings and reads
+    /// resume when it finishes.
+    #[error("a firmware update is installing; try again when it finishes")]
+    FirmwareUpdateInProgress,
 }
 
 /// HID++ operation being performed when a device write/read failed.

@@ -3,10 +3,16 @@
 //! Long-running HID++ sessions share pooled receiver channels under read leases.
 //! Pairing and coordinated host transitions announce their intent so those
 //! sessions stop, then wait for an exclusive write lease.
+//!
+//! A firmware update is exclusive too, but holds the receiver for minutes, not
+//! seconds. Ordinary I/O is refused while one waits or runs instead of
+//! queueing behind it, and inventory passes pause for its duration.
 
 use std::sync::Arc;
 
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, watch};
+use tokio::sync::{
+    Mutex, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, watch,
+};
 
 /// Coordinates exclusive access to the receiver HID node.
 #[derive(Clone)]
@@ -17,6 +23,9 @@ pub struct ReceiverAccess {
 struct ReceiverAccessInner {
     lease: Arc<RwLock<()>>,
     requests: watch::Sender<ReceiverRequestState>,
+    /// Held by one inventory enumeration pass, or by a firmware update for its
+    /// whole transaction.
+    inventory: Arc<Mutex<()>>,
 }
 
 /// Authoritative count of queued or active exclusive receiver requests.
@@ -71,10 +80,30 @@ pub struct SessionReceiverLease {
     _guard: OwnedRwLockReadGuard<()>,
 }
 
-/// Exclusive receiver lease held by a pairing or host-transition operation.
+/// Exclusive receiver lease held by a pairing, host-transition or firmware
+/// operation.
 pub struct ExclusiveReceiverLease {
     _guard: OwnedRwLockWriteGuard<()>,
     _request: ExclusiveRequest,
+    /// A firmware update also holds off inventory passes.
+    _inventory: Option<OwnedMutexGuard<()>>,
+}
+
+/// Held for one inventory enumeration pass; see
+/// [`ReceiverAccess::inventory_pass`].
+pub struct InventoryPass {
+    _guard: OwnedMutexGuard<()>,
+}
+
+/// Ordinary device I/O was refused because a firmware update is waiting for
+/// or holding the receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirmwareUpdateActive;
+
+impl From<FirmwareUpdateActive> for openlogi_core::hid::WriteError {
+    fn from(_: FirmwareUpdateActive) -> Self {
+        Self::FirmwareUpdateInProgress
+    }
 }
 
 impl Default for ReceiverAccess {
@@ -84,6 +113,7 @@ impl Default for ReceiverAccess {
             inner: Arc::new(ReceiverAccessInner {
                 lease: Arc::new(RwLock::new(())),
                 requests,
+                inventory: Arc::default(),
             }),
         }
     }
@@ -127,23 +157,52 @@ impl ReceiverAccess {
     /// Wait for shared access for a bounded device-I/O operation.
     ///
     /// Unlike long-running sessions, ordinary reads and writes must not be
-    /// dropped merely because an exclusive operation is queued. Tokio's fair
-    /// lock ordering makes them wait behind that operation instead.
-    pub async fn acquire_for_io(&self) -> SessionReceiverLease {
-        let guard = Arc::clone(&self.inner.lease).read_owned().await;
-        SessionReceiverLease { _guard: guard }
+    /// dropped merely because a pairing or host transition is queued. Tokio's
+    /// fair lock ordering makes them wait behind that operation instead.
+    ///
+    /// A firmware update holds the receiver for minutes, longer than any
+    /// requester waits for an answer. While one waits for or holds the
+    /// receiver, the request is refused at once instead of queueing behind it.
+    pub async fn acquire_for_io(&self) -> Result<SessionReceiverLease, FirmwareUpdateActive> {
+        let mut requests = self.inner.requests.subscribe();
+        tokio::select! {
+            biased;
+            _ = requests.wait_for(|state| state.firmware_update != 0) => Err(FirmwareUpdateActive),
+            guard = Arc::clone(&self.inner.lease).read_owned() => {
+                Ok(SessionReceiverLease { _guard: guard })
+            }
+        }
     }
 
     /// Request and acquire exclusive receiver access for `reason`.
     ///
     /// If the returned future is cancelled while waiting, the pairing request is
-    /// withdrawn automatically so capture can resume.
+    /// withdrawn automatically so capture can resume. A firmware update also
+    /// waits for an in-flight inventory pass and holds off later ones until the
+    /// lease is dropped, so inventory never talks to the device mid-transfer.
     pub async fn acquire_exclusive(&self, reason: ExclusiveAccessReason) -> ExclusiveReceiverLease {
         let request = ExclusiveRequest::new(self.inner.requests.clone(), reason);
         let guard = Arc::clone(&self.inner.lease).write_owned().await;
+        let inventory = match reason {
+            ExclusiveAccessReason::FirmwareUpdate => {
+                Some(Arc::clone(&self.inner.inventory).lock_owned().await)
+            }
+            ExclusiveAccessReason::Pairing | ExclusiveAccessReason::HostTransition => None,
+        };
         ExclusiveReceiverLease {
             _guard: guard,
             _request: request,
+            _inventory: inventory,
+        }
+    }
+
+    /// Wait to run one inventory enumeration pass.
+    ///
+    /// Passes are otherwise independent of receiver leases, so pairing and
+    /// capture keep their inventory. Only a firmware update holds them off.
+    pub async fn inventory_pass(&self) -> InventoryPass {
+        InventoryPass {
+            _guard: Arc::clone(&self.inner.inventory).lock_owned().await,
         }
     }
 
@@ -181,6 +240,8 @@ impl Drop for ExclusiveRequest {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[tokio::test]
@@ -315,8 +376,89 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(!waiting.is_finished());
         drop(transition);
-        waiting
+        assert!(
+            waiting
+                .await
+                .expect("bounded io must acquire its lease once the host transition releases")
+                .is_ok(),
+            "a host transition delays bounded io but never refuses it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_firmware_update_refuses_bounded_io_instead_of_queueing_it() {
+        let access = ReceiverAccess::default();
+        // Capture holds a session lease, so the firmware request is still
+        // waiting: bounded io is refused already, not queued behind it.
+        let capture = access.try_acquire_for_session().unwrap();
+        let firmware = tokio::spawn({
+            let access = access.clone();
+            async move {
+                access
+                    .acquire_exclusive(ExclusiveAccessReason::FirmwareUpdate)
+                    .await
+            }
+        });
+        let mut requests = access.subscribe_requests();
+        requests
+            .wait_for(|state| state.requested(ExclusiveAccessReason::FirmwareUpdate))
             .await
-            .expect("bounded io must acquire its lease once the host transition releases");
+            .unwrap();
+        let refused = tokio::time::timeout(Duration::from_millis(100), access.acquire_for_io())
+            .await
+            .expect("refused at once, not after the update");
+        assert!(matches!(refused, Err(FirmwareUpdateActive)));
+
+        drop(capture);
+        let lease = firmware.await.unwrap();
+        assert!(matches!(
+            access.acquire_for_io().await,
+            Err(FirmwareUpdateActive)
+        ));
+        drop(lease);
+        let _lease = access
+            .acquire_for_io()
+            .await
+            .expect("bounded io resumes once the update releases the receiver");
+    }
+
+    #[tokio::test]
+    async fn a_firmware_update_waits_for_an_inventory_pass_and_holds_off_the_next() {
+        let access = ReceiverAccess::default();
+        let pass = access.inventory_pass().await;
+        let firmware = tokio::spawn({
+            let access = access.clone();
+            async move {
+                access
+                    .acquire_exclusive(ExclusiveAccessReason::FirmwareUpdate)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !firmware.is_finished(),
+            "the in-flight pass finishes before the transfer"
+        );
+        drop(pass);
+        let lease = firmware.await.unwrap();
+        let next = tokio::spawn({
+            let access = access.clone();
+            async move { access.inventory_pass().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!next.is_finished(), "no pass runs during the update");
+        drop(lease);
+        let _pass = next.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pairing_keeps_inventory_running() {
+        let access = ReceiverAccess::default();
+        let _pairing = access
+            .acquire_exclusive(ExclusiveAccessReason::Pairing)
+            .await;
+        tokio::time::timeout(Duration::from_millis(100), access.inventory_pass())
+            .await
+            .expect("pairing does not pause inventory");
     }
 }
