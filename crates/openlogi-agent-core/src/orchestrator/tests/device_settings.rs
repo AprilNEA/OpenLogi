@@ -911,3 +911,22 @@ async fn a_haptics_read_waits_for_the_writes_before_it() {
         .expect("the read joins")
         .expect_err("no device here");
 }
+
+/// A reload that writes the user's changed haptics counts the choice before
+/// it numbers the write, as the settings app's own write does: an Actions
+/// Ring arming queued before then sees the choice and writes nothing.
+#[test]
+fn a_reload_counts_the_users_haptics_choice() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![haptic_device("a", 1, true)];
+    let route = orch.devices[0].route.clone().expect("a Bolt route");
+    let choices = orch.shared.haptic_choices();
+    let mark = choices.mark(&route);
+    let mut config = Config::default();
+    config.set_haptics("a", haptics(false, 60));
+    let _ = orch.reload_config(config);
+    assert!(
+        !choices.unchanged_since(&mark),
+        "the reload counted the user's choice"
+    );
+}

@@ -14,6 +14,7 @@ use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
+use openlogi_agent_core::haptic_choices::{ChoiceMark, HapticChoices};
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
@@ -550,6 +551,8 @@ pub struct RingHapticPlayer {
     /// an activation buzz queued just before must still play first, and a
     /// buzz that already played must not play again.
     closed: tokio::sync::watch::Sender<()>,
+    /// The user's haptic-engine choices, noted when a session opens.
+    choices: HapticChoices,
 }
 
 /// What the worker shares with the trigger, the IPC handlers, and the
@@ -562,42 +565,22 @@ struct Sessions {
     /// handing over to a replacement, and an enable made now could not be
     /// handed back.
     paused: bool,
-    /// How many times the user has set each device's haptic engine, by
-    /// route. A session notes the count when it opens; its arming writes
-    /// nothing once the count has moved (see [`arm_unless_chosen`]).
-    choices: std::collections::HashMap<String, u64>,
 }
 
-impl Sessions {
-    /// The user's choices on `route` so far, for [`arm_unless_chosen`].
-    fn choice_mark(&self, route: &DeviceRoute) -> u64 {
-        self.choices.get(&route.to_string()).copied().unwrap_or(0)
-    }
-
-    /// Count a choice the user made for `route`'s haptic engine.
-    fn chose(&mut self, route: &DeviceRoute) {
-        *self.choices.entry(route.to_string()).or_default() += 1;
-    }
-}
-
-/// Run `arm` unless the user has set `route`'s haptic engine since `mark`.
+/// Run `arm` unless the user has set the marked device's haptic engine
+/// since `mark` was taken.
 ///
 /// The caller runs this inside the device's transport turn, the boundary the
-/// user's haptics write also passes. The user's choice is counted before that
-/// write asks for its turn, so either the count has moved here and arming
-/// writes nothing, or the write waits for this turn and lands after it.
+/// user's haptics writes also pass. Each is counted in `choices` before it is
+/// numbered (`SharedHandles::set_haptics`, and a reload's write), so either
+/// the count has moved here and arming writes nothing, or the user's write
+/// waits for this turn and lands after it.
 async fn arm_unless_chosen<T, E>(
-    sessions: &std::sync::Mutex<Sessions>,
-    route: &DeviceRoute,
-    mark: u64,
+    choices: &HapticChoices,
+    mark: &ChoiceMark,
     arm: impl Future<Output = Result<Option<T>, E>>,
 ) -> Result<Option<T>, E> {
-    let chosen = sessions
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .choice_mark(route)
-        != mark;
-    if chosen {
+    if !choices.unchanged_since(mark) {
         debug!("the user set the haptic engine since the ring opened — not arming it");
         return Ok(None);
     }
@@ -611,8 +594,8 @@ async fn arm_unless_chosen<T, E>(
 struct SessionNews {
     /// The newest session that opened with haptic feedback, its device, how
     /// it treats the device's engine, and the user's choices on that device
-    /// when it opened ([`Sessions::choice_mark`]).
-    opened: Option<(u64, DeviceRoute, RingHaptics, u64)>,
+    /// when it opened.
+    opened: Option<(u64, DeviceRoute, RingHaptics, ChoiceMark)>,
     /// The newest session that closed.
     closed: Option<u64>,
     /// Devices whose haptic engine the user set since the worker last
@@ -666,8 +649,8 @@ const FINISH_BUDGET: Duration = PLAY_BUDGET.saturating_add(RESTORE_BUDGET);
 async fn arm_firmware_haptics(
     shared: &SharedHandles,
     route: &DeviceRoute,
-    sessions: &Arc<std::sync::Mutex<Sessions>>,
-    mark: u64,
+    choices: &HapticChoices,
+    mark: &ChoiceMark,
 ) -> Option<HapticRestore> {
     let budget = Budget::starting_at(Instant::now(), ARM_BUDGET);
     for attempt in 1..=2u8 {
@@ -680,13 +663,8 @@ async fn arm_firmware_haptics(
             shared
                 .device(route)
                 .run(HidppOperation::PlayHaptic, |c| async move {
-                    arm_unless_chosen(
-                        sessions,
-                        route,
-                        mark,
-                        openlogi_hid::ensure_haptics_armed_on(&c),
-                    )
-                    .await
+                    arm_unless_chosen(choices, mark, openlogi_hid::ensure_haptics_armed_on(&c))
+                        .await
                 }),
         )
         .await
@@ -959,6 +937,8 @@ impl RingHapticPlayer {
         let (closed, mut closed_rx) = tokio::sync::watch::channel(());
         let sessions = Arc::new(std::sync::Mutex::new(Sessions::default()));
         let worker_sessions = Arc::clone(&sessions);
+        let choices = shared.haptic_choices();
+        let worker_choices = choices.clone();
         tokio::spawn(async move {
             let mut breaker = HapticBreaker::default();
             let mut ledger = RestoreLedger::default();
@@ -1001,7 +981,7 @@ impl RingHapticPlayer {
                     breaker = HapticBreaker::default();
                     let restore = owed_restore(
                         engine,
-                        arm_firmware_haptics(&shared, &route, &worker_sessions, mark).await,
+                        arm_firmware_haptics(&shared, &route, &worker_choices, &mark).await,
                     );
                     ledger.opened(session, route, restore, Instant::now());
                 }
@@ -1049,6 +1029,7 @@ impl RingHapticPlayer {
             tx,
             sessions,
             closed,
+            choices,
         }
     }
 
@@ -1061,10 +1042,8 @@ impl RingHapticPlayer {
         let Some(route) = route else {
             return;
         };
-        let mut sessions = self.sessions();
-        let mark = sessions.choice_mark(&route);
-        sessions.news.opened = Some((session, route, engine, mark));
-        drop(sessions);
+        let mark = self.choices.mark(&route);
+        self.sessions().news.opened = Some((session, route, engine, mark));
         let _ = self.tx.send(None);
     }
 
@@ -1082,15 +1061,10 @@ impl RingHapticPlayer {
 
     /// Report that the user set the haptic engine of the device on `route`,
     /// from the settings app or a changed `config.toml`: no ring session
-    /// hands that engine back, and no session that opened before this arms
-    /// it. Call it before writing the user's settings, so the arming that
-    /// runs first sees the choice (see [`arm_unless_chosen`]).
+    /// hands that engine back. Arming is kept from undoing the choice where
+    /// the write is numbered (see [`arm_unless_chosen`]).
     pub fn user_chose_haptics(&self, route: DeviceRoute) {
-        {
-            let mut sessions = self.sessions();
-            sessions.chose(&route);
-            sessions.news.user_chose.push(route);
-        }
+        self.sessions().news.user_chose.push(route);
         let _ = self.closed.send(());
     }
 
@@ -1185,22 +1159,40 @@ mod tests {
     /// queued: the arming must not turn it back on.
     #[tokio::test]
     async fn arming_writes_nothing_once_the_user_set_the_engine() {
+        let orch = openlogi_agent_core::orchestrator::Orchestrator::new(
+            openlogi_core::config::Config::default(),
+            std::sync::Arc::new(openlogi_agent_core::observable::ObservableState::new(
+                "test".to_owned(),
+            )),
+        );
+        let mut config = openlogi_core::config::Config::default();
+        config.set_haptics(
+            "a",
+            HapticSettings {
+                enabled: false,
+                power_save: false,
+                intensity: HapticIntensity::try_new(60).expect("in range"),
+            },
+        );
+        let choices = orch.shared().haptic_choices();
         let mouse = openlogi_hid::DeviceRoute::Direct {
             vendor_id: 0x046d,
             product_id: 0xb042,
         };
-        let sessions = std::sync::Mutex::new(super::Sessions::default());
-        let mark = sessions.lock().expect("sessions").choice_mark(&mouse);
+        let mark = choices.mark(&mouse);
         let unchosen: Result<Option<u8>, ()> =
-            super::arm_unless_chosen(&sessions, &mouse, mark, async { Ok(Some(7)) }).await;
+            super::arm_unless_chosen(&choices, &mark, async { Ok(Some(7)) }).await;
         assert_eq!(unchosen, Ok(Some(7)), "nothing chosen: arming runs");
 
-        sessions.lock().expect("sessions").chose(&mouse);
-        let chosen: Result<Option<u8>, ()> =
-            super::arm_unless_chosen(&sessions, &mouse, mark, async {
-                panic!("arming must not run after the user's choice")
-            })
+        // The settings app writes the user's choice; no device answers here.
+        let _ = orch
+            .shared()
+            .set_haptics(&mouse, config.haptics("a").expect("saved"))
             .await;
+        let chosen: Result<Option<u8>, ()> = super::arm_unless_chosen(&choices, &mark, async {
+            panic!("arming must not run after the user's choice")
+        })
+        .await;
         assert_eq!(chosen, Ok(None));
     }
 

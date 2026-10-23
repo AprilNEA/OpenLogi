@@ -43,9 +43,10 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
+use crate::haptic_choices::HapticChoices;
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
-    show_precision_led, write_pointer_speed_in_background,
+    WriteTicket, show_precision_led, write_pointer_speed_in_background,
 };
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
@@ -168,6 +169,9 @@ pub struct SharedHandles {
     pointer_speeds: Arc<PointerSpeeds>,
     /// Orders every path's haptic-settings writes per device.
     haptics_order: WriteOrder,
+    /// The user's haptic-engine choices, counted before each of the user's
+    /// haptics writes is numbered in [`Self::haptics_order`].
+    haptic_choices: HapticChoices,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
@@ -288,7 +292,7 @@ impl SharedHandles {
         route: &DeviceRoute,
         settings: HapticSettings,
     ) -> Result<HapticSettings, WriteError> {
-        let ticket = self.haptics_order.request(route);
+        let ticket = self.user_haptics_write(route);
         self.device(route)
             .run_in_turn(
                 HidppOperation::WriteHaptics,
@@ -448,9 +452,24 @@ impl SharedHandles {
     fn write_haptics_in_background(&self, route: &DeviceRoute, settings: HapticSettings) {
         crate::hardware::write_haptics_in_background(
             self.device(route),
-            self.haptics_order.request(route),
+            self.user_haptics_write(route),
             settings,
         );
+    }
+
+    /// Number a write of the user's haptic settings to `route`, after
+    /// counting the user's choice: an Actions Ring arming that checks
+    /// [`Self::haptic_choices`] inside its transport turn then either sees
+    /// the choice or runs before this write, which lands last.
+    fn user_haptics_write(&self, route: &DeviceRoute) -> WriteTicket {
+        self.haptic_choices.chose(route);
+        self.haptics_order.request(route)
+    }
+
+    /// The user's haptic-engine choices, for the Actions Ring's arming.
+    #[must_use]
+    pub fn haptic_choices(&self) -> HapticChoices {
+        self.haptic_choices.clone()
     }
 
     /// [`Self::set_fn_lock`] without waiting, for the config-reload and
@@ -616,6 +635,7 @@ impl Orchestrator {
             report_rate_order: WriteOrder::default(),
             pointer_speeds: Arc::default(),
             haptics_order: WriteOrder::default(),
+            haptic_choices: HapticChoices::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
