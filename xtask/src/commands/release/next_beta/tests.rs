@@ -1,6 +1,7 @@
 use anyhow::Result;
+use xshell::{Shell, cmd};
 
-use super::{NextBeta, Repo, plan};
+use super::{NextBeta, Repo, next_beta, plan};
 
 fn tags(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
@@ -158,4 +159,161 @@ fn a_beta_number_past_the_msi_limit_is_refused() {
         error.contains("does not fit an MSI ProductVersion"),
         "{error}"
     );
+}
+
+/// A Git repository in a temporary directory, for what `next_beta` reads
+/// from Git, which `plan` cannot see.
+///
+/// Git runs without the user's and the system's configuration, so commit
+/// signing or a global hooks path on the machine cannot change it.
+struct Git {
+    sh: Shell,
+    _dir: tempfile::TempDir,
+}
+
+impl Git {
+    /// An empty repository on `master`.
+    fn init() -> Git {
+        let git = Git::at(tempfile::tempdir().unwrap(), "repo");
+        let sh = &git.sh;
+        cmd!(sh, "git init -q -b master").run().unwrap();
+        git
+    }
+
+    /// A shell in `dir/name`, with Git's configuration shut out.
+    fn at(dir: tempfile::TempDir, name: &str) -> Git {
+        let sh = Shell::new().unwrap();
+        let config = dir.path().join("gitconfig");
+        fs_err::write(&config, "").unwrap();
+        sh.set_var("GIT_CONFIG_GLOBAL", &config);
+        sh.set_var("GIT_CONFIG_NOSYSTEM", "1");
+        for key in ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"] {
+            sh.set_var(key, "xtask");
+        }
+        for key in ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"] {
+            sh.set_var(key, "xtask@example.invalid");
+        }
+        let path = dir.path().join(name);
+        fs_err::create_dir_all(&path).unwrap();
+        sh.change_dir(&path);
+        Git { sh, _dir: dir }
+    }
+
+    /// Write a root `Cargo.toml` with workspace version `version`.
+    fn write_version(&self, version: &str) {
+        let manifest = format!(
+            "[workspace]\nmembers = []\n\n[workspace.package]\nversion = \"{version}\"\nrust-version = \"1.85\"\n"
+        );
+        fs_err::write(self.sh.current_dir().join("Cargo.toml"), manifest).unwrap();
+    }
+
+    /// Commit workspace version `version` with message `message`, and return
+    /// the commit's SHA.
+    fn commit(&self, version: &str, message: &str) -> String {
+        self.write_version(version);
+        let sh = &self.sh;
+        cmd!(sh, "git add Cargo.toml").run().unwrap();
+        cmd!(sh, "git commit -q --allow-empty -m {message}")
+            .run()
+            .unwrap();
+        cmd!(sh, "git rev-parse HEAD").read().unwrap()
+    }
+
+    /// Commit the release PR's version `version` on a new branch `release`
+    /// off the current commit, then go back to `master`.
+    fn release_branch(&self, version: &str) {
+        let sh = &self.sh;
+        cmd!(sh, "git checkout -q -b release").run().unwrap();
+        self.commit(version, "chore: release");
+        cmd!(sh, "git checkout -q master").run().unwrap();
+    }
+
+    fn next_beta(&self, release_ref: &str) -> Result<(NextBeta, String)> {
+        next_beta(&self.sh, release_ref)
+    }
+}
+
+/// `master` two commits past `v0.8.17`, and a release PR preparing `0.8.18`
+/// on top. Also returns `master`'s SHA.
+fn two_past_v0_8_17() -> (Git, String) {
+    let git = Git::init();
+    git.commit("0.8.17", "chore: release v0.8.17");
+    let sh = &git.sh;
+    cmd!(sh, "git tag v0.8.17").run().unwrap();
+    git.commit("0.8.17", "feat: one");
+    let head = git.commit("0.8.17", "feat: two");
+    git.release_branch("0.8.18");
+    (git, head)
+}
+
+#[test]
+fn a_beta_is_read_from_the_head_commit() {
+    let (git, head) = two_past_v0_8_17();
+    let (next, commit) = git.next_beta("release").unwrap();
+    assert_eq!(next.tag.to_string(), "v0.8.18-beta.2");
+    assert_eq!(next.build.to_string(), "0.8.17.2");
+    assert_eq!(commit, head);
+}
+
+#[test]
+fn an_uncommitted_edit_does_not_change_the_beta() {
+    let (git, head) = two_past_v0_8_17();
+    git.write_version("0.8.18");
+    let (next, commit) = git.next_beta("release").unwrap();
+    assert_eq!(next.tag.to_string(), "v0.8.18-beta.2");
+    assert_eq!(commit, head);
+}
+
+#[test]
+fn an_uncommitted_edit_does_not_hide_a_committed_version_bump() {
+    let (git, _) = two_past_v0_8_17();
+    // `master` takes 0.8.18 without a `v0.8.18` tag, and the release PR moves
+    // on to 0.8.19. Putting 0.8.17 back only in the working tree does not
+    // make the commit a beta of 0.8.19.
+    git.commit("0.8.18", "chore: bump without a tag");
+    let sh = &git.sh;
+    cmd!(sh, "git branch -q -D release").run().unwrap();
+    git.release_branch("0.8.19");
+    git.write_version("0.8.17");
+    let error = format!("{:#}", git.next_beta("release").unwrap_err());
+    assert!(
+        error.contains("HEAD carries workspace version 0.8.18"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_shallow_repository_is_refused() {
+    // `v0.8.17`, then five commits on a branch that a merge brings in: six
+    // commits lead from `v0.8.17` to `master`.
+    let full = Git::init();
+    full.commit("0.8.17", "chore: release v0.8.17");
+    let sh = &full.sh;
+    cmd!(sh, "git tag v0.8.17").run().unwrap();
+    cmd!(sh, "git checkout -q -b topic").run().unwrap();
+    for n in 1..=5 {
+        full.commit("0.8.17", &format!("feat: {n}"));
+    }
+    cmd!(sh, "git checkout -q master").run().unwrap();
+    cmd!(sh, "git merge -q --no-ff -m merge topic")
+        .run()
+        .unwrap();
+    full.release_branch("0.8.18");
+    let (next, _) = full.next_beta("release").unwrap();
+    assert_eq!(next.tag.to_string(), "v0.8.18-beta.6");
+
+    // Two levels deep, `v0.8.17` is still on the history, but four of the
+    // topic commits are not, so a count would say 2.
+    let origin = full.sh.current_dir();
+    let shallow = Git::at(tempfile::tempdir().unwrap(), "shallow");
+    let sh = &shallow.sh;
+    cmd!(sh, "git clone -q --no-local --depth 2 --no-tags {origin} .")
+        .run()
+        .unwrap();
+    cmd!(sh, "git tag v0.8.17 HEAD^1").run().unwrap();
+    cmd!(sh, "git fetch -q --depth 1 origin release")
+        .run()
+        .unwrap();
+    let error = format!("{:#}", shallow.next_beta("FETCH_HEAD").unwrap_err());
+    assert!(error.contains("this repository is shallow"), "{error}");
 }

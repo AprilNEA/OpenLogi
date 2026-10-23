@@ -4,9 +4,11 @@
 //! release-plz tags a stable release `vX.Y.Z`. The prerelease workflow tags
 //! a beta `vX.Y.Z-beta.N` on `master`, without a version bump: `X.Y.Z` is the
 //! stable release it leads to, and `N` counts the commits since the stable
-//! release before it, so a later beta has a larger `N`. Every command that
-//! reads a release tag parses it here, and [`ReleaseTag::beta`] spells the
-//! beta tag `release next-beta` names.
+//! release before it. Within one stable release's cycle, a later beta has a
+//! larger `N`; the count starts again after the next stable release.
+//!
+//! Every command that reads a release tag parses it here, and
+//! [`ReleaseTag::beta`] spells the beta tag `release next-beta` names.
 
 use std::fmt;
 use std::str::FromStr;

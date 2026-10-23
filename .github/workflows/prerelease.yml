@@ -1,13 +1,16 @@
 name: Prerelease
 
-# Cut a beta: tag the tip of `master` `v<release>-beta.<N>`. `<release>` is
-# the version the open release-plz PR prepares, and `<N>` counts the commits
-# since the stable release before it. The tag push starts release.yml, which
-# builds the beta at its own version and publishes it to the beta channel.
+# Cut a beta: tag the `master` commit the run was dispatched on
+# `v<release>-beta.<N>`. The run does not move to a newer commit when `master`
+# advances. `<release>` is the version the open release-plz PR prepares, and
+# `<N>` counts the commits since the stable release before it. The tag push
+# starts release.yml, which builds the beta at its own version and publishes
+# it to the beta channel.
 #
-# Run it from `master` in the Actions tab. `release next-beta` checks the tag
-# with the rules `release version` applies to it in release.yml, so a tag
-# this creates builds. A dry run prints the tag without creating it.
+# Run it from `master` in the Actions tab. `release next-beta` checks the
+# tag's version with the rules `release version` applies again in
+# release.yml. A build, signature or publish can still fail. A dry run prints
+# the tag and creates nothing.
 
 on:
   workflow_dispatch:
@@ -19,8 +22,8 @@ on:
 
 permissions: {}
 
-# One cut at a time: a second run starts after the first one's tag exists,
-# and refuses to tag the same commit again.
+# One cut at a time. After a real cut, a later run refuses the same commit; a
+# dry run creates no tag. A newer pending run replaces an older pending one.
 concurrency:
   group: prerelease
   cancel-in-progress: false

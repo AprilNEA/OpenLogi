@@ -42,10 +42,12 @@ devenv shell -- cargo run -p xtask -- <command>
 - `release channels` — compose every channel's `latest.json` and appcasts
   from the release records on the update host, and print what each channel
   offers as GitHub Actions outputs.
-- `release next-beta` — name the beta tag to cut on `HEAD`: the open release
-  PR's version and the count of commits since the stable release before it,
-  checked as `release version` checks the pushed tag. The prerelease workflow
-  runs it and creates the tag.
+- `release next-beta --release-ref <commit>` — name the beta tag to cut on
+  `HEAD`: the version that `<commit>`, the open release PR, prepares, and the
+  count of commits since the stable release before it, checked as
+  `release version` checks the pushed tag. It reads committed files, not the
+  working tree, and needs the whole history and every `v*` tag; it refuses a
+  shallow repository. The prerelease workflow runs it and creates the tag.
 - `release sparkle-deltas` — make verified Sparkle deltas from the newest
   earlier stable releases to a stable release's stapled DMG, with the metadata
   `release appcast` reads. A beta gets none.

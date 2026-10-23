@@ -5,6 +5,11 @@
 //! the open release PR prepares, and its number is the count of commits since
 //! the stable release before it. The prerelease workflow runs this on
 //! `master`, then creates the tag it prints.
+//!
+//! It reads the `HEAD` commit and the tags, not the working tree, so an
+//! uncommitted edit cannot change the tag it names. It needs the whole history
+//! and every `v*` tag: it refuses a shallow repository, because a shallow
+//! history can hide commits from the count.
 
 use std::path::PathBuf;
 
@@ -14,7 +19,7 @@ use semver::Version;
 use xshell::{Shell, cmd};
 
 use crate::support::github_output;
-use crate::support::manifest::{parse_workspace_package, workspace_package};
+use crate::support::manifest::parse_workspace_package;
 use crate::support::release_tag::{BetaBase, BuildVersion, ReleaseTag};
 use openlogi_core::update_feed::UpdateChannel;
 
@@ -32,7 +37,7 @@ pub(crate) struct Repo {
     /// The release PR's workspace version: the stable release the beta leads
     /// to.
     pub(crate) release: String,
-    /// `HEAD`'s workspace version.
+    /// The workspace version committed on `HEAD`.
     pub(crate) workspace: String,
     /// The `v*` tags reachable from `HEAD`.
     pub(crate) merged: Vec<String>,
@@ -59,37 +64,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     let sh = Shell::new()?;
     let root = PathBuf::from(cmd!(sh, "git rev-parse --show-toplevel").quiet().read()?);
     sh.change_dir(&root);
-
-    let release_ref = &args.release_ref;
-    let release_manifest = format!("{release_ref}:Cargo.toml");
-    let release_toml = cmd!(sh, "git show {release_manifest}").quiet().read()?;
-    let release = parse_workspace_package(&release_toml)
-        .with_context(|| format!("reading the release PR's version from {release_manifest}"))?
-        .version;
-    let head_commit = "HEAD^{commit}";
-    let head = cmd!(sh, "git rev-parse --verify {head_commit}")
-        .quiet()
-        .read()?;
-    let lines = |text: String| -> Vec<String> { text.lines().map(str::to_owned).collect() };
-    let repo = Repo {
-        release,
-        workspace: workspace_package(&root)?.version,
-        merged: lines(cmd!(sh, "git tag --merged HEAD --list v*").quiet().read()?),
-        tags: lines(cmd!(sh, "git tag --list v*").quiet().read()?),
-        on_head: lines(
-            cmd!(sh, "git tag --points-at HEAD --list v*")
-                .quiet()
-                .read()?,
-        ),
-    };
-    let next = plan(&repo, |base| {
-        let range = format!("{base}..HEAD");
-        let count = cmd!(sh, "git rev-list --count {range}").quiet().read()?;
-        count
-            .trim()
-            .parse()
-            .with_context(|| format!("`git rev-list --count {range}` printed {count:?}"))
-    })?;
+    let (next, head) = next_beta(&sh, &args.release_ref)?;
 
     let tag = next.tag.to_string();
     let version = next.tag.version().to_string();
@@ -107,6 +82,61 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     github_output::write(&outputs)
 }
 
+/// The beta to cut on the `HEAD` commit of the repository `sh` is in, and that
+/// commit's SHA.
+///
+/// It resolves `HEAD` once and reads everything else from that SHA: the
+/// committed manifest, the tags on it and before it, and the commit count. The
+/// working tree and a `HEAD` that moves later do not change the answer.
+fn next_beta(sh: &Shell, release_ref: &str) -> Result<(NextBeta, String)> {
+    let shallow = cmd!(sh, "git rev-parse --is-shallow-repository")
+        .quiet()
+        .read()?;
+    ensure!(
+        shallow.trim() != "true",
+        "this repository is shallow, so its history can hide commits that a beta's number counts; fetch the whole history and every tag first (`git fetch --unshallow --tags`)"
+    );
+
+    let head_commit = "HEAD^{commit}";
+    let head = cmd!(sh, "git rev-parse --verify {head_commit}")
+        .quiet()
+        .read()?;
+    let lines = |text: String| -> Vec<String> { text.lines().map(str::to_owned).collect() };
+    let repo = Repo {
+        release: workspace_version(sh, release_ref).context("reading the release PR's version")?,
+        workspace: workspace_version(sh, &head).context("reading HEAD's version")?,
+        merged: lines(
+            cmd!(sh, "git tag --merged {head} --list v*")
+                .quiet()
+                .read()?,
+        ),
+        tags: lines(cmd!(sh, "git tag --list v*").quiet().read()?),
+        on_head: lines(
+            cmd!(sh, "git tag --points-at {head} --list v*")
+                .quiet()
+                .read()?,
+        ),
+    };
+    let next = plan(&repo, |base| {
+        let range = format!("{base}..{head}");
+        let count = cmd!(sh, "git rev-list --count {range}").quiet().read()?;
+        count
+            .trim()
+            .parse()
+            .with_context(|| format!("`git rev-list --count {range}` printed {count:?}"))
+    })?;
+    Ok((next, head))
+}
+
+/// The `[workspace.package]` version in the root `Cargo.toml` that `commit`
+/// records.
+fn workspace_version(sh: &Shell, commit: &str) -> Result<String> {
+    let manifest = format!("{commit}:Cargo.toml");
+    let text = cmd!(sh, "git show {manifest}").quiet().read()?;
+    let package = parse_workspace_package(&text).with_context(|| format!("parsing {manifest}"))?;
+    Ok(package.version)
+}
+
 /// The beta to cut on `HEAD`. `commits_since` counts the commits from a tag to
 /// `HEAD`.
 ///
@@ -121,9 +151,9 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 ///   history;
 /// - its build version fits an MSI `ProductVersion`.
 ///
-/// The first, second and last are what `release version` checks on the
-/// pushed tag, so a tag this names builds. The others keep betas rising, one
-/// per commit.
+/// `release version` checks the first, second and last again on the pushed
+/// tag. They check the tag's version, so a build, signature or publish can
+/// still fail. The others keep betas rising, one per commit.
 pub(crate) fn plan(
     repo: &Repo,
     commits_since: impl FnOnce(&str) -> Result<u64>,
