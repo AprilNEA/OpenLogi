@@ -196,8 +196,16 @@ pub struct Capabilities {
     /// there too. Appended: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub pointer_scaling: bool,
+    /// The press force of a force-sensing button — the MX Master 4's Haptic
+    /// Sense Panel — can be changed: reverse-engineered HID++ `0x19c0
+    /// ForceSensingButton`, when the probe also reads that the device lets
+    /// software change it. Appended: crosses the IPC and the persisted
+    /// identity.
+    #[serde(default)]
+    pub force_sensing: bool,
     /// Fixed lock/system-key disabling through HID++ `0x4521 DisableKeys`.
-    /// This is measured only from feature-table presence.
+    /// Measured only from feature-table presence. Appended after
+    /// `force_sensing`: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub disable_keys: bool,
 }
@@ -236,6 +244,9 @@ impl Capabilities {
             // cannot say which controls report raw wheel.
             virtual_thumbwheel: false,
             pointer_scaling: !pointer && ids.contains(&0x2205),
+            // The probe clears it unless the device lets software change the
+            // force; the feature table alone cannot say.
+            force_sensing: ids.contains(&0x19c0),
             disable_keys: ids.contains(&0x4521),
         }
     }
@@ -752,6 +763,7 @@ mod tests {
                     easy_switch: false,
                     virtual_thumbwheel: false,
                     pointer_scaling: false,
+                    force_sensing: false,
                     disable_keys: false,
                 }),
                 settings_revision: 0,
@@ -872,6 +884,7 @@ mod tests {
                 easy_switch: false,
                 virtual_thumbwheel: false,
                 pointer_scaling: false,
+                force_sensing: false,
                 disable_keys: false,
             }
         );
@@ -897,6 +910,7 @@ mod tests {
                 easy_switch: false,
                 virtual_thumbwheel: false,
                 pointer_scaling: false,
+                force_sensing: false,
                 disable_keys: false,
             }
         );
@@ -925,6 +939,10 @@ mod tests {
         assert!(scaled.pointer_scaling && !scaled.pointer);
         let both = Capabilities::from_feature_ids(&[0x0001, 0x2201, 0x2205]);
         assert!(both.pointer && !both.pointer_scaling);
+        // 0x19c0 offers the press force until the probe reads it cannot be
+        // changed; the 0x19b0 haptic engine alone does not.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x19c0]).force_sensing);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x19b0]).force_sensing);
     }
 
     #[test]

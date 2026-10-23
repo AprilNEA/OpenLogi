@@ -41,8 +41,8 @@
 use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState, LightCommand,
-    PointerSpeed, ReportRateInfo, WriteError,
+    BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState,
+    ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, WriteError,
 };
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
@@ -68,10 +68,10 @@ use request::LinkLost;
 pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDisableKeys, ReadDpi,
-    ReadEasySwitchHosts, ReadFnLock, ReadPointerSpeed, ReadReportRate, ReadSmartShift,
-    ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight, SetDisableKeys,
-    SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate,
-    SetSmartShift, StartPairing, UnpairDevice,
+    ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadPointerSpeed, ReadReportRate,
+    ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight,
+    SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
+    SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.
@@ -176,6 +176,20 @@ pub enum GuiUpdate {
         key: DeviceKey,
         /// The read-back, or why the write did not land.
         result: Result<PointerSpeed, WriteError>,
+    },
+    /// What a force-sensing button reports after a press-force write the GUI
+    /// asked for: the force it took, or the typed refusal. Answers
+    /// [`SetForceSensing`].
+    ForceSensingWritten {
+        /// The device that was written.
+        key: DeviceKey,
+        /// Which write this answers: [`SetForceSensing::write`].
+        write: u64,
+        /// The force that was written: [`SetForceSensing::force`].
+        force: u16,
+        /// The read-back, or why the write did not land. A write the agent
+        /// superseded before its turn answers with a plain read.
+        result: Result<ForceSensingInfo, WriteError>,
     },
     /// What a keyboard reports after a backlight change the GUI asked for:
     /// the backlight it reads back, or the typed refusal. Answers

@@ -1,0 +1,142 @@
+name: Prerelease
+
+# Cut a beta: tag the `master` commit the run was dispatched on
+# `v<release>-beta.<N>`. The run does not move to a newer commit when `master`
+# advances. `<release>` is the version the open release-plz PR prepares, and
+# `<N>` counts the commits since the stable release before it. The tag push
+# starts release.yml, which builds the beta at its own version and publishes
+# it to the beta channel.
+#
+# Run it from `master` in the Actions tab. `release next-beta` checks the
+# tag's version with the rules `release version` applies again in
+# release.yml. A build, signature or publish can still fail. A dry run prints
+# the tag and creates nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Name the beta tag without creating it
+        type: boolean
+        default: false
+
+permissions: {}
+
+# One cut at a time. After a real cut, a later run refuses the same commit; a
+# dry run creates no tag. A newer pending run replaces an older pending one.
+concurrency:
+  group: prerelease
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    name: Cut a beta
+    if: ${{ github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # Full history with tags: the beta's number counts from the stable
+      # release tag before it.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      # Match CI so Cargo inputs and sccache compiler objects are reusable.
+      - name: Align compiler inputs with CI
+        run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cargo
+          shared-key: linux-stable-debug
+          cache-targets: false
+          save-if: false
+
+      # The release PR release-plz keeps for this commit, found as
+      # release-plz.yml finds it: an open `release-plz/` branch of this
+      # repository whose head contains this commit.
+      - name: Find the release PR
+        id: release_pr
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const openPulls = await github.paginate(github.rest.pulls.list, {
+              ...context.repo,
+              state: "open",
+              per_page: 100,
+            });
+            const releasePulls = openPulls.filter(({ head }) =>
+              head.ref.startsWith("release-plz/") &&
+              head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}`
+            );
+            for (const candidate of releasePulls) {
+              const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+                ...context.repo,
+                basehead: `${context.sha}...${candidate.head.sha}`,
+              });
+              if (comparison.status === "ahead" || comparison.status === "identical") {
+                core.info(`Release PR #${candidate.number} at ${candidate.head.sha}`);
+                core.setOutput("sha", candidate.head.sha);
+                return;
+              }
+              core.info(`Ignoring stale release PR #${candidate.number}: ${comparison.status}`);
+            }
+            core.setFailed(
+              `No open release PR contains ${context.sha}. A beta takes its version from the release PR; wait for release-plz to update it, then run this again.`
+            );
+
+      - name: Fetch the release PR
+        env:
+          RELEASE_SHA: ${{ steps.release_pr.outputs.sha }}
+        run: git fetch --no-tags origin "$RELEASE_SHA"
+
+      - name: Name the beta
+        id: beta
+        env:
+          RELEASE_SHA: ${{ steps.release_pr.outputs.sha }}
+        run: cargo xtask release next-beta --release-ref "$RELEASE_SHA"
+
+      - name: Mint GitHub App token
+        if: ${{ !inputs.dry_run }}
+        id: app-token
+        uses: ./.github/actions/github-app-token-from-1password
+        with:
+          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+
+      # The App's token, not GITHUB_TOKEN: a tag GITHUB_TOKEN pushes starts no
+      # workflow, and release.yml must run on it.
+      - name: Create the tag
+        if: ${{ !inputs.dry_run }}
+        uses: actions/github-script@v9
+        env:
+          TAG: ${{ steps.beta.outputs.tag }}
+          COMMIT: ${{ steps.beta.outputs.commit }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { TAG: tag, COMMIT: sha } = process.env;
+            await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha });
+            core.info(`Created ${tag} at ${sha}; release.yml publishes it.`);
+
+      - name: Summarize
+        env:
+          TAG: ${{ steps.beta.outputs.tag }}
+          COMMIT: ${{ steps.beta.outputs.commit }}
+          BUILD_VERSION: ${{ steps.beta.outputs.build_version }}
+          STABLE_BASE: ${{ steps.beta.outputs.stable_base }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          {
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "Dry run: would tag \`$COMMIT\` as \`$TAG\`."
+            else
+              echo "Tagged \`$COMMIT\` as \`$TAG\`. The Release workflow builds and publishes it."
+            fi
+            echo
+            echo "Build version \`$BUILD_VERSION\`, after \`$STABLE_BASE\`."
+          } >> "$GITHUB_STEP_SUMMARY"

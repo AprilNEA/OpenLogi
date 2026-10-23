@@ -54,7 +54,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v15 adds the `0x4521` disable-keys event index.
 /// v16 adds the `0x2121` hi-res wheel event index.
 /// v17 records whether a legacy `0x1000` battery reports mileage.
-const SCHEMA_VERSION: u32 = 17;
+/// v18 adds the `Capabilities::force_sensing` flag (`0x19c0` press force
+/// software can change).
+const SCHEMA_VERSION: u32 = 18;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.

@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use openlogi_core::hid::{
-    BacklightState, DisableKeysState, DpiInfo, EasySwitchHosts, FnLockState, PointerSpeed,
-    ReportRateInfo, SmartShiftStatus,
+    BacklightState, DisableKeysState, DpiInfo, EasySwitchHosts, FnLockState, ForceSensingInfo,
+    PointerSpeed, ReportRateInfo, SmartShiftStatus,
 };
 
 /// State projected from an swr-backed device query: unqueried, in flight,
@@ -50,6 +50,10 @@ pub type ReportRateLoad = Load<Arc<ReportRateInfo>>;
 /// the speed the mouse moves at now: the persisted `pointer_speed`, or the
 /// slowest speed while precision mode is on.
 pub type PointerSpeedLoad = Load<Arc<PointerSpeed>>;
+/// Per-device press-force (`0x19c0`) load state. See [`Load`]. The read is
+/// the force the button clicks at now, the range the device accepts, and
+/// whether software may change it.
+pub type ForceSensingLoad = Load<Arc<ForceSensingInfo>>;
 /// Per-keyboard backlight (`0x1982`) load state. See [`Load`]. The keyboard
 /// stores its backlight itself and changes it on its own — the backlight keys,
 /// the light sensor, a low battery — so the read is the only record.

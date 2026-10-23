@@ -208,6 +208,22 @@ pub enum WriteError {
         /// The name the device reports afterwards, if any.
         actual: Option<String>,
     },
+    /// A press-force write to a force-sensing button whose `0x19c0` info
+    /// does not let software change the force.
+    ///
+    /// Nothing was written: the device layer checks a fresh read first.
+    #[error("the device does not let software change its press force")]
+    ForceSensingUnchangeable,
+    /// The device acknowledged a press-force write but reads back a
+    /// different force.
+    #[error("device reports press force {actual} after a write of {requested}")]
+    ForceSensingNotApplied {
+        /// The force that was written, after clamping into the device's
+        /// range.
+        requested: u16,
+        /// The force the device reports afterwards.
+        actual: u16,
+    },
     /// A requested bit mask contains unknown or device-unsupported bits.
     #[error(
         "unsupported mask during {operation:?} for feature {feature_hex:#06x}: requested {requested:#x}, supported {supported:#x}"
@@ -307,9 +323,16 @@ pub enum HidppOperation {
     /// Light or darken the `0x1300` DPI LED. Appended last — variant order
     /// is wire format.
     WriteLed,
-    /// Read HID++ `0x4521` capabilities/current disabled-key mask.
+    /// Read the `0x19c0` press force and its range. Appended last — variant
+    /// order is wire format.
+    ReadForceSensing,
+    /// Write the `0x19c0` press force. Appended last — variant order is wire
+    /// format.
+    WriteForceSensing,
+    /// Read HID++ `0x4521` capabilities/current disabled-key mask. Appended
+    /// after the `0x19c0` operations — variant order is wire format.
     ReadDisableKeys,
-    /// Write and verify HID++ `0x4521` disabled-key mask.
+    /// Write and verify HID++ `0x4521` disabled-key mask. Appended last.
     WriteDisableKeys,
 }
 

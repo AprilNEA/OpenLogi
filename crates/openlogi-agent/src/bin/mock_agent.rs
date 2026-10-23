@@ -64,8 +64,8 @@ use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    ForceSensingInfo, LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -1208,6 +1208,30 @@ impl Agent for MockAgent {
         *stored = speed;
         info!(%route, %speed, "set_pointer_speed");
         Ok(speed)
+    }
+    async fn read_force_sensing(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ForceSensingInfo, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.force_sensing, &route, 0x19c0).copied()
+    }
+    async fn set_force_sensing(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        force: u16,
+    ) -> Result<ForceSensingInfo, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.force_sensing, &route, 0x19c0)?;
+        if !stored.changeable {
+            return Err(WriteError::ForceSensingUnchangeable);
+        }
+        stored.current = stored.clamp(force);
+        info!(%route, force, applied = stored.current, "set_force_sensing");
+        Ok(*stored)
     }
     async fn set_backlight(
         self,

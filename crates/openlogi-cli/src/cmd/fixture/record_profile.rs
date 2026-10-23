@@ -339,6 +339,13 @@ async fn capture_hidpp_settings(
         || agent::call(client.read_pointer_speed(context::current(), source_route.clone())),
     )
     .await?;
+    let force_sensing = gated_read(
+        "press-force",
+        device.online,
+        capabilities.force_sensing,
+        || agent::call(client.read_force_sensing(context::current(), source_route.clone())),
+    )
+    .await?;
 
     Ok(ProfileDeviceSettings {
         route: profile_route,
@@ -350,6 +357,7 @@ async fn capture_hidpp_settings(
         report_rate,
         easy_switch,
         pointer_speed,
+        force_sensing,
         disable_keys,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
@@ -430,6 +438,7 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         report_rate: ProfileSetting::Unsupported,
         easy_switch: ProfileSetting::Unsupported,
         pointer_speed: ProfileSetting::Unsupported,
+        force_sensing: ProfileSetting::Unsupported,
         disable_keys: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),

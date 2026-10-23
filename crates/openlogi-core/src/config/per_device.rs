@@ -367,6 +367,24 @@ impl Config {
             .or_default()
             .pointer_speed = Some(speed);
     }
+
+    /// The persisted press force for `device_key`'s force-sensing button, or
+    /// `None` when the user never chose one (the device keeps its own force).
+    #[must_use]
+    pub fn force_sensing(&self, device_key: &str) -> Option<u16> {
+        self.devices.get(device_key).and_then(|d| d.force_sensing)
+    }
+
+    /// Record the press force for `device_key`'s force-sensing button; the
+    /// agent re-applies it, clamped into the device's range, when the device
+    /// reconnects.
+    pub fn set_force_sensing(&mut self, device_key: &str, force: u16) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .force_sensing = Some(force);
+    }
+
     /// Record the SmartShift wheel config for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).
     pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {

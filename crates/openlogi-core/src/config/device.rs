@@ -352,6 +352,15 @@ pub struct DeviceConfig {
     /// leave the mouse's speed alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer_speed: Option<PointerSpeed>,
+    /// Press force of a force-sensing button — the MX Master 4's Haptic
+    /// Sense Panel (reverse-engineered HID++ `0x19c0`) — as a raw device
+    /// value: lower is a lighter press. The range differs from unit to unit,
+    /// so the agent clamps it into the one the device reports before writing.
+    /// The agent writes it when the device reconnects and when a reload
+    /// changes it, like [`Self::fn_lock`]. `None` means "never set — leave the
+    /// device's force alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_sensing: Option<u16>,
     /// Known keys OpenLogi should disable on reconnect. `None` leaves the
     /// firmware unmanaged; an explicit empty set re-enables every known key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -460,6 +469,7 @@ impl Default for DeviceConfig {
             keep_os_layout: None,
             report_rate: None,
             pointer_speed: None,
+            force_sensing: None,
             disabled_keys: None,
         }
     }
@@ -590,6 +600,7 @@ struct RawDeviceConfig {
     #[serde(default)]
     pointer_speed: Option<PointerSpeed>,
     #[serde(default)]
+    force_sensing: Option<u16>,
     disabled_keys: Option<BTreeSet<DisableKey>>,
     #[serde(default = "default_true")]
     enabled: bool,
@@ -655,6 +666,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             keep_os_layout: raw.keep_os_layout,
             report_rate: raw.report_rate,
             pointer_speed: raw.pointer_speed,
+            force_sensing: raw.force_sensing,
             disabled_keys: raw.disabled_keys,
         }
     }

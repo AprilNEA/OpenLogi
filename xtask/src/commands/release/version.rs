@@ -19,10 +19,11 @@ pub(crate) struct Args {
     tag: String,
 }
 
-/// Print the tag's `channel`, `version`, `build_version` and `previous_tag`
-/// as `key=value` lines, and append them to the step's GitHub Actions
-/// outputs. `previous_tag` is [`ReleaseTag::notes_base`], empty for the first
-/// release.
+/// Print the tag's `channel`, `version`, `build_version`, `stamp_version` and
+/// `previous_tag` as `key=value` lines, and append them to the step's GitHub
+/// Actions outputs. `stamp_version` is [`ReleaseTag::stamp_version`], empty
+/// for a stable tag. `previous_tag` is [`ReleaseTag::notes_base`], empty for
+/// the first release.
 ///
 /// Fails unless `HEAD` is the tagged commit and carries the workspace version
 /// [`ReleaseTag::tagged_workspace_version`] names: a stable tag's own version,
@@ -73,6 +74,10 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         }
         None => None,
     };
+    let stamp = tag
+        .stamp_version(base.as_ref())
+        .map(ToString::to_string)
+        .unwrap_or_default();
     let build = BuildVersion::of(&tag, beta)?.to_string();
     let version = tag.version().to_string();
     let previous = tag.notes_base(&merged).unwrap_or_default();
@@ -80,6 +85,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         ("channel", tag.channel().as_str()),
         ("version", version.as_str()),
         ("build_version", build.as_str()),
+        ("stamp_version", stamp.as_str()),
         ("previous_tag", previous),
     ];
     for (key, value) in outputs {

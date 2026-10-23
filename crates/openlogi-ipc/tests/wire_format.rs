@@ -43,10 +43,10 @@ use openlogi_core::device::{
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
     DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities, DpiInfo, EasySwitchHosts,
-    EasySwitchSlot, FnLockState, HidppFeatureErrorKind, HidppOperation, HostConnection, HostOsInfo,
-    HostOsKind, LightCommand, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind, HidppOperation,
+    HostConnection, HostOsInfo, HostOsKind, LightCommand, PasskeyMethod, ReceiverSelector,
+    ReportRate, ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
+    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -111,7 +111,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 40);
+    assert_eq!(PROTOCOL_VERSION, 41);
 }
 
 #[test]
@@ -359,16 +359,16 @@ fn reload_saved_config() {
                 }],
             },
         },
-        "2ce3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\
+        "2ee3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\
          010d73657269616c3a414243313233000101",
     );
     assert_wire(
         &AgentResponse::ReloadSavedConfigWithVerdict(Ok(SavedConfigVerdict::Accepted)),
-        "2c0000",
+        "2e0000",
     );
     assert_wire(
         &AgentResponse::ReloadSavedConfigWithVerdict(Ok(SavedConfigVerdict::FileChangedAfterSave)),
-        "2c0001",
+        "2e0001",
     );
 }
 
@@ -706,6 +706,7 @@ fn device_inventory() {
                 easy_switch: true,
                 virtual_thumbwheel: true,
                 pointer_scaling: true,
+                force_sensing: true,
                 disable_keys: false,
             }),
             settings_revision: 7,
@@ -713,7 +714,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010007",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010007",
     );
 }
 
@@ -761,8 +762,8 @@ fn device_settings_payloads() {
     assert_wire(&DisableKeysMask::from_bits_retain(0xa1), "a1");
     assert_wire(&disable_keys, "a1e0");
     assert_wire(&Ok::<DisableKeysState, WriteError>(disable_keys), "00a1e0");
-    assert_wire(&HidppOperation::ReadDisableKeys, "18");
-    assert_wire(&HidppOperation::WriteDisableKeys, "19");
+    assert_wire(&HidppOperation::ReadDisableKeys, "1a");
+    assert_wire(&HidppOperation::WriteDisableKeys, "1b");
     assert_wire(
         &WriteError::UnsupportedMask {
             operation: HidppOperation::WriteDisableKeys,
@@ -770,7 +771,7 @@ fn device_settings_payloads() {
             requested: 0x20,
             supported: 0x1f,
         },
-        "1a19fb2145201f",
+        "1c1bfb2145201f",
     );
     assert_wire(
         &WriteError::WriteNotApplied {
@@ -779,13 +780,13 @@ fn device_settings_payloads() {
             expected: 0xa1,
             actual: 0x01,
         },
-        "1b19fb2145a101",
+        "1d1bfb2145a101",
     );
     assert_wire(
         &WriteError::WriteSuperseded {
             operation: HidppOperation::WriteDisableKeys,
         },
-        "1c19",
+        "1e1b",
     );
     let dpi: Result<DpiInfo, WriteError> = Ok(DpiInfo {
         current: Dpi::new(1600),
@@ -1143,6 +1144,48 @@ fn pointer_speed_and_precision_mode() {
     assert_wire(&Action::TogglePrecisionMode, "36");
 }
 
+/// The press force of a force-sensing button (the MX Master 4's Haptic Sense
+/// Panel): raw device values as varints, all of them past one byte.
+#[test]
+fn force_sensing_dtos_and_errors() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "F00DCAFE".into(),
+        slot: 1,
+    };
+    assert_wire(
+        &AgentRequest::ReadForceSensing {
+            route: route.clone(),
+        },
+        "2a0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetForceSensing { route, force: 4500 },
+        "2b0008463030444341464501fb9411",
+    );
+    let info = ForceSensingInfo {
+        changeable: true,
+        default: 5089,
+        min: 4071,
+        max: 6768,
+        current: 4500,
+    };
+    assert_wire(&info, "01fbe113fbe70ffb701afb9411");
+    assert_wire(
+        &Ok::<ForceSensingInfo, WriteError>(info),
+        "0001fbe113fbe70ffb701afb9411",
+    );
+    assert_wire(&HidppOperation::ReadForceSensing, "18");
+    assert_wire(&HidppOperation::WriteForceSensing, "19");
+    assert_wire(&WriteError::ForceSensingUnchangeable, "1a");
+    assert_wire(
+        &WriteError::ForceSensingNotApplied {
+            requested: 4500,
+            actual: 5089,
+        },
+        "1bfb9411fbe113",
+    );
+}
+
 #[test]
 fn disable_keys_requests_are_appended() {
     let route = DeviceRoute::Bolt {
@@ -1153,13 +1196,13 @@ fn disable_keys_requests_are_appended() {
         &AgentRequest::ReadDisableKeys {
             route: route.clone(),
         },
-        "2a0008463030444341464501",
+        "2c0008463030444341464501",
     );
     assert_wire(
         &AgentRequest::SetDisableKeys {
             route,
             desired: DisableKeysMask::CAPS_LOCK,
         },
-        "2b000846303044434146450101",
+        "2d000846303044434146450101",
     );
 }

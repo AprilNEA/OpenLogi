@@ -38,6 +38,7 @@ jobs:
       channel: ${{ steps.version.outputs.channel }}
       version: ${{ steps.version.outputs.version }}
       build_version: ${{ steps.version.outputs.build_version }}
+      stamp_version: ${{ steps.version.outputs.stamp_version }}
       previous_tag: ${{ steps.version.outputs.previous_tag }}
     steps:
       # Full history with tags: a beta's build version counts from the stable
@@ -61,19 +62,6 @@ jobs:
       - name: Read the release version
         id: version
         run: cargo xtask release version --tag "$GITHUB_REF_NAME"
-      # Publish can route a beta: it writes the beta's feed record and
-      # composes the beta channel from it. A beta's build still carries the
-      # workspace version, which is the stable release it follows, so its
-      # built-in update engine would take the beta's own release for an
-      # update. Until betas build at their own version, fail here, before
-      # anything is built or signed.
-      - name: Refuse a channel publish cannot route
-        if: ${{ steps.version.outputs.channel != 'stable' }}
-        env:
-          CHANNEL: ${{ steps.version.outputs.channel }}
-        run: |
-          echo "::error::$GITHUB_REF_NAME is a $CHANNEL release; this workflow publishes stable releases only"
-          exit 1
 
   # Build (and sign/notarize) every platform's installers. The build matrix
   # lives in a reusable workflow so PRs / manual dispatches can build the same
@@ -94,6 +82,8 @@ jobs:
     with:
       sign: true
       build_version: ${{ needs.version.outputs.build_version }}
+      # Empty for a stable release; a beta builds at its own version.
+      stamp_version: ${{ needs.version.outputs.stamp_version }}
 
   publish:
     name: Publish release
@@ -129,6 +119,11 @@ jobs:
       RELEASE_CHANNEL: ${{ needs.version.outputs.channel }}
     outputs:
       installer_published: ${{ steps.artifacts.outputs.installer }}
+      # The release the beta channel serves after this publish, and whether
+      # this publish changed it. A stable release newer than the newest beta
+      # changes it too.
+      beta_tag: ${{ steps.channels.outputs.beta_tag }}
+      beta_changed: ${{ steps.channels.outputs.beta_changed }}
     steps:
       # Needed to build & run the xtask manifest generator below.
       - uses: actions/checkout@v7
@@ -550,18 +545,21 @@ jobs:
           client-payload: |
             {"tag": "${{ github.ref_name }}"}
 
+  # `openlogi@latest` follows the stable channel and `openlogi@beta` the beta
+  # channel. Each is a separate event type: a tap that does not know
+  # `update-openlogi-beta` ignores it, instead of writing a beta into
+  # `openlogi@latest`.
   homebrew-tap:
     name: Dispatch homebrew-tap update
     runs-on: ubuntu-latest
     needs: [version, publish]
-    if: ${{ needs.version.outputs.channel == 'stable' }}
+    if: ${{ needs.version.outputs.channel == 'stable' || needs.publish.outputs.beta_changed == 'true' }}
     permissions:
       contents: read
     steps:
       # The token-minting action below is a local action, so the repo must be
       # on disk before it can run.
       - uses: actions/checkout@v7
-
       - name: Mint homebrew-tap token (GitHub App)
         id: tap_token
         uses: ./.github/actions/github-app-token-from-1password
@@ -570,12 +568,23 @@ jobs:
           op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
           owner: AprilNEA
           repositories: homebrew-tap
-
       - name: Dispatch homebrew-tap update
+        if: ${{ needs.version.outputs.channel == 'stable' }}
         uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
         with:
           token: ${{ steps.tap_token.outputs.token }}
           repository: AprilNEA/homebrew-tap
           event-type: update-openlogi
           client-payload: |
-            {"version": "${{ github.ref_name }}"}
+            {"cask": "openlogi@latest", "version": "${{ github.ref_name }}"}
+      # `beta_tag` is a release tag `release channels` read from a feed
+      # record, so it is `vX.Y.Z` or `vX.Y.Z-beta.N`.
+      - name: Dispatch homebrew-tap beta update
+        if: ${{ needs.publish.outputs.beta_changed == 'true' }}
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
+        with:
+          token: ${{ steps.tap_token.outputs.token }}
+          repository: AprilNEA/homebrew-tap
+          event-type: update-openlogi-beta
+          client-payload: |
+            {"cask": "openlogi@beta", "version": "${{ needs.publish.outputs.beta_tag }}"}

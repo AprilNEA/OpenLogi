@@ -19,8 +19,8 @@ use std::future::Future;
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, LightCommand, PointerSpeed, ReceiverSelector, ReportRate,
-    ReportRateInfo, SmartShiftStatus, WriteError,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PointerSpeed, ReceiverSelector,
+    ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
@@ -229,6 +229,36 @@ impl Request for SetPointerSpeed {
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         let _ = updates.send(GuiUpdate::PointerSpeedWritten {
             key: self.key,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Write the press force of a force-sensing button now, answered as
+/// [`GuiUpdate::ForceSensingWritten`] with what the device reads back.
+pub struct SetForceSensing {
+    pub route: DeviceRoute,
+    pub force: u16,
+    pub key: DeviceKey,
+    /// The number the state gave this write, returned with the answer so it
+    /// is matched to the write it answers.
+    pub write: u64,
+}
+
+impl Request for SetForceSensing {
+    type Answer = Result<ForceSensingInfo, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_force_sensing(context::current(), self.route.clone(), self.force)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::ForceSensingWritten {
+            key: self.key,
+            write: self.write,
+            force: self.force,
             result: or_unavailable(outcome),
         });
     }
@@ -507,6 +537,27 @@ impl Request for ReadPointerSpeed {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_pointer_speed(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read the press force of a force-sensing button, with the range the device
+/// accepts; the answer goes back over `reply`.
+pub struct ReadForceSensing {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<ForceSensingInfo, WriteError>>,
+}
+
+impl Request for ReadForceSensing {
+    type Answer = Result<ForceSensingInfo, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_force_sensing(context::current(), self.route.clone())
             .await
     }
 
@@ -923,6 +974,7 @@ commands! {
     SetFnLock,
     SetReportRate,
     SetPointerSpeed,
+    SetForceSensing,
     SetBacklight,
     RenameEasySwitchHost,
     ReadDpi,
@@ -930,6 +982,7 @@ commands! {
     ReadFnLock,
     ReadReportRate,
     ReadPointerSpeed,
+    ReadForceSensing,
     ReadBacklight,
     ReadEasySwitchHosts,
     LoadConfig,
