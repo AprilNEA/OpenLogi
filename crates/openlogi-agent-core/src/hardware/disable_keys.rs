@@ -9,20 +9,49 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use openlogi_hid::{DisableKeysMask, DisableKeysState, HidppOperation, WriteError};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use tracing::{debug, warn};
 
-use super::write_order::{PendingWrite, WriteTicket};
+use super::write_order::{PendingWrite, ReservedTurn, WriteTicket};
 use super::{DeviceOp, WRITE_TIMEOUT};
+
+/// Persistent cancellation state with a wake-up for pre-I/O waits.
+#[derive(Default)]
+struct Cancellation {
+    requested: AtomicBool,
+    changed: Notify,
+}
+
+impl Cancellation {
+    fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    async fn wait(&self) {
+        let changed = self.changed.notified();
+        let mut changed = std::pin::pin!(changed);
+        // Register before checking the persistent flag, including cancellation
+        // before the worker's runtime first polls this future.
+        changed.as_mut().enable();
+        if !self.is_requested() {
+            changed.await;
+        }
+    }
+}
 
 /// A requester-owned cancellation signal for an owned native write.
 struct RequesterCancellation {
-    cancelled: Arc<AtomicBool>,
+    cancelled: Arc<Cancellation>,
     armed: bool,
 }
 
 impl RequesterCancellation {
-    fn new(cancelled: Arc<AtomicBool>) -> Self {
+    fn new(cancelled: Arc<Cancellation>) -> Self {
         Self {
             cancelled,
             armed: true,
@@ -37,7 +66,7 @@ impl RequesterCancellation {
 impl Drop for RequesterCancellation {
     fn drop(&mut self) {
         if self.armed {
-            self.cancelled.store(true, Ordering::Release);
+            self.cancelled.request();
         }
     }
 }
@@ -149,11 +178,10 @@ where
     // worker owns both ordering turns and the receiver lease.
     drop(op.resolve()?);
 
-    let transport = op.access.transport_turns.turn_for(&op.route);
     // Published synchronously: a reread issued after reload must not overtake
     // this worker just because its OS thread has not started polling yet.
     let reservation = ticket.reserve();
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(Cancellation::default());
     let worker_cancelled = Arc::clone(&cancelled);
     let (sender, result) = oneshot::channel();
     let (started_sender, started) = oneshot::channel();
@@ -161,52 +189,14 @@ where
         .name("openlogi-disable-keys".into())
         .spawn(move || {
             let outcome = match openlogi_core::worker::runtime() {
-                Ok(runtime) => {
-                    let write_cancelled = Arc::clone(&worker_cancelled);
-                    runtime.block_on(async move {
-                        reservation.wait().await;
-                        let _reservation = reservation;
-                        let io = &op;
-                        let admitted = &ticket;
-                        ticket
-                            .write_or(
-                                async {
-                                    let lease = io.access.receiver_access.acquire_for_io().await;
-                                    let turn = transport.lock().await;
-                                    (lease, turn)
-                                },
-                                || async move {
-                                    let check = || {
-                                        if write_cancelled.load(Ordering::Acquire) {
-                                            return Err(timed_out());
-                                        }
-                                        if !io.access.device_io.allows_io() {
-                                            return Err(WriteError::DeviceNotFound);
-                                        }
-                                        if !admitted.is_current() {
-                                            return Err(WriteError::WriteSuperseded {
-                                                operation: HidppOperation::WriteDisableKeys,
-                                            });
-                                        }
-                                        Ok(())
-                                    };
-                                    check()?;
-                                    let shared = io.resolve()?;
-                                    let _ = started_sender.send(());
-                                    openlogi_hid::set_disable_keys_write_through_on(
-                                        &shared, desired, check,
-                                    )
-                                    .await
-                                },
-                                || async {
-                                    Err(WriteError::WriteSuperseded {
-                                        operation: HidppOperation::WriteDisableKeys,
-                                    })
-                                },
-                            )
-                            .await
-                    })
-                }
+                Ok(runtime) => runtime.block_on(run_disable_keys(
+                    op,
+                    ticket,
+                    desired,
+                    reservation,
+                    worker_cancelled,
+                    started_sender,
+                )),
                 Err(error) => Err(WriteError::RuntimeInit {
                     message: error.to_string(),
                 }),
@@ -227,6 +217,52 @@ where
         result,
         worker,
     })
+}
+
+async fn run_disable_keys(
+    op: DeviceOp,
+    ticket: WriteTicket<Option<DisableKeysMask>>,
+    desired: DisableKeysMask,
+    reservation: Arc<ReservedTurn<Option<DisableKeysMask>>>,
+    cancelled: Arc<Cancellation>,
+    started: oneshot::Sender<()>,
+) -> Result<DisableKeysState, WriteError> {
+    let transport = op.access.transport_turns.turn_for(&op.route);
+    let ready = async {
+        reservation.wait().await;
+        ticket
+            .acquire(async {
+                let lease = op.access.receiver_access.acquire_for_io().await;
+                let turn = transport.lock().await;
+                (lease, turn)
+            })
+            .await
+    };
+    let (_setting, (_lease, _transport)) = tokio::select! {
+        biased;
+        () = cancelled.wait() => return Err(timed_out()),
+        guards = ready => guards,
+    };
+    let check = || {
+        if cancelled.is_requested() {
+            return Err(timed_out());
+        }
+        if !op.access.device_io.allows_io() {
+            return Err(WriteError::DeviceNotFound);
+        }
+        if !ticket.is_current() {
+            return Err(WriteError::WriteSuperseded {
+                operation: HidppOperation::WriteDisableKeys,
+            });
+        }
+        Ok(())
+    };
+    check()?;
+    let shared = op.resolve()?;
+    let _ = started.send(());
+    // Cancellation can stop admission, but must never drop an in-flight
+    // native report. The write-through checkpoints still run between reports.
+    openlogi_hid::set_disable_keys_write_through_on(&shared, desired, check).await
 }
 
 fn timed_out() -> WriteError {

@@ -302,6 +302,17 @@ impl<T> WriteTicket<T> {
 }
 
 impl<V> WriteTicket<V> {
+    /// Acquire the setting turn and the caller's I/O guards without starting
+    /// I/O. Cancellation may drop this wait; an admitted writer must keep the
+    /// returned guards through native completion and recheck its intent.
+    pub(crate) async fn acquire<Guard>(
+        &self,
+        ready: impl Future<Output = Guard>,
+    ) -> (tokio::sync::MutexGuard<'_, ()>, Guard) {
+        let turn = self.queue.turn.lock().await;
+        (turn, ready.await)
+    }
+
     /// Run `write` in this ticket's turn, or `superseded` instead once a
     /// newer write was requested: a caller that owes an answer reads the
     /// device there, and a background write simply stops. Acquire the
@@ -317,8 +328,7 @@ impl<V> WriteTicket<V> {
         Write: Future<Output = T>,
         Superseded: Future<Output = T>,
     {
-        let _turn = self.queue.turn.lock().await;
-        let _ready = ready.await;
+        let (_turn, _ready) = self.acquire(ready).await;
         if self.is_current() {
             write().await
         } else {
