@@ -82,10 +82,16 @@ impl NoticePlacement {
     )]
     pub(crate) fn capture(cx: &mut gpui::App, size: Size<Pixels>) -> anyhow::Result<Self> {
         let attempts = if on_wayland() {
-            wayland_indicator_windows(WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::new(Point::default(), size))),
-                ..notice_window_options()
-            })
+            wayland_indicator_windows(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        Point::default(),
+                        size,
+                    ))),
+                    ..notice_window_options()
+                },
+                IndicatorPosition::Bottom,
+            )
         } else {
             vec![positioned_notice(cx, size)]
         };
@@ -202,44 +208,67 @@ fn positioned_notice(cx: &gpui::App, size: Size<Pixels>) -> WindowOptions {
 /// sanctioned way to put one at a screen edge, so try that first; a
 /// compositor without `wlr-layer-shell` gets an ordinary window it places
 /// itself.
-fn wayland_indicator_windows(plain: WindowOptions) -> Vec<WindowOptions> {
-    layer_shell_notice(plain.window_bounds, plain.app_id.as_deref())
+#[derive(Clone, Copy)]
+enum IndicatorPosition {
+    Bottom,
+    Centre,
+}
+
+fn wayland_indicator_windows(
+    plain: WindowOptions,
+    position: IndicatorPosition,
+) -> Vec<WindowOptions> {
+    layer_shell_notice(plain.window_bounds, plain.app_id.as_deref(), position)
         .into_iter()
         .chain([plain])
         .collect()
 }
 
-/// Prefer a layer surface for a transient indicator on Wayland, preserving
+/// Prefer a centred layer surface for a transient indicator on Wayland, preserving
 /// the caller's ordinary window on every other backend and as the fallback.
 pub(crate) fn indicator_windows(plain: WindowOptions) -> Vec<WindowOptions> {
     if on_wayland() {
-        wayland_indicator_windows(plain)
+        wayland_indicator_windows(plain, IndicatorPosition::Centre)
     } else {
         vec![plain]
     }
 }
 
-/// The notice as a layer-shell surface on the bottom edge, above other
-/// windows and never taking the keyboard, unless the compositor refused one.
+/// A transient layer surface, never taking the keyboard, unless refused.
 #[cfg(target_os = "linux")]
-fn layer_shell_notice(bounds: Option<WindowBounds>, app_id: Option<&str>) -> Option<WindowOptions> {
+fn layer_shell_notice(
+    bounds: Option<WindowBounds>,
+    app_id: Option<&str>,
+    position: IndicatorPosition,
+) -> Option<WindowOptions> {
     if super::layer_shell_refused() {
         return None;
     }
-    Some(layer_shell_indicator(bounds, app_id))
+    Some(layer_shell_indicator(bounds, app_id, position))
 }
 
 /// Layer-surface policy shared by notices and lock-key indicators.
 #[cfg(target_os = "linux")]
-fn layer_shell_indicator(bounds: Option<WindowBounds>, app_id: Option<&str>) -> WindowOptions {
+fn layer_shell_indicator(
+    bounds: Option<WindowBounds>,
+    app_id: Option<&str>,
+    position: IndicatorPosition,
+) -> WindowOptions {
     use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 
+    let (anchor, margin) = match position {
+        IndicatorPosition::Bottom => (
+            Anchor::BOTTOM,
+            Some((px(0.0), px(0.0), px(crate::notice::BOTTOM_MARGIN), px(0.0))),
+        ),
+        IndicatorPosition::Centre => (Anchor::empty(), None),
+    };
     WindowOptions {
         kind: gpui::WindowKind::LayerShell(LayerShellOptions {
             namespace: app_id.unwrap_or(crate::notice::NOTICE_APP_ID).to_string(),
             layer: Layer::Overlay,
-            anchor: Anchor::BOTTOM,
-            margin: Some((px(0.0), px(0.0), px(crate::notice::BOTTOM_MARGIN), px(0.0))),
+            anchor,
+            margin,
             keyboard_interactivity: KeyboardInteractivity::None,
             ..LayerShellOptions::default()
         }),
@@ -253,6 +282,7 @@ fn layer_shell_indicator(bounds: Option<WindowBounds>, app_id: Option<&str>) -> 
 const fn layer_shell_notice(
     _bounds: Option<WindowBounds>,
     _app_id: Option<&str>,
+    _position: IndicatorPosition,
 ) -> Option<WindowOptions> {
     None
 }
@@ -372,13 +402,28 @@ mod tests {
             Point::default(),
             Size::new(px(360.0), px(72.0)),
         )));
-        let options = layer_shell_indicator(bounds, Some("openlogi-lock-key-osd"));
+        let options = layer_shell_indicator(
+            bounds,
+            Some("openlogi-lock-key-osd"),
+            IndicatorPosition::Centre,
+        );
         let gpui::WindowKind::LayerShell(layer) = options.kind else {
             panic!("a Wayland lock-key indicator must not be tiled as a popup");
         };
         assert_eq!(layer.namespace, "openlogi-lock-key-osd");
         assert_eq!(layer.layer, Layer::Overlay);
-        assert_eq!(layer.anchor, Anchor::BOTTOM);
+        assert_eq!(layer.anchor, Anchor::empty());
+        assert_eq!(layer.margin, None);
+        let notice = layer_shell_indicator(
+            bounds,
+            Some(crate::notice::NOTICE_APP_ID),
+            IndicatorPosition::Bottom,
+        );
+        let gpui::WindowKind::LayerShell(notice_layer) = notice.kind else {
+            panic!("notices still use layer shell");
+        };
+        assert_eq!(notice_layer.anchor, Anchor::BOTTOM);
+        assert_ne!(layer.anchor, notice_layer.anchor);
         assert_eq!(layer.keyboard_interactivity, KeyboardInteractivity::None);
         assert_eq!(options.app_id.as_deref(), Some("openlogi-lock-key-osd"));
         assert_eq!(options.window_bounds, bounds);
@@ -403,7 +448,7 @@ mod tests {
             app_id: Some("openlogi-lock-key-osd".to_string()),
             ..notice_window_options()
         };
-        let mut windows = wayland_indicator_windows(options).into_iter();
+        let mut windows = wayland_indicator_windows(options, IndicatorPosition::Centre).into_iter();
         let options = windows.next().unwrap();
         assert!(windows.next().is_none(), "only the original popup remains");
         assert_eq!(options.kind, gpui::WindowKind::PopUp);
