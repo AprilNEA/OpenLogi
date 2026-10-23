@@ -306,6 +306,14 @@ platform's logo key — Command on macOS, the Windows key, `KEY_LEFTMETA` on Lin
 so `Win+L` locks Windows and `Super+End` reaches GNOME and KDE shortcuts bound to
 Super.
 
+Keypad keys have their own names, since `+` separates chord tokens and a keypad
+digit is a different key from the top-row one: `Numpad0`–`Numpad9`,
+`NumpadPlus`, `NumpadMinus`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal`,
+`NumpadEnter`, and `NumpadEquals` (the `=` key on Mac keypads), as in
+`Ctrl+Alt+Shift+NumpadMinus`. Num Lock is not a shortcut key. As on a physical
+keypad, Linux and Windows may read a keypad digit as its navigation key while
+Num Lock is off.
+
 `CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
 the chord down until the originating physical button is released, and also
 releases it if capture is interrupted, the binding becomes invalid, or the

@@ -90,6 +90,15 @@ impl KeyboardUsage {
             0x50 => "Left".to_string(),
             0x51 => "Down".to_string(),
             0x52 => "Up".to_string(),
+            0x54 => "NumpadDivide".to_string(),
+            0x55 => "NumpadMultiply".to_string(),
+            0x56 => "NumpadMinus".to_string(),
+            0x57 => "NumpadPlus".to_string(),
+            0x58 => "NumpadEnter".to_string(),
+            0x59..=0x61 => format!("Numpad{}", code - 0x58),
+            0x62 => "Numpad0".to_string(),
+            0x63 => "NumpadDecimal".to_string(),
+            0x67 => "NumpadEquals".to_string(),
             0x68..=0x6f => format!("F{}", code - 0x68 + 13),
             _ => format!("Usage 0x{code:02X}"),
         }
@@ -108,7 +117,7 @@ pub struct KeyboardUsageError(pub u8);
 const fn validate_keyboard_usage(value: &u8) -> Result<(), KeyboardUsageError> {
     if matches!(
         value,
-        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x45 | 0x4a..=0x52 | 0x68..=0x6f
+        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x45 | 0x4a..=0x52 | 0x54..=0x63 | 0x67..=0x6f
     ) {
         Ok(())
     } else {
@@ -360,6 +369,23 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
             13..=20 => 0x68 + number - 13,
             _ => return Err(KeyComboParseError::UnknownToken(token.to_string())),
         }
+    } else if let Some(keypad) = lowercase.strip_prefix("numpad") {
+        // Keypad keys are named, not typed: `+` separates chord tokens, and
+        // a keypad digit is a different key from the top-row one.
+        match keypad {
+            "divide" => 0x54,
+            "multiply" => 0x55,
+            "minus" => 0x56,
+            "plus" => 0x57,
+            "enter" => 0x58,
+            "0" => 0x62,
+            "decimal" => 0x63,
+            "equals" => 0x67,
+            digit => match digit.parse::<u8>() {
+                Ok(n @ 1..=9) if digit.len() == 1 => 0x58 + n,
+                _ => return Err(KeyComboParseError::UnknownToken(token.to_string())),
+            },
+        }
     } else {
         match lowercase.as_str() {
             "enter" | "return" => 0x28,
@@ -462,6 +488,56 @@ mod tests {
             "Cmd+Hyper".parse::<KeyCombo>(),
             Err(KeyComboParseError::UnknownToken(_))
         ));
+    }
+
+    #[test]
+    fn keypad_tokens_round_trip_through_their_labels() {
+        let tokens = [
+            ("NumpadDivide", 0x54),
+            ("NumpadMultiply", 0x55),
+            ("NumpadMinus", 0x56),
+            ("NumpadPlus", 0x57),
+            ("NumpadEnter", 0x58),
+            ("Numpad1", 0x59),
+            ("Numpad9", 0x61),
+            ("Numpad0", 0x62),
+            ("NumpadDecimal", 0x63),
+            ("NumpadEquals", 0x67),
+        ];
+        for (token, usage) in tokens {
+            let combo = format!("Ctrl+Alt+Shift+{token}")
+                .parse::<KeyCombo>()
+                .expect("valid keypad shortcut");
+            assert_eq!(combo.key().code(), usage, "{token}");
+            assert_eq!(combo.key().ascii_char(), None, "{token}");
+            assert_eq!(combo.rendered_label(), format!("Ctrl+Alt+Shift+{token}"));
+        }
+        assert_eq!(
+            "numpadminus".parse::<KeyCombo>().map(|c| c.key().code()),
+            Ok(0x56)
+        );
+        for code in (0x54..=0x63).chain([0x67]) {
+            let usage = KeyboardUsage::try_new(code).expect("keypad usage is valid");
+            let label = usage.label();
+            assert_eq!(
+                label.parse::<KeyCombo>().map(|c| c.key()),
+                Ok(usage),
+                "{label}"
+            );
+        }
+        for unknown in ["Numpad", "Numpad10", "Numpad01", "NumpadClear", "NumLock"] {
+            assert!(
+                matches!(
+                    unknown.parse::<KeyCombo>(),
+                    Err(KeyComboParseError::UnknownToken(_))
+                ),
+                "{unknown}"
+            );
+        }
+        // Num Lock / Clear (0x53) and the unused 0x64..=0x66 stay rejected.
+        for code in [0x53, 0x64, 0x65, 0x66] {
+            assert!(KeyboardUsage::try_new(code).is_err(), "{code:#04x}");
+        }
     }
 
     #[test]

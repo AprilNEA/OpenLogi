@@ -80,6 +80,25 @@ const KEYS: &[(u8, u16)] = &[
     (0x50, 0x7b), // Left Arrow
     (0x51, 0x7d), // Down Arrow
     (0x52, 0x7e), // Up Arrow
+    // Keypad: the fixed `kVK_ANSI_Keypad*` codes of HIToolbox `Events.h`. A
+    // layout never moves them, so they bypass the layout lookup.
+    (0x54, 0x4b), // Keypad /
+    (0x55, 0x43), // Keypad *
+    (0x56, 0x4e), // Keypad -
+    (0x57, 0x45), // Keypad +
+    (0x58, 0x4c), // Keypad Enter
+    (0x59, 0x53), // Keypad 1
+    (0x5a, 0x54), // Keypad 2
+    (0x5b, 0x55), // Keypad 3
+    (0x5c, 0x56), // Keypad 4
+    (0x5d, 0x57), // Keypad 5
+    (0x5e, 0x58), // Keypad 6
+    (0x5f, 0x59), // Keypad 7
+    (0x60, 0x5b), // Keypad 8
+    (0x61, 0x5c), // Keypad 9
+    (0x62, 0x52), // Keypad 0
+    (0x63, 0x41), // Keypad .
+    (0x67, 0x51), // Keypad =
     (0x6f, 0x5a), // F20, one past the row `FunctionKey` covers
     (0x64, 0x0a), // ISO § (Non-US \ and |)
     (0x89, 0x5d), // JIS ¥ (International 3)
@@ -193,6 +212,16 @@ mod tests {
             assert!(usages.insert(usage), "usage {usage:#04x} listed twice");
             assert!(keycodes.insert(vk), "keycode {vk:#04x} listed twice");
         }
+    }
+
+    #[test]
+    fn keypad_usages_use_the_fixed_keypad_keycodes() {
+        assert_eq!(hid_usage_to_macos(0x56), Some(0x4e)); // kVK_ANSI_KeypadMinus
+        assert_eq!(hid_usage_to_macos(0x57), Some(0x45)); // kVK_ANSI_KeypadPlus
+        assert_eq!(hid_usage_to_macos(0x58), Some(0x4c)); // kVK_ANSI_KeypadEnter
+        assert_eq!(hid_usage_to_macos(0x62), Some(0x52)); // kVK_ANSI_Keypad0
+        assert_eq!(hid_usage_to_macos(0x61), Some(0x5c)); // kVK_ANSI_Keypad9
+        assert_eq!(hid_usage_to_macos(0x67), Some(0x51)); // kVK_ANSI_KeypadEquals
     }
 
     #[test]
