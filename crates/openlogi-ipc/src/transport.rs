@@ -42,10 +42,15 @@ pub fn endpoint_name() -> io::Result<interprocess::local_socket::Name<'static>> 
     #[cfg(windows)]
     {
         use interprocess::local_socket::{GenericNamespaced, ToNsName};
-        // A fixed per-machine pipe name. The default DACL grants the creating
-        // user + administrators, which is acceptable for a single-user desktop;
-        // per-user isolation on a shared machine is a future hardening point.
-        "openlogi-agent.sock".to_ns_name::<GenericNamespaced>()
+        // Windows' named-pipe namespace is machine-wide, not per-user like the
+        // Unix branch's filesystem path — a fixed name collides across
+        // concurrently signed-in accounts (#1685): the first account's agent
+        // binds it exclusively and every other account's agent/GUI fails to
+        // reach it. `USERNAME` scopes the pipe to the signed-in account; it's
+        // only ever absent in an environment with no session at all, which
+        // can't run this agent either way.
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        format!("openlogi-agent-{user}.sock").to_ns_name::<GenericNamespaced>()
     }
 }
 
