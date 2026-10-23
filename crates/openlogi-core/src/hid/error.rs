@@ -334,6 +334,11 @@ pub enum HidppOperation {
     ReadDisableKeys,
     /// Write and verify HID++ `0x4521` disabled-key mask. Appended last.
     WriteDisableKeys,
+    /// Read application firmware identity and update availability. Appended
+    /// after the `0x4521` operations — variant order is wire format.
+    ReadFirmware,
+    /// Transfer and activate an official application firmware image.
+    WriteFirmware,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.
