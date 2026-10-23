@@ -331,7 +331,7 @@ fn each_feed_offers_its_architectures_dmg_signed_with_the_embedded_key() {
         let xml = fs_err::read_to_string(
             out.path()
                 .join("releases/v0.8.15/feed")
-                .join(arch.appcast_file_name()),
+                .join(format!("appcast-{}.xml", arch.as_str())),
         )
         .unwrap();
         let doc = roxmltree::Document::parse(&xml).unwrap();
@@ -385,7 +385,9 @@ fn deltas_go_into_their_architectures_feed_signed() {
 
     let key = signing_key(PRIVATE_KEY).unwrap();
     let records = out.path().join("releases/v0.8.15/feed");
-    let xml = fs_err::read_to_string(records.join(MacArch::Arm64.appcast_file_name())).unwrap();
+    let xml =
+        fs_err::read_to_string(records.join(format!("appcast-{}.xml", MacArch::Arm64.as_str())))
+            .unwrap();
     let doc = roxmltree::Document::parse(&xml).unwrap();
     let item = child(child(doc.root_element(), None, "channel"), None, "item");
     let deltas: Vec<_> = child(item, Some(SPARKLE_NS), "deltas")
@@ -420,7 +422,9 @@ fn deltas_go_into_their_architectures_feed_signed() {
         );
     }
 
-    let intel = fs_err::read_to_string(records.join(MacArch::X86_64.appcast_file_name())).unwrap();
+    let intel =
+        fs_err::read_to_string(records.join(format!("appcast-{}.xml", MacArch::X86_64.as_str())))
+            .unwrap();
     assert!(
         !intel.contains("sparkle:deltas"),
         "an arm64 delta leaked into the x86_64 feed"
@@ -545,7 +549,7 @@ fn a_beta_record_offers_its_build_version_on_the_beta_channel() {
     let xml = fs_err::read_to_string(
         out.path()
             .join("releases/v0.8.15-beta.4/feed")
-            .join(MacArch::Arm64.appcast_file_name()),
+            .join(format!("appcast-{}.xml", MacArch::Arm64.as_str())),
     )
     .unwrap();
     let doc = roxmltree::Document::parse(&xml).unwrap();

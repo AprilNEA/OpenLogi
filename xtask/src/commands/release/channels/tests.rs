@@ -1,11 +1,11 @@
 use std::path::Path;
 
-use gpui_updater_release::{Appcast, AppcastItem, Enclosure};
+use gpui_updater_release::{Appcast, AppcastItem, Enclosure, Manifest};
 use openlogi_core::update_feed::{MANIFEST_FILE_NAME, UpdateChannel};
 use strum::VariantArray as _;
 
 use super::{Args, ChannelFile, Outcome, destination, feed_items, write_channels, write_files};
-use crate::commands::release::latest_json::Manifest;
+use crate::commands::release::latest_json;
 use crate::support::update_feed::{MacArch, appcast_url};
 
 const BASE: &str = "https://updates.example";
@@ -34,7 +34,7 @@ fn manifest(tag: &str, channel: &str) -> String {
         }],
     }))
     .unwrap();
-    manifest.render().unwrap()
+    latest_json::render(&manifest).unwrap()
 }
 
 fn is_beta(tag: &str) -> bool {
@@ -86,9 +86,9 @@ fn record(mirror: &Path, tag: &str, build: &str) {
     write(&dir.join(MANIFEST_FILE_NAME), &manifest(tag, channel));
     for arch in MacArch::VARIANTS {
         write(
-            &dir.join(arch.appcast_file_name()),
+            &dir.join(format!("appcast-{}.xml", arch.as_str())),
             &appcast(
-                &format!("{BASE}/releases/{tag}/feed/{}", arch.appcast_file_name()),
+                &format!("{BASE}/releases/{tag}/feed/appcast-{}.xml", arch.as_str()),
                 "a record",
                 vec![item(tag, build, *arch)],
             ),
@@ -118,7 +118,7 @@ fn legacy_stable_channel(mirror: &Path, tag: &str, beta: Option<(&str, &str)>) {
     for arch in MacArch::VARIANTS {
         let items: Vec<(&str, &str)> = beta.into_iter().chain([(tag, version)]).collect();
         write(
-            &dir.join(arch.appcast_file_name()),
+            &dir.join(format!("appcast-{}.xml", arch.as_str())),
             &stable_feed(*arch, &items),
         );
     }
@@ -141,7 +141,7 @@ fn read(out: &Path, file: &str) -> String {
 fn offered(out: &Path, arch: MacArch) -> Vec<(String, Option<String>)> {
     feed_items(&read(
         out,
-        &format!("channels/stable/{}", arch.appcast_file_name()),
+        &format!("channels/stable/appcast-{}.xml", arch.as_str()),
     ))
     .unwrap()
     .into_iter()
@@ -172,7 +172,7 @@ fn a_stable_release_alone_serves_the_feed_it_always_had() {
         assert_eq!(
             read(
                 out.path(),
-                &format!("channels/stable/{}", arch.appcast_file_name())
+                &format!("channels/stable/appcast-{}.xml", arch.as_str())
             ),
             stable_feed(*arch, &[("v0.8.18", "0.8.18")]),
             "byte for byte the single-item feed installed apps have read since 0.8.14"
@@ -223,7 +223,7 @@ fn a_beta_newer_than_stable_joins_the_feed_on_its_channel_only() {
         assert_eq!(
             read(
                 out.path(),
-                &format!("channels/stable/{}", arch.appcast_file_name())
+                &format!("channels/stable/appcast-{}.xml", arch.as_str())
             ),
             stable_feed(
                 *arch,
@@ -370,7 +370,7 @@ fn the_stable_channel_stands_in_for_a_stable_release_without_a_record() {
         assert_eq!(
             read(
                 out.path(),
-                &format!("channels/stable/{}", arch.appcast_file_name())
+                &format!("channels/stable/appcast-{}.xml", arch.as_str())
             ),
             stable_feed(
                 *arch,
@@ -501,7 +501,7 @@ type Break = fn(&Path);
 
 #[test]
 fn a_broken_record_stops_the_composition() {
-    let broken: [(&str, Break); 5] = [
+    let broken: [(&str, Break); 6] = [
         // fs_err's own words; the OS's differ between Unix and Windows.
         ("failed to open file", |dir| {
             fs_err::remove_file(dir.join("appcast-x86_64.xml")).unwrap();
@@ -522,6 +522,15 @@ fn a_broken_record_stops_the_composition() {
         }),
         ("is the manifest of v0.8.18", |dir| {
             write(&dir.join(MANIFEST_FILE_NAME), &manifest("v0.8.18", "beta"));
+        }),
+        ("unknown fields [\"expires_soon\"]", |dir| {
+            // The engine's manifest type would keep the field; a record
+            // `release latest-json` wrote never has one.
+            let path = dir.join(MANIFEST_FILE_NAME);
+            let mut manifest: serde_json::Value =
+                serde_json::from_str(&fs_err::read_to_string(&path).unwrap()).unwrap();
+            manifest["expires_soon"] = serde_json::Value::Bool(true);
+            write(&path, &serde_json::to_string_pretty(&manifest).unwrap());
         }),
         ("holds 0 items", |dir| {
             write(
