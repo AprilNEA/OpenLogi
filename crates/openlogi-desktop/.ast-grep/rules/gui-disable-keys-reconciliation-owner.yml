@@ -1,18 +1,18 @@
-# Owner: AppState::reconcile_disable_keys_config. A refreshed external file
-# needs its own reload receipt and a subsequent device read before editing.
+# Owner: AppState::reconcile_external_config. Every external-file adoption
+# invalidates Disable Keys snapshots, closes the shared fence, and activates locale.
 id: gui-disable-keys-reconciliation-owner
 language: rust
 severity: error
-message: Use AppState::reconcile_disable_keys_config for Disable Keys mismatch and retry recovery; a file refresh alone does not confirm its revision.
+message: Use AppState::reconcile_external_config to adopt an external file; it owns snapshot invalidation, the revision fence, projections, and locale activation.
 files:
-  - crates/openlogi-desktop/src/state/disable_keys.rs
+  - crates/openlogi-desktop/src/**/*.rs
 rule:
   all:
-    - pattern: $STATE.reconcile_external_config()
+    - pattern: $CONFIG.refresh_feature()
     - not:
         inside:
           kind: function_item
           stopBy: end
           has:
             field: name
-            regex: '^reconcile_disable_keys_config$'
+            regex: '^reconcile_external_config$'

@@ -10,8 +10,8 @@ use swr_core::{QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient}
 use swr_gpui::Query;
 use tokio::sync::mpsc;
 
-use super::ipc::{Command, ReadDisableKeys};
-use crate::state::{AppState, DeviceKey, DisableKeysLoad, Load};
+use super::ipc::{Command, ConfigReloadContext, ReadDisableKeys};
+use crate::state::{AppState, DeviceKey, DisableKeysError, DisableKeysLoad, Load};
 
 const ROOT: &str = "disable-keys-read";
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -29,6 +29,18 @@ struct DisableKeysRead {
     _observer: Subscription,
 }
 
+/// Whether hardware snapshots can describe the externally adopted file.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) enum ConfigReconciliation {
+    /// No external adoption is waiting for an agent receipt.
+    #[default]
+    Confirmed,
+    /// Reload Retry can refresh and submit the file again.
+    Required(DisableKeysError),
+    /// Only this receipt may release the shared write fence.
+    Awaiting(ConfigReloadContext),
+}
+
 /// Dedicated owner of Disable Keys reads and their route generations.
 #[derive(Default)]
 pub(crate) struct DisableKeysReads {
@@ -37,6 +49,8 @@ pub(crate) struct DisableKeysReads {
     next_generation: u64,
     reads: BTreeMap<DeviceKey, DisableKeysRead>,
     confirmed: BTreeMap<DeviceKey, Arc<DisableKeysState>>,
+    reconciliation: ConfigReconciliation,
+    next_reconciliation_id: u64,
     #[cfg(test)]
     test_generations: BTreeMap<DeviceKey, u64>,
 }
@@ -135,6 +149,63 @@ impl DisableKeysReads {
     /// An external config reload may change every managed keyboard. Clear
     /// retained offline values too, and return the keys whose UI must update.
     pub(crate) fn reconcile_external_config(&mut self) -> BTreeSet<DeviceKey> {
+        self.reconciliation = ConfigReconciliation::Required(DisableKeysError::RefreshFailed);
+        self.invalidate_all_snapshots()
+    }
+
+    /// The refreshed file still needs its own agent acknowledgement.
+    pub(crate) fn external_config_refreshed(&mut self) {
+        self.reconciliation = ConfigReconciliation::Required(DisableKeysError::ReloadFailed);
+    }
+
+    /// Shared recovery state, independent of device connection lifetimes.
+    pub(crate) fn reconciliation(&self) -> &ConfigReconciliation {
+        &self.reconciliation
+    }
+
+    /// Allocate a route-independent receipt for an application-wide reload.
+    pub(crate) fn next_config_reload(&mut self) -> u64 {
+        let id = self.next_reconciliation_id;
+        self.next_reconciliation_id = self.next_reconciliation_id.saturating_add(1);
+        id
+    }
+
+    /// The latest save supersedes any older confirmation of the adopted file.
+    pub(crate) fn track_config_reload(&mut self, context: ConfigReloadContext) {
+        if self.reconciliation != ConfigReconciliation::Confirmed {
+            self.reconciliation = ConfigReconciliation::Awaiting(context);
+        }
+    }
+
+    /// Late receipts must not release a newer revision's write fence.
+    pub(crate) fn config_reload_matches(&self, context: &ConfigReloadContext) -> bool {
+        matches!(&self.reconciliation, ConfigReconciliation::Awaiting(current) if current == context)
+    }
+
+    /// Only reads started after this matching receipt can enable writes.
+    pub(crate) fn confirm_config_reload(
+        &mut self,
+        context: &ConfigReloadContext,
+    ) -> BTreeSet<DeviceKey> {
+        if !self.config_reload_matches(context) {
+            return BTreeSet::new();
+        }
+        self.reconciliation = ConfigReconciliation::Confirmed;
+        self.invalidate_all_snapshots()
+    }
+
+    /// Keep the existing Reload Retry action available after a failed reload.
+    pub(crate) fn fail_config_reload(
+        &mut self,
+        context: &ConfigReloadContext,
+        error: DisableKeysError,
+    ) {
+        if self.config_reload_matches(context) {
+            self.reconciliation = ConfigReconciliation::Required(error);
+        }
+    }
+
+    fn invalidate_all_snapshots(&mut self) -> BTreeSet<DeviceKey> {
         let keys: BTreeSet<_> = self
             .reads
             .keys()
@@ -164,6 +235,12 @@ impl DisableKeysReads {
     /// Drop the active subscription and fence its completion, retaining the
     /// last confirmed snapshot for offline rendering.
     pub(crate) fn remove(&mut self, key: &DeviceKey) {
+        if matches!(&self.reconciliation,
+            ConfigReconciliation::Awaiting(ConfigReloadContext::DisableKeys(context)) if &context.key == key)
+        {
+            self.reconciliation =
+                ConfigReconciliation::Required(DisableKeysError::ConnectionChanged);
+        }
         #[cfg(test)]
         self.test_generations.remove(key);
         if let Some(read) = self.reads.remove(key) {

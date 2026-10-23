@@ -43,6 +43,9 @@ fn apply_saved_config_reload(
         ipc::ConfigReloadContext::DisableKeys(context) => {
             state.apply_disable_keys_reload_result(context, result)
         }
+        ipc::ConfigReloadContext::Reconciled(request_id) => {
+            state.apply_reconciled_config_reload_result(request_id, result)
+        }
     });
 }
 

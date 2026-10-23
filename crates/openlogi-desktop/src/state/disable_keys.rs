@@ -7,9 +7,13 @@ use openlogi_core::config::DisableKey;
 use openlogi_core::hid::{DisableKeysMask, DisableKeysState, WriteError};
 use tracing::warn;
 
-use crate::services::ipc::{DisableKeysRequestContext, ReloadConfig, SetDisableKeys};
+use crate::services::ipc::{
+    ConfigReloadContext, DisableKeysRequestContext, ReloadConfig, SetDisableKeys,
+};
 
-use super::{AppState, DeviceKey, DisableKeysLoad, Load, StateEvent, StateEvents};
+use super::{
+    AppState, ConfigReconciliation, DeviceKey, DisableKeysLoad, Load, StateEvent, StateEvents,
+};
 
 /// Route-independent identity retained across disconnects during recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,25 +124,12 @@ impl AppState {
     }
 
     fn begin_disable_keys_write(&mut self, desired: DisableKeysMask) -> Option<DeviceKey> {
-        if !self.config.is_writable() {
-            return None;
-        }
-        let record = self.current_record()?;
-        if !record.online || !record.is_persistent() {
-            return None;
-        }
-        let key = record.device_key();
-        if !matches!(self.disable_keys_reads.load(&key), Load::Ready(_)) {
+        let key = self.current_record()?.device_key();
+        if !self.disable_keys_controls_enabled(&key) {
             return None;
         }
         let context = self.allocate_disable_keys_context(&key)?;
         let state = self.devices.sessions.entry(key.clone()).or_default();
-        if !matches!(
-            state.disable_keys.persistence,
-            DisableKeysPersistenceStatus::Idle
-        ) {
-            return None;
-        }
         state.disable_keys.persistence = DisableKeysPersistenceStatus::Applying(context.clone());
         state.disable_keys.error = None;
         if !self.send_ipc(SetDisableKeys { context, desired }) {
@@ -218,10 +209,15 @@ impl AppState {
             }
         };
         state.disable_keys.error = None;
+        let reload_context = ConfigReloadContext::DisableKeys(context.clone());
+        self.disable_keys_reads
+            .track_config_reload(reload_context.clone());
         if !self.send_ipc(ReloadConfig::disable_keys(
             context.clone(),
             self.config.revision(),
         )) {
+            self.disable_keys_reads
+                .fail_config_reload(&reload_context, DisableKeysError::AgentUnavailable);
             let state = self.devices.sessions.entry(key).or_default();
             state.disable_keys.persistence = match purpose {
                 ReloadPurpose::Saved => DisableKeysPersistenceStatus::SavedNotReloaded(context),
@@ -241,7 +237,7 @@ impl AppState {
         context: DisableKeysRequestContext,
         result: Result<openlogi_ipc::SavedConfigVerdict, openlogi_ipc::ConfigReloadError>,
     ) -> StateEvents {
-        let events = StateEvents::from(StateEvent::DisableKeysChanged(context.key.clone()));
+        let mut events = StateEvents::from(StateEvent::DisableKeysChanged(context.key.clone()));
         let current = match self.disable_keys_status(&context.key) {
             Some(
                 DisableKeysPersistenceStatus::AwaitingReload(current)
@@ -257,9 +253,15 @@ impl AppState {
         ) {
             return StateEvents::none();
         }
+        let reload_context = ConfigReloadContext::DisableKeys(context.clone());
         match result {
             Ok(openlogi_ipc::SavedConfigVerdict::Accepted) => {
-                if matches!(
+                if self
+                    .disable_keys_reads
+                    .config_reload_matches(&reload_context)
+                {
+                    events = events.and(self.confirm_external_config_reload(&reload_context));
+                } else if matches!(
                     self.disable_keys_status(&context.key),
                     Some(DisableKeysPersistenceStatus::AwaitingReconciliationReload(
                         _
@@ -286,6 +288,9 @@ impl AppState {
             }
             Err(error) => {
                 warn!(error = %error.message, key = %context.key, "could not reload disabled keys");
+                self.disable_keys_reads
+                    .fail_config_reload(&reload_context, DisableKeysError::ReloadFailed);
+                events = events.and(self.disable_keys_config_events());
                 let state = self
                     .devices
                     .sessions
@@ -317,24 +322,19 @@ impl AppState {
             return StateEvents::none();
         };
         let events = StateEvents::from(StateEvent::DisableKeysChanged(key.clone()));
-        if let Err(error) = self.config.refresh_feature() {
-            warn!(%error, %key, "could not refresh configuration before disabled keys recovery");
-            self.devices
-                .sessions
-                .entry(key.clone())
-                .or_default()
-                .disable_keys
-                .error = Some(DisableKeysError::RefreshFailed);
-            return events;
-        }
-        // Refresh adopts the whole file, including unrelated external edits.
-        // Rebuild projections even if saving our confirmed choice fails again:
-        // that failure rolls back to the newly loaded revision, not the old one.
-        self.restore_config_projections();
-        let events = events
-            .and(StateEvent::SettingsChanged)
-            .and(self.for_current_device(StateEvent::BindingsChanged))
-            .and(self.for_current_device(StateEvent::DpiChanged));
+        let config_events = match self.reconcile_external_config() {
+            Ok(events) => events,
+            Err(config_events) => {
+                self.devices
+                    .sessions
+                    .entry(key.clone())
+                    .or_default()
+                    .disable_keys
+                    .error = Some(DisableKeysError::RefreshFailed);
+                return events.and(config_events);
+            }
+        };
+        let events = events.and(config_events);
         let known = confirmed_known_set(confirmed);
         self.config
             .edit(|config| config.set_disabled_keys(recovery.key.as_str(), known));
@@ -374,6 +374,14 @@ impl AppState {
             }
             Some(DisableKeysPersistenceStatus::ReconcileRequired(recovery)) => {
                 return self.reconcile_disable_keys_config(recovery.clone());
+            }
+            None | Some(DisableKeysPersistenceStatus::Idle)
+                if matches!(
+                    self.disable_keys_config_reconciliation(),
+                    ConfigReconciliation::Required(_)
+                ) =>
+            {
+                return self.reconcile_saved_config();
             }
             _ => return StateEvents::none(),
         };
@@ -501,7 +509,8 @@ impl AppState {
     }
 
     pub(crate) fn disable_keys_controls_enabled(&self, key: &DeviceKey) -> bool {
-        self.config.is_writable()
+        self.disable_keys_config_reconciliation() == &ConfigReconciliation::Confirmed
+            && self.config.is_writable()
             && self
                 .devices
                 .record(key)
@@ -547,7 +556,7 @@ mod tests {
     use openlogi_core::hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
     use crate::services::assets::AssetResolver;
-    use crate::services::ipc::{Command, ConfigReloadContext};
+    use crate::services::ipc::Command;
     use crate::state::ConfigPersistence;
 
     fn keyboard_inventory(product_id: u16, unit_id: [u8; 4]) -> DeviceInventory {
@@ -1691,7 +1700,10 @@ mod tests {
         std::fs::write(fixture.path(), "[invalid TOML").expect("external invalid edit");
         assert_eq!(
             fixture.state.retry_disable_keys_save_inner(&fixture.key),
-            [StateEvent::DisableKeysChanged(fixture.key.clone())]
+            [
+                StateEvent::DisableKeysChanged(fixture.key.clone()),
+                StateEvent::SettingsChanged
+            ]
         );
         assert_eq!(fixture.state.keyboard_bindings(), &previous);
         assert!(!fixture.state.app_settings().smooth_scroll);
@@ -1753,6 +1765,193 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn save_retry_fences_other_keyboards_until_receipt_and_post_receipt_read(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut fixture = SaveRetryFixture::new(&[
+            keyboard_inventory(0xb35b, [1, 2, 3, 4]),
+            keyboard_inventory(0xb35c, [5, 6, 7, 8]),
+        ]);
+        let other = fixture.state.current_record().unwrap().device_key();
+        let offline = DeviceKey::from("offline-keyboard");
+        fixture
+            .state
+            .disable_keys_reads
+            .set_confirmed(&offline, DisableKeysState::default());
+        fixture
+            .external
+            .set_disabled_keys(other.as_str(), BTreeSet::from([DisableKey::CapsLock]));
+        fixture.external.save_to_path(&fixture.path()).unwrap();
+        let SaveRetryFixture {
+            directory: _directory,
+            state,
+            mut receiver,
+            key,
+            ..
+        } = fixture;
+        install_reads(state, cx);
+        let before = DisableKeysState {
+            supported: DisableKeysMask::CAPS_LOCK | DisableKeysMask::NUM_LOCK,
+            disabled: DisableKeysMask::EMPTY,
+        };
+        take_read(&mut receiver).reply.send(Ok(before)).unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(state.disable_keys_controls_enabled(&other));
+        });
+        cx.update(|cx| AppState::retry_disable_keys_save(cx, &key));
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(matches!(state.disable_keys_load_for(&other), Load::Loading));
+            assert!(state.disable_keys_reads.confirmed(&other).is_none());
+            assert!(state.disable_keys_reads.confirmed(&offline).is_none());
+            assert!(!state.disable_keys_controls_enabled(&other));
+            assert!(matches!(
+                state.disable_keys_status(&key),
+                Some(DisableKeysPersistenceStatus::AwaitingReload(_))
+            ));
+        });
+        cx.run_until_parked();
+        let (reload, early_read) = take_reconciliation_commands(&mut receiver);
+        let ConfigReloadContext::DisableKeys(context) = reload.contexts[0].context() else {
+            panic!("Save Retry keeps its Saved reload purpose");
+        };
+        assert_eq!(context.key, key);
+        early_read.reply.send(Ok(before)).unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| AppState::update_disable_keys(cx, DisableKeysMask::NUM_LOCK));
+        assert!(
+            receiver.try_recv().is_err(),
+            "no write from a pre-receipt snapshot"
+        );
+        cx.update(|cx| {
+            AppState::apply(cx, |state| {
+                state.apply_disable_keys_reload_result(
+                    context,
+                    Ok(openlogi_ipc::SavedConfigVerdict::Accepted),
+                )
+            })
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(!state.disable_keys_controls_enabled(&other));
+        });
+        take_read(&mut receiver)
+            .reply
+            .send(Ok(DisableKeysState {
+                disabled: DisableKeysMask::CAPS_LOCK,
+                ..before
+            }))
+            .unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(state.disable_keys_controls_enabled(&other));
+            assert_eq!(
+                state.config.disabled_keys(other.as_str()),
+                Some(&BTreeSet::from([DisableKey::CapsLock]))
+            );
+            let Load::Ready(snapshot) = state.disable_keys_load_for(&other) else {
+                panic!("post-receipt snapshot");
+            };
+            assert_eq!(snapshot.disabled, DisableKeysMask::CAPS_LOCK);
+        });
+        assert!(
+            receiver.try_recv().is_err(),
+            "Save Retry never resends A's hardware write"
+        );
+    }
+
+    struct RestoreLocale(String);
+
+    impl Drop for RestoreLocale {
+        fn drop(&mut self) {
+            rust_i18n::set_locale(&self.0);
+        }
+    }
+
+    fn assert_russian_locale() {
+        let locale = rust_i18n::locale().to_string();
+        assert_eq!(locale, "ru");
+    }
+
+    #[gpui::test]
+    fn save_retry_activates_external_language_and_emits_language_changed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let _restore = RestoreLocale(rust_i18n::locale().to_string());
+        rust_i18n::set_locale("en");
+        let mut fixture = SaveRetryFixture::new(&[keyboard_inventory(0xb35b, [1, 2, 3, 4])]);
+        fixture.external.app_settings.language = Some("ru".into());
+        fixture.external.save_to_path(&fixture.path()).unwrap();
+        let SaveRetryFixture {
+            directory: _directory,
+            state,
+            mut receiver,
+            key,
+            ..
+        } = fixture;
+        let observed = cx.update(|cx| {
+            let state = cx.new(|_| state);
+            AppState::set_global(state.clone(), cx);
+            let observed = cx.new(|cx: &mut gpui::Context<Vec<StateEvent>>| {
+                cx.subscribe(&state, |events, source, event: &StateEvent, cx| {
+                    if event == &StateEvent::LanguageChanged {
+                        assert_eq!(source.read(cx).language(), Some("ru"));
+                        assert_russian_locale();
+                    }
+                    events.push(event.clone());
+                })
+                .detach();
+                Vec::new()
+            });
+            AppState::retry_disable_keys_save(cx, &key);
+            observed
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(observed.read(cx).contains(&StateEvent::LanguageChanged));
+            assert_eq!(AppState::try_read(cx).unwrap().language(), Some("ru"));
+            assert_russian_locale();
+        });
+        take_disable_keys_reload(&mut receiver);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn save_retry_activates_external_language_even_when_the_save_fails_again() {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let _restore = RestoreLocale(rust_i18n::locale().to_string());
+        rust_i18n::set_locale("en");
+        let mut fixture = SaveRetryFixture::new(&[keyboard_inventory(0xb35b, [1, 2, 3, 4])]);
+        fixture.external.app_settings.language = Some("ru".into());
+        fixture.external.save_to_path(&fixture.path()).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(fixture.path().with_added_extension("lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let events = fixture.state.retry_disable_keys_save_inner(&fixture.key);
+        assert!(events.contains(&StateEvent::LanguageChanged));
+        assert_eq!(fixture.state.language(), Some("ru"));
+        assert_russian_locale();
+        assert!(matches!(
+            fixture.state.disable_keys_status(&fixture.key),
+            Some(DisableKeysPersistenceStatus::AppliedNotSaved { .. })
+        ));
+        assert_eq!(
+            fixture.state.disable_keys_error(&fixture.key),
+            Some(DisableKeysError::SaveFailed)
+        );
+        assert!(!fixture.state.disable_keys_controls_enabled(&fixture.key));
+        assert!(fixture.receiver.try_recv().is_err());
+    }
+
     #[test]
     fn save_retry_without_recovery_is_a_noop() {
         let (mut state, mut receiver, key) = test_state(
@@ -1807,6 +2006,7 @@ mod tests {
                 observer.read(cx),
                 &vec![
                     StateEvent::DisableKeysChanged(key.clone()),
+                    StateEvent::DisableKeysChanged(current.clone()),
                     StateEvent::SettingsChanged,
                     StateEvent::BindingsChanged(current.clone()),
                     StateEvent::DpiChanged(current.clone()),
@@ -2030,6 +2230,172 @@ mod tests {
                 .disabled_keys(key.as_str()),
             Some(&BTreeSet::from([DisableKey::CapsLock]))
         );
+    }
+
+    fn take_config_reconciliation(
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) -> (u64, openlogi_core::config::ConfigRevision) {
+        let Ok(Command::ReloadConfig(reload)) = receiver.try_recv() else {
+            panic!("expected config confirmation, never a hardware write");
+        };
+        let request_id = reload
+            .contexts
+            .iter()
+            .find_map(|context| match context.context() {
+                ConfigReloadContext::Reconciled(id) => Some(id),
+                _ => None,
+            })
+            .expect("revision-specific receipt");
+        assert!(receiver.try_recv().is_err());
+        (request_id, reload.revision)
+    }
+
+    #[test]
+    fn general_reconciliation_repeats_for_new_revisions_and_rejects_old_receipts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+        let (_, file) = ConfigFile::load_from_path(&path).unwrap();
+        let (mut state, mut receiver, key) = test_state(
+            ConfigPersistence::UserFile(file),
+            &[keyboard_inventory(0xb35b, [1, 2, 3, 4])],
+        );
+        let mismatch = Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave);
+        let _ = state.apply_saved_config_reload_result(mismatch.clone());
+        let (first, _) = take_config_reconciliation(&mut receiver);
+        let mut external = Config::load_from_path(&path).unwrap();
+        external.set_disabled_keys(key.as_str(), BTreeSet::from([DisableKey::CapsLock]));
+        external.save_to_path(&path).unwrap();
+        let _ = state.apply_reconciled_config_reload_result(first, mismatch);
+        let (second, revision) = take_config_reconciliation(&mut receiver);
+        assert_ne!(first, second);
+        assert_eq!(
+            revision,
+            openlogi_core::config::ConfigRevision::of(&std::fs::read_to_string(&path).unwrap())
+        );
+        state
+            .disable_keys_reads
+            .set_confirmed(&key, DisableKeysState::default());
+        assert!(
+            state
+                .apply_reconciled_config_reload_result(
+                    first,
+                    Ok(openlogi_ipc::SavedConfigVerdict::Accepted)
+                )
+                .is_empty()
+        );
+        assert!(!state.disable_keys_controls_enabled(&key));
+        let _ = state.apply_reconciled_config_reload_result(
+            second,
+            Ok(openlogi_ipc::SavedConfigVerdict::Accepted),
+        );
+        assert!(matches!(state.disable_keys_load_for(&key), Load::Unknown));
+        assert!(
+            !state.disable_keys_controls_enabled(&key),
+            "the pre-receipt snapshot was retired"
+        );
+    }
+
+    #[test]
+    fn general_refresh_and_reload_failures_keep_a_working_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+        let (_, file) = ConfigFile::load_from_path(&path).unwrap();
+        let (mut state, mut receiver, key) = test_state(
+            ConfigPersistence::UserFile(file),
+            &[keyboard_inventory(0xb35b, [1, 2, 3, 4])],
+        );
+        let valid = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, "[malformed").unwrap();
+        let _ = state.apply_saved_config_reload_result(Ok(
+            openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave,
+        ));
+        for _ in 0..2 {
+            state
+                .disable_keys_reads
+                .set_confirmed(&key, DisableKeysState::default());
+            assert!(!state.disable_keys_controls_enabled(&key));
+            assert_eq!(
+                state.disable_keys_config_reconciliation(),
+                &ConfigReconciliation::Required(DisableKeysError::RefreshFailed)
+            );
+            assert!(!state.retry_disable_keys_reload_inner(&key).is_empty());
+            assert!(receiver.try_recv().is_err());
+        }
+        std::fs::write(&path, &valid).unwrap();
+        let _ = state.retry_disable_keys_reload_inner(&key);
+        let (first, revision) = take_config_reconciliation(&mut receiver);
+        assert_eq!(revision, openlogi_core::config::ConfigRevision::of(&valid));
+        let _ = state.apply_reconciled_config_reload_result(
+            first,
+            Err(openlogi_ipc::ConfigReloadError {
+                message: "retryable".into(),
+            }),
+        );
+        assert_eq!(
+            state.disable_keys_config_reconciliation(),
+            &ConfigReconciliation::Required(DisableKeysError::ReloadFailed)
+        );
+        let _ = state.retry_disable_keys_reload_inner(&key);
+        let (second, _) = take_config_reconciliation(&mut receiver);
+        assert_ne!(first, second);
+        assert!(
+            state
+                .apply_reconciled_config_reload_result(
+                    first,
+                    Ok(openlogi_ipc::SavedConfigVerdict::Accepted)
+                )
+                .is_empty()
+        );
+        assert!(!state.disable_keys_controls_enabled(&key));
+        let _ = state.apply_reconciled_config_reload_result(
+            second,
+            Ok(openlogi_ipc::SavedConfigVerdict::Accepted),
+        );
+        assert_eq!(
+            state.disable_keys_config_reconciliation(),
+            &ConfigReconciliation::Confirmed
+        );
+        assert!(
+            !state.disable_keys_controls_enabled(&key),
+            "retry still needs a post-receipt read"
+        );
+    }
+
+    #[test]
+    fn later_general_save_supersedes_pending_confirmation_and_closed_ipc_keeps_retry() {
+        let (mut state, mut receiver, key) = test_state(
+            ConfigPersistence::MemoryOnly,
+            &[keyboard_inventory(0xb35b, [1, 2, 3, 4])],
+        );
+        let _ = state.apply_saved_config_reload_result(Ok(
+            openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave,
+        ));
+        let (first, _) = take_config_reconciliation(&mut receiver);
+        let _ = state.commit_smooth_scroll(true);
+        let (second, _) = take_config_reconciliation(&mut receiver);
+        assert_ne!(first, second);
+        assert!(
+            state
+                .apply_reconciled_config_reload_result(
+                    first,
+                    Ok(openlogi_ipc::SavedConfigVerdict::Accepted)
+                )
+                .is_empty()
+        );
+        let _ =
+            state.apply_saved_config_reload_result(Ok(openlogi_ipc::SavedConfigVerdict::Accepted));
+        assert!(!state.disable_keys_controls_enabled(&key));
+        drop(receiver);
+        let _ = state.apply_reconciled_config_reload_result(
+            second,
+            Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave),
+        );
+        assert_eq!(
+            state.disable_keys_config_reconciliation(),
+            &ConfigReconciliation::Required(DisableKeysError::AgentUnavailable)
+        );
+        assert!(!state.retry_disable_keys_reload_inner(&key).is_empty());
+        assert!(!state.disable_keys_controls_enabled(&key));
     }
 
     #[test]

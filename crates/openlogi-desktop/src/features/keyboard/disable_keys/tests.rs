@@ -119,7 +119,9 @@ fn answer_initial_read(
 }
 
 #[gpui::test]
-fn general_external_reload_closes_the_write_gate_until_fresh_read(cx: &mut TestAppContext) {
+fn general_external_reload_requires_latest_revision_receipt_then_fresh_read(
+    cx: &mut TestAppContext,
+) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
     let (config, file) = ConfigFile::load_from_path(&path).unwrap();
@@ -134,8 +136,10 @@ fn general_external_reload_closes_the_write_gate_until_fresh_read(cx: &mut TestA
     assert!(matches!(receiver.try_recv(), Ok(Command::ReloadConfig(_))));
 
     let mut external = Config::load_from_path(&path).unwrap();
+    external.app_settings.animate_desktop_switch = false;
+    external.save_to_path(&path).unwrap(); // R2, already loaded by the agent.
     external.set_disabled_keys(key.as_str(), BTreeSet::from([DisableKey::CapsLock]));
-    external.save_to_path(&path).unwrap();
+    external.save_to_path(&path).unwrap(); // R3, adopted by the GUI below.
     let external_text = std::fs::read_to_string(&path).unwrap();
     cx.update(|cx| {
         AppState::apply(cx, |state| {
@@ -152,7 +156,7 @@ fn general_external_reload_closes_the_write_gate_until_fresh_read(cx: &mut TestA
     cx.update(|cx| AppState::update_disable_keys(cx, DisableKeysMask::CAPS_LOCK));
     cx.run_until_parked();
     let mut fresh_read = None;
-    let mut unrelated = Vec::new();
+    let mut receipt = None;
     while let Ok(command) = receiver.try_recv() {
         match command {
             Command::SetDisableKeys(_) => panic!("stale cache must not permit a write"),
@@ -162,7 +166,17 @@ fn general_external_reload_closes_the_write_gate_until_fresh_read(cx: &mut TestA
                     "one fresh read is required"
                 );
             }
-            other => unrelated.push(other),
+            Command::ReloadConfig(reload) => {
+                assert_eq!(
+                    reload.revision,
+                    openlogi_core::config::ConfigRevision::of(&external_text)
+                );
+                let ConfigReloadContext::Reconciled(id) = reload.contexts[0].context() else {
+                    panic!("revision-specific reconciliation");
+                };
+                assert!(receipt.replace(id).is_none());
+            }
+            _ => panic!("only a reload and a read are needed"),
         }
     }
     fresh_read
@@ -170,10 +184,26 @@ fn general_external_reload_closes_the_write_gate_until_fresh_read(cx: &mut TestA
         .reply
         .send(Ok(DisableKeysState {
             supported: DisableKeysMask::CAPS_LOCK,
-            disabled: DisableKeysMask::CAPS_LOCK,
+            disabled: DisableKeysMask::EMPTY,
         }))
         .unwrap();
     cx.run_until_parked();
+    cx.read(|cx| {
+        assert!(
+            !AppState::try_read(cx)
+                .unwrap()
+                .disable_keys_controls_enabled(&key)
+        )
+    });
+    cx.update(|cx| {
+        AppState::apply(cx, |state| {
+            state.apply_reconciled_config_reload_result(
+                receipt.expect("reload for R3"),
+                Ok(openlogi_ipc::SavedConfigVerdict::Accepted),
+            )
+        });
+    });
+    answer_post_receipt_read(&mut receiver, &key, cx);
     cx.read(|cx| {
         let state = AppState::try_read(cx).unwrap();
         assert!(state.disable_keys_controls_enabled(&key));
@@ -183,6 +213,100 @@ fn general_external_reload_closes_the_write_gate_until_fresh_read(cx: &mut TestA
         assert_eq!(snapshot.disabled, DisableKeysMask::CAPS_LOCK);
     });
     assert_eq!(std::fs::read_to_string(&path).unwrap(), external_text);
+}
+
+fn answer_post_receipt_read(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    key: &DeviceKey,
+    cx: &mut TestAppContext,
+) {
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert!(
+            !AppState::try_read(cx)
+                .unwrap()
+                .disable_keys_controls_enabled(key)
+        )
+    });
+    let Ok(Command::ReadDisableKeys(read)) = receiver.try_recv() else {
+        panic!("receipt must retire the earlier read");
+    };
+    read.reply
+        .send(Ok(DisableKeysState {
+            supported: DisableKeysMask::CAPS_LOCK,
+            disabled: DisableKeysMask::CAPS_LOCK,
+        }))
+        .unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn general_refresh_failure_offers_a_working_reload_retry(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+    let (config, file) = ConfigFile::load_from_path(&path).unwrap();
+    let mut receiver = install_keyboard_with_config(cx, config, ConfigPersistence::UserFile(file));
+    let _other_requests = answer_initial_read(&mut receiver, cx);
+    let valid = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, "[malformed").unwrap();
+    cx.update(|cx| {
+        AppState::apply(cx, |state| {
+            state.apply_saved_config_reload_result(Ok(
+                openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave,
+            ))
+        })
+    });
+    cx.run_until_parked();
+    let Ok(Command::ReadDisableKeys(read)) = receiver.try_recv() else {
+        panic!("refresh invalidates the earlier snapshot");
+    };
+    read.reply.send(Ok(DisableKeysState::default())).unwrap();
+    cx.run_until_parked();
+    assert!(
+        receiver.try_recv().is_err(),
+        "a failed refresh cannot request an exact revision"
+    );
+    let (_, visual) = cx.add_window_view(|_, cx| PanelHarness(cx.new(DisableKeysPanel::new)));
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let retry = visual
+        .debug_bounds("disable-keys-reload-retry")
+        .expect("shared recovery must not be a dead end");
+    std::fs::write(&path, &valid).unwrap();
+    visual.simulate_click(retry.center(), Modifiers::default());
+    visual.run_until_parked();
+    let mut reload = None;
+    let mut reads = Vec::new();
+    while let Ok(command) = receiver.try_recv() {
+        match command {
+            Command::ReloadConfig(request) => {
+                assert!(reload.replace(request).is_none());
+            }
+            Command::ReadDisableKeys(read) => reads.push(read),
+            _ => panic!("recovery never resends a hardware write"),
+        }
+    }
+    let reload = reload.expect("the retry requests confirmation of the repaired file");
+    assert_eq!(
+        reload.revision,
+        openlogi_core::config::ConfigRevision::of(&valid)
+    );
+    assert!(matches!(
+        reload.contexts[0].context(),
+        ConfigReloadContext::Reconciled(_)
+    ));
+    visual.read(|cx| {
+        let state = AppState::try_read(cx).unwrap();
+        let key = state.current_record().unwrap().device_key();
+        assert!(!state.disable_keys_controls_enabled(&key));
+        assert!(matches!(
+            state.disable_keys_config_reconciliation(),
+            ConfigReconciliation::Awaiting(_)
+        ));
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("disable-keys-reload-retry").is_none());
 }
 
 #[gpui::test]
@@ -433,6 +557,29 @@ fn take_reload(
     context
 }
 
+fn take_save_retry_reload(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+) -> (
+    crate::services::ipc::DisableKeysRequestContext,
+    Vec<crate::services::ipc::ReadDisableKeys>,
+) {
+    let mut context = None;
+    let mut reads = Vec::new();
+    while let Ok(command) = receiver.try_recv() {
+        match command {
+            Command::ReloadConfig(reload) => {
+                let ConfigReloadContext::DisableKeys(receipt) = reload.contexts[0].context() else {
+                    panic!("Save Retry retains its device transaction");
+                };
+                assert!(context.replace(receipt).is_none());
+            }
+            Command::ReadDisableKeys(read) => reads.push(read),
+            _ => panic!("Save Retry must not repeat a hardware write"),
+        }
+    }
+    (context.expect("one saved reload"), reads)
+}
+
 struct PanelHarness(Entity<DisableKeysPanel>);
 
 impl Render for PanelHarness {
@@ -503,7 +650,7 @@ fn exercise_save_retry(cx: &mut TestAppContext, keypress: Option<&str>) {
     } else {
         visual.simulate_click(button.center(), Modifiers::default());
     }
-    let reload = take_reload(&mut receiver);
+    let (reload, _refresh_reads) = take_save_retry_reload(&mut receiver);
     assert_eq!(reload.key, key);
     assert!(
         receiver.try_recv().is_err(),

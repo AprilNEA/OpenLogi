@@ -322,10 +322,15 @@ fn file_changed_after_general_save_reconciles_external_settings_without_resaving
     let persisted = Config::load_from_path(&path).expect("external config remains on disk");
     assert!(!persisted.app_settings.smooth_scroll);
     assert!(!persisted.app_settings.animate_desktop_switch);
-    assert!(
-        receiver.try_recv().is_err(),
-        "the external verdict must not enqueue a reload of the stale save"
+    let Ok(crate::services::ipc::Command::ReloadConfig(reload)) = receiver.try_recv() else {
+        panic!("the adopted revision needs its own reload");
+    };
+    assert_eq!(
+        reload.revision,
+        ConfigRevision::of(&std::fs::read_to_string(&path).unwrap()),
+        "reload the refreshed file, never the stale save"
     );
+    assert!(receiver.try_recv().is_err());
 }
 
 /// Picking a channel in a user-edited file adds the `update_channel` line and

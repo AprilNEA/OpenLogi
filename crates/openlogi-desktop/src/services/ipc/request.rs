@@ -603,6 +603,11 @@ pub(crate) enum SavedReloadContext {
         context: DisableKeysRequestContext,
         revision: ConfigRevision,
     },
+    /// External adoption must confirm its own revision, not a later batch member.
+    Reconciled {
+        request_id: u64,
+        revision: ConfigRevision,
+    },
 }
 
 impl SavedReloadContext {
@@ -611,6 +616,7 @@ impl SavedReloadContext {
         match self {
             Self::General => ConfigReloadContext::General,
             Self::DisableKeys { context, .. } => ConfigReloadContext::DisableKeys(context.clone()),
+            Self::Reconciled { request_id, .. } => ConfigReloadContext::Reconciled(*request_id),
         }
     }
 
@@ -620,11 +626,10 @@ impl SavedReloadContext {
         outcome: Result<SavedConfigVerdict, ConfigReloadError>,
     ) -> Result<SavedConfigVerdict, ConfigReloadError> {
         match (self, outcome) {
-            (Self::DisableKeys { revision, .. }, Ok(SavedConfigVerdict::Accepted))
-                if *revision != submitted =>
-            {
-                Ok(SavedConfigVerdict::FileChangedAfterSave)
-            }
+            (
+                Self::DisableKeys { revision, .. } | Self::Reconciled { revision, .. },
+                Ok(SavedConfigVerdict::Accepted),
+            ) if *revision != submitted => Ok(SavedConfigVerdict::FileChangedAfterSave),
             (_, outcome) => outcome,
         }
     }
@@ -641,6 +646,26 @@ impl Default for ReloadConfig {
 }
 
 impl ReloadConfig {
+    /// Confirm an adopted file without changing general-save error presentation.
+    pub(crate) fn reconciled(request_id: u64, revision: ConfigRevision) -> Self {
+        Self {
+            contexts: vec![SavedReloadContext::Reconciled {
+                request_id,
+                revision,
+            }],
+            revision,
+            ..Default::default()
+        }
+    }
+
+    /// Also confirm a later general save while external-file reconciliation is pending.
+    pub(crate) fn track_reconciliation(&mut self, request_id: u64) {
+        self.contexts.push(SavedReloadContext::Reconciled {
+            request_id,
+            revision: self.revision,
+        });
+    }
+
     pub(crate) fn disable_keys(
         context: DisableKeysRequestContext,
         revision: ConfigRevision,

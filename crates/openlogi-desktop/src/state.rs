@@ -62,6 +62,7 @@ use pointer::PointerState;
 
 use crate::services::assets::AssetResolver;
 use crate::services::device_reads::DeviceReads;
+pub(crate) use crate::services::disable_keys_reads::ConfigReconciliation;
 use crate::services::disable_keys_reads::DisableKeysReads;
 use crate::state::config::ConfigState;
 use crate::state::devices::{build_device_list, pick_initial_device};
@@ -88,6 +89,7 @@ mod load;
 mod os_layout;
 mod pointer;
 mod pointer_speed;
+mod reconciliation;
 mod report_rate;
 mod scroll;
 mod settings;
@@ -352,11 +354,13 @@ impl AppState {
     ) -> bool {
         if self.persist_config(what) {
             let revision = self.config.revision();
-            self.send_ipc(crate::services::ipc::ReloadConfig {
+            let mut reload = crate::services::ipc::ReloadConfig {
                 chosen,
                 revision,
                 ..Default::default()
-            });
+            };
+            self.track_external_config_reload(&mut reload);
+            self.send_config_reload(reload);
             true
         } else {
             false
@@ -393,11 +397,13 @@ impl AppState {
         for key in self.disable_keys_reads.reconcile_external_config() {
             events = events.and(StateEvent::DisableKeysChanged(key));
         }
+        let events = events.and(self.disable_keys_config_events());
         let previous_language = self.config.app_settings.language.clone();
         if let Err(error) = self.config.refresh_feature() {
             warn!(%error, "could not reconcile externally edited configuration");
             return Err(events.and(StateEvent::SettingsChanged));
         }
+        self.disable_keys_reads.external_config_refreshed();
         let language_changed = self.config.app_settings.language != previous_language;
         self.restore_config_projections();
         let events = events
@@ -440,15 +446,8 @@ impl AppState {
                 self.apply_config_reload_result(Ok(()))
             }
             Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave) => {
-                let cleared_reload_error = self.config.apply_reload_result(Ok(()));
-                let events = self
-                    .reconcile_external_config()
-                    .unwrap_or_else(|events| events);
-                if events.is_empty() && cleared_reload_error {
-                    StateEvent::SettingsChanged.into()
-                } else {
-                    events
-                }
+                let _ = self.config.apply_reload_result(Ok(()));
+                self.reconcile_saved_config()
             }
             Err(error) => self.apply_config_reload_result(Err(error)),
         }

@@ -9,8 +9,8 @@ use openlogi_core::config::DisableKey;
 use openlogi_core::hid::DisableKeysMask;
 
 use crate::state::{
-    AppState, DeviceKey, DisableKeysError, DisableKeysLoad, DisableKeysPersistenceStatus,
-    StateEvent,
+    AppState, ConfigReconciliation, DeviceKey, DisableKeysError, DisableKeysLoad,
+    DisableKeysPersistenceStatus, StateEvent,
 };
 use crate::ui::components::PanelCard;
 use crate::ui::status::{retry_line, status_line};
@@ -44,7 +44,13 @@ impl DisableKeysPanel {
         let enabled = state.disable_keys_controls_enabled(&key);
         let persistence = state.disable_keys_status(&key).cloned().unwrap_or_default();
         let error = state.disable_keys_error(&key);
-        let recovery = recovery_content(&persistence, online, &key, pal);
+        let recovery = recovery_content(&persistence, online, &key, pal).or_else(|| {
+            config_recovery_content(
+                state.disable_keys_config_reconciliation(),
+                ReloadRecovery { online, key: &key },
+                pal,
+            )
+        });
         let body = load_content(
             state.disable_keys_load_for(&key),
             online,
@@ -91,36 +97,21 @@ fn recovery_content(
         ),
         DisableKeysPersistenceStatus::SavedNotReloaded(_)
         | DisableKeysPersistenceStatus::SavedNotReloadedDetached(_)
-        | DisableKeysPersistenceStatus::ReconcileRequired(_) => Some(
-            v_flex()
-                .gap_2()
-                .child(status_line(
-                    if matches!(
-                        persistence,
-                        DisableKeysPersistenceStatus::ReconcileRequired(_)
-                    ) {
-                        tr!("keyboard.disable_keys_refresh_failed")
-                    } else {
-                        tr!("keyboard.saved_but_agent_not_reloaded")
-                    },
-                    pal,
-                ))
-                .child(
-                    retry_line(
-                        device_control_id(key, "reload-retry"),
-                        tr!("keyboard.reload_retry"),
-                        {
-                            let key = key.clone();
-                            move |cx| {
-                                AppState::retry_disable_keys_reload(cx, &key);
-                            }
-                        },
-                    )
-                    .disabled(!online)
-                    .debug_selector(|| "disable-keys-reload-retry".into()),
-                )
-                .into_any_element(),
-        ),
+        | DisableKeysPersistenceStatus::ReconcileRequired(_) => {
+            let message = if matches!(
+                persistence,
+                DisableKeysPersistenceStatus::ReconcileRequired(_)
+            ) {
+                tr!("keyboard.disable_keys_refresh_failed")
+            } else {
+                tr!("keyboard.saved_but_agent_not_reloaded")
+            };
+            Some(reload_recovery_content(
+                message,
+                ReloadRecovery { online, key },
+                pal,
+            ))
+        }
         DisableKeysPersistenceStatus::Applying(_)
         | DisableKeysPersistenceStatus::AwaitingReload(_)
         | DisableKeysPersistenceStatus::AwaitingReconciliationReload(_) => {
@@ -128,6 +119,53 @@ fn recovery_content(
         }
         DisableKeysPersistenceStatus::Idle => None,
     }
+}
+
+#[derive(Clone, Copy)]
+struct ReloadRecovery<'a> {
+    online: bool,
+    key: &'a DeviceKey,
+}
+
+fn config_recovery_content(
+    reconciliation: &ConfigReconciliation,
+    recovery: ReloadRecovery<'_>,
+    pal: Palette,
+) -> Option<gpui::AnyElement> {
+    match reconciliation {
+        ConfigReconciliation::Confirmed => None,
+        ConfigReconciliation::Awaiting(_) => {
+            Some(status_line(tr!("keyboard.applying_and_confirming"), pal).into_any_element())
+        }
+        ConfigReconciliation::Required(error) => Some(reload_recovery_content(
+            recovery_error_text(*error),
+            recovery,
+            pal,
+        )),
+    }
+}
+
+fn reload_recovery_content(
+    message: gpui::SharedString,
+    recovery: ReloadRecovery<'_>,
+    pal: Palette,
+) -> gpui::AnyElement {
+    v_flex()
+        .gap_2()
+        .child(status_line(message, pal))
+        .child(
+            retry_line(
+                device_control_id(recovery.key, "reload-retry"),
+                tr!("keyboard.reload_retry"),
+                {
+                    let key = recovery.key.clone();
+                    move |cx| AppState::retry_disable_keys_reload(cx, &key)
+                },
+            )
+            .disabled(!recovery.online)
+            .debug_selector(|| "disable-keys-reload-retry".into()),
+        )
+        .into_any_element()
 }
 
 fn load_content(

@@ -90,6 +90,8 @@ pub(crate) enum ConfigReloadContext {
     General,
     /// Reload following one confirmed Disable Keys transaction.
     DisableKeys(DisableKeysRequestContext),
+    /// Confirmation of an externally adopted file, independent of device routes.
+    Reconciled(u64),
 }
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -943,6 +945,33 @@ mod tests {
             observed,
             "earlier context must receive a reconciliation verdict"
         );
+    }
+
+    #[test]
+    fn coalesced_reconciliation_only_accepts_its_own_revision() {
+        let mut owed = OwedReloads::default();
+        owed.save(ReloadConfig::reconciled(
+            1,
+            ConfigRevision::of("adopted R3"),
+        ));
+        owed.save(ReloadConfig::reconciled(
+            2,
+            ConfigRevision::of("adopted R4"),
+        ));
+        let reload = owed.save.expect("one batched reload");
+        let (updates, mut received) = mpsc::unbounded_channel();
+        request::Request::deliver(reload, Ok(Ok(SavedConfigVerdict::Accepted)), &updates);
+        for (expected_id, expected_verdict) in [
+            (1, SavedConfigVerdict::FileChangedAfterSave),
+            (2, SavedConfigVerdict::Accepted),
+        ] {
+            let Ok(GuiUpdate::ConfigReloadResult { context, result }) = received.try_recv() else {
+                panic!("each adoption receives its own verdict");
+            };
+            assert_eq!(context, ConfigReloadContext::Reconciled(expected_id));
+            assert_eq!(result.unwrap(), expected_verdict);
+        }
+        assert!(received.try_recv().is_err());
     }
 
     #[test]
