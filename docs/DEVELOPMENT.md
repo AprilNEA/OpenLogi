@@ -621,7 +621,7 @@ never the latest release. It leaves the channel files, the installer site and
 the Homebrew cask as they are. A stable release's notes compare with the
 previous stable tag, so they cover its betas too; a beta's notes compare with
 the tag just before it. `cargo xtask release version` picks that tag and prints
-it as `previous_tag`; the release-notes generator only uses it. The release
+it as `previous_tag`; publish passes it to GitHub's release-notes API. The release
 workflow still stops a beta tag before the build, until the beta feeds exist.
 
 ## Crowdin translation sync

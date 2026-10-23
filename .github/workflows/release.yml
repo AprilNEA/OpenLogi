@@ -94,83 +94,10 @@ jobs:
       sign: true
       build_version: ${{ needs.version.outputs.build_version }}
 
-  release-notes:
-    name: Generate release notes
-    # Tag runs only: the generator diffs from the previous tag, and its only
-    # consumer (publish) is tag-gated too. `release version` picks that tag:
-    # for a stable release the stable release before it, so the notes cover
-    # its betas.
-    needs: version
-    if: ${{ github.ref_type == 'tag' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10.11.0
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: .github/scripts/release-notes/pnpm-lock.yaml
-
-      - name: Load Codex release-notes credentials from 1Password
-        id: release_notes_config
-        continue-on-error: true
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
-        with:
-          export-env: false
-        # Load only fields the item has: one missing field fails the whole
-        # step, which leaves every output empty and the notes without Codex.
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          CODEX_ACCESS_TOKEN: ${{ secrets.OP_CODEX_SECRET_ITEM }}/credential
-          CHATGPT_USERNAME: ${{ secrets.OP_CODEX_SECRET_ITEM }}/username
-
-      - name: Mint release-notes GitHub App token
-        id: release_notes_app_token
-        continue-on-error: true
-        uses: ./.github/actions/github-app-token-from-1password
-        with:
-          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
-
-      - name: Install release-notes dependencies
-        run: pnpm --dir .github/scripts/release-notes install --frozen-lockfile
-
-      - name: Generate GitHub Release notes
-        env:
-          CODEX_ACCESS_TOKEN: ${{ steps.release_notes_config.outputs.CODEX_ACCESS_TOKEN }}
-          CHATGPT_USERNAME: ${{ steps.release_notes_config.outputs.CHATGPT_USERNAME }}
-          # Optional override; unset, generate.ts picks the endpoint from the
-          # credential kind.
-          CODEX_ENDPOINT: ${{ vars.CODEX_ENDPOINT }}
-          GH_TOKEN: ${{ steps.release_notes_app_token.outputs.token }}
-          PREVIOUS_TAG: ${{ needs.version.outputs.previous_tag }}
-        run: |
-          set -euo pipefail
-          # An empty tag (the first release) compares with nothing.
-          node .github/scripts/release-notes/generate.ts \
-            --tag "$GITHUB_REF_NAME" \
-            --previous-tag "$PREVIOUS_TAG" \
-            --output .release/RELEASE_NOTES.md
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: OpenLogi-release-notes
-          path: .release/RELEASE_NOTES.md
-
   publish:
     name: Publish release
     runs-on: ubuntu-latest
-    needs: [version, build, release-notes]
+    needs: [version, build]
     # Wait for the Windows jobs (so the successful .zip/.msi set can be attached)
     # but do NOT let their failure block the macOS release. `!cancelled()` removes
     # the implicit "all needs succeeded" gate, so the required deps are checked
@@ -184,7 +111,7 @@ jobs:
     # by build.yml's `results` job — the reusable-workflow job result aggregates
     # all legs, so gating on it would let a failed Windows/Linux leg block the
     # macOS release. The Windows/Linux legs stay best-effort (pattern download).
-    if: ${{ github.ref_type == 'tag' && !cancelled() && needs.version.result == 'success' && needs.build.outputs.macos_result == 'success' && needs.release-notes.result == 'success' }}
+    if: ${{ github.ref_type == 'tag' && !cancelled() && needs.version.result == 'success' && needs.build.outputs.macos_result == 'success' }}
     # The channel files on R2 are shared by every release. One publish at a
     # time keeps two tags from interleaving their writes. `queue: max` keeps
     # every waiting publish (up to 100) instead of only the newest one;
@@ -241,10 +168,34 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: actions/download-artifact@v8
-        with:
-          name: OpenLogi-release-notes
-          path: .release
+      # The release body and the appcast's notes: GitHub's list of the PRs
+      # merged since `previous_tag`. `release version` picks that tag: for a
+      # stable release, the stable release before it, so the notes cover its
+      # betas. An empty one (the first release) lets GitHub pick the start.
+      # Notes must not block a release: a failed call leaves a compare link
+      # and a warning instead.
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ needs.version.outputs.previous_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release
+          notes=.release/RELEASE_NOTES.md
+          args=(-f "tag_name=$GITHUB_REF_NAME")
+          if [ -n "$PREVIOUS_TAG" ]; then
+            args+=(-f "previous_tag_name=$PREVIOUS_TAG")
+          fi
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              "${args[@]}" --jq .body > "$notes"; then
+            echo "::warning title=Release notes::GitHub did not generate the release notes; the release links the changes instead"
+            base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+            if [ -n "$PREVIOUS_TAG" ]; then
+              echo "**Full Changelog**: $base/compare/$PREVIOUS_TAG...$GITHUB_REF_NAME" > "$notes"
+            else
+              echo "**Full Changelog**: $base/commits/$GITHUB_REF_NAME" > "$notes"
+            fi
+          fi
 
       - uses: actions/download-artifact@v8
         with:

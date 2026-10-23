@@ -137,9 +137,7 @@ children of the GUI and survive both closing its window and Ctrl-C.
 `../.cargo/run-macos.sh` stays a shell script — Cargo execs it for every binary
 of every `cargo run`/`test`/`bench`, so the passthrough must not pay for an
 interpreter start — but it now does nothing except that passthrough and calling
-this command. The release-notes generator stays in `../.github/scripts/release-notes` because it is a
-dedicated Node tool with Octokit, changelog parsing, and OpenAI dependencies;
-xtask should not add a one-line wrapper around a canonical specialized tool.
+this command.
 
 ## Layout
 

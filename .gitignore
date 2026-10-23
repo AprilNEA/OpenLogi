@@ -62,7 +62,8 @@ devenv.local.yaml
 !/.claude/skills/contributing-device-fixtures
 !/.claude/skills/ast-grep
 
-# Node dependencies for the JS helper scripts under .github/scripts/.
+# No Node project is tracked. This keeps an old install of the removed
+# release-notes script out of `git status`.
 node_modules/
 
 # macOS finder metadata
