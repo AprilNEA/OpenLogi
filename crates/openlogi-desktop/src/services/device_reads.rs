@@ -578,7 +578,7 @@ impl DeviceReads {
             },
             READ_RETRY_POLICY,
         )
-        .retry_if(|error| !pointer_speed_error_is_permanent(error));
+        .retry_if(|error| !unsupported_error_is_permanent(error));
         let handle = client.subscribe(
             query_key(POINTER_SPEED, &key),
             fetcher,
@@ -586,10 +586,10 @@ impl DeviceReads {
         );
         read_through(&client, POINTER_SPEED, &key, &handle);
         let query = Query::new(&client, handle, cx);
-        let load = project_load(query.read(cx), pointer_speed_error_is_permanent);
+        let load = project_load(query.read(cx), unsupported_error_is_permanent);
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
-            let load = project_load(query_state.read(cx), pointer_speed_error_is_permanent);
+            let load = project_load(query_state.read(cx), unsupported_error_is_permanent);
             if state
                 .device_reads_mut()
                 .update_pointer_speed(&observed_key, flight, load)
@@ -689,7 +689,7 @@ impl DeviceReads {
             },
             READ_RETRY_POLICY,
         )
-        .retry_if(|error| !force_sensing_error_is_permanent(error));
+        .retry_if(|error| !unsupported_error_is_permanent(error));
         let handle = client.subscribe(
             query_key(FORCE_SENSING, &key),
             fetcher,
@@ -697,10 +697,10 @@ impl DeviceReads {
         );
         read_through(&client, FORCE_SENSING, &key, &handle);
         let query = Query::new(&client, handle, cx);
-        let load = project_load(query.read(cx), force_sensing_error_is_permanent);
+        let load = project_load(query.read(cx), unsupported_error_is_permanent);
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
-            let load = project_load(query_state.read(cx), force_sensing_error_is_permanent);
+            let load = project_load(query_state.read(cx), unsupported_error_is_permanent);
             if state
                 .device_reads_mut()
                 .update_force_sensing(&observed_key, flight, load)
@@ -797,7 +797,7 @@ impl DeviceReads {
             },
             READ_RETRY_POLICY,
         )
-        .retry_if(|error| !backlight_error_is_permanent(error));
+        .retry_if(|error| !unsupported_error_is_permanent(error));
         let handle = client.subscribe(
             query_key(BACKLIGHT, &key),
             fetcher,
@@ -805,10 +805,10 @@ impl DeviceReads {
         );
         read_through(&client, BACKLIGHT, &key, &handle);
         let query = Query::new(&client, handle, cx);
-        let load = project_load(query.read(cx), backlight_error_is_permanent);
+        let load = project_load(query.read(cx), unsupported_error_is_permanent);
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
-            let load = project_load(query_state.read(cx), backlight_error_is_permanent);
+            let load = project_load(query_state.read(cx), unsupported_error_is_permanent);
             if state
                 .device_reads_mut()
                 .update_backlight(&observed_key, flight, load)
@@ -1565,15 +1565,7 @@ fn report_rate_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
-fn pointer_speed_error_is_permanent(error: &WriteError) -> bool {
-    matches!(error, WriteError::FeatureUnsupported { .. })
-}
-
-fn force_sensing_error_is_permanent(error: &WriteError) -> bool {
-    matches!(error, WriteError::FeatureUnsupported { .. })
-}
-
-fn backlight_error_is_permanent(error: &WriteError) -> bool {
+fn unsupported_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 

@@ -3,6 +3,7 @@
 //! for.
 
 use super::fn_lock::drain;
+pub(crate) use super::pointer_speed::install;
 use super::*;
 use crate::services::ipc::{Command, ReadForceSensing, SetForceSensing};
 use crate::state::ForceSensingLoad;
@@ -18,7 +19,7 @@ pub(crate) const PANEL: ForceSensingInfo = ForceSensingInfo {
 };
 
 /// The known mouse on its cable, with a force-sensing button or without.
-pub(crate) fn mouse_inventory(force_sensing: bool) -> DeviceInventory {
+fn mouse_inventory(force_sensing: bool) -> DeviceInventory {
     let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
     inventory.paired[0]
         .capabilities
@@ -28,7 +29,7 @@ pub(crate) fn mouse_inventory(force_sensing: bool) -> DeviceInventory {
     inventory
 }
 
-fn mouse_state(
+pub(crate) fn mouse_state(
     force_sensing: bool,
     config: Config,
 ) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
@@ -101,23 +102,6 @@ fn reloads(commands: &[Command]) -> usize {
         .iter()
         .filter(|command| matches!(command, Command::ReloadConfig(_)))
         .count()
-}
-
-/// Install `state` with live swr-backed reads, as the app does, and have it
-/// read the selected device.
-pub(crate) fn install(state: AppState, cx: &mut gpui::TestAppContext) {
-    cx.update(|cx| {
-        let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
-        let client = swr_core::SwrClient::builder().build(runtime.clone());
-        let state = cx.new(|_| {
-            let mut state = state;
-            state.connect_device_reads(client, runtime);
-            state
-        });
-        AppState::set_global(state, cx);
-        AppState::load_current_device_reads(cx);
-    });
-    cx.run_until_parked();
 }
 
 /// Install a mouse with a force-sensing button whose read answers `reading`.

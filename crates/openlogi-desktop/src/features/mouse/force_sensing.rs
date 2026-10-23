@@ -259,11 +259,10 @@ mod tests {
 
     use super::super::hotspots::MouseControlId;
     use super::super::view::MouseModelView;
-    use crate::services::assets::AssetResolver;
     use crate::services::i18n::LOCALE_LOCK;
     use crate::services::ipc::{Command, SetForceSensing};
-    use crate::state::tests::force_sensing::{PANEL, answer_force_read, install, mouse_inventory};
-    use crate::state::{AppState, DeviceRecord, Sources};
+    use crate::state::tests::force_sensing::{PANEL, answer_force_read, install, mouse_state};
+    use crate::state::{AppState, DeviceRecord};
 
     /// The mouse view over a mouse with a force-sensing button whose read
     /// answered `reading`, with the haptic panel selected.
@@ -276,12 +275,7 @@ mod tests {
         UnboundedReceiver<Command>,
     ) {
         cx.update(gpui_component::init);
-        let resolver = AssetResolver::new();
-        let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let state = AppState::new(Sources {
-            inventories: &[mouse_inventory(true)],
-            ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
-        });
+        let (state, mut receiver) = mouse_state(true, Config::ephemeral());
         install(state, cx);
         answer_force_read(&mut receiver, reading);
         cx.run_until_parked();
@@ -330,13 +324,7 @@ mod tests {
         slider.update(cx, |_, cx| cx.emit(SliderEvent::Release(6000.0.into())));
         cx.run_until_parked();
 
-        let writes: Vec<u16> = std::iter::from_fn(|| receiver.try_recv().ok())
-            .filter_map(|command| match command {
-                Command::SetForceSensing(SetForceSensing { force, .. }) => Some(force),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(writes, [6000]);
+        assert_eq!(force_writes(&mut receiver), [6000]);
     }
 
     #[gpui::test]
@@ -494,12 +482,7 @@ mod tests {
     #[gpui::test]
     fn a_mouse_without_a_force_sensing_button_shows_no_row(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
-        let resolver = AssetResolver::new();
-        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let state = AppState::new(Sources {
-            inventories: &[mouse_inventory(false)],
-            ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
-        });
+        let (state, _receiver) = mouse_state(false, Config::ephemeral());
         install(state, cx);
         let (panel, cx) = cx.add_window_view(MouseModelView::new);
         cx.simulate_resize(size(px(1200.), px(1000.)));
