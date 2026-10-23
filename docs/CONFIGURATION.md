@@ -252,15 +252,18 @@ several requests share one agent reload. Acceptance of a newer save does not
 confirm an older one. If the file changed externally, the app refreshes it
 without overwriting it, requests acceptance of that exact revision, and then
 reads the keyboard again before editing resumes. This also covers another edit
-between the agent's reload and the app's refresh. A failed refresh keeps editing
-blocked; **Reload Retry** resumes this reconciliation. A device read alone cannot
+between the agent's reload and the app's refresh. It applies to every keyboard,
+including when Save Retry or a save of another setting finds the external edit.
+A failed refresh or agent reload keeps editing blocked; **Reload Retry** resumes
+this reconciliation. A device read alone cannot
 resolve an unconfirmed file revision.
 
 Recovery stays inside the device card, using the same status and retry controls
 as other device settings. Messages follow the selected interface language;
 technical read, write, and configuration errors are recorded in the app logs.
 Switches and recovery actions retain identity per physical device, not per
-translated label or connection route.
+translated label or connection route. Each switch's accessible name states the
+disable action and the key.
 
 The agent reapplies a managed device's configured policy on initial discovery,
 reconnect, and wake, with bounded delayed confirmation attempts. If an
@@ -282,12 +285,17 @@ queue behind already scheduled policy writes, including workers that have not
 started running yet. Ordinary standalone reads still use bounded query timeouts.
 A native driver operation that never completes can therefore keep subsequent
 writes waiting; a requester timeout does not make it safe to release that turn.
+A request cancelled before its first report leaves the queue at once and
+releases the turns and lease it was waiting for.
 
-When a receiver slot reports a different known unit ID or serial, the agent
-retires the former device's requests and starts a fresh discovery retry budget.
-Learning previously missing identity information for the same slot instead
-preserves active work and its remaining budget. Replacement cannot be detected
-from a slot alone when neither snapshot provides distinguishing identity.
+When a receiver slot or a directly connected keyboard reports a different known
+unit ID or serial, the agent retires the former device's requests and starts a
+fresh discovery retry budget. Learning previously missing identity information
+for the same slot, or a serial for a direct keyboard with the same nonzero unit
+ID, instead preserves active work and its remaining budget. Replacement cannot
+be detected from a slot alone when neither snapshot provides distinguishing
+identity, and a direct keyboard without a nonzero unit ID counts as new when its
+identity changes.
 
 ### Application aliases
 
