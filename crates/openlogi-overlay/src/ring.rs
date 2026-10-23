@@ -499,7 +499,7 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext, WindowHandle};
+    use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext, WindowHandle, size};
     use openlogi_core::binding::ActionRingIcon;
     use openlogi_ipc::ActionRingPresentation;
 
@@ -764,13 +764,52 @@ mod tests {
         assert!(right.left + right.width <= WINDOW_SIZE - TOOLTIP_PANEL_INSET);
     }
 
-    fn ring_window(cx: &mut TestAppContext) -> WindowHandle<RingView> {
+    fn slot_center(slot: ActionRingSlot) -> Point<Pixels> {
+        let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        point(px(left + SLOT_SIZE / 2.0), px(top + SLOT_SIZE / 2.0))
+    }
+
+    fn multi_slot_invocation() -> ActionRingInvocation {
+        ActionRingInvocation {
+            session_id: 7,
+            slots: [
+                (
+                    ActionRingSlot::Top,
+                    ActionRingPresentation {
+                        label: "Alpha".to_string(),
+                        literal: true,
+                        icon: ActionRingIcon::Copy,
+                    },
+                ),
+                (
+                    ActionRingSlot::Right,
+                    ActionRingPresentation {
+                        label: "Beta".to_string(),
+                        literal: true,
+                        icon: ActionRingIcon::Paste,
+                    },
+                ),
+            ]
+            .into(),
+            language: None,
+        }
+    }
+
+    fn open_ring_window(
+        cx: &mut TestAppContext,
+        invocation: ActionRingInvocation,
+        reduce_motion: bool,
+    ) -> (
+        WindowHandle<RingView>,
+        mpsc::UnboundedReceiver<OverlayCommand>,
+    ) {
+        cx.update(|cx| cx.set_reduce_motion(reduce_motion));
         let live = Arc::new(ClickAwaySession::new());
-        let (commands, _) = mpsc::unbounded_channel();
+        let (commands, sent) = mpsc::unbounded_channel();
         let pointer = cx.new(|_| RingPointer::default());
-        cx.add_window(|window, cx| {
+        let window = cx.open_window(size(px(WINDOW_SIZE), px(WINDOW_SIZE)), |window, cx| {
             RingView::new(
-                invocation(),
+                invocation,
                 commands,
                 &live,
                 Placement::Window,
@@ -778,7 +817,29 @@ mod tests {
                 window,
                 cx,
             )
-        })
+        });
+        (window, sent)
+    }
+
+    fn ring_window(cx: &mut TestAppContext) -> WindowHandle<RingView> {
+        open_ring_window(cx, invocation(), true).0
+    }
+
+    fn advance_ring_clock(cx: &mut TestAppContext, duration: Duration) {
+        cx.executor().advance_clock(duration);
+        cx.run_until_parked();
+    }
+
+    fn pump_entrance_animation(cx: &mut TestAppContext, window: &WindowHandle<RingView>) {
+        let step = Duration::from_millis(20);
+        let steps = SLOT_ENTER_MS / 20 + 3;
+        for _ in 0..steps {
+            std::thread::sleep(step);
+            window
+                .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+                .unwrap();
+            cx.run_until_parked();
+        }
     }
 
     #[gpui::test]
@@ -818,5 +879,108 @@ mod tests {
         let default_geom = tooltip_geometry(left, top, default_width, 16.0, WINDOW_SIZE);
         let large_geom = tooltip_geometry(left, top, large_width, large_line_height, WINDOW_SIZE);
         assert!(large_geom.width >= default_geom.width);
+    }
+
+    #[gpui::test]
+    fn tooltip_waits_for_the_hover_dwell_before_showing(cx: &mut TestAppContext) {
+        let (window, _) = open_ring_window(cx, invocation(), true);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_mouse_move(slot_center(ActionRingSlot::Top), None, Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            !window.read_with(cx, |view, _| view.label_visible).unwrap(),
+            "tooltip must not show before the dwell elapses"
+        );
+        advance_ring_clock(cx, TOOLTIP_DELAY);
+        assert!(
+            window.read_with(cx, |view, _| view.label_visible).unwrap(),
+            "tooltip shows after the dwell"
+        );
+    }
+
+    #[gpui::test]
+    fn leaving_before_the_dwell_cancels_the_tooltip(cx: &mut TestAppContext) {
+        let (window, _) = open_ring_window(cx, invocation(), true);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_mouse_move(slot_center(ActionRingSlot::Top), None, Modifiers::default());
+        vcx.simulate_mouse_move(point(px(8.0), px(8.0)), None, Modifiers::default());
+        advance_ring_clock(cx, TOOLTIP_DELAY + Duration::from_millis(50));
+        assert!(
+            !window.read_with(cx, |view, _| view.label_visible).unwrap(),
+            "tooltip stays hidden when hover ends before the dwell"
+        );
+    }
+
+    #[gpui::test]
+    fn switching_slots_restarts_the_dwell_and_reports_each_hover(cx: &mut TestAppContext) {
+        let (window, mut sent) = open_ring_window(cx, multi_slot_invocation(), true);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_mouse_move(slot_center(ActionRingSlot::Top), None, Modifiers::default());
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(OverlayCommand::Hover {
+                session_id: 7,
+                slot: ActionRingSlot::Top
+            })
+        ));
+        advance_ring_clock(cx, Duration::from_millis(40));
+        vcx.simulate_mouse_move(
+            slot_center(ActionRingSlot::Right),
+            None,
+            Modifiers::default(),
+        );
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(OverlayCommand::Hover {
+                session_id: 7,
+                slot: ActionRingSlot::Right
+            })
+        ));
+        advance_ring_clock(cx, Duration::from_millis(40));
+        assert!(
+            !window.read_with(cx, |view, _| view.label_visible).unwrap(),
+            "the first slot's dwell must not have fired"
+        );
+        advance_ring_clock(cx, Duration::from_millis(70));
+        assert_eq!(
+            window.read_with(cx, |view, _| view.hovered).unwrap(),
+            Some(ActionRingSlot::Right)
+        );
+        assert!(window.read_with(cx, |view, _| view.label_visible).unwrap());
+    }
+
+    #[gpui::test]
+    fn slots_finish_animating_before_resting_hover_registers(cx: &mut TestAppContext) {
+        let (window, _) = open_ring_window(cx, invocation(), false);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let resting = slot_center(ActionRingSlot::Top);
+        vcx.simulate_mouse_move(resting, None, Modifiers::default());
+        assert_eq!(
+            window.read_with(cx, |view, _| view.hovered).unwrap(),
+            None,
+            "on the first animated frame the slot is still at the hub, not its resting position"
+        );
+        pump_entrance_animation(cx, &window);
+        vcx.simulate_mouse_move(point(px(8.0), px(8.0)), None, Modifiers::default());
+        vcx.simulate_mouse_move(resting, None, Modifiers::default());
+        assert_eq!(
+            window.read_with(cx, |view, _| view.hovered).unwrap(),
+            Some(ActionRingSlot::Top),
+            "after the entrance animation, the resting position hovers the slot"
+        );
+    }
+
+    #[gpui::test]
+    fn reduced_motion_lets_resting_hover_register_immediately(cx: &mut TestAppContext) {
+        let (window, _) = open_ring_window(cx, invocation(), true);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        vcx.simulate_mouse_move(slot_center(ActionRingSlot::Top), None, Modifiers::default());
+        assert_eq!(
+            window.read_with(cx, |view, _| view.hovered).unwrap(),
+            Some(ActionRingSlot::Top),
+            "reduced motion leaves slots at their resting positions on the first frame"
+        );
     }
 }
