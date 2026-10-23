@@ -862,3 +862,32 @@ async fn a_broadcast_that_missed_its_wait_is_not_a_later_answer() {
     assert_eq!(state.packet_attempts, 4);
     assert_eq!(state.sent_bytes, package().images[0].blocks[0]);
 }
+
+#[tokio::test]
+async fn a_failed_apply_write_is_decided_by_what_the_device_runs() {
+    for rebooted in [true, false] {
+        let (original, state) = hardware(Hardware::default()).await;
+        let target = update_target_on(&original).await.unwrap().unwrap();
+        let (respond, incoming) = responder(&state);
+        let (raw, _handle) = ScriptedRawHidChannel::with_failing_writes(respond, |request| {
+            request[2] == 4 && request[3] >> 4 == 3
+        });
+        incoming.set(raw.incoming_sender()).unwrap();
+        let shared = SharedChannel::new(scripted_channel(raw).await, original.route().clone());
+        drop(original);
+        let pending = prepare_update_on(&shared, target, &package())
+            .await
+            .unwrap()
+            .install(|_| {}, || false)
+            .await
+            .expect("an apply whose write failed may still have activated");
+        // The link dropped as the device took (or never saw) the command.
+        state.lock().unwrap().applied = rebooted;
+        let verified = pending.verify_on(&shared).await;
+        if rebooted {
+            verified.unwrap();
+        } else {
+            assert_eq!(verified, Err(FirmwareUpdateFailure::NotActivated));
+        }
+    }
+}
