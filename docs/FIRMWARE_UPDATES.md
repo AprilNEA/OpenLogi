@@ -148,8 +148,14 @@ states; they do not exercise hardware or make network requests.
    one starts again.
    The transfer state machine rejects unexpected entities, acknowledgements,
    skipped blocks and rewinds. A recovery query may request a retry of the exact
-   packet whose write failed; ordinary replies must still advance. Wait for
-   unsolicited status events, falling back to a status query when needed.
+   packet whose write failed; ordinary replies must still advance.
+   A command's reply is matched by its request header alone: the recorded
+   MX Master 4 run echoed every command's header and broadcast status only
+   after a Wait reply. A Wait ends only on a broadcast received after the reply
+   that asked for it, falling back to a status query when none arrives in time;
+   an earlier broadcast never answers a command or ends a later wait. A reply
+   that arrives after its command timed out is quarantined by the channel
+   rather than taken as the next command's answer.
    Recovery queries and waits are bounded; a
    20-minute transfer deadline is checked between commands.
    Decode status from the actual wire payload: Ready and Wait require four

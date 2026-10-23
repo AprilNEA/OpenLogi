@@ -13,11 +13,11 @@ use std::{sync::Arc, time::Duration};
 use hidpp::{
     device::{Device, DeviceError},
     feature::{
-        CreatableFeature, EmittingFeature,
+        CreatableFeature,
         device_information::{
             DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
         },
-        dfu_resumable::{DfuCapabilities, DfuResumableFeature, DfuStatus},
+        dfu_resumable::{DfuCapabilities, DfuReply, DfuResumableFeature, DfuStatus},
         unified_battery::{BatteryStatus, UnifiedBatteryFeature},
     },
     protocol::v20::Hidpp20Error,
@@ -230,7 +230,7 @@ pub async fn update_target_on(
 }
 
 /// A preflight-checked inactive-bank update. It owns the selected image and
-/// feature listeners; consuming it is the only path to activation.
+/// the DFU feature; consuming it is the only path to activation.
 pub struct PreparedFirmwareUpdate {
     feature: Arc<DfuResumableFeature>,
     /// Preflight found an earlier run's transfer state for the target bank.
@@ -313,7 +313,11 @@ pub async fn prepare_update_on(
     {
         return Err(FirmwareUpdateFailure::Unsupported);
     }
-    let initial = feature.get_dfu_status(entity).await.map_err(update_error)?;
+    let initial = feature
+        .get_dfu_status(entity)
+        .await
+        .map_err(update_error)?
+        .report;
     if initial.entity != entity {
         return Err(FirmwareUpdateFailure::Protocol(
             "status names a different firmware bank".into(),
@@ -388,17 +392,16 @@ impl PreparedFirmwareUpdate {
         mut should_stop: impl FnMut() -> bool,
     ) -> Result<PendingFirmwareActivation, FirmwareUpdateFailure> {
         let started = tokio::time::Instant::now();
-        let events = self.feature.listen();
         let mut transfer = Transfer::new(&self.image);
         let mut recoveries = 0;
         let mut waits = 0;
         check_stop(started, &mut should_stop)?;
-        let (mut report, mut recovering) = match self
+        let (mut reply, mut recovering) = match self
             .feature
             .start_dfu(self.image.entity, self.image.magic)
             .await
         {
-            Ok(report) => (report, false),
+            Ok(reply) => (reply, false),
             // After an interruption, a status query cannot tell this run's
             // restart apart from the state the earlier run left behind.
             Err(Hidpp20Error::Channel(_)) if self.interrupted => {
@@ -411,18 +414,13 @@ impl PreparedFirmwareUpdate {
                 // Keep this admission and query; never blindly start again.
                 recoveries += 1;
                 check_stop(started, &mut should_stop)?;
-                while events.try_recv().is_ok() {}
-                let report = self
-                    .feature
-                    .get_dfu_status(self.image.entity)
-                    .await
-                    .map_err(update_error)?;
                 // Transfer's initial transition accepts only this entity at
                 // block zero. NotStarted, waits and advanced states fail closed.
-                (report, true)
+                (self.poll_status().await?, true)
             }
             Err(error) => return Err(update_error(error)),
         };
+        let mut report = reply.report;
         progress(FirmwareUpdatePhase::Transferring { percent: 0 });
         loop {
             check_stop(started, &mut should_stop)?;
@@ -433,24 +431,20 @@ impl PreparedFirmwareUpdate {
             match action {
                 TransferAction::Send(packet) => {
                     recovering = false;
-                    match self.feature.transfer_dfu_data(packet).await {
-                        Ok(next) => report = next,
+                    reply = match self.feature.transfer_dfu_data(packet).await {
+                        Ok(next) => next,
                         Err(error @ Hidpp20Error::Channel(_)) => {
                             if recoveries >= MAX_RECOVERIES {
                                 return Err(update_error(error));
                             }
                             recoveries += 1;
                             check_stop(started, &mut should_stop)?;
-                            while events.try_recv().is_ok() {}
-                            report = self
-                                .feature
-                                .get_dfu_status(self.image.entity)
-                                .await
-                                .map_err(update_error)?;
                             recovering = true;
+                            self.poll_status().await?
                         }
                         Err(error) => return Err(update_error(error)),
-                    }
+                    };
+                    report = reply.report;
                 }
                 TransferAction::Wait(delay) => {
                     waits += 1;
@@ -459,9 +453,11 @@ impl PreparedFirmwareUpdate {
                             "excessive update waits".into(),
                         ));
                     }
-                    report = if let Ok(Ok(next)) = tokio::time::timeout(delay, events.recv()).await
-                    {
-                        next
+                    // Only a broadcast sent after the reply that asked for
+                    // this wait can end it; an earlier one is a stale state.
+                    let broadcast = tokio::time::timeout(delay, reply.next_broadcast()).await;
+                    if let Ok(Some(next)) = broadcast {
+                        report = next;
                     } else {
                         if recoveries >= MAX_RECOVERIES {
                             return Err(FirmwareUpdateFailure::Protocol(
@@ -471,11 +467,9 @@ impl PreparedFirmwareUpdate {
                         recoveries += 1;
                         check_stop(started, &mut should_stop)?;
                         recovering = true;
-                        self.feature
-                            .get_dfu_status(self.image.entity)
-                            .await
-                            .map_err(update_error)?
-                    };
+                        reply = self.poll_status().await?;
+                        report = reply.report;
+                    }
                 }
                 TransferAction::Complete => break,
             }
@@ -489,6 +483,13 @@ impl PreparedFirmwareUpdate {
             .await
             .map_err(update_error)?;
         Ok(self.pending)
+    }
+
+    async fn poll_status(&self) -> Result<DfuReply, FirmwareUpdateFailure> {
+        self.feature
+            .get_dfu_status(self.image.entity)
+            .await
+            .map_err(update_error)
     }
 }
 
