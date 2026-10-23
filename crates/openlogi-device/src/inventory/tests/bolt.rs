@@ -358,6 +358,102 @@ async fn a_receiver_probe_whose_io_outruns_the_budget_is_failed() {
     assert!(probe.inventory.is_none());
 }
 
+fn bolt_receiver_with_an_unanswered_uid(request: &[u8]) -> Option<Vec<u8>> {
+    if let [_, 0xff, 0x83, 0xfb, ..] = *request {
+        return None;
+    }
+    bolt_receiver_with_a_silent_slot(request)
+}
+
+/// A receiver UID is optional metadata. Losing that reply must not cancel
+/// the readable pairing table or prevent a slow slot from using its cache.
+#[tokio::test]
+async fn a_bolt_receiver_with_an_unanswered_uid_keeps_its_slots() {
+    let info = bolt_receiver_node("unanswered-uid");
+    let timeouts = ProbeTimeouts {
+        receiver: Duration::from_secs(2),
+        ..quick_timeouts()
+    };
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(bolt_receiver_with_an_unanswered_uid);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let (key, cache) = stale_silent_slot_cache();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &timeouts,
+    };
+
+    let probe = probe_one(info, channel, pass).await;
+
+    assert_eq!(
+        probe.verdict,
+        ProbeVerdict::Healthy { complete: true },
+        "an unanswered UID must not make readable slots disappear"
+    );
+    let inventory = probe.inventory.expect("the pairing table answered");
+    assert!(inventory.receiver.unique_id.is_none());
+    assert_eq!(inventory.paired.len(), 1);
+    let device = &inventory.paired[0];
+    assert_eq!(device.slot, 1);
+    assert!(device.online);
+    assert_eq!(device.codename.as_deref(), Some("MX Probe"));
+    assert_eq!(
+        device.model_info.as_ref().map(|model| model.unit_id),
+        Some(SILENT_SLOT_UNIT_ID),
+        "the slow slot keeps its last-good capabilities and identity"
+    );
+    assert!(
+        matches!(probe.outcomes.as_slice(), [CacheOutcome::Seen(seen)] if *seen == key),
+        "optional UID failure must not expire the slot cache"
+    );
+}
+
+fn bolt_receiver_with_an_unanswered_pairing_count(request: &[u8]) -> Option<Vec<u8>> {
+    if let [_, 0xff, 0x81, 0x02, ..] = *request {
+        return None;
+    }
+    bolt_receiver_with_a_silent_slot(request)
+}
+
+/// Check receiver liveness before metadata and stop when it does not answer.
+/// A dead channel still fails without spending the full receiver budget.
+#[tokio::test]
+async fn a_bolt_receiver_with_an_unanswered_pairing_count_stops_before_metadata() {
+    let info = bolt_receiver_node("unanswered-pairing-count");
+    let timeouts = ProbeTimeouts {
+        receiver: Duration::from_secs(2),
+        ..quick_timeouts()
+    };
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(bolt_receiver_with_an_unanswered_pairing_count);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let cache = HashMap::new();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &timeouts,
+    };
+
+    let started = Instant::now();
+    let probe = probe_one(info, channel, pass).await;
+
+    assert_eq!(probe.verdict, ProbeVerdict::Failed);
+    assert!(probe.inventory.is_none());
+    assert!(probe.outcomes.is_empty());
+    assert_eq!(
+        handle.written_reports(),
+        vec![vec![0x10, 0xff, 0x81, 0x02, 0, 0, 0]],
+        "a dead receiver must not receive metadata, arrival or slot requests"
+    );
+    assert!(
+        started.elapsed() < timeouts.receiver,
+        "liveness failure must settle before the whole-node deadline"
+    );
+}
+
 /// [`bolt_receiver_with_a_silent_slot`], but slot 1's codename register holds
 /// a 14-byte name and so returns only its first 13 bytes (#1960).
 fn bolt_receiver_with_a_truncated_codename(request: &[u8]) -> Option<Vec<u8>> {

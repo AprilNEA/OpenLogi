@@ -18,7 +18,10 @@ use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverI
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
-use super::{MAX_BOLT_SLOTS, NodeProbe, PassContext, ProbeVerdict};
+use super::{
+    MAX_BOLT_SLOTS, NodeProbe, PassContext, ProbeVerdict, RECEIVER_OPERATION_TIMEOUT,
+    RECEIVER_UID_TIMEOUT,
+};
 use crate::backend::NodeInfo;
 use crate::host_lock::ReceiverRegisterPhase;
 use crate::inventory::cache::{CacheKey, CacheOutcome, probe_or_reuse, seen};
@@ -37,9 +40,23 @@ pub(super) async fn probe_bolt_receiver(
     registers: ReceiverRegisterPhase,
     pass: PassContext<'_>,
 ) -> NodeProbe {
-    let unique_id = bolt.get_unique_id().await.ok();
-    let pairing_count = bolt.count_pairings().await.ok();
+    // Pairing count proves receiver liveness. Check it before optional metadata,
+    // and stop on failure instead of consuming the whole-node budget on a dead
+    // channel. Use the same receiver-operation policy as the Unifying path.
+    let pairing_count = match timeout(RECEIVER_OPERATION_TIMEOUT, bolt.count_pairings()).await {
+        Ok(Ok(count)) => count,
+        result => {
+            debug!(?result, "Bolt receiver pairing-count read failed");
+            return NodeProbe::failed();
+        }
+    };
     debug!(?pairing_count, "receiver reports pairing count");
+    // UID is cache metadata, not a liveness gate. A missing reply must leave
+    // time for the readable pairing table and per-slot cache fallback (#454).
+    let unique_id = timeout(RECEIVER_UID_TIMEOUT, bolt.get_unique_id())
+        .await
+        .ok()
+        .and_then(Result::ok);
 
     let connections =
         drain_device_arrival(&bolt, pass.subscriptions, pass.timeouts.arrival_drain).await;
@@ -80,7 +97,7 @@ pub(super) async fn probe_bolt_receiver(
         product_id: info.product_id,
         unique_id,
     };
-    assemble_bolt_probe(receiver, pairing_count, slot_results)
+    assemble_bolt_probe(receiver, Some(pairing_count), slot_results)
 }
 
 /// Fold a Bolt receiver's per-slot results into a [`NodeProbe`].
