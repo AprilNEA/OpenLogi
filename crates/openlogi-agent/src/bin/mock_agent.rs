@@ -73,7 +73,7 @@ use openlogi_ipc::{
     BacklightObservation, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation,
     Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind,
     NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -1260,6 +1260,15 @@ impl Agent for MockAgent {
     ) -> Result<(), ConfigReloadError> {
         info!("reload_saved_config (no-op in the mock)");
         Ok(())
+    }
+
+    async fn reload_saved_config_with_verdict(
+        self,
+        _: Context,
+        _saved: SavedConfig,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError> {
+        info!("reload_saved_config_with_verdict (accepted no-op in the mock)");
+        Ok(SavedConfigVerdict::Accepted)
     }
     async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {
         if since == 0

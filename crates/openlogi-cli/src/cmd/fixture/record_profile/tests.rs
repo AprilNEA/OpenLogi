@@ -23,6 +23,7 @@ use openlogi_ipc::{
     ClientKind, ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth,
     LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
     PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -404,6 +405,14 @@ impl Agent for TestAgent {
         _: TarpcContext,
         _saved: SavedConfig,
     ) -> Result<(), ConfigReloadError> {
+        unreachable!("profile capture is read-only")
+    }
+
+    async fn reload_saved_config_with_verdict(
+        self,
+        _: TarpcContext,
+        _saved: SavedConfig,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError> {
         unreachable!("profile capture is read-only")
     }
 

@@ -19,7 +19,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_core::config::{ConfigFile, Lighting};
+use openlogi_core::config::{ConfigFile, ConfigRevision, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
@@ -32,7 +32,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, Generation, Identity, LockKeyObservation,
     MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate, RingObservation, SavedConfig,
+    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 
@@ -106,20 +106,24 @@ impl AgentServer {
     /// [`Agent::reload_saved_config`] when the GUI's save is given. The
     /// revision is that of the text the config is parsed from, so an edit
     /// that lands after the read cannot pass for the save.
-    async fn reload(self, saved: Option<SavedConfig>) -> Result<(), ConfigReloadError> {
+    async fn reload(
+        &self,
+        saved: Option<&SavedConfig>,
+    ) -> Result<ConfigRevision, ConfigReloadError> {
         match ConfigFile::load_or_default() {
             Ok((config, file)) => {
+                let revision = file.revision();
                 let launch_at_login = config.app_settings.launch_at_login;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
                 let language = config.app_settings.language.clone();
                 match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
-                    Some(saved) => self.orchestrator.lock().await.reload_saved_config(
-                        config,
-                        file.revision(),
-                        &saved,
-                    ),
+                    Some(saved) => self
+                        .orchestrator
+                        .lock()
+                        .await
+                        .reload_saved_config(config, revision, saved),
                 }
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
@@ -136,7 +140,7 @@ impl AgentServer {
                 openlogi_core::locale::activate(language.as_deref());
                 #[cfg(target_os = "macos")]
                 crate::tray::relocalize();
-                Ok(())
+                Ok(revision)
             }
             Err(error) => {
                 warn!(error = %error, "reload_config: parse failed; keeping current config");
@@ -145,6 +149,15 @@ impl AgentServer {
                 })
             }
         }
+    }
+}
+
+/// Decide whether the agent reloaded the exact revision the GUI saved.
+fn saved_config_verdict(saved: &SavedConfig, revision: ConfigRevision) -> SavedConfigVerdict {
+    if saved.revision == revision {
+        SavedConfigVerdict::Accepted
+    } else {
+        SavedConfigVerdict::FileChangedAfterSave
     }
 }
 
@@ -183,7 +196,7 @@ impl Agent for AgentServer {
     }
 
     async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
-        self.reload(None).await
+        self.reload(None).await.map(|_| ())
     }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
@@ -401,7 +414,16 @@ impl Agent for AgentServer {
         _: Context,
         saved: SavedConfig,
     ) -> Result<(), ConfigReloadError> {
-        self.reload(Some(saved)).await
+        self.reload(Some(&saved)).await.map(|_| ())
+    }
+
+    async fn reload_saved_config_with_verdict(
+        self,
+        _: Context,
+        saved: SavedConfig,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError> {
+        let revision = self.reload(Some(&saved)).await?;
+        Ok(saved_config_verdict(&saved, revision))
     }
 
     async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {
@@ -1057,9 +1079,13 @@ mod tests {
         ARM_BUDGET, Budget, HapticBreaker, PLAY_BUDGET, PlayOutcome, RESTORE_BUDGET, WriteError,
         haptic_restore, is_worth_retrying,
     };
-    use super::{DeviceRoute, HidppOperation, ObservableState, Orchestrator, disable_keys_device};
-    use openlogi_core::config::Config;
+    use super::{
+        DeviceRoute, HidppOperation, ObservableState, Orchestrator, disable_keys_device,
+        saved_config_verdict,
+    };
+    use openlogi_core::config::{Config, ConfigFile};
     use openlogi_device::test_support::publish_scripted_channel;
+    use openlogi_ipc::{SavedConfig, SavedConfigVerdict};
     use std::sync::{Arc, PoisonError};
     use std::time::{Duration, Instant};
 
@@ -1085,6 +1111,35 @@ mod tests {
         response[1..4].copy_from_slice(&request[1..4]);
         response[4..].copy_from_slice(&payload[..3]);
         Some(response)
+    }
+
+    #[test]
+    fn a_file_edit_after_save_is_reported_by_its_verdict() {
+        let directory = tempfile::tempdir().expect("temporary config directory");
+        let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+        Config::default()
+            .save_to_path(&path)
+            .expect("seed config file");
+        let (_, file) = ConfigFile::load_from_path(&path).expect("saved revision");
+        let saved = SavedConfig {
+            revision: file.revision(),
+            chosen: Vec::new(),
+        };
+        assert_eq!(
+            saved_config_verdict(&saved, file.revision()),
+            SavedConfigVerdict::Accepted
+        );
+
+        let mut external = Config::load_from_path(&path).expect("external config");
+        external.app_settings.smooth_scroll = true;
+        external.save_to_path(&path).expect("external edit");
+        let (_, edited) = ConfigFile::load_from_path(&path).expect("edited revision");
+
+        assert_eq!(
+            saved_config_verdict(&saved, edited.revision()),
+            SavedConfigVerdict::FileChangedAfterSave,
+            "the server must not acknowledge the earlier saved revision"
+        );
     }
 
     #[tokio::test]

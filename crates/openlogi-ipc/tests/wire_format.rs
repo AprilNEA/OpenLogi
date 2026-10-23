@@ -50,11 +50,12 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind, ConfigReloadError,
-    ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange, LockKeyObservation,
-    MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation, ObservedLight,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig, SecureInput, VirtualKeyboardStatus,
+    AgentResponse, AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind,
+    ConfigReloadError, ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange,
+    LockKeyObservation, MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation,
+    ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, SecureInput,
+    VirtualKeyboardStatus,
 };
 use succession::{Compat, Run};
 
@@ -335,6 +336,39 @@ fn reload_saved_config() {
         },
         "24e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\
          010d73657269616c3a414243313233000101",
+    );
+    assert_wire(&SavedConfigVerdict::Accepted, "00");
+    assert_wire(&SavedConfigVerdict::FileChangedAfterSave, "01");
+    assert_wire(
+        &Ok::<SavedConfigVerdict, ConfigReloadError>(SavedConfigVerdict::Accepted),
+        "0000",
+    );
+    assert_wire(
+        &Ok::<SavedConfigVerdict, ConfigReloadError>(SavedConfigVerdict::FileChangedAfterSave),
+        "0001",
+    );
+    assert_wire(
+        &AgentRequest::ReloadSavedConfigWithVerdict {
+            saved: SavedConfig {
+                revision: ConfigRevision::of(""),
+                chosen: vec![ChosenLight {
+                    device: "serial:ABC123".into(),
+                    power: false,
+                    brightness: true,
+                    temperature: true,
+                }],
+            },
+        },
+        "2ce3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\
+         010d73657269616c3a414243313233000101",
+    );
+    assert_wire(
+        &AgentResponse::ReloadSavedConfigWithVerdict(Ok(SavedConfigVerdict::Accepted)),
+        "2c0000",
+    );
+    assert_wire(
+        &AgentResponse::ReloadSavedConfigWithVerdict(Ok(SavedConfigVerdict::FileChangedAfterSave)),
+        "2c0001",
     );
 }
 

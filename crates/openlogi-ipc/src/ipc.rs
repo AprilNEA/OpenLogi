@@ -135,7 +135,10 @@ pub use succession::Identity;
 ///      appended — whether the agent types synthesized keys on its macOS
 ///      virtual HID keyboard.
 /// v40: Disable Keys capability and read/write methods appended, together with
-///      raw-preserving masks and guarded-write/superseded errors.
+///      raw-preserving masks and guarded-write/superseded errors;
+///      `Agent::reload_saved_config_with_verdict` and
+///      [`SavedConfigVerdict`] appended, so a GUI distinguishes its accepted
+///      saved revision from an external edit that replaced it before reload.
 pub const PROTOCOL_VERSION: u32 = 40;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -298,6 +301,18 @@ pub struct SavedConfig {
     pub revision: ConfigRevision,
     /// The controls of lights the user set in the save without a write.
     pub chosen: Vec<ChosenLight>,
+}
+
+/// How the agent treated a GUI save when it re-read `config.toml`.
+///
+/// Variants are append-only because this type crosses the IPC boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SavedConfigVerdict {
+    /// The agent read the exact revision the GUI saved.
+    Accepted,
+    /// Another writer changed the file after the GUI saved it. The agent
+    /// applied that external revision without restoring the GUI's older save.
+    FileChangedAfterSave,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -902,4 +917,12 @@ pub trait Agent {
         route: DeviceRoute,
         desired: DisableKeysMask,
     ) -> Result<DisableKeysState, WriteError>;
+    /// Re-read a GUI save and report whether its exact revision was still on
+    /// disk. Unlike [`Self::reload_saved_config`], callers use this to
+    /// reconcile presentation after another writer replaced the saved file.
+    ///
+    /// This method is appended to preserve the existing service-method order.
+    async fn reload_saved_config_with_verdict(
+        saved: SavedConfig,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError>;
 }
