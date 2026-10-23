@@ -195,13 +195,37 @@ pub async fn get_firmware_status(
     .await
 }
 
-/// Returns the pinned current or newer release for this live device. The caller downloads
-/// exactly this descriptor; it never reconstructs identity/version matching.
-pub async fn installable_release_on(
+/// A selected update bound to the physical device inspected at admission.
+/// Private identity fields must survive download and I/O ownership waits.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FirmwareUpdateTarget {
+    route: DeviceRoute,
+    unit_id: [u8; 4],
+    release: &'static FirmwareRelease,
+}
+
+impl FirmwareUpdateTarget {
+    /// The approved package to download and describe in progress updates.
+    #[must_use]
+    pub fn release(&self) -> &'static FirmwareRelease {
+        self.release
+    }
+}
+
+/// Selects a current or newer approved release and retains the live device's
+/// identity. Preflight consumes this target rather than selecting a new unit.
+pub async fn update_target_on(
     shared: &SharedChannel,
-) -> Result<Option<&'static FirmwareRelease>, WriteError> {
+) -> Result<Option<FirmwareUpdateTarget>, WriteError> {
     let mut device = device_on(shared).await?;
-    Ok(inspect(&mut device).await?.installable_release())
+    let inspection = inspect(&mut device).await?;
+    Ok(inspection
+        .installable_release()
+        .map(|release| FirmwareUpdateTarget {
+            route: shared.route().clone(),
+            unit_id: inspection.unit_id,
+            release,
+        }))
 }
 
 /// A preflight-checked inactive-bank update. It owns the selected image and
@@ -227,16 +251,21 @@ pub struct PendingFirmwareActivation {
 /// idle update state before returning a token. No DFU write occurs here.
 pub async fn prepare_update_on(
     shared: &SharedChannel,
-    release: &'static FirmwareRelease,
+    target: FirmwareUpdateTarget,
     package: &FirmwarePackage,
 ) -> Result<PreparedFirmwareUpdate, FirmwareUpdateFailure> {
+    if !shared.matches(&target.route) {
+        return Err(FirmwareUpdateFailure::WrongDevice);
+    }
     let mut device = device_on(shared)
         .await
         .map_err(FirmwareUpdateFailure::Device)?;
     let inspection = inspect(&mut device)
         .await
         .map_err(FirmwareUpdateFailure::Device)?;
-    if inspection.installable_release() != Some(release)
+    let release = target.release;
+    if inspection.unit_id != target.unit_id
+        || inspection.installable_release() != Some(release)
         || !matches!(inspection.active, 1 | 2)
         || inspection.applications.len() != 2
     {
@@ -291,8 +320,8 @@ pub async fn prepare_update_on(
         feature,
         image: image.clone(),
         pending: PendingFirmwareActivation {
-            route: shared.route().clone(),
-            unit_id: inspection.unit_id,
+            route: target.route,
+            unit_id: target.unit_id,
             entity,
             product_id: image.product_id,
             version: image.version,

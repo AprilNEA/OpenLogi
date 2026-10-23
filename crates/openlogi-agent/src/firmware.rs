@@ -58,11 +58,11 @@ impl FirmwareManager {
         if *self.stopping.borrow() {
             return Err(FirmwareUpdateRefusal::Busy);
         }
-        let release = self
+        let target = self
             .shared
             .device(&route)
             .run(HidppOperation::ReadFirmware, |channel| async move {
-                firmware::installable_release_on(&channel).await
+                firmware::update_target_on(&channel).await
             })
             .await
             .map_err(|_| FirmwareUpdateRefusal::DeviceNotFound)?
@@ -71,12 +71,13 @@ impl FirmwareManager {
             return Err(FirmwareUpdateRefusal::Busy);
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let release = target.release();
         self.publish(id, &route, release, FirmwareUpdatePhase::Downloading);
         // Ownership moves to the agent before acknowledging admission. Client
         // cancellation/disconnect cannot cancel a flash transaction.
         let manager = Arc::clone(self);
         tokio::spawn(async move {
-            manager.run(id, route, release, admission).await;
+            manager.run(id, route, target, admission).await;
         });
         Ok(())
     }
@@ -85,17 +86,18 @@ impl FirmwareManager {
         &self,
         id: u64,
         route: DeviceRoute,
-        release: &'static FirmwareRelease,
+        target: firmware::FirmwareUpdateTarget,
         _admission: OwnedMutexGuard<()>,
     ) {
         // The supervisor publishes a terminal result even if the worker panics;
         // admission remains held until that publication and resource cleanup.
+        let release = target.release();
         let shared = self.shared.clone();
         let observable = Arc::clone(&self.observable);
         let worker_route = route.clone();
         let stopping = self.stopping.subscribe();
         let result = tokio::spawn(async move {
-            run_update(shared, observable, id, worker_route, release, stopping).await
+            run_update(shared, observable, id, worker_route, target, stopping).await
         })
         .await
         .unwrap_or_else(|error| Err(FirmwareUpdateFailure::Protocol(error.to_string())));
@@ -164,9 +166,10 @@ async fn run_update(
     observable: Arc<ObservableState>,
     id: u64,
     route: DeviceRoute,
-    release: &'static FirmwareRelease,
+    target: firmware::FirmwareUpdateTarget,
     mut stopping: watch::Receiver<bool>,
 ) -> Result<(), FirmwareUpdateFailure> {
+    let release = target.release();
     let download = tokio::task::spawn_blocking(move || download::download(release));
     // Dropping a download join handle is safe: the blocking worker only owns
     // HTTP bytes, never a device. A native flash write is always drained below.
@@ -189,7 +192,7 @@ async fn run_update(
     let pending = shared
         .device(&route)
         .firmware(|channel| async move {
-            let prepared = firmware::prepare_update_on(&channel, release, &package).await?;
+            let prepared = firmware::prepare_update_on(&channel, target, &package).await?;
             prepared
                 .install(
                     |phase| publish(&progress, id, &progress_route, release, phase),
