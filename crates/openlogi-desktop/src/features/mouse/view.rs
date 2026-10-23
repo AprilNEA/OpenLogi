@@ -128,6 +128,15 @@ impl<'a> MouseWorkspaceData<'a> {
     }
 }
 
+/// Which action pickers are open. The thumb-wheel tap's picker shares the
+/// wheel's inspector body with the rotation preset picker (`action`) rather
+/// than getting its own hotspot, so the two open independently.
+#[derive(Clone, Copy, Debug, Default)]
+struct OpenPickers {
+    action: bool,
+    thumbwheel_tap: bool,
+}
+
 /// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
     focus_handle: FocusHandle,
@@ -136,7 +145,7 @@ pub struct MouseModelView {
     selected: Option<MouseControlId>,
     /// The gesture direction whose action is open in the fixed inspector.
     gesture_active_dir: Option<GestureDirection>,
-    action_picker_open: bool,
+    pickers: OpenPickers,
     action_search: Entity<InputState>,
     pub(super) custom_shortcut_input: Entity<InputState>,
     pub(super) custom_application_input: Entity<InputState>,
@@ -198,7 +207,7 @@ impl MouseModelView {
             hovered: None,
             selected: None,
             gesture_active_dir: None,
-            action_picker_open: false,
+            pickers: OpenPickers::default(),
             action_search,
             custom_shortcut_input,
             custom_application_input,
@@ -230,15 +239,27 @@ impl MouseModelView {
     /// `cx.notify()` to re-render.
     pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
         self.gesture_active_dir = dir;
-        self.action_picker_open = false;
+        self.pickers.action = false;
     }
 
     pub(super) fn toggle_action_picker(&mut self) {
-        self.action_picker_open = !self.action_picker_open;
+        self.pickers.action = !self.pickers.action;
     }
 
     pub(super) fn close_action_picker(&mut self) {
-        self.action_picker_open = false;
+        self.pickers.action = false;
+    }
+
+    pub(super) fn toggle_thumbwheel_tap_picker(&mut self) {
+        self.pickers.thumbwheel_tap = !self.pickers.thumbwheel_tap;
+    }
+
+    pub(super) fn close_thumbwheel_tap_picker(&mut self) {
+        self.pickers.thumbwheel_tap = false;
+    }
+
+    pub(super) fn any_picker_open(&self) -> bool {
+        self.pickers.action || self.pickers.thumbwheel_tap
     }
 
     fn reset_for_device(&mut self, device_key: Option<DeviceKey>) {
@@ -249,14 +270,14 @@ impl MouseModelView {
         self.hovered = None;
         self.selected = None;
         self.gesture_active_dir = None;
-        self.action_picker_open = false;
+        self.pickers = OpenPickers::default();
     }
 
     fn select(&mut self, control: MouseControlId) {
         if self.selected != Some(control) {
             self.selected = Some(control);
             self.gesture_active_dir = None;
-            self.action_picker_open = false;
+            self.pickers = OpenPickers::default();
         }
     }
 }
@@ -305,6 +326,22 @@ impl MouseModelView {
             window,
             cx,
         );
+    }
+
+    /// The shared action picker's context, split out of `render` to keep it
+    /// under clippy's line budget.
+    fn action_picker<'a>(&'a self, view: &'a Entity<Self>) -> ActionPickerContext<'a> {
+        ActionPickerContext {
+            open: self.pickers.action,
+            search: &self.action_search,
+            shortcut_input: &self.custom_shortcut_input,
+            application_input: &self.custom_application_input,
+            shortcut_invalid: self.custom_shortcut_invalid,
+            shortcut_mode: self.shortcut_mode,
+            application_invalid: self.custom_application_invalid,
+            view,
+            toggle: Self::toggle_action_picker,
+        }
     }
 }
 
@@ -395,6 +432,7 @@ impl Render for MouseModelView {
             BindingInspectorData {
                 selected: self.selected,
                 gesture_direction: self.gesture_active_dir,
+                thumbwheel_tap_picker_open: self.pickers.thumbwheel_tap,
                 bindings,
                 gesture_maps,
                 dpi_gestures,
@@ -403,16 +441,7 @@ impl Render for MouseModelView {
                 editing_app: editing_app.as_deref(),
                 overridden,
             },
-            ActionPickerContext {
-                open: self.action_picker_open,
-                search: &self.action_search,
-                shortcut_input: &self.custom_shortcut_input,
-                application_input: &self.custom_application_input,
-                shortcut_invalid: self.custom_shortcut_invalid,
-                shortcut_mode: self.shortcut_mode,
-                application_invalid: self.custom_application_invalid,
-                view: &view,
-            },
+            self.action_picker(&view),
             cx,
         );
         workspace_layout(canvas, profile_status, inspector, &self.focus_handle)

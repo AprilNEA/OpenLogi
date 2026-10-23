@@ -32,6 +32,9 @@ pub(super) const INSPECTOR_W: f32 = 328.;
 pub(super) struct BindingInspectorData<'a> {
     pub selected: Option<MouseControlId>,
     pub gesture_direction: Option<GestureDirection>,
+    /// Independent open state for the thumb-wheel tap's action picker; see
+    /// `MouseModelView::thumbwheel_tap_picker_open`.
+    pub thumbwheel_tap_picker_open: bool,
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     pub dpi_gestures: bool,
@@ -54,6 +57,11 @@ pub(super) struct ActionPickerContext<'a> {
     pub shortcut_mode: ShortcutMode,
     pub application_invalid: bool,
     pub view: &'a Entity<MouseModelView>,
+    /// Which of `MouseModelView`'s independent picker-open flags this
+    /// context's `selection_card` flips — the shared one for most controls,
+    /// or the thumb-wheel tap's own flag when it shares a body with the
+    /// rotation preset picker.
+    pub toggle: fn(&mut MouseModelView),
 }
 
 /// Whether the custom shortcut editor records a tapped or a held chord.
@@ -84,13 +92,30 @@ pub(super) fn binding_inspector(
             data.overridden.map_or(0, BTreeMap::len),
             pal,
         ),
-        Some(MouseControlId::ThumbwheelRotation) => thumbwheel_inspector(
-            data.bindings,
-            data.editing_app,
-            data.overridden,
-            picker,
-            pal,
-        ),
+        Some(MouseControlId::ThumbwheelRotation) => {
+            let tap_picker = ActionPickerContext {
+                open: data.thumbwheel_tap_picker_open,
+                toggle: MouseModelView::toggle_thumbwheel_tap_picker,
+                ..picker
+            };
+            v_flex()
+                .gap_3()
+                .child(thumbwheel_inspector(
+                    data.bindings,
+                    data.editing_app,
+                    data.overridden,
+                    picker,
+                    pal,
+                ))
+                .child(thumbwheel_tap_section(
+                    data.bindings,
+                    data.editing_app,
+                    data.overridden,
+                    tap_picker,
+                    pal,
+                    cx,
+                ))
+        }
         Some(MouseControlId::Button(button)) => button_inspector(button, &data, picker, pal, cx),
     };
 
@@ -633,6 +658,74 @@ fn thumbwheel_inspector(
         })
 }
 
+/// The thumb wheel's capacitive tap, bound like a button below the rotation
+/// preset in the wheel's inspector.
+fn thumbwheel_tap_section(
+    bindings: &BTreeMap<ButtonId, Action>,
+    editing_app: Option<&str>,
+    overridden: Option<&BTreeMap<ButtonId, Action>>,
+    tap_picker: ActionPickerContext<'_>,
+    pal: Palette,
+    cx: &Context<MouseModelView>,
+) -> gpui::Div {
+    let tap_action = bindings
+        .get(&ButtonId::Thumbwheel)
+        .cloned()
+        .unwrap_or_else(|| default_binding(ButtonId::Thumbwheel));
+    let tap_overridden =
+        overridden.is_some_and(|overrides| overrides.contains_key(&ButtonId::Thumbwheel));
+    let tap_status = match (editing_app, tap_overridden) {
+        (Some(app), true) => tr!("actions.overridden_in_app", app => app.to_string()),
+        (Some(_), false) => tr!("profiles.inherited_from_default"),
+        (None, _) => tr!("pointer.device_default"),
+    };
+    let tap_observer = tap_picker.view.clone();
+    let on_pick_tap: PickFn = Rc::new(move |action, _window, cx| {
+        AppState::apply(cx, |state| {
+            state.commit_binding(ButtonId::Thumbwheel, action)
+        });
+        tap_observer.update(cx, |view, cx| {
+            view.close_thumbwheel_tap_picker();
+            cx.notify();
+        });
+    });
+
+    v_flex()
+        .gap_3()
+        .child(inspector_heading(
+            tr!("pointer.thumb_wheel_tap"),
+            Some(tap_status),
+            pal,
+        ))
+        .child(current_action_card(&tap_action, tap_picker, pal))
+        .when(tap_picker.open, |panel| {
+            panel.child(action_library(
+                "inspector-thumbwheel-tap",
+                Some(&tap_action),
+                tap_picker,
+                &on_pick_tap,
+                pal,
+                cx,
+            ))
+        })
+        .when(tap_overridden, |panel| {
+            let observer = tap_picker.view.clone();
+            panel.child(
+                control_button("inspector-thumbwheel-tap-use-default")
+                    .w_full()
+                    .icon(IconName::Undo)
+                    .label(tr!("profiles.use_the_default_profile"))
+                    .on_click(move |_, _, cx| {
+                        AppState::apply(cx, |state| state.clear_app_binding(ButtonId::Thumbwheel));
+                        observer.update(cx, |view, cx| {
+                            view.close_thumbwheel_tap_picker();
+                            cx.notify();
+                        });
+                    }),
+            )
+        })
+}
+
 fn inspector_heading(
     title: gpui::SharedString,
     status: Option<gpui::SharedString>,
@@ -684,6 +777,7 @@ fn selection_card(
     pal: Palette,
 ) -> impl IntoElement {
     let toggle = picker.view.clone();
+    let toggle_flag = picker.toggle;
     let search = picker.search.clone();
     let opening = !picker.open;
     let accessible_label = value.clone();
@@ -741,14 +835,14 @@ fn selection_card(
                 ),
         )
         .on_click(move |_, window, cx| {
-            if opening {
-                search.update(cx, |search, cx| search.set_value("", window, cx));
-            }
             toggle.update(cx, |view, cx| {
-                if opening {
+                // The rotation and tap pickers share the search and draft
+                // inputs; opening one must not wipe what the other holds.
+                if opening && !view.any_picker_open() {
+                    search.update(cx, |search, cx| search.set_value("", window, cx));
                     view.clear_custom_action_drafts(window, cx);
                 }
-                view.toggle_action_picker();
+                toggle_flag(view);
                 cx.notify();
             });
         })
@@ -991,6 +1085,7 @@ mod tests {
         BindingInspectorData {
             selected: Some(MouseControlId::Button(ButtonId::Back)),
             gesture_direction: None,
+            thumbwheel_tap_picker_open: false,
             bindings,
             gesture_maps,
             dpi_gestures: false,
