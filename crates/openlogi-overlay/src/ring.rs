@@ -5,16 +5,18 @@
 //! neither half of that, so there each display gets a window covering it and
 //! the same panel is drawn at the pointer, in the one window that heard it last.
 
+use std::time::Duration;
+
 use gpui::{
-    Bounds, Context, Div, Entity, Hsla, InteractiveElement, IntoElement, MouseMoveEvent,
-    ParentElement, Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions,
-    div, point, prelude::FluentBuilder as _, px, svg,
+    Animation, AnimationExt as _, Bounds, Context, Div, Entity, Hsla, InteractiveElement,
+    IntoElement, MouseMoveEvent, ParentElement, Pixels, Point, Render, Size,
+    StatefulInteractiveElement as _, Styled, Subscription, Task, Window,
+    WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions, div, ease_out_quint, point,
+    prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
-use openlogi_ui::color;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -33,10 +35,19 @@ pub(crate) const RING_APP_ID: &str = "openlogi-action-ring";
 /// shared (`openlogi_ui::color`); these greys are local by nature.
 const PANEL: Hsla = neutral(0.06, 0.82);
 const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
+const SLOT_HOVER: Hsla = neutral(0.10, 0.98);
 const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
 const GLYPH: Hsla = neutral(0.98, 1.0);
-const LABEL: Hsla = neutral(0.94, 1.0);
+const TOOLTIP_BG: Hsla = neutral(0.98, 1.0);
+const TOOLTIP_TEXT: Hsla = neutral(0.08, 1.0);
 const CANCEL_GLYPH: Hsla = neutral(0.82, 1.0);
+
+/// How long a slot must stay hovered before its tooltip appears, so sweeping
+/// across the ring does not flash labels.
+const TOOLTIP_DELAY: Duration = Duration::from_millis(100);
+const TOOLTIP_HEIGHT: f32 = 26.0;
+const TOOLTIP_GAP: f32 = 10.0;
+const SLOT_ENTER_MS: u64 = 340;
 
 const fn neutral(lightness: f32, alpha: f32) -> Hsla {
     Hsla {
@@ -46,12 +57,6 @@ const fn neutral(lightness: f32, alpha: f32) -> Hsla {
         a: alpha,
     }
 }
-
-/// The accent deepened for the dark panel: the brand lightness sits too close to
-/// the white glyph a selected slot carries, so the fill drops to `0.48` and the
-/// ring around it rises to `0.78`. Both keep the brand hue and saturation.
-const SELECTED_FILL_L: f32 = 0.48;
-const SELECTED_BORDER_L: f32 = 0.78;
 
 /// Where the ring's panel sits inside the window it was given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +111,10 @@ pub(crate) struct RingView {
     invocation: ActionRingInvocation,
     commands: mpsc::UnboundedSender<OverlayCommand>,
     hovered: Option<ActionRingSlot>,
+    /// Whether the hovered slot's tooltip has cleared its dwell delay.
+    label_visible: bool,
+    /// Cancels a pending tooltip when the pointer leaves the slot.
+    label_task: Option<Task<()>>,
     placement: Placement,
     /// Shared by every window of this ring.
     pointer: Entity<RingPointer>,
@@ -143,6 +152,8 @@ impl RingView {
             invocation,
             commands,
             hovered: None,
+            label_visible: false,
+            label_task: None,
             placement,
             pointer,
             _pointer_changes: pointer_changes,
@@ -174,6 +185,7 @@ impl RingView {
         let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
         let session_id = self.invocation.session_id;
         let activate = self.commands.clone();
+        let origin = WINDOW_SIZE / 2.0 - SLOT_SIZE / 2.0;
         Some(
             div()
                 .id(("ring-slot", slot.index()))
@@ -185,15 +197,7 @@ impl RingView {
                 .items_center()
                 .justify_center()
                 .rounded_full()
-                .bg(if selected {
-                    color::accent_at_lightness(SELECTED_FILL_L)
-                } else {
-                    SLOT_RESTING
-                })
-                .when(selected, |slot| {
-                    slot.border_2()
-                        .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
-                })
+                .bg(if selected { SLOT_HOVER } else { SLOT_RESTING })
                 .shadow_md()
                 .text_color(GLYPH)
                 .cursor_pointer()
@@ -201,12 +205,16 @@ impl RingView {
                 .on_hover(cx.listener(move |this, hovered, _, cx| {
                     if *hovered && this.hovered != Some(slot) {
                         this.hovered = Some(slot);
+                        this.label_visible = false;
                         let _ = this
                             .commands
                             .send(OverlayCommand::Hover { session_id, slot });
+                        this.start_label_timer(slot, cx);
                         cx.notify();
                     } else if !*hovered && this.hovered == Some(slot) {
                         this.hovered = None;
+                        this.label_visible = false;
+                        this.label_task = None;
                         cx.notify();
                     }
                 }))
@@ -215,30 +223,74 @@ impl RingView {
                     let _ = activate.send(OverlayCommand::Activate { session_id, slot });
                     session::dismiss_from_window(cx, window, session_id);
                 })
+                .with_animation(
+                    ("ring-slot-in", slot.index()),
+                    Animation::new(Duration::from_millis(SLOT_ENTER_MS))
+                        .with_easing(ease_out_quint()),
+                    move |slot, delta| {
+                        slot.left(px(origin + (left - origin) * delta))
+                            .top(px(origin + (top - origin) * delta))
+                            .opacity(delta)
+                    },
+                )
                 .into_any_element(),
         )
     }
 }
 
 impl RingView {
+    /// Start the tooltip dwell for `slot`; a later hover replaces this task,
+    /// and leaving the slot drops it before it fires.
+    fn start_label_timer(&mut self, slot: ActionRingSlot, cx: &mut Context<Self>) {
+        self.label_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOOLTIP_DELAY).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.hovered == Some(slot) {
+                    view.label_visible = true;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
     /// The fixed 360×360 ring. Both placements anchor this same element.
     fn panel(&self, cx: &mut Context<Self>) -> Div {
         let session_id = self.invocation.session_id;
         let center_commands = self.commands.clone();
-        let hovered_label = self.hovered.and_then(|slot| {
-            let presentation = self.invocation.slots.get(&slot)?;
-            // User-authored labels render verbatim: passing them through the
-            // localization table would translate any label that happens to
-            // collide with a known key ("Copy" → "Copier" under fr).
-            let label = if presentation.literal {
-                presentation.label.clone()
-            } else if let Some(key) = Action::translation_key_for_label(&presentation.label) {
-                rust_i18n::t!(key).into_owned()
-            } else {
-                presentation.label.clone()
-            };
-            Some(SharedString::from(label))
-        });
+        let tooltip = self
+            .hovered
+            .filter(|_| self.label_visible)
+            .and_then(|slot| {
+                let presentation = self.invocation.slots.get(&slot)?;
+                // User-authored labels render verbatim: passing them through the
+                // localization table would translate any label that happens to
+                // collide with a known key ("Copy" → "Copier" under fr).
+                let label = if presentation.literal {
+                    presentation.label.clone()
+                } else if let Some(key) = Action::translation_key_for_label(&presentation.label) {
+                    rust_i18n::t!(key).into_owned()
+                } else {
+                    presentation.label.clone()
+                };
+                let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+                // Approximate the pill from its text: GPUI cannot measure before
+                // layout, so keep it wide enough for the longest translated label
+                // and clamp it inside the panel either way.
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "label lengths are far below f32's exact integer range"
+                )]
+                let width = ((label.chars().count() as f32) * 7.5 + 28.0).clamp(64.0, 220.0);
+                let anchor = left + SLOT_SIZE / 2.0;
+                let above = top - TOOLTIP_HEIGHT - TOOLTIP_GAP;
+                let tip_top = if above >= 4.0 {
+                    above
+                } else {
+                    top + SLOT_SIZE + TOOLTIP_GAP
+                };
+                let tip_left = (anchor - width / 2.0).clamp(4.0, WINDOW_SIZE - width - 4.0);
+                Some((tip_left, tip_top, width, label))
+            });
         let slots = ActionRingSlot::ALL
             .into_iter()
             .filter_map(|slot| self.slot_element(slot, cx))
@@ -255,7 +307,13 @@ impl RingView {
                     .size(px(WINDOW_SIZE - 36.0))
                     .rounded_full()
                     .bg(PANEL)
-                    .shadow_lg(),
+                    .shadow_lg()
+                    .with_animation(
+                        "ring-panel-in",
+                        Animation::new(Duration::from_millis(SLOT_ENTER_MS))
+                            .with_easing(ease_out_quint()),
+                        Styled::opacity,
+                    ),
             )
             .children(slots)
             .child(
@@ -279,16 +337,22 @@ impl RingView {
                         session::dismiss_from_window(cx, window, session_id);
                     }),
             )
-            .when_some(hovered_label, |ring, label| {
+            .when_some(tooltip, |ring, (left, top, width, label)| {
                 ring.child(
                     div()
                         .absolute()
-                        .left(px(WINDOW_SIZE / 2.0 - 80.0))
-                        .top(px(WINDOW_SIZE / 2.0 + 34.0))
-                        .w(px(160.0))
-                        .text_center()
+                        .left(px(left))
+                        .top(px(top))
+                        .w(px(width))
+                        .h(px(TOOLTIP_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(TOOLTIP_BG)
+                        .text_color(TOOLTIP_TEXT)
                         .text_sm()
-                        .text_color(LABEL)
+                        .shadow_md()
                         .child(label),
                 )
             })
@@ -538,6 +602,9 @@ mod tests {
 
     #[gpui::test]
     fn a_ring_window_that_loses_the_pointer_stops_drawing_and_hovering(cx: &mut TestAppContext) {
+        // render the entrance animation at its end state so hit-testing sees
+        // the slots at their resting positions
+        cx.update(|cx| cx.set_reduce_motion(true));
         let live = Arc::new(ClickAwaySession::new());
         let (commands, mut sent) = mpsc::unbounded_channel();
         let pointer = cx.new(|_| RingPointer::default());
