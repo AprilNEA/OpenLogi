@@ -60,7 +60,10 @@ selected firmware version, official package URL, and a download-verification
 entry. Transfer history advances in 10% milestones; live progress keeps its full
 percentage precision. The agent retains up to 128 entries in the
 job snapshot, including terminal failures. A GUI session retains its known
-physical-device binding across reconnects to the same agent. Snapshots do not
+physical-device binding across reconnects to the same agent.
+Pending local admissions also retain their device key if the connection drops
+before the first job snapshot or admission reply arrives. An unavailable reply
+is uncertain; a definite refusal cannot bind a later job. Snapshots do not
 carry physical identity, so a cold GUI or a new agent run leaves historical
 jobs unbound instead of assigning their progress to a device by route alone.
 An unbound active job still blocks another installation.

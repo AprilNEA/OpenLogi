@@ -329,7 +329,9 @@ impl AppState {
                         .filter(|start| {
                             start.route == update.route
                                 && start.prior_job != Some(update.id)
-                                && start.result.is_ok()
+                                // A lost reply leaves admission uncertain;
+                                // an explicit refusal proves this is not our job.
+                                && !matches!(&start.result, Err(FirmwareStartFailure::Refused(_)))
                         })
                         .map(|start| start.key.clone())
                 })
@@ -353,12 +355,12 @@ impl AppState {
         StateEvent::FirmwareChanged.into()
     }
 
-    /// Every connection fences old read flights; only a new agent run resets
-    /// job identities and their physical-device bindings.
+    /// Every connection fences old read flights. Pending admissions and bound
+    /// jobs survive reconnects to the same agent; a new agent resets both.
     pub(crate) fn firmware_reconnected(&mut self, identity: openlogi_ipc::Identity) -> StateEvents {
         self.firmware.reads.clear();
-        self.firmware.start = None;
         if self.firmware.agent_identity != Some(identity) {
+            self.firmware.start = None;
             self.firmware.observed = None;
         }
         self.firmware.agent_identity = Some(identity);
@@ -525,6 +527,110 @@ pub(crate) mod tests {
                 assert_eq!(app.firmware_busy(), !job.phase.is_finished());
             }
         }
+    }
+
+    #[test]
+    fn same_agent_reconnect_before_first_snapshot_preserves_progress_and_history() {
+        for (before_reconnect, after_reconnect) in [
+            (None, None),
+            (Some(Ok(())), None),
+            (Some(Err(FirmwareStartFailure::Unavailable)), None),
+            (None, Some(Err(FirmwareStartFailure::Unavailable))),
+        ] {
+            let (mut state, mut received) = state();
+            let read = ready(&mut state, &mut received);
+            let _ = state.start_firmware_update(&read.key, target());
+            let Command::StartFirmwareUpdate(start) = received.try_recv().unwrap() else {
+                panic!("start command");
+            };
+            if let Some(answer) = before_reconnect {
+                let _ =
+                    state.apply_firmware_started(&start.key, &start.route, start.flight, answer);
+            }
+            let _ = state.firmware_reconnected(identity(1));
+            if let Some(answer) = after_reconnect {
+                let _ =
+                    state.apply_firmware_started(&start.key, &start.route, start.flight, answer);
+            }
+            for phase in [
+                FirmwareUpdatePhase::Preparing,
+                FirmwareUpdatePhase::Transferring { percent: 10 },
+                FirmwareUpdatePhase::Succeeded,
+            ] {
+                let job = FirmwareUpdate {
+                    source: None,
+                    id: 42,
+                    route: read.route.clone(),
+                    target: target(),
+                    events: vec![openlogi_core::hid::FirmwareUpdateEvent {
+                        timestamp_millis: 42_000,
+                        phase: phase.clone(),
+                    }],
+                    phase,
+                };
+                let _ = observe(&mut state, Some(job.clone()));
+                assert_eq!(state.current_firmware_update(), Some(&job));
+                assert!(state.current_firmware_start_failure().is_none());
+                assert!(!state.current_firmware_starting());
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_agent_cannot_inherit_a_pending_start_before_its_first_snapshot() {
+        let (mut state, mut received) = state();
+        let read = ready(&mut state, &mut received);
+        let _ = state.start_firmware_update(&read.key, target());
+        let Command::StartFirmwareUpdate(start) = received.try_recv().unwrap() else {
+            panic!("start command");
+        };
+        let _ = state.firmware_reconnected(identity(2));
+        assert!(
+            state
+                .apply_firmware_started(&start.key, &start.route, start.flight, Ok(()))
+                .is_empty()
+        );
+        let _ = observe(
+            &mut state,
+            Some(FirmwareUpdate {
+                source: None,
+                events: vec![],
+                id: 42,
+                route: read.route,
+                target: target(),
+                phase: FirmwareUpdatePhase::Preparing,
+            }),
+        );
+        assert!(state.current_firmware_update().is_none());
+    }
+
+    #[test]
+    fn reconnect_does_not_bind_a_definitively_refused_start() {
+        let (mut state, mut received) = state();
+        let read = ready(&mut state, &mut received);
+        let _ = state.start_firmware_update(&read.key, target());
+        let Command::StartFirmwareUpdate(start) = received.try_recv().unwrap() else {
+            panic!("start command");
+        };
+        let _ = state.apply_firmware_started(
+            &start.key,
+            &start.route,
+            start.flight,
+            Err(FirmwareStartFailure::Refused(FirmwareUpdateRefusal::Busy)),
+        );
+        let _ = state.firmware_reconnected(identity(1));
+        let _ = observe(
+            &mut state,
+            Some(FirmwareUpdate {
+                source: None,
+                events: vec![],
+                id: 42,
+                route: read.route,
+                target: target(),
+                phase: FirmwareUpdatePhase::Preparing,
+            }),
+        );
+        assert!(state.current_firmware_update().is_none());
     }
 
     #[test]
