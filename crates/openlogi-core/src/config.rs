@@ -59,6 +59,11 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
+/// v10 adds per-device [`DeviceConfig::disabled_keys`]. Older files omit the
+/// setting and leave the firmware unmanaged. The bump makes a v9 build reject
+/// a file that stores the field at the version check instead of failing after
+/// parsing an unknown field.
+///
 /// v9 adds the `[apps]` alias table and `app:<alias>` per-app profile keys
 /// (see [`Config::apps`]). Nothing older needs migrating; the bump makes a v8
 /// build refuse a file that may hold either at the version check, instead of
@@ -112,7 +117,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
