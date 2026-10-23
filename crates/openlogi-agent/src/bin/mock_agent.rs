@@ -806,6 +806,12 @@ impl State {
 }
 
 /// The route of each device `inventory` pairs, in its order.
+/// The catalog release the scripted MX Master 4 installs.
+fn mock_release() -> &'static openlogi_device_registry::firmware::FirmwareRelease {
+    openlogi_device_registry::firmware::latest_release("RBM", 27, 0xb042)
+        .unwrap_or(&openlogi_device_registry::firmware::FIRMWARE_RELEASES[0])
+}
+
 fn slot_routes(inventory: &DeviceInventory) -> Vec<Option<DeviceRoute>> {
     inventory
         .paired
@@ -1206,11 +1212,7 @@ impl Agent for MockAgent {
                 feature_hex: 0x0003,
             });
         }
-        let target = FirmwareVersion {
-            number: 27,
-            revision: 3,
-            build: 19,
-        };
+        let target = FirmwareVersion::from(mock_release());
         let updated = state.installed_firmware.contains(&route);
         Ok(FirmwareStatus {
             running: if updated {
@@ -1236,9 +1238,7 @@ impl Agent for MockAgent {
         route: DeviceRoute,
         request: openlogi_core::hid::FirmwareRequest,
     ) -> Result<(), openlogi_core::hid::FirmwareUpdateRefusal> {
-        use openlogi_core::hid::{
-            FirmwareUpdate, FirmwareUpdatePhase, FirmwareUpdateRefusal, FirmwareVersion,
-        };
+        use openlogi_core::hid::{FirmwareUpdate, FirmwareUpdatePhase, FirmwareUpdateRefusal};
         {
             let mut state = self.state.lock().await;
             if state
@@ -1259,17 +1259,12 @@ impl Agent for MockAgent {
                 .as_ref()
                 .map_or(1, |update| update.id + 1);
             let update = FirmwareUpdate {
-                source: openlogi_device_registry::firmware::latest_release("RBM", 27, 0xb042)
-                    .map(Into::into),
+                source: Some(mock_release().into()),
                 events: Vec::new(),
                 id,
                 request,
                 route,
-                target: FirmwareVersion {
-                    number: 27,
-                    revision: 3,
-                    build: 19,
-                },
+                target: mock_release().into(),
                 phase: FirmwareUpdatePhase::Downloading,
             };
             openlogi_agent_core::firmware::record_progress(&mut state.firmware_update, update);

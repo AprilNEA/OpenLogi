@@ -156,6 +156,18 @@ pub struct FirmwareUpdateSource {
     pub package_url: String,
 }
 
+/// The version a catalog release installs. Every consumer converts through
+/// this, so the release and the version a device reports compare one way.
+impl From<&openlogi_device_registry::firmware::FirmwareRelease> for FirmwareVersion {
+    fn from(release: &openlogi_device_registry::firmware::FirmwareRelease) -> Self {
+        Self {
+            number: release.number,
+            revision: release.revision,
+            build: release.build,
+        }
+    }
+}
+
 impl From<&openlogi_device_registry::firmware::FirmwareRelease> for FirmwareUpdateSource {
     fn from(release: &openlogi_device_registry::firmware::FirmwareRelease) -> Self {
         Self {

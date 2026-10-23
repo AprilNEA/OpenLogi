@@ -63,7 +63,7 @@ impl Inspection {
             running.firmware_number,
             running.transport_pid()?,
         )
-        .filter(|release| release_version(release) >= firmware_version(running))
+        .filter(|release| FirmwareVersion::from(*release) >= firmware_version(running))
     }
 }
 
@@ -72,14 +72,6 @@ fn firmware_version(info: &DeviceEntityFirmwareInfo) -> FirmwareVersion {
         number: info.firmware_number,
         revision: info.revision,
         build: info.build,
-    }
-}
-
-fn release_version(release: &FirmwareRelease) -> FirmwareVersion {
-    FirmwareVersion {
-        number: release.number,
-        revision: release.revision,
-        build: release.build,
     }
 }
 
@@ -166,10 +158,10 @@ pub async fn get_firmware_status_on(shared: &SharedChannel) -> Result<FirmwareSt
                     .map_err(|error| read_error(error, DfuResumableFeature::ID))?;
                 if !capabilities.contains(DfuCapabilities::RESUMABLE | DfuCapabilities::FORCIBLE) {
                     FirmwareOffer::Unavailable
-                } else if release_version(release) == firmware_version(running) {
+                } else if FirmwareVersion::from(release) == firmware_version(running) {
                     FirmwareOffer::UpToDate
                 } else {
-                    FirmwareOffer::Available(release_version(release))
+                    FirmwareOffer::Available(FirmwareVersion::from(release))
                 }
             }
             Err(WriteError::FeatureUnsupported { .. }) => FirmwareOffer::Unavailable,
@@ -290,7 +282,7 @@ pub async fn prepare_update_on(
         .iter()
         .find(|image| image.entity == entity)
         .ok_or(FirmwareUpdateFailure::ImageRejected)?;
-    if image.version != release_version(release)
+    if image.version != FirmwareVersion::from(release)
         || !release.fits(&image.prefix, image.version.number, image.product_id)
     {
         return Err(FirmwareUpdateFailure::ImageRejected);

@@ -13,7 +13,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::SharedHandles;
 use openlogi_core::hid::{
     DeviceRoute, FirmwareRequest, FirmwareStatus, FirmwareUpdate, FirmwareUpdateFailure,
-    FirmwareUpdatePhase, FirmwareUpdateRefusal, FirmwareVersion, HidppOperation, WriteError,
+    FirmwareUpdatePhase, FirmwareUpdateRefusal, HidppOperation, WriteError,
 };
 use openlogi_device::firmware;
 use openlogi_device_registry::firmware::FirmwareRelease;
@@ -164,11 +164,7 @@ fn publish(
         id: job.id,
         request: job.request,
         route: route.clone(),
-        target: FirmwareVersion {
-            number: release.number,
-            revision: release.revision,
-            build: release.build,
-        },
+        target: release.into(),
         phase,
     });
 }
