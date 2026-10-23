@@ -4,8 +4,8 @@
 # from the root Cargo.toml, so the whole workspace moves on a single shared
 # version. `version_group` ties the crates together so they are always bumped and
 # released in lockstep (the highest next version among them wins), and a single
-# `v{version}` tag is cut for the workspace as a whole — which is what
-# `.github/workflows/release.yml` listens on to build the macOS DMG.
+# stable `v{version}` tag is cut for the workspace as a whole — which is what
+# `.github/workflows/release.yml` listens on to build the release.
 #
 # Beta tags (`v{version}-beta.{N}`) do not come from release-plz.
 # `.github/workflows/prerelease.yml` cuts them on `master` between release
