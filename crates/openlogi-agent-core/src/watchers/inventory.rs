@@ -563,6 +563,15 @@ impl InventoryWorker {
         // for its transfer, so the pass waits rather than polling the device
         // being written or retiring its channel.
         let _pass = self.receiver_access.inventory_pass().await;
+        // A suspend can close the gate while the pass waits for a firmware
+        // update; enumerating then would open and probe every device.
+        if !self.device_io.allows_io() {
+            debug!(
+                ?trigger,
+                "device I/O suspended while inventory waited for firmware — pass skipped"
+            );
+            return true;
+        }
         let started = Instant::now();
         let result = self.enumerator.enumerate().await;
         self.complete_enumeration(trigger, result, started).await

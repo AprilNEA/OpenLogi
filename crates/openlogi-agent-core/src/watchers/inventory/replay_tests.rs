@@ -170,6 +170,65 @@ async fn a_firmware_update_holds_off_inventory_passes_until_it_ends() {
 }
 
 #[tokio::test]
+async fn a_suspend_while_waiting_for_firmware_skips_the_held_off_pass() {
+    let node_id = NodeId::from("agent-direct-node".to_string());
+    let backend = Arc::new(
+        ReplayBackend::new(
+            direct_topology(node_id.clone()),
+            vec![direct_inventory_and_dpi_cassette()],
+        )
+        .expect("valid agent replay fixture"),
+    );
+    let (device_io_signal, device_io) = device_io_channel();
+    let hardware = HardwareContext::injected(backend.clone(), device_io);
+    let observable = Arc::new(ObservableState::new("test".to_string()));
+    let orchestrator = Orchestrator::with_hardware(Config::default(), observable, hardware);
+    let shared = orchestrator.shared();
+    let firmware = shared
+        .receiver_access
+        .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::FirmwareUpdate)
+        .await;
+    let mut watcher = spawn_with_hardware(
+        shared.hardware(),
+        shared.channel_registry.clone(),
+        shared.receiver_access.clone(),
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), watcher.events.recv())
+            .await
+            .is_err(),
+        "the initial pass waits for the firmware update"
+    );
+    assert!(device_io_signal.suspend());
+    drop(firmware);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), watcher.events.recv())
+            .await
+            .is_err(),
+        "a suspended pass publishes nothing"
+    );
+    assert_eq!(
+        backend.open_count(&node_id).unwrap(),
+        0,
+        "the pass released by firmware must not open devices while suspended"
+    );
+
+    assert!(device_io_signal.resume());
+    let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match watcher.events.recv().await {
+                Some(InventoryEvent::Snapshot { .. }) => break,
+                Some(_) => {}
+                None => panic!("inventory watcher must keep running"),
+            }
+        }
+    })
+    .await;
+    assert!(snapshot.is_ok(), "the resumed watcher reconciles again");
+    assert!(backend.open_count(&node_id).unwrap() > 0);
+}
+
+#[tokio::test]
 async fn replay_inventory_and_authoritative_read_share_one_injected_backend() {
     let node_id = NodeId::from("agent-direct-node".to_string());
     let route = DeviceRoute::Direct {
