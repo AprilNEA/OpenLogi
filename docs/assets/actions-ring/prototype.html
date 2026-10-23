@@ -344,7 +344,7 @@
   const PROV_R = 108;                         // provider arc, anchored on the AI slot
   const PROV_ANGLES = [-55, 0, 55];           // degrees, from +x axis
 
-  const state = { open: false, mode: "ring", hovered: null, active: 1, aiTimer: 0, aiCooldown: 0, outTimer: 0 };
+  const state = { open: false, mode: "ring", hovered: null, active: 1, aiTimer: 0, aiCooldown: 0, outTimer: 0, closeTimer: 0 };
   let keyboardMode = false;
   document.addEventListener("keydown", () => { keyboardMode = true; }, true);
   document.addEventListener("pointerdown", () => { keyboardMode = false; }, true);
@@ -607,6 +607,16 @@
 
   function open() {
     if (state.open) return;
+    if (state.closeTimer) {
+      // reopened mid-close: drop the pending hide and undo its visual state
+      clearTimeout(state.closeTimer);
+      state.closeTimer = 0;
+      ring.classList.remove("is-ai");
+      stage.classList.remove("ai");
+      ring.querySelectorAll(".is-selected").forEach((n) => n.classList.remove("is-selected"));
+      provEls.forEach((p) => p.el.classList.remove("is-selected", "is-active"));
+      hintEl.textContent = "1–8 · ← → · Enter · Esc";
+    }
     state.open = true;
     hideTip();
     stage.style.display = "";
@@ -657,6 +667,7 @@
   }
 
   function close(after) {
+    clearTimeout(state.closeTimer);
     state.open = false;
     state.mode = "ring";
     clearTimeout(state.aiTimer);
@@ -664,7 +675,8 @@
     hideTip();
     stage.classList.add("is-closing");
     ring.classList.add("is-closing");
-    setTimeout(() => {
+    state.closeTimer = setTimeout(() => {
+      state.closeTimer = 0;
       ring.style.display = "none";
       ring.classList.remove("is-closing", "is-ai");
       stage.classList.remove("is-closing", "ai");
