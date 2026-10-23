@@ -1832,7 +1832,7 @@ mod tests {
                     context,
                     Ok(openlogi_ipc::SavedConfigVerdict::Accepted),
                 )
-            })
+            });
         });
         cx.run_until_parked();
         cx.read(|cx| {

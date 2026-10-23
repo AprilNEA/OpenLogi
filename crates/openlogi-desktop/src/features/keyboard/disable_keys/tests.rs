@@ -193,7 +193,7 @@ fn general_external_reload_requires_latest_revision_receipt_then_fresh_read(
             !AppState::try_read(cx)
                 .unwrap()
                 .disable_keys_controls_enabled(&key)
-        )
+        );
     });
     cx.update(|cx| {
         AppState::apply(cx, |state| {
@@ -226,7 +226,7 @@ fn answer_post_receipt_read(
             !AppState::try_read(cx)
                 .unwrap()
                 .disable_keys_controls_enabled(key)
-        )
+        );
     });
     let Ok(Command::ReadDisableKeys(read)) = receiver.try_recv() else {
         panic!("receipt must retire the earlier read");
@@ -256,7 +256,7 @@ fn general_refresh_failure_offers_a_working_reload_retry(cx: &mut TestAppContext
             state.apply_saved_config_reload_result(Ok(
                 openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave,
             ))
-        })
+        });
     });
     cx.run_until_parked();
     let Ok(Command::ReadDisableKeys(read)) = receiver.try_recv() else {
