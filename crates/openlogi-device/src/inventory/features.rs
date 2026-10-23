@@ -267,7 +267,7 @@ async fn read_marketing_identity(
 }
 
 fn derive_capabilities(
-    features: &[hidpp::feature::FeatureInformation],
+    features: &[hidpp::feature::feature_set::FeatureInformation],
     ids: &[u16],
 ) -> Capabilities {
     let mut capabilities = Capabilities::from_feature_ids(ids);
