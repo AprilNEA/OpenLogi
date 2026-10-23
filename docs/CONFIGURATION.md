@@ -101,6 +101,20 @@ optional physical device key.
   setting off, the agent posts two frames and the Dock changes Space at once.
   A change applies from the next switch. Windows and Linux ignore the setting.
 
+On macOS, a left or right gesture bound to Previous Desktop or Next Desktop
+moves the Space with the hand instead, the way a three-finger trackpad swipe
+does, and `animate_desktop_switch` does not apply to it. Once the swipe commits,
+the neighbouring Space follows the hold's travel. Releasing past halfway, or
+flicking toward a desktop that exists, finishes the switch; otherwise the Space
+springs back. Each further desktop width in the same hold switches again. At the
+last desktop the Space holds at the edge. The hold can drag back past where it
+started only when the opposite direction is bound to the opposite desktop
+action. When another switch already owns the Dock, the gesture falls back to
+the one-shot switch above. The `OPENLOGI_SPACE_SWIPE_TRAVEL` environment
+variable, read by the agent at launch, sets the raw sensor travel per desktop
+width (default `800`); `0` turns the live swipe off in favour of the one-shot
+switch. Windows and Linux always use the one-shot switch.
+
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use
 other generated keys. Do not substitute a model id such as `2b042`.
