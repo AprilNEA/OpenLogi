@@ -145,11 +145,20 @@ fn private_tempdir() -> Result<tempfile::TempDir, String> {
         .map_err(|error| format!("failed to create a private download directory: {error}"))
 }
 
-fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
+/// Read limit for the signature and `SHA256SUMS` downloads, which are tiny.
+const METADATA_LIMIT: u64 = 1024 * 1024;
+
+/// Read limit for the package itself; release packages are ~40 MB, well past
+/// ureq's 10 MB default.
+const PACKAGE_LIMIT: u64 = 512 * 1024 * 1024;
+
+fn download_bytes(url: &str, limit: u64) -> Result<Vec<u8>, String> {
     ureq::get(url)
         .call()
         .map_err(|error| format!("download of {url} failed: {error}"))?
         .body_mut()
+        .with_config()
+        .limit(limit)
         .read_to_vec()
         .map_err(|error| format!("failed to read downloaded bytes from {url}: {error}"))
 }
@@ -168,11 +177,13 @@ fn download_verify_and_install(
 ) -> Result<(), String> {
     let matched = linux_package_install::match_assets(assets, version, source)?;
 
-    let package_bytes = download_bytes(&matched.package.browser_download_url)?;
-    let signature_bytes = download_bytes(&matched.signature.browser_download_url)?;
-    let checksums_text =
-        String::from_utf8(download_bytes(&matched.checksums.browser_download_url)?)
-            .map_err(|error| format!("SHA256SUMS is not valid UTF-8: {error}"))?;
+    let package_bytes = download_bytes(&matched.package.browser_download_url, PACKAGE_LIMIT)?;
+    let signature_bytes = download_bytes(&matched.signature.browser_download_url, METADATA_LIMIT)?;
+    let checksums_text = String::from_utf8(download_bytes(
+        &matched.checksums.browser_download_url,
+        METADATA_LIMIT,
+    )?)
+    .map_err(|error| format!("SHA256SUMS is not valid UTF-8: {error}"))?;
 
     let expected_hex = linux_package_install::find_checksum(&checksums_text, &matched.package.name)
         .ok_or_else(|| format!("SHA256SUMS has no entry for {}", matched.package.name))?;
