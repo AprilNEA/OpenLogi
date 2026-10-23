@@ -806,10 +806,15 @@ impl State {
 }
 
 /// The route of each device `inventory` pairs, in its order.
-/// The catalog release the scripted MX Master 4 installs.
-fn mock_release() -> &'static openlogi_device_registry::firmware::FirmwareRelease {
-    openlogi_device_registry::firmware::latest_release("RBM", 27, 0xb042)
-        .unwrap_or(&openlogi_device_registry::firmware::FIRMWARE_RELEASES[0])
+/// The firmware the scripted MX Master 4 reports: prefix, number and PID.
+const MOCK_FIRMWARE: (&str, u8, u16) = ("RBM", 27, 0xb042);
+
+/// The catalog release the scripted MX Master 4 can install. A catalog
+/// without one leaves the mock with nothing to offer instead of borrowing an
+/// unrelated release.
+fn mock_release() -> Option<&'static openlogi_device_registry::firmware::FirmwareRelease> {
+    let (prefix, number, product_id) = MOCK_FIRMWARE;
+    openlogi_device_registry::firmware::latest_release(prefix, number, product_id)
 }
 
 fn slot_routes(inventory: &DeviceInventory) -> Vec<Option<DeviceRoute>> {
@@ -1212,18 +1217,21 @@ impl Agent for MockAgent {
                 feature_hex: 0x0003,
             });
         }
-        let target = FirmwareVersion::from(mock_release());
+        let shipped = FirmwareVersion {
+            number: 27,
+            revision: 1,
+            build: 16,
+        };
+        let Some(release) = mock_release() else {
+            return Ok(FirmwareStatus {
+                running: shipped,
+                offer: FirmwareOffer::Unavailable,
+            });
+        };
+        let target = FirmwareVersion::from(release);
         let updated = state.installed_firmware.contains(&route);
         Ok(FirmwareStatus {
-            running: if updated {
-                target
-            } else {
-                FirmwareVersion {
-                    number: 27,
-                    revision: 1,
-                    build: 16,
-                }
-            },
+            running: if updated { target } else { shipped },
             offer: if updated {
                 FirmwareOffer::UpToDate
             } else {
@@ -1254,17 +1262,18 @@ impl Agent for MockAgent {
             if !state.clock.is_demo() {
                 return Err(FirmwareUpdateRefusal::NoUpdate);
             }
+            let release = mock_release().ok_or(FirmwareUpdateRefusal::NoUpdate)?;
             let id = state
                 .firmware_update
                 .as_ref()
                 .map_or(1, |update| update.id + 1);
             let update = FirmwareUpdate {
-                source: Some(mock_release().into()),
+                source: Some(release.into()),
                 events: Vec::new(),
                 id,
                 request,
                 route,
-                target: mock_release().into(),
+                target: release.into(),
                 phase: FirmwareUpdatePhase::Downloading,
             };
             openlogi_agent_core::firmware::record_progress(&mut state.firmware_update, update);
