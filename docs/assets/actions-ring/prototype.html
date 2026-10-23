@@ -515,6 +515,10 @@
       setActiveProvider(k);
       haptic("hover", btn);
     });
+    btn.addEventListener("focus", () => {
+      if (state.mode !== "ai") return;
+      setActiveProvider(k);
+    });
     btn.addEventListener("click", (e) => { e.stopPropagation(); invokeProvider(k, btn); });
 
     aiLayer.appendChild(btn);
