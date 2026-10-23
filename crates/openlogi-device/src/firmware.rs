@@ -18,7 +18,7 @@ use hidpp::{
             DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
         },
         dfu_resumable::{DfuCapabilities, DfuResumableFeature, DfuStatus},
-        unified_battery::{BatteryLevel, BatteryStatus, UnifiedBatteryFeature},
+        unified_battery::{BatteryStatus, UnifiedBatteryFeature},
     },
     protocol::v20::Hidpp20Error,
 };
@@ -31,6 +31,7 @@ use openlogi_device_registry::firmware::{FirmwareRelease, latest_release};
 use crate::{
     DeviceRoute, SharedChannel,
     backend::HidBackend,
+    inventory::mappings::map_battery_level,
     write::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route},
 };
 
@@ -356,8 +357,11 @@ async fn check_battery(device: &mut Device) -> Result<(), FirmwareUpdateFailure>
             "battery subsystem is not ready for an update".into(),
         ));
     }
-    if !FirmwareBatteryCharge::from_percentage(Some(battery.charging_percentage)).is_sufficient()
-        || !matches!(battery.level, BatteryLevel::Good | BatteryLevel::Full)
+    if !FirmwareBatteryCharge::from_reading(
+        Some(battery.charging_percentage),
+        map_battery_level(battery.level),
+    )
+    .is_sufficient()
     {
         return Err(FirmwareUpdateFailure::BatteryLow {
             percent: battery.charging_percentage,

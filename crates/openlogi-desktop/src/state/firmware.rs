@@ -105,10 +105,15 @@ impl AppState {
         if !self.is_current_device(key) {
             return FirmwareBatteryCharge::Unknown;
         }
-        FirmwareBatteryCharge::from_percentage(
-            self.current_record()
-                .filter(|record| record.online)
-                .and_then(|record| record.battery.as_ref()?.percentage),
+        let battery = self
+            .current_record()
+            .filter(|record| record.online)
+            .and_then(|record| record.battery.as_ref());
+        FirmwareBatteryCharge::from_reading(
+            battery.and_then(|battery| battery.percentage),
+            battery.map_or(openlogi_core::device::BatteryLevel::Unknown, |battery| {
+                battery.level
+            }),
         )
     }
 
@@ -774,6 +779,27 @@ pub(crate) mod tests {
         let _ = observe(&mut state, Some(ours.clone()));
         assert_eq!(state.current_firmware_update(), Some(&ours));
         assert!(!state.current_firmware_starting());
+    }
+
+    #[test]
+    fn a_low_battery_level_blocks_admission_even_above_the_minimum_charge() {
+        let (mut state, mut received) = ready_state();
+        let key = state.current_record().unwrap().device_key();
+        let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        inventory.paired[0].battery = Some(openlogi_core::device::BatteryInfo {
+            percentage: Some(45),
+            level: openlogi_core::device::BatteryLevel::Low,
+            status: openlogi_core::device::BatteryStatus::Discharging,
+        });
+        let _ = state.refresh_inventories(&[inventory], &[], &AssetResolver::new(), &[]);
+        while received.try_recv().is_ok() {}
+        assert_eq!(
+            state.firmware_battery_charge(&key),
+            FirmwareBatteryCharge::Low,
+            "the device preflight would refuse this reading"
+        );
+        assert!(state.start_firmware_update(&key, target()).is_empty());
+        assert!(received.try_recv().is_err());
     }
 
     #[test]

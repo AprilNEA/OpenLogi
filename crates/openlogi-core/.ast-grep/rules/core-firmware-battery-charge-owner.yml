@@ -3,7 +3,7 @@
 id: core-firmware-battery-charge-owner
 language: rust
 severity: error
-message: Use FirmwareBatteryCharge::from_percentage; core owns firmware charge eligibility.
+message: Use FirmwareBatteryCharge::from_reading; core owns firmware charge eligibility.
 files:
   - crates/**/firmware.rs
   - crates/**/firmware/**/*.rs
