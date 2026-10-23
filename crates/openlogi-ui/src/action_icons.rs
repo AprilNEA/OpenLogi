@@ -87,6 +87,8 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/square-plus.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/square-plus.svg"))),
     ("action-icons/square-terminal.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/square-terminal.svg"))),
     ("action-icons/square-x.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/square-x.svg"))),
+    ("action-icons/sun-dim.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/sun-dim.svg"))),
+    ("action-icons/sun.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/sun.svg"))),
     ("action-icons/terminal.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/terminal.svg"))),
     ("action-icons/star.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/star.svg"))),
     ("action-icons/undo-2.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/undo-2.svg"))),
