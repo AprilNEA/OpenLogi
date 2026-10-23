@@ -22,6 +22,7 @@ mod dpi_led;
 mod easy_switch;
 mod error;
 mod fn_lock;
+mod force_sensing;
 mod haptic;
 mod hires_wheel;
 mod lighting;
@@ -48,6 +49,7 @@ pub use easy_switch::{
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
+pub use force_sensing::{get_force_sensing_on, set_force_sensing_on};
 pub use haptic::{
     HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic, play_haptic_on,
     restore_haptics_on,
@@ -73,7 +75,7 @@ pub use litra::{
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
 };
-pub use openlogi_core::hid::{PointerSpeed, ReportRate, ReportRateInfo};
+pub use openlogi_core::hid::{ForceSensingInfo, PointerSpeed, ReportRate, ReportRateInfo};
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
 pub use pointer_scaling::{
     PointerScaling, get_pointer_scaling, get_pointer_speed_on, set_pointer_scaling,
@@ -93,6 +95,7 @@ pub use smartshift::{
 pub use openlogi_core::hid::light::commands_for_light_settings;
 
 pub(crate) use error::classify_hidpp_error;
+pub(crate) use force_sensing::{force_button_is_changeable, panel_button};
 
 /// Look up `F` on a device by HID++ feature ID, register it with
 /// [`Device::add_feature`], and return the typed wrapper.

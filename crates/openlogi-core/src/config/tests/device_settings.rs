@@ -334,6 +334,41 @@ fn a_pointer_speed_outside_the_safe_range_does_not_load() {
 }
 
 #[test]
+fn force_sensing_roundtrips_as_the_raw_device_value() {
+    let mut cfg = Config::default();
+    cfg.set_force_sensing("2b042", 4500);
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(
+        toml.contains("force_sensing = 4500"),
+        "the force is stored as the raw device value: {toml}"
+    );
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.force_sensing("2b042"), Some(4500));
+    assert_eq!(restored.force_sensing("absent"), None);
+}
+
+#[test]
+fn unset_force_sensing_is_omitted_from_toml() {
+    // Absent means the agent never writes the force, so it must not appear
+    // just because another setting was saved.
+    let mut cfg = Config::default();
+    cfg.set_dpi("2b042", Dpi::new(1600));
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(!toml.contains("force_sensing"), "{toml}");
+    assert_eq!(write_and_read(&cfg).force_sensing("2b042"), None);
+}
+
+#[test]
+fn a_saved_force_sensing_survives_route_adoption() {
+    let route = "receiver:82839805:slot:2";
+    let mut config = Config::default();
+    config.set_force_sensing(route, 6000);
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:a393cae0").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert_eq!(config.force_sensing("unit:a393cae0"), Some(6000));
+}
+
+#[test]
 fn a_saved_pointer_speed_survives_route_adoption() {
     use crate::hid::PointerSpeed;
     let route = "receiver:82839805:slot:2";

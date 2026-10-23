@@ -11,11 +11,13 @@ use hidpp::{
         battery_voltage::BatteryVoltageFeature,
         device_information::{DeviceInformationFeature, DeviceTransport},
         device_type_and_name::DeviceTypeAndNameFeature,
+        force_sensing_button::ForceSensingButtonFeature,
         gestures2::Gestures2Feature,
         multi_platform::{MultiPlatformCapabilities, MultiPlatformFeature},
         reprog_controls::{ReprogControlsFeature, control_ids},
         unified_battery::UnifiedBatteryFeature,
     },
+    protocol::v20::Hidpp20Error,
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -24,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::reprog_controls::{BACK_CIDS, DPI_MODE_SHIFT_CIDS, FORWARD_CIDS};
+use crate::write::{force_button_is_changeable, panel_button};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
@@ -506,6 +509,21 @@ async fn probe_extra_capabilities(
             .capabilities
             .contains(MultiPlatformCapabilities::SET_HOST_PLATFORM);
     }
+    // The press force is offered only for a button the device lets software
+    // change; the write path refuses the others.
+    if caps.force_sensing
+        && let Some(feature) = device.get_feature::<ForceSensingButtonFeature>()
+    {
+        caps.force_sensing = match feature.get_button_count().await.map_err(|_| ())? {
+            0 => false,
+            _ => match panel_button(&feature).await {
+                Ok(button) => force_button_is_changeable(&button),
+                // A reply naming no usable range is an answer, not a lost read.
+                Err(Hidpp20Error::UnsupportedResponse) => false,
+                Err(_) => return Err(()),
+            },
+        };
+    }
     if let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
         let count = feature.get_count().await.map_err(|_| ())?;
         let mut haptic_panel = false;
@@ -695,6 +713,63 @@ mod tests {
         }
         // An unanswered read leaves the set incomplete, so it is not memoized.
         let probe = multi_platform_probe(None).await;
+        assert!(probe.capabilities_incomplete);
+    }
+
+    /// Probe a mouse whose `0x19c0` (at index 2) reports `count` buttons and
+    /// answers `getButtonInfo` with `info`, or fails that read when it is
+    /// `None`.
+    async fn force_sensing_probe(count: u8, info: Option<[u8; 8]>) -> ProbedFeatures {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            let features = [0x0001_u16, 0x19c0];
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => response[4] = 1,
+                (1, 0) => response[4] = 2,
+                (1, 1) => {
+                    let id = features[usize::from(request[4]) - 1];
+                    response[4..6].copy_from_slice(&id.to_be_bytes());
+                }
+                (2, 0) => response[4] = count,
+                (2, 1) => match info {
+                    Some(info) => response[4..12].copy_from_slice(&info),
+                    None => return Some(feature_error(request, 0x08)),
+                },
+                _ => panic!("unexpected capability request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        probe_features(&channel, 0xff, None).await.0
+    }
+
+    #[tokio::test]
+    async fn force_sensing_needs_a_button_whose_force_software_can_change() {
+        // The MX Master 4 Haptic Sense Panel: changeable, 5089 in 4071..=6768.
+        const MX_MASTER_4: [u8; 8] = [0x00, 0x01, 0x13, 0xe1, 0x1a, 0x70, 0x0f, 0xe7];
+        const FIXED: [u8; 8] = [0x00, 0x00, 0x13, 0xe1, 0x1a, 0x70, 0x0f, 0xe7];
+        const INVERTED: [u8; 8] = [0x00, 0x01, 0x13, 0xe1, 0x0f, 0xe7, 0x1a, 0x70];
+        const DEFAULT_OUTSIDE: [u8; 8] = [0x00, 0x01, 0x0f, 0x00, 0x1a, 0x70, 0x0f, 0xe7];
+        for (count, info, offered) in [
+            (1, MX_MASTER_4, true),
+            (1, FIXED, false),
+            (1, INVERTED, false),
+            (1, DEFAULT_OUTSIDE, false),
+            (0, MX_MASTER_4, false),
+        ] {
+            let probe = force_sensing_probe(count, Some(info)).await;
+            assert!(!probe.capabilities_incomplete);
+            assert_eq!(
+                probe.capabilities.unwrap().force_sensing,
+                offered,
+                "count {count}, info {info:02x?}"
+            );
+        }
+        // An unanswered read leaves the set incomplete, so it is not memoized.
+        let probe = force_sensing_probe(1, None).await;
         assert!(probe.capabilities_incomplete);
     }
 
