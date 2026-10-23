@@ -247,6 +247,15 @@ write. Save Retry rereads the configuration to preserve external edits and
 refreshes the app's settings and binding displays from that revision, even if
 the subsequent save must be retried again.
 
+Reload acceptance is tied to the saved file revision of each change, even when
+several requests share one agent reload. Acceptance of a newer save does not
+confirm an older one. If the file changed externally, the app refreshes it
+without overwriting it, requests acceptance of that exact revision, and then
+reads the keyboard again before editing resumes. This also covers another edit
+between the agent's reload and the app's refresh. A failed refresh keeps editing
+blocked; **Reload Retry** resumes this reconciliation. A device read alone cannot
+resolve an unconfirmed file revision.
+
 Recovery stays inside the device card, using the same status and retry controls
 as other device settings. Messages follow the selected interface language;
 technical read, write, and configuration errors are recorded in the app logs.
@@ -263,6 +272,22 @@ successful confirmation: they use bounded delayed retries, retaining pending
 confirmation for the normal recovery scan after those retries are exhausted.
 An unreachable keyboard cannot be guaranteed to accept a setting; reconnect
 or wake starts a new lifecycle attempt.
+
+Manual writes retain their setting turn, receiver lease, and transport turn
+until each submitted native report completes, including discovery and readback
+reports. Cancellation is checked before submitting the next report. A completed
+write becomes the recovery baseline only when the requester consumes its
+successful result; an unread result is still unconfirmed. Reads of this setting
+queue behind already scheduled policy writes, including workers that have not
+started running yet. Ordinary standalone reads still use bounded query timeouts.
+A native driver operation that never completes can therefore keep subsequent
+writes waiting; a requester timeout does not make it safe to release that turn.
+
+When a receiver slot reports a different known unit ID or serial, the agent
+retires the former device's requests and starts a fresh discovery retry budget.
+Learning previously missing identity information for the same slot instead
+preserves active work and its remaining budget. Replacement cannot be detected
+from a slot alone when neither snapshot provides distinguishing identity.
 
 ### Application aliases
 
