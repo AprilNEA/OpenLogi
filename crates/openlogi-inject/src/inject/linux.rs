@@ -43,7 +43,7 @@ pub(super) fn execute(action: &Action) {
         Effect::None => {}
         // Extra mouse buttons: BTN_SIDE/BTN_EXTRA are the evdev side
         // buttons ("back"/"forward") browsers handle natively.
-        Effect::Click(button) => click(mouse_button_code(button)),
+        Effect::Click(button) => super::click_mouse(button),
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
@@ -119,6 +119,20 @@ pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
     if !keys.is_empty() {
         emit(&held_key_events(&keys, phase));
     }
+}
+
+/// Emit one edge for the mouse buttons whose ownership changed.
+pub(super) fn hold_mouse_buttons(buttons: &[MouseButton], phase: KeyPhase) {
+    let events = mouse_button_events(buttons, phase);
+    if !events.is_empty() {
+        emit(&events);
+    }
+}
+
+/// Inject a one-shot down and up in separate SYN_REPORT frames.
+pub(super) fn click_mouse(button: MouseButton) {
+    hold_mouse_buttons(&[button], KeyPhase::Down);
+    hold_mouse_buttons(&[button], KeyPhase::Up);
 }
 
 /// MPRIS targets the running media player; XF86 volume keys go to the
@@ -629,10 +643,13 @@ fn held_key_events(keys: &[KeyCode], phase: KeyPhase) -> Vec<InputEvent> {
     events
 }
 
-/// Inject a button-down in one SYN frame and button-up in a second.
-fn click(button: KeyCode) {
-    emit(&[key_ev(button, 1), syn()]);
-    emit(&[key_ev(button, 0), syn()]);
+/// Build the one `SYN_REPORT` frame for a selected mouse-button edge.
+fn mouse_button_events(buttons: &[MouseButton], phase: KeyPhase) -> Vec<InputEvent> {
+    if buttons.is_empty() {
+        return Vec::new();
+    }
+    let buttons: Vec<_> = buttons.iter().copied().map(mouse_button_code).collect();
+    held_key_events(&buttons, phase)
 }
 
 pub(super) fn post_scroll(delta: ScrollDelta) {
@@ -1141,14 +1158,14 @@ fn try_mpris_command(command: &str) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use evdev::{KeyCode, RelativeAxisCode};
-    use openlogi_core::binding::{KeyCombo, NativeAction, Shortcut};
+    use openlogi_core::binding::{KeyCombo, MouseButton, NativeAction, Shortcut};
 
     use super::{
         HELPER_PREFIXES, ScrollOutput, action_scroll, capture_region_mods, combo,
         generic_linux_lock_fallback_chord, hid_usage_to_linux, hyprland_helper,
         hyprland_lock_fallback_chord, hyprland_lock_helper, hyprland_session_from_signature,
-        key_ev, key_phase_events, modifiers_to_keycodes, rel_ev, resolve_allowlisted_under,
-        scroll_events, syn,
+        key_ev, key_phase_events, modifiers_to_keycodes, mouse_button_code, mouse_button_events,
+        rel_ev, resolve_allowlisted_under, scroll_events, syn,
     };
     use crate::inject::KeyPhase;
 
@@ -1173,6 +1190,27 @@ mod tests {
                 syn(),
             ]
         );
+    }
+
+    #[test]
+    fn held_mouse_buttons_map_to_one_selected_syn_report_edge() {
+        for (button, code) in [
+            (MouseButton::Left, KeyCode::BTN_LEFT),
+            (MouseButton::Right, KeyCode::BTN_RIGHT),
+            (MouseButton::Middle, KeyCode::BTN_MIDDLE),
+            (MouseButton::Back, KeyCode::BTN_SIDE),
+            (MouseButton::Forward, KeyCode::BTN_EXTRA),
+        ] {
+            assert_eq!(mouse_button_code(button), code);
+            assert_eq!(
+                mouse_button_events(&[button], KeyPhase::Down),
+                vec![key_ev(code, 1), syn()]
+            );
+            assert_eq!(
+                mouse_button_events(&[button], KeyPhase::Up),
+                vec![key_ev(code, 0), syn()]
+            );
+        }
     }
 
     /// libinput reads only the hi-res axes of a device that has them, so a
