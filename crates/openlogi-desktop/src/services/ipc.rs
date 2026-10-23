@@ -114,7 +114,8 @@ pub enum GuiUpdate {
         key: DeviceKey,
         route: DeviceRoute,
         request: openlogi_core::hid::FirmwareRequest,
-        result: Result<(), crate::state::FirmwareStartFailure>,
+        /// The admitted job's id, or why no job was admitted.
+        result: Result<u64, crate::state::FirmwareStartFailure>,
     },
     /// The agent's state, as of a generation this client had not seen.
     Snapshot(Box<AgentSnapshot>),

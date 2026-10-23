@@ -69,7 +69,9 @@ agent stores it in the job it starts. The GUI binds a job to a device only
 through that request, never by route: another client's job, or a different
 physical device on the same route, stays unbound. An admission whose reply was
 lost in transit may still have started a job, so it survives reconnects to the
-same agent and binds when its job appears. A request that was never sent, or
+same agent and binds when its job appears. An admitted request's reply names
+its job id; if a later job replaces that job before the GUI sees it, the wait
+ends instead of holding the firmware actions. A request that was never sent, or
 that the agent refused, cannot start a job; it is dropped on reconnect and can
 never bind one. Snapshots do not carry physical identity, so a cold GUI or a
 new agent run leaves historical jobs unbound. An unbound active job still

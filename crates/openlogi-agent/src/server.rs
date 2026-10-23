@@ -366,7 +366,7 @@ impl Agent for AgentServer {
         _: Context,
         route: DeviceRoute,
         request: openlogi_core::hid::FirmwareRequest,
-    ) -> Result<(), openlogi_core::hid::FirmwareUpdateRefusal> {
+    ) -> Result<u64, openlogi_core::hid::FirmwareUpdateRefusal> {
         self.firmware.start(route, request).await
     }
 

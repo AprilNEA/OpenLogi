@@ -1103,7 +1103,7 @@ async fn firmware_job_survives_the_request_and_finishes_in_the_snapshot() {
         FirmwareOffer::UpToDate
     );
     let previous_id = server.current().await.snapshot.firmware_update.unwrap().id;
-    server
+    let admitted = server
         .clone()
         .start_firmware_update(
             tarpc::context::current(),
@@ -1112,7 +1112,12 @@ async fn firmware_job_survives_the_request_and_finishes_in_the_snapshot() {
         )
         .await
         .unwrap();
-    assert!(server.current().await.snapshot.firmware_update.unwrap().id > previous_id);
+    assert!(admitted > previous_id);
+    assert_eq!(
+        server.current().await.snapshot.firmware_update.unwrap().id,
+        admitted,
+        "the reply names the job the snapshot publishes"
+    );
     assert_eq!(
         server
             .clone()

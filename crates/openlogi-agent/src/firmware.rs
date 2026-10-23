@@ -61,7 +61,7 @@ impl FirmwareManager {
         self: &Arc<Self>,
         route: DeviceRoute,
         request: FirmwareRequest,
-    ) -> Result<(), FirmwareUpdateRefusal> {
+    ) -> Result<u64, FirmwareUpdateRefusal> {
         let admission = admit(&self.admission)?;
         if *self.stopping.borrow() {
             return Err(FirmwareUpdateRefusal::Stopping);
@@ -90,7 +90,7 @@ impl FirmwareManager {
         tokio::spawn(async move {
             manager.run(job, route, target, admission).await;
         });
-        Ok(())
+        Ok(job.id)
     }
 
     async fn run(

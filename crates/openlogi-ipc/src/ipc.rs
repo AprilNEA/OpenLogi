@@ -958,12 +958,13 @@ pub trait Agent {
     ) -> Result<SavedConfigVerdict, ConfigReloadError>;
     /// Read the running application firmware and the newest supported official release.
     async fn firmware_status(route: DeviceRoute) -> Result<FirmwareStatus, WriteError>;
-    /// Admit an update to the newest supported official release. Progress survives
-    /// client disconnects in [`AgentSnapshot::firmware_update`], whose
-    /// `request` names the admitted request so the requester can recognize
-    /// its job even if this reply is lost.
+    /// Admit an update to the newest supported official release, answering
+    /// with the admitted job's id. Progress survives client disconnects in
+    /// [`AgentSnapshot::firmware_update`], whose `request` names the admitted
+    /// request so the requester can recognize its job even if this reply is
+    /// lost, and whose `id` tells it when a later job has replaced its own.
     async fn start_firmware_update(
         route: DeviceRoute,
         request: FirmwareRequest,
-    ) -> Result<(), FirmwareUpdateRefusal>;
+    ) -> Result<u64, FirmwareUpdateRefusal>;
 }

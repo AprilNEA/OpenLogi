@@ -210,7 +210,7 @@ impl Agent for TestAgent {
         _: TarpcContext,
         _route: DeviceRoute,
         _request: openlogi_core::hid::FirmwareRequest,
-    ) -> Result<(), openlogi_core::hid::FirmwareUpdateRefusal> {
+    ) -> Result<u64, openlogi_core::hid::FirmwareUpdateRefusal> {
         unreachable!("profile capture must never update firmware")
     }
 
