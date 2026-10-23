@@ -299,6 +299,7 @@ pub(crate) fn spawn_state_watchers(
     let inventory = watchers::inventory::spawn_with_hardware(
         shared.hardware(),
         shared.channel_registry.clone(),
+        shared.receiver_access.clone(),
     );
     shared.publish_inventory_refresh(inventory.refresh.clone());
     let (light_events, lights) = tokio::sync::mpsc::unbounded_channel();

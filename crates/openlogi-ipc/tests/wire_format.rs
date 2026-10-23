@@ -1082,6 +1082,7 @@ fn easy_switch_hosts_and_errors() {
         },
         "19044465736b01034f6c64",
     );
+    assert_wire(&WriteError::FirmwareUpdateInProgress, "1f");
 }
 
 #[test]

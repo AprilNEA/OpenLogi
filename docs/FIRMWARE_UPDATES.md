@@ -122,8 +122,10 @@ states; they do not exercise hardware or make network requests.
    reverse-engineered for this layout, not a general Logitech flash map.
 4. **Acquire exclusive access and preflight again.** The agent's firmware I/O
    operation pauses its capture activity and holds the receiver's exclusive
-   lease and transport turn. Resolve the authoritative channel after waiting
-   for ownership; do not open a competing connection. Re-read the device and
+   lease and transport turn. It also waits for an in-flight inventory pass
+   and holds off new passes, so inventory never polls the device or retires
+   its channel during the transfer. Resolve the authoritative channel after
+   waiting for ownership; do not open a competing connection. Re-read the device and
    require the admitted route and unit ID before any DFU start. A replacement
    device on the same route is refused. Require exactly two application banks
    with one active, and choose the other.
@@ -155,6 +157,12 @@ states; they do not exercise hardware or make network requests.
    application PID, active target bank and exact target version. Publish success
    only after those checks pass. A timeout means activation was not confirmed;
    it does not establish that the old firmware is still running.
+
+Other device reads and writes are refused with
+`WriteError::FirmwareUpdateInProgress` while a firmware update waits for or
+holds the lease, instead of queueing behind a transfer that outlasts every
+requester's deadline. They resume when the update releases the lease.
+Pairing and host transitions keep their short exclusive waits.
 
 Native write futures must finish while the I/O lease remains held. Shutdown
 signals a cooperative stop between commands and drains ownership before exit.

@@ -339,7 +339,7 @@ impl DeviceOp {
             return Err(WriteError::DeviceNotFound);
         }
         let turn = self.access.transport_turns.turn_for(&self.route);
-        let _lease = self.access.receiver_access.acquire_for_io().await;
+        let _lease = self.access.receiver_access.acquire_for_io().await?;
         after_transport_turn(&turn, async {
             let shared = self.resolve()?;
             timed(op, f(shared)).await
@@ -404,7 +404,7 @@ impl DeviceOp {
             return Err(WriteError::DeviceNotFound);
         }
         let turn = self.access.transport_turns.turn_for(&self.route);
-        let _lease = self.access.receiver_access.acquire_for_io().await;
+        let _lease = self.access.receiver_access.acquire_for_io().await?;
         within_turn(
             ticket,
             &turn,
@@ -440,7 +440,7 @@ impl DeviceOp {
         let turn = self.access.transport_turns.turn_for(&self.route);
         ticket
             .in_order(|| async {
-                let _lease = self.access.receiver_access.acquire_for_io().await;
+                let _lease = self.access.receiver_access.acquire_for_io().await?;
                 after_transport_turn(&turn, async {
                     let shared = self.resolve()?;
                     timed(op, write(shared)).await
@@ -483,7 +483,7 @@ impl DeviceOp {
                 .await
                 .map_err(|_| WriteError::RequestTimedOut {
                     operation: HidppOperation::Lighting,
-                })?;
+                })??;
             if !device_io.allows_io() {
                 return Err(WriteError::DeviceNotFound);
             }
@@ -525,7 +525,7 @@ impl DeviceOp {
                 .await
                 .map_err(|_| WriteError::RequestTimedOut {
                     operation: HidppOperation::Lighting,
-                })?;
+                })??;
             if !device_io.allows_io() {
                 return Err(WriteError::DeviceNotFound);
             }
@@ -1051,7 +1051,9 @@ where
     Fut: Future,
 {
     let leased = || async move {
-        let _lease = op.access.receiver_access.acquire_for_io().await;
+        let Ok(_lease) = op.access.receiver_access.acquire_for_io().await else {
+            return None;
+        };
         if !op.access.device_io.allows_io() {
             return None;
         }
@@ -1240,7 +1242,13 @@ pub(crate) fn reapply_mouse_volatile_in_background(
             return;
         };
         rt.block_on(async move {
-            let _lease = access.receiver_access.acquire_for_io().await;
+            let Ok(_lease) = access.receiver_access.acquire_for_io().await else {
+                debug!(
+                    index,
+                    "firmware update in progress — volatile reapply skipped"
+                );
+                return;
+            };
             if !access.device_io.allows_io() {
                 debug!(
                     index,
@@ -2372,7 +2380,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn firmware_waits_for_capture_and_blocks_ordinary_writes_until_cleanup() {
+    async fn firmware_waits_for_capture_and_refuses_ordinary_writes_until_cleanup() {
         let published = publish_direct_mouse().await;
         let receiver_access = ReceiverAccess::default();
         let access = DeviceAccess {
@@ -2404,24 +2412,29 @@ mod tests {
         assert!(receiver_access.try_acquire_for_session().is_none());
         drop(capture);
         started_rx.await.unwrap();
-        let (write_tx, mut write_rx) = tokio::sync::oneshot::channel();
-        let write = tokio::spawn(access.op(&published.route).run(
-            HidppOperation::WriteDpi,
-            |_channel| async move {
-                write_tx.send(()).unwrap();
-                Ok(())
-            },
-        ));
-        tokio::task::yield_now().await;
-        assert!(
-            write_rx.try_recv().is_err(),
-            "firmware owns the receiver until cleanup"
-        );
+        // A write would wait minutes behind the transfer, longer than any
+        // requester's deadline: it is refused at once and never runs.
+        let refused = tokio::time::timeout(
+            Duration::from_millis(100),
+            access
+                .op(&published.route)
+                .run(HidppOperation::WriteDpi, |_channel| async move {
+                    panic!("no ordinary write runs during a firmware transfer");
+                    #[expect(unreachable_code, reason = "names the future's output type")]
+                    Ok::<(), WriteError>(())
+                }),
+        )
+        .await
+        .expect("refused immediately, not after the transfer");
+        assert_eq!(refused, Err(WriteError::FirmwareUpdateInProgress));
         finish_tx.send(()).unwrap();
         firmware.await.unwrap().unwrap();
-        write_rx.await.unwrap();
-        write.await.unwrap().unwrap();
         assert!(!receiver_access.exclusive_requested());
+        access
+            .op(&published.route)
+            .run(HidppOperation::WriteDpi, |_channel| async move { Ok(()) })
+            .await
+            .expect("writes resume after cleanup");
     }
 
     /// The timeout every [`DeviceOp::run`] call relies on: a write that never

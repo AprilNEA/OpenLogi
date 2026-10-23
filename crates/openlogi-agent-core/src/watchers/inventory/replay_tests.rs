@@ -72,6 +72,7 @@ async fn failed_confirmation_and_repairs_keep_delayed_work_until_recovery() {
         schedule: Schedule::new(start),
         wake_detector: WakeDetector::new(SystemTime::now(), start),
         device_io,
+        receiver_access: crate::receiver_access::ReceiverAccess::default(),
         refresh_open: true,
         rescans_open: true,
     };
@@ -131,6 +132,44 @@ const CHANNEL: &str = "agent-direct-mouse";
 const PRODUCT_ID: u16 = 0xb35b;
 
 #[tokio::test]
+async fn a_firmware_update_holds_off_inventory_passes_until_it_ends() {
+    let node_id = NodeId::from("agent-direct-node".to_string());
+    let backend = Arc::new(
+        ReplayBackend::new(
+            direct_topology(node_id),
+            vec![direct_inventory_and_dpi_cassette()],
+        )
+        .expect("valid agent replay fixture"),
+    );
+    let (_device_io_signal, device_io) = device_io_channel();
+    let hardware = HardwareContext::injected(backend, device_io);
+    let observable = Arc::new(ObservableState::new("test".to_string()));
+    let orchestrator = Orchestrator::with_hardware(Config::default(), observable, hardware);
+    let shared = orchestrator.shared();
+    let firmware = shared
+        .receiver_access
+        .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::FirmwareUpdate)
+        .await;
+    let mut watcher = spawn_with_hardware(
+        shared.hardware(),
+        shared.channel_registry.clone(),
+        shared.receiver_access.clone(),
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), watcher.events.recv())
+            .await
+            .is_err(),
+        "no inventory pass talks to the devices during the transfer"
+    );
+    drop(firmware);
+    let event = tokio::time::timeout(Duration::from_secs(2), watcher.events.recv())
+        .await
+        .expect("the held-off pass runs once the update ends")
+        .expect("inventory watcher must publish its snapshot");
+    assert!(matches!(event, InventoryEvent::Snapshot { .. }));
+}
+
+#[tokio::test]
 async fn replay_inventory_and_authoritative_read_share_one_injected_backend() {
     let node_id = NodeId::from("agent-direct-node".to_string());
     let route = DeviceRoute::Direct {
@@ -149,7 +188,11 @@ async fn replay_inventory_and_authoritative_read_share_one_injected_backend() {
     let observable = Arc::new(ObservableState::new("test".to_string()));
     let mut orchestrator = Orchestrator::with_hardware(Config::default(), observable, hardware);
     let shared = orchestrator.shared();
-    let mut watcher = spawn_with_hardware(shared.hardware(), shared.channel_registry.clone());
+    let mut watcher = spawn_with_hardware(
+        shared.hardware(),
+        shared.channel_registry.clone(),
+        shared.receiver_access.clone(),
+    );
 
     let event = tokio::time::timeout(Duration::from_secs(2), watcher.events.recv())
         .await
@@ -439,6 +482,7 @@ async fn a_bluetooth_mouse_that_wakes_as_a_new_node_is_published_again() {
     let mut watcher = spawn_with_hardware(
         HardwareContext::injected(mouse.backend.clone(), device_io),
         registry.clone(),
+        crate::receiver_access::ReceiverAccess::default(),
     );
     let awake = published(&mut watcher, has_devices).await;
     // A capture session still holds the channel when the link drops; the
@@ -478,6 +522,7 @@ async fn a_mouse_that_wakes_while_device_io_is_paused_is_published_on_resume() {
     let mut watcher = spawn_with_hardware(
         HardwareContext::injected(mouse.backend.clone(), device_io),
         registry.clone(),
+        crate::receiver_access::ReceiverAccess::default(),
     );
     let awake = published(&mut watcher, has_devices).await;
     mouse.sleep();
@@ -553,6 +598,7 @@ async fn reopening_a_retired_channel_requests_device_wake_before_its_snapshot() 
         schedule: Schedule::new(start),
         wake_detector: WakeDetector::new(SystemTime::now(), start),
         device_io,
+        receiver_access: crate::receiver_access::ReceiverAccess::default(),
         refresh_open: true,
         rescans_open: true,
     };
