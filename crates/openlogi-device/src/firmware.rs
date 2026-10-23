@@ -382,12 +382,29 @@ impl PreparedFirmwareUpdate {
         let mut recoveries = 0;
         let mut waits = 0;
         check_stop(started, &mut should_stop)?;
-        let mut report = self
+        let (mut report, mut recovering) = match self
             .feature
             .start_dfu(self.image.entity, self.image.magic)
             .await
-            .map_err(update_error)?;
-        let mut recovering = false;
+        {
+            Ok(report) => (report, false),
+            Err(Hidpp20Error::Channel(_)) => {
+                // A start may have reached the device despite a lost reply.
+                // Keep this admission and query; never blindly start again.
+                recoveries += 1;
+                check_stop(started, &mut should_stop)?;
+                while events.try_recv().is_ok() {}
+                let report = self
+                    .feature
+                    .get_dfu_status(self.image.entity)
+                    .await
+                    .map_err(update_error)?;
+                // Transfer's initial transition accepts only this entity at
+                // block zero. NotStarted, waits and advanced states fail closed.
+                (report, true)
+            }
+            Err(error) => return Err(update_error(error)),
+        };
         progress(FirmwareUpdatePhase::Transferring { percent: 0 });
         loop {
             check_stop(started, &mut should_stop)?;
