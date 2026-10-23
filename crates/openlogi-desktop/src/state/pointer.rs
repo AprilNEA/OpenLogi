@@ -42,6 +42,7 @@ impl AppState {
         client: SwrClient,
         runtime: std::sync::Arc<dyn Runtime>,
     ) {
-        self.pointer.reads.connect(client, runtime);
+        self.pointer.reads.connect(client.clone(), runtime.clone());
+        self.disable_keys_reads.connect(client, runtime);
     }
 }

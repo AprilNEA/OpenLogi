@@ -5590,6 +5590,7 @@ dependencies = [
  "axwatch",
  "futures-lite",
  "openlogi-core",
+ "openlogi-device",
  "openlogi-fixture",
  "openlogi-hid",
  "openlogi-hook",

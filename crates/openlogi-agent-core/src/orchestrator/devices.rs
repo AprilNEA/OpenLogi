@@ -685,7 +685,7 @@ pub(super) fn any_device_needs_capture_rearm(
 /// wake can enumerate a receiver whose mouse link is still re-establishing —
 /// so the first write (and a single confirm) can both time out against a
 /// still-booting device. Four confirmations are requested at two-second
-/// intervals; any intervening authoritative reconciliation satisfies one.
+/// intervals; only a delayed confirmation consumes an attempt.
 pub(super) const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
 /// The shorter confirmation budget for a link re-establishment (a device nap
@@ -708,6 +708,7 @@ pub(super) fn plan_reapply(
     next: &[AgentDevice],
     followup: &HashMap<String, u8>,
     forced: Option<u8>,
+    confirm_followup: bool,
 ) -> (Vec<usize>, HashMap<String, u8>) {
     let mut targets = reapply_targets(prev, next, forced.is_some());
     let mut next_followup: HashMap<String, u8> = targets
@@ -725,9 +726,9 @@ pub(super) fn plan_reapply(
             // A new trigger can land mid-run (a reconnect while the boot
             // confirmations are still draining) — keep the larger of the
             // fresh budget and what this pass would have drained to.
-            let carried = followup
-                .get(&next[idx].config_key)
-                .map_or(0, |remaining| remaining.saturating_sub(1));
+            let carried = followup.get(&next[idx].config_key).map_or(0, |remaining| {
+                remaining.saturating_sub(u8::from(confirm_followup))
+            });
             let budget = budget.max(carried);
             (budget > 0).then(|| (next[idx].config_key.clone(), budget))
         })
@@ -738,9 +739,13 @@ pub(super) fn plan_reapply(
             && !targets.contains(&idx)
             && let Some(&remaining) = followup.get(&dev.config_key)
         {
-            targets.push(idx);
-            if remaining > 1 {
-                next_followup.insert(dev.config_key.clone(), remaining - 1);
+            if confirm_followup {
+                targets.push(idx);
+                if remaining > 1 {
+                    next_followup.insert(dev.config_key.clone(), remaining - 1);
+                }
+            } else {
+                next_followup.insert(dev.config_key.clone(), remaining);
             }
         }
     }

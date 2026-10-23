@@ -18,9 +18,9 @@ use std::future::Future;
 
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
-    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus,
-    WriteError,
+    BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
+    EasySwitchHosts, FnLockState, LightCommand, PointerSpeed, ReceiverSelector, ReportRate,
+    ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
@@ -30,7 +30,9 @@ use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use super::{GuiUpdate, UnpairFailure, UnpairIntent};
+use super::{
+    ConfigReloadContext, DisableKeysRequestContext, GuiUpdate, UnpairFailure, UnpairIntent,
+};
 use crate::state::DeviceKey;
 
 /// The GPUI-bound update stream a request may deliver through.
@@ -414,6 +416,50 @@ pub struct ReadSmartShift {
     pub reply: oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
 }
 
+/// Read a device's Disable Keys state; the answer goes back over `reply`.
+pub struct ReadDisableKeys {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<DisableKeysState, WriteError>>,
+}
+
+impl Request for ReadDisableKeys {
+    type Answer = Result<DisableKeysState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_disable_keys(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Guardedly replace a device's Disable Keys mask and report the confirmed
+/// device state to the transaction that requested it.
+pub struct SetDisableKeys {
+    pub context: DisableKeysRequestContext,
+    pub desired: DisableKeysMask,
+}
+
+impl Request for SetDisableKeys {
+    type Answer = Result<DisableKeysState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_disable_keys(context::current(), self.context.route.clone(), self.desired)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::DisableKeysWriteResult {
+            context: self.context,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
 impl Request for ReadSmartShift {
     type Answer = Result<SmartShiftStatus, WriteError>;
 
@@ -535,7 +581,7 @@ impl Request for ReadFnLock {
 /// The loop holds this one until a connection exists and never answers it
 /// locally (module doc), so `deliver` only ever reports the agent's own
 /// verdict: a reload that did not happen is not one the agent refused.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReloadConfig {
     /// The controls of lights the user set in the save without a write to
     /// the light. A change made on the light to one of them gives way.
@@ -543,6 +589,30 @@ pub struct ReloadConfig {
     /// The revision of `config.toml` that the save wrote. The agent takes a
     /// file at another revision as edited after the save.
     pub revision: ConfigRevision,
+    pub(crate) contexts: Vec<ConfigReloadContext>,
+}
+
+impl Default for ReloadConfig {
+    fn default() -> Self {
+        Self {
+            chosen: Vec::new(),
+            revision: ConfigRevision::default(),
+            contexts: vec![ConfigReloadContext::General],
+        }
+    }
+}
+
+impl ReloadConfig {
+    pub(crate) fn disable_keys(
+        context: DisableKeysRequestContext,
+        revision: ConfigRevision,
+    ) -> Self {
+        Self {
+            contexts: vec![ConfigReloadContext::DisableKeys(context)],
+            revision,
+            ..Default::default()
+        }
+    }
 }
 
 impl Request for ReloadConfig {
@@ -557,7 +627,7 @@ impl Request for ReloadConfig {
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
-        report_reload(outcome, updates);
+        report_reload(self.contexts, outcome, updates);
     }
 }
 
@@ -575,18 +645,24 @@ impl Request for LoadConfig {
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
-        report_reload(outcome, updates);
+        report_reload([ConfigReloadContext::General], outcome, updates);
     }
 }
 
 /// Report the agent's verdict on a held reload. A reload that did not happen
 /// is not one the agent refused, so it reports nothing.
 fn report_reload(
+    contexts: impl IntoIterator<Item = ConfigReloadContext>,
     outcome: Result<Result<(), ConfigReloadError>, Unavailable>,
     updates: &UpdateSender,
 ) {
     if let Ok(verdict) = outcome {
-        let _ = updates.send(GuiUpdate::ConfigReloadResult(verdict));
+        for context in contexts {
+            let _ = updates.send(GuiUpdate::ConfigReloadResult {
+                context,
+                result: verdict.clone(),
+            });
+        }
     }
 }
 
@@ -789,6 +865,8 @@ commands! {
     ReadBacklight,
     ReadEasySwitchHosts,
     LoadConfig,
+    ReadDisableKeys,
+    SetDisableKeys,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,

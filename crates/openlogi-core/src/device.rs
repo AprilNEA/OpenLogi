@@ -196,6 +196,10 @@ pub struct Capabilities {
     /// there too. Appended: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub pointer_scaling: bool,
+    /// Fixed lock/system-key disabling through HID++ `0x4521 DisableKeys`.
+    /// This is measured only from feature-table presence.
+    #[serde(default)]
+    pub disable_keys: bool,
 }
 
 impl Capabilities {
@@ -232,6 +236,7 @@ impl Capabilities {
             // cannot say which controls report raw wheel.
             virtual_thumbwheel: false,
             pointer_scaling: !pointer && ids.contains(&0x2205),
+            disable_keys: ids.contains(&0x4521),
         }
     }
 
@@ -747,6 +752,7 @@ mod tests {
                     easy_switch: false,
                     virtual_thumbwheel: false,
                     pointer_scaling: false,
+                    disable_keys: false,
                 }),
                 settings_revision: 0,
             }],
@@ -866,6 +872,7 @@ mod tests {
                 easy_switch: false,
                 virtual_thumbwheel: false,
                 pointer_scaling: false,
+                disable_keys: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -890,6 +897,7 @@ mod tests {
                 easy_switch: false,
                 virtual_thumbwheel: false,
                 pointer_scaling: false,
+                disable_keys: false,
             }
         );
         // No driving features → nothing offered.
@@ -935,6 +943,13 @@ mod tests {
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a2]).fn_lock);
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a0]).fn_lock);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).fn_lock);
+    }
+
+    #[test]
+    fn only_measured_disable_keys_feature_enables_the_capability() {
+        assert!(Capabilities::from_feature_ids(&[0x4521]).disable_keys);
+        assert!(!Capabilities::from_feature_ids(&[0x4522]).disable_keys);
+        assert!(!Capabilities::presumed_from_kind(DeviceKind::Keyboard).disable_keys);
     }
 
     #[test]

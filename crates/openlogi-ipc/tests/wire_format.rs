@@ -42,11 +42,11 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
-    DeviceRoute, Dpi, DpiCapabilities, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
-    HidppFeatureErrorKind, HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand,
-    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget,
-    ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
-    SmartShiftThreshold, TunableTorque, WriteError,
+    DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities, DpiInfo, EasySwitchHosts,
+    EasySwitchSlot, FnLockState, HidppFeatureErrorKind, HidppOperation, HostConnection, HostOsInfo,
+    HostOsKind, LightCommand, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
+    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -110,7 +110,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 39);
+    assert_eq!(PROTOCOL_VERSION, 40);
 }
 
 #[test]
@@ -672,13 +672,14 @@ fn device_inventory() {
                 easy_switch: true,
                 virtual_thumbwheel: true,
                 pointer_scaling: true,
+                disable_keys: false,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010007",
     );
 }
 
@@ -719,6 +720,39 @@ fn pairing_updates() {
 
 #[test]
 fn device_settings_payloads() {
+    let disable_keys = DisableKeysState {
+        supported: DisableKeysMask::from_bits_retain(0xa1),
+        disabled: DisableKeysMask::from_bits_retain(0xe0),
+    };
+    assert_wire(&DisableKeysMask::from_bits_retain(0xa1), "a1");
+    assert_wire(&disable_keys, "a1e0");
+    assert_wire(&Ok::<DisableKeysState, WriteError>(disable_keys), "00a1e0");
+    assert_wire(&HidppOperation::ReadDisableKeys, "18");
+    assert_wire(&HidppOperation::WriteDisableKeys, "19");
+    assert_wire(
+        &WriteError::UnsupportedMask {
+            operation: HidppOperation::WriteDisableKeys,
+            feature_hex: 0x4521,
+            requested: 0x20,
+            supported: 0x1f,
+        },
+        "1a19fb2145201f",
+    );
+    assert_wire(
+        &WriteError::WriteNotApplied {
+            operation: HidppOperation::WriteDisableKeys,
+            feature_hex: 0x4521,
+            expected: 0xa1,
+            actual: 0x01,
+        },
+        "1b19fb2145a101",
+    );
+    assert_wire(
+        &WriteError::WriteSuperseded {
+            operation: HidppOperation::WriteDisableKeys,
+        },
+        "1c19",
+    );
     let dpi: Result<DpiInfo, WriteError> = Ok(DpiInfo {
         current: Dpi::new(1600),
         capabilities: DpiCapabilities::new(vec![800, 1600, 3200]).expect("non-empty list"),
@@ -1073,4 +1107,25 @@ fn pointer_speed_and_precision_mode() {
     );
     // Appended at the end of `Action`, so every earlier index is unchanged.
     assert_wire(&Action::TogglePrecisionMode, "36");
+}
+
+#[test]
+fn disable_keys_requests_are_appended() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "F00DCAFE".into(),
+        slot: 1,
+    };
+    assert_wire(
+        &AgentRequest::ReadDisableKeys {
+            route: route.clone(),
+        },
+        "2a0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetDisableKeys {
+            route,
+            desired: DisableKeysMask::CAPS_LOCK,
+        },
+        "2b000846303044434146450101",
+    );
 }

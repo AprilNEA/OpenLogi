@@ -1,0 +1,21 @@
+# Owner: SharedHandles setting intents and hardware::WriteOrder. Receiver
+# leases alone do not serialize writes or retire superseded policy attempts.
+id: agent-keyboard-write-owner
+language: rust
+severity: error
+message: Route keyboard setting writes through SharedHandles so manual, reload and reconnect paths share intent ordering.
+note: |
+  PR #993 allowed stale reconnect writes to replace a successful manual choice.
+  Only the ordered foreground and background writers may call the device setters.
+files:
+  - crates/openlogi-agent-core/**/*.rs
+  - crates/openlogi-agent/**/*.rs
+ignores:
+  - crates/openlogi-agent-core/src/hardware.rs
+  - crates/openlogi-agent-core/src/orchestrator.rs
+rule:
+  all:
+    - kind: call_expression
+    - has:
+        field: function
+        regex: '(^|::)set_(disable_keys|fn_lock)(_on)?$'

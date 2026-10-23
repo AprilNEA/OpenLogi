@@ -41,10 +41,9 @@
 use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, LightCommand, PointerSpeed,
-    ReportRateInfo, WriteError,
+    BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState, LightCommand,
+    PointerSpeed, ReportRateInfo, WriteError,
 };
-use openlogi_ipc::SavedConfig;
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
 use tarpc::client::RpcError;
@@ -66,12 +65,30 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts,
-    ReadFnLock, ReadPointerSpeed, ReadReportRate, ReadSmartShift, ReloadConfig,
-    RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight,
-    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing,
-    UnpairDevice,
+    CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDisableKeys, ReadDpi,
+    ReadEasySwitchHosts, ReadFnLock, ReadPointerSpeed, ReadReportRate, ReadSmartShift,
+    ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight, SetDisableKeys,
+    SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate,
+    SetSmartShift, StartPairing, UnpairDevice,
 };
+
+/// Complete identity of one Disable Keys write/reload transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DisableKeysRequestContext {
+    pub(crate) key: DeviceKey,
+    pub(crate) route: DeviceRoute,
+    pub(crate) route_generation: u64,
+    pub(crate) request_id: u64,
+}
+
+/// Correlation scope for a config reload result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ConfigReloadContext {
+    /// Existing application-wide reload behavior.
+    General,
+    /// Reload following one confirmed Disable Keys transaction.
+    DisableKeys(DisableKeysRequestContext),
+}
 
 /// How long to wait before retrying a connect that failed. This is a retry
 /// cadence, not a poll: once connected, nothing here runs on a timer. Short
@@ -103,8 +120,16 @@ pub enum GuiUpdate {
         /// Agent acceptance or typed device failure.
         result: Result<(), WriteError>,
     },
+    /// Result of a guarded Disable Keys replacement.
+    DisableKeysWriteResult {
+        context: DisableKeysRequestContext,
+        result: Result<DisableKeysState, WriteError>,
+    },
     /// Whether the agent adopted the config currently on disk.
-    ConfigReloadResult(Result<(), ConfigReloadError>),
+    ConfigReloadResult {
+        context: ConfigReloadContext,
+        result: Result<(), ConfigReloadError>,
+    },
     /// The device's verdict on a DPI write the GUI asked for: taken, or the
     /// typed refusal. Answers [`SetDpi`].
     DpiWritten {
@@ -349,16 +374,28 @@ struct OwedReloads {
     load: bool,
     /// A [`ReloadConfig`] is owed, at the revision of the latest save it
     /// stands for and with the chosen controls of every one of them.
-    save: Option<SavedConfig>,
+    save: Option<ReloadConfig>,
 }
 
 impl OwedReloads {
     /// Owe `reload`, merged into the one already owed: the file is now at
     /// the revision of this save, and its chosen controls join the others.
     fn save(&mut self, reload: ReloadConfig) {
-        let ReloadConfig { chosen, revision } = reload;
-        let owed = self.save.get_or_insert_with(SavedConfig::default);
+        let ReloadConfig {
+            chosen,
+            revision,
+            contexts,
+        } = reload;
+        let owed = self.save.get_or_insert_with(|| ReloadConfig {
+            contexts: Vec::new(),
+            ..Default::default()
+        });
         owed.revision = revision;
+        for context in contexts {
+            if !owed.contexts.contains(&context) {
+                owed.contexts.push(context);
+            }
+        }
         for light in chosen {
             match owed
                 .chosen
@@ -381,10 +418,10 @@ impl OwedReloads {
     /// on a light since. A transport failure drops the link and keeps the
     /// reload for the next one.
     async fn deliver(&mut self, link: &mut Link, update_tx: &mpsc::UnboundedSender<GuiUpdate>) {
-        if let Some(SavedConfig { revision, chosen }) = self.save.clone()
+        if let Some(reload) = self.save.clone()
             && let Some(client) = link.client()
         {
-            match request::run(ReloadConfig { chosen, revision }, Some(client), update_tx).await {
+            match request::run(reload, Some(client), update_tx).await {
                 Ok(()) => self.save = None,
                 Err(LinkLost) => link.lose(Instant::now()),
             }
@@ -432,7 +469,7 @@ mod tests {
     use openlogi_ipc::testing::in_memory_agent;
     use openlogi_ipc::{
         AgentRequest, AgentResponse, AgentStatus, ChosenLight, ForegroundApps, InventoryHealth,
-        Observation, PROTOCOL_VERSION,
+        Observation, PROTOCOL_VERSION, SavedConfig,
     };
     use tokio::sync::oneshot;
 
@@ -557,7 +594,10 @@ mod tests {
     ) -> Result<(), ConfigReloadError> {
         loop {
             match updates.recv().await {
-                Some(GuiUpdate::ConfigReloadResult(verdict)) => return verdict,
+                Some(GuiUpdate::ConfigReloadResult {
+                    context: ConfigReloadContext::General,
+                    result,
+                }) => return result,
                 Some(_) => {}
                 None => panic!("the loop dropped its update channel"),
             }
@@ -674,7 +714,14 @@ mod tests {
         ] {
             let revision = ConfigRevision::of(text);
             commands
-                .send(ReloadConfig { chosen, revision }.into())
+                .send(
+                    ReloadConfig {
+                        chosen,
+                        revision,
+                        ..Default::default()
+                    }
+                    .into(),
+                )
                 .unwrap();
         }
 
@@ -722,15 +769,17 @@ mod tests {
         let save = |text: &str, chosen| ReloadConfig {
             chosen,
             revision: ConfigRevision::of(text),
+            ..Default::default()
         };
         // A save that chose nothing is still a save to deliver.
         let mut owed = OwedReloads::default();
         owed.save(save("first", Vec::new()));
         assert_eq!(
             owed.save,
-            Some(SavedConfig {
+            Some(ReloadConfig {
                 revision: ConfigRevision::of("first"),
                 chosen: Vec::new(),
+                ..Default::default()
             })
         );
         // A control any merged save chose stays chosen, and the file is at
@@ -745,15 +794,74 @@ mod tests {
         ));
         assert_eq!(
             owed.save,
-            Some(SavedConfig {
+            Some(ReloadConfig {
                 revision: ConfigRevision::of("third"),
                 chosen: vec![
                     chosen("glow", true, true, true),
                     chosen("beam", false, false, true),
                 ],
+                ..Default::default()
             })
         );
         assert!(!owed.load);
+    }
+
+    #[test]
+    fn owed_saves_preserve_each_transaction_context_at_the_latest_file_revision() {
+        let context = DisableKeysRequestContext {
+            key: DeviceKey::from("keyboard"),
+            route: some_route(),
+            route_generation: 3,
+            request_id: 7,
+        };
+        let mut owed = OwedReloads::default();
+        owed.save(ReloadConfig::disable_keys(
+            context.clone(),
+            ConfigRevision::of("first"),
+        ));
+        let chosen = ChosenLight {
+            device: "light".into(),
+            power: true,
+            brightness: false,
+            temperature: false,
+        };
+        owed.save(ReloadConfig {
+            chosen: vec![chosen.clone()],
+            revision: ConfigRevision::of("second"),
+            ..Default::default()
+        });
+        owed.save(ReloadConfig::disable_keys(
+            context.clone(),
+            ConfigRevision::of("third"),
+        ));
+        let reload = owed.save.expect("one coalesced reload");
+        assert_eq!(reload.revision, ConfigRevision::of("third"));
+        assert_eq!(reload.chosen, [chosen]);
+        assert_eq!(
+            reload.contexts,
+            [
+                ConfigReloadContext::DisableKeys(context.clone()),
+                ConfigReloadContext::General
+            ]
+        );
+        let (updates, mut received) = mpsc::unbounded_channel();
+        request::Request::deliver(reload, Ok(Ok(())), &updates);
+        assert!(
+            matches!(received.try_recv(), Ok(GuiUpdate::ConfigReloadResult {
+            context: ConfigReloadContext::DisableKeys(actual), result: Ok(())
+        }) if actual == context)
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Ok(GuiUpdate::ConfigReloadResult {
+                context: ConfigReloadContext::General,
+                result: Ok(())
+            })
+        ));
+        assert!(
+            received.try_recv().is_err(),
+            "a duplicate context is answered only once"
+        );
     }
 
     #[tokio::test(start_paused = true)]

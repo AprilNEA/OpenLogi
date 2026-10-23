@@ -279,7 +279,7 @@ fn a_setting_changed_on_the_device_is_not_replayed_over() {
     inventory.paired[0].settings_revision += 1;
     let after = build_devices(&Config::default(), &[inventory], &[]);
 
-    let (targets, followup) = plan_reapply(&before, &after, &HashMap::new(), None);
+    let (targets, followup) = plan_reapply(&before, &after, &HashMap::new(), None, false);
     assert!(targets.is_empty());
     assert!(followup.is_empty());
 }

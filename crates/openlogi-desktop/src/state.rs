@@ -32,8 +32,8 @@ pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
-    BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, PointerSpeedLoad, ReportRateLoad,
-    SmartShiftLoad,
+    BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, PointerSpeedLoad,
+    ReportRateLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -56,11 +56,13 @@ use agent::AgentSession;
 use bindings::BindingState;
 use device_store::DeviceStore;
 pub(crate) use devices::camera_model_info;
+pub(crate) use disable_keys::DisableKeysPersistenceStatus;
 use light::LightSession;
 use pointer::PointerState;
 
 use crate::services::assets::AssetResolver;
 use crate::services::device_reads::DeviceReads;
+use crate::services::disable_keys_reads::DisableKeysReads;
 use crate::state::config::ConfigState;
 use crate::state::devices::{build_device_list, pick_initial_device};
 
@@ -74,6 +76,7 @@ mod device_key;
 mod device_session;
 mod device_store;
 mod devices;
+mod disable_keys;
 mod dpi;
 mod easy_switch;
 mod events;
@@ -182,6 +185,10 @@ pub struct AppState {
     action_ring_editing_apps: BTreeMap<String, String>,
     /// DPI/SmartShift reads and the active pointer editor value.
     pointer: PointerState,
+    /// Dedicated generation-fenced Disable Keys read owner.
+    disable_keys_reads: DisableKeysReads,
+    /// Monotonic identity for Disable Keys write/reload transactions.
+    next_disable_keys_request_id: u64,
     /// Standalone-light sequencing and aggregate camera activity.
     lights: LightSession,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
@@ -232,6 +239,7 @@ impl AppState {
             state.load_current_pointer_speed(cx);
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);
+            state.load_current_disable_keys(cx);
         });
     }
 
@@ -288,6 +296,8 @@ impl AppState {
             action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
             lights: LightSession::default(),
+            disable_keys_reads: DisableKeysReads::default(),
+            next_disable_keys_request_id: 0,
             ipc_commands,
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,
@@ -342,7 +352,11 @@ impl AppState {
     ) -> bool {
         if self.persist_config(what) {
             let revision = self.config.revision();
-            self.send_ipc(crate::services::ipc::ReloadConfig { chosen, revision });
+            self.send_ipc(crate::services::ipc::ReloadConfig {
+                chosen,
+                revision,
+                ..Default::default()
+            });
             true
         } else {
             false

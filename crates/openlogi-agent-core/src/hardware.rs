@@ -25,10 +25,10 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, FollowerLink,
-    FollowerRelease, HidppOperation, HostOs, HostSwitchError, LeadCookie, OsLayoutOutcome,
-    PointerSpeed, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel,
-    WriteError,
+    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi,
+    FollowerLink, FollowerRelease, HidppOperation, HostOs, HostSwitchError, LeadCookie,
+    OsLayoutOutcome, PointerSpeed, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus,
+    WeakSharedChannel, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
@@ -352,10 +352,10 @@ impl DeviceOp {
     /// write to a mouse that stopped answering still gets its full budget once
     /// that write gives up. Resolving after the wait keeps [`Self::run`]'s
     /// rule of never queueing on an already-resolved channel.
-    pub(crate) async fn run_in_turn<W, WriteFut, S, SupersededFut, T>(
+    pub(crate) async fn run_in_turn<V, W, WriteFut, S, SupersededFut, T>(
         self,
         op: HidppOperation,
-        ticket: &WriteTicket,
+        ticket: &WriteTicket<V>,
         write: W,
         superseded: S,
     ) -> Result<T, WriteError>
@@ -572,7 +572,7 @@ impl DeviceOp {
         F: FnOnce(DeviceOp) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Result<T, WriteError>, Elapsed>>,
     {
-        self.spawn_leased_write(label, None, f, log);
+        let _ = self.spawn_leased_write(label, None, f, log);
     }
 
     /// [`Self::spawn_timed_write`] for a write that must land after every
@@ -589,7 +589,7 @@ impl DeviceOp {
         F: FnOnce(DeviceOp) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Result<T, WriteError>, Elapsed>>,
     {
-        self.spawn_leased_write(label, Some(ticket), f, log);
+        let _ = self.spawn_leased_write(label, Some(ticket), f, log);
     }
 
     fn spawn_leased_write<F, Fut, T>(
@@ -598,7 +598,8 @@ impl DeviceOp {
         ticket: Option<WriteTicket>,
         f: F,
         log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
-    ) where
+    ) -> Option<std::thread::JoinHandle<()>>
+    where
         F: FnOnce(DeviceOp) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Result<T, WriteError>, Elapsed>>,
     {
@@ -606,10 +607,10 @@ impl DeviceOp {
             Ok(shared) => drop(shared),
             Err(reason) => {
                 debug!(route = %self.route, label, %reason, "background write skipped");
-                return;
+                return None;
             }
         }
-        std::thread::spawn(move || {
+        Some(std::thread::spawn(move || {
             let Some(rt) = one_shot_runtime(label) else {
                 return;
             };
@@ -622,7 +623,7 @@ impl DeviceOp {
                     "host device I/O suspended — background write skipped"
                 );
             }
-        });
+        }))
     }
 }
 
@@ -647,8 +648,8 @@ fn log_outcome<T>(
 /// `write` and `superseded` runs the whole `WRITE_TIMEOUT`. Every ordered
 /// write goes through here: neither wait is part of the deadline, and the
 /// transport turn is held only while that bounded I/O runs.
-async fn within_turn<T, W, WriteFut, S, SupersededFut>(
-    ticket: &WriteTicket,
+async fn within_turn<V, T, W, WriteFut, S, SupersededFut>(
+    ticket: &WriteTicket<V>,
     transport: &TransportTurn,
     write: W,
     superseded: S,
@@ -661,18 +662,9 @@ where
 {
     ticket
         .write_or(
-            || async {
-                after_transport_turn(transport, async {
-                    tokio::time::timeout(WRITE_TIMEOUT, write()).await
-                })
-                .await
-            },
-            || async {
-                after_transport_turn(transport, async {
-                    tokio::time::timeout(WRITE_TIMEOUT, superseded()).await
-                })
-                .await
-            },
+            transport.lock(),
+            || async { tokio::time::timeout(WRITE_TIMEOUT, write()).await },
+            || async { tokio::time::timeout(WRITE_TIMEOUT, superseded()).await },
         )
         .await
 }
@@ -688,6 +680,47 @@ fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
             None
         }
     }
+}
+
+/// Re-apply a saved Disable Keys intent without making its retry newer than
+/// the user's pending or confirmed choice. The returned worker allows tests
+/// to await completion without a timing guess.
+pub(crate) fn write_disabled_keys_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket<Option<DisableKeysMask>>,
+    desired: DisableKeysMask,
+) -> Option<std::thread::JoinHandle<()>> {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_leased_write(
+        "Disable Keys write",
+        None,
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_disable_keys_on(&shared, desired)
+                        .await
+                        .map(Some)
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "Disable Keys write", result, |state| {
+                if let Some(state) = state {
+                    debug!(
+                        index,
+                        disabled = state.disabled.bits(),
+                        "disabled keys written"
+                    );
+                }
+            });
+        },
+    )
 }
 
 /// Spawn an OS thread that toggles SmartShift (free ↔ ratchet) on `op`'s
@@ -1670,7 +1703,12 @@ mod tests {
         );
 
         assert!(
-            pick.write_or(|| async { true }, || async { false }).await,
+            pick.write_or(
+                std::future::ready(()),
+                || async { true },
+                || async { false }
+            )
+            .await,
             "the pick is still the newest report-rate write"
         );
     }
@@ -1729,6 +1767,27 @@ mod tests {
             .expect("the waiting write runs after the earlier one")
             .expect("the waiting write did not panic");
         assert_eq!(ran, Some("written"));
+    }
+
+    #[tokio::test]
+    async fn a_policy_retired_while_waiting_for_transport_never_writes() {
+        let route = unresolvable_route();
+        let policies = WriteOrder::<Option<DisableKeysMask>>::default();
+        policies.sync_policy(&route, Some(DisableKeysMask::default()));
+        let (_, ticket) = policies.policy(&route).expect("configured intent");
+        let transport = TransportTurns::default().turn_for(&route);
+        let held = transport.lock().await;
+        let mut queued = std::pin::pin!(within_turn(
+            &ticket,
+            &transport,
+            || async { panic!("a retired intent must not resolve a channel or write") },
+            || async { "superseded" },
+        ));
+        assert!(futures_lite::future::poll_once(&mut queued).await.is_none());
+        // Opt-out and physical route replacement both retire the old intent.
+        policies.retire(&route);
+        drop(held);
+        assert_eq!(queued.await.expect("no I/O timeout"), "superseded");
     }
 
     /// A reconnect write to a mouse that stopped answering holds the turn

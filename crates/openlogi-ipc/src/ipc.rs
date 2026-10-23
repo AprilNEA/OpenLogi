@@ -19,9 +19,9 @@ use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
+    EasySwitchHosts, FnLockState, LightCommand, PairingError, PasskeyMethod, PointerSpeed,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -134,7 +134,9 @@ pub use succession::Identity;
 /// v39: `AgentStatus::virtual_keyboard` and [`VirtualKeyboardStatus`]
 ///      appended — whether the agent types synthesized keys on its macOS
 ///      virtual HID keyboard.
-pub const PROTOCOL_VERSION: u32 = 39;
+/// v40: Disable Keys capability and read/write methods appended, together with
+///      raw-preserving masks and guarded-write/superseded errors.
+pub const PROTOCOL_VERSION: u32 = 40;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -893,4 +895,11 @@ pub trait Agent {
         route: DeviceRoute,
         speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError>;
+    /// Read raw Disable Keys capabilities and current state for `route`.
+    async fn read_disable_keys(route: DeviceRoute) -> Result<DisableKeysState, WriteError>;
+    /// Replace the desired known disabled-key set for `route`.
+    async fn set_disable_keys(
+        route: DeviceRoute,
+        desired: DisableKeysMask,
+    ) -> Result<DisableKeysState, WriteError>;
 }

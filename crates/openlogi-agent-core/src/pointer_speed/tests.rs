@@ -425,11 +425,19 @@ async fn the_newest_press_supersedes_a_write_still_waiting() {
 
     let older = on
         .ticket
-        .write_or(|| async { "wrote" }, || async { "skipped" })
+        .write_or(
+            std::future::ready(()),
+            || async { "wrote" },
+            || async { "skipped" },
+        )
         .await;
     let newer = off
         .ticket
-        .write_or(|| async { "wrote" }, || async { "skipped" })
+        .write_or(
+            std::future::ready(()),
+            || async { "wrote" },
+            || async { "skipped" },
+        )
         .await;
 
     assert_eq!((older, newer), ("skipped", "wrote"));
@@ -524,7 +532,11 @@ fn a_dpi_mouse_with_no_saved_dpi_gets_no_reconnect_write_outside_precision_mode(
 
 /// Whether `write` still writes when its turn comes.
 fn takes_its_turn(write: &SpeedWrite) -> bool {
-    futures_lite::future::block_on(write.ticket.write_or(|| async { true }, || async { false }))
+    futures_lite::future::block_on(write.ticket.write_or(
+        std::future::ready(()),
+        || async { true },
+        || async { false },
+    ))
 }
 
 #[test]
@@ -728,7 +740,11 @@ fn a_reconnect_after_an_app_write_that_never_landed_darkens_the_led() {
 
 /// Whether the app write still writes when its turn comes.
 fn takes_its_turn_app(write: &AppWrite) -> bool {
-    futures_lite::future::block_on(write.ticket.write_or(|| async { true }, || async { false }))
+    futures_lite::future::block_on(write.ticket.write_or(
+        std::future::ready(()),
+        || async { true },
+        || async { false },
+    ))
 }
 
 #[test]

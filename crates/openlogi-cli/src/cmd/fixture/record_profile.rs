@@ -303,6 +303,13 @@ async fn capture_hidpp_settings(
         agent::call(client.read_backlight(context::current(), source_route.clone()))
     })
     .await?;
+    let disable_keys = gated_read(
+        "Disable Keys",
+        device.online,
+        capabilities.disable_keys,
+        || agent::call(client.read_disable_keys(context::current(), source_route.clone())),
+    )
+    .await?;
 
     let fn_lock = gated_read("fn-lock", device.online, capabilities.fn_lock, || {
         agent::call(client.read_fn_lock(context::current(), source_route.clone()))
@@ -343,6 +350,7 @@ async fn capture_hidpp_settings(
         report_rate,
         easy_switch,
         pointer_speed,
+        disable_keys,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
@@ -422,6 +430,7 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         report_rate: ProfileSetting::Unsupported,
         easy_switch: ProfileSetting::Unsupported,
         pointer_speed: ProfileSetting::Unsupported,
+        disable_keys: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };

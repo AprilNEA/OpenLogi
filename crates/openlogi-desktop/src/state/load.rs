@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use openlogi_core::hid::{
-    BacklightState, DpiInfo, EasySwitchHosts, FnLockState, PointerSpeed, ReportRateInfo,
-    SmartShiftStatus,
+    BacklightState, DisableKeysState, DpiInfo, EasySwitchHosts, FnLockState, PointerSpeed,
+    ReportRateInfo, SmartShiftStatus,
 };
 
 /// State projected from an swr-backed device query: unqueried, in flight,
@@ -59,3 +59,6 @@ pub type BacklightLoad = Load<Arc<BacklightState>>;
 /// stores each slot's host name and OS itself — the computer on the slot
 /// writes them — so the read is the only record.
 pub type EasySwitchLoad = Load<Arc<EasySwitchHosts>>;
+
+/// Per-device Disable Keys capability/current-state load.
+pub type DisableKeysLoad = Load<Arc<DisableKeysState>>;

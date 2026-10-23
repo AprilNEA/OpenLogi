@@ -1,43 +1,49 @@
-//! Per-device ordering for the writes of one setting.
+//! Per-route setting intents, shared by foreground and background writers.
 //!
-//! A keyboard's Fn-lock is written from three places: the GUI toggle's RPC, a
-//! config reload that changed the value, and the reconnect reapply. A mouse's
-//! report rate is written from two: the GUI pick's RPC and the reconnect
-//! reapply. The writers share the receiver lease, which orders nothing, so
-//! the older value could reach the device last — after two quick toggles, or
-//! when a reapply scheduled with the configured rate lands after the user's
-//! newer pick. Each write takes a [`WriteTicket`] when it is requested and
-//! writes only if it is still the newest request once the device's earlier
-//! writes have finished.
+//! A receiver lease is not a write queue. Hold a ticket's turn through readback;
+//! retries reuse their policy ticket instead of becoming a new user intent.
 //!
-//! A keyboard's backlight needs every write, not just the newest: each change
-//! is a read-modify-write of its own field, so a battery-saving click followed
-//! by a level click must both land, in that order, and two of them running at
-//! once could each read the old config and write back over the other.
-//! [`WriteTicket::in_order`] runs every ticket, strictly in request order.
-//!
-//! One [`WriteOrder`] orders one setting: Fn-lock and report-rate writes do
-//! not wait for each other. A setting uses one of the two disciplines.
+//! Independent settings choose one discipline: newest-request wins for Fn-lock
+//! and report rate; strict request order for backlight read-modify-writes and
+//! host renames; confirmed-policy ordering for Disable Keys. The latter keeps
+//! old retries behind manual choices and restores accepted policy when a newer
+//! request fails or is cancelled. All share the same per-route turn owner.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use openlogi_hid::DeviceRoute;
-use tokio::sync::{MutexGuard, Notify};
 
-/// One setting's write queues, one per device route.
+/// Independent instances isolate settings; routes isolate keyboards.
 #[derive(Clone, Default)]
-pub(crate) struct WriteOrder(Arc<Mutex<HashMap<String, Arc<Queue>>>>);
+pub(crate) struct WriteOrder<T = ()>(Arc<Mutex<HashMap<String, Arc<Queue<T>>>>>);
 
 #[derive(Default)]
-struct Queue {
-    latest: AtomicU64,
+struct Queue<T> {
+    state: Mutex<State<T>>,
     turn: tokio::sync::Mutex<()>,
-    /// Which tickets are done, for [`WriteTicket::in_order`].
     finished: Mutex<Finished>,
-    /// Woken whenever a ticket finishes.
-    advanced: Notify,
+    advanced: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct State<T> {
+    next: u64,
+    committed: Option<Intent<T>>,
+    policy: Option<Intent<T>>,
+    pending: BTreeSet<u64>,
+}
+
+#[derive(Clone)]
+struct Intent<T> {
+    number: u64,
+    value: T,
+}
+
+impl<T> Queue<T> {
+    fn state(&self) -> MutexGuard<'_, State<T>> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// Every ticket up to `through` is done, as are the later `early` ones,
@@ -48,7 +54,7 @@ struct Finished {
     early: BTreeSet<u64>,
 }
 
-impl Queue {
+impl<T> Queue<T> {
     fn finish(&self, number: u64) {
         {
             // Two integers and a set of them: a panic mid-update leaves at
@@ -76,42 +82,166 @@ impl Queue {
     }
 }
 
-/// One requested write, numbered in request order. Dropping it — once its
-/// write ran, or when the request gave up before — lets the next one go.
-pub(crate) struct WriteTicket {
-    queue: Arc<Queue>,
+impl<T> State<T> {
+    fn intent(&mut self, value: T) -> Intent<T> {
+        self.next += 1;
+        Intent {
+            number: self.next,
+            value,
+        }
+    }
+
+    fn latest(&self) -> u64 {
+        self.pending
+            .last()
+            .copied()
+            .unwrap_or_default()
+            .max(self.committed.as_ref().map_or(0, |intent| intent.number))
+    }
+}
+
+/// One intent; cloning it creates another attempt, not another intent.
+#[derive(Clone)]
+pub(crate) struct WriteTicket<T = ()> {
+    queue: Arc<Queue<T>>,
     number: u64,
+    // Only request-ordered writes retire a sequence slot; policy retries reuse an intent.
+    _completion: Option<Arc<TicketLifetime<T>>>,
 }
 
-impl WriteOrder {
-    /// Number a new write for `route`. Call it when the write is requested,
-    /// not when it runs: the number is what orders it.
-    pub(crate) fn request(&self, route: &DeviceRoute) -> WriteTicket {
-        let queue = {
-            // The map only holds `Arc`s, so a panic mid-insert leaves nothing
-            // half-written worth refusing to read.
-            let mut queues = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-            Arc::clone(queues.entry(route.to_string()).or_default())
+impl<T: Clone + Default + Eq> WriteOrder<T> {
+    fn queue(&self, route: &DeviceRoute) -> Arc<Queue<T>> {
+        Arc::clone(
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(route.to_string())
+                .or_default(),
+        )
+    }
+
+    /// Immediately publish a new intent for request-ordered settings.
+    fn request_value(&self, route: &DeviceRoute, value: T) -> WriteTicket<T> {
+        let queue = self.queue(route);
+        let number = {
+            let mut state = queue.state();
+            let intent = state.intent(value);
+            let number = intent.number;
+            state.committed = Some(intent);
+            number
         };
-        let number = queue.latest.fetch_add(1, Ordering::AcqRel) + 1;
-        WriteTicket { queue, number }
+        WriteTicket {
+            queue,
+            number,
+            _completion: None,
+        }
+    }
+
+    /// Publish a changed policy, or acknowledge a matching confirmed RPC.
+    /// An unchanged, different old policy must never supersede an unsaved RPC.
+    pub(crate) fn sync_policy(&self, route: &DeviceRoute, value: T) -> bool {
+        let queue = self.queue(route);
+        let mut state = queue.state();
+        if state
+            .committed
+            .as_ref()
+            .is_some_and(|intent| intent.value == value)
+        {
+            let State {
+                policy, committed, ..
+            } = &mut *state;
+            policy.clone_from(committed);
+            return false;
+        }
+        if state
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.value == value)
+        {
+            return false;
+        }
+        if state.policy.is_none() {
+            // Inventory may first publish config while an RPC already owns
+            // this route. The baseline predates every interactive intent.
+            let intent = Intent { number: 0, value };
+            if state.committed.is_none() {
+                state.committed = Some(intent.clone());
+            }
+            state.policy = Some(intent);
+            return true;
+        }
+        let intent = state.intent(value);
+        state.committed = Some(intent.clone());
+        state.policy = Some(intent);
+        true
+    }
+
+    /// Retirement differs from a value transition: even an unmanaged route
+    /// can have a queued manual request. Retire it before forgetting the route.
+    pub(crate) fn retire(&self, route: &DeviceRoute) {
+        let queue = self.queue(route);
+        let mut state = queue.state();
+        let intent = state.intent(T::default());
+        state.committed = Some(intent.clone());
+        state.policy = Some(intent);
+    }
+
+    /// Reuse the configured intent, including while a newer RPC supersedes it.
+    pub(crate) fn policy(&self, route: &DeviceRoute) -> Option<(T, WriteTicket<T>)> {
+        let queue = self.queue(route);
+        let intent = queue.state().policy.clone()?;
+        Some((
+            intent.value,
+            WriteTicket {
+                queue,
+                number: intent.number,
+                _completion: None,
+            },
+        ))
+    }
+
+    /// A pending RPC owns priority until confirmation or cancellation/failure.
+    pub(crate) fn begin(&self, route: &DeviceRoute, value: T) -> PendingWrite<T> {
+        let queue = self.queue(route);
+        let intent = {
+            let mut state = queue.state();
+            let intent = state.intent(value);
+            state.pending.insert(intent.number);
+            intent
+        };
+        PendingWrite {
+            ticket: WriteTicket {
+                queue,
+                number: intent.number,
+                _completion: None,
+            },
+            intent,
+        }
     }
 }
 
-impl WriteTicket {
-    /// Wait for the device's earlier writes, then hold its turn. `None` when
-    /// a newer write was requested meanwhile: that write leaves the final
-    /// state, so this one must not touch the device.
-    async fn turn(&self) -> Option<MutexGuard<'_, ()>> {
+impl<T> WriteTicket<T> {
+    /// Earlier writes finish before a current ticket can start HID I/O.
+    #[cfg(test)]
+    pub(crate) async fn turn(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
         let turn = self.queue.turn.lock().await;
-        (self.queue.latest.load(Ordering::Acquire) == self.number).then_some(turn)
+        self.is_current().then_some(turn)
     }
 
+    pub(crate) fn is_current(&self) -> bool {
+        self.queue.state().latest() == self.number
+    }
+}
+
+impl<V> WriteTicket<V> {
     /// Run `write` in this ticket's turn, or `superseded` instead once a
     /// newer write was requested: a caller that owes an answer reads the
-    /// device there, and a background write simply stops.
-    pub(crate) async fn write_or<T, Write, Superseded>(
+    /// device there, and a background write simply stops. Acquire the
+    /// transport guard from `ready` before deciding: an intent can be retired
+    /// while waiting for another setting's I/O. Hold both guards through I/O.
+    pub(crate) async fn write_or<T, Guard, Write, Superseded>(
         &self,
+        ready: impl Future<Output = Guard>,
         write: impl FnOnce() -> Write,
         superseded: impl FnOnce() -> Superseded,
     ) -> T
@@ -119,9 +249,12 @@ impl WriteTicket {
         Write: Future<Output = T>,
         Superseded: Future<Output = T>,
     {
-        match self.turn().await {
-            Some(_turn) => write().await,
-            None => superseded().await,
+        let _turn = self.queue.turn.lock().await;
+        let _ready = ready.await;
+        if self.is_current() {
+            write().await
+        } else {
+            superseded().await
         }
     }
 
@@ -148,14 +281,260 @@ impl WriteTicket {
     }
 }
 
-impl Drop for WriteTicket {
+/// Completes a strictly ordered slot only when its final handle is dropped.
+struct TicketLifetime<T> {
+    queue: Arc<Queue<T>>,
+    number: u64,
+}
+
+impl<T> Drop for TicketLifetime<T> {
     fn drop(&mut self) {
         self.queue.finish(self.number);
     }
 }
 
+impl WriteOrder {
+    /// Number a new request. Existing settings use request ordering; retries of
+    /// persisted policy use `sync_policy` / `policy` instead.
+    pub(crate) fn request(&self, route: &DeviceRoute) -> WriteTicket {
+        let ticket = self.request_value(route, ());
+        WriteTicket {
+            _completion: Some(Arc::new(TicketLifetime {
+                queue: Arc::clone(&ticket.queue),
+                number: ticket.number,
+            })),
+            ..ticket
+        }
+    }
+}
+
+/// RAII prevents failed/cancelled RPCs from permanently retiring saved policy.
+pub(crate) struct PendingWrite<T> {
+    ticket: WriteTicket<T>,
+    intent: Intent<T>,
+}
+
+impl<T: Clone> PendingWrite<T> {
+    pub(crate) fn ticket(&self) -> WriteTicket<T> {
+        self.ticket.clone()
+    }
+
+    /// Commit only a current result that the caller can return as success.
+    /// A superseded completion must not strand saved policy if its successor
+    /// fails: the client never accepted or saved that intermediate value.
+    pub(crate) fn confirm(self) -> bool {
+        let mut state = self.ticket.queue.state();
+        if state.latest() != self.intent.number {
+            return false;
+        }
+        state.committed = Some(self.intent.clone());
+        true
+    }
+}
+
+impl<T> Drop for PendingWrite<T> {
+    fn drop(&mut self) {
+        self.ticket
+            .queue
+            .state()
+            .pending
+            .remove(&self.intent.number);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn route(slot: u8) -> DeviceRoute {
+        DeviceRoute::Bolt {
+            receiver_uid: "receiver".into(),
+            slot,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_older_write_yields_to_a_newer_request() {
+        let order = WriteOrder::default();
+        let stale = order.request_value(&route(1), false);
+        let newer = order.request_value(&route(1), true);
+        assert!(stale.turn().await.is_none());
+        assert!(newer.turn().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_write_requested_while_another_runs_waits_its_turn() {
+        let order = WriteOrder::default();
+        let running = order.request_value(&route(1), false);
+        let turn = running.turn().await.expect("current");
+        let next = order.request_value(&route(1), true);
+        let mut waiting = std::pin::pin!(next.turn());
+        assert!(
+            futures_lite::future::poll_once(&mut waiting)
+                .await
+                .is_none()
+        );
+        drop(turn);
+        assert!(waiting.await.is_some());
+    }
+
+    #[tokio::test]
+    async fn keyboards_and_settings_do_not_order_each_other() {
+        let order = WriteOrder::default();
+        let other_setting = WriteOrder::default();
+        let first = order.request_value(&route(1), false);
+        let _other = order.request_value(&route(2), true);
+        let _other_setting = other_setting.request_value(&route(1), true);
+        assert!(first.turn().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn retries_before_reload_keep_the_old_policy_identity() {
+        let order = WriteOrder::default();
+        order.sync_policy(&route(1), Some(1));
+        let (_, old) = order.policy(&route(1)).expect("policy");
+        let manual = order.begin(&route(1), Some(0));
+        assert!(old.turn().await.is_none());
+        assert!(manual.confirm());
+        assert!(!order.sync_policy(&route(1), Some(1)));
+        let (_, retry) = order.policy(&route(1)).expect("policy");
+        assert!(retry.turn().await.is_none());
+        order.sync_policy(&route(1), Some(0));
+        assert!(
+            order
+                .policy(&route(1))
+                .expect("policy")
+                .1
+                .turn()
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn same_value_save_acknowledges_without_a_new_write_intent() {
+        let order = WriteOrder::default();
+        order.sync_policy(&route(1), Some(1));
+        let manual = order.begin(&route(1), Some(1));
+        let ticket = manual.ticket();
+        assert!(manual.confirm());
+        assert!(!order.sync_policy(&route(1), Some(1)));
+        assert!(ticket.is_current());
+        assert!(
+            order
+                .policy(&route(1))
+                .expect("policy")
+                .1
+                .turn()
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_failures_and_cancellations_restore_only_committed_policy() {
+        for reverse in [false, true] {
+            let order = WriteOrder::default();
+            order.sync_policy(&route(1), Some(1));
+            let (_, policy) = order.policy(&route(1)).expect("policy");
+            let first = order.begin(&route(1), Some(0));
+            let second = order.begin(&route(1), Some(2));
+            assert!(!policy.is_current());
+            if reverse {
+                drop(second);
+                drop(first);
+            } else {
+                drop(first);
+                drop(second);
+            }
+            assert!(policy.turn().await.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn superseded_confirmation_preserves_the_last_accepted_intent() {
+        for previous_manual in [false, true] {
+            let order = WriteOrder::default();
+            order.sync_policy(&route(1), Some(1));
+            let (_, mut accepted) = order.policy(&route(1)).expect("saved policy");
+            if previous_manual {
+                let confirmed = order.begin(&route(1), Some(2));
+                accepted = confirmed.ticket();
+                assert!(confirmed.confirm());
+            }
+            let first = order.begin(&route(1), Some(0));
+            let second = order.begin(&route(1), Some(3));
+            assert!(!first.confirm());
+            drop(second);
+            assert!(accepted.turn().await.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn acknowledging_a_save_does_not_supersede_the_next_pending_choice() {
+        let order = WriteOrder::default();
+        order.sync_policy(&route(1), Some(1));
+        assert!(order.begin(&route(1), Some(2)).confirm());
+        let next = order.begin(&route(1), Some(3));
+        assert!(!order.sync_policy(&route(1), Some(2)));
+        assert!(next.ticket().is_current());
+        assert!(
+            order
+                .policy(&route(1))
+                .expect("policy")
+                .1
+                .turn()
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_policy_is_older_than_a_manual_request() {
+        let order = WriteOrder::default();
+        let manual = order.begin(&route(1), Some(2));
+        order.sync_policy(&route(1), Some(1));
+        assert!(manual.ticket().is_current());
+        drop(manual);
+        assert!(
+            order
+                .policy(&route(1))
+                .expect("policy")
+                .1
+                .turn()
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_completion_and_cleanup_cannot_replace_successors() {
+        let order = WriteOrder::default();
+        order.sync_policy(&route(1), Some(1));
+        let stale = order.begin(&route(1), Some(0));
+        let newer = order.begin(&route(1), Some(2));
+        let ticket = newer.ticket();
+        assert!(newer.confirm());
+        assert!(!stale.confirm());
+        assert!(ticket.is_current());
+        let cancelled = order.begin(&route(1), Some(3));
+        order.sync_policy(&route(1), None);
+        drop(cancelled);
+        assert!(!ticket.is_current());
+        assert!(
+            order
+                .policy(&route(1))
+                .expect("unmanaged")
+                .1
+                .turn()
+                .await
+                .is_some()
+        );
+    }
+}
+
+#[cfg(test)]
+mod sequence_tests {
     use super::*;
 
     fn route(slot: u8) -> DeviceRoute {
@@ -208,10 +587,18 @@ mod tests {
         let pick = rates.request(&route(1));
 
         let reapplied = reapply
-            .write_or(|| async { Some(1000) }, || async { None })
+            .write_or(
+                std::future::ready(()),
+                || async { Some(1000) },
+                || async { None },
+            )
             .await;
         let picked = pick
-            .write_or(|| async { Some(2000) }, || async { None })
+            .write_or(
+                std::future::ready(()),
+                || async { Some(2000) },
+                || async { None },
+            )
             .await;
 
         assert_eq!(reapplied, None);
@@ -232,6 +619,7 @@ mod tests {
         let reapplying = tokio::spawn(async move {
             reapply
                 .write_or(
+                    std::future::ready(()),
                     || async move {
                         let _ = started.send(());
                         let _ = released.await;
@@ -247,6 +635,7 @@ mod tests {
         let pick_writes = Arc::clone(&writes);
         let picking = tokio::spawn(async move {
             pick.write_or(
+                std::future::ready(()),
                 || async move { pick_writes.lock().unwrap().push(2000) },
                 || async {},
             )
