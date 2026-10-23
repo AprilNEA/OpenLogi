@@ -659,8 +659,9 @@ prints these values for the build:
 | `build_version` | `0.8.17` | `0.8.16.12` |
 | `stamp_version` | empty | `0.8.17-beta.12` |
 
-A beta builds at its own version. Before anything compiles, each build leg
-runs `cargo xtask release stamp-version --version <stamp_version>`. It writes
+A beta builds at its own version. Each build leg that compiles OpenLogi
+first runs `cargo xtask release stamp-version --version <stamp_version>`
+(`windows-msi` compiles nothing and has no such step). It writes
 the version into `[workspace.package]`, into the `version` of every path
 dependency and `[patch]` entry that points at a workspace crate, and into the
 workspace crates in `Cargo.lock`, and commits nothing. A dependency belongs
@@ -668,8 +669,9 @@ to the workspace by its `path`, so a registry or git crate with a workspace
 crate's name keeps its requirement. The command fails on a requirement it
 would not write itself, such as `0.8`, before it writes anything. After it
 writes, the tree must resolve with `cargo metadata --locked`; if that fails,
-it puts every file back. So `CARGO_PKG_VERSION` is the beta's version
-everywhere: the update engine's current version, the About page,
+it puts every file back. That run compiles xtask at the old version, but
+everything the leg builds after it, xtask included, sees the beta's
+`CARGO_PKG_VERSION`: the update engine's current version, the About page,
 diagnostics, `CFBundleShortVersionString`, the Linux packages and the
 AppStream release. nfpm writes a pre-release as `0.8.17~beta.12` in the deb
 and rpm. For the Arch package, `linux package` spells it `0.8.17beta.12`,
@@ -702,9 +704,10 @@ Only `vX.Y.Z` and `vX.Y.Z-beta.N` are release tags.
 
 The publish side follows the channel. A beta becomes a GitHub prerelease and
 never the latest release. It leaves the installer site and the Homebrew cask
-as they are. Its publish composes the channel files too: the beta channel's
-`latest.json` offers it, and the appcasts gain its beta item, which only apps
-on `beta` see. The stable channel's `latest.json` keeps its bytes.
+as they are. Its publish composes the channel files too: the beta channel
+offers the newest beta above the newest stable release, normally this one,
+and the appcasts gain that beta's item, which only apps on `beta` see. The
+stable channel's `latest.json` keeps its bytes.
 
 A stable release's notes compare with the previous stable tag, so they cover
 its betas too; a beta's notes compare with the tag just before it.

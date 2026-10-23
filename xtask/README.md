@@ -129,8 +129,8 @@ the crate version in `CFBundleShortVersionString`. A stable release's build
 version is its version; `support/release_tag.rs` owns the encoding.
 Signing re-signs Sparkle's `Autoupdate`, `Updater.app` and the framework, inside
 out, before the app seals them. Without the key the bundle has no Sparkle and
-the app updates through its built-in engine, which is what every non-release
-build does.
+the app updates through its built-in engine; PR builds and unsigned
+dispatches are built that way.
 
 ### The dev bundle
 
