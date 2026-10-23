@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 
 use schedule::{
     DeadlinePurpose, HID_EVENT_SETTLE, HOTPLUG_SETTLE, ReconcileTrigger, SYSTEM_RESUME_SETTLE,
-    ScanClock, Schedule, WakeDetector,
+    ScanClock, ScanOutcome, Schedule, WakeDetector,
 };
 
 use crate::hardware::HardwareContext;
@@ -56,8 +56,9 @@ pub enum InventoryEvent {
         /// macOS the observable signature of a missing or stale Input
         /// Monitoring grant (the open denial itself is silent).
         hid_open_failures: bool,
-        /// This pass ran at the explicit volatile-settings confirmation
-        /// deadline, so the orchestrator may consume one bounded retry.
+        /// This pass satisfies a requested volatile-settings confirmation,
+        /// including low-frequency recovery after enumeration failures. The
+        /// orchestrator may consume one bounded settings retry.
         confirms_volatile_settings: bool,
     },
     /// Enumeration has never succeeded and won't be treated as "still
@@ -249,6 +250,19 @@ pub struct InventoryRefresh {
 }
 
 impl InventoryRefresh {
+    /// Observe a normal one-slot confirmation request without a worker thread.
+    #[cfg(test)]
+    pub(crate) fn test_settings_confirmation() -> (Self, impl Future<Output = ()> + Send) {
+        let (sender, mut requests) = mpsc::channel(1);
+        let (rescan, _rescans) = mpsc::channel(1);
+        (Self { sender, rescan }, async move {
+            assert!(matches!(
+                requests.recv().await,
+                Some(RefreshRequest::SettingsConfirmation)
+            ));
+        })
+    }
+
     /// Request the next delayed confirmation pass for volatile settings.
     /// Repeated requests coalesce into the bounded one-slot channel.
     pub fn request_settings_confirmation(&self) {
@@ -525,7 +539,19 @@ impl InventoryWorker {
         // Repair retries use completion, or a pass longer than
         // `FAST_RETRY_DELAY` would already be due when it returns (#1774).
         let started = Instant::now();
-        let (event, needs_repair) = match self.enumerator.enumerate().await {
+        let result = self.enumerator.enumerate().await;
+        self.complete_enumeration(trigger, result, started).await
+    }
+
+    /// Deliver the authoritative result before acknowledging its scheduled
+    /// purpose. An enumeration error retains the last snapshot, not success.
+    async fn complete_enumeration(
+        &mut self,
+        trigger: ReconcileTrigger,
+        result: Result<Vec<DeviceInventory>, openlogi_hid::InventoryError>,
+        started: Instant,
+    ) -> bool {
+        let (event, outcome) = match result {
             Ok(inventories) => {
                 let standalone = self.hardware.enumerate_standalone().await;
                 let standalone_failed = standalone.is_err();
@@ -534,14 +560,14 @@ impl InventoryWorker {
                     inventories,
                     standalone,
                     open_failures,
-                    trigger == ReconcileTrigger::SettingsConfirmation,
+                    self.schedule.confirms_settings(trigger),
                 );
                 let needs_repair = self.enumerator.retry_needed_last_tick()
                     || standalone_failed
                     || self.state.raw_nodes.has_pending_misses();
-                (Some(event), needs_repair)
+                (Some(event), ScanOutcome::Snapshot { needs_repair })
             }
-            Err(error) => (self.state.classify(Err(error)), true),
+            Err(error) => (self.state.classify(Err(error)), ScanOutcome::Failed),
         };
         if !self.device_io.allows_io() {
             debug!(
@@ -558,7 +584,7 @@ impl InventoryWorker {
         }
         self.schedule.scan_finished(
             trigger,
-            needs_repair,
+            outcome,
             ScanClock {
                 started,
                 finished: Instant::now(),

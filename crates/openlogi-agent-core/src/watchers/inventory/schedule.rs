@@ -79,10 +79,26 @@ pub(super) struct ScanClock {
     pub(super) finished: Instant,
 }
 
+/// Enumeration failure cannot satisfy a request for a delivered snapshot.
+#[derive(Clone, Copy)]
+pub(super) enum ScanOutcome {
+    Snapshot { needs_repair: bool },
+    Failed,
+}
+
+enum Confirmation {
+    Scheduled {
+        due: Instant,
+        failures: u8,
+    },
+    /// Fast enumeration attempts are exhausted, not the confirmation request.
+    AwaitingRecovery,
+}
+
 /// Scheduling state only; all I/O stays in the watcher loop.
 pub(super) struct Schedule {
     retry_due: Option<Instant>,
-    settings_due: Option<Instant>,
+    confirmation: Option<Confirmation>,
     recovery_due: Instant,
     retry_count: u8,
 }
@@ -91,7 +107,7 @@ impl Schedule {
     pub(super) fn new(now: Instant) -> Self {
         Self {
             retry_due: None,
-            settings_due: None,
+            confirmation: None,
             recovery_due: now + RECOVERY_SCAN_PERIOD,
             retry_count: 0,
         }
@@ -107,33 +123,67 @@ impl Schedule {
         if let Some(at) = self.retry_due {
             next = (at, DeadlinePurpose::RepairRetry);
         }
-        if let Some(at) = self.settings_due
-            && at < next.0
+        if let Some(Confirmation::Scheduled { due, .. }) = self.confirmation
+            && due <= next.0
         {
-            next = (at, DeadlinePurpose::SettingsConfirmation);
+            next = (due, DeadlinePurpose::SettingsConfirmation);
         }
         next
     }
 
-    /// Any completed full pass satisfies a pending repair deadline. A settings
-    /// deadline is consumed only by the pass it scheduled: earlier HID or
-    /// hotplug scans are useful inventory updates, but are not confirmation
-    /// attempts. An unhealthy result starts (or advances) one repair run.
+    /// A successful low-frequency recovery also delivers a confirmation whose
+    /// fast enumeration budget was exhausted. Other lifecycle snapshots do not
+    /// consume the orchestrator's confirmation budget.
+    pub(super) fn confirms_settings(&self, trigger: ReconcileTrigger) -> bool {
+        trigger == ReconcileTrigger::SettingsConfirmation
+            || (trigger == ReconcileTrigger::RecoveryScan
+                && matches!(self.confirmation, Some(Confirmation::AwaitingRecovery)))
+    }
+
+    /// Retire a confirmation only when its snapshot reached the orchestrator.
+    /// Failed enumeration gets bounded delayed attempts, then keeps the logical
+    /// request for the ordinary recovery cadence. Repair scans cannot reset it.
     pub(super) fn scan_finished(
         &mut self,
         trigger: ReconcileTrigger,
-        needs_repair: bool,
+        outcome: ScanOutcome,
         clock: ScanClock,
     ) {
         self.retry_due = None;
-        if trigger == ReconcileTrigger::SettingsConfirmation {
-            self.settings_due = None;
+        match (self.confirms_settings(trigger), outcome) {
+            (true, ScanOutcome::Snapshot { .. }) => self.confirmation = None,
+            (true, ScanOutcome::Failed) => {
+                if let Some(Confirmation::Scheduled { failures, .. }) = self.confirmation {
+                    self.confirmation = Some(if failures + 1 < FAST_RETRY_LIMIT {
+                        Confirmation::Scheduled {
+                            due: clock.finished + FAST_RETRY_DELAY,
+                            failures: failures + 1,
+                        }
+                    } else {
+                        Confirmation::AwaitingRecovery
+                    });
+                }
+            }
+            (false, ScanOutcome::Snapshot { .. }) => {
+                if matches!(self.confirmation, Some(Confirmation::AwaitingRecovery)) {
+                    self.confirmation = None;
+                    self.request_settings_confirmation(clock.finished);
+                }
+            }
+            (false, ScanOutcome::Failed) => {}
         }
         self.recovery_due = clock.started + RECOVERY_SCAN_PERIOD;
 
-        if !matches!(trigger, ReconcileTrigger::RepairRetry) {
+        if !matches!(
+            trigger,
+            ReconcileTrigger::RepairRetry | ReconcileTrigger::SettingsConfirmation
+        ) {
             self.retry_count = 0;
         }
+        let needs_repair = match outcome {
+            ScanOutcome::Snapshot { needs_repair } => needs_repair,
+            ScanOutcome::Failed => true,
+        };
         if needs_repair && self.retry_count < FAST_RETRY_LIMIT {
             self.retry_count += 1;
             self.retry_due = Some(clock.finished + FAST_RETRY_DELAY);
@@ -143,10 +193,13 @@ impl Schedule {
     }
 
     /// Request one delayed settings-confirmation pass. Repeated requests
-    /// coalesce without postponing the deadline; only that scheduled pass
-    /// satisfies the request.
+    /// coalesce without postponing the deadline or restarting an exhausted
+    /// enumeration budget. Only a delivered confirmation satisfies the request.
     pub(super) fn request_settings_confirmation(&mut self, now: Instant) {
-        self.settings_due.get_or_insert(now + FAST_RETRY_DELAY);
+        self.confirmation.get_or_insert(Confirmation::Scheduled {
+            due: now + FAST_RETRY_DELAY,
+            failures: 0,
+        });
     }
 }
 
@@ -188,11 +241,19 @@ mod tests {
         let start = Instant::now();
         let mut schedule = Schedule::new(start);
 
-        schedule.scan_finished(ReconcileTrigger::Initial, true, closed(start));
+        schedule.scan_finished(
+            ReconcileTrigger::Initial,
+            ScanOutcome::Snapshot { needs_repair: true },
+            closed(start),
+        );
         for _ in 0..FAST_RETRY_LIMIT {
             let (due, purpose) = schedule.next_deadline();
             assert_eq!(purpose, DeadlinePurpose::RepairRetry);
-            schedule.scan_finished(ReconcileTrigger::RepairRetry, true, closed(due));
+            schedule.scan_finished(
+                ReconcileTrigger::RepairRetry,
+                ScanOutcome::Snapshot { needs_repair: true },
+                closed(due),
+            );
         }
 
         assert!(schedule.retry_due.is_none());
@@ -203,9 +264,19 @@ mod tests {
     fn healthy_pass_resets_the_repair_budget() {
         let start = Instant::now();
         let mut schedule = Schedule::new(start);
-        schedule.scan_finished(ReconcileTrigger::Initial, true, closed(start));
+        schedule.scan_finished(
+            ReconcileTrigger::Initial,
+            ScanOutcome::Snapshot { needs_repair: true },
+            closed(start),
+        );
         let retry = schedule.next_deadline().0;
-        schedule.scan_finished(ReconcileTrigger::RepairRetry, false, closed(retry));
+        schedule.scan_finished(
+            ReconcileTrigger::RepairRetry,
+            ScanOutcome::Snapshot {
+                needs_repair: false,
+            },
+            closed(retry),
+        );
 
         assert!(schedule.retry_due.is_none());
         assert_eq!(schedule.retry_count, 0);
@@ -227,10 +298,12 @@ mod tests {
         );
         schedule.scan_finished(
             ReconcileTrigger::SettingsConfirmation,
-            false,
+            ScanOutcome::Snapshot {
+                needs_repair: false,
+            },
             closed(start + FAST_RETRY_DELAY),
         );
-        assert!(schedule.settings_due.is_none());
+        assert!(schedule.confirmation.is_none());
     }
 
     #[test]
@@ -242,13 +315,17 @@ mod tests {
 
         schedule.scan_finished(
             ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery),
-            false,
+            ScanOutcome::Snapshot {
+                needs_repair: false,
+            },
             closed(start + Duration::from_millis(500)),
         );
         schedule.request_settings_confirmation(start + Duration::from_millis(500));
         schedule.scan_finished(
             ReconcileTrigger::Hotplug,
-            false,
+            ScanOutcome::Snapshot {
+                needs_repair: false,
+            },
             closed(start + Duration::from_secs(1)),
         );
         schedule.request_settings_confirmation(start + Duration::from_secs(1));
@@ -260,13 +337,132 @@ mod tests {
     }
 
     #[test]
+    fn failed_confirmation_is_delayed_and_failed_repairs_do_not_postpone_it() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(start);
+        schedule.request_settings_confirmation(start);
+        let failed_at = start + FAST_RETRY_DELAY;
+        schedule.scan_finished(
+            ReconcileTrigger::SettingsConfirmation,
+            ScanOutcome::Failed,
+            closed(failed_at),
+        );
+        let next = failed_at + FAST_RETRY_DELAY;
+        schedule.scan_finished(
+            ReconcileTrigger::RepairRetry,
+            ScanOutcome::Failed,
+            closed(failed_at + Duration::from_millis(500)),
+        );
+        schedule.request_settings_confirmation(failed_at + Duration::from_secs(1));
+        assert_eq!(
+            schedule.next_deadline(),
+            (next, DeadlinePurpose::SettingsConfirmation)
+        );
+    }
+
+    #[test]
+    fn failed_confirmation_ties_exhaust_both_fast_budgets_without_losing_the_request() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(start);
+        schedule.request_settings_confirmation(start);
+        schedule.scan_finished(
+            ReconcileTrigger::Initial,
+            ScanOutcome::Failed,
+            closed(start),
+        );
+
+        for attempt in 0..FAST_RETRY_LIMIT {
+            let (due, purpose) = schedule.next_deadline();
+            assert_eq!(
+                purpose,
+                DeadlinePurpose::SettingsConfirmation,
+                "a tied repair must not starve confirmation"
+            );
+            assert_eq!(due, start + FAST_RETRY_DELAY * u32::from(attempt + 1));
+            schedule.scan_finished(
+                ReconcileTrigger::SettingsConfirmation,
+                ScanOutcome::Failed,
+                closed(due),
+            );
+            schedule.request_settings_confirmation(due);
+        }
+
+        assert_eq!(schedule.next_deadline().1, DeadlinePurpose::RecoveryScan);
+        assert_eq!(schedule.retry_count, FAST_RETRY_LIMIT);
+        assert!(schedule.confirms_settings(ReconcileTrigger::RecoveryScan));
+        let recovery = schedule.next_deadline().0;
+        schedule.scan_finished(
+            ReconcileTrigger::RecoveryScan,
+            ScanOutcome::Snapshot {
+                needs_repair: false,
+            },
+            closed(recovery),
+        );
+        assert!(!schedule.confirms_settings(ReconcileTrigger::RecoveryScan));
+        assert!(schedule.confirmation.is_none());
+    }
+
+    #[test]
+    fn failed_low_frequency_recovery_keeps_confirmation_pending_through_repair() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(start);
+        schedule.request_settings_confirmation(start);
+        for _ in 0..FAST_RETRY_LIMIT {
+            let (due, _) = schedule.next_deadline();
+            schedule.scan_finished(
+                ReconcileTrigger::SettingsConfirmation,
+                ScanOutcome::Failed,
+                closed(due),
+            );
+        }
+        // A repair may remain after the initial confirmation failure armed it.
+        for _ in 0..FAST_RETRY_LIMIT {
+            if schedule.next_deadline().1 != DeadlinePurpose::RepairRetry {
+                break;
+            }
+            let due = schedule.next_deadline().0;
+            schedule.scan_finished(
+                ReconcileTrigger::RepairRetry,
+                ScanOutcome::Failed,
+                closed(due),
+            );
+        }
+        assert_eq!(schedule.next_deadline().1, DeadlinePurpose::RecoveryScan);
+        let recovery = schedule.next_deadline().0;
+        schedule.scan_finished(
+            ReconcileTrigger::RecoveryScan,
+            ScanOutcome::Failed,
+            closed(recovery),
+        );
+        assert!(schedule.confirms_settings(ReconcileTrigger::RecoveryScan));
+        let repaired = schedule.next_deadline().0;
+        assert!(!schedule.confirms_settings(ReconcileTrigger::RepairRetry));
+        schedule.scan_finished(
+            ReconcileTrigger::RepairRetry,
+            ScanOutcome::Snapshot {
+                needs_repair: false,
+            },
+            closed(repaired),
+        );
+        assert_eq!(
+            schedule.next_deadline(),
+            (
+                repaired + FAST_RETRY_DELAY,
+                DeadlinePurpose::SettingsConfirmation
+            )
+        );
+    }
+
+    #[test]
     fn event_scan_reanchors_the_inactivity_recovery_deadline() {
         let start = Instant::now();
         let mut schedule = Schedule::new(start);
         let event_time = start + Duration::from_secs(30);
         schedule.scan_finished(
             ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery),
-            false,
+            ScanOutcome::Snapshot {
+                needs_repair: false,
+            },
             closed(event_time),
         );
 
@@ -280,7 +476,9 @@ mod tests {
         let mut schedule = Schedule::new(started);
         schedule.scan_finished(
             ReconcileTrigger::Initial,
-            false,
+            ScanOutcome::Snapshot {
+                needs_repair: false,
+            },
             ScanClock { started, finished },
         );
 
@@ -318,7 +516,7 @@ mod tests {
         let mut schedule = Schedule::new(started);
         schedule.scan_finished(
             ReconcileTrigger::Initial,
-            true,
+            ScanOutcome::Snapshot { needs_repair: true },
             ScanClock { started, finished },
         );
 
@@ -336,7 +534,7 @@ mod tests {
         let mut schedule = Schedule::new(started);
         schedule.scan_finished(
             ReconcileTrigger::Initial,
-            true,
+            ScanOutcome::Snapshot { needs_repair: true },
             ScanClock { started, finished },
         );
 

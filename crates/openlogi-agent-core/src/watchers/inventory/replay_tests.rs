@@ -24,6 +24,109 @@ use crate::orchestrator::Orchestrator;
 
 use super::{InventoryEvent, InventoryWatcher, spawn_with_hardware};
 
+#[tokio::test]
+async fn failed_confirmation_and_repairs_keep_delayed_work_until_recovery() {
+    use super::schedule::{DeadlinePurpose, ReconcileTrigger, Schedule, WakeDetector};
+    use std::time::{Instant, SystemTime};
+
+    async fn fail(worker: &mut super::InventoryWorker, trigger: ReconcileTrigger) {
+        assert!(
+            worker
+                .complete_enumeration(
+                    trigger,
+                    Err(openlogi_hid::InventoryError::Hid(
+                        openlogi_hid::BackendError::Disconnected
+                    )),
+                    Instant::now()
+                )
+                .await
+        );
+    }
+
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![],
+                channels: vec![],
+            },
+            vec![],
+        )
+        .expect("empty replay topology"),
+    );
+    let (_signal, device_io) = device_io_channel();
+    let hardware = HardwareContext::injected(backend.clone(), device_io.clone());
+    let (events, mut published) = tokio::sync::mpsc::unbounded_channel();
+    let (_refresh, refresh_requests) = tokio::sync::mpsc::channel(1);
+    let (_rescan, rescans) = tokio::sync::mpsc::channel(1);
+    let (_notifier, hid_events) = openlogi_hid::inventory::events::event_channel();
+    let start = Instant::now();
+    let mut worker = super::InventoryWorker {
+        events,
+        refresh_requests,
+        rescans,
+        enumerator: hardware.enumerator(),
+        hardware,
+        state: super::WatchState::default(),
+        hotplug: None,
+        hid_events,
+        schedule: Schedule::new(start),
+        wake_detector: WakeDetector::new(SystemTime::now(), start),
+        device_io,
+        refresh_open: true,
+        rescans_open: true,
+    };
+    assert!(worker.reconcile(ReconcileTrigger::Initial).await);
+    assert!(matches!(
+        published.try_recv().unwrap(),
+        InventoryEvent::Snapshot { .. }
+    ));
+    worker.schedule.request_settings_confirmation(start);
+    fail(&mut worker, ReconcileTrigger::SettingsConfirmation).await;
+    assert!(
+        published.is_empty(),
+        "keep the previous inventory after enumeration failure"
+    );
+    assert_eq!(
+        worker.schedule.next_deadline().1,
+        DeadlinePurpose::SettingsConfirmation,
+        "failure must not consume the only confirmation request"
+    );
+
+    // Drive actual scans without sleeping; the scheduler's logical-time tests
+    // below cover timer selection and cadence independently of backend I/O.
+    fail(&mut worker, ReconcileTrigger::RepairRetry).await;
+    for _ in 0..12 {
+        let trigger = match worker.schedule.next_deadline().1 {
+            DeadlinePurpose::SettingsConfirmation => ReconcileTrigger::SettingsConfirmation,
+            DeadlinePurpose::RepairRetry => ReconcileTrigger::RepairRetry,
+            DeadlinePurpose::RecoveryScan => break,
+        };
+        let before = Instant::now();
+        fail(&mut worker, trigger).await;
+        assert!(
+            worker.schedule.next_deadline().0 > before,
+            "a failed pass must never leave an immediately due deadline"
+        );
+    }
+    assert_eq!(
+        worker.schedule.next_deadline().1,
+        DeadlinePurpose::RecoveryScan
+    );
+    assert!(published.is_empty());
+
+    assert!(worker.reconcile(ReconcileTrigger::RecoveryScan).await);
+    assert!(
+        matches!(
+            published.try_recv().unwrap(),
+            InventoryEvent::Snapshot {
+                confirms_volatile_settings: true,
+                ..
+            }
+        ),
+        "low-frequency recovery must deliver the still-pending confirmation"
+    );
+}
+
 const CHANNEL: &str = "agent-direct-mouse";
 const PRODUCT_ID: u16 = 0xb35b;
 

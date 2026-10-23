@@ -401,7 +401,16 @@ impl SharedHandles {
         route: &DeviceRoute,
         desired: DisableKeysMask,
     ) -> Result<openlogi_hid::DisableKeysState, WriteError> {
-        let pending = self.disabled_keys_order.begin(route, Some(desired));
+        let refresh = Arc::clone(&self.inventory_refresh);
+        let pending = self
+            .disabled_keys_order
+            .begin(route, Some(desired))
+            .on_abandoned(move || {
+                let refresh = refresh.read().unwrap_or_else(PoisonError::into_inner);
+                if let Some(refresh) = refresh.as_ref() {
+                    refresh.request_settings_confirmation();
+                }
+            });
         let ticket = pending.ticket();
         self.keyboard_device(route)
             .run_in_turn(
@@ -1086,6 +1095,23 @@ impl Orchestrator {
         let next_current = pick_current(&devices, self.config.selected_device());
         let rearm_capture =
             any_device_needs_capture_rearm(&self.devices, &devices, forced.is_some());
+        // Manual cancellation can happen long after the boot/reconnect ladder
+        // drained. Its owner requests recovery without capturing an old mask;
+        // use the same bounded confirmation run, and do not consume a request
+        // while a successor still owns the setting.
+        for dev in &devices {
+            if dev.online
+                && let Some(route) = &dev.route
+                && self.shared.disabled_keys_order.schedule_recovery(route)
+            {
+                self.reapply_followup
+                    .entry(dev.config_key.clone())
+                    .and_modify(|remaining| {
+                        *remaining = (*remaining).max(VOLATILE_REAPPLY_CONFIRM_RETRIES);
+                    })
+                    .or_insert(VOLATILE_REAPPLY_CONFIRM_RETRIES);
+            }
+        }
         let followup = std::mem::take(&mut self.reapply_followup);
         let (targets, next_followup) =
             plan_reapply(&self.devices, &devices, &followup, forced, confirm_reapply);
@@ -1105,6 +1131,14 @@ impl Orchestrator {
         }
         for idx in targets {
             self.reapply_volatile_settings(&devices[idx], &devices);
+        }
+        for dev in &devices {
+            if dev.online
+                && !self.reapply_followup.contains_key(&dev.config_key)
+                && let Some(route) = &dev.route
+            {
+                self.shared.disabled_keys_order.finish_recovery(route);
+            }
         }
         let changed = next_current != self.current
             || devices.len() != self.devices.len()

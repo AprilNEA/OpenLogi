@@ -130,6 +130,19 @@ impl DisableKeysReads {
         }
     }
 
+    /// A failed write may already have changed hardware. Retire the old value
+    /// and fence any in-flight read before allowing another edit.
+    pub(crate) fn reconcile_after_write(&mut self, key: &DeviceKey) {
+        self.confirmed.remove(key);
+        if let Some(read) = self.reads.get_mut(key) {
+            read.load = Load::Loading;
+            if let Some(client) = &self.client {
+                client.set::<_, Cached, WriteError>(query_key(key), None);
+                client.invalidate(query_key(key));
+            }
+        }
+    }
+
     /// Drop the active subscription and fence its completion, retaining the
     /// last confirmed snapshot for offline rendering.
     pub(crate) fn remove(&mut self, key: &DeviceKey) {

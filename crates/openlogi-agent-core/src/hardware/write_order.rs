@@ -32,6 +32,15 @@ struct State<T> {
     committed: Option<Intent<T>>,
     policy: Option<Intent<T>>,
     pending: BTreeSet<u64>,
+    recovery: Recovery,
+}
+
+#[derive(Default)]
+enum Recovery {
+    #[default]
+    None,
+    Requested,
+    Scheduled,
 }
 
 #[derive(Clone)]
@@ -173,6 +182,7 @@ impl<T: Clone + Default + Eq> WriteOrder<T> {
         let intent = state.intent(value);
         state.committed = Some(intent.clone());
         state.policy = Some(intent);
+        state.recovery = Recovery::None;
         true
     }
 
@@ -184,12 +194,23 @@ impl<T: Clone + Default + Eq> WriteOrder<T> {
         let intent = state.intent(T::default());
         state.committed = Some(intent.clone());
         state.policy = Some(intent);
+        state.recovery = Recovery::None;
     }
 
-    /// Reuse the configured intent, including while a newer RPC supersedes it.
+    /// Reuse saved policy, or the latest accepted intent during an explicitly
+    /// scheduled recovery. Neither path gives a retry new write authority.
     pub(crate) fn policy(&self, route: &DeviceRoute) -> Option<(T, WriteTicket<T>)> {
         let queue = self.queue(route);
-        let intent = queue.state().policy.clone()?;
+        let intent = {
+            let state = queue.state();
+            if matches!(state.recovery, Recovery::Scheduled) {
+                // A confirmed RPC can precede its config save. Recovery must
+                // restore that accepted choice, not the older saved value.
+                state.committed.clone()
+            } else {
+                state.policy.clone()
+            }
+        }?;
         Some((
             intent.value,
             WriteTicket {
@@ -198,6 +219,28 @@ impl<T: Clone + Default + Eq> WriteOrder<T> {
                 _completion: None,
             },
         ))
+    }
+
+    /// Hand abandoned-request recovery to the existing bounded scheduler.
+    /// A pending successor keeps ownership; its completion will wake inventory.
+    pub(crate) fn schedule_recovery(&self, route: &DeviceRoute) -> bool {
+        let queue = self.queue(route);
+        let mut state = queue.state();
+        if !state.pending.is_empty() || !matches!(state.recovery, Recovery::Requested) {
+            return false;
+        }
+        state.recovery = Recovery::Scheduled;
+        true
+    }
+
+    /// The scheduled run has spent its last attempt. Tickets already handed
+    /// to writers retain their accepted identity even after this transition.
+    pub(crate) fn finish_recovery(&self, route: &DeviceRoute) {
+        let queue = self.queue(route);
+        let mut state = queue.state();
+        if matches!(state.recovery, Recovery::Scheduled) {
+            state.recovery = Recovery::None;
+        }
     }
 
     /// A pending RPC owns priority until confirmation or cancellation/failure.
@@ -216,6 +259,7 @@ impl<T: Clone + Default + Eq> WriteOrder<T> {
                 _completion: None,
             },
             intent,
+            abandoned: None,
         }
     }
 }
@@ -312,9 +356,17 @@ impl WriteOrder {
 pub(crate) struct PendingWrite<T> {
     ticket: WriteTicket<T>,
     intent: Intent<T>,
+    abandoned: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl<T: Clone> PendingWrite<T> {
+    /// Notify the runtime after unsuccessful ownership release, including
+    /// cancellation. The callback schedules work and must not perform HID I/O.
+    pub(crate) fn on_abandoned(mut self, notify: impl FnOnce() + Send + 'static) -> Self {
+        self.abandoned = Some(Box::new(notify));
+        self
+    }
+
     pub(crate) fn ticket(&self) -> WriteTicket<T> {
         self.ticket.clone()
     }
@@ -328,17 +380,28 @@ impl<T: Clone> PendingWrite<T> {
             return false;
         }
         state.committed = Some(self.intent.clone());
+        state.recovery = Recovery::None;
         true
     }
 }
 
 impl<T> Drop for PendingWrite<T> {
     fn drop(&mut self) {
-        self.ticket
-            .queue
-            .state()
-            .pending
-            .remove(&self.intent.number);
+        let abandoned = {
+            let mut state = self.ticket.queue.state();
+            state.pending.remove(&self.intent.number);
+            let abandoned = state
+                .committed
+                .as_ref()
+                .is_none_or(|accepted| accepted.number < self.intent.number);
+            if abandoned {
+                state.recovery = Recovery::Requested;
+            }
+            abandoned
+        };
+        if abandoned && let Some(notify) = self.abandoned.take() {
+            notify();
+        }
     }
 }
 
@@ -449,6 +512,60 @@ mod tests {
             }
             assert!(policy.turn().await.is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn recovery_waits_for_all_pending_requests_and_keeps_the_committed_choice() {
+        let order = WriteOrder::default();
+        order.sync_policy(&route(1), Some(1));
+        assert!(order.begin(&route(1), Some(2)).confirm());
+        let first = order.begin(&route(1), Some(3));
+        let newer = order.begin(&route(1), Some(4));
+        drop(first);
+        assert!(
+            !order.schedule_recovery(&route(1)),
+            "successor still owns priority"
+        );
+        order.finish_recovery(&route(1));
+        drop(newer);
+        assert!(order.schedule_recovery(&route(1)));
+        assert!(
+            !order.schedule_recovery(&route(1)),
+            "one bounded scheduler run"
+        );
+        let (value, ticket) = order.policy(&route(1)).expect("accepted value");
+        assert_eq!(value, Some(2));
+        order.finish_recovery(&route(1));
+        assert!(
+            ticket.turn().await.is_some(),
+            "last scheduled attempt retains identity"
+        );
+        assert!(
+            !order.schedule_recovery(&route(1)),
+            "budget exhaustion is final"
+        );
+    }
+
+    #[test]
+    fn confirmed_or_retired_requests_do_not_signal_abandoned_recovery() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let order = WriteOrder::default();
+        let signals = Arc::new(AtomicUsize::new(0));
+        for confirmed in [false, true] {
+            let observed = Arc::clone(&signals);
+            let pending = order.begin(&route(1), Some(1)).on_abandoned(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            });
+            if confirmed {
+                assert!(pending.confirm());
+            } else {
+                order.retire(&route(1));
+                drop(pending);
+            }
+        }
+        assert_eq!(signals.load(Ordering::SeqCst), 0);
+        assert!(!order.schedule_recovery(&route(1)));
     }
 
     #[tokio::test]

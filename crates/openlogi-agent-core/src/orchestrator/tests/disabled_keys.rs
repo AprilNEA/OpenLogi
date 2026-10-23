@@ -80,6 +80,17 @@ impl Keyboard {
     fn assert_writes(&self, expected: &[u8]) {
         assert_eq!(*self.writes.lock().expect("writes"), expected);
     }
+
+    fn hold_write_readback(&self) -> openlogi_device::replay::ReplayResponseBarrier {
+        use openlogi_fixture::RequestMatch;
+
+        let get_state = [0x10, 0xff, 5, 0x10, 0, 0, 0];
+        self.reports
+            .hold_next_response(RequestMatch::Hidpp20, &get_state)
+            .release();
+        self.reports
+            .hold_next_response(RequestMatch::Hidpp20, &get_state)
+    }
 }
 
 async fn finish(worker: Option<std::thread::JoinHandle<()>>) {
@@ -87,6 +98,226 @@ async fn finish(worker: Option<std::thread::JoinHandle<()>>) {
     tokio::task::spawn_blocking(move || worker.join().expect("worker joins"))
         .await
         .expect("join task");
+}
+
+/// Start after the boot ladder has drained, then install real policy via reload.
+async fn settled_keyboard() -> (Orchestrator, Keyboard, DeviceInventory) {
+    let mut orchestrator = orchestrator(Config::default());
+    let mut inventory = direct_inventory(None, [1, 2, 3, 4]);
+    inventory.receiver.product_id = 0xb35b;
+    inventory.paired[0].kind = DeviceKind::Keyboard;
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    for _ in 0..VOLATILE_REAPPLY_CONFIRM_RETRIES {
+        orchestrator.refresh_inventory_for_settings_confirmation(
+            std::slice::from_ref(&inventory),
+            &[],
+            false,
+        );
+    }
+    assert!(!orchestrator.needs_reapply_confirmation());
+    let shared = orchestrator.shared();
+    let keyboard = Keyboard::publish(&shared).await;
+    let mut config = Config::default();
+    config.set_disabled_keys("unit:01020304", BTreeSet::from([DisableKey::CapsLock]));
+    orchestrator.reload_config(config);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        keyboard.write_notice.notified(),
+    )
+    .await
+    .expect("reload applies saved policy");
+    let (_, ticket) = shared
+        .disabled_keys_order
+        .policy(&keyboard.route)
+        .expect("saved policy");
+    assert!(ticket.turn().await.is_some());
+    keyboard.assert_writes(&[0x81]);
+    (orchestrator, keyboard, inventory)
+}
+
+#[tokio::test]
+async fn failed_successor_automatically_restores_policy_after_boot_retries_drain() {
+    use std::time::Duration;
+
+    for unsaved_confirmed in [false, true] {
+        for cancelled in [false, true] {
+            let (mut orchestrator, keyboard, inventory) = settled_keyboard().await;
+            let shared = orchestrator.shared();
+            let (refresh, requested) =
+                crate::watchers::inventory::InventoryRefresh::test_settings_confirmation();
+            shared.publish_inventory_refresh(refresh);
+            if unsaved_confirmed {
+                shared
+                    .set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY)
+                    .await
+                    .expect("B is confirmed but not saved");
+                keyboard.write_notice.notified().await;
+            }
+            let desired = if unsaved_confirmed {
+                DisableKeysMask::CAPS_LOCK
+            } else {
+                DisableKeysMask::EMPTY
+            };
+            let readback = keyboard.hold_write_readback();
+            let writer = shared.clone();
+            let route = keyboard.route.clone();
+            let first = tokio::spawn(async move { writer.set_disable_keys(&route, desired).await });
+            tokio::time::timeout(Duration::from_secs(2), readback.request_written())
+                .await
+                .expect("unconfirmed write reached hardware");
+            keyboard.write_notice.notified().await;
+            let mut successor = Box::pin(
+                shared.set_disable_keys(&keyboard.route, DisableKeysMask::from_bits_retain(0x40)),
+            );
+            assert!(
+                futures_lite::future::poll_once(&mut successor)
+                    .await
+                    .is_none()
+            );
+            readback.release();
+            assert!(matches!(
+                first.await.unwrap().expect_err("superseded"),
+                WriteError::WriteSuperseded { .. }
+            ));
+            tokio::time::timeout(Duration::from_secs(2), requested)
+                .await
+                .expect("abandoned RPC must schedule production inventory confirmation");
+            // A confirmation while the successor owns priority must not retire
+            // the eventual recovery of the accepted value.
+            orchestrator.refresh_inventory_for_settings_confirmation(
+                std::slice::from_ref(&inventory),
+                &[],
+                false,
+            );
+            let (refresh, requested) =
+                crate::watchers::inventory::InventoryRefresh::test_settings_confirmation();
+            shared.publish_inventory_refresh(refresh);
+            if cancelled {
+                drop(successor);
+            } else {
+                assert!(matches!(
+                    successor.await.expect_err("unsupported"),
+                    WriteError::UnsupportedMask { .. }
+                ));
+            }
+            tokio::time::timeout(Duration::from_secs(2), requested)
+                .await
+                .expect("successor release must request confirmation again");
+            orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+            assert!(
+                orchestrator.needs_reapply_confirmation(),
+                "failed manual request must arm recovery after boot retries drained"
+            );
+            orchestrator.refresh_inventory_for_settings_confirmation(
+                std::slice::from_ref(&inventory),
+                &[],
+                false,
+            );
+            tokio::time::timeout(Duration::from_secs(2), keyboard.write_notice.notified())
+                .await
+                .expect("production confirmation restores accepted policy");
+            let expected = if unsaved_confirmed { 0x80 } else { 0x81 };
+            assert_eq!(keyboard.disabled.load(Ordering::SeqCst), expected);
+            for _ in 1..VOLATILE_REAPPLY_CONFIRM_RETRIES {
+                orchestrator.refresh_inventory_for_settings_confirmation(
+                    std::slice::from_ref(&inventory),
+                    &[],
+                    false,
+                );
+                tokio::time::timeout(Duration::from_secs(2), keyboard.write_notice.notified())
+                    .await
+                    .expect("bounded confirming reapply");
+            }
+            assert!(!orchestrator.needs_reapply_confirmation());
+            orchestrator.refresh_inventory(&[inventory], &[], false);
+            assert!(
+                !orchestrator.needs_reapply_confirmation(),
+                "settled recovery does not rearm itself"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn successful_successor_retires_abandoned_request_recovery() {
+    use std::time::Duration;
+
+    let (mut orchestrator, keyboard, inventory) = settled_keyboard().await;
+    let shared = orchestrator.shared();
+    let readback = keyboard.hold_write_readback();
+    let writer = shared.clone();
+    let route = keyboard.route.clone();
+    let first = tokio::spawn(async move {
+        writer
+            .set_disable_keys(&route, DisableKeysMask::EMPTY)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), readback.request_written())
+        .await
+        .unwrap();
+    let mut successor = Box::pin(shared.set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY));
+    assert!(
+        futures_lite::future::poll_once(&mut successor)
+            .await
+            .is_none()
+    );
+    readback.release();
+    assert!(matches!(
+        first.await.unwrap().expect_err("superseded"),
+        WriteError::WriteSuperseded { .. }
+    ));
+    successor.await.expect("new accepted choice");
+    orchestrator.refresh_inventory_for_settings_confirmation(&[inventory], &[], false);
+    assert!(
+        !orchestrator.needs_reapply_confirmation(),
+        "success closes the recovery request"
+    );
+    keyboard.assert_writes(&[0x81, 0x80, 0x80]);
+}
+
+#[tokio::test]
+async fn retired_policy_cannot_be_recovered_by_late_manual_cancellation() {
+    use std::time::Duration;
+
+    for retirement in ["remove", "opt-out", "replacement"] {
+        let (mut orchestrator, keyboard, mut inventory) = settled_keyboard().await;
+        let shared = orchestrator.shared();
+        let readback = keyboard.hold_write_readback();
+        let writer = shared.clone();
+        let route = keyboard.route.clone();
+        let first = tokio::spawn(async move {
+            writer
+                .set_disable_keys(&route, DisableKeysMask::EMPTY)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), readback.request_written())
+            .await
+            .unwrap();
+        match retirement {
+            "replacement" => {
+                inventory.paired[0].model_info.as_mut().unwrap().unit_id = [5, 6, 7, 8];
+                orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+            }
+            "opt-out" => {
+                let mut config = orchestrator.config.clone();
+                config.set_device_enabled("unit:01020304", false);
+                orchestrator.reload_config(config);
+            }
+            _ => orchestrator.reload_config(Config::default()),
+        }
+        first.abort();
+        assert!(first.await.expect_err("cancelled").is_cancelled());
+        readback.release();
+        for _ in 0..VOLATILE_REAPPLY_CONFIRM_RETRIES {
+            orchestrator.refresh_inventory_for_settings_confirmation(
+                std::slice::from_ref(&inventory),
+                &[],
+                false,
+            );
+        }
+        assert!(!orchestrator.needs_reapply_confirmation());
+        keyboard.assert_writes(&[0x81, 0x80]);
+    }
 }
 
 #[tokio::test]

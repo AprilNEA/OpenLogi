@@ -190,6 +190,10 @@ Common device fields are:
   clear a link when the keyboard is asleep or its receiver is unplugged. After
   a restart, the agent knows the cookie again once the keyboard reports it
 - `fn_lock` for compatible keyboards
+- `disabled_keys` for keyboards with HID++ `0x4521`: the keys the keyboard
+  suppresses in hardware (see [Disabled keys](#disabled-keys)). Absent leaves
+  the setting unmanaged; an explicit empty array enables all supported known
+  keys
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+
   does; `false` leaves the keyboard's layout to its own shortcuts
@@ -207,6 +211,48 @@ Common device fields are:
 `[keyboard.bindings]` contains global key triggers such as `f1` or
 `shift+command+f5`. Supported trigger modifiers are `shift`, `control`,
 `option`, and `command`; aliases such as `ctrl`, `alt`, and `cmd` are accepted.
+
+### Disabled keys
+
+The Device tab shows a **Disabled keys** card only when the device advertises
+HID++ `0x4521`. It reads the supported mask from the keyboard and offers only
+the supported keys: Caps Lock, Num Lock, Scroll Lock, Insert, and Windows /
+Command (labelled for the host OS). A switch **on disables that key**. This is
+a firmware setting, not key remapping: disabling Caps Lock also suppresses a
+host-side action assigned to it, such as switching the input language.
+
+For example, under an existing physical-device entry:
+
+```toml
+disabled_keys = ["caps_lock", "windows_command"]
+```
+
+The other accepted names are `num_lock`, `scroll_lock`, and `insert`. Removing
+the field stops managing this setting; `disabled_keys = []` instead requests
+that every supported known key be enabled. OpenLogi preserves advertised
+disabled bits it does not recognise, rather than clearing firmware settings
+outside these five controls.
+
+Controls require an online device with a persistent identity, a writable
+configuration, and a successful read. A change is written to the keyboard and
+read back before the app saves the confirmed known keys and asks the agent to
+reload. An error or timeout is not proof that the keyboard stayed unchanged:
+the app discards its old value, reads again, and prevents further edits until
+that read succeeds. **Retry** retries an exhausted read. An unconfirmed request
+is never saved as the device's setting. **Save Retry** and **Reload Retry**
+recover their respective persistence steps without repeating the hardware
+write.
+
+The agent reapplies a managed device's configured policy on initial discovery,
+reconnect, and wake, with bounded delayed confirmation attempts. If an
+unconfirmed manual write may have changed hardware, it schedules restoration
+of the latest confirmed choice (including a choice not yet saved by the app),
+without overtaking a newer pending request. New configuration or a retired
+connection invalidates obsolete work. Failed inventory scans do not count as
+successful confirmation: they use bounded delayed retries, retaining pending
+confirmation for the normal recovery scan after those retries are exhausted.
+An unreachable keyboard cannot be guaranteed to accept a setting; reconnect
+or wake starts a new lifecycle attempt.
 
 ### Application aliases
 

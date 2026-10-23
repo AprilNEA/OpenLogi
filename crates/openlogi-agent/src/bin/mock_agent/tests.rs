@@ -748,11 +748,179 @@ fn disable_keys_scenarios_are_strict_and_reconnect_uses_logical_time() {
     DisableKeysScenario::parse("READY").expect_err("scenario names are case-sensitive");
 
     let mut state = test_state_with_disable_keys_scenario(DisableKeysScenario::SameRouteReconnect);
-    assert_eq!(state.route_online(&keyboard_route()), Some(true));
+    state
+        .require_reachable(&keyboard_route())
+        .expect("initially online");
     state.advance_test_time(Duration::from_secs(2));
-    assert_eq!(state.route_online(&keyboard_route()), Some(false));
+    assert_eq!(
+        state.require_reachable(&keyboard_route()),
+        Err(WriteError::DeviceUnreachable {
+            index: keyboard_route().device_index(),
+        })
+    );
     state.advance_test_time(Duration::from_secs(2));
-    assert_eq!(state.route_online(&keyboard_route()), Some(true));
+    state
+        .require_reachable(&keyboard_route())
+        .expect("online after reconnect");
+}
+
+#[tokio::test]
+async fn disable_keys_obeys_mock_console_faults() {
+    let agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::Ready,
+    ));
+    let device = agent
+        .state
+        .lock()
+        .await
+        .targets()
+        .iter()
+        .position(|target| target.route == keyboard_route())
+        .expect("keyboard target");
+    let settings = AppSettings::default();
+    for fault in [
+        super::control::Fault::Error,
+        super::control::Fault::Unreachable,
+    ] {
+        agent
+            .apply(
+                super::control::Command::Fault {
+                    device,
+                    fault: Some(fault),
+                },
+                &settings,
+            )
+            .await
+            .expect("set console fault");
+        assert_eq!(
+            agent
+                .clone()
+                .read_disable_keys(tarpc::context::current(), keyboard_route())
+                .await,
+            Err(fault.error(&keyboard_route()))
+        );
+        assert_eq!(
+            agent
+                .clone()
+                .set_disable_keys(
+                    tarpc::context::current(),
+                    keyboard_route(),
+                    DisableKeysMask::CAPS_LOCK
+                )
+                .await,
+            Err(fault.error(&keyboard_route()))
+        );
+    }
+    agent
+        .apply(
+            super::control::Command::Fault {
+                device,
+                fault: None,
+            },
+            &settings,
+        )
+        .await
+        .expect("clear fault");
+    let initial = agent
+        .clone()
+        .read_disable_keys(tarpc::context::current(), keyboard_route())
+        .await
+        .expect("read after clearing fault");
+    assert!(
+        !initial.disabled.contains(DisableKeysMask::CAPS_LOCK),
+        "failed writes must not change the profile"
+    );
+    agent
+        .set_disable_keys(
+            tarpc::context::current(),
+            keyboard_route(),
+            DisableKeysMask::CAPS_LOCK,
+        )
+        .await
+        .expect("write after clearing fault");
+}
+
+#[tokio::test]
+async fn disable_keys_obeys_mock_console_link_changes() {
+    let agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::Ready,
+    ));
+    let device = agent
+        .state
+        .lock()
+        .await
+        .targets()
+        .iter()
+        .position(|target| target.route == keyboard_route())
+        .expect("keyboard target");
+    let settings = AppSettings::default();
+    agent
+        .apply(
+            super::control::Command::Link {
+                device,
+                online: false,
+            },
+            &settings,
+        )
+        .await
+        .expect("disconnect");
+    let offline = WriteError::DeviceUnreachable {
+        index: keyboard_route().device_index(),
+    };
+    assert_eq!(
+        agent
+            .clone()
+            .read_disable_keys(tarpc::context::current(), keyboard_route())
+            .await,
+        Err(offline.clone())
+    );
+    assert_eq!(
+        agent
+            .clone()
+            .set_disable_keys(
+                tarpc::context::current(),
+                keyboard_route(),
+                DisableKeysMask::CAPS_LOCK
+            )
+            .await,
+        Err(offline)
+    );
+    agent
+        .apply(
+            super::control::Command::Link {
+                device,
+                online: true,
+            },
+            &settings,
+        )
+        .await
+        .expect("reconnect");
+    let initial = agent
+        .clone()
+        .read_disable_keys(tarpc::context::current(), keyboard_route())
+        .await
+        .expect("read after reconnect");
+    assert!(
+        !initial.disabled.contains(DisableKeysMask::CAPS_LOCK),
+        "failed writes must not change the profile"
+    );
+    let confirmed = agent
+        .clone()
+        .set_disable_keys(
+            tarpc::context::current(),
+            keyboard_route(),
+            DisableKeysMask::CAPS_LOCK,
+        )
+        .await
+        .expect("write after reconnect");
+    assert!(confirmed.disabled.contains(DisableKeysMask::CAPS_LOCK));
+    assert_eq!(
+        agent
+            .read_disable_keys(tarpc::context::current(), keyboard_route())
+            .await
+            .expect("read back"),
+        confirmed
+    );
 }
 
 #[tokio::test]

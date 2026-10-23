@@ -154,6 +154,7 @@ impl AppState {
         let result = match result {
             Ok(confirmed) => confirmed,
             Err(error) => {
+                self.disable_keys_reads.reconcile_after_write(&key);
                 let state = self.devices.sessions.entry(key).or_default();
                 state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
                 state.disable_keys.error = Some(error.to_string());
@@ -729,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn hardware_failure_keeps_snapshot_and_config_unchanged() {
+    fn hardware_failure_retires_snapshot_without_changing_config() {
         let inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
         let (mut state, mut receiver, key) =
             test_state(ConfigPersistence::MemoryOnly, &[inventory]);
@@ -740,15 +741,247 @@ mod tests {
             [StateEvent::DisableKeysChanged(key.clone())]
         );
 
-        assert_eq!(
+        assert!(state.disable_keys_reads.confirmed(&key).is_none());
+        assert!(!state.disable_keys_controls_enabled(&key));
+        assert!(
             state
-                .disable_keys_reads
-                .confirmed(&key)
-                .expect("old snapshot")
-                .disabled,
-            DisableKeysMask::EMPTY
+                .begin_disable_keys_write(DisableKeysMask::EMPTY)
+                .is_none()
         );
         assert_eq!(state.config.disabled_keys(key.as_str()), None);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn unconfirmed_disable_keys_write_requires_fresh_read_before_another_toggle(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
+        let (state, mut receiver, key) = test_state(ConfigPersistence::MemoryOnly, &[inventory]);
+        install_reads(state, cx);
+        let original = DisableKeysState {
+            supported: DisableKeysMask::CAPS_LOCK,
+            disabled: DisableKeysMask::EMPTY,
+        };
+        take_read(&mut receiver)
+            .reply
+            .send(Ok(original))
+            .expect("initial read");
+        cx.run_until_parked();
+        let context = cx.update(|cx| AppState::update(cx, |state, _| begin(state, &mut receiver)));
+
+        // An unsolicited read was already in flight when the write changed
+        // hardware. Neither this result nor the pre-write cache is authoritative.
+        cx.update(|cx| {
+            AppState::update(cx, |state, _| {
+                state.disable_keys_reads.revalidate_device_settings(&key);
+            });
+        });
+        cx.run_until_parked();
+        let stale_read = take_read(&mut receiver);
+        let hardware = DisableKeysState {
+            disabled: DisableKeysMask::CAPS_LOCK,
+            ..original
+        };
+        cx.update(|cx| {
+            AppState::update(cx, |state, _| {
+                let _ = state.apply_disable_keys_write_result(
+                    context,
+                    Err(WriteError::RequestTimedOut {
+                        operation: openlogi_core::hid::HidppOperation::WriteDisableKeys,
+                    }),
+                );
+                assert!(!state.disable_keys_controls_enabled(&key));
+                assert!(
+                    state
+                        .begin_disable_keys_write(DisableKeysMask::EMPTY)
+                        .is_none()
+                );
+                assert_eq!(state.config.disabled_keys(key.as_str()), None);
+            });
+        });
+        cx.run_until_parked();
+        let fresh_read = take_read(&mut receiver);
+        let _ = stale_read.reply.send(Ok(original));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(
+                !AppState::try_read(cx)
+                    .unwrap()
+                    .disable_keys_controls_enabled(&key)
+            );
+        });
+        fresh_read.reply.send(Ok(hardware)).expect("fresh read");
+        cx.run_until_parked();
+        cx.update(|cx| {
+            AppState::update(cx, |state, _| {
+                assert_eq!(
+                    state.disable_keys_load_for(&key),
+                    Load::Ready(std::sync::Arc::new(hardware))
+                );
+                assert!(state.disable_keys_controls_enabled(&key));
+                assert_eq!(
+                    state.config.disabled_keys(key.as_str()),
+                    None,
+                    "rereading never saves the request"
+                );
+                assert!(
+                    state
+                        .begin_disable_keys_write(DisableKeysMask::EMPTY)
+                        .is_some()
+                );
+            });
+        });
+        let Command::SetDisableKeys(SetDisableKeys { desired, .. }) =
+            receiver.try_recv().expect("undo")
+        else {
+            panic!("fresh state permits undo, not reload");
+        };
+        assert_eq!(desired, DisableKeysMask::EMPTY);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn same_route_reconnect_fences_an_outstanding_disable_keys_reconciliation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
+        let (state, mut receiver, key) = test_state(
+            ConfigPersistence::MemoryOnly,
+            std::slice::from_ref(&inventory),
+        );
+        install_reads(state, cx);
+        let original = DisableKeysState {
+            supported: DisableKeysMask::CAPS_LOCK,
+            disabled: DisableKeysMask::EMPTY,
+        };
+        take_read(&mut receiver)
+            .reply
+            .send(Ok(original))
+            .expect("initial read");
+        cx.run_until_parked();
+        let context = cx.update(|cx| AppState::update(cx, |state, _| begin(state, &mut receiver)));
+        cx.update(|cx| {
+            AppState::update(cx, |state, _| {
+                let _ = state.apply_disable_keys_write_result(
+                    context.clone(),
+                    Err(WriteError::AgentUnavailable),
+                );
+            });
+        });
+        cx.run_until_parked();
+        let old_read = take_read(&mut receiver);
+
+        inventory.paired[0].online = false;
+        let _ = refresh_inventory(&inventory, cx);
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(!state.disable_keys_controls_enabled(&key));
+            assert!(state.disable_keys_reads.generation(&key).is_none());
+        });
+        inventory.paired[0].online = true;
+        let _ = refresh_inventory(&inventory, cx);
+        cx.update(|cx| AppState::update(cx, AppState::load_current_disable_keys));
+        cx.run_until_parked();
+        let fresh_read = take_read(&mut receiver);
+        assert_eq!(
+            fresh_read.route, old_read.route,
+            "route identity is unchanged"
+        );
+        let _ = old_read.reply.send(Ok(original));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            AppState::update(cx, |state, _| {
+                assert_ne!(
+                    state.disable_keys_reads.generation(&key),
+                    Some(context.route_generation),
+                    "the new connection owns a new subscription generation"
+                );
+                assert!(!state.disable_keys_controls_enabled(&key));
+                assert!(
+                    state
+                        .begin_disable_keys_write(DisableKeysMask::EMPTY)
+                        .is_none()
+                );
+                assert_eq!(state.config.disabled_keys(key.as_str()), None);
+            });
+        });
+        let current = DisableKeysState {
+            disabled: DisableKeysMask::CAPS_LOCK,
+            ..original
+        };
+        fresh_read
+            .reply
+            .send(Ok(current))
+            .expect("current connection read");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert_eq!(
+                state.disable_keys_load_for(&key),
+                Load::Ready(std::sync::Arc::new(current))
+            );
+            assert!(state.disable_keys_controls_enabled(&key));
+            assert_eq!(state.config.disabled_keys(key.as_str()), None);
+        });
+        assert!(
+            receiver.try_recv().is_err(),
+            "neither completion writes or reloads config"
+        );
+    }
+
+    #[gpui::test]
+    fn failed_disable_keys_reconciliation_stays_blocked_until_retry_succeeds(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
+        let (state, mut receiver, key) = test_state(ConfigPersistence::MemoryOnly, &[inventory]);
+        install_reads(state, cx);
+        let hardware = DisableKeysState {
+            supported: DisableKeysMask::CAPS_LOCK,
+            disabled: DisableKeysMask::EMPTY,
+        };
+        take_read(&mut receiver)
+            .reply
+            .send(Ok(hardware))
+            .expect("initial read");
+        cx.run_until_parked();
+        let context = cx.update(|cx| AppState::update(cx, |state, _| begin(state, &mut receiver)));
+        cx.update(|cx| {
+            AppState::update(cx, |state, _| {
+                let _ = state
+                    .apply_disable_keys_write_result(context, Err(WriteError::AgentUnavailable));
+                assert!(!state.disable_keys_controls_enabled(&key));
+            });
+        });
+        cx.run_until_parked();
+        for _ in 0..3 {
+            take_read(&mut receiver)
+                .reply
+                .send(Err(WriteError::AgentUnavailable))
+                .expect("read failure");
+            cx.run_until_parked();
+        }
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(matches!(state.disable_keys_load_for(&key), Load::Failed(_)));
+            assert!(!state.disable_keys_controls_enabled(&key));
+            assert_eq!(state.config.disabled_keys(key.as_str()), None);
+        });
+        cx.update(|cx| AppState::retry_disable_keys_read(cx, key.clone()));
+        cx.run_until_parked();
+        take_read(&mut receiver)
+            .reply
+            .send(Ok(hardware))
+            .expect("retry read");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .disable_keys_controls_enabled(&key)
+            );
+        });
         assert!(receiver.try_recv().is_err());
     }
 
