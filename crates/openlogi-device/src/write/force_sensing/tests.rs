@@ -176,18 +176,19 @@ async fn the_force_the_panel_already_has_is_not_written_again() {
 }
 
 #[tokio::test]
-async fn a_failed_read_back_still_reports_the_acknowledged_write() {
+async fn a_failed_read_back_is_an_error() {
     let panel = Arc::new(Mutex::new(Panel {
         fails_read_back: true,
         ..Panel::mx_master_4()
     }));
     let shared = panel_channel(&panel).await;
 
-    let info = set_force_sensing_on(&shared, 6000)
-        .await
-        .expect("the write was acknowledged");
+    let result = set_force_sensing_on(&shared, 6000).await;
 
-    assert_eq!(info.current, 6000);
+    assert!(
+        result.is_err(),
+        "an unconfirmed force must not be reported as applied: {result:?}"
+    );
     assert_eq!(writes(&panel), [6000]);
 }
 

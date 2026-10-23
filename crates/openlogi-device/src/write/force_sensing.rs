@@ -60,9 +60,9 @@ pub async fn get_force_sensing_on(shared: &SharedChannel) -> Result<ForceSensing
 ///
 /// A device that does not let software change its force is refused with
 /// [`WriteError::ForceSensingUnchangeable`] and nothing is written. A force
-/// the device already has is not written again. The write was acknowledged
-/// when the read-back fails, so the written force is returned then, as the
-/// report-rate write does.
+/// the device already has is not written again. A failed read-back is
+/// returned as an error, so only a force the device confirmed is ever
+/// saved.
 pub async fn set_force_sensing_on(
     shared: &SharedChannel,
     force: u16,
@@ -107,26 +107,18 @@ pub async fn set_force_sensing_on(
                 classify_hidpp_error(error, operation, ForceSensingButtonFeature::ID)
             }
         })?;
-    match read_current(&button, operation).await {
-        Ok(actual) if actual == force => {
-            debug!(index, force, "press force written");
-            Ok(ForceSensingInfo {
-                current: actual,
-                ..before
-            })
-        }
-        Ok(actual) => Err(WriteError::ForceSensingNotApplied {
+    let actual = read_current(&button, operation).await?;
+    if actual != force {
+        return Err(WriteError::ForceSensingNotApplied {
             requested: force,
             actual,
-        }),
-        Err(error) => {
-            debug!(index, force, %error, "press force written (read-back skipped)");
-            Ok(ForceSensingInfo {
-                current: force,
-                ..before
-            })
-        }
+        });
     }
+    debug!(index, force, "press force written");
+    Ok(ForceSensingInfo {
+        current: actual,
+        ..before
+    })
 }
 
 async fn open_force_feature(
