@@ -538,6 +538,7 @@ impl Orchestrator {
             scroll_preferences: Arc::new(ScrollPreferences::new(
                 config.app_settings.smooth_scroll,
                 config.app_settings.vertical_scroll_sensitivity,
+                config.app_settings.smooth_scroll_tuning(),
             )),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans,
@@ -1566,6 +1567,7 @@ impl Orchestrator {
         self.shared.scroll_preferences.publish(
             self.config.app_settings.smooth_scroll,
             self.config.app_settings.vertical_scroll_sensitivity,
+            self.config.app_settings.smooth_scroll_tuning(),
         );
         openlogi_inject::set_desktop_switch(desktop_switch(&self.config.app_settings));
         self.observable
