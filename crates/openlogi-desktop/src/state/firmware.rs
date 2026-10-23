@@ -318,7 +318,9 @@ impl AppState {
         let refresh = matches!(
             &result,
             Err(FirmwareStartFailure::Refused(
-                FirmwareUpdateRefusal::NoUpdate | FirmwareUpdateRefusal::DeviceNotFound
+                FirmwareUpdateRefusal::NoUpdate
+                    | FirmwareUpdateRefusal::DeviceNotFound
+                    | FirmwareUpdateRefusal::Unreadable
             ))
         );
         start.result = result;
