@@ -3354,9 +3354,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-updater-core"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f58edfb69f1976c852dc7814d20ef542bee57769fb1476622acbd9fece0a3d4f"
+checksum = "26d2aff421b77aef4e40cb13205b67fd5b1282b493a62c10fd8ca2be59268484"
 dependencies = [
  "base64",
  "ed25519-compact",
@@ -3384,13 +3384,13 @@ dependencies = [
 
 [[package]]
 name = "gpui-updater-release"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa6905202eca20dd158e0b4d38362431f9b22fb460530f1ed01a172d4c87288a"
+checksum = "f462ce895f79c20663d0fa215aec8ef3b64dc96057bd9b3d48d8cff3b524c9f3"
 dependencies = [
  "base64",
  "ed25519-compact",
- "gpui-updater-core 0.4.3",
+ "gpui-updater-core 0.4.4",
  "minisign",
  "plist",
  "semver",

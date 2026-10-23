@@ -402,7 +402,7 @@ jobs:
           aws s3 cp dist/ "$release_prefix/" \
             --recursive \
             --exclude latest.json \
-            --exclude "*.sparkle-delta.json" \
+            --exclude "*.sparkle.delta.json" \
             --exclude "*.exe" \
             --exclude "*.exe.minisig" \
             --cache-control "public, max-age=31536000, immutable" \

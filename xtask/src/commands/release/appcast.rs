@@ -27,14 +27,10 @@ use crate::support::update_feed::{self, MacArch};
 /// process listing.
 const PRIVATE_KEY_ENV: &str = "OPENLOGI_SPARKLE_PRIVATE_ED_KEY";
 
-/// The extension of the deltas `release sparkle-deltas` writes; the rest of
-/// the name is `sparkle::delta::delta_file_name`'s.
-const DELTA_EXTENSION: &str = "sparkle-delta";
-
 #[derive(Parser)]
 pub(crate) struct Args {
     /// Directory holding the stapled `…-macos-<arch>.dmg` release artifacts
-    /// and the `<dmg>.from-<version>.sparkle-delta` files made from them.
+    /// and the `<dmg>.from-<version>.sparkle.delta` files made from them.
     #[arg(long, default_value = "dist")]
     dist: PathBuf,
     /// Directory the `appcast-<arch>.xml` feeds are written to. Keep it out
@@ -211,8 +207,7 @@ fn release_deltas(dist: &Path, dmg: &str, version: &str) -> Result<Vec<SparkleDe
         .with_context(|| format!("could not read artifact directory {}", dist.display()))?
     {
         let path = entry?.path();
-        let is_delta = path.extension().is_some_and(|ext| ext == DELTA_EXTENSION);
-        if is_delta
+        if sparkle::delta::is_delta_file(&path)
             && path
                 .file_name()
                 .and_then(|name| name.to_str())

@@ -431,8 +431,8 @@ jobs:
           # metadata next to each one in the publish job.
           path: |
             dist/*.dmg
-            dist/*.sparkle-delta
-            dist/*.sparkle-delta.json
+            dist/*.sparkle.delta
+            dist/*.sparkle.delta.json
           # 'warn' (the default) would let an empty-dist job stay green while
           # `results.macos` reports success and the publish gate ships nothing —
           # same reasoning as the windows zip upload.

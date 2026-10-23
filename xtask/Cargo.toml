@@ -20,7 +20,7 @@ comfy-table = { version = "8.0.0", default-features = false }
 fs-err = "3.3.0"
 # The release side of gpui-updater: the Sparkle appcast (with its deltas),
 # EdDSA signing, and verified Sparkle deltas made with Sparkle's BinaryDelta.
-gpui-updater-release = { version = "0.4.3", default-features = false }
+gpui-updater-release = { version = "0.4.4", default-features = false }
 # For `brand`: the bundle-identifier family stamped into every Info.plist and
 # advertised by the update manifest. The app reads the same constants at
 # runtime, so what packaging builds and what the app claims cannot diverge.

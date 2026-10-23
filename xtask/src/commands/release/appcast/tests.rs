@@ -71,10 +71,10 @@ fn every_architecture_needs_exactly_one_dmg() {
     assert!(missing.to_string().contains("no arm64 DMG"), "{missing}");
 
     touch(dist.path(), "OpenLogi-v0.8.14-macos-arm64.dmg", b"arm");
-    // A delta's name ends in `.sparkle-delta`, so it is never taken for a DMG.
+    // A delta's name ends in `.sparkle.delta`, so it is never taken for a DMG.
     touch(
         dist.path(),
-        "OpenLogi-v0.8.14-macos-arm64.dmg.from-0.8.13.sparkle-delta",
+        "OpenLogi-v0.8.14-macos-arm64.dmg.from-0.8.13.sparkle.delta",
         b"delta",
     );
     let dmgs = release_dmgs(dist.path()).unwrap();
@@ -265,7 +265,7 @@ fn release_dist() -> tempfile::TempDir {
 /// A delta in `dist` with the metadata `release sparkle-deltas` writes next
 /// to it (`SparkleDelta::write_metadata`'s format).
 fn delta(dist: &Path, dmg: &str, from: &str, to: &str, contents: &[u8]) -> String {
-    let name = format!("{dmg}.from-{from}.sparkle-delta");
+    let name = format!("{dmg}.from-{from}.sparkle.delta");
     touch(dist, &name, contents);
     let metadata = serde_json::json!({
         "path": name,
@@ -417,7 +417,7 @@ fn a_delta_that_does_not_fit_this_release_writes_no_feed() {
     let dist = release_dist();
     touch(
         dist.path(),
-        &format!("{arm}.from-0.8.14.sparkle-delta"),
+        &format!("{arm}.from-0.8.14.sparkle.delta"),
         b"x",
     );
     let error = write_appcasts(

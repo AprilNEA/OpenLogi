@@ -581,10 +581,15 @@ GH_TOKEN=… cargo run -p xtask -- release sparkle-deltas \
 
 It downloads each earlier DMG from the GitHub Release, applies the new delta
 to that app, and keeps the delta only when the result matches the new app file
-for file. It writes `<dmg>.from-<version>.sparkle-delta` and a `.json` next to
+for file. It writes `<dmg>.from-<version>.sparkle.delta` and a `.json` next to
 it; `release appcast` reads that metadata and signs the delta. A delta that
 cannot be made is a warning, and the feed still offers the full DMG. The deltas
 go to `/releases/<tag>/` with the DMGs; their metadata stays out of R2.
+
+Sparkle applies a download as a delta only when its file name ends in
+`.delta`. With any other name it cannot unarchive the file and downloads the
+full DMG instead. 0.8.16 and 0.8.17 shipped `.sparkle-delta` names, so no
+client used those deltas.
 
 ### Release versions
 
