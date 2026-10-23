@@ -15,7 +15,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, div, px, rgb,
+    Subscription, Window, div, rgb,
 };
 use gpui_component::{
     Disableable as _, Selectable as _, button::Button, h_flex, slider::Slider, v_flex,
@@ -32,7 +32,7 @@ use crate::state::{
     StateEvents,
 };
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::components::Toggle;
+use crate::ui::components::{Toggle, disabled_track};
 use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -453,11 +453,6 @@ fn mode_pill(label: SharedString, selected: bool, status: SmartShiftStatus) -> i
         .on_click(move |_event, _window, cx| {
             AppState::update_smartshift(cx, status);
         })
-}
-
-/// A greyed bar standing in for the slider when sensitivity isn't adjustable.
-fn disabled_track(pal: Palette) -> gpui::Div {
-    div().w_full().h(px(6.)).rounded_full().bg(pal.border)
 }
 
 /// Map a device-reported threshold into the slider's friendly band for display.

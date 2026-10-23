@@ -70,6 +70,12 @@ impl Queue {
         self.advanced.notify_waiters();
     }
 
+    /// Whether every ticket up to `number` has finished.
+    fn finished_through(&self, number: u64) -> bool {
+        let finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
+        finished.through >= number
+    }
+
     fn is_turn_of(&self, number: u64) -> bool {
         let finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
         finished.through + 1 >= number
@@ -95,6 +101,31 @@ impl WriteOrder {
         };
         let number = queue.latest.fetch_add(1, Ordering::AcqRel) + 1;
         WriteTicket { queue, number }
+    }
+
+    /// Wait until every write already requested for `route` has finished,
+    /// without numbering one: a read that must see what those writes leave
+    /// neither supersedes them nor waits for writes requested after it.
+    pub(crate) async fn settled(&self, route: &DeviceRoute) {
+        let queue = {
+            // As in `request`: the map only holds `Arc`s.
+            let queues = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            match queues.get(&route.to_string()) {
+                Some(queue) => Arc::clone(queue),
+                None => return,
+            }
+        };
+        let last = queue.latest.load(Ordering::Acquire);
+        loop {
+            let advanced = queue.advanced.notified();
+            let mut advanced = std::pin::pin!(advanced);
+            // Registered before the check, as in `WriteTicket::in_order`.
+            advanced.as_mut().enable();
+            if queue.finished_through(last) {
+                return;
+            }
+            advanced.await;
+        }
     }
 }
 
@@ -187,6 +218,27 @@ mod tests {
         assert!(!waiting.is_finished());
         drop(turn);
         assert!(waiting.await.expect("task joins"));
+    }
+
+    #[tokio::test]
+    async fn settling_waits_for_the_writes_requested_before_it() {
+        let queues = WriteOrder::default();
+        let first = queues.request(&route(1));
+        let second = queues.request(&route(1));
+        let settling = {
+            let queues = queues.clone();
+            tokio::spawn(async move { queues.settled(&route(1)).await })
+        };
+        tokio::task::yield_now().await;
+        let _later = queues.request(&route(1));
+        drop(second);
+        tokio::task::yield_now().await;
+        assert!(!settling.is_finished(), "the first write is still running");
+        drop(first);
+        settling
+            .await
+            .expect("settles without waiting for the later write");
+        queues.settled(&route(2)).await;
     }
 
     #[tokio::test]

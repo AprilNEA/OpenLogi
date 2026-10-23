@@ -292,6 +292,28 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_config_reload_result(result));
                 });
             }
+            update @ (ipc::GuiUpdate::DpiWritten { .. }
+            | ipc::GuiUpdate::FnLockWritten { .. }
+            | ipc::GuiUpdate::HapticsWritten { .. }
+            | ipc::GuiUpdate::ReportRateWritten { .. }
+            | ipc::GuiUpdate::PointerSpeedWritten { .. }
+            | ipc::GuiUpdate::BacklightWritten { .. }
+            | ipc::GuiUpdate::EasySwitchHostRenamed { .. }) => Self::on_setting_written(update, cx),
+            ipc::GuiUpdate::DeviceUnpaired {
+                route,
+                intent,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_unpaired(&route, intent, result));
+                });
+            }
+        }
+    }
+
+    /// The device's answer to a setting write the GUI asked for.
+    fn on_setting_written(update: ipc::GuiUpdate, cx: &AsyncApp) {
+        match update {
             ipc::GuiUpdate::DpiWritten {
                 key,
                 write,
@@ -307,6 +329,11 @@ impl Runtime {
             ipc::GuiUpdate::FnLockWritten { key, result } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| state.apply_fn_lock_written(&key, result));
+                });
+            }
+            ipc::GuiUpdate::HapticsWritten { key, write, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_haptics_written(&key, write, result));
                 });
             }
             ipc::GuiUpdate::ReportRateWritten { key, route, result } => {
@@ -345,14 +372,15 @@ impl Runtime {
                     });
                 });
             }
-            ipc::GuiUpdate::DeviceUnpaired {
-                route,
-                intent,
-                result,
-            } => {
-                cx.update(|cx| {
-                    AppState::apply(cx, |state| state.apply_unpaired(&route, intent, result));
-                });
+            ipc::GuiUpdate::Snapshot(_)
+            | ipc::GuiUpdate::Unreachable
+            | ipc::GuiUpdate::OutdatedGui
+            | ipc::GuiUpdate::LightCommandResult { .. }
+            | ipc::GuiUpdate::PairingUndeliverable(_)
+            | ipc::GuiUpdate::PairingCancelled
+            | ipc::GuiUpdate::ConfigReloadResult(_)
+            | ipc::GuiUpdate::DeviceUnpaired { .. } => {
+                unreachable!("on_agent_update routes only setting answers here")
             }
         }
     }

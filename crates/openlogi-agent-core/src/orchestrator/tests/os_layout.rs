@@ -151,7 +151,7 @@ fn a_reload_withdraws_queued_layout_writes_the_user_opted_out_of() {
     let mut config = Config::default();
     config.set_keep_os_layout("kbd", false);
     config.set_device_enabled("disabled", false);
-    orch.reload_config(config);
+    let _ = orch.reload_config(config);
     assert!(!kept.contains("kbd"));
     assert!(!kept.contains("disabled"));
     assert!(kept.contains("other"));

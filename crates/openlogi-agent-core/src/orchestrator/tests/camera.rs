@@ -116,7 +116,7 @@ fn config_reload_keeps_manual_override_for_parameter_edits() {
             color: None,
         },
     );
-    orch.reload_config(updated);
+    let _ = orch.reload_config(updated);
 
     assert_eq!(
         orch.effective_light_settings(key).map(|light| (
@@ -157,7 +157,7 @@ fn config_reload_clears_override_when_camera_mode_changes() {
             color: None,
         },
     );
-    orch.reload_config(updated);
+    let _ = orch.reload_config(updated);
 
     assert_eq!(orch.manual_light_overrides.get(key), None);
     assert_eq!(

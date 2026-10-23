@@ -578,13 +578,14 @@ impl Running {
             .action_ring_session(device_key)
         {
             let haptic_route = session.haptic_route.clone();
+            let haptic_engine = session.haptic_engine;
             let invocation = self.inputs.ring.begin(session);
             // Re-arm the firmware haptic engine before the first buzz: power
             // transitions can clear it, after which plays are accepted
             // without feedback. This still precedes every hover, because the
             // overlay can only hover once it has observed the invocation.
             self.ring_haptics
-                .begin_session(invocation.session_id, haptic_route);
+                .begin_session(invocation.session_id, haptic_route, haptic_engine);
         }
     }
 

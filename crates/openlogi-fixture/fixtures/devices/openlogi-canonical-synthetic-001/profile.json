@@ -212,6 +212,18 @@
       "backlight": {
         "support": "unsupported"
       },
+      "haptics": {
+        "support": "supported",
+        "value": {
+          "settings": {
+            "enabled": true,
+            "power_save": false,
+            "intensity": 60
+          },
+          "levels": "Any",
+          "default_intensity": 60
+        }
+      },
       "lighting": "unsupported",
       "light": "unsupported"
     },

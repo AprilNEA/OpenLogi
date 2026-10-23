@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use openlogi_core::hid::{
-    BacklightState, DpiInfo, EasySwitchHosts, FnLockState, PointerSpeed, ReportRateInfo,
-    SmartShiftStatus,
+    BacklightState, DpiInfo, EasySwitchHosts, FnLockState, HapticReading, PointerSpeed,
+    ReportRateInfo, SmartShiftStatus,
 };
 
 /// State projected from an swr-backed device query: unqueried, in flight,
@@ -40,6 +40,11 @@ pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
 /// read shows what the keyboard holds right now — it can differ from the
 /// persisted `fn_lock` after the user pressed Fn+Esc on the keyboard.
 pub type FnLockLoad = Load<Arc<FnLockState>>;
+
+/// Per-device haptic-feedback (`0x19b0`) load state. See [`Load`]. The read
+/// carries the engine, power-save and intensity settings the device holds
+/// now, the intensities it accepts, and its factory intensity.
+pub type HapticsLoad = Load<Arc<HapticReading>>;
 
 /// Per-mouse report-rate (`0x8060` / `0x8061`) load state. See [`Load`]. The
 /// read carries the rate the mouse reports at now and the rates it offers on

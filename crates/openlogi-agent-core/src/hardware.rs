@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
+use openlogi_core::hid::HapticSettings;
 use openlogi_hid::{
     CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, FollowerLink,
     FollowerRelease, HidppOperation, HostOs, HostSwitchError, LeadCookie, OsLayoutOutcome,
@@ -746,6 +747,50 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on:
     );
 }
 
+/// Spawn an OS thread that writes haptic `settings` to `op`'s device, unless
+/// a newer haptic write for the device was requested after `ticket`.
+/// Returns immediately; the outcome is logged.
+pub(crate) fn write_haptics_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    settings: HapticSettings,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "haptics write",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_haptics_on(&shared, settings)
+                        .await
+                        .map(Some)
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| log_haptics_write(index, settings, result),
+    );
+}
+
+fn log_haptics_write(
+    index: u8,
+    settings: HapticSettings,
+    result: Result<Result<Option<HapticSettings>, WriteError>, Elapsed>,
+) {
+    log_outcome(index, "haptics write", result, |applied| {
+        if let Some(applied) = applied {
+            debug!(index, ?applied, "haptic settings written");
+        } else {
+            debug!(index, ?settings, "haptics write superseded by a newer one");
+        }
+    });
+}
+
 /// Spawn an OS thread that writes `target` to `op`'s mouse, a `0x2205` speed
 /// via [`openlogi_hid::set_pointer_speed_on`] or a DPI via
 /// [`openlogi_hid::set_dpi_target_on`], unless a newer pointer-speed write
@@ -1107,6 +1152,10 @@ pub struct VolatileMouseSettings {
     pub report_rate: Option<ReportRate>,
     /// SmartShift mode and thresholds.
     pub smartshift: Option<SmartShiftStatus>,
+    /// Haptic engine, power save, and intensity. Written last, and skipped
+    /// when a newer haptic write was requested since the reapply was
+    /// scheduled.
+    pub haptics: Option<HapticSettings>,
 }
 
 impl VolatileMouseSettings {
@@ -1138,11 +1187,13 @@ impl VolatileMouseSettings {
 /// its write is numbered in `report_rate_order` now, as the reapply is
 /// scheduled: a pick the user makes before the reapply reaches the mouse is
 /// newer, and the reapply then leaves the rate to it rather than writing the
-/// configured one over it.
+/// configured one over it. The haptic settings are numbered the same way in
+/// `haptics_order`.
 pub(crate) fn reapply_mouse_volatile_in_background(
     op: &DeviceOp,
     settings: VolatileMouseSettings,
     report_rate_order: &WriteOrder,
+    haptics_order: &WriteOrder,
     capture_plans: &SharedCapturePlans,
 ) {
     match op.resolve() {
@@ -1157,10 +1208,12 @@ pub(crate) fn reapply_mouse_volatile_in_background(
         dpi,
         report_rate,
         smartshift,
+        haptics,
     } = settings;
     // Numbered only once the reapply will run: a ticket that never writes
     // would still supersede a pick already waiting for its turn.
     let report_rate = report_rate.map(|rate| (rate, report_rate_order.request(&op.route)));
+    let haptics = haptics.map(|settings| (settings, haptics_order.request(&op.route)));
     let access = op.access.clone();
     let route = op.route.clone();
     let index = route.device_index();
@@ -1226,6 +1279,21 @@ pub(crate) fn reapply_mouse_volatile_in_background(
                 log_outcome(index, "SmartShift write", result, |()| {
                     debug!(index, status = ?ss, "SmartShift config written");
                 });
+            }
+            if let Some((settings, ticket)) = haptics {
+                let result = within_turn(
+                    &ticket,
+                    &turn,
+                    || async {
+                        let shared = op.resolve()?;
+                        openlogi_hid::set_haptics_on(&shared, settings)
+                            .await
+                            .map(Some)
+                    },
+                    || async { Ok(None) },
+                )
+                .await;
+                log_haptics_write(index, settings, result);
             }
         });
     });
@@ -1666,6 +1734,7 @@ mod tests {
                 ..VolatileMouseSettings::default()
             },
             &rates,
+            &WriteOrder::default(),
             &no_capture_plans(),
         );
 
@@ -1949,6 +2018,7 @@ mod tests {
                 ..VolatileMouseSettings::default()
             },
             &WriteOrder::default(),
+            &WriteOrder::default(),
             &no_capture_plans(),
         );
         wait_until_a_worker_holds_the_receiver(&receiver_access).await;
@@ -2038,6 +2108,7 @@ mod tests {
                     wheel: Some(change),
                     ..VolatileMouseSettings::default()
                 },
+                &WriteOrder::default(),
                 &WriteOrder::default(),
                 &plans,
             ),

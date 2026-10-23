@@ -265,6 +265,232 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// The Pointer tab carries a Haptics card only for a device that reports
+/// haptic feedback.
+#[gpui::test]
+fn the_pointer_tab_shows_haptics_only_with_haptic_feedback(cx: &mut gpui::TestAppContext) {
+    for haptic_feedback in [true, false] {
+        let shown = pointer_tab_shows(cx, "haptics-panel", |inventory| {
+            inventory.paired[0]
+                .capabilities
+                .as_mut()
+                .expect("the fixture mouse has capabilities")
+                .haptic_feedback = haptic_feedback;
+        });
+        assert_eq!(
+            shown, haptic_feedback,
+            "haptic_feedback = {haptic_feedback}"
+        );
+    }
+}
+
+/// Open the known mouse's Pointer tab with `adjust` applied to its
+/// inventory, and say whether `selector` is drawn.
+fn pointer_tab_shows(
+    cx: &mut gpui::TestAppContext,
+    selector: &'static str,
+    adjust: impl FnOnce(&mut openlogi_core::device::DeviceInventory),
+) -> bool {
+    pointer_tab_bounds(cx, 1280., &[selector], adjust)[0].is_some()
+}
+
+/// Open the known mouse's Pointer tab in a window `width` px wide with
+/// `adjust` applied to its inventory, and return the bounds of `selectors`.
+fn pointer_tab_bounds(
+    cx: &mut gpui::TestAppContext,
+    width: f32,
+    selectors: &[&'static str],
+    adjust: impl FnOnce(&mut openlogi_core::device::DeviceInventory),
+) -> Vec<Option<gpui::Bounds<gpui::Pixels>>> {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::{AppContext as _, px, size};
+    use gpui_component::Root;
+
+    use super::AppView;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::tests::direct_inventory;
+    use crate::state::{AgentLink, AppState, Sources};
+    use openlogi_ipc::{AgentStatus, InventoryHealth, PROTOCOL_VERSION};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        adjust(&mut inventory);
+        let config = openlogi_core::config::Config::ephemeral();
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources {
+                inventories: &[inventory],
+                ..Sources::in_memory(config, &resolver, commands)
+            });
+            // Past the connecting frame and the accessibility gate.
+            let _ = state.set_agent_link(AgentLink::Ready(AgentStatus {
+                accessibility_granted: true,
+                hook_installed: true,
+                launch_at_login: false,
+                inventory: InventoryHealth::Ready,
+                protocol_version: PROTOCOL_VERSION,
+                agent_version: "pointer-tab-test".to_string(),
+                input_monitoring_granted: true,
+                hid_open_failures: false,
+                secure_input: openlogi_ipc::SecureInput::Off,
+                virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
+            }));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let hosted = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&hosted);
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        *slot.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let app_view = hosted
+        .borrow_mut()
+        .take()
+        .expect("the window hosts the app view");
+    cx.simulate_resize(size(px(width), px(853.)));
+    cx.update(|window, cx| {
+        let record_key = AppState::try_read(cx)
+            .expect("state is installed")
+            .devices()[0]
+            .record_key()
+            .clone();
+        app_view.update(cx, |view, cx| {
+            view.open_device(record_key, cx);
+            view.active_tab = DetailTab::Pointer;
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    });
+    selectors
+        .iter()
+        .map(|selector| cx.debug_bounds(selector))
+        .collect()
+}
+
+/// The Pointer tab's grid wraps to one column at the 720 px window minimum,
+/// where two cards do not fit beside the navigation rail, and every card
+/// stays inside the window. At the default 1280 × 853 window Haptics stacks
+/// under the DPI card beside SmartShift, both columns end on one line, and
+/// Scrolling takes a full row below.
+#[gpui::test]
+fn the_pointer_grid_fits_the_window(cx: &mut gpui::TestAppContext) {
+    let narrow = pointer_cards(cx, 720.);
+    let (content, cards) = narrow.split_first().expect("content first");
+    assert!(
+        content.right() <= gpui::px(720.),
+        "the tab content {content:?} stays inside a 720 px window"
+    );
+    for card in cards {
+        assert!(
+            card.left() >= content.left() && card.right() <= content.right(),
+            "card {card:?} stays inside the tab content {content:?}"
+        );
+        assert_eq!(card.left(), content.left(), "one column at 720 px");
+    }
+
+    let wide = pointer_cards(cx, 1280.);
+    let (content, cards) = wide.split_first().expect("content first");
+    let [tuning, smartshift, scrolling, haptics] = cards else {
+        panic!("four cards");
+    };
+    assert_eq!(tuning.top(), smartshift.top(), "two columns at 1280 px");
+    assert!(smartshift.right() <= content.right());
+    assert_eq!(haptics.left(), tuning.left(), "Haptics stacks under DPI");
+    assert!(haptics.top() > tuning.bottom());
+    assert_eq!(
+        haptics.bottom(),
+        smartshift.bottom(),
+        "both columns end on one line"
+    );
+    assert!(scrolling.top() > haptics.bottom(), "Scrolling comes last");
+    assert_eq!(
+        scrolling.size.width, content.size.width,
+        "Scrolling takes a full row"
+    );
+}
+
+/// The wheel-resolution group fits the full-row Scrolling card at the
+/// default 1280 px window in every language, so a longer translation fails
+/// here instead of overflowing the card.
+#[gpui::test]
+fn the_wheel_resolution_group_fits_the_scrolling_card(cx: &mut gpui::TestAppContext) {
+    use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+
+    struct NaturalWidth;
+
+    impl gpui::Render for NaturalWidth {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            gpui::div().flex().items_start().child(
+                gpui::div()
+                    .debug_selector(|| "wheel-resolution-natural".into())
+                    .flex_none()
+                    .child(super::detail::wheel_resolution_control(None, true)),
+            )
+        }
+    }
+
+    let wide = pointer_cards(cx, 1280.);
+    let scrolling = wide[3];
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    cx.update(gpui_component::init);
+    for (locale, _) in openlogi_core::locale::SUPPORTED {
+        rust_i18n::set_locale(locale);
+        let (_view, vcx) = cx.add_window_view(|_, _| NaturalWidth);
+        vcx.simulate_resize(gpui::size(gpui::px(1600.), gpui::px(600.)));
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let group = vcx
+            .debug_bounds("wheel-resolution-natural")
+            .expect("the group renders");
+        let pad = vcx.update(|window, _| {
+            crate::ui::theme::CARD_PAD
+                .rems()
+                .to_pixels(window.rem_size())
+        });
+        // The card's padding on both sides, and its 1 px border.
+        let room = scrolling.size.width - pad * 2. - gpui::px(2.);
+        assert!(
+            group.size.width <= room,
+            "{locale}: the wheel-resolution group needs {:?}, the Scrolling card holds {room:?}",
+            group.size.width
+        );
+    }
+    rust_i18n::set_locale("en");
+}
+
+/// The tab content and the four Pointer cards, for a haptic mouse in a
+/// window `width` px wide.
+fn pointer_cards(cx: &mut gpui::TestAppContext, width: f32) -> Vec<gpui::Bounds<gpui::Pixels>> {
+    const SELECTORS: [&str; 5] = [
+        "detail-tab-content",
+        "pointer-card-tuning",
+        "pointer-card-smartshift",
+        "pointer-card-scrolling",
+        "pointer-card-haptics",
+    ];
+    pointer_tab_bounds(cx, width, &SELECTORS, |inventory| {
+        inventory.paired[0]
+            .capabilities
+            .as_mut()
+            .expect("the fixture mouse has capabilities")
+            .haptic_feedback = true;
+    })
+    .into_iter()
+    .map(|bounds| bounds.expect("the Pointer tab draws every card"))
+    .collect()
+}
+
 /// "Charging" replaces the bogus percentage only when charging *and* the
 /// reading is still 0% or absent with no level (cold start, no cached
 /// pre-charge value). A non-zero charge, a real 0% while discharging, or a

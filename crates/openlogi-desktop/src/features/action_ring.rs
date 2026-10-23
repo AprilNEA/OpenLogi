@@ -10,8 +10,8 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
-    v_flex,
+    Disableable as _, Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
+    tooltip::Tooltip, v_flex,
 };
 use openlogi_core::binding::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
@@ -23,6 +23,7 @@ use self::editor::{PowerUserInputs, action_library};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::state::{AppState, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
+use crate::ui::components::{Toggle, toggle_row};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
@@ -43,8 +44,14 @@ pub struct ActionRingPanel {
 impl ActionRingPanel {
     /// Create the editor and repaint it after any config/device change.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs =
-            AppState::repaint_on(cx, |event| matches!(event, StateEvent::BindingsChanged(_)));
+        // Haptic settings decide whether the ring's own haptics toggle is
+        // live, so their changes repaint it too.
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::BindingsChanged(_) | StateEvent::HapticsChanged(_)
+            )
+        });
         Self {
             focus_handle: cx.focus_handle(),
             selected_slot: ActionRingSlot::Top,
@@ -99,6 +106,8 @@ impl Render for ActionRingPanel {
         let pal = theme::palette(cx);
         let (ring, layout) = action_ring_editor_state(cx);
         let haptics_supported = current_device_supports_haptics(cx);
+        let engine_silenced =
+            AppState::try_read(cx).is_some_and(AppState::current_haptics_silenced);
         let application_input = editor_input(
             &mut self.application_input,
             tr!("action_ring.application_folder_path_or_url"),
@@ -153,7 +162,7 @@ impl Render for ActionRingPanel {
             )
             .child(enabled_row(ring.enabled, pal))
             .when(haptics_supported, |panel| {
-                panel.child(haptics_row(ring.haptics, pal))
+                panel.child(haptics_row(ring.haptics, engine_silenced, pal))
             })
     }
 }
@@ -182,26 +191,22 @@ fn enabled_row(enabled: bool, pal: Palette) -> impl IntoElement {
 }
 
 /// The haptic-feedback toggle row, shown only when the device supports it.
-fn haptics_row(haptics: bool, pal: Palette) -> impl IntoElement {
-    h_flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .child(
-            v_flex()
-                .child(div().text_body().child(tr!("action_ring.haptic_feedback")))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("action_ring.action_ring_haptic_description")),
-                ),
-        )
-        .child(toggle_button(
-            "ring-haptics",
-            haptics,
-            AppState::commit_action_ring_haptics,
-        ))
+/// While the user has the device's haptic engine silenced the ring plays
+/// nothing either way, so the switch is disabled and says it is unavailable.
+fn haptics_row(haptics: bool, engine_silenced: bool, pal: Palette) -> impl IntoElement {
+    toggle_row(
+        "ring-haptics-row",
+        pal,
+        tr!("action_ring.haptic_feedback"),
+        tr!("action_ring.action_ring_haptic_description"),
+        Toggle::new("ring-haptics")
+            .selected(haptics)
+            .disabled(engine_silenced)
+            .label(engine_silenced.then(|| tr!("common.unavailable")))
+            .on_change(|enabled, _window, cx| {
+                AppState::apply(cx, |state| state.commit_action_ring_haptics(*enabled));
+            }),
+    )
 }
 
 fn action_ring_editor_state(cx: &Context<ActionRingPanel>) -> (ActionRingConfig, ActionRingLayout) {

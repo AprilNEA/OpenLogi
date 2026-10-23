@@ -174,6 +174,7 @@ impl AppState {
         for key in &reconnected {
             self.pointer_speed_reconnected(key);
         }
+        self.haptics_reconnected(&reconnected);
         let present: HashSet<_> = self
             .devices
             .records

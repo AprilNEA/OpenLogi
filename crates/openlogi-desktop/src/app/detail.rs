@@ -30,6 +30,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::haptics::HapticsPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
@@ -96,6 +97,7 @@ pub(super) struct DetailPanels<'a> {
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
+    pub haptics_panel: &'a gpui::Entity<HapticsPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
@@ -125,9 +127,13 @@ pub(super) fn detail_content(
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
-        DetailTab::Pointer => {
-            pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
-        }
+        DetailTab::Pointer => pointer_tab(
+            panels.dpi_panel,
+            panels.smartshift_panel,
+            panels.haptics_panel,
+            cx,
+        )
+        .into_any_element(),
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
@@ -272,13 +278,25 @@ fn tab_body(
     content: impl IntoElement,
 ) -> gpui_component::scroll::Scrollable<gpui::Div> {
     v_flex()
+        .debug_selector(|| "detail-tab-body".into())
         .flex_1()
         .w_full()
+        // Beside the navigation rail the body must narrow to what is left of
+        // the window; without this, a flex item never shrinks below its
+        // content's widest line, and the pointer grid kept two columns past
+        // the window edge instead of wrapping.
+        .min_w_0()
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
         .p(SCREEN_PAD.rems())
-        .child(div().w_full().max_w(width.rems()).child(content))
+        .child(
+            div()
+                .debug_selector(|| "detail-tab-content".into())
+                .w_full()
+                .max_w(width.rems())
+                .child(content),
+        )
 }
 
 /// Keys tab: the function-row remapper for a keyboard.
@@ -304,57 +322,93 @@ fn action_ring_tab(
         .child(tab_body(ContentWidth::Medium, panel.clone()))
 }
 
-/// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
-/// scroll-wheel preferences, each in a titled card. Use a responsive two-column
-/// grid that still fits the window's 720 px minimum width, so these short
-/// controls don't force a vertical scroll.
+/// Pointer tab: the DPI panel, the SmartShift wheel controls, haptic
+/// feedback on a device that has it, and the scroll-wheel preferences, each
+/// in a titled card. The cards sit in two columns that wrap to one at the
+/// window's 720 px minimum: the short DPI card stacks with Haptics beside the
+/// tall SmartShift card, so neither column leaves a hole. Scrolling takes a
+/// full row below: its wheel-resolution control is wider than a half card in
+/// many languages.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
+    haptics_panel: &gpui::Entity<HapticsPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
+    let haptics = AppState::try_read(cx).is_some_and(AppState::current_haptics_supported);
     tab_body(
         ContentWidth::Large,
-        h_flex()
+        v_flex()
             .w_full()
-            .items_stretch()
             .gap_4()
-            .flex_wrap()
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("device.pointer_tuning"),
-                    Icon::empty().path("action-icons/gauge.svg"),
-                    dpi_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("pointer.smartshift"),
-                    Icon::empty().path("action-icons/refresh-cw.svg"),
-                    smartshift_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
+            .child(
+                h_flex()
+                    .debug_selector(|| "pointer-grid".into())
+                    .w_full()
+                    .items_stretch()
+                    .gap_4()
+                    .flex_wrap()
+                    .child(
+                        pointer_grid_column()
+                            .child(pointer_grid_card(
+                                "pointer-card-tuning",
+                                PanelCard::new(
+                                    tr!("device.pointer_tuning"),
+                                    Icon::empty().path("action-icons/gauge.svg"),
+                                    dpi_panel.clone().into_any_element(),
+                                )
+                                .fill(),
+                            ))
+                            .when(haptics, |column| {
+                                column.child(pointer_grid_card(
+                                    "pointer-card-haptics",
+                                    PanelCard::new(
+                                        tr!("pointer.haptic_feedback"),
+                                        Icon::empty().path("action-icons/bell.svg"),
+                                        haptics_panel.clone().into_any_element(),
+                                    )
+                                    .fill(),
+                                ))
+                            }),
+                    )
+                    .child(
+                        pointer_grid_column().child(pointer_grid_card(
+                            "pointer-card-smartshift",
+                            PanelCard::new(
+                                tr!("pointer.smartshift"),
+                                Icon::empty().path("action-icons/refresh-cw.svg"),
+                                smartshift_panel.clone().into_any_element(),
+                            )
+                            .fill(),
+                        )),
+                    ),
+            )
             .child(
                 div()
-                    .min_w(POINTER_CARD_MIN_W)
-                    .flex_1()
+                    .debug_selector(|| "pointer-card-scrolling".into())
+                    .w_full()
                     .child(scrolling_card(pal, cx)),
             ),
     )
 }
 
-fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
-    // At 100%, two cards plus one 16 px gap fit exactly inside the 720 px
-    // window minimum after this tab's 20 px side insets, while still leaving a
-    // usable slider: 332·2 + 16 + 20·2 = 720. In rems, the whole relationship
-    // scales together.
+/// One column of the pointer grid. A column never narrows below a usable
+/// slider, `POINTER_CARD_MIN_W`; the grid wraps to one column instead. Two
+/// columns need the tab body to hold two cards, the 16 px gap, and its
+/// `SCREEN_PAD` insets, beside the `DETAIL_RAIL_W` rail: at 100%,
+/// 168 + 20·2 + 332·2 + 16 = 888 px of window. The 720 px window minimum
+/// therefore shows one column.
+fn pointer_grid_column() -> gpui::Div {
+    v_flex().min_w(POINTER_CARD_MIN_W).flex_1().gap_4()
+}
+
+/// A card in a pointer grid column. Cards share out the height the taller
+/// column sets, so both columns end on the same line.
+fn pointer_grid_card(selector: &'static str, card: impl IntoElement) -> impl IntoElement {
     div()
-        .min_w(POINTER_CARD_MIN_W)
-        .flex_1()
-        .h_full()
+        .debug_selector(move || selector.into())
+        .flex_auto()
         .child(card)
 }
 
@@ -426,35 +480,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         },
     });
     let smooth_wheel = AppState::try_read(cx).is_some_and(AppState::current_smooth_wheel);
-    let inversion_description = inversion_description(inversion_supported, inversion_is_software);
-    let inversion_row = h_flex()
-        .justify_between()
-        .items_center()
-        .gap_4()
-        .child(
-            v_flex()
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(pal.text_primary)
-                        .child(tr!("pointer.invert_scroll_direction")),
-                )
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(inversion_description),
-                ),
-        )
-        .child(
-            Toggle::new("invert-scroll-toggle")
-                .selected(inverted)
-                .disabled(!inversion_supported)
-                .label((!inversion_supported).then(|| tr!("common.unavailable")))
-                .on_change(|inverted, _window, cx| {
-                    AppState::apply(cx, |state| state.commit_invert_scroll(*inverted));
-                }),
-        );
+    let inversion_row = inversion_row(pal, inverted, inversion_supported, inversion_is_software);
     let resolution_description = match hires {
         HiresWheel::Here => match resolution {
             None => tr!("pointer.wheel_resolution_device_default_description"),
@@ -504,6 +530,29 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
 /// control's reasons for being unavailable, since both need `0x2121` on this
 /// link. A smooth wheel that is already on stays switchable, so a setting made
 /// on another link can always be turned off from here.
+/// The scroll-inversion row. Built on `toggle_row`, so its caption wraps
+/// instead of pushing the switch out of a half-width card.
+fn inversion_row(
+    pal: Palette,
+    inverted: bool,
+    supported: bool,
+    is_software: bool,
+) -> impl IntoElement {
+    toggle_row(
+        "invert-scroll-row",
+        pal,
+        tr!("pointer.invert_scroll_direction"),
+        inversion_description(supported, is_software),
+        Toggle::new("invert-scroll-toggle")
+            .selected(inverted)
+            .disabled(!supported)
+            .label((!supported).then(|| tr!("common.unavailable")))
+            .on_change(|inverted, _window, cx| {
+                AppState::apply(cx, |state| state.commit_invert_scroll(*inverted));
+            }),
+    )
+}
+
 fn smooth_wheel_row(pal: Palette, smooth_wheel: bool, hires: HiresWheel) -> impl IntoElement {
     let available = hires == HiresWheel::Here || smooth_wheel;
     toggle_row(
@@ -531,7 +580,10 @@ fn smooth_wheel_caption(hires: HiresWheel) -> gpui::SharedString {
     }
 }
 
-fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> impl IntoElement {
+pub(super) fn wheel_resolution_control(
+    selected: Option<ScrollResolution>,
+    enabled: bool,
+) -> impl IntoElement {
     let values = [
         None,
         Some(ScrollResolution::Low),
@@ -1003,7 +1055,8 @@ mod tests {
     use openlogi_core::config::Config;
 
     use super::{
-        HiresWheel, device_enabled_row, elided_key, smooth_wheel_caption, smooth_wheel_row,
+        HiresWheel, device_enabled_row, elided_key, inversion_row, smooth_wheel_caption,
+        smooth_wheel_row,
     };
     use crate::services::assets::AssetResolver;
     use crate::services::i18n::LOCALE_LOCK;
@@ -1044,6 +1097,40 @@ mod tests {
             row.size.width <= px(360.),
             "row {row:?} must fit its 360px host"
         );
+        assert!(
+            switch.left() >= row.left() && switch.right() <= row.right(),
+            "switch {switch:?} must sit inside its row {row:?}"
+        );
+    }
+
+    /// Hosts the scroll-inversion row at a card-like width.
+    struct InversionRowHost;
+
+    impl Render for InversionRowHost {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(360.))
+                .child(inversion_row(theme::palette(cx), true, true, true))
+        }
+    }
+
+    #[gpui::test]
+    fn the_inversion_switch_stays_inside_a_half_width_card(cx: &mut TestAppContext) {
+        // Greek carries the longest caption; it must wrap rather than push the
+        // switch out of the card, as it did beside the Haptics card.
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("el");
+        cx.update(gpui_component::init);
+        let (_view, cx) = cx.add_window_view(|_, _| InversionRowHost);
+        cx.simulate_resize(size(px(800.), px(600.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx
+            .debug_bounds("invert-scroll-row")
+            .expect("the row renders");
+        let switch = cx
+            .debug_bounds("invert-scroll-row-control")
+            .expect("the row renders its switch");
+        assert!(row.size.width <= px(360.), "row {row:?} must fit its host");
         assert!(
             switch.left() >= row.left() && switch.right() <= row.right(),
             "switch {switch:?} must sit inside its row {row:?}"

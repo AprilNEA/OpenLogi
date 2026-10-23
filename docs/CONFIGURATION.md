@@ -202,6 +202,18 @@ Common device fields are:
   3×), the range Logi Options+ writes. The agent writes it when the mouse
   connects; absent leaves the mouse's own speed. The desktop app sets it with
   the Pointer speed slider, where 50 % is 1×
+- `haptics` for devices with haptic feedback (HID++ `0x19b0`, for example the
+  MX Master 4): `enabled` turns the haptic engine on or off, `power_save` turns
+  its battery saving on or off, and `intensity` is a percentage from `0` to
+  `100` (a device that offers only 25, 50, 75 and 100 takes only those). The
+  desktop app sets all three in the Pointer tab's Haptics card; releasing the
+  intensity slider plays one short pulse at the new strength. The agent writes
+  them when the device connects and when a save changes them; absent leaves
+  the device's own settings. They also govern the Actions Ring's feedback:
+  with the engine off or the intensity at `0`, the ring plays nothing, and its
+  haptic feedback switch shows as unavailable. With nothing saved, the ring
+  turns the engine on for a session if it is off and turns it back off when
+  the session ends; with the engine saved on, it stays on
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or

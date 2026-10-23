@@ -42,6 +42,7 @@ use file::{backup_existing_config, config_backup_path};
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
+pub use per_device::RingHaptics;
 pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{

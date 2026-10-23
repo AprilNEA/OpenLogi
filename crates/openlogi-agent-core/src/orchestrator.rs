@@ -18,13 +18,15 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
-    AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
+    AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, RingHaptics,
+    canonical_device_key,
 };
 use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
     LightState, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
+use openlogi_core::hid::{HapticReading, HapticSettings};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, HidppOperation, HostOs,
@@ -41,9 +43,10 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
+use crate::haptic_choices::HapticChoices;
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
-    show_precision_led, write_pointer_speed_in_background,
+    WriteTicket, show_precision_led, write_pointer_speed_in_background,
 };
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
@@ -67,11 +70,11 @@ use devices::reapply_targets;
 use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, assignments_changed,
-    build_devices, changed_follower_cookies, config_keeps_os_layout, configured_dpi,
-    configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
-    keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
-    plan_reapply, reconnect_follower_cookies, saved_speed, settings_moved, stable_id,
-    wheel_inverted,
+    build_devices, changed_follower_cookies, changed_haptics, config_keeps_os_layout,
+    configured_dpi, configured_haptics, configured_report_rate, configured_wheel_mode,
+    host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts,
+    os_layout_appeared, pick_current, plan_reapply, reconnect_follower_cookies, saved_speed,
+    settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -164,6 +167,11 @@ pub struct SharedHandles {
     /// Precision mode of the mice whose speed `0x2205` scales, and the order
     /// of every path's pointer-speed writes.
     pointer_speeds: Arc<PointerSpeeds>,
+    /// Orders every path's haptic-settings writes per device.
+    haptics_order: WriteOrder,
+    /// The user's haptic-engine choices, counted before each of the user's
+    /// haptics writes is numbered in [`Self::haptics_order`].
+    haptic_choices: HapticChoices,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
@@ -270,6 +278,46 @@ impl SharedHandles {
                 |c| async move { openlogi_hid::set_report_rate_on(&c, rate).await },
                 |c| async move { openlogi_hid::get_report_rate_info_on(&c).await },
             )
+            .await
+    }
+
+    /// Write haptic `settings` to the device at `route` and return what it
+    /// reports after the write. Each write sets every setting, so only the
+    /// newest one matters: when a newer haptic write for the device is
+    /// requested before this one gets its turn, this one reads the device
+    /// instead. Waiting for the turn does not count against the write's
+    /// deadline.
+    pub async fn set_haptics(
+        &self,
+        route: &DeviceRoute,
+        settings: HapticSettings,
+    ) -> Result<HapticSettings, WriteError> {
+        let ticket = self.user_haptics_write(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteHaptics,
+                &ticket,
+                |c| async move { openlogi_hid::set_haptics_on(&c, settings).await },
+                |c| async move {
+                    openlogi_hid::read_haptics_on(&c)
+                        .await
+                        .map(|reading| reading.settings)
+                },
+            )
+            .await
+    }
+
+    /// Read the haptic settings of the device at `route` once every haptics
+    /// write already requested for it has finished. A reconnect numbers its
+    /// write as it is scheduled, so a read the settings app asks for on
+    /// seeing the reconnect shows what that write left, not what the device
+    /// held before it.
+    pub async fn read_haptics(&self, route: &DeviceRoute) -> Result<HapticReading, WriteError> {
+        self.haptics_order.settled(route).await;
+        self.device(route)
+            .run(HidppOperation::ReadHaptics, |c| async move {
+                openlogi_hid::read_haptics_on(&c).await
+            })
             .await
     }
 
@@ -399,6 +447,31 @@ impl SharedHandles {
         }
     }
 
+    /// [`Self::set_haptics`] without waiting, for the config-reload path;
+    /// the outcome is logged.
+    fn write_haptics_in_background(&self, route: &DeviceRoute, settings: HapticSettings) {
+        crate::hardware::write_haptics_in_background(
+            self.device(route),
+            self.user_haptics_write(route),
+            settings,
+        );
+    }
+
+    /// Number a write of the user's haptic settings to `route`, after
+    /// counting the user's choice: an Actions Ring arming that checks
+    /// [`Self::haptic_choices`] inside its transport turn then either sees
+    /// the choice or runs before this write, which lands last.
+    fn user_haptics_write(&self, route: &DeviceRoute) -> WriteTicket {
+        self.haptic_choices.chose(route);
+        self.haptics_order.request(route)
+    }
+
+    /// The user's haptic-engine choices, for the Actions Ring's arming.
+    #[must_use]
+    pub fn haptic_choices(&self) -> HapticChoices {
+        self.haptic_choices.clone()
+    }
+
     /// [`Self::set_fn_lock`] without waiting, for the config-reload and
     /// reconnect paths; the outcome is logged.
     fn write_fn_lock_in_background(&self, route: &DeviceRoute, fn_lock: bool) {
@@ -408,6 +481,14 @@ impl SharedHandles {
             fn_lock,
         );
     }
+}
+
+/// What a config reload left for its caller.
+struct Reloaded {
+    /// One write per online light whose settings changed.
+    lights: Vec<LightWrite>,
+    /// The routes of the devices whose saved haptic settings changed.
+    haptics_chosen: Vec<DeviceRoute>,
 }
 
 /// Owns the config + device selection and keeps [`SharedHandles`] in sync.
@@ -553,6 +634,8 @@ impl Orchestrator {
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
             pointer_speeds: Arc::default(),
+            haptics_order: WriteOrder::default(),
+            haptic_choices: HapticChoices::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
@@ -1168,12 +1251,14 @@ impl Orchestrator {
             smartshift: device
                 .and_then(|d| d.effective_smartshift(&route_key))
                 .map(openlogi_hid::SmartShiftStatus::from),
+            haptics: configured_haptics(&self.config, dev),
         };
         if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
                 settings,
                 &self.shared.report_rate_order,
+                &self.shared.haptics_order,
                 &self.shared.capture_plans,
             );
         }
@@ -1392,8 +1477,9 @@ impl Orchestrator {
         if layout.slots.is_empty() {
             return None;
         }
+        let haptic_engine = self.config.ring_haptic_engine(key);
         let haptic_route = (device.online
-            && ring.haptics
+            && haptic_engine != RingHaptics::Off
             && device
                 .capabilities
                 .is_some_and(|capabilities| capabilities.haptic_feedback))
@@ -1402,6 +1488,7 @@ impl Orchestrator {
         Some(ActionRingSessionSpec {
             device_key: key.to_owned(),
             haptic_route,
+            haptic_engine,
             layout,
             language: self.config.app_settings.language.clone(),
         })
@@ -1516,27 +1603,39 @@ impl Orchestrator {
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     /// The file is one the agent did not see saved, as at startup or after a
     /// hand edit (see [`ConfigSource::Loaded`]).
-    pub fn reload_config(&mut self, config: Config) {
-        self.reload_from(config, ConfigSource::Loaded);
+    ///
+    /// Returns the routes of the devices whose saved haptic settings the
+    /// reload changed: the user chose their engine, so an Actions Ring
+    /// session must not hand it back.
+    #[must_use]
+    pub fn reload_config(&mut self, config: Config) -> Vec<DeviceRoute> {
+        self.reload_from(config, ConfigSource::Loaded)
     }
 
     /// [`Self::reload_config`] after the GUI saved `saved`, with `config`
     /// read from a file at revision `read`. A file still at the revision the
     /// GUI wrote is its save; another was edited since, and loads as
     /// [`Self::reload_config`] loads it (see [`ConfigSource::of_saved`]).
+    /// Returns what [`Self::reload_config`] returns.
+    #[must_use]
     pub fn reload_saved_config(
         &mut self,
         config: Config,
         read: ConfigRevision,
         saved: &SavedConfig,
-    ) {
-        self.reload_from(config, ConfigSource::of_saved(read, saved));
+    ) -> Vec<DeviceRoute> {
+        self.reload_from(config, ConfigSource::of_saved(read, saved))
     }
 
     /// Replace the config from `source` and write each light it changed.
-    fn reload_from(&mut self, config: Config, source: ConfigSource<'_>) {
-        let writes = self.replace_config_from(config, source);
-        self.write_lights(writes);
+    /// Returns the routes whose saved haptic settings changed.
+    fn reload_from(&mut self, config: Config, source: ConfigSource<'_>) -> Vec<DeviceRoute> {
+        let Reloaded {
+            lights,
+            haptics_chosen,
+        } = self.replace_config_from(config, source);
+        self.write_lights(lights);
+        haptics_chosen
     }
 
     fn write_lights(&self, writes: Vec<LightWrite>) {
@@ -1554,15 +1653,17 @@ impl Orchestrator {
     #[cfg(test)]
     fn replace_config(&mut self, config: Config) -> Vec<LightWrite> {
         self.replace_config_from(config, ConfigSource::Loaded)
+            .lights
     }
 
     /// [`Self::replace_config`] for [`Self::reload_saved_config`].
     #[cfg(test)]
     fn replace_saved_config(&mut self, config: Config, chosen: &[ChosenLight]) -> Vec<LightWrite> {
         self.replace_config_from(config, ConfigSource::Saved { chosen })
+            .lights
     }
 
-    fn replace_config_from(&mut self, config: Config, source: ConfigSource<'_>) -> Vec<LightWrite> {
+    fn replace_config_from(&mut self, config: Config, source: ConfigSource<'_>) -> Reloaded {
         let previous_lights = self.effective_online_lights();
         let previous = std::mem::replace(&mut self.config, config);
         self.forget_saved_light_changes(&previous, source);
@@ -1591,6 +1692,14 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        let haptics_chosen = match source {
+            // The GUI writes the haptics it saves itself, in the same
+            // request that answers with the device's echo. A write from here
+            // would be numbered after it and supersede it, so the GUI would
+            // read the device back before its own settings landed.
+            ConfigSource::Saved { .. } => self.chosen_haptics(&previous),
+            ConfigSource::Loaded => self.apply_changed_haptics(&previous),
+        };
         self.apply_changed_pointer_speeds(&previous);
         self.apply_enabled_os_layouts(&previous);
         let writes = changed_follower_cookies(
@@ -1600,7 +1709,10 @@ impl Orchestrator {
             &mut self.follower_cookies(),
         );
         self.write_follower_cookies(writes);
-        self.changed_lights(&previous_lights)
+        Reloaded {
+            lights: self.changed_lights(&previous_lights),
+            haptics_chosen,
+        }
     }
 
     /// Put each keyboard whose "keep OS layout" just took effect — turned on,
@@ -1635,6 +1747,28 @@ impl Orchestrator {
                 self.shared.write_fn_lock_in_background(&route, fn_lock);
             }
         }
+    }
+
+    /// Push haptic settings a loaded file changed to the online devices they
+    /// belong to, as [`Self::apply_changed_fn_locks`] does: an unrelated edit
+    /// writes nothing. A save of the settings app writes nothing here: the
+    /// app writes the device itself through [`SharedHandles::set_haptics`].
+    /// Returns what [`Self::chosen_haptics`] returns.
+    fn apply_changed_haptics(&self, previous: &Config) -> Vec<DeviceRoute> {
+        for (dev, settings) in changed_haptics(previous, &self.config, &self.devices) {
+            if let Some(route) = dev.route.as_ref().filter(|_| dev.online) {
+                self.shared.write_haptics_in_background(route, settings);
+            }
+        }
+        self.chosen_haptics(previous)
+    }
+
+    /// The route of every device whose saved haptic settings changed since
+    /// `previous`, online or not: the user chose its engine.
+    fn chosen_haptics(&self, previous: &Config) -> Vec<DeviceRoute> {
+        changed_haptics(previous, &self.config, &self.devices)
+            .filter_map(|(dev, _)| dev.route.clone())
+            .collect()
     }
 
     /// End precision mode on every mouse whose speed, DPI or button

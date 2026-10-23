@@ -8,8 +8,9 @@ use hidpp::{
         CreatableFeature,
         device_information::DeviceInformationFeature,
         haptic_feedback::{
-            HapticConfigFlags, HapticConfiguration, HapticFeedbackFeature, HapticStatus,
-            HapticWaveform, SupportedWaveforms,
+            HapticCapabilities, HapticConfigFlags, HapticConfiguration, HapticFeedbackFeature,
+            HapticIntensity, HapticLevels, HapticPlayReply, HapticStatus, HapticWaveform,
+            SupportedWaveforms, WaveformRunningStatus,
         },
     },
 };
@@ -276,15 +277,15 @@ pub enum HapticRestoreOutcome {
 /// the [`HapticRestore`] the caller owes the device when this call turned the
 /// flag on, and `None` when it wrote nothing.
 ///
-/// Nothing else in the stack ever asserts this state — devices historically
-/// inherited it from Logi Options+, and some power transitions clear the
-/// enable flag, after which `play` calls are accepted but produce no physical
-/// feedback. The repair sets that flag only: intensity, power save, and
-/// unnamed bits are the user's (Options+ writes them) and are written back as
-/// read. A zero intensity is the user's "off" and is left alone. The enable
-/// flag is device-wide, so a clear flag may also be the user's choice in
-/// another app: hand the returned restore to [`restore_haptics_on`] when the
-/// session that needed the engine is over.
+/// Some power transitions clear the enable flag, after which `play` calls
+/// are accepted but produce no physical feedback. The repair sets that flag
+/// only: intensity, power save, and unnamed bits are the user's (written by
+/// [`set_haptics_on`] or by Logi Options+) and are written back as read. A
+/// zero intensity is the user's "off" and is left alone. When the user set
+/// the engine on in OpenLogi, the caller keeps the enable and drops the
+/// returned restore. Otherwise the flag may be the user's choice in another
+/// app, as it is device-wide: hand the returned restore to
+/// [`restore_haptics_on`] when the session that needed the engine is over.
 ///
 /// Callers arm once per Actions Ring session, before the first hover —
 /// which is why this deliberately bypasses the cached location and
@@ -413,6 +414,7 @@ pub async fn play_haptic_on(
     if let Some(haptics) = cached_feature(channel, index) {
         haptics.check(waveform)?;
         if haptics.feature.play(waveform).await.is_ok() {
+            // The reply is advisory: the agent's plays are fire-and-forget.
             return Ok(());
         }
         clear_cached_location();
@@ -420,27 +422,263 @@ pub async fn play_haptic_on(
     let haptics = open_haptics(channel, index).await?;
     store_cached_location(channel, index, &haptics);
     haptics.check(waveform)?;
-    haptics.feature.play(waveform).await.map_err(|error| {
-        clear_cached_location();
-        classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
-    })
+    haptics
+        .feature
+        .play(waveform)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            clear_cached_location();
+            classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })
 }
 
-/// Play a waveform immediately by route. A waveform the device does not
-/// advertise fails with [`WriteError::HapticWaveformUnsupported`], and a play
-/// while the device reports a non-zero haptic status with
-/// [`WriteError::HapticsUnavailable`], before anything is sent.
+/// Play a waveform immediately by route, returning the device's reply. A
+/// waveform the device does not advertise fails with
+/// [`WriteError::HapticWaveformUnsupported`], and a play while the device
+/// reports a non-zero haptic status with [`WriteError::HapticsUnavailable`],
+/// before anything is sent.
 pub async fn play_haptic(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
     waveform: HapticWaveform,
-) -> Result<(), WriteError> {
+) -> Result<HapticPlayReply, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
         let haptics = open_haptics(&channel, index).await?;
         haptics.check(waveform)?;
         haptics.feature.play(waveform).await.map_err(|error| {
             classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })
+    })
+    .await
+}
+
+/// Everything a device reports about its haptic feature, read in one open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HapticReport {
+    /// The function-0 capabilities.
+    pub capabilities: HapticCapabilities,
+    /// The function-1 configuration.
+    pub configuration: HapticConfiguration,
+    /// The function-3 haptic status.
+    pub status: HapticStatus,
+}
+
+/// Read the haptic capabilities, configuration, and status by route.
+///
+/// Unlike the advisory status read before a play, every read here must
+/// answer: a diagnostic that hid an unanswered function would report a
+/// device it never heard from.
+pub async fn read_haptics(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<HapticReport, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let classify = |error| {
+            classify_hidpp_error(
+                error,
+                HidppOperation::ReadHaptics,
+                HapticFeedbackFeature::ID,
+            )
+        };
+        let mut device = open_device(&channel, index).await?;
+        let (feature, _) = resolve_feature(&mut device).await?;
+        Ok(HapticReport {
+            capabilities: feature.get_capabilities().await.map_err(classify)?,
+            configuration: feature.get_configuration().await.map_err(classify)?,
+            status: feature.get_haptic_status().await.map_err(classify)?,
+        })
+    })
+    .await
+}
+
+/// A haptic configuration edit. `None` keeps what the device reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HapticChange {
+    /// Turn the firmware haptic engine on or off.
+    pub enabled: Option<bool>,
+    /// Turn battery-saving haptics on or off.
+    pub power_save: Option<bool>,
+    /// The new intensity percentage.
+    pub intensity: Option<HapticIntensity>,
+}
+
+/// Apply `change` to the device's haptic configuration by route, returning
+/// the configuration the device reports after the write.
+///
+/// The configuration is read first and edited, so unnamed flag bits are
+/// written back as read. Logi Options+ instead rebuilds the flag byte from
+/// its two settings, dropping any other bit. A new intensity outside the
+/// levels the capabilities accept fails with
+/// [`WriteError::HapticIntensityUnsupported`] before anything is written;
+/// the intensity the device already holds is always written back.
+pub async fn set_haptics(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    change: HapticChange,
+) -> Result<HapticConfiguration, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        change_haptics_on_channel(&channel, index, change).await
+    })
+    .await
+}
+
+async fn change_haptics_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    change: HapticChange,
+) -> Result<HapticConfiguration, WriteError> {
+    let classify = |error| {
+        classify_hidpp_error(
+            error,
+            HidppOperation::WriteHaptics,
+            HapticFeedbackFeature::ID,
+        )
+    };
+    let mut device = open_device(channel, index).await?;
+    let (feature, _) = resolve_feature(&mut device).await?;
+    let config = feature.get_configuration().await.map_err(classify)?;
+    // Only a new intensity is checked against the level set: writing back
+    // the one the device holds guesses nothing onto the wire, so the
+    // switches still work on a device whose levels OpenLogi cannot list.
+    if let Some(intensity) = change.intensity.filter(|i| *i != config.intensity) {
+        let capabilities = feature.get_capabilities().await.map_err(classify)?;
+        if !capabilities.levels.accepts(intensity) {
+            return Err(WriteError::HapticIntensityUnsupported {
+                requested: intensity.get(),
+            });
+        }
+    }
+    let mut flags = config.flags;
+    if let Some(enabled) = change.enabled {
+        flags.set(HapticConfigFlags::ENABLED, enabled);
+    }
+    if let Some(power_save) = change.power_save {
+        flags.set(HapticConfigFlags::POWER_SAVE, power_save);
+    }
+    feature
+        .set_configuration(flags, change.intensity.unwrap_or(config.intensity))
+        .await
+        .map_err(classify)
+}
+
+/// Read the haptic settings of the device on an open channel, which
+/// intensities it accepts, and its factory intensity.
+pub async fn read_haptics_on(
+    shared: &SharedChannel,
+) -> Result<openlogi_core::hid::HapticReading, WriteError> {
+    let classify = |error| {
+        classify_hidpp_error(
+            error,
+            HidppOperation::ReadHaptics,
+            HapticFeedbackFeature::ID,
+        )
+    };
+    let mut device = open_device(shared.channel(), shared.device_index()).await?;
+    let (feature, _) = resolve_feature(&mut device).await?;
+    let capabilities = feature.get_capabilities().await.map_err(classify)?;
+    let configuration = feature.get_configuration().await.map_err(classify)?;
+    Ok(openlogi_core::hid::HapticReading {
+        settings: core_settings(configuration),
+        levels: core_levels(capabilities.levels),
+        default_intensity: capabilities.default_intensity,
+    })
+}
+
+/// Write `settings` to the device on an open channel and return the
+/// settings it reports after the write.
+///
+/// Unnamed flag bits are written back as read (see [`set_haptics`]), and an
+/// intensity the device's levels reject fails with
+/// [`WriteError::HapticIntensityUnsupported`] before anything is written.
+/// The plays' cached location is dropped: it holds the haptic status read
+/// before this write, and the next play must read the one after it.
+pub async fn set_haptics_on(
+    shared: &SharedChannel,
+    settings: openlogi_core::hid::HapticSettings,
+) -> Result<openlogi_core::hid::HapticSettings, WriteError> {
+    let applied =
+        change_haptics_on_channel(shared.channel(), shared.device_index(), settings.into()).await;
+    clear_cached_location();
+    applied.map(core_settings)
+}
+
+impl From<openlogi_core::hid::HapticSettings> for HapticChange {
+    fn from(settings: openlogi_core::hid::HapticSettings) -> Self {
+        Self {
+            enabled: Some(settings.enabled),
+            power_save: Some(settings.power_save),
+            intensity: Some(hidpp_intensity(settings.intensity)),
+        }
+    }
+}
+
+/// The wire intensity for a settings intensity. Both types hold exactly
+/// `0..=100` (`core_and_hidpp_intensity_bounds_agree`).
+fn hidpp_intensity(intensity: openlogi_core::hid::HapticIntensity) -> HapticIntensity {
+    let Some(intensity) = HapticIntensity::new(intensity.into_inner()) else {
+        unreachable!("a settings intensity is always a wire intensity");
+    };
+    intensity
+}
+
+/// The settings a device configuration holds. Unnamed flag bits and the
+/// level nibbles are not settings and are dropped.
+fn core_settings(configuration: HapticConfiguration) -> openlogi_core::hid::HapticSettings {
+    let Ok(intensity) = openlogi_core::hid::HapticIntensity::try_new(configuration.intensity.get())
+    else {
+        unreachable!("a wire intensity is always a settings intensity");
+    };
+    openlogi_core::hid::HapticSettings {
+        enabled: configuration.flags.contains(HapticConfigFlags::ENABLED),
+        power_save: configuration.flags.contains(HapticConfigFlags::POWER_SAVE),
+        intensity,
+    }
+}
+
+fn core_levels(levels: HapticLevels) -> openlogi_core::hid::HapticLevels {
+    match levels {
+        HapticLevels::Any => openlogi_core::hid::HapticLevels::Any,
+        HapticLevels::Quarters => openlogi_core::hid::HapticLevels::Quarters,
+        HapticLevels::Other(raw) => openlogi_core::hid::HapticLevels::Other(raw),
+    }
+}
+
+/// Stop the waveform playing now by route. Returns what was running.
+pub async fn stop_haptic(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<WaveformRunningStatus, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = open_device(&channel, index).await?;
+        let (feature, _) = resolve_feature(&mut device).await?;
+        feature.stop().await.map_err(|error| {
+            classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })
+    })
+    .await
+}
+
+/// Read which waveform is playing by route: the raw waveform ID and its
+/// running status.
+pub async fn get_playing_haptic(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<(u8, WaveformRunningStatus), WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = open_device(&channel, index).await?;
+        let (feature, _) = resolve_feature(&mut device).await?;
+        feature.get_playing().await.map_err(|error| {
+            classify_hidpp_error(
+                error,
+                HidppOperation::ReadHaptics,
+                HapticFeedbackFeature::ID,
+            )
         })
     })
     .await
@@ -518,6 +756,19 @@ mod tests {
         status: StatusReply,
         unit: Option<Unit>,
     ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
+        haptics_with_levels(initial, firmware, waveforms, status, unit, 0)
+    }
+
+    /// [`haptics_identified`] whose capabilities report `levels` as their
+    /// level-set byte (byte 2).
+    fn haptics_with_levels(
+        initial: [u8; 3],
+        firmware: fn(&mut [u8; 3]),
+        waveforms: u32,
+        status: StatusReply,
+        unit: Option<Unit>,
+        levels: u8,
+    ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
         let state = StdMutex::new(initial);
         ScriptedRawHidChannel::with_dynamic_responder(move |request| {
             if request.len() < 7 || request[0] != 0x10 {
@@ -559,9 +810,10 @@ mod tests {
                 return Some(response);
             }
             if (request[2], request[3] >> 4) == (HAPTIC_INDEX, 0x00) {
-                // getCapabilities: a long reply, the mask in bytes 4..8.
+                // getCapabilities: a long reply, the level set in byte 2
+                // and the mask in bytes 4..8.
                 let mut response = vec![0x11, request[1], request[2], request[3]];
-                response.extend_from_slice(&[0; 4]);
+                response.extend_from_slice(&[0, 0, levels, 0]);
                 response.extend_from_slice(&waveforms.to_be_bytes());
                 response.resize(20, 0);
                 return Some(response);
@@ -1126,5 +1378,185 @@ mod tests {
         );
         assert_eq!(plays(&handle), vec![4, 4]);
         clear_cached_location();
+    }
+
+    #[tokio::test]
+    async fn a_haptic_change_edits_only_the_fields_it_names() {
+        // Engine on with an unnamed bit, intensity 45, as a device reports it.
+        let (raw, handle) = stateful_haptics([0x81, 45, 0], |_| {}, RING_WAVEFORMS);
+        let shared = shared_channel(raw).await;
+        let applied = change_haptics_on_channel(
+            shared.channel(),
+            shared.device_index(),
+            HapticChange {
+                power_save: Some(true),
+                intensity: HapticIntensity::new(63),
+                ..HapticChange::default()
+            },
+        )
+        .await
+        .expect("the scripted device accepts the write");
+        assert_eq!(config_writes(&handle), vec![[0x83, 63, 0]]);
+        assert_eq!(applied.flags.bits(), 0x83, "the unnamed bit survives");
+        assert_eq!(applied.intensity.get(), 63);
+
+        let applied = change_haptics_on_channel(
+            shared.channel(),
+            shared.device_index(),
+            HapticChange {
+                enabled: Some(false),
+                ..HapticChange::default()
+            },
+        )
+        .await
+        .expect("the scripted device accepts the write");
+        assert_eq!(config_writes(&handle).last(), Some(&[0x82, 63, 0]));
+        assert_eq!(applied.intensity.get(), 63, "intensity is kept as read");
+    }
+
+    /// A device whose level set OpenLogi cannot list still takes the
+    /// settings' switches: the intensity it holds is written back as read,
+    /// which guesses nothing onto the wire.
+    #[tokio::test]
+    async fn the_switches_work_on_a_device_whose_levels_are_unlisted() {
+        let _slot = CACHE_SLOT.lock().await;
+        let (raw, handle) = haptics_with_levels(
+            [0x01, 45, 0],
+            |_| {},
+            RING_WAVEFORMS,
+            StatusReply::Status(0),
+            None,
+            7,
+        );
+        let shared = shared_channel(raw).await;
+        let applied = set_haptics_on(&shared, user_settings(false, true, 45))
+            .await
+            .expect("keeping the held intensity is not a level the device refuses");
+        assert_eq!(applied, user_settings(false, true, 45));
+        assert_eq!(config_writes(&handle), vec![[0x02, 45, 0]]);
+    }
+
+    #[tokio::test]
+    async fn an_intensity_the_level_set_refuses_is_never_written() {
+        for (levels, requested) in [(1, 63), (7, 50)] {
+            let (raw, handle) = haptics_with_levels(
+                [0x01, 45, 0],
+                |_| {},
+                RING_WAVEFORMS,
+                StatusReply::Status(0),
+                None,
+                levels,
+            );
+            let shared = shared_channel(raw).await;
+            let result = change_haptics_on_channel(
+                shared.channel(),
+                shared.device_index(),
+                HapticChange {
+                    intensity: HapticIntensity::new(requested),
+                    ..HapticChange::default()
+                },
+            )
+            .await;
+            assert_matches!(
+                result,
+                Err(WriteError::HapticIntensityUnsupported { requested: r }) if r == requested,
+                "level set {levels} refuses {requested}"
+            );
+            assert!(
+                config_writes(&handle).is_empty(),
+                "level set {levels}: nothing is written"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quarter_step_intensity_is_written() {
+        let (raw, handle) = haptics_with_levels(
+            [0x01, 50, 0],
+            |_| {},
+            RING_WAVEFORMS,
+            StatusReply::Status(0),
+            None,
+            1,
+        );
+        let shared = shared_channel(raw).await;
+        let applied = change_haptics_on_channel(
+            shared.channel(),
+            shared.device_index(),
+            HapticChange {
+                intensity: HapticIntensity::new(75),
+                ..HapticChange::default()
+            },
+        )
+        .await
+        .expect("75 is a quarter step");
+        assert_eq!(config_writes(&handle), vec![[0x01, 75, 0]]);
+        assert_eq!(applied.intensity.get(), 75);
+    }
+
+    fn user_settings(
+        enabled: bool,
+        power_save: bool,
+        intensity: u8,
+    ) -> openlogi_core::hid::HapticSettings {
+        openlogi_core::hid::HapticSettings {
+            enabled,
+            power_save,
+            intensity: openlogi_core::hid::HapticIntensity::try_new(intensity).expect("in range"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_haptics_on_writes_settings_and_keeps_unnamed_bits() {
+        let _slot = CACHE_SLOT.lock().await;
+        // Engine off, power save on, an unnamed bit set: the user turns the
+        // engine on at 63 with power save off.
+        let (raw, handle) = stateful_haptics([0x82, 60, 0x34], |_| {}, RING_WAVEFORMS);
+        let shared = shared_channel(raw).await;
+        // A play caches the location, with the status read before the write.
+        play_haptic_on(&shared, HapticWaveform::SubtleCollision)
+            .await
+            .expect("the scripted device plays");
+        let wanted = user_settings(true, false, 63);
+        let applied = set_haptics_on(&shared, wanted)
+            .await
+            .expect("the scripted device accepts the write");
+        assert_eq!(applied, wanted);
+        assert_eq!(config_writes(&handle), vec![[0x81, 63, 0]]);
+        assert!(
+            cached_feature(shared.channel(), shared.device_index()).is_none(),
+            "the write drops the cached status, so the next play reads it again"
+        );
+        let reading = read_haptics_on(&shared).await.expect("the device answers");
+        assert_eq!(reading.settings, wanted);
+        assert_eq!(reading.levels, openlogi_core::hid::HapticLevels::Any);
+    }
+
+    #[tokio::test]
+    async fn set_haptics_on_answers_with_what_the_device_kept() {
+        let _slot = CACHE_SLOT.lock().await;
+        // The firmware clears power save whatever is written.
+        let (raw, _handle) =
+            stateful_haptics([0x01, 60, 0], |state| state[0] &= !0x02, RING_WAVEFORMS);
+        let shared = shared_channel(raw).await;
+        let applied = set_haptics_on(&shared, user_settings(true, true, 40))
+            .await
+            .expect("the scripted device accepts the write");
+        assert_eq!(applied, user_settings(true, false, 40));
+    }
+
+    #[test]
+    fn core_and_hidpp_intensity_bounds_agree() {
+        for raw in 0..=u8::MAX {
+            let core = openlogi_core::hid::HapticIntensity::try_new(raw).ok();
+            assert_eq!(
+                core.is_some(),
+                HapticIntensity::new(raw).is_some(),
+                "{raw} is valid in one and not the other"
+            );
+            if let Some(core) = core {
+                assert_eq!(hidpp_intensity(core).get(), raw);
+            }
+        }
     }
 }

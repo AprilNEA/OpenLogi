@@ -19,8 +19,8 @@ use std::future::Future;
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus,
-    WriteError,
+    HapticReading, HapticSettings, LightCommand, PointerSpeed, ReceiverSelector, ReportRate,
+    ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
@@ -175,6 +175,42 @@ impl Request for SetFnLock {
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         let _ = updates.send(GuiUpdate::FnLockWritten {
             key: self.key,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Write a device's haptic settings now, answered as
+/// [`GuiUpdate::HapticsWritten`] with the settings the device echoes back.
+/// With `preview`, the device then plays one short pulse at them.
+pub struct SetHaptics {
+    pub route: DeviceRoute,
+    pub settings: HapticSettings,
+    pub preview: bool,
+    pub key: DeviceKey,
+    /// The number the state gave this write, returned with the answer so it
+    /// is matched to the write it answers.
+    pub write: u64,
+}
+
+impl Request for SetHaptics {
+    type Answer = Result<HapticSettings, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_haptics(
+                context::current(),
+                self.route.clone(),
+                self.settings,
+                self.preview,
+            )
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::HapticsWritten {
+            key: self.key,
+            write: self.write,
             result: or_unavailable(outcome),
         });
     }
@@ -460,6 +496,26 @@ impl Request for ReadPointerSpeed {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_pointer_speed(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a device's haptic settings; the answer goes back over `reply`.
+pub struct ReadHaptics {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<HapticReading, WriteError>>,
+}
+
+impl Request for ReadHaptics {
+    type Answer = Result<HapticReading, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_haptics(context::current(), self.route.clone())
             .await
     }
 
@@ -779,6 +835,7 @@ commands! {
     SetFnLock,
     SetReportRate,
     SetPointerSpeed,
+    SetHaptics,
     SetBacklight,
     RenameEasySwitchHost,
     ReadDpi,
@@ -786,6 +843,7 @@ commands! {
     ReadFnLock,
     ReadReportRate,
     ReadPointerSpeed,
+    ReadHaptics,
     ReadBacklight,
     ReadEasySwitchHosts,
     LoadConfig,

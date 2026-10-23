@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, EasySwitchHosts,
-    FnLockState, PointerSpeed, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    FnLockState, HapticReading, PointerSpeed, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -201,6 +201,12 @@ pub struct ProfileDeviceSettings {
     /// profiles recorded before it existed keep loading.
     #[serde(default = "ProfileSetting::unsupported")]
     pub pointer_speed: ProfileSetting<PointerSpeed>,
+    /// Haptic-feedback (`0x19b0`) read state. Defaults to unsupported so
+    /// profiles recorded before it existed keep loading; unlike the families
+    /// above, it is not checked against the inventory's capability, so those
+    /// profiles stay valid for a device that advertises haptics.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub haptics: ProfileSetting<HapticReading>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -646,6 +652,7 @@ fn validate_setting_support(
             || settings.report_rate.supports_feature()
             || settings.easy_switch.supports_feature()
             || settings.pointer_speed.supports_feature()
+            || settings.haptics.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(

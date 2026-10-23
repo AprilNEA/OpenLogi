@@ -746,3 +746,187 @@ fn keyboard_spec_never_diverts_reserved_controls() {
         BTreeMap::from([(0x010a, ButtonId::control(0x010a))])
     );
 }
+
+fn haptic_device(key: &str, slot: u8, online: bool) -> AgentDevice {
+    AgentDevice {
+        capabilities: Some(Capabilities {
+            haptic_feedback: true,
+            ..Capabilities::default()
+        }),
+        ..dev(key, slot, online)
+    }
+}
+
+fn haptics(enabled: bool, intensity: u8) -> openlogi_core::hid::HapticSettings {
+    openlogi_core::hid::HapticSettings {
+        enabled,
+        power_save: false,
+        intensity: openlogi_core::hid::HapticIntensity::try_new(intensity).expect("in range"),
+    }
+}
+
+#[test]
+fn reapply_carries_haptics_only_to_a_device_with_the_feature() {
+    let mut config = Config::default();
+    let mut device = haptic_device("a", 1, true);
+    // Nothing saved: the device keeps its own settings.
+    assert_eq!(configured_haptics(&config, &device), None);
+    config.set_haptics("a", haptics(true, 40));
+    assert_eq!(
+        configured_haptics(&config, &device),
+        Some(haptics(true, 40))
+    );
+    device.capabilities = Some(Capabilities::default());
+    assert_eq!(configured_haptics(&config, &device), None);
+}
+
+#[test]
+fn reload_writes_only_changed_haptics() {
+    let mut previous = Config::default();
+    previous.set_haptics("a", haptics(true, 60));
+    previous.set_haptics("b", haptics(true, 60));
+    let mut config = previous.clone();
+    config.set_haptics("a", haptics(false, 60));
+    config.set_haptics("c", haptics(true, 25));
+    config.set_haptics("d", haptics(true, 25));
+    let devices = [
+        haptic_device("a", 1, true),
+        haptic_device("b", 2, true),
+        haptic_device("c", 3, true),
+        // Offline: written when it reconnects, but chosen all the same.
+        haptic_device("d", 4, false),
+    ];
+    let written: Vec<_> = changed_haptics(&previous, &config, &devices)
+        .map(|(dev, settings)| (dev.config_key.as_str(), settings))
+        .collect();
+    assert_eq!(
+        written,
+        [
+            ("a", haptics(false, 60)),
+            ("c", haptics(true, 25)),
+            ("d", haptics(true, 25))
+        ],
+        "an unchanged device is left alone"
+    );
+}
+
+#[test]
+fn ring_session_has_no_haptic_route_when_engine_off() {
+    use openlogi_core::config::RingHaptics;
+
+    let mut config = Config::default();
+    config.set_haptics("a", haptics(false, 60));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![haptic_device("a", 1, true)];
+    let spec = orch.action_ring_session(Some("a")).expect("the ring opens");
+    assert_eq!(spec.haptic_route, None, "a silenced engine plays nothing");
+    assert_eq!(spec.haptic_engine, RingHaptics::Off);
+
+    let mut config = Config::default();
+    config.set_haptics("a", haptics(true, 60));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![haptic_device("a", 1, true)];
+    let spec = orch.action_ring_session(Some("a")).expect("the ring opens");
+    assert_eq!(spec.haptic_route, orch.devices[0].route);
+    assert_eq!(spec.haptic_engine, RingHaptics::Owned);
+}
+
+/// A reload names the devices whose saved haptics changed, so the agent can
+/// tell the Actions Ring the user chose their engine; an unrelated reload
+/// names none.
+#[test]
+fn reload_names_the_devices_whose_haptics_the_user_chose() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![haptic_device("a", 1, false)];
+    let mut config = Config::default();
+    config.set_haptics("a", haptics(true, 60));
+    assert_eq!(
+        orch.reload_config(config.clone()),
+        [orch.devices[0].route.clone().expect("a Bolt route")]
+    );
+    assert!(orch.reload_config(config).is_empty());
+}
+
+/// The settings app saves haptics and writes them itself. Its write is
+/// numbered before the save's reload reaches the agent, so a write from the
+/// reload would supersede it and the app would read the device back before
+/// its own settings landed. A save of the app therefore writes nothing, and
+/// the app's write stays the newest; a hand edit still writes.
+#[tokio::test]
+async fn a_gui_save_leaves_the_haptics_write_to_the_gui() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![haptic_device("a", 1, true)];
+    let route = orch.devices[0].route.clone().expect("a Bolt route");
+    let mut config = Config::default();
+    config.set_haptics("a", haptics(true, 60));
+
+    let gui_write = orch.shared.haptics_order.request(&route);
+    assert!(
+        orch.replace_saved_config(config.clone(), &[]).is_empty(),
+        "the save changes no light"
+    );
+    assert!(
+        gui_write
+            .write_or(|| async { true }, || async { false })
+            .await,
+        "the app's write is still the newest after its own save"
+    );
+    drop(gui_write);
+
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![haptic_device("a", 1, true)];
+    let gui_write = orch.shared.haptics_order.request(&route);
+    assert_eq!(
+        orch.reload_config(config),
+        [route],
+        "the hand edit chose the mouse's engine"
+    );
+    assert!(
+        !gui_write
+            .write_or(|| async { true }, || async { false })
+            .await,
+        "a hand edit writes the device and supersedes the older write"
+    );
+}
+
+/// A reconnect numbers its haptics write as it schedules it. A read asked
+/// after that waits for the write, so the settings app is not shown what
+/// the device held before it.
+#[tokio::test]
+async fn a_haptics_read_waits_for_the_writes_before_it() {
+    let orch = orchestrator(Config::default());
+    let route = haptic_device("a", 1, true).route.expect("a Bolt route");
+    let reapply = orch.shared.haptics_order.request(&route);
+    let shared = orch.shared();
+    let read_route = route.clone();
+    let read = tokio::spawn(async move { shared.read_haptics(&read_route).await });
+    tokio::task::yield_now().await;
+    assert!(
+        !read.is_finished(),
+        "the read waits for the reapply's write"
+    );
+    drop(reapply);
+    // No device answers in a test; what matters is that the read went ahead.
+    read.await
+        .expect("the read joins")
+        .expect_err("no device here");
+}
+
+/// A reload that writes the user's changed haptics counts the choice before
+/// it numbers the write, as the settings app's own write does: an Actions
+/// Ring arming queued before then sees the choice and writes nothing.
+#[test]
+fn a_reload_counts_the_users_haptics_choice() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![haptic_device("a", 1, true)];
+    let route = orch.devices[0].route.clone().expect("a Bolt route");
+    let choices = orch.shared.haptic_choices();
+    let mark = choices.mark(&route);
+    let mut config = Config::default();
+    config.set_haptics("a", haptics(false, 60));
+    let _ = orch.reload_config(config);
+    assert!(
+        !choices.unchanged_since(&mark),
+        "the reload counted the user's choice"
+    );
+}

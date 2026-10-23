@@ -15,7 +15,7 @@ use super::{
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
 };
-use crate::hid::{Dpi, PointerSpeed, ReportRate};
+use crate::hid::{Dpi, HapticSettings, PointerSpeed, ReportRate};
 
 impl Config {
     /// The bindings stored for `device_key` as they were committed, or an
@@ -296,6 +296,45 @@ impl Config {
             .fn_lock = Some(fn_lock);
     }
 
+    /// The persisted haptic settings for `device_key`, or `None` when the
+    /// user never set them (the device keeps its own).
+    #[must_use]
+    pub fn haptics(&self, device_key: &str) -> Option<HapticSettings> {
+        self.devices.get(device_key).and_then(|d| d.haptics)
+    }
+
+    /// Record the haptic settings for `device_key`; the agent writes them on
+    /// reload and re-applies them when the device reconnects.
+    pub fn set_haptics(&mut self, device_key: &str, haptics: HapticSettings) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .haptics = Some(haptics);
+    }
+
+    /// How the Actions Ring of `device_key` treats the firmware haptic
+    /// engine. The one owner of that decision: the ring plays nothing when
+    /// its own haptics toggle is off or the user silenced the engine
+    /// ([`HapticSettings::is_silent`]), even with the ring toggle on.
+    #[must_use]
+    pub fn ring_haptic_engine(&self, device_key: &str) -> RingHaptics {
+        if !self.action_ring(device_key).haptics || self.haptics_silenced(device_key) {
+            RingHaptics::Off
+        } else if self.haptics(device_key).is_some() {
+            RingHaptics::Owned
+        } else {
+            RingHaptics::Borrow
+        }
+    }
+
+    /// Whether the user silenced `device_key`'s haptic engine in OpenLogi
+    /// ([`HapticSettings::is_silent`]), which silences its Actions Ring too.
+    #[must_use]
+    pub fn haptics_silenced(&self, device_key: &str) -> bool {
+        self.haptics(device_key)
+            .is_some_and(HapticSettings::is_silent)
+    }
+
     /// Whether the agent keeps `device_key`'s key layout on the host OS. On
     /// unless the user turned it off, as in Logi Options+.
     #[must_use]
@@ -446,4 +485,18 @@ impl Config {
             .or_default()
             .smooth_wheel = enabled;
     }
+}
+
+/// How an Actions Ring session treats the device's firmware haptic engine,
+/// from [`Config::ring_haptic_engine`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RingHaptics {
+    /// The session plays no feedback.
+    Off,
+    /// The user never set the engine, so it may be another app's: a session
+    /// that turns it on to play hands it back off when it ends.
+    Borrow,
+    /// The user turned the engine on in OpenLogi: a session that finds it off
+    /// turns it back on as a repair and leaves it on.
+    Owned,
 }

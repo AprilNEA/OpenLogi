@@ -19,7 +19,7 @@ fn config_reload_publishes_scroll_preferences_without_restarting_the_hook() {
     config.app_settings.smooth_scroll = true;
     config.app_settings.vertical_scroll_sensitivity =
         VerticalScrollSensitivity::try_new(7).expect("valid sensitivity");
-    orch.reload_config(config);
+    let _ = orch.reload_config(config);
 
     assert!(preferences.smooth_scroll_enabled());
     assert_eq!(
@@ -219,7 +219,7 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
 
     // The explicit option takes effect immediately without moving the pointer.
     config.app_settings.mouse_profile_target = openlogi_core::config::MouseProfileTarget::Focused;
-    orch.reload_config(config);
+    let _ = orch.reload_config(config);
     assert_eq!(published_back_binding(&orch), Some(Action::BrowserBack));
     assert_eq!(
         orch.shared
@@ -362,7 +362,7 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
 
     // Config/app rebuilds replace binding maps but hardware observations must
     // remain in the same atomically published snapshot.
-    orch.reload_config(Config::default());
+    let _ = orch.reload_config(Config::default());
     let maps = orch.shared.hook_maps.read().expect("hook maps");
     assert_eq!(maps.selected_device.as_deref(), Some("a"));
     assert_eq!(maps.thumbwheel_positive_is_forward.get("a"), Some(&true));
