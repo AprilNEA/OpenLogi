@@ -387,14 +387,19 @@ impl AppState {
     /// The agent already applied that file, so this path never retries the
     /// GUI's older save.
     fn reconcile_external_config(&mut self) -> StateEvents {
+        let mut events = StateEvents::none();
+        for key in self.disable_keys_reads.reconcile_external_config() {
+            events = events.and(StateEvent::DisableKeysChanged(key));
+        }
         let previous_language = self.config.app_settings.language.clone();
         if let Err(error) = self.config.refresh_feature() {
             warn!(%error, "could not reconcile externally edited configuration");
-            return StateEvents::none();
+            return events.and(StateEvent::SettingsChanged);
         }
         let language_changed = self.config.app_settings.language != previous_language;
         self.restore_config_projections();
-        let events = StateEvents::from(StateEvent::SettingsChanged)
+        let events = events
+            .and(StateEvent::SettingsChanged)
             .and(self.for_current_device(StateEvent::BindingsChanged))
             .and(self.for_current_device(StateEvent::DpiChanged));
         if language_changed {

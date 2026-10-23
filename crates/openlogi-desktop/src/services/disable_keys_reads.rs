@@ -132,6 +132,21 @@ impl DisableKeysReads {
         self.invalidate_snapshot(key);
     }
 
+    /// An external config reload may change every managed keyboard. Clear
+    /// retained offline values too, and return the keys whose UI must update.
+    pub(crate) fn reconcile_external_config(&mut self) -> BTreeSet<DeviceKey> {
+        let keys: BTreeSet<_> = self
+            .reads
+            .keys()
+            .chain(self.confirmed.keys())
+            .cloned()
+            .collect();
+        for key in &keys {
+            self.invalidate_snapshot(key);
+        }
+        keys
+    }
+
     /// Clear a stale snapshot before the active query obtains a new device
     /// reading. Both an unsolicited revision and an unconfirmed write need
     /// this same fail-closed transition.
@@ -277,6 +292,20 @@ fn project_load(state: &QueryState<Cached, WriteError>) -> DisableKeysLoad {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_reload_clears_retained_offline_snapshots() {
+        let key = DeviceKey::from("offline-keyboard");
+        let mut reads = DisableKeysReads::default();
+        reads.set_confirmed(&key, DisableKeysState::default());
+        assert!(matches!(reads.load(&key), Load::Ready(_)));
+        assert_eq!(
+            reads.reconcile_external_config(),
+            BTreeSet::from([key.clone()])
+        );
+        assert!(matches!(reads.load(&key), Load::Unknown));
+        assert!(reads.confirmed(&key).is_none());
+    }
 
     #[test]
     fn stale_disable_keys_generation_cannot_replace_newer_snapshot() {

@@ -246,7 +246,6 @@ impl AppState {
             Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave) => {
                 let _ = self.config.apply_reload_result(Ok(()));
                 let config_events = self.reconcile_external_config();
-                self.disable_keys_reads.reconcile_after_write(&context.key);
                 let state = self
                     .devices
                     .sessions

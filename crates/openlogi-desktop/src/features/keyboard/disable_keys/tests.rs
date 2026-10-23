@@ -99,6 +99,73 @@ fn answer_initial_read(
 }
 
 #[gpui::test]
+fn general_external_reload_closes_the_write_gate_until_fresh_read(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+    let (config, file) = ConfigFile::load_from_path(&path).unwrap();
+    let mut receiver = install_keyboard_with_config(cx, config, ConfigPersistence::UserFile(file));
+    let _other_requests = answer_initial_read(&mut receiver, cx);
+    let key = cx.read(|cx| {
+        let state = AppState::try_read(cx).unwrap();
+        assert!(state.disable_keys_controls_enabled(&state.current_record().unwrap().device_key()));
+        state.current_record().unwrap().device_key()
+    });
+    cx.update(|cx| AppState::apply(cx, |state| state.commit_smooth_scroll(true)));
+    assert!(matches!(receiver.try_recv(), Ok(Command::ReloadConfig(_))));
+
+    let mut external = Config::load_from_path(&path).unwrap();
+    external.set_disabled_keys(key.as_str(), BTreeSet::from([DisableKey::CapsLock]));
+    external.save_to_path(&path).unwrap();
+    let external_text = std::fs::read_to_string(&path).unwrap();
+    cx.update(|cx| {
+        AppState::apply(cx, |state| {
+            state.apply_saved_config_reload_result(Ok(
+                openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave,
+            ))
+        });
+    });
+    cx.read(|cx| {
+        let state = AppState::try_read(cx).unwrap();
+        assert!(matches!(state.disable_keys_load_for(&key), Load::Loading));
+        assert!(!state.disable_keys_controls_enabled(&key));
+    });
+    cx.update(|cx| AppState::update_disable_keys(cx, DisableKeysMask::CAPS_LOCK));
+    cx.run_until_parked();
+    let mut fresh_read = None;
+    let mut unrelated = Vec::new();
+    while let Ok(command) = receiver.try_recv() {
+        match command {
+            Command::SetDisableKeys(_) => panic!("stale cache must not permit a write"),
+            Command::ReadDisableKeys(read) => {
+                assert!(
+                    fresh_read.replace(read).is_none(),
+                    "one fresh read is required"
+                );
+            }
+            other => unrelated.push(other),
+        }
+    }
+    fresh_read
+        .expect("external verdict requests a fresh read")
+        .reply
+        .send(Ok(DisableKeysState {
+            supported: DisableKeysMask::CAPS_LOCK,
+            disabled: DisableKeysMask::CAPS_LOCK,
+        }))
+        .unwrap();
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let state = AppState::try_read(cx).unwrap();
+        assert!(state.disable_keys_controls_enabled(&key));
+        let Load::Ready(snapshot) = state.disable_keys_load_for(&key) else {
+            panic!("fresh response must replace the stale snapshot");
+        };
+        assert_eq!(snapshot.disabled, DisableKeysMask::CAPS_LOCK);
+    });
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), external_text);
+}
+
+#[gpui::test]
 fn unavailable_agent_recovery_uses_the_current_language(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let _restore = RestoreLocale(rust_i18n::locale().to_string());
