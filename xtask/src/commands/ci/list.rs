@@ -19,9 +19,8 @@ Env CI always sets: CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 RUSTFLAGS=-D war
 
 Other PR workflows, not part of `cargo xtask ci`:
   Nix CI      (cd packaging && nix fmt -- --check flake.nix linux/package.nix \\
-                linux/nixos-module.nix ../flake.nix ../devenv.nix)
+                linux/nixos-module.nix ../devenv.nix)
               nix flake check ./packaging --all-systems --no-build --show-trace
-              nix flake check --all-systems --no-build --no-write-lock-file
   devenv CI   (cd packaging && nix fmt -- --check ../devenv.nix)
               devenv --no-tui shell -- true
   Build       unsigned installers; only when touching xtask/packaging
