@@ -126,8 +126,7 @@ impl DfuResumableFeature {
         if let Some(error) = response.feature_error_for(header) {
             return Err(error);
         }
-        let payload = response.extend_payload();
-        DfuStatusReport::decode(&payload).ok_or(Hidpp20Error::UnsupportedResponse)
+        DfuStatusReport::from_message(&response).ok_or(Hidpp20Error::UnsupportedResponse)
     }
 }
 
@@ -165,32 +164,47 @@ pub struct DfuStatusReport {
 }
 
 impl DfuStatusReport {
-    /// Decodes `[entity, code, params…]`, or `None` for a code this crate does
-    /// not know.
-    fn decode(payload: &[u8; 16]) -> Option<Self> {
-        let param_u16 = u16::from_be_bytes([payload[2], payload[3]]);
-        let status = match payload[1] {
+    fn from_message(message: &v20::Message) -> Option<Self> {
+        match message {
+            v20::Message::Short(_, payload) => Self::decode(payload),
+            v20::Message::Long(_, payload) => Self::decode(payload),
+        }
+    }
+
+    /// Decodes `[entity, code, params…]`, rejecting unknown codes and missing
+    /// bytes before reading status parameters.
+    fn decode(payload: &[u8]) -> Option<Self> {
+        let entity = *payload.first()?;
+        let param_u16 = || Some(u16::from_be_bytes([*payload.get(2)?, *payload.get(3)?]));
+        let status = match *payload.get(1)? {
             0x01 => DfuStatus::NotStarted,
-            0x02 => DfuStatus::TransferReady { block: param_u16 },
+            0x02 => DfuStatus::TransferReady {
+                block: param_u16()?,
+            },
             0x03 => DfuStatus::TransferWait {
-                delay_ms: param_u16,
+                delay_ms: param_u16()?,
             },
             0x04 => DfuStatus::TransferComplete,
             0x05 => DfuStatus::ApplyPending,
             0x06 => DfuStatus::PacketAck {
-                next_packet: u32::from_be_bytes([payload[2], payload[3], payload[4], payload[5]]),
+                next_packet: u32::from_be_bytes(payload.get(2..6)?.try_into().ok()?),
             },
             0x07 => DfuStatus::Aborted,
             code => DfuStatus::Error(DfuError::try_from(code).ok()?),
         };
-        Some(Self {
-            entity: payload[0],
-            status,
-        })
+        Some(Self { entity, status })
     }
 }
 
 impl DecodeEvent for DfuStatusReport {
+    fn decode_message(message: &v20::Message) -> Option<Self> {
+        // Length depends on the status code, so preserve the original short
+        // or long payload instead of the default zero-extended event path.
+        (message.header().function_id.to_lo() == 0)
+            .then(|| Self::from_message(message))
+            .flatten()
+    }
+
     /// The device broadcasts the next status on sub-id `0` once a wait ends.
     fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
         (sub_id == 0).then(|| Self::decode(payload)).flatten()
@@ -255,6 +269,76 @@ pub enum DfuError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn header() -> v20::MessageHeader {
+        v20::MessageHeader {
+            device_index: 3,
+            feature_index: 8,
+            function_id: crate::nibble::U4::from_lo(0),
+            software_id: crate::nibble::U4::from_lo(0),
+        }
+    }
+
+    #[test]
+    fn truncated_status_events_are_not_zero_extended_into_valid_states() {
+        for code in [0x02, 0x03, 0x06] {
+            let short = v20::Message::Short(header(), [1, code, 0]);
+            assert_eq!(
+                <DfuStatusReport as DecodeEvent>::decode_message(&short),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn truncated_status_responses_are_unsupported() {
+        use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+        use crate::feature::CreatableFeature;
+        use std::sync::Arc;
+
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let feature = DfuResumableFeature::new(channel, 3, 8);
+            for echo in [false, true] {
+                let mut reply = header();
+                if echo {
+                    reply.function_id = crate::nibble::U4::from_lo(2);
+                    reply.software_id = crate::nibble::U4::from_lo(1);
+                }
+                for code in [0x02, 0x03, 0x06] {
+                    handle.queue_response(v20::Message::Short(reply, [1, code, 0]).into());
+                    assert!(matches!(
+                        feature.get_dfu_status(1).await,
+                        Err(Hidpp20Error::UnsupportedResponse)
+                    ));
+                }
+                for (code, status) in [(1, DfuStatus::NotStarted), (4, DfuStatus::TransferComplete)]
+                {
+                    handle.queue_response(v20::Message::Short(reply, [1, code, 0]).into());
+                    assert_eq!(feature.get_dfu_status(1).await.unwrap().status, status);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn status_parameter_lengths_are_checked_before_decoding() {
+        for bytes in [
+            &[1, 2, 0, 0][..],
+            &[1, 3, 0, 0][..],
+            &[1, 6, 0, 0, 0, 0][..],
+        ] {
+            for length in 0..bytes.len() {
+                assert_eq!(DfuStatusReport::decode(&bytes[..length]), None);
+            }
+            assert!(DfuStatusReport::decode(bytes).is_some());
+        }
+        for code in [1, 4, 5, 7, 0x80] {
+            let short = v20::Message::Short(header(), [1, code, 0]);
+            assert!(<DfuStatusReport as DecodeEvent>::decode_message(&short).is_some());
+        }
+    }
 
     fn payload(bytes: &[u8]) -> [u8; 16] {
         let mut payload = [0; 16];
