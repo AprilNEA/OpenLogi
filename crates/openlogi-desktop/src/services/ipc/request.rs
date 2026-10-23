@@ -39,9 +39,17 @@ use crate::state::DeviceKey;
 /// The GPUI-bound update stream a request may deliver through.
 pub(super) type UpdateSender = mpsc::UnboundedSender<GuiUpdate>;
 
-/// No agent could be reached for a request: the socket was down when it was
-/// dequeued, or the connection dropped before the answer arrived.
-pub(super) struct Unavailable;
+/// No agent answered a request.
+///
+/// The two cases differ for a request with side effects: one that was never
+/// sent cannot have taken effect, while one lost in transit may have.
+pub(super) enum Unavailable {
+    /// The socket was down when the request was dequeued; it was never sent.
+    NotSent,
+    /// The connection dropped before the answer arrived; the agent may have
+    /// acted on it.
+    Lost,
+}
 
 /// The connection dropped while a request was in flight; the loop reconnects.
 pub(super) struct LinkLost;
@@ -72,7 +80,7 @@ pub(super) async fn run<R: Request>(
     updates: &UpdateSender,
 ) -> Result<(), LinkLost> {
     let Some(client) = client else {
-        request.deliver(Err(Unavailable), updates);
+        request.deliver(Err(Unavailable::NotSent), updates);
         return Ok(());
     };
     match request.call(client).await {
@@ -82,7 +90,7 @@ pub(super) async fn run<R: Request>(
         }
         Err(error) => {
             debug!(%error, "request lost in transit — reconnecting");
-            request.deliver(Err(Unavailable), updates);
+            request.deliver(Err(Unavailable::Lost), updates);
             Err(LinkLost)
         }
     }
@@ -637,7 +645,8 @@ impl Request for ReadFirmware {
 pub struct StartFirmwareUpdate {
     pub route: DeviceRoute,
     pub key: DeviceKey,
-    pub flight: u64,
+    /// Echoed in the job this request starts, and returned with the answer.
+    pub request: openlogi_core::hid::FirmwareRequest,
 }
 
 impl Request for StartFirmwareUpdate {
@@ -645,19 +654,21 @@ impl Request for StartFirmwareUpdate {
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
-            .start_firmware_update(context::current(), self.route.clone())
+            .start_firmware_update(context::current(), self.route.clone(), self.request)
             .await
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         use crate::state::FirmwareStartFailure;
-        let result = outcome
-            .map_err(|_| FirmwareStartFailure::Unavailable)
-            .and_then(|result| result.map_err(FirmwareStartFailure::Refused));
+        let result = match outcome {
+            Ok(answer) => answer.map_err(FirmwareStartFailure::Refused),
+            Err(Unavailable::NotSent) => Err(FirmwareStartFailure::NotSent),
+            Err(Unavailable::Lost) => Err(FirmwareStartFailure::Unavailable),
+        };
         let _ = updates.send(GuiUpdate::FirmwareStarted {
             key: self.key,
             route: self.route,
-            flight: self.flight,
+            request: self.request,
             result,
         });
     }
@@ -871,7 +882,7 @@ fn report_pairing_refusal(
     let failure = match outcome {
         Ok(Ok(())) => return,
         Ok(Err(refused)) => PairingFailure::from(refused),
-        Err(Unavailable) => PairingFailure::AgentRestarted,
+        Err(_) => PairingFailure::AgentRestarted,
     };
     let _ = updates.send(GuiUpdate::PairingUndeliverable(failure));
 }
@@ -954,7 +965,7 @@ impl Request for UnpairDevice {
         let result = match outcome {
             Ok(Ok(())) => Ok(()),
             Ok(Err(failure)) => Err(UnpairFailure::Refused(failure)),
-            Err(Unavailable) => Err(UnpairFailure::AgentUnreachable),
+            Err(_) => Err(UnpairFailure::AgentUnreachable),
         };
         let _ = updates.send(GuiUpdate::DeviceUnpaired {
             route: self.route,
@@ -1067,7 +1078,7 @@ mod tests {
         StartPairing {
             selector: ReceiverSelector::First,
         }
-        .deliver(Err(Unavailable), &updates);
+        .deliver(Err(Unavailable::NotSent), &updates);
 
         assert!(matches!(
             received.try_recv(),
@@ -1092,7 +1103,7 @@ mod tests {
     fn a_cancel_that_found_no_agent_releases_the_local_wait_with_an_error() {
         let (updates, mut received) = mpsc::unbounded_channel();
 
-        CancelPairing.deliver(Err(Unavailable), &updates);
+        CancelPairing.deliver(Err(Unavailable::NotSent), &updates);
 
         assert!(matches!(
             received.try_recv(),
@@ -1116,8 +1127,8 @@ mod tests {
     fn a_reload_that_never_reached_the_agent_is_not_a_verdict() {
         let (updates, mut received) = mpsc::unbounded_channel();
 
-        ReloadConfig::default().deliver(Err(Unavailable), &updates);
-        LoadConfig.deliver(Err(Unavailable), &updates);
+        ReloadConfig::default().deliver(Err(Unavailable::NotSent), &updates);
+        LoadConfig.deliver(Err(Unavailable::NotSent), &updates);
 
         assert!(received.try_recv().is_err());
     }

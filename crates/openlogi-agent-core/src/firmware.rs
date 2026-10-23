@@ -8,8 +8,8 @@ const MAX_ACTIVITY_ENTRIES: usize = 128;
 
 /// Publishes a phase change with an agent timestamp, retaining this job's history.
 /// Transfer history records crossed 10% milestones while the current phase keeps
-/// its full precision. Repeated phases do not notify observers. A new job, route,
-/// or target starts a fresh history; caller-supplied history is not authoritative.
+/// its full precision. Repeated phases do not notify observers. A new job, request,
+/// route, or target starts a fresh history; caller-supplied history is not authoritative.
 pub fn record_progress(current: &mut Option<FirmwareUpdate>, next: FirmwareUpdate) -> bool {
     record_at(current, next, || {
         SystemTime::now()
@@ -26,7 +26,10 @@ fn record_at(
     now: impl FnOnce() -> u64,
 ) -> bool {
     let previous = current.as_ref().filter(|previous| {
-        previous.id == next.id && previous.route == next.route && previous.target == next.target
+        previous.id == next.id
+            && previous.request == next.request
+            && previous.route == next.route
+            && previous.target == next.target
     });
     if previous
         .is_some_and(|previous| previous.phase == next.phase && previous.source == next.source)
@@ -92,6 +95,7 @@ mod tests {
             phase,
             id,
             events: Vec::new(),
+            request: openlogi_core::hid::FirmwareRequest(1),
         }
     }
 

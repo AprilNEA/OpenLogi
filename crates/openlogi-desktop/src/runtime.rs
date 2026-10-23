@@ -303,12 +303,12 @@ impl Runtime {
             ipc::GuiUpdate::FirmwareStarted {
                 key,
                 route,
-                flight,
+                request,
                 result,
             } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| {
-                        state.apply_firmware_started(&key, &route, flight, result)
+                        state.apply_firmware_started(&key, &route, request, result)
                     });
                 });
             }

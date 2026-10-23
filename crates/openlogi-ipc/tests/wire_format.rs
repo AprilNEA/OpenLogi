@@ -1212,14 +1212,10 @@ fn disable_keys_requests_are_appended() {
 }
 
 #[test]
-fn firmware_updates_and_requests() {
+fn firmware_status_failures_and_refusals() {
     use openlogi_core::hid::{
-        FirmwareOffer, FirmwareStatus, FirmwareUpdate, FirmwareUpdateEvent, FirmwareUpdateFailure,
-        FirmwareUpdatePhase, FirmwareUpdateRefusal, FirmwareVersion,
-    };
-    let route = DeviceRoute::Bolt {
-        receiver_uid: "R".into(),
-        slot: 1,
+        FirmwareOffer, FirmwareStatus, FirmwareUpdateFailure, FirmwareUpdatePhase,
+        FirmwareUpdateRefusal, FirmwareVersion,
     };
     let version = FirmwareVersion {
         number: 27,
@@ -1271,6 +1267,22 @@ fn firmware_updates_and_requests() {
     assert_wire(&FirmwareUpdateRefusal::Busy, "00");
     assert_wire(&FirmwareUpdateRefusal::NoUpdate, "01");
     assert_wire(&FirmwareUpdateRefusal::DeviceNotFound, "02");
+}
+
+#[test]
+fn firmware_jobs_and_admission_requests() {
+    use openlogi_core::hid::{
+        FirmwareRequest, FirmwareUpdate, FirmwareUpdateEvent, FirmwareUpdatePhase, FirmwareVersion,
+    };
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "R".into(),
+        slot: 1,
+    };
+    let version = FirmwareVersion {
+        number: 27,
+        revision: 3,
+        build: 19,
+    };
     assert_wire(
         &FirmwareUpdate {
             source: None,
@@ -1279,9 +1291,12 @@ fn firmware_updates_and_requests() {
             route: route.clone(),
             target: version,
             phase: FirmwareUpdatePhase::Preparing,
+            request: FirmwareRequest(0x2a),
         },
-        "000152011b031301070000",
+        "000152011b0313010700002a",
     );
+    // A generated request spans the full u64 range.
+    assert_wire(&FirmwareRequest(u64::MAX), "fdffffffffffffffff");
     let entry = FirmwareUpdateEvent {
         timestamp_millis: 42,
         phase: FirmwareUpdatePhase::Downloading,
@@ -1299,8 +1314,9 @@ fn firmware_updates_and_requests() {
             route: route.clone(),
             target: version,
             phase: FirmwareUpdatePhase::Preparing,
+            request: FirmwareRequest(0x2a),
         },
-        "000152011b03130107012a0001016d01660175",
+        "000152011b03130107012a0001016d016601752a",
     );
     assert_wire(
         &AgentRequest::FirmwareStatus {
@@ -1308,5 +1324,11 @@ fn firmware_updates_and_requests() {
         },
         "2f00015201",
     );
-    assert_wire(&AgentRequest::StartFirmwareUpdate { route }, "3000015201");
+    assert_wire(
+        &AgentRequest::StartFirmwareUpdate {
+            route,
+            request: FirmwareRequest(0x2a),
+        },
+        "30000152012a",
+    );
 }
