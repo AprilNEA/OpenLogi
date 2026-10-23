@@ -24,11 +24,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
+#[cfg(test)]
+use openlogi_hid::DisableKeysMask;
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi,
-    FollowerLink, FollowerRelease, HidppOperation, HostOs, HostSwitchError, LeadCookie,
-    OsLayoutOutcome, PointerSpeed, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus,
-    WeakSharedChannel, WriteError,
+    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, FollowerLink,
+    FollowerRelease, HidppOperation, HostOs, HostSwitchError, LeadCookie, OsLayoutOutcome,
+    PointerSpeed, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel,
+    WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};

@@ -48,6 +48,7 @@ impl Drop for RequesterCancellation {
 #[must_use = "wait for Disable Keys or explicitly detach the completion owner"]
 pub(crate) struct DisableKeysJob {
     cancellation: RequesterCancellation,
+    started: oneshot::Receiver<()>,
     result: oneshot::Receiver<Result<DisableKeysState, WriteError>>,
     worker: JoinHandle<()>,
 }
@@ -57,6 +58,10 @@ impl DisableKeysJob {
     /// write. An elapsed wait drops this handle, while the worker keeps its
     /// receiver lease and turns until the device operation completes.
     pub(crate) async fn wait(mut self) -> Result<DisableKeysState, WriteError> {
+        // Queue and lease waits do not spend the device response budget. A
+        // closed start signal means the owner returned without starting I/O;
+        // its typed result below still reports the reason.
+        let _ = (&mut self.started).await;
         tokio::time::timeout(WRITE_TIMEOUT, &mut self.result)
             .await
             .map_err(|_| timed_out())?
@@ -150,6 +155,7 @@ where
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker_cancelled = Arc::clone(&cancelled);
     let (sender, result) = oneshot::channel();
+    let (started_sender, started) = oneshot::channel();
     let worker = std::thread::Builder::new()
         .name("openlogi-disable-keys".into())
         .spawn(move || {
@@ -160,15 +166,18 @@ where
                         ticket
                             .write_or(
                                 transport.lock(),
-                                || async {
+                                || async move {
                                     if write_cancelled.load(Ordering::Acquire) {
                                         return Err(timed_out());
                                     }
                                     let _lease = op.access.receiver_access.acquire_for_io().await;
-                                    if !op.access.device_io.allows_io() {
+                                    if !op.access.device_io.allows_io()
+                                        || write_cancelled.load(Ordering::Acquire)
+                                    {
                                         return Err(WriteError::DeviceNotFound);
                                     }
                                     let shared = op.resolve()?;
+                                    let _ = started_sender.send(());
                                     openlogi_hid::set_disable_keys_on(&shared, desired).await
                                 },
                                 || async {
@@ -195,6 +204,7 @@ where
 
     Ok(DisableKeysJob {
         cancellation: RequesterCancellation::new(cancelled),
+        started,
         result,
         worker,
     })

@@ -12,6 +12,7 @@ files:
   - crates/openlogi-agent/**/*.rs
 ignores:
   - crates/openlogi-agent-core/src/hardware.rs
+  - crates/openlogi-agent-core/src/hardware/disable_keys.rs
   - crates/openlogi-agent-core/src/orchestrator.rs
 rule:
   all:

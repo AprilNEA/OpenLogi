@@ -126,3 +126,44 @@ async fn cancelled_request_retains_native_write_turn_until_successor_completes()
         "the old echo cannot replace the successor's final mask"
     );
 }
+
+#[tokio::test]
+async fn queued_request_preserves_budget_until_native_predecessor_completes() {
+    let shared = orchestrator(Config::default()).shared();
+    let keyboard = Keyboard::publish(&shared).await;
+    let old_write = keyboard.hold_set_write(0x81);
+    let mut old = Box::pin(shared.set_disable_keys(&keyboard.route, DisableKeysMask::CAPS_LOCK));
+    assert!(futures_lite::future::poll_once(&mut old).await.is_none());
+    tokio::time::timeout(Duration::from_secs(2), old_write.write_accepted())
+        .await
+        .expect("predecessor enters native write");
+
+    tokio::time::pause();
+    let successor_write = keyboard.hold_set_write(0x80);
+    let mut successor = Box::pin(shared.set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY));
+    assert!(
+        futures_lite::future::poll_once(&mut successor)
+            .await
+            .is_none()
+    );
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(
+        futures_lite::future::poll_once(&mut successor)
+            .await
+            .is_none(),
+        "queue wait must not exhaust the successor's five-second response budget"
+    );
+    tokio::time::resume();
+    drop(old);
+    old_write.release();
+    tokio::time::timeout(Duration::from_secs(2), successor_write.write_accepted())
+        .await
+        .expect("successor can still start after the queue wait");
+    successor_write.release();
+    let state = tokio::time::timeout(Duration::from_secs(2), successor)
+        .await
+        .expect("successor completes")
+        .expect("successor succeeds");
+    assert_eq!(state.disabled.bits(), 0x80);
+    assert_eq!(*keyboard.writes.lock().expect("writes"), [0x81, 0x80]);
+}
