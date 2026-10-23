@@ -107,6 +107,7 @@ fn main() -> Result<()> {
                 };
                 openlogi_core::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
+                    cx.set_reduce_motion(platform::prefers_reduced_motion());
                     close_all_ring_windows(cx);
                     #[cfg_attr(
                         windows,

@@ -180,6 +180,58 @@ pub fn watch_clicks_outside(_on_mouse_down: impl Fn() + 'static) -> Option<Click
     None
 }
 
+/// Whether the host OS asks for reduced UI motion, read once per ring open.
+#[must_use]
+pub fn prefers_reduced_motion() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+        };
+
+        let mut enabled = 0i32;
+        // SAFETY: `SPI_GETCLIENTAREAANIMATION` writes one `BOOL` when the call succeeds.
+        let ok = unsafe {
+            SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut enabled).cast(), 0)
+        };
+        if ok == 0 {
+            return false;
+        }
+        enabled == 0
+    }
+    #[cfg(target_os = "linux")]
+    {
+        static GNOME_ANIMATIONS: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+        // No GNOME setting (other desktops, no gsettings): keep motion on.
+        *GNOME_ANIMATIONS.get_or_init(gnome_animations_enabled) == Some(false)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn gnome_animations_enabled() -> Option<bool> {
+    use std::process::Command;
+
+    let output = Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "enable-animations"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => match String::from_utf8_lossy(&out.stdout).trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// One display's global geometry, in the same top-left-origin global point
 /// space that `openlogi_hook::cursor_position()` reports.
 #[cfg(not(target_os = "windows"))]

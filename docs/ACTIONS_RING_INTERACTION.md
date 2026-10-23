@@ -32,8 +32,11 @@ overlay only reports `Hover`, `Activate` and `Cancel`.
 - Hover inverts the slot to a near-black fill; the accent is no longer spent on
   a transient hover.
 - Entrance motion: slots travel from the hub to their positions together and
-  the panel fades in. GPUI's `with_animation` respects the host's reduced-motion
-  setting, so it renders one static frame when that is on.
+  the panel fades in. On each open the overlay reads the OS reduced-motion
+  preference (macOS Reduce Motion, Windows client-area animation setting, Linux
+  GNOME `enable-animations` when available) and passes it to GPUI's
+  `reduce_motion`, so `with_animation` renders one static frame when motion is
+  reduced.
 
 The close animation is not implemented: the overlay hides the window as soon as
 the agent dismisses the session, so animating the exit would mean delaying
@@ -166,8 +169,10 @@ is, and which actions carry a submenu.
   the session dismisses on hover.
 - **Wayland.** There the window already covers the display, so growing it is a
   no-op; the arc placement logic still has to clamp.
-- **Reduced motion.** GPUI exposes no cross-platform reduced-motion flag in this
-  workspace today. If one is added, phases 1–2 should honour it.
+- **Reduced motion.** The overlay reads the OS preference per platform (macOS
+  Reduce Motion, Windows client-area animation setting, Linux GNOME
+  `enable-animations` or no signal) on each ring open and forwards it to GPUI's
+  `reduce_motion` so entrance animations collapse to a single static frame.
 - **Submenu ownership.** The overlay holds the expanded state because it is
   presentation; the agent remains the only owner of executable actions. If a
   submenu should survive a snapshot refresh, the expanded slot has to move into
