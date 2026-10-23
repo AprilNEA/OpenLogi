@@ -211,6 +211,7 @@ preparing = "Gerät wird überprüft…"
 transferring = "Firmware wird installiert · %{percent}%"
 activity_log = "Aktivitätsprotokoll (UTC)"
 activity_error = "Fehler: %{message}"
+activity_warning = "Warnung: %{message}"
 activity_device = "Gerät: %{name} · %{family} · Firmware %{version}"
 activity_url = "Paket-URL: %{url}"
 activity_downloaded = "Firmware %{version} heruntergeladen und überprüft."
@@ -233,6 +234,8 @@ unsupported = "Dieses Gerät oder diese Verbindung unterstützt keine Firmwareup
 device_refused = "Das Gerät hat das Update abgelehnt. Schließe andere Gerätesoftware und versuche es erneut."
 interrupted = "Das Update wurde unterbrochen. Halte das Gerät wach und verbinde es erneut, um seine Firmwareversion zu prüfen."
 not_activated = "Die neue Firmware konnte nach dem Neustart nicht bestätigt werden. Verbinde das Gerät erneut, um seine Firmwareversion zu prüfen."
+warning_erased_bank = "Firmware-Bank %{bank} ist nach einem unterbrochenen Update leer. Die ganze Bank wird neu geschrieben; die laufende Firmware bleibt unberührt."
+warning_unfinished_transfer = "Firmware-Bank %{bank} enthält ein unvollständiges früheres Update. Es wird verworfen und die Übertragung beginnt von vorn."
 
 [profiles]
 remove_all_profiles = "Delete all app settings"

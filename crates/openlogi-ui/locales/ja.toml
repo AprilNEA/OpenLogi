@@ -211,6 +211,7 @@ preparing = "デバイスを確認中…"
 transferring = "ファームウェアをインストール中 · %{percent}%"
 activity_log = "アクティビティログ（UTC）"
 activity_error = "エラー: %{message}"
+activity_warning = "警告: %{message}"
 activity_device = "デバイス: %{name} · %{family} · ファームウェア %{version}"
 activity_url = "パッケージ URL: %{url}"
 activity_downloaded = "ファームウェア %{version} のダウンロードと検証が完了しました。"
@@ -233,6 +234,8 @@ unsupported = "このデバイスまたは接続は、ファームウェアの�
 device_refused = "デバイスが更新を拒否しました。他のデバイス管理ソフトを終了して、もう一度お試しください。"
 interrupted = "更新が停止しました。デバイスがスリープしないようにして再接続し、ファームウェアのバージョンを確認してください。"
 not_activated = "再起動後の新しいファームウェアを確認できませんでした。デバイスを再接続してファームウェアのバージョンを確認してください。"
+warning_erased_bank = "中断された更新により、ファームウェアバンク %{bank} が空になっています。バンク全体を書き直します。実行中のファームウェアには触れません。"
+warning_unfinished_transfer = "ファームウェアバンク %{bank} に、以前の未完了の更新が残っています。それを破棄し、転送を最初からやり直します。"
 
 [profiles]
 remove_all_profiles = "Delete all app settings"

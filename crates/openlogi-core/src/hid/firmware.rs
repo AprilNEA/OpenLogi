@@ -217,6 +217,30 @@ pub enum FirmwareUpdatePhase {
     Succeeded,
     /// The update stopped; the reason describes the observed failure.
     Failed(FirmwareUpdateFailure),
+    /// Preflight found damage an earlier, interrupted update left behind. The
+    /// update continues; the warning names what this run does about it.
+    Warning(FirmwareUpdateWarning),
+}
+
+/// What an earlier, interrupted update left on the target bank. Each variant
+/// implies the action the update takes, so the activity log can say both.
+///
+/// bincode encodes the variant *index*, so variants are append-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FirmwareUpdateWarning {
+    /// The inactive bank reports a blank record: an interrupted transfer
+    /// cleared it. The update rewrites the whole bank.
+    ErasedBank {
+        /// The firmware entity (bank) that reports the blank record.
+        entity: u8,
+    },
+    /// The inactive bank holds an unfinished transfer from an earlier run.
+    /// Nothing proves its bytes came from this package, so the update
+    /// discards it and restarts from the first block.
+    UnfinishedTransfer {
+        /// The firmware entity (bank) that holds the transfer state.
+        entity: u8,
+    },
 }
 
 impl FirmwareUpdatePhase {

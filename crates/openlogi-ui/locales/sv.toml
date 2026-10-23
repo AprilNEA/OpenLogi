@@ -211,6 +211,7 @@ preparing = "Kontrollerar enheten…"
 transferring = "Installerar fast programvara · %{percent}%"
 activity_log = "Aktivitetslogg (UTC)"
 activity_error = "Fel: %{message}"
+activity_warning = "Varning: %{message}"
 activity_device = "Enhet: %{name} · %{family} · fast programvara %{version}"
 activity_url = "Paketets URL: %{url}"
 activity_downloaded = "Fast programvara %{version} har hämtats och verifierats."
@@ -233,6 +234,8 @@ unsupported = "Den här enheten eller anslutningen stöder inte uppdateringar av
 device_refused = "Enheten avvisade uppdateringen. Stäng andra program för enheten och försök igen."
 interrupted = "Uppdateringen avbröts. Håll enheten vaken och anslut den igen för att kontrollera versionen av den fasta programvaran."
 not_activated = "Kunde inte bekräfta den nya fasta programvaran efter omstart. Anslut enheten igen för att kontrollera versionen av den fasta programvaran."
+warning_erased_bank = "Firmwarebank %{bank} är tom efter en avbruten uppdatering. Hela banken skrivs om; den firmware som körs påverkas inte."
+warning_unfinished_transfer = "Firmwarebank %{bank} innehåller en ofullständig tidigare uppdatering. Den kasseras och överföringen börjar om från början."
 
 [profiles]
 remove_all_profiles = "Delete all app settings"

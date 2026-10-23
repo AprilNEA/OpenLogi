@@ -15,7 +15,7 @@ use gpui_component::{
 };
 use openlogi_core::hid::{
     FirmwareBatteryCharge, FirmwareOffer, FirmwareStatus, FirmwareUpdate, FirmwareUpdateFailure,
-    FirmwareUpdatePhase, FirmwareUpdateRefusal, FirmwareVersion,
+    FirmwareUpdatePhase, FirmwareUpdateRefusal, FirmwareUpdateWarning, FirmwareVersion,
 };
 
 use crate::state::{AgentLink, AppState, DeviceKey, FirmwareStartFailure, Load};
@@ -232,6 +232,9 @@ fn progress_line(phase: &FirmwareUpdatePhase, pal: Palette, cx: &App) -> AnyElem
             caption(text.clone(), pal)
                 .when(matches!(phase, FirmwareUpdatePhase::Failed(_)), |line| {
                     line.text_color(cx.theme().danger)
+                })
+                .when(matches!(phase, FirmwareUpdatePhase::Warning(_)), |line| {
+                    line.text_color(cx.theme().warning)
                 }),
         )
         .when(!phase.is_finished(), |column| {
@@ -256,6 +259,19 @@ fn phase_text(phase: &FirmwareUpdatePhase) -> SharedString {
         FirmwareUpdatePhase::Restarting => tr!("firmware.restarting"),
         FirmwareUpdatePhase::Succeeded => tr!("firmware.succeeded"),
         FirmwareUpdatePhase::Failed(error) => failure_text(error),
+        FirmwareUpdatePhase::Warning(warning) => warning_text(*warning),
+    }
+}
+
+/// What preflight found and the action the update takes about it.
+fn warning_text(warning: FirmwareUpdateWarning) -> SharedString {
+    match warning {
+        FirmwareUpdateWarning::ErasedBank { entity } => {
+            tr!("firmware.warning_erased_bank", bank => entity)
+        }
+        FirmwareUpdateWarning::UnfinishedTransfer { entity } => {
+            tr!("firmware.warning_unfinished_transfer", bank => entity)
+        }
     }
 }
 
@@ -270,17 +286,25 @@ struct FirmwareActivityLog {
 struct ActivityLine {
     timestamp_millis: u64,
     text: SharedString,
-    error: bool,
+    tone: ActivityTone,
+}
+
+/// How an activity line is labelled and colored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivityTone {
+    Normal,
+    Warning,
+    Error,
 }
 
 fn activity_lines(update: &FirmwareUpdate) -> Vec<ActivityLine> {
     let mut lines = Vec::new();
     for (index, event) in update.events.iter().enumerate() {
-        let mut add = |text, error| {
+        let mut add = |text, tone| {
             lines.push(ActivityLine {
                 timestamp_millis: event.timestamp_millis,
                 text,
-                error,
+                tone,
             });
         };
         if index == 0
@@ -288,29 +312,31 @@ fn activity_lines(update: &FirmwareUpdate) -> Vec<ActivityLine> {
         {
             add(
                 tr!("firmware.activity_device", name => source.device_name.clone(), family => source.firmware_line.clone(), version => update.target.to_string()),
-                false,
+                ActivityTone::Normal,
             );
             add(
                 tr!("firmware.activity_url", url => source.package_url.clone()),
-                false,
+                ActivityTone::Normal,
             );
         }
         if matches!(event.phase, FirmwareUpdatePhase::Preparing) && update.source.is_some() {
             add(
                 tr!("firmware.activity_downloaded", version => update.target.to_string()),
-                false,
+                ActivityTone::Normal,
             );
         }
-        let error = matches!(event.phase, FirmwareUpdatePhase::Failed(_));
         let message = phase_text(&event.phase);
-        add(
-            if error {
-                tr!("firmware.activity_error", message => message)
-            } else {
-                message
-            },
-            error,
-        );
+        match event.phase {
+            FirmwareUpdatePhase::Failed(_) => add(
+                tr!("firmware.activity_error", message => message),
+                ActivityTone::Error,
+            ),
+            FirmwareUpdatePhase::Warning(_) => add(
+                tr!("firmware.activity_warning", message => message),
+                ActivityTone::Warning,
+            ),
+            _ => add(message, ActivityTone::Normal),
+        }
     }
     lines
 }
@@ -391,13 +417,17 @@ impl RenderOnce for FirmwareActivityLog {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .when(line.error, |message| {
+                                        .when(line.tone == ActivityTone::Error, |message| {
                                             message.debug_selector(|| "firmware-log-error".into())
                                         })
-                                        .text_color(if line.error {
-                                            cx.theme().danger
-                                        } else {
-                                            pal.text_primary
+                                        .when(line.tone == ActivityTone::Warning, |message| {
+                                            message
+                                                .debug_selector(|| "firmware-log-warning".into())
+                                        })
+                                        .text_color(match line.tone {
+                                            ActivityTone::Normal => pal.text_primary,
+                                            ActivityTone::Warning => cx.theme().warning,
+                                            ActivityTone::Error => cx.theme().danger,
                                         })
                                         .child(line.text.clone()),
                                 )
@@ -624,6 +654,39 @@ mod tests {
             "Package URL: https://firmware.example.test/releases/27.3.19/firmware.zip"
         );
         assert_eq!(lines[3].text, "Firmware 27.3.19 downloaded and verified.");
+    }
+
+    #[test]
+    fn firmware_activity_labels_preflight_warnings_with_the_action_taken() {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let mut update = activity_update();
+        update.events.insert(
+            2,
+            FirmwareUpdateEvent {
+                timestamp_millis: 1500,
+                phase: FirmwareUpdatePhase::Warning(FirmwareUpdateWarning::ErasedBank {
+                    entity: 1,
+                }),
+            },
+        );
+        let lines = activity_lines(&update);
+        let warning = lines
+            .iter()
+            .find(|line| line.tone == ActivityTone::Warning)
+            .expect("the warning has its own line");
+        assert_eq!(
+            warning.text,
+            "Warning: Firmware bank 1 is empty after an interrupted update. Rewriting the \
+             whole bank; the running firmware is not touched."
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.tone != ActivityTone::Normal)
+                .count(),
+            1
+        );
     }
 
     struct NestedActivityHost {

@@ -211,6 +211,7 @@ preparing = "Apparaat controleren…"
 transferring = "Firmware installeren · %{percent}%"
 activity_log = "Activiteitenlogboek (UTC)"
 activity_error = "Fout: %{message}"
+activity_warning = "Waarschuwing: %{message}"
 activity_device = "Apparaat: %{name} · %{family} · firmware %{version}"
 activity_url = "Pakket-URL: %{url}"
 activity_downloaded = "Firmware %{version} gedownload en geverifieerd."
@@ -233,6 +234,8 @@ unsupported = "Dit apparaat of deze verbinding ondersteunt geen firmware-updates
 device_refused = "Het apparaat heeft de update geweigerd. Sluit andere apparaatsoftware en probeer het opnieuw."
 interrupted = "De update is gestopt. Houd het apparaat wakker en verbind het opnieuw om de firmwareversie te controleren."
 not_activated = "Kan de nieuwe firmware na het opnieuw opstarten niet bevestigen. Verbind het apparaat opnieuw om de firmwareversie te controleren."
+warning_erased_bank = "Firmwarebank %{bank} is leeg na een onderbroken update. De hele bank wordt opnieuw geschreven; de actieve firmware blijft onaangeroerd."
+warning_unfinished_transfer = "Firmwarebank %{bank} bevat een onvoltooide eerdere update. Die wordt verworpen en de overdracht begint opnieuw vanaf het begin."
 
 [profiles]
 remove_all_profiles = "Delete all app settings"

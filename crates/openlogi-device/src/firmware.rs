@@ -24,7 +24,7 @@ use hidpp::{
 };
 use openlogi_core::hid::{
     FirmwareBatteryCharge, FirmwareOffer, FirmwareStatus, FirmwareUpdateFailure,
-    FirmwareUpdatePhase, FirmwareVersion,
+    FirmwareUpdatePhase, FirmwareUpdateWarning, FirmwareVersion,
 };
 use openlogi_device_registry::firmware::{FirmwareRelease, latest_release};
 use tracing::warn;
@@ -152,6 +152,28 @@ async fn inspect(device: &mut Device) -> Result<Inspection, WriteError> {
     })
 }
 
+/// Whether an inactive application bank reports an all-zero record: no
+/// firmware prefix, version, build, active flag or transport bytes.
+///
+/// An interrupted transfer leaves the inactive bank in this state. Observed,
+/// not specified: an MX Master 4 (`RBM` 27.3.19, Bluetooth) whose reinstall
+/// was stopped mid-transfer reported exactly this record for entity 1 while it
+/// kept running entity 2, presumably because the device clears the bank when
+/// a transfer begins. Without this exception the inactive-bank line check
+/// refuses every retry, so OpenLogi could never refill a bank its own
+/// interrupted run cleared. A blank record names no other firmware line, so it
+/// cannot be the mismatch that check guards against; a bank that reports a
+/// different line is still refused.
+fn is_erased_bank(info: &DeviceEntityFirmwareInfo) -> bool {
+    info.entity_type == DeviceEntityType::MainApplication
+        && !info.active
+        && info.firmware_prefix.bytes().all(|byte| byte == 0)
+        && info.firmware_number == 0
+        && info.revision == 0
+        && info.build == 0
+        && info.transport_specific_info == [0; 7]
+}
+
 /// Reads the running application version and the update decision on an
 /// existing inventory-owned connection.
 pub async fn get_firmware_status_on(shared: &SharedChannel) -> Result<FirmwareStatus, WriteError> {
@@ -236,6 +258,9 @@ pub struct PreparedFirmwareUpdate {
     feature: Arc<DfuResumableFeature>,
     /// Preflight found an earlier run's transfer state for the target bank.
     interrupted: bool,
+    /// Damage an earlier run left on the target bank, reported to the
+    /// activity log before the transfer starts.
+    warnings: Vec<FirmwareUpdateWarning>,
     image: FirmwareImage,
     pending: PendingFirmwareActivation,
 }
@@ -284,8 +309,9 @@ pub async fn prepare_update_on(
         .map(|(_, info)| info)
         .ok_or(FirmwareUpdateFailure::WrongDevice)?;
     if inactive.active
-        || inactive.firmware_prefix != running.firmware_prefix
-        || inactive.firmware_number != running.firmware_number
+        || !(is_erased_bank(inactive)
+            || (inactive.firmware_prefix == running.firmware_prefix
+                && inactive.firmware_number == running.firmware_number))
     {
         return Err(FirmwareUpdateFailure::WrongDevice);
     }
@@ -328,9 +354,18 @@ pub async fn prepare_update_on(
     // leave any transfer state behind. Nothing proves its bytes came from this
     // package, so it is never resumed or applied: install restarts the
     // transfer and must send every packet itself.
+    let interrupted = initial.status != DfuStatus::NotStarted;
+    let warnings = [
+        is_erased_bank(inactive).then_some(FirmwareUpdateWarning::ErasedBank { entity }),
+        interrupted.then_some(FirmwareUpdateWarning::UnfinishedTransfer { entity }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     Ok(PreparedFirmwareUpdate {
         feature,
-        interrupted: initial.status != DfuStatus::NotStarted,
+        interrupted,
+        warnings,
         image: image.clone(),
         pending: PendingFirmwareActivation {
             route: target.route,
@@ -397,6 +432,11 @@ impl PreparedFirmwareUpdate {
         mut should_stop: impl FnMut() -> bool,
     ) -> Result<PendingFirmwareActivation, FirmwareUpdateFailure> {
         let started = tokio::time::Instant::now();
+        // Logged before any DFU command, so the activity log shows what was
+        // found and what this run does about it even if the start fails.
+        for warning in &self.warnings {
+            progress(FirmwareUpdatePhase::Warning(*warning));
+        }
         let mut transfer = Transfer::new(&self.image);
         let mut recoveries = 0;
         let mut waits = 0;

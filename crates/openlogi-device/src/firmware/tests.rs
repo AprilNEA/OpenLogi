@@ -50,6 +50,11 @@ enum Fault {
     Hidpp10,
     /// Reports no application entity as running.
     NoActiveApplication,
+    /// The inactive bank reports an all-zero record, as an MX Master 4 did
+    /// after its transfer was interrupted.
+    ErasedInactive,
+    /// The inactive bank reports a different firmware line.
+    ForeignInactive,
 }
 
 /// What an earlier, interrupted run left for the target bank, as the status
@@ -96,8 +101,21 @@ impl Hardware {
         if entity == 0 {
             payload[0] = 1;
             payload[1..4].copy_from_slice(b"LD\0");
+        } else if self.fault == Fault::ErasedInactive
+            && !self.applied
+            && entity == self.target_entity.unwrap_or(1)
+        {
+            // All zeros, entity type included: a blank main application.
         } else {
-            payload[1..4].copy_from_slice(b"RBM");
+            let prefix = if self.fault == Fault::ForeignInactive
+                && !self.applied
+                && entity == self.target_entity.unwrap_or(1)
+            {
+                b"MPM"
+            } else {
+                b"RBM"
+            };
+            payload[1..4].copy_from_slice(prefix);
             payload[4] = 0x27;
             let active = self.active_entity.unwrap_or(2);
             let target = self.target_entity.unwrap_or(1);
@@ -390,6 +408,12 @@ async fn reads_offer_transfers_exact_inactive_payload_and_verifies_activation() 
         .install(|phase| progress.push(phase), || false)
         .await
         .unwrap();
+    assert!(
+        !progress
+            .iter()
+            .any(|phase| matches!(phase, FirmwareUpdatePhase::Warning(_))),
+        "an intact bank is not reported as damaged"
+    );
     assert_eq!(hardware.lock().unwrap().packets, 4);
     assert_eq!(
         hardware.lock().unwrap().sent_bytes,
@@ -654,6 +678,58 @@ async fn current_release_can_be_reinstalled_into_the_inactive_bank() {
     }
 }
 
+/// An interrupted run can leave the inactive bank blank. A retry must refill
+/// it rather than refuse the device it already admitted, and say so in the
+/// activity log before the transfer starts.
+#[tokio::test]
+async fn an_erased_inactive_bank_is_refilled() {
+    let (shared, hardware) = hardware(Hardware {
+        running_version: Some((3, 0x19)),
+        fault: Fault::ErasedInactive,
+        ..Hardware::default()
+    })
+    .await;
+    let target = update_target_on(&shared).await.unwrap().unwrap();
+    let mut phases = Vec::new();
+    let pending = prepare_update_on(&shared, target, &package())
+        .await
+        .unwrap()
+        .install(|phase| phases.push(phase), || false)
+        .await
+        .unwrap();
+    pending.verify_on(&shared).await.unwrap();
+    assert_eq!(
+        phases[..2],
+        [
+            FirmwareUpdatePhase::Warning(FirmwareUpdateWarning::ErasedBank { entity: 1 }),
+            FirmwareUpdatePhase::Transferring { percent: 0 },
+        ]
+    );
+    let state = hardware.lock().unwrap();
+    assert_eq!(state.start_count, 1);
+    assert_eq!(state.packets, 4);
+    assert!(state.applied);
+}
+
+/// Only a blank inactive bank is exempt: one that reports another firmware
+/// line is still refused before any DFU command.
+#[tokio::test]
+async fn an_inactive_bank_of_another_firmware_line_is_refused() {
+    let (shared, hardware) = hardware(Hardware {
+        fault: Fault::ForeignInactive,
+        ..Hardware::default()
+    })
+    .await;
+    let target = update_target_on(&shared).await.unwrap().unwrap();
+    assert!(matches!(
+        prepare_update_on(&shared, target, &package()).await,
+        Err(FirmwareUpdateFailure::WrongDevice)
+    ));
+    let state = hardware.lock().unwrap();
+    assert_eq!(state.start_count, 0);
+    assert!(!state.applied);
+}
+
 #[tokio::test]
 async fn newer_than_catalog_is_not_installable_and_never_downgrades() {
     let (shared, hardware) = hardware(Hardware::default()).await;
@@ -728,8 +804,19 @@ async fn an_interrupted_transfer_restarts_from_the_first_block_and_sends_every_p
             .await
             .unwrap_or_else(|error| panic!("{status:?} must not block a retry: {error:?}"));
         assert_eq!(hardware.lock().unwrap().start_count, 0);
-        let pending = prepared.install(|_| {}, || false).await.unwrap();
+        let mut phases = Vec::new();
+        let pending = prepared
+            .install(|phase| phases.push(phase), || false)
+            .await
+            .unwrap();
         pending.verify_on(&shared).await.unwrap();
+        assert_eq!(
+            phases.first(),
+            Some(&FirmwareUpdatePhase::Warning(
+                FirmwareUpdateWarning::UnfinishedTransfer { entity: 1 }
+            )),
+            "{status:?}"
+        );
         let state = hardware.lock().unwrap();
         assert_eq!(state.start_count, 1, "{status:?}");
         assert_eq!(state.packets, 4, "{status:?}");

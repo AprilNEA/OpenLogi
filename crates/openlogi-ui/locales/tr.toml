@@ -211,6 +211,7 @@ preparing = "Cihaz denetleniyor…"
 transferring = "Ürün yazılımı yükleniyor · %%{percent}"
 activity_log = "Etkinlik günlüğü (UTC)"
 activity_error = "Hata: %{message}"
+activity_warning = "Uyarı: %{message}"
 activity_device = "Cihaz: %{name} · %{family} · ürün yazılımı %{version}"
 activity_url = "Paket URL’si: %{url}"
 activity_downloaded = "%{version} ürün yazılımı indirildi ve doğrulandı."
@@ -233,6 +234,8 @@ unsupported = "Bu cihaz veya bağlantı, ürün yazılımı güncellemelerini de
 device_refused = "Cihaz güncellemeyi reddetti. Diğer cihaz yazılımlarını kapatın ve yeniden deneyin."
 interrupted = "Güncelleme durdu. Cihazı uyanık tutun ve ürün yazılımı sürümünü denetlemek için yeniden bağlayın."
 not_activated = "Yeniden başlatmanın ardından yeni ürün yazılımı doğrulanamadı. Ürün yazılımı sürümünü denetlemek için cihazı yeniden bağlayın."
+warning_erased_bank = "Yazılım bankası %{bank}, yarıda kalan bir güncellemeden sonra boş. Bankanın tamamı yeniden yazılıyor; çalışan yazılıma dokunulmuyor."
+warning_unfinished_transfer = "Yazılım bankası %{bank}, daha önceki tamamlanmamış bir güncellemeyi içeriyor. Bu güncelleme atılıyor ve aktarım baştan başlıyor."
 
 [profiles]
 remove_all_profiles = "Delete all app settings"

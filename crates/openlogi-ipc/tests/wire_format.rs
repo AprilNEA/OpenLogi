@@ -1224,7 +1224,7 @@ fn disable_keys_requests_are_appended() {
 fn firmware_status_failures_and_refusals() {
     use openlogi_core::hid::{
         FirmwareOffer, FirmwareStatus, FirmwareUpdateFailure, FirmwareUpdatePhase,
-        FirmwareUpdateRefusal, FirmwareVersion,
+        FirmwareUpdateRefusal, FirmwareUpdateWarning, FirmwareVersion,
     };
     let version = FirmwareVersion {
         number: 27,
@@ -1253,6 +1253,14 @@ fn firmware_status_failures_and_refusals() {
         (
             FirmwareUpdatePhase::Failed(FirmwareUpdateFailure::ImageRejected),
             "0501",
+        ),
+        (
+            FirmwareUpdatePhase::Warning(FirmwareUpdateWarning::ErasedBank { entity: 1 }),
+            "060001",
+        ),
+        (
+            FirmwareUpdatePhase::Warning(FirmwareUpdateWarning::UnfinishedTransfer { entity: 2 }),
+            "060102",
         ),
     ] {
         assert_wire(&phase, golden);
