@@ -11,7 +11,7 @@
 //! show the asked-for settings at once, then the echo replaces them, or a
 //! refusal sends the query back to the device for the truth.
 
-use openlogi_core::hid::{HapticSettings, WriteError};
+use openlogi_core::hid::{HapticIntensity, HapticSettings, WriteError};
 use tracing::warn;
 
 use super::device_key::DeviceKey;
@@ -114,6 +114,24 @@ impl AppState {
             write,
         });
         events
+    }
+
+    /// Commit the intensity a drag of `key`'s slider was released on, with
+    /// a preview pulse. A release after the selection moved to another device
+    /// commits nothing: the dragged value belongs to `key`, and the other
+    /// device's settings must not be combined with it.
+    pub fn commit_haptics_intensity(
+        &mut self,
+        key: &DeviceKey,
+        intensity: HapticIntensity,
+    ) -> StateEvents {
+        if !self.is_current_device(key) {
+            return StateEvents::none();
+        }
+        self.current_haptics_shown()
+            .map_or_else(StateEvents::none, |shown| {
+                self.commit_haptics(HapticSettings { intensity, ..shown }, true)
+            })
     }
 
     /// The device's answer to a [`Self::commit_haptics`] write: show the

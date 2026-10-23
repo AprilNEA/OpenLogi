@@ -325,3 +325,56 @@ fn an_older_answer_does_not_undo_a_newer_change(cx: &mut gpui::TestAppContext) {
         "the older answer leaves the newer change shown"
     );
 }
+
+/// A drag of one mouse's intensity slider released after the selection moved
+/// to another mouse writes neither: the other mouse keeps its settings.
+#[test]
+fn a_release_after_the_selection_moved_leaves_the_other_device_alone() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let first = mouse_inventory(true);
+    let mut second = direct_inventory([0x11, 0x22, 0x33, 0x44]);
+    second.paired[0]
+        .capabilities
+        .as_mut()
+        .expect("the fixture mouse has capabilities")
+        .haptic_feedback = true;
+    let mut state = AppState::new(Sources {
+        inventories: &[first, second],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+    let dragged = state.current_record().expect("a mouse").device_key();
+    let other_index = (0..state.devices().len())
+        .find(|index| {
+            !state.devices()[*index]
+                .device_key()
+                .as_str()
+                .eq(dragged.as_str())
+        })
+        .expect("a second mouse");
+    let _ = state.select_device(other_index);
+    let other = state.current_record().expect("the other mouse");
+    let other_config_key = other
+        .persistent_config_key()
+        .expect("persistent")
+        .to_string();
+    state
+        .config
+        .edit(|saved| saved.set_haptics(&other_config_key, settings(true, 60)));
+    drain(&mut receiver);
+
+    let _ =
+        state.commit_haptics_intensity(&dragged, HapticIntensity::try_new(25).expect("in range"));
+
+    assert_eq!(
+        state.config.haptics(&other_config_key),
+        Some(settings(true, 60)),
+        "the other mouse keeps its settings"
+    );
+    assert!(
+        !drain(&mut receiver)
+            .iter()
+            .any(|command| matches!(command, Command::SetHaptics(_))),
+        "nothing is written"
+    );
+}

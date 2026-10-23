@@ -15,7 +15,7 @@ use gpui::{
 use gpui_component::{Disableable as _, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::hid::{HapticIntensity, HapticLevels, HapticSettings};
 
-use crate::state::{AppState, DeviceKey, HapticsLoad, StateEvent, StateEvents};
+use crate::state::{AppState, DeviceKey, HapticsLoad, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::{Toggle, disabled_track, toggle_row};
 use crate::ui::section::section_label;
@@ -128,15 +128,12 @@ impl HapticsPanel {
             }
             return;
         }
-        let slider = CommitSlider::new(range, intensity, cx, |_, intensity, cx| {
-            // Resolved on release, so a device switch mid-drag writes the
-            // device now on screen.
+        let dragged = key.clone();
+        let slider = CommitSlider::new(range, intensity, cx, move |_, intensity, cx| {
+            // Bound to the device the slider was built for: a release after
+            // the selection moved writes nothing.
             AppState::apply(cx, |state| {
-                state
-                    .current_haptics_shown()
-                    .map_or_else(StateEvents::none, |shown| {
-                        state.commit_haptics(HapticSettings { intensity, ..shown }, true)
-                    })
+                state.commit_haptics_intensity(&dragged, intensity)
             });
         });
         self.intensity = Some(IntensitySlider {
