@@ -235,11 +235,12 @@ fn reading(settings: HapticSettings) -> HapticReading {
     }
 }
 
-/// The agent writes saved haptic settings last in its reconnect reapply, so
-/// a read on reconnect could answer with what the mouse held while away. The
-/// saved settings are shown instead, and nothing is read.
+/// The agent writes saved haptic settings again when the mouse reconnects,
+/// and answers a read only once that write has finished. The app therefore
+/// reads the mouse again, and shows its answer rather than the saved
+/// settings it has not confirmed.
 #[gpui::test]
-fn a_reconnect_shows_the_saved_settings_the_agent_writes(cx: &mut gpui::TestAppContext) {
+fn a_reconnect_reads_the_settings_the_agent_wrote(cx: &mut gpui::TestAppContext) {
     let mut config = Config::ephemeral();
     config.set_haptics(KNOWN_MOUSE_KEY, settings(true, 40));
     let resolver = AssetResolver::new();
@@ -258,10 +259,8 @@ fn a_reconnect_shows_the_saved_settings_the_agent_writes(cx: &mut gpui::TestAppC
     refresh(cx, mouse_on_receiver(false));
     refresh(cx, mouse_on_receiver(true));
 
-    assert!(
-        !reads_haptics(&mut receiver),
-        "no read races the agent's reapply"
-    );
+    answer_haptics_read(&mut receiver, reading(settings(true, 40)));
+    cx.run_until_parked();
     assert_eq!(shown(cx), Some(settings(true, 40)));
 }
 

@@ -26,7 +26,7 @@ use openlogi_core::device::{
     LightState, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
-use openlogi_core::hid::HapticSettings;
+use openlogi_core::hid::{HapticReading, HapticSettings};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, HidppOperation, HostOs,
@@ -300,6 +300,20 @@ impl SharedHandles {
                         .map(|reading| reading.settings)
                 },
             )
+            .await
+    }
+
+    /// Read the haptic settings of the device at `route` once every haptics
+    /// write already requested for it has finished. A reconnect numbers its
+    /// write as it is scheduled, so a read the settings app asks for on
+    /// seeing the reconnect shows what that write left, not what the device
+    /// held before it.
+    pub async fn read_haptics(&self, route: &DeviceRoute) -> Result<HapticReading, WriteError> {
+        self.haptics_order.settled(route).await;
+        self.device(route)
+            .run(HidppOperation::ReadHaptics, |c| async move {
+                openlogi_hid::read_haptics_on(&c).await
+            })
             .await
     }
 

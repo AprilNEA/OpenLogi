@@ -150,31 +150,12 @@ impl AppState {
         StateEvent::HapticsChanged(key.clone()).into()
     }
 
-    /// The `reconnected` devices came back online. With saved settings, the
-    /// agent writes them as the last step of its reconnect reapply, so a read
-    /// now could land before that write and show what the device held while
-    /// away: the saved settings are shown instead, as the device's own once
-    /// the reapply lands. With none saved, the agent writes nothing, and the
-    /// device is read again.
+    /// The `reconnected` devices came back online. The agent writes their
+    /// saved haptic settings again, and answers a read only once that write
+    /// has finished, so each is read again for what it holds now.
     pub(super) fn haptics_reconnected(&mut self, reconnected: &[DeviceKey]) {
-        let saved: Vec<(DeviceKey, Option<HapticSettings>)> = self
-            .devices
-            .records
-            .iter()
-            .map(|record| (record.device_key(), record))
-            .filter(|(key, _)| reconnected.contains(key))
-            .map(|(key, record)| {
-                let saved = record
-                    .persistent_config_key()
-                    .and_then(|config_key| self.config.haptics(config_key));
-                (key, saved)
-            })
-            .collect();
-        for (key, saved) in saved {
-            match saved {
-                Some(settings) => self.pointer.reads.set_haptics_ready(&key, settings),
-                None => self.pointer.reads.refresh_haptics(&key),
-            }
+        for key in reconnected {
+            self.pointer.reads.refresh_haptics(key);
         }
     }
 

@@ -346,12 +346,12 @@ impl Agent for AgentServer {
         _: Context,
         route: DeviceRoute,
     ) -> Result<HapticReading, WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::ReadHaptics, |c| async move {
-                openlogi_hid::read_haptics_on(&c).await
-            })
-            .await
+        // A reconnect numbers its haptics write under the orchestrator lock,
+        // after publishing the inventory this read may have been asked on:
+        // waiting for the lock lets that write be numbered first, so the
+        // read answers with what it leaves.
+        drop(self.orchestrator.lock().await);
+        self.shared.read_haptics(&route).await
     }
     async fn set_haptics(
         self,

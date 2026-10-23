@@ -888,3 +888,26 @@ async fn a_gui_save_leaves_the_haptics_write_to_the_gui() {
         "a hand edit writes the device and supersedes the older write"
     );
 }
+
+/// A reconnect numbers its haptics write as it schedules it. A read asked
+/// after that waits for the write, so the settings app is not shown what
+/// the device held before it.
+#[tokio::test]
+async fn a_haptics_read_waits_for_the_writes_before_it() {
+    let orch = orchestrator(Config::default());
+    let route = haptic_device("a", 1, true).route.expect("a Bolt route");
+    let reapply = orch.shared.haptics_order.request(&route);
+    let shared = orch.shared();
+    let read_route = route.clone();
+    let read = tokio::spawn(async move { shared.read_haptics(&read_route).await });
+    tokio::task::yield_now().await;
+    assert!(
+        !read.is_finished(),
+        "the read waits for the reapply's write"
+    );
+    drop(reapply);
+    // No device answers in a test; what matters is that the read went ahead.
+    read.await
+        .expect("the read joins")
+        .expect_err("no device here");
+}
