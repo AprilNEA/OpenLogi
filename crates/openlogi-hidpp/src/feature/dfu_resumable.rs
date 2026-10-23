@@ -11,13 +11,21 @@
 //! See `docs/FIRMWARE_UPDATES.md` at the repository root for the complete
 //! flashing sequence, validation boundaries and hardware evidence.
 
-use std::time::Duration;
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use num_enum::TryFromPrimitive;
 use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    feature::{DecodeEvent, EventSource, FeatureEndpoint},
+    channel::MessageListenerGuard,
+    feature::{DecodeEvent, FeatureEndpoint, InboundReport, inbound_report},
     protocol::v20::{self, Hidpp20Error},
 };
 
@@ -40,10 +48,6 @@ const TRANSFER_DFU_DATA: u8 = 4;
 pub struct DfuResumableFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
-
-    /// Publishes the status reports the device broadcasts after a
-    /// [`DfuStatus::TransferWait`].
-    events: EventSource<DfuStatusReport>,
 }
 
 impl DfuResumableFeature {
@@ -62,7 +66,7 @@ impl DfuResumableFeature {
         &self,
         entity: u8,
         magic: [u8; DFU_MAGIC_LEN],
-    ) -> Result<DfuStatusReport, Hidpp20Error> {
+    ) -> Result<DfuReply, Hidpp20Error> {
         let mut args = [0; 16];
         args[0] = entity;
         args[1..=DFU_MAGIC_LEN].copy_from_slice(&magic);
@@ -70,7 +74,7 @@ impl DfuResumableFeature {
     }
 
     /// Reads where the update of firmware `entity` stands.
-    pub async fn get_dfu_status(&self, entity: u8) -> Result<DfuStatusReport, Hidpp20Error> {
+    pub async fn get_dfu_status(&self, entity: u8) -> Result<DfuReply, Hidpp20Error> {
         let mut args = [0; 16];
         args[0] = entity;
         self.status_call(GET_DFU_STATUS, args).await
@@ -80,7 +84,7 @@ impl DfuResumableFeature {
     pub async fn transfer_dfu_data(
         &self,
         packet: [u8; DFU_PACKET_LEN],
-    ) -> Result<DfuStatusReport, Hidpp20Error> {
+    ) -> Result<DfuReply, Hidpp20Error> {
         self.status_call(TRANSFER_DFU_DATA, packet).await
     }
 
@@ -95,15 +99,39 @@ impl DfuResumableFeature {
         self.endpoint.notify_long(APPLY_DFU, args).await
     }
 
-    async fn status_call(
-        &self,
-        function: u8,
-        args: [u8; 16],
-    ) -> Result<DfuStatusReport, Hidpp20Error> {
-        // REVERSE-ENGINEERED: RDFU may answer a command with its status
-        // broadcast (software ID 0, event sub-ID 0) instead of echoing the
-        // request header. Only this feature uses that response convention.
+    async fn status_call(&self, function: u8, args: [u8; 16]) -> Result<DfuReply, Hidpp20Error> {
+        // The recorded MX Master 4 transfer answered every command with its
+        // own request header and broadcast status (software ID 0, event 0)
+        // only after a `TransferWait` reply. A reply is therefore matched by
+        // header alone: a broadcast never answers a command, and a late reply
+        // to an abandoned command is quarantined by the channel.
         let header = self.endpoint.header(function);
+        let (sender, broadcasts) = async_channel::unbounded();
+        let replied = Arc::new(AtomicBool::new(false));
+        let own = self.endpoint.chan.request_sw_ids();
+        // Registered before the write: the read loop dispatches reports in
+        // arrival order, so the broadcasts seen after this command's own reply
+        // are exactly the ones the device sent after answering it.
+        let listener = self.endpoint.chan.add_msg_listener_guarded({
+            let replied = Arc::clone(&replied);
+            move |raw, matched| {
+                if matched {
+                    if v20::Message::from(raw).header() == header {
+                        replied.store(true, Ordering::SeqCst);
+                    }
+                    return;
+                }
+                if !replied.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Some(InboundReport::Broadcast(message)) =
+                    inbound_report(raw, matched, header.device_index, header.feature_index, own)
+                    && let Some(report) = DfuStatusReport::decode_message(&message)
+                {
+                    let _ = sender.try_send(report);
+                }
+            }
+        });
         let raw = self
             .endpoint
             .chan
@@ -111,22 +139,57 @@ impl DfuResumableFeature {
                 v20::Message::Long(header, args).into(),
                 move |raw| {
                     let response = v20::Message::from(*raw);
-                    let received = response.header();
-                    response.feature_error_for(header).is_some()
-                        || received == header
-                        || (received.device_index == header.device_index
-                            && received.feature_index == header.feature_index
-                            && received.software_id.to_lo() == 0
-                            && received.function_id.to_lo() == 0)
+                    response.feature_error_for(header).is_some() || response.header() == header
                 },
-                Duration::from_secs(8),
+                REPLY_TIMEOUT,
             )
             .await?;
         let response = v20::Message::from(raw);
         if let Some(error) = response.feature_error_for(header) {
             return Err(error);
         }
-        DfuStatusReport::from_message(&response).ok_or(Hidpp20Error::UnsupportedResponse)
+        let report =
+            DfuStatusReport::from_message(&response).ok_or(Hidpp20Error::UnsupportedResponse)?;
+        Ok(DfuReply {
+            report,
+            broadcasts,
+            _listener: listener,
+        })
+    }
+}
+
+/// How long a command waits for its own reply. Tests shorten it so a
+/// deliberately unanswered command does not cost the full budget.
+#[cfg(not(test))]
+const REPLY_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(test)]
+const REPLY_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// A command's status reply, with the status broadcasts the device sent after
+/// it.
+pub struct DfuReply {
+    /// The status this command's own reply carried.
+    pub report: DfuStatusReport,
+    broadcasts: async_channel::Receiver<DfuStatusReport>,
+    /// Keeps collecting broadcasts until the reply is dropped.
+    _listener: MessageListenerGuard,
+}
+
+impl DfuReply {
+    /// The next status broadcast the device sent after this reply, which is
+    /// how it ends a [`DfuStatus::TransferWait`]. A broadcast that arrived
+    /// before the reply belongs to an earlier state and is never returned.
+    /// `None` once the channel closes.
+    pub async fn next_broadcast(&self) -> Option<DfuStatusReport> {
+        self.broadcasts.recv().await.ok()
+    }
+}
+
+impl fmt::Debug for DfuReply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DfuReply")
+            .field("report", &self.report)
+            .finish_non_exhaustive()
     }
 }
 
@@ -269,6 +332,13 @@ pub enum DfuError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        channel::{
+            HidppMessage,
+            mock::{MockRawHidChannel, MockRawHidHandle, channel_with_reader},
+        },
+        feature::CreatableFeature,
+    };
 
     fn header() -> v20::MessageHeader {
         v20::MessageHeader {
@@ -290,35 +360,142 @@ mod tests {
         }
     }
 
-    #[test]
-    fn truncated_status_responses_are_unsupported() {
-        use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
-        use crate::feature::CreatableFeature;
-        use std::sync::Arc;
-
+    fn mock_feature() -> (DfuResumableFeature, MockRawHidHandle) {
         futures::executor::block_on(async {
             let (raw, handle) = MockRawHidChannel::new();
             let channel = Arc::new(channel_with_reader(raw).await);
-            let feature = DfuResumableFeature::new(channel, 3, 8);
-            for echo in [false, true] {
-                let mut reply = header();
-                if echo {
-                    reply.function_id = crate::nibble::U4::from_lo(2);
-                    reply.software_id = crate::nibble::U4::from_lo(1);
-                }
-                for code in [0x02, 0x03, 0x06] {
-                    handle.queue_response(v20::Message::Short(reply, [1, code, 0]).into());
-                    assert!(matches!(
-                        feature.get_dfu_status(1).await,
-                        Err(Hidpp20Error::UnsupportedResponse)
-                    ));
-                }
-                for (code, status) in [(1, DfuStatus::NotStarted), (4, DfuStatus::TransferComplete)]
-                {
-                    handle.queue_response(v20::Message::Short(reply, [1, code, 0]).into());
-                    assert_eq!(feature.get_dfu_status(1).await.unwrap().status, status);
-                }
+            (DfuResumableFeature::new(channel, 3, 8), handle)
+        })
+    }
+
+    /// The header of the `index`th report the feature wrote.
+    fn written_header(handle: &MockRawHidHandle, index: usize) -> v20::MessageHeader {
+        let written = handle.written_reports();
+        v20::Message::from(HidppMessage::read_raw(&written[index]).unwrap()).header()
+    }
+
+    /// Waits until the feature has written `count` reports.
+    async fn written(handle: &MockRawHidHandle, count: usize) {
+        while handle.written_reports().len() < count {
+            futures_timer::Delay::new(Duration::from_millis(1)).await;
+        }
+    }
+
+    fn status(header: v20::MessageHeader, payload: &[u8]) -> HidppMessage {
+        let mut long = [0; 16];
+        long[..payload.len()].copy_from_slice(payload);
+        v20::Message::Long(header, long).into()
+    }
+
+    #[test]
+    fn truncated_status_responses_are_unsupported() {
+        let (feature, handle) = mock_feature();
+        futures::executor::block_on(async {
+            let mut reply = header();
+            reply.function_id = crate::nibble::U4::from_lo(2);
+            reply.software_id = crate::nibble::U4::from_lo(1);
+            for code in [0x02, 0x03, 0x06] {
+                handle.queue_response(v20::Message::Short(reply, [1, code, 0]).into());
+                assert!(matches!(
+                    feature.get_dfu_status(1).await,
+                    Err(Hidpp20Error::UnsupportedResponse)
+                ));
             }
+            for (code, status) in [(1, DfuStatus::NotStarted), (4, DfuStatus::TransferComplete)] {
+                handle.queue_response(v20::Message::Short(reply, [1, code, 0]).into());
+                assert_eq!(
+                    feature.get_dfu_status(1).await.unwrap().report.status,
+                    status
+                );
+            }
+        });
+    }
+
+    /// A broadcast that lands while a command waits is not its answer, and a
+    /// later wait never sees it; only broadcasts after the reply end a wait.
+    #[test]
+    fn a_broadcast_never_answers_a_command_or_ends_a_later_wait() {
+        let (feature, handle) = mock_feature();
+        futures::executor::block_on(async {
+            handle.park_writes();
+            let command = feature.transfer_dfu_data([0; DFU_PACKET_LEN]);
+            let device = async {
+                written(&handle, 1).await;
+                // Late, from an earlier wait: it asks for a block this
+                // command's reply must not be confused with.
+                handle
+                    .send_incoming(status(header(), &[1, 0x02, 0x00, 0x07]))
+                    .await;
+                handle.queue_response(status(written_header(&handle, 0), &[1, 0x03, 0x00, 0x10]));
+                handle.release_writes();
+            };
+            let (reply, ()) = futures::join!(command, device);
+            let reply = reply.unwrap();
+            assert_eq!(
+                reply.report.status,
+                DfuStatus::TransferWait { delay_ms: 16 }
+            );
+            assert!(
+                reply.broadcasts.try_recv().is_err(),
+                "a broadcast from before the reply cannot end its wait"
+            );
+            handle
+                .send_incoming(status(header(), &[1, 0x02, 0x00, 0x01]))
+                .await;
+            assert_eq!(
+                reply.next_broadcast().await.unwrap().status,
+                DfuStatus::TransferReady { block: 1 }
+            );
+        });
+    }
+
+    /// A reply that arrives after its command timed out answers neither a
+    /// different command nor a re-ask of the same one.
+    #[test]
+    fn a_reply_after_its_timeout_is_not_the_next_commands_answer() {
+        let (feature, handle) = mock_feature();
+        futures::executor::block_on(async {
+            assert!(matches!(
+                feature.get_dfu_status(1).await,
+                Err(Hidpp20Error::Channel(_))
+            ));
+            let abandoned = written_header(&handle, 0);
+            let late = status(abandoned, &[1, 0x06, 0, 0, 0, 0x09]);
+
+            handle.park_writes();
+            let command = feature.transfer_dfu_data([0; DFU_PACKET_LEN]);
+            let device = async {
+                written(&handle, 2).await;
+                handle.send_incoming(late).await;
+                handle.queue_response(status(written_header(&handle, 1), &[1, 0x06, 0, 0, 0, 1]));
+                handle.release_writes();
+            };
+            let (reply, ()) = futures::join!(command, device);
+            assert_eq!(
+                reply.unwrap().report.status,
+                DfuStatus::PacketAck { next_packet: 1 }
+            );
+        });
+
+        // The same header again: the channel holds the re-ask until the
+        // abandoned reply lands and is discarded.
+        let (feature, handle) = mock_feature();
+        futures::executor::block_on(async {
+            assert!(matches!(
+                feature.get_dfu_status(1).await,
+                Err(Hidpp20Error::Channel(_))
+            ));
+            let abandoned = written_header(&handle, 0);
+            let reask = feature.get_dfu_status(1);
+            let device = async {
+                futures_timer::Delay::new(Duration::from_millis(20)).await;
+                handle.queue_response(status(abandoned, &[1, 0x01]));
+                handle
+                    .send_incoming(status(abandoned, &[1, 0x06, 0, 0, 0, 0x09]))
+                    .await;
+            };
+            let (reply, ()) = futures::join!(reask, device);
+            assert_eq!(reply.unwrap().report.status, DfuStatus::NotStarted);
         });
     }
 

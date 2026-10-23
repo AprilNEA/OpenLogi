@@ -17,9 +17,10 @@ async fn cooperative_stop_and_deadline_prevent_the_next_command() {
 
 use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
 use std::sync::{
-    Mutex,
+    Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Default, PartialEq, Eq)]
 enum Fault {
@@ -33,7 +34,15 @@ enum Fault {
         packet: usize,
         remaining: usize,
     },
+    /// Packet 4 asks to wait, and its status broadcast never arrives.
     WaitForPoll,
+    /// Packet 4 asks to wait, then broadcasts completion like the recorded
+    /// device does.
+    WaitThenBroadcast,
+    /// Packet 2 asks to wait; its broadcast misses the wait and lands while
+    /// the next packet's command is outstanding. Packet 4 then waits and
+    /// broadcasts completion.
+    LateBroadcast,
     DropStartReply,
     StartNotAccepted,
     StartWrongEntity,
@@ -65,8 +74,14 @@ struct Hardware {
     packets: usize,
     packet_attempts: usize,
     start_count: usize,
+    status_polls: usize,
     started: bool,
     leftover: Option<Leftover>,
+    device_index: u8,
+    /// Reports the device sends before / after its reply to the current
+    /// request; the responder flushes them in order.
+    before: Vec<Vec<u8>>,
+    after: Vec<Vec<u8>>,
     battery: Option<u8>,
     running_version: Option<(u8, u8)>,
     active_entity: Option<u8>,
@@ -145,10 +160,20 @@ impl Hardware {
         Some(payload)
     }
 
+    /// A status broadcast: software ID 0, event 0, on the DFU feature.
+    fn broadcast(&self, status: &[u8]) -> Vec<u8> {
+        let mut report = vec![0; 20];
+        report[..3].copy_from_slice(&[0x11, self.device_index, 4]);
+        report[4] = self.target_entity.unwrap_or(1);
+        report[5..5 + status.len()].copy_from_slice(status);
+        report
+    }
+
     fn respond(&mut self, request: &[u8]) -> Option<Vec<u8>> {
         if request.len() < 7 {
             return None;
         }
+        self.device_index = request[1];
         if self.fault == Fault::Hidpp10 && (request[2], request[3] >> 4) == (0, 1) {
             // HID++ 1.0 error report: sub-id 0x8f, our feature index and
             // function/software byte echoed, then "invalid sub-id".
@@ -180,6 +205,7 @@ impl Hardware {
             }
             (4, 0) => payload[0] = 7,
             (4, 2) => {
+                self.status_polls += 1;
                 payload[0] = request[4];
                 if self.packets == 4 {
                     payload[1] = 4;
@@ -206,6 +232,10 @@ impl Hardware {
                     *remaining -= 1;
                     return None;
                 }
+                if self.fault == Fault::LateBroadcast && self.packets == 2 {
+                    // The broadcast that should have ended packet 2's wait.
+                    self.before.push(self.broadcast(&[6, 0, 0, 0, 2]));
+                }
                 self.packets += 1;
                 self.sent_bytes.extend_from_slice(&request[4..20]);
                 payload[0] = self.target_entity.unwrap_or(1);
@@ -213,9 +243,17 @@ impl Hardware {
                     self.fault = Fault::None;
                     return None;
                 }
-                if self.packets == 4 && self.fault == Fault::WaitForPoll {
+                let waits = match self.fault {
+                    Fault::WaitForPoll | Fault::WaitThenBroadcast => self.packets == 4,
+                    Fault::LateBroadcast => matches!(self.packets, 2 | 4),
+                    _ => false,
+                };
+                if waits {
                     payload[1] = 3;
                     payload[3] = 1;
+                    if self.packets == 4 && self.fault != Fault::WaitForPoll {
+                        self.after.push(self.broadcast(&[4]));
+                    }
                 } else if self.packets == 4 || self.fault == Fault::EarlyComplete {
                     payload[1] = 4;
                 } else {
@@ -230,25 +268,49 @@ impl Hardware {
             }
             _ => return None,
         }
+        // The recorded device echoes each request's header, DFU commands
+        // included; status broadcasts only follow a wait (see `broadcast`).
         let mut response = vec![0; 20];
         response[0] = 0x11;
         response[1..4].copy_from_slice(&request[1..4]);
-        // Test the real RDFU convention: status arrives as software-ID-zero
-        // event 0 rather than a header-echoed response.
-        if request[2] == 4 && request[3] >> 4 != 0 {
-            response[3] = 0;
-        }
         response[4..].copy_from_slice(&payload);
         Some(response)
     }
 }
 
+/// Where the responder sends reports, set once the channel exists.
+type Incoming = Arc<OnceLock<UnboundedSender<Vec<u8>>>>;
+
+/// Answers each request from `state`, sending the reports the device emits
+/// around its reply in wire order.
+fn responder(
+    state: &Arc<Mutex<Hardware>>,
+) -> (
+    impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
+    Incoming,
+) {
+    let state = Arc::clone(state);
+    let incoming: Incoming = Arc::new(OnceLock::new());
+    let sender = Arc::clone(&incoming);
+    let respond = move |request: &[u8]| {
+        let mut state = state.lock().unwrap();
+        let reply = state.respond(request);
+        let before = std::mem::take(&mut state.before);
+        let after = std::mem::take(&mut state.after);
+        let incoming = sender.get().expect("responder is wired to its channel");
+        for report in before.into_iter().chain(reply).chain(after) {
+            let _ = incoming.send(report);
+        }
+        None
+    };
+    (respond, incoming)
+}
+
 async fn hardware(state: Hardware) -> (SharedChannel, Arc<Mutex<Hardware>>) {
     let state = Arc::new(Mutex::new(state));
-    let responder = Arc::clone(&state);
-    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
-        responder.lock().unwrap().respond(request)
-    });
+    let (respond, incoming) = responder(&state);
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(respond);
+    incoming.set(raw.incoming_sender()).unwrap();
     let shared = SharedChannel::new(
         scripted_channel(raw).await,
         DeviceRoute::Bolt {
@@ -534,13 +596,14 @@ async fn lost_packet_retries_the_requested_position_without_skipping_bytes() {
 async fn repeated_packet_loss_exhausts_recovery_without_activating() {
     let (original, state) = hardware(Hardware::default()).await;
     let target = update_target_on(&original).await.unwrap().unwrap();
-    let responder = Arc::clone(&state);
+    let (respond, incoming) = responder(&state);
     let (raw, handle) = ScriptedRawHidChannel::with_failing_writes(
-        move |request| responder.lock().unwrap().respond(request),
+        respond,
         // Drop the init payload (packet 1) before the responder receives it.
         // Native failures avoid spending real timeout intervals on each retry.
         |request| request[2] == 4 && request[3] >> 4 == 4 && request.get(4..8) == Some(b"\x01RBM"),
     );
+    incoming.set(raw.incoming_sender()).unwrap();
     let shared = SharedChannel::new(scripted_channel(raw).await, original.route().clone());
     drop(original);
     let result = prepare_update_on(&shared, target, &package())
@@ -768,4 +831,34 @@ async fn a_retry_after_an_interrupted_run_transfers_everything_again() {
         );
         assert!(state.applied, "after {percent}%");
     }
+}
+
+#[tokio::test]
+async fn a_wait_ends_on_the_broadcast_sent_after_its_reply() {
+    let (shared, hardware) = hardware(Hardware {
+        fault: Fault::WaitThenBroadcast,
+        ..Hardware::default()
+    })
+    .await;
+    update(&shared).await.unwrap();
+    let state = hardware.lock().unwrap();
+    assert!(state.applied);
+    assert_eq!(
+        state.status_polls, 1,
+        "only preflight polls; the broadcast ends the wait"
+    );
+}
+
+#[tokio::test]
+async fn a_broadcast_that_missed_its_wait_is_not_a_later_answer() {
+    let (shared, hardware) = hardware(Hardware {
+        fault: Fault::LateBroadcast,
+        ..Hardware::default()
+    })
+    .await;
+    update(&shared).await.unwrap();
+    let state = hardware.lock().unwrap();
+    assert!(state.applied);
+    assert_eq!(state.packet_attempts, 4);
+    assert_eq!(state.sent_bytes, package().images[0].blocks[0]);
 }
