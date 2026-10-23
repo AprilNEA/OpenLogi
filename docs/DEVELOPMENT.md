@@ -467,11 +467,13 @@ Sparkle keeps reading the stable appcasts below and, on `beta`, also offers
 their items tagged `<sparkle:channel>beta</sparkle:channel>`. The beta
 channel's `latest.json` offers the newest beta when it is newer than the
 newest stable release, and that stable release otherwise. So an app on `beta`
-gets every stable release too, with one exception: the engine compares
+gets every stable release too, with one exception. The engine compares
 release versions and never offers a lower one, so an app on a beta numbered
-past a later stable release (the release PR's version went down after the
-beta) stays on the beta until a release numbered past it. Sparkle compares
-build versions and moves it to the stable release.
+past a release cut after it stays on that beta until a release numbered past
+it. This happens when the release PR's version goes down after the beta,
+whether the later release is stable or another beta. Sparkle compares build
+versions and moves the app to the later release. `release channels` warns
+whenever a beta is numbered past what the beta channel offers.
 
 ### macOS: Sparkle
 

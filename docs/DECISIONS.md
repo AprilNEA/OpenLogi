@@ -23,12 +23,15 @@ records (`cargo xtask release channels`).
   the stable release it was cut from, plus its beta number, so build order
   follows the commits. Sparkle and Windows Installer compare build versions.
   The built-in update engine compares release versions, and never offers a
-  lower one. The two orders differ only for a beta numbered past a stable
-  release but cut before it, when the release PR's version went down in
-  between. That beta is older, and the beta channel offers the stable
-  release: Sparkle moves a Mac on the beta to it, while the built-in engine
-  keeps the beta until a release numbered past it. `release channels` warns
-  when this happens.
+  lower one. The two orders disagree whenever a beta is numbered past a
+  release cut after it, which happens when the release PR's version goes
+  down in between. The later release can be stable (`0.9.0-beta.5`, then
+  `0.8.19`) or another beta (`0.9.0-beta.3`, then `0.8.19-beta.10`). The
+  channels offer the release cut last, which has the earlier one's changes.
+  Sparkle moves a Mac to it; the built-in engine keeps the higher-numbered
+  beta until a release numbered past it. We accept this: `release channels`
+  warns whenever a beta is numbered past what the beta channel offers, so
+  that a release numbered past the beta can follow.
 - **Items copied byte for byte.** The composer never signs. The EdDSA
   signatures stay the ones `release appcast` made, and the private key stays
   in that one step.

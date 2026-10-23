@@ -4,7 +4,7 @@ use gpui_updater_release::{Appcast, AppcastItem, Enclosure};
 use openlogi_core::update_feed::{MANIFEST_FILE_NAME, UpdateChannel};
 use strum::VariantArray as _;
 
-use super::{Args, ChannelFile, Outcome, feed_items, write_channels, write_files};
+use super::{Args, ChannelFile, Outcome, destination, feed_items, write_channels, write_files};
 use crate::commands::release::latest_json::Manifest;
 use crate::support::update_feed::{MacArch, appcast_url};
 
@@ -155,6 +155,7 @@ fn outcome(stable: &str, beta: &str, beta_changed: bool) -> Outcome {
         beta_tag: beta.into(),
         beta_version: beta.trim_start_matches('v').into(),
         beta_changed,
+        warnings: Vec::new(),
     }
 }
 
@@ -301,7 +302,18 @@ fn a_beta_cut_before_the_stable_release_is_older_whatever_its_number() {
 
     let done = write_channels(&args(mirror.path(), out.path(), "v0.8.19")).unwrap();
 
-    assert_eq!(done, outcome("v0.8.19", "v0.8.19", true));
+    assert_eq!(
+        done,
+        Outcome {
+            warnings: vec![
+                "v0.9.0-beta.5 is numbered past v0.8.19, but was cut before it (build 0.8.18.5 < 0.8.19); \
+                 the beta channel offers v0.8.19. Apps on v0.9.0-beta.5 that update with the built-in \
+                 engine stay on it until a release numbered past it"
+                    .to_owned()
+            ],
+            ..outcome("v0.8.19", "v0.8.19", true)
+        }
+    );
     assert_eq!(
         offered(out.path(), MacArch::Arm64),
         [("0.8.19".to_owned(), None)]
@@ -319,6 +331,15 @@ fn the_newest_beta_is_the_one_cut_last() {
     let done = write_channels(&args(mirror.path(), out.path(), "v0.8.19-beta.10")).unwrap();
 
     assert_eq!(done.beta_tag, "v0.8.19-beta.10");
+    assert_eq!(
+        done.warnings,
+        [
+            "v0.9.0-beta.3 is numbered past v0.8.19-beta.10, but was cut before it (build 0.8.18.3 < 0.8.18.10); \
+             the beta channel offers v0.8.19-beta.10. Apps on v0.9.0-beta.3 that update with the built-in \
+             engine stay on it until a release numbered past it"
+        ],
+        "the built-in engine never offers 0.8.19-beta.10 to an app on 0.9.0-beta.3"
+    );
     assert_eq!(
         offered(out.path(), MacArch::Arm64),
         [
@@ -551,4 +572,68 @@ fn nothing_stale_is_uploaded_with_the_channel_files() {
     write(&out.path().join("stage/stale.json"), "{}");
     let error = write_channels(&args(mirror.path(), out.path(), "v0.8.18")).unwrap_err();
     assert!(error.to_string().contains("is not empty"), "{error}");
+}
+
+#[test]
+fn an_output_directory_spelled_with_a_trailing_dot_is_written() {
+    let mirror = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    record(mirror.path(), "v0.8.18", "0.8.18");
+    let empty = out.path().join("empty");
+    fs_err::create_dir(&empty).unwrap();
+    let mut spelled = args(mirror.path(), out.path(), "v0.8.18");
+    spelled.output_dir = empty.join(".");
+
+    write_channels(&spelled).unwrap();
+
+    assert_eq!(
+        fs_err::read_to_string(empty.join("channels/stable/latest.json")).unwrap(),
+        manifest("v0.8.18", "stable")
+    );
+    let left: Vec<_> = fs_err::read_dir(out.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["empty"], "no scratch directory is left beside it");
+}
+
+#[test]
+fn the_output_directory_resolves_against_the_current_directory() {
+    let cwd = tempfile::tempdir().unwrap();
+    let real = fs_err::canonicalize(cwd.path()).unwrap();
+    fs_err::create_dir(cwd.path().join("stage")).unwrap();
+
+    assert_eq!(
+        destination(Path::new("stage/."), cwd.path()).unwrap(),
+        real.join("stage")
+    );
+    assert_eq!(
+        destination(Path::new("new/channels"), cwd.path()).unwrap(),
+        real.join("new/channels"),
+        "a missing directory resolves through its parent, which is created"
+    );
+    assert!(cwd.path().join("new").is_dir());
+    assert_eq!(
+        destination(Path::new("stage/../other"), cwd.path()).unwrap(),
+        real.join("other")
+    );
+}
+
+#[test]
+fn the_current_directory_is_not_an_output_directory() {
+    let cwd = tempfile::tempdir().unwrap();
+    fs_err::create_dir(cwd.path().join("stage")).unwrap();
+
+    for spelled in [".", "./", "stage/.."] {
+        let err = destination(Path::new(spelled), cwd.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("is the current directory"),
+            "{spelled}: {err:#}"
+        );
+    }
+    let err = destination(Path::new("missing/.."), cwd.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("does not name a directory"),
+        "{err:#}"
+    );
 }

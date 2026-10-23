@@ -15,15 +15,17 @@
 //!   beta is newer. Sparkle offers the beta item only to apps that allow the
 //!   beta channel.
 //!
-//! "Newer" is the order of build versions, which follows the commits: a beta
-//! is newer than a stable release only when it was cut after it. Sparkle and
-//! Windows Installer compare build versions too. The built-in update engine
-//! compares release versions instead, and the two orders differ only for a
-//! beta numbered past a stable release but cut before it (the release PR's
-//! version went down in between). That beta is older, and the stable release
-//! has its changes: Sparkle moves a Mac on the beta to the stable release,
-//! while the built-in engine, which never offers a lower version, keeps the
-//! beta until a release numbered past it. [`select`] warns when this happens.
+//! "Newer" is the order of build versions, which follows the commits: a
+//! release cut later is newer. Sparkle and Windows Installer compare build
+//! versions too. The built-in update engine compares release versions
+//! instead, and never offers a lower one. The two orders disagree whenever a
+//! beta is numbered past a release cut after it, which happens when the
+//! release PR's version goes down in between: `0.9.0-beta.5` and then the
+//! stable `0.8.19`, or `0.9.0-beta.3` and then `0.8.19-beta.10`. The channels
+//! offer the release cut last, which has the earlier one's changes. Sparkle
+//! moves a Mac to it; the built-in engine keeps the higher-numbered beta until
+//! a release numbered past it. [`select`] warns whenever a beta is numbered
+//! past the release the beta channel offers.
 //!
 //! Items are copied from the records byte for byte, so their signatures stay
 //! the ones `release appcast` made. The files are recomputed from every record
@@ -96,6 +98,8 @@ struct Selection<'a> {
     stable: &'a Record,
     /// The newest beta, when it is newer than [`Self::stable`].
     beta: Option<&'a Record>,
+    /// What an operator should know about the choice.
+    warnings: Vec<String>,
 }
 
 impl Selection<'_> {
@@ -114,14 +118,25 @@ struct Outcome {
     beta_version: String,
     /// Whether the beta channel offered another version before.
     beta_changed: bool,
+    /// From [`select`].
+    warnings: Vec<String>,
 }
 
 /// Compose and write the channel files, then report what each channel
 /// offers in the step's outputs. The outputs come last: when writing them
 /// fails, the files are written but the step fails, and the publish job
-/// uploads nothing.
+/// uploads no channel files. Each warning from [`select`] is also a GitHub
+/// Actions warning annotation when the command runs in a workflow.
 pub(crate) fn run(args: &Args) -> Result<()> {
     let outcome = write_channels(args)?;
+    let in_workflow = std::env::var_os("GITHUB_ACTIONS").is_some();
+    for warning in &outcome.warnings {
+        if in_workflow {
+            println!("::warning title=Update channels::{warning}");
+        } else {
+            eprintln!("warning: {warning}");
+        }
+    }
     println!("stable channel: {}", outcome.stable_tag);
     println!(
         "beta channel: {}{}",
@@ -173,6 +188,7 @@ fn write_channels(args: &Args) -> Result<Outcome> {
         beta_changed: served_version(&args.mirror, UpdateChannel::Beta).as_deref()
             != Some(beta_version.as_str()),
         beta_version,
+        warnings: selection.warnings.clone(),
     })
 }
 
@@ -333,18 +349,29 @@ fn select(records: &[Record]) -> Result<Selection<'_>> {
     };
     let stable = newest(UpdateChannel::Stable)
         .context("no stable release has a record, and the stable channel offers none")?;
-    let newest_beta = newest(UpdateChannel::Beta);
-    let beta = newest_beta.filter(|beta| beta.build > stable.build);
-    if let Some(skipped) = newest_beta.filter(|_| beta.is_none())
-        && skipped.tag.version() > stable.tag.version()
-    {
-        eprintln!(
-            "{} is numbered past {}, but was cut before it (build {} < {}); the beta channel offers {}. \
-             Apps on {} that update with the built-in engine stay on it until a release numbered past it",
-            skipped.tag, stable.tag, skipped.build, stable.build, stable.tag, skipped.tag
-        );
-    }
-    Ok(Selection { stable, beta })
+    let beta = newest(UpdateChannel::Beta).filter(|beta| beta.build > stable.build);
+    let offered = beta.unwrap_or(stable);
+    // The beta channel offers the release with the highest build, so a beta
+    // numbered past it was cut before it.
+    let warnings = records
+        .iter()
+        .filter(|record| record.tag.channel() == UpdateChannel::Beta)
+        .filter(|record| record.tag.version() > offered.tag.version())
+        .max_by(|a, b| a.tag.version().cmp(b.tag.version()))
+        .map(|ahead| {
+            format!(
+                "{} is numbered past {}, but was cut before it (build {} < {}); the beta channel offers {}. \
+                 Apps on {} that update with the built-in engine stay on it until a release numbered past it",
+                ahead.tag, offered.tag, ahead.build, offered.build, offered.tag, ahead.tag
+            )
+        })
+        .into_iter()
+        .collect();
+    Ok(Selection {
+        stable,
+        beta,
+        warnings,
+    })
 }
 
 /// A channel file: its path relative to the root of the update host, and
@@ -438,8 +465,10 @@ fn check_feed(feed: &str, offered: &[&Record]) -> Result<()> {
 /// Write `files` under `output_dir`, all or none: they go into a scratch
 /// directory beside it, which becomes `output_dir` once every file is
 /// written. A failure removes the scratch directory and leaves `output_dir`
-/// as it was.
+/// as it was. `output_dir` is replaced, so it cannot be the current
+/// directory.
 fn write_files(output_dir: &Path, files: &[ChannelFile]) -> Result<()> {
+    let output_dir = &destination(output_dir, &std::env::current_dir()?)?;
     if output_dir.exists() {
         ensure!(
             fs_err::read_dir(output_dir)?.next().is_none(),
@@ -447,11 +476,9 @@ fn write_files(output_dir: &Path, files: &[ChannelFile]) -> Result<()> {
             output_dir.display()
         );
     }
-    let parent = match output_dir.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    fs_err::create_dir_all(parent)?;
+    let parent = output_dir
+        .parent()
+        .context("the output directory has no parent")?;
     let scratch = tempfile::Builder::new()
         .prefix(".channels-")
         .tempdir_in(parent)
@@ -478,6 +505,35 @@ fn write_files(output_dir: &Path, files: &[ChannelFile]) -> Result<()> {
         println!("{}", output_dir.join(&file.path).display());
     }
     Ok(())
+}
+
+/// `output_dir` as an absolute path without `.` or `..`, so that its parent
+/// is the directory it sits in; relative paths start at `cwd`. Its parent is
+/// created when missing. `cwd` itself, which [`write_files`] would have to
+/// remove, is an error.
+fn destination(output_dir: &Path, cwd: &Path) -> Result<PathBuf> {
+    let path = cwd.join(output_dir);
+    let resolved = if path.exists() {
+        fs_err::canonicalize(&path)?
+    } else {
+        let name = path.file_name().with_context(|| {
+            format!(
+                "{} does not name a directory to write",
+                output_dir.display()
+            )
+        })?;
+        let parent = path
+            .parent()
+            .context("the output directory has no parent")?;
+        fs_err::create_dir_all(parent)?;
+        fs_err::canonicalize(parent)?.join(name)
+    };
+    ensure!(
+        resolved != fs_err::canonicalize(cwd)?,
+        "{} is the current directory, which the channel files cannot replace; name another directory",
+        output_dir.display()
+    );
+    Ok(resolved)
 }
 
 /// The version `channel` offers now, from its manifest in `mirror`. `None`
