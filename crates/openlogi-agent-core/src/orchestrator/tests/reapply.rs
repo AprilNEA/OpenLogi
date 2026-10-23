@@ -4,6 +4,76 @@ use super::*;
 use std::collections::BTreeMap;
 
 #[test]
+fn direct_identity_enrichment_carries_the_spent_followup_budget() {
+    let snapshots = [None, Some("keyboard"), None].map(|serial| AgentDevice {
+        route: Some(DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        }),
+        serial: serial.map(str::to_string),
+        unit_id: [1, 2, 3, 4],
+        ..dev("keyboard", DIRECT_DEVICE_INDEX, true)
+    });
+    for pair in snapshots.windows(2) {
+        let previous = &pair[..1];
+        let next = &pair[1..];
+        let old_id = stable_id(&previous[0]);
+        let next_id = stable_id(&next[0]);
+        assert_ne!(old_id, next_id);
+        let followup = BTreeMap::from([(old_id, 2)]);
+        let (targets, retained) = plan_reapply(previous, next, &followup, None, false);
+        assert!(targets.is_empty(), "identity enrichment is not an arrival");
+        assert_eq!(retained, BTreeMap::from([(next_id.clone(), 2)]));
+        let (targets, retained) = plan_reapply(previous, next, &followup, None, true);
+        assert_eq!(targets, [0]);
+        assert_eq!(retained, BTreeMap::from([(next_id, 1)]));
+        let (targets, retained) = plan_reapply(previous, next, &followup, Some(1), true);
+        assert_eq!(targets, [0]);
+        assert_eq!(retained.get(&stable_id(&next[0])), Some(&1));
+    }
+}
+
+#[test]
+fn direct_and_routeless_enrichment_requires_matching_nonzero_units() {
+    use crate::orchestrator::devices::same_device_lifecycle;
+
+    for route in [
+        Some(DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        }),
+        None,
+    ] {
+        for (before_unit, after_unit, expected) in [
+            ([1, 2, 3, 4], [1, 2, 3, 4], true),
+            ([1, 2, 3, 4], [5, 6, 7, 8], false),
+            ([0; 4], [1, 2, 3, 4], false),
+            ([1, 2, 3, 4], [0; 4], false),
+            ([0; 4], [0; 4], false),
+        ] {
+            let previous = AgentDevice {
+                route: route.clone(),
+                unit_id: before_unit,
+                ..dev("keyboard", DIRECT_DEVICE_INDEX, true)
+            };
+            let next = AgentDevice {
+                route: route.clone(),
+                serial: Some("keyboard".into()),
+                unit_id: after_unit,
+                ..dev("keyboard", DIRECT_DEVICE_INDEX, true)
+            };
+            assert_eq!(same_device_lifecycle(&previous, &next), expected);
+            assert_eq!(same_device_lifecycle(&next, &previous), expected);
+            let previous = AgentDevice {
+                serial: Some("another-keyboard".into()),
+                ..previous
+            };
+            assert!(!same_device_lifecycle(&previous, &next));
+        }
+    }
+}
+
+#[test]
 fn regression_reapply_budget_does_not_transfer_to_replacement_in_same_slot() {
     let previous = [AgentDevice {
         unit_id: [1, 2, 3, 4],

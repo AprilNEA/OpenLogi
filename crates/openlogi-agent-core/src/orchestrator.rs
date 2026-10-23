@@ -67,11 +67,11 @@ use devices::reapply_targets;
 use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, assignments_changed,
-    build_devices, changed_follower_cookies, config_keeps_os_layout, configured_dpi,
-    configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
-    keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
-    plan_disabled_keys_recovery, plan_reapply, reconnect_follower_cookies, same_device_lifecycle,
-    saved_speed, settings_moved, stable_id, wheel_inverted,
+    build_devices, carry_lifecycle_budgets, changed_follower_cookies, config_keeps_os_layout,
+    configured_dpi, configured_report_rate, configured_wheel_mode, host_switch_links,
+    is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared,
+    pick_current, plan_disabled_keys_recovery, plan_reapply, reconnect_follower_cookies,
+    same_device_lifecycle, saved_speed, settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -1074,9 +1074,10 @@ impl Orchestrator {
                 && !devices.iter().any(|dev| same_device_lifecycle(old, dev))
             {
                 self.shared.disabled_keys_order.retire(route);
-                self.disabled_keys_recovery.remove(&stable_id(old));
             }
         }
+        self.disabled_keys_recovery =
+            carry_lifecycle_budgets(&self.devices, &devices, &self.disabled_keys_recovery);
         for dev in &devices {
             self.sync_disabled_keys_policy(dev);
         }

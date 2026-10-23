@@ -579,21 +579,42 @@ pub(super) fn stable_id(dev: &AgentDevice) -> DeviceStableId {
 /// stable ID. Missing identity fields are not replacement evidence: a later
 /// probe can enrich them while requests and confirmation budgets remain live.
 pub(super) fn same_device_lifecycle(previous: &AgentDevice, next: &AgentDevice) -> bool {
-    if stable_id(previous) != stable_id(next)
-        || previous.route != next.route
+    if previous.route != next.route
         || (previous.unit_id != [0; 4]
             && next.unit_id != [0; 4]
             && previous.unit_id != next.unit_id)
     {
         return false;
     }
-    match (
+    if let (DeviceIdentity::Serial(before), DeviceIdentity::Serial(after)) = (
         DeviceIdentity::from_parts(previous.serial.as_deref(), previous.unit_id),
         DeviceIdentity::from_parts(next.serial.as_deref(), next.unit_id),
-    ) {
-        (DeviceIdentity::Serial(previous), DeviceIdentity::Serial(next)) => previous == next,
-        _ => true,
+    ) && before != after
+    {
+        return false;
     }
+    stable_id(previous) == stable_id(next)
+        || (previous.unit_id != [0; 4]
+            && previous.unit_id == next.unit_id
+            && (previous.route.is_some() || previous.slot == next.slot))
+}
+
+/// Carry remaining attempts across identity enrichment, but never across a
+/// replacement or removal. Both confirmation schedulers use this transition.
+pub(super) fn carry_lifecycle_budgets(
+    previous: &[AgentDevice],
+    next: &[AgentDevice],
+    budgets: &BTreeMap<DeviceStableId, u8>,
+) -> BTreeMap<DeviceStableId, u8> {
+    next.iter()
+        .filter_map(|device| {
+            let old = previous
+                .iter()
+                .find(|old| same_device_lifecycle(old, device))?;
+            let remaining = *budgets.get(&stable_id(old))?;
+            Some((stable_id(device), remaining))
+        })
+        .collect()
 }
 
 /// Indices into `next` of devices whose volatile settings need re-applying:
@@ -731,6 +752,7 @@ pub(super) fn plan_reapply(
     forced: Option<u8>,
     confirm_followup: bool,
 ) -> (Vec<usize>, BTreeMap<DeviceStableId, u8>) {
+    let followup = carry_lifecycle_budgets(prev, next, followup);
     let mut targets = reapply_targets(prev, next, forced.is_some());
     let mut next_followup: BTreeMap<DeviceStableId, u8> = targets
         .iter()

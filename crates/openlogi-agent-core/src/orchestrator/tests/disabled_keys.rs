@@ -141,6 +141,67 @@ async fn keyboard_after_boot(config: Config) -> (Orchestrator, Keyboard, DeviceI
     (orchestrator, keyboard, inventory)
 }
 
+#[tokio::test]
+async fn direct_identity_enrichment_preserves_pending_write_and_recovery() {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    let mut orchestrator = orchestrator(Config::default());
+    let mut inventory = direct_inventory(None, [1, 2, 3, 4]);
+    inventory.receiver.product_id = 0xb35b;
+    inventory.paired[0].kind = DeviceKind::Keyboard;
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    let shared = orchestrator.shared();
+    let route = orchestrator.devices[0].route.clone().expect("direct route");
+    drop(
+        shared
+            .disabled_keys_order
+            .begin(&route, Some(DisableKeysMask::EMPTY)),
+    );
+    orchestrator.refresh_inventory_for_settings_confirmation(
+        std::slice::from_ref(&inventory),
+        &[],
+        false,
+    );
+    let old_id = stable_id(&orchestrator.devices[0]);
+    let spent_budget = VOLATILE_REAPPLY_CONFIRM_RETRIES - 1;
+    assert_eq!(
+        orchestrator.disabled_keys_recovery.get(&old_id),
+        Some(&spent_budget)
+    );
+    assert_eq!(
+        orchestrator.reapply_followup.get(&old_id),
+        Some(&spent_budget)
+    );
+
+    let keyboard = Keyboard::publish(&shared).await;
+    let lease = shared
+        .receiver_access
+        .acquire_exclusive(ExclusiveAccessReason::Pairing)
+        .await;
+    let mut manual = Box::pin(shared.set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY));
+    assert!(futures_lite::future::poll_once(&mut manual).await.is_none());
+    inventory.paired[0]
+        .model_info
+        .as_mut()
+        .expect("model")
+        .serial_number = Some("keyboard".into());
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    let next_id = stable_id(&orchestrator.devices[0]);
+    assert_ne!(old_id, next_id);
+    let expected = BTreeMap::from([(next_id, spent_budget)]);
+    assert_eq!(orchestrator.disabled_keys_recovery, expected);
+    assert_eq!(orchestrator.reapply_followup, expected);
+    keyboard.assert_writes(&[]);
+    drop(lease);
+    let state = tokio::time::timeout(Duration::from_secs(2), manual)
+        .await
+        .expect("manual request finishes")
+        .expect("identity enrichment must not retire a live request");
+    assert_eq!(state.disabled.bits(), 0x80);
+    keyboard.assert_writes(&[0x80]);
+}
+
 /// Start after the boot ladder has drained, then install real policy via reload.
 async fn settled_keyboard() -> (Orchestrator, Keyboard, DeviceInventory) {
     let (mut orchestrator, keyboard, inventory) = keyboard_after_boot(Config::default()).await;
