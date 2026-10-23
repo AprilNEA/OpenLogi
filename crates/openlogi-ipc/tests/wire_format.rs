@@ -818,14 +818,17 @@ fn semantic_read_payloads() {
         current_level: 4,
         nb_levels: 8,
         power_save: true,
+        duration_secs: 30,
         controls: BacklightControls {
             automatic: true,
             level: true,
             power_save: false,
+            duration: true,
         },
     });
-    // v36 appends `power_save` and `controls` after the level count.
-    assert_wire(&backlight, "00010102040801010100");
+    // v36 appends `power_save` and `controls`; v37 appends `duration` and
+    // `duration_secs` (30 seconds, one varint byte).
+    assert_wire(&backlight, "00010102040801010100011e");
 
     let fn_lock: Result<FnLockState, WriteError> = Ok(FnLockState {
         fn_lock: true,
@@ -1017,6 +1020,8 @@ fn backlight_changes_and_errors() {
     assert_wire(&BacklightChange::Automatic(false), "0100");
     assert_wire(&BacklightChange::Level(3), "0203");
     assert_wire(&BacklightChange::PowerSave(true), "0301");
+    // Variant 4, then the seconds as a varint. 15 fits one byte.
+    assert_wire(&BacklightChange::Duration(15), "040f");
     assert_wire(
         &WriteError::BacklightChangeUnsupported {
             change: BacklightChange::Level(8),

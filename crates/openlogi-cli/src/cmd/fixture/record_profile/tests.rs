@@ -467,6 +467,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
         current_level: 3,
         nb_levels: 8,
         power_save: false,
+        duration_secs: 0,
         controls: BacklightControls::default(),
     });
     profile.standalone[0].address.identity = RAW_STANDALONE_ID.to_string();

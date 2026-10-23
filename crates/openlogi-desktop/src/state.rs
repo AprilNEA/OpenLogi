@@ -184,6 +184,10 @@ pub struct AppState {
     pointer: PointerState,
     /// Standalone-light sequencing and aggregate camera activity.
     lights: LightSession,
+    /// Whether the backlight card is showing timers past 30 seconds. A
+    /// disclosure, not a keyboard setting: the keyboard keeps whatever
+    /// duration was last written, and flipping this writes nothing.
+    extended_backlight_durations: bool,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
@@ -288,6 +292,7 @@ impl AppState {
             action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
             lights: LightSession::default(),
+            extended_backlight_durations: false,
             ipc_commands,
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,

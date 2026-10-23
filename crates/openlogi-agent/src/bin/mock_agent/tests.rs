@@ -202,10 +202,12 @@ async fn profile_backed_wheel_and_backlight_reads_return_exact_values() {
         current_level: 3,
         nb_levels: 8,
         power_save: true,
+        duration_secs: 30,
         controls: openlogi_hid::BacklightControls {
             automatic: true,
             level: true,
             power_save: true,
+            duration: true,
         },
     };
     let agent = MockAgent::new(test_state_with_backlight(ProfileSetting::Supported(
@@ -229,10 +231,12 @@ async fn backlight_changes_are_kept_and_unoffered_ones_refused() {
         current_level: 3,
         nb_levels: 8,
         power_save: true,
+        duration_secs: 0,
         controls: openlogi_hid::BacklightControls {
             automatic: true,
             level: false,
             power_save: true,
+            duration: false,
         },
     };
     let agent = MockAgent::new(test_state_with_backlight(ProfileSetting::Supported(manual)));

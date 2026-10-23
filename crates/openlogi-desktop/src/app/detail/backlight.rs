@@ -26,6 +26,8 @@ pub(super) struct BacklightFacts {
     key: DeviceKey,
     load: BacklightLoad,
     reachable: bool,
+    /// Whether timers past 30 seconds are on screen. Not a keyboard setting.
+    extended: bool,
 }
 
 impl BacklightFacts {
@@ -41,6 +43,7 @@ impl BacklightFacts {
             key: record.device_key(),
             load: state.current_backlight_load(),
             reachable: record.route.is_some(),
+            extended: state.extended_backlight_durations(),
         })
     }
 }
@@ -53,9 +56,10 @@ pub(super) fn backlight_card(facts: Option<BacklightFacts>, pal: Palette) -> Opt
         key,
         load,
         reachable,
+        extended,
     } = facts?;
     let body: AnyElement = match load {
-        BacklightLoad::Ready(state) => backlight_rows(*state, pal).into_any_element(),
+        BacklightLoad::Ready(state) => backlight_rows(*state, extended, pal).into_any_element(),
         BacklightLoad::Unknown | BacklightLoad::Loading if !reachable => return None,
         BacklightLoad::Unknown | BacklightLoad::Loading => {
             status_line(tr!("device.reading_backlight"), pal).into_any_element()
@@ -75,7 +79,7 @@ pub(super) fn backlight_card(facts: Option<BacklightFacts>, pal: Palette) -> Opt
 /// One row per control the keyboard accepts. While the backlight is off, the
 /// level and how it is chosen have nothing to act on, so those rows are shown
 /// but disabled; battery saving still applies.
-fn backlight_rows(state: BacklightState, pal: Palette) -> impl IntoElement {
+fn backlight_rows(state: BacklightState, extended: bool, pal: Palette) -> impl IntoElement {
     let lit_row = toggle_row(
         "backlight-row",
         pal,
@@ -113,6 +117,9 @@ fn backlight_rows(state: BacklightState, pal: Palette) -> impl IntoElement {
                     .selected(state.power_save)
                     .on_change(|on, _window, cx| commit(cx, BacklightChange::PowerSave(*on))),
             ))
+        })
+        .when(state.controls.duration, |rows| {
+            rows.child(duration_row(state, extended, pal))
         })
 }
 
@@ -168,6 +175,93 @@ fn level_row(state: BacklightState, pal: Palette) -> impl IntoElement {
         })
 }
 
+/// The timer, 5 through 30 seconds unless extended durations are on, then
+/// through the two hours `0x1982` can store. The selected pill is the
+/// keyboard's current timer when it is one of the steps on screen.
+fn duration_row(state: BacklightState, extended: bool, pal: Palette) -> impl IntoElement {
+    v_flex()
+        .debug_selector(|| "backlight-duration-row".into())
+        .gap_2()
+        .child(
+            div()
+                .text_body()
+                .text_color(pal.text_primary)
+                .child(tr!("device.backlight_duration")),
+        )
+        .child(duration_pills(
+            state,
+            &BacklightChange::SHORT_DURATION_SECONDS,
+        ))
+        .when(extended, |row| {
+            row.child(duration_pills(
+                state,
+                &BacklightChange::EXTENDED_DURATION_SECONDS,
+            ))
+        })
+        .child(
+            div()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(duration_caption(state, extended)),
+        )
+        .child(toggle_row(
+            "extended-durations-row",
+            pal,
+            tr!("device.enable_extended_durations"),
+            tr!("device.extended_durations_warning"),
+            Toggle::new("extended-durations-toggle")
+                .selected(extended)
+                .on_change(|on, _window, cx| {
+                    AppState::apply(cx, |state| state.set_extended_backlight_durations(*on));
+                }),
+        ))
+}
+
+fn duration_pills(state: BacklightState, steps: &[u16]) -> impl IntoElement {
+    h_flex()
+        .gap_2()
+        .flex_wrap()
+        .children(steps.iter().copied().map(|seconds| {
+            Button::new(("backlight-duration", usize::from(seconds)))
+                .compact()
+                .label(duration_label(seconds))
+                .selected(seconds == state.duration_secs)
+                .disabled(!state.enabled)
+                .on_click(move |_event, _window, cx| {
+                    commit(cx, BacklightChange::Duration(seconds));
+                })
+        }))
+}
+
+/// A step label: seconds under a minute, otherwise minutes or hours. Never
+/// built by concatenating a translated unit onto a number the other way
+/// around — each shape is its own catalog string.
+fn duration_label(seconds: u16) -> gpui::SharedString {
+    if seconds < 60 {
+        tr!("device.backlight_duration_seconds", seconds => seconds)
+    } else if seconds.is_multiple_of(3_600) {
+        tr!(
+            "device.backlight_duration_hours",
+            hours => seconds / 3_600
+        )
+    } else {
+        tr!(
+            "device.backlight_duration_minutes",
+            minutes => seconds / 60
+        )
+    }
+}
+
+/// The usual explanation, or the seconds the keyboard actually stored when
+/// they are not one of the steps this row is showing.
+fn duration_caption(state: BacklightState, extended: bool) -> gpui::SharedString {
+    if state.duration_secs > 0 && !BacklightChange::duration_step(state.duration_secs, extended) {
+        tr!("device.backlight_duration_other", seconds => state.duration_secs)
+    } else {
+        tr!("device.backlight_duration_description")
+    }
+}
+
 fn commit(cx: &mut App, change: BacklightChange) {
     AppState::apply(cx, |state| state.commit_backlight(change));
 }
@@ -182,16 +276,18 @@ mod tests {
     };
     use openlogi_core::hid::{BacklightControls, BacklightMode, BacklightState, BacklightStatus};
 
-    use super::{BacklightFacts, backlight_card, lit_caption};
+    use super::{BacklightFacts, backlight_card, duration_caption, lit_caption};
     use crate::services::i18n::LOCALE_LOCK;
     use crate::state::{DeviceKey, Load};
     use crate::ui::theme;
 
-    const ROWS: [&str; 4] = [
+    const ROWS: [&str; 6] = [
         "backlight-row",
         "automatic-brightness-row",
         "backlight-level-row",
         "battery-saving-row",
+        "backlight-duration-row",
+        "extended-durations-row",
     ];
 
     fn reading(controls: BacklightControls) -> BacklightState {
@@ -202,6 +298,7 @@ mod tests {
             current_level: 2,
             nb_levels: 5,
             power_save: true,
+            duration_secs: 30,
             controls,
         }
     }
@@ -215,6 +312,7 @@ mod tests {
                 key: DeviceKey::from("direct:046d:b35b:unit:a393cae0"),
                 load: Load::Ready(Arc::new(self.0)),
                 reachable: true,
+                extended: self.0.duration_secs > 30,
             };
             div()
                 .w(px(360.))
@@ -241,6 +339,7 @@ mod tests {
                 automatic: true,
                 level: true,
                 power_save: true,
+                duration: true,
             }),
         );
 
@@ -260,6 +359,7 @@ mod tests {
                 "automatic-brightness-row-control",
             ),
             ("battery-saving-row", "battery-saving-row-control"),
+            ("extended-durations-row", "extended-durations-row-control"),
         ] {
             let bounds = cx.debug_bounds(row).expect("row");
             let control = cx
@@ -305,5 +405,36 @@ mod tests {
             ..with(BacklightStatus::DisabledByCriticalBattery)
         };
         assert_eq!(lit_caption(off), tr!("device.light_the_keys_description"));
+    }
+
+    #[test]
+    fn an_unoffered_duration_is_named_instead_of_being_hidden() {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let offered = reading(BacklightControls {
+            duration: true,
+            ..BacklightControls::default()
+        });
+        assert_eq!(
+            duration_caption(offered, false),
+            tr!("device.backlight_duration_description")
+        );
+        let longer = BacklightState {
+            duration_secs: 55,
+            ..offered
+        };
+        assert_eq!(
+            duration_caption(longer, true),
+            tr!("device.backlight_duration_other", seconds => 55u16)
+        );
+        // A two-hour timer is one of the extended steps, so it needs no aside.
+        let max = BacklightState {
+            duration_secs: 7_200,
+            ..offered
+        };
+        assert_eq!(
+            duration_caption(max, true),
+            tr!("device.backlight_duration_description")
+        );
     }
 }
