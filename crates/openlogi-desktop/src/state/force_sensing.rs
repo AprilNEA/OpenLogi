@@ -40,6 +40,25 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// The active device's press-force reading when software may change the
+    /// force: its probe found a force-sensing button and its last reading is
+    /// in and says the force is changeable. `None` while the reading is
+    /// unknown, loading, failed or unsupported, or says the force is fixed.
+    #[must_use]
+    pub fn current_force_sensing_reading(&self) -> Option<ForceSensingInfo> {
+        if !self.current_force_sensing_supported() {
+            return None;
+        }
+        match self.current_force_sensing_load() {
+            ForceSensingLoad::Ready(info) if info.changeable => Some(*info),
+            ForceSensingLoad::Ready(_)
+            | ForceSensingLoad::Unknown
+            | ForceSensingLoad::Loading
+            | ForceSensingLoad::Failed(_)
+            | ForceSensingLoad::Unsupported(_) => None,
+        }
+    }
+
     /// Whether the active device refused its last press-force write. The
     /// slider then shows the force the device read back, not the one asked
     /// for.
@@ -60,22 +79,12 @@ impl AppState {
     /// says the force may change.
     pub fn commit_force_sensing(&mut self, force: u16) -> StateEvents {
         let events = self.for_current_device(StateEvent::ForceSensingChanged);
-        if !self.current_force_sensing_supported() {
+        let Some(info) = self.current_force_sensing_reading() else {
+            debug!(
+                force,
+                "no changeable press-force reading — ignoring the release"
+            );
             return events;
-        }
-        let info = match self.current_force_sensing_load() {
-            ForceSensingLoad::Ready(info) if info.changeable => *info,
-            ForceSensingLoad::Ready(_)
-            | ForceSensingLoad::Unknown
-            | ForceSensingLoad::Loading
-            | ForceSensingLoad::Failed(_)
-            | ForceSensingLoad::Unsupported(_) => {
-                debug!(
-                    force,
-                    "no changeable press-force reading — ignoring the release"
-                );
-                return events;
-            }
         };
         let Some((key, route)) = self
             .current_record()
@@ -111,21 +120,9 @@ impl AppState {
     /// reading, or when the force already sits there.
     #[must_use]
     pub fn current_force_sensing_reset(&self) -> Option<u16> {
-        if !self.current_force_sensing_supported() {
-            return None;
-        }
-        match self.current_force_sensing_load() {
-            ForceSensingLoad::Ready(info)
-                if info.changeable && info.clamp(info.current) != info.clamp(info.default) =>
-            {
-                Some(info.default)
-            }
-            ForceSensingLoad::Ready(_)
-            | ForceSensingLoad::Unknown
-            | ForceSensingLoad::Loading
-            | ForceSensingLoad::Failed(_)
-            | ForceSensingLoad::Unsupported(_) => None,
-        }
+        self.current_force_sensing_reading()
+            .filter(|info| info.current != info.default)
+            .map(|info| info.default)
     }
 
     /// Put the active device's press force back to its out-of-box force.

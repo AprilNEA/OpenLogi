@@ -33,6 +33,9 @@ use crate::ui::theme::{Palette, Typography as _};
 pub(super) struct ForceSensingFacts {
     key: DeviceKey,
     load: ForceSensingLoad,
+    /// The reading to put the slider on, or `None` while the slider must
+    /// not show.
+    reading: Option<ForceSensingInfo>,
     /// The device refused the last write.
     refused: bool,
     /// The force differs from the device's default, so the reset button
@@ -58,37 +61,30 @@ impl ForceSensingFacts {
         let record = state.current_record()?;
         record.route.as_ref()?;
         let load = state.current_force_sensing_load();
-        row_shows(&load).then(|| Self {
+        let reading = state.current_force_sensing_reading();
+        row_shows(reading.as_ref(), &load).then(|| Self {
             key: record.device_key(),
             load,
+            reading,
             refused: state.current_force_sensing_refused(),
             resettable: state.current_force_sensing_reset().is_some(),
         })
     }
-
-    /// The reading to put the slider on, or `None` while the slider must
-    /// not show.
-    fn reading(&self) -> Option<ForceSensingInfo> {
-        match &self.load {
-            ForceSensingLoad::Ready(info) if info.changeable => Some(**info),
-            ForceSensingLoad::Ready(_)
-            | ForceSensingLoad::Unknown
-            | ForceSensingLoad::Loading
-            | ForceSensingLoad::Failed(_)
-            | ForceSensingLoad::Unsupported(_) => None,
-        }
-    }
 }
 
 /// Whether the row shows for a device whose probe found its force
-/// changeable. Only a reading that says otherwise hides it; a reading on its
-/// way, including a retry after a failure, keeps the row in place.
-fn row_shows(load: &ForceSensingLoad) -> bool {
-    match load {
-        ForceSensingLoad::Ready(info) => info.changeable,
-        ForceSensingLoad::Unknown | ForceSensingLoad::Loading | ForceSensingLoad::Failed(_) => true,
-        ForceSensingLoad::Unsupported(_) => false,
-    }
+/// changeable: with the changeable `reading`
+/// [`AppState::current_force_sensing_reading`] gave, or while `load` is on
+/// its way, including a retry after a failure, so the row keeps its place.
+/// Only a reading that says otherwise hides it.
+fn row_shows(reading: Option<&ForceSensingInfo>, load: &ForceSensingLoad) -> bool {
+    reading.is_some()
+        || match load {
+            ForceSensingLoad::Unknown | ForceSensingLoad::Loading | ForceSensingLoad::Failed(_) => {
+                true
+            }
+            ForceSensingLoad::Ready(_) | ForceSensingLoad::Unsupported(_) => false,
+        }
 }
 
 /// The slider, kept across frames, with the device and range it was built
@@ -111,11 +107,11 @@ impl ForceSensingSlider {
         window: &mut Window,
         cx: &mut Context<V>,
     ) {
-        let Some((key, info)) = facts.and_then(|facts| Some((&facts.key, facts.reading()?))) else {
+        let Some((key, info)) = facts.and_then(|facts| Some((&facts.key, facts.reading?))) else {
             *current = None;
             return;
         };
-        let force = info.clamp(info.current);
+        let force = info.current;
         let bounds = (info.min, info.max);
         if let Some(existing) = current
             .as_ref()
@@ -163,12 +159,14 @@ impl<'a> PressForce<'a> {
 /// device's default, with the inspector's revert icon. Disabled while the
 /// force already sits there.
 fn reset_button(resettable: bool) -> impl IntoElement {
+    let label = tr!("pointer.press_force_reset");
     div().debug_selector(|| "force-sensing-reset".into()).child(
         Button::new("force-sensing-reset")
             .ghost()
             .small()
             .icon(IconName::Undo)
-            .tooltip(tr!("action_ring.press_force_reset"))
+            .accessibility_label(label.clone())
+            .tooltip(label)
             .disabled(!resettable)
             .on_click(|_, _, cx| AppState::apply(cx, AppState::reset_force_sensing)),
     )
@@ -190,7 +188,7 @@ pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> An
                 div()
                     .text_caption()
                     .text_color(pal.text_muted)
-                    .child(tr!("action_ring.press_force_light")),
+                    .child(tr!("pointer.press_force_light")),
             )
             .child(
                 div()
@@ -201,13 +199,13 @@ pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> An
                 div()
                     .text_caption()
                     .text_color(pal.text_muted)
-                    .child(tr!("action_ring.press_force_firm")),
+                    .child(tr!("pointer.press_force_firm")),
             )
             .child(reset_button(facts.resettable))
             .into_any_element(),
         (None, ForceSensingLoad::Failed(_)) => retry_line(
             "force-sensing-retry",
-            tr!("action_ring.couldnt_read_press_force_click_to_retry"),
+            tr!("pointer.couldnt_read_press_force_click_to_retry"),
             pal,
             move |cx| AppState::apply(cx, |state| state.retry_force_sensing_read(&key)),
         )
@@ -220,7 +218,7 @@ pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> An
             | ForceSensingLoad::Loading
             | ForceSensingLoad::Ready(_)
             | ForceSensingLoad::Unsupported(_),
-        ) => status_line(tr!("action_ring.reading_press_force"), pal).into_any_element(),
+        ) => status_line(tr!("pointer.reading_press_force"), pal).into_any_element(),
     };
     v_flex()
         .debug_selector(|| "force-sensing-row".into())
@@ -231,12 +229,12 @@ pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> An
         .border_color(pal.border)
         .child(
             v_flex()
-                .child(div().text_body().child(tr!("action_ring.press_force")))
+                .child(div().text_body().child(tr!("pointer.press_force")))
                 .child(
                     div()
                         .text_caption()
                         .text_color(pal.text_muted)
-                        .child(tr!("action_ring.press_force_description")),
+                        .child(tr!("pointer.press_force_description")),
                 ),
         )
         .child(body)
@@ -245,7 +243,7 @@ pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> An
                 .debug_selector(|| "force-sensing-refusal".into())
                 .text_caption()
                 .text_color(pal.text_muted)
-                .child(tr!("action_ring.press_force_not_applied"))
+                .child(tr!("pointer.press_force_not_applied"))
         }))
         .into_any_element()
 }
@@ -523,18 +521,25 @@ mod tests {
             changeable: false,
             ..PANEL
         };
-        for (load, shows) in [
-            (ForceSensingLoad::Unknown, true),
-            (ForceSensingLoad::Loading, true),
-            (ForceSensingLoad::Failed("unreachable".to_string()), true),
-            (ForceSensingLoad::Ready(Arc::new(PANEL)), true),
-            (ForceSensingLoad::Ready(Arc::new(unchangeable)), false),
+        // The reading is the one `current_force_sensing_reading` gives for
+        // each load: only a ready, changeable one.
+        for (load, reading, shows) in [
+            (ForceSensingLoad::Unknown, None, true),
+            (ForceSensingLoad::Loading, None, true),
+            (
+                ForceSensingLoad::Failed("unreachable".to_string()),
+                None,
+                true,
+            ),
+            (ForceSensingLoad::Ready(Arc::new(PANEL)), Some(PANEL), true),
+            (ForceSensingLoad::Ready(Arc::new(unchangeable)), None, false),
             (
                 ForceSensingLoad::Unsupported("no 0x19c0".to_string()),
+                None,
                 false,
             ),
         ] {
-            assert_eq!(row_shows(&load), shows, "{load:?}");
+            assert_eq!(row_shows(reading.as_ref(), &load), shows, "{load:?}");
         }
     }
 }
