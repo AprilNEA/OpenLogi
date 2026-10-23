@@ -37,7 +37,7 @@ use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::notice::NoticeShelf;
-use crate::platform::{MotionPreference, RingPlacement, apply_motion_preference};
+use crate::platform::{MotionPreference, RingPlacement, settle_latest_invocation};
 use crate::ring::{RingPointer, RingView};
 use crate::session::{
     ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
@@ -106,8 +106,20 @@ fn main() -> Result<()> {
                     cx.update(close_all_ring_windows);
                     continue;
                 };
+                cx.update(close_all_ring_windows);
+                let Some(invocation) = settle_latest_invocation(
+                    cx,
+                    invocation,
+                    &mut invocations,
+                    &mut motion,
+                    platform::read_reduced_motion,
+                )
+                .await
+                else {
+                    cx.update(close_all_ring_windows);
+                    continue;
+                };
                 openlogi_core::locale::activate(invocation.language.as_deref());
-                apply_motion_preference(cx, &mut motion, platform::read_reduced_motion).await;
                 cx.update(|cx| {
                     close_all_ring_windows(cx);
                     #[cfg_attr(
