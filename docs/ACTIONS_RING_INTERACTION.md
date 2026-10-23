@@ -1,25 +1,44 @@
 # Actions Ring: interaction and motion plan
 
-Status: proposal. Scope is the overlay ring
-(`crates/openlogi-overlay/src/ring.rs`) and the presentation data it receives.
-Haptics are already implemented and are listed here only for completeness.
+Status: phases 1–2 are implemented in `crates/openlogi-overlay/src/ring.rs`;
+phases 3–4 remain proposals. Haptics are already implemented and are listed
+here only for completeness.
 
-## What exists today
+The reference prototype lives at
+[`docs/assets/actions-ring/prototype.html`](assets/actions-ring/prototype.html)
+(open it in a browser; `?state=ai` shows the expanded submenu).
+
+## What existed before this change
 
 | Area | Current behaviour |
 | --- | --- |
 | Panel | 360×360, centred on the cursor and clamped to its display (`WINDOW_SIZE`) |
 | Slots | Eight fixed positions (`ActionRingSlot`), 54 px circles at radius 122 |
 | Cancel | 48 px hub; click cancels the session |
-| Hover | Slot fills with the accent and gains a 2 px accent border |
+| Hover | Slot filled with the accent and gained a 2 px accent border |
 | Label | One label, fixed below the panel — not attached to the hovered slot |
-| Motion | None; the panel appears and disappears at full opacity |
+| Motion | None; the panel appeared and disappeared at full opacity |
 | Haptics | Hover plays `SubtleCollision` (waveform 4); activation plays `DampStateChange` (waveform 1) — `crates/openlogi-agent/src/server.rs` |
 
 Presentation crosses the IPC boundary as
 `ActionRingInvocation { session_id, slots: BTreeMap<ActionRingSlot, ActionRingPresentation>, language }`
 (`crates/openlogi-ipc/src/ipc.rs`). Executable actions stay in the agent; the
 overlay only reports `Hover`, `Activate` and `Cancel`.
+
+## Implemented in this change
+
+- Per-slot tooltip on a 100 ms dwell, flipped below when the slot is near the
+  top of the panel and clamped to its horizontal bounds.
+- Hover inverts the slot to a near-black fill; the accent is no longer spent on
+  a transient hover.
+- Entrance motion: slots travel from the hub to their positions together and
+  the panel fades in. GPUI's `with_animation` respects the host's reduced-motion
+  setting, so it renders one static frame when that is on.
+
+The close animation is not implemented: the overlay hides the window as soon as
+the agent dismisses the session, so animating the exit would mean delaying
+teardown. That belongs with phase 3, where the submenu needs a teardown story of
+its own.
 
 ## Proposed changes
 
@@ -116,14 +135,15 @@ activates as before.
 
 ## Phases
 
-| Phase | Change | Wire impact |
-| --- | --- | --- |
-| 1 | Tooltip, hover inversion | None — overlay only |
-| 2 | Open/close motion | None — overlay only |
-| 3 | AI submenu, window growth, provider arc | `submenu` field, agent resolution |
-| 4 | Notification dot | `badge` field |
+| Phase | Change | Wire impact | Status |
+| --- | --- | --- | --- |
+| 1 | Tooltip, hover inversion | None — overlay only | Implemented |
+| 2 | Open motion (close deferred) | None — overlay only | Implemented |
+| 3 | AI submenu, window growth, provider arc | `submenu` field, agent resolution | Proposed |
+| 4 | Notification dot | `badge` field | Proposed |
 
-Phase 1 and 2 can ship independently and are the cheapest visual wins.
+Phases 3–4 need a product decision before the wire changes: what an "AI action"
+is, and which actions carry a submenu.
 
 ## Acceptance
 

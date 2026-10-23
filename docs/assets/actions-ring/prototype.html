@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Actions Ring — prototype</title>
+<!--
+  Prototype notes (provenance)
+  ---------------------------------------------------------------------------
+  Geometry    : main ring measured from the first screenshot (8 slots, ~168px radius,
+                84px slots, 58px hub). AI expansion layout measured from the second
+                screenshot: AI slot becomes a bare sparkle anchor, three provider
+                bubbles arc to the right, large sparkle + label pill for the active one.
+  Icons       : approximations, not brand assets. Provider marks are generic stand-ins.
+  Animation   : DESIGN CHOICE. Real ring animation lives inside
+                logi::radial_menu::metal::flyout_interface; timings/easing not recovered.
+  Haptics     : HOOK ONLY. The shipping app does haptics in logioptionsplus_agent via
+                HID++ feature 0x19B0 play_haptic_waveform(); a web page cannot reach it.
+                window.actionsRingHaptic(kind) is the seam a native shell can implement.
+-->
+<style>
+  :root{
+    --bg:#1b1b1d;
+    --slot:#e9e9ea;
+    --ink:#111214;
+    --hub:#b41f27;
+    --hub-dim:#6a6a6c;
+    --hub-ink:#fff;
+    --slot-d:84px;
+    --hub-d:58px;
+    --radius:168px;
+    --stage-w:1160px;
+    --stage-h:560px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;background:#0f0f10;color:#fff;
+    font:400 14px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,system-ui,sans-serif;
+    display:grid;place-items:center;overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  .fit{transform:scale(var(--fit,1));transform-origin:center}
+  .stage{
+    position:relative;width:var(--stage-w);height:var(--stage-h);
+    background:var(--bg);border-radius:18px;overflow:hidden;
+    box-shadow:0 24px 80px rgba(0,0,0,.55);
+    user-select:none;
+  }
+
+  /* ---------- main ring ---------- */
+  .ring{position:absolute;inset:0}
+
+  .slot-wrap{
+    position:absolute;left:50%;top:50%;
+    width:var(--slot-d);height:var(--slot-d);
+    margin:calc(var(--slot-d) / -2) 0 0 calc(var(--slot-d) / -2);
+    transform:translate(var(--x,0),var(--y,0));
+    will-change:transform,opacity;
+    animation:spread .34s cubic-bezier(.22,1,.36,1) backwards;
+  }
+  /* slots fly out from the hub instead of popping in place */
+  @keyframes spread{
+    0%{opacity:0;transform:translate(0,0) scale(.32)}
+    55%{opacity:1}
+    100%{opacity:1;transform:translate(var(--x,0),var(--y,0)) scale(1)}
+  }
+
+  .slot{
+    all:unset;position:relative;display:grid;place-items:center;
+    width:100%;height:100%;border-radius:50%;
+    background:var(--slot);color:var(--ink);cursor:pointer;
+    transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .18s ease,
+               background .18s ease,color .18s ease,opacity .24s ease;
+    box-shadow:0 2px 10px rgba(0,0,0,.28);
+  }
+  @keyframes slot-pop{
+    0%{transform:scale(.35);opacity:0}
+    100%{transform:scale(1);opacity:1}
+  }
+  .slot:hover{transform:scale(1.09);box-shadow:0 8px 22px rgba(0,0,0,.4);background:var(--ink);color:#fff}
+  .slot:active{transform:scale(.95)}
+  .slot:focus-visible{outline:2px solid #fff;outline-offset:4px;background:var(--ink);color:#fff}
+  .slot svg{width:36px;height:36px;display:block;pointer-events:none}
+
+  .slot-inner{display:grid;place-items:center;width:100%;height:100%}
+  .slot.tick .slot-inner{animation:tick .16s ease-out}
+  @keyframes tick{
+    0%{transform:scale(1)}35%{transform:scale(.93)}70%{transform:scale(1.03)}100%{transform:scale(1)}
+  }
+  .slot.is-selected{animation:select-pop .34s ease-out forwards}
+  @keyframes select-pop{
+    0%{transform:scale(1)}
+    38%{transform:scale(1.14)}
+    100%{transform:scale(.86);opacity:0}
+  }
+
+  /* AI slot becomes a bare sparkle anchor in AI mode */
+  .ring.is-ai [data-id="ai"]{
+    background:transparent;box-shadow:none;transform:scale(.94);
+    pointer-events:none;
+  }
+  .ring.is-ai [data-id="ai"] svg{color:var(--slot)}
+  .ring.is-ai .bell{opacity:0;transition:opacity .2s}
+
+  /* notification dot: floating, no tab or notch */
+  .bell{
+    position:absolute;right:0;top:0;
+    width:12px;height:12px;border-radius:50%;
+    background:var(--hub);
+    box-shadow:0 0 0 2.5px var(--bg),0 2px 6px rgba(0,0,0,.45);
+    pointer-events:none;
+    transition:opacity .2s ease,transform .2s ease;
+  }
+
+  /* ---------- hub ---------- */
+  .hub-wrap{
+    position:absolute;left:50%;top:50%;
+    width:var(--hub-d);height:var(--hub-d);
+    margin:calc(var(--hub-d) / -2) 0 0 calc(var(--hub-d) / -2);
+  }
+  .hub{
+    all:unset;position:relative;display:grid;place-items:center;cursor:pointer;
+    width:100%;height:100%;border-radius:50%;
+    background:var(--hub);color:var(--hub-ink);
+    box-shadow:0 3px 14px rgba(0,0,0,.45);
+    transition:transform .16s cubic-bezier(.34,1.56,.64,1),filter .16s ease,background .3s ease;
+    animation:slot-pop .3s cubic-bezier(.22,1,.36,1) backwards;
+  }
+  .hub:hover{transform:scale(1.07);filter:brightness(1.08)}
+  .hub:active{transform:scale(.93)}
+  .hub:focus-visible{outline:2px solid #fff;outline-offset:4px}
+  .hub svg{width:20px;height:20px}
+  .stage.ai .hub{background:var(--hub-dim)}
+
+  .ripple{
+    position:absolute;inset:0;border-radius:50%;
+    border:1.5px solid rgba(232,232,234,.9);
+    opacity:0;pointer-events:none;
+  }
+  .hub-wrap.rippling .ripple{animation:ripple .55s ease-out}
+  @keyframes ripple{
+    0%{transform:scale(.35);opacity:.9}
+    100%{transform:scale(2.6);opacity:0}
+  }
+
+  /* ---------- AI submenu ---------- */
+  .ai-layer{position:absolute;inset:0;pointer-events:none;opacity:0;transition:opacity .2s ease}
+  .stage.ai .ai-layer{opacity:1;pointer-events:auto}
+
+  .provider{
+    all:unset;position:absolute;width:76px;height:76px;border-radius:50%;
+    display:grid;place-items:center;cursor:pointer;
+    background:var(--slot);color:var(--ink);
+    box-shadow:0 2px 12px rgba(0,0,0,.3);
+    translate:-50% -50%;
+    opacity:0;transform:scale(.4);
+    transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .18s ease,
+               background .18s ease,color .18s ease,filter .18s ease;
+  }
+  .stage.ai .provider{
+    opacity:1;transform:scale(1);
+    animation:provider-in .3s cubic-bezier(.22,1,.36,1) backwards;
+  }
+  @keyframes provider-in{
+    0%{opacity:0;transform:scale(.4)}
+    100%{opacity:1;transform:scale(1)}
+  }
+  .provider:hover,.provider.is-active{transform:scale(1.07);box-shadow:0 10px 26px rgba(0,0,0,.45)}
+  .provider:hover{background:var(--ink);color:#fff}
+  .provider:active{transform:scale(.95)}
+  .provider:focus-visible{outline:2px solid #fff;outline-offset:4px}
+  .provider svg{width:34px;height:34px;display:block;pointer-events:none}
+  .provider.tick svg{animation:tick .16s ease-out}
+  .provider.is-selected{animation:select-pop .34s ease-out forwards}
+
+  .ai-label{
+    position:absolute;display:flex;align-items:center;
+    height:40px;padding:0 14px;border-radius:12px;
+    background:#fff;color:#141416;
+    font-size:14px;font-weight:500;letter-spacing:.005em;
+    box-shadow:0 10px 30px rgba(0,0,0,.35);
+    white-space:nowrap;pointer-events:none;
+    opacity:0;translate:0 -50%;
+    transition:left .3s cubic-bezier(.22,1,.36,1),top .3s cubic-bezier(.22,1,.36,1),opacity .2s ease;
+  }
+  .stage.ai .ai-label{opacity:1}
+  .ai-label::before{
+    content:"";position:absolute;left:-5px;top:50%;translate:0 -50%;
+    width:12px;height:12px;background:#fff;rotate:45deg;border-radius:2px;
+  }
+
+  /* ---------- tooltip ---------- */
+  .tip{
+    position:absolute;z-index:6;pointer-events:none;
+    display:flex;align-items:center;height:38px;padding:0 14px;
+    border-radius:11px;background:#fff;color:#141416;
+    font-size:14px;font-weight:500;letter-spacing:.005em;white-space:nowrap;
+    box-shadow:0 10px 28px rgba(0,0,0,.35);
+    opacity:0;transition:opacity .12s ease;
+  }
+  .tip.show{opacity:1}
+  .tip::after{
+    content:"";position:absolute;left:var(--tail,50%);translate:-50% 0;
+    width:10px;height:10px;background:#fff;rotate:45deg;border-radius:2px;
+  }
+  .tip[data-pos="above"]::after{bottom:-4px}
+  .tip[data-pos="below"]::after{top:-4px}
+
+  /* ---------- closing ---------- */
+  .ring.is-closing .slot-wrap{
+    animation:wrap-out .26s cubic-bezier(.4,0,.2,1) both;
+  }
+  @keyframes wrap-out{
+    0%{opacity:1;transform:translate(var(--x,0),var(--y,0)) scale(1)}
+    100%{opacity:0;transform:translate(0,0) scale(.2)}
+  }
+  .ring.is-closing .hub-wrap{animation:hub-out .26s cubic-bezier(.4,0,.2,1) both}
+  @keyframes hub-out{to{opacity:0;transform:scale(.4)}}
+  .stage.is-closing .ai-layer{opacity:0;transition:opacity .18s ease}
+
+  /* ---------- chrome ---------- */
+  .reopen{
+    all:unset;position:absolute;left:50%;bottom:26px;translate:-50% 0;
+    padding:8px 14px;border-radius:999px;cursor:pointer;
+    background:rgba(255,255,255,.08);color:rgba(255,255,255,.7);
+    font-size:12px;letter-spacing:.02em;
+    opacity:0;pointer-events:none;transition:opacity .2s ease;
+  }
+  .reopen.show{opacity:1;pointer-events:auto}
+  .reopen:hover{background:rgba(255,255,255,.14);color:#fff}
+  .reopen:focus-visible{outline:2px solid #fff;outline-offset:3px}
+
+  .hint{
+    position:absolute;left:0;right:0;bottom:10px;text-align:center;
+    font-size:11px;color:rgba(255,255,255,.28);letter-spacing:.03em;
+    pointer-events:none;
+  }
+  .toast{
+    position:absolute;left:50%;top:20px;translate:-50% 0;
+    padding:6px 12px;border-radius:999px;
+    background:rgba(255,255,255,.1);color:rgba(255,255,255,.85);
+    font-size:12px;opacity:0;transition:opacity .18s ease;
+    pointer-events:none;
+  }
+  .toast.show{opacity:1}
+
+  @media (prefers-reduced-motion:reduce){
+    .ring,.provider,.ai-label{transition:none}
+    .slot,.slot-wrap,.hub,.provider,
+    .ring.is-closing .slot-wrap,.ring.is-closing .hub-wrap{animation:none!important}
+    .stage.ai .provider{opacity:1;transform:none}
+  }
+</style>
+</head>
+<body>
+<div class="fit" id="fit">
+  <div class="stage" id="stage">
+    <div class="ring" id="ring" role="menu" aria-label="Actions Ring"></div>
+
+    <div class="ai-layer" id="aiLayer">
+      <div class="ai-label" id="aiLabel" role="status"></div>
+    </div>
+
+    <div class="tip" id="tip" role="tooltip"></div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <button class="reopen" id="reopen" type="button">Open Actions Ring</button>
+    <div class="hint" id="hint">1–8 · ← → · Enter · Esc</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const ITEMS = [
+    { id: "media",   label: "Media",             icon: "play" },
+    { id: "notes",   label: "Capture note",      icon: "edit" },
+    { id: "ai",      label: "AI actions",        icon: "sparkles", bell: true },
+    { id: "secure",  label: "Lock workstation",  icon: "monitorLock" },
+    { id: "shot",    label: "Screenshot",        icon: "screenshot" },
+    { id: "history", label: "Recent actions",    icon: "clock" },
+    { id: "emoji",   label: "Emoji",             icon: "smiley" },
+    { id: "plant",   label: "Focus / wellbeing", icon: "plant" }
+  ];
+
+  // Generic marks — deliberately not the vendors' trademarked logos.
+  const PROVIDERS = [
+    { id: "chatgpt",  name: "ChatGPT",  verb: "Ask",      icon: "knot" },
+    { id: "gemini",   name: "Gemini",   verb: "Rephrase", icon: "star" },
+    { id: "copilot",  name: "Copilot",  verb: "Draft",    icon: "ribbon" }
+  ];
+
+  const ICONS = {
+    play: '<path d="M9.4 6.4v11.2L18.8 12z" fill="currentColor" stroke="none"/>',
+    plant: '<rect x="3.2" y="3.2" width="17.6" height="17.6" rx="5.2"/>' +
+           '<path d="M12 17v-5.4"/>' +
+           '<path d="M12 11.6c0-2.3 1.9-4.1 4.2-4.1 0 2.3-1.9 4.1-4.2 4.1z"/>' +
+           '<path d="M12 13.2c0-1.9-1.5-3.4-3.4-3.4 0 1.9 1.5 3.4 3.4 3.4z"/>',
+    edit: '<rect x="3.8" y="3.6" width="13.6" height="16.8" rx="2.4"/>' +
+          '<path d="M6.6 15.4l.9-3.9 6.9-6.9 2.7 2.7-6.9 6.9z"/>' +
+          '<path d="M13.2 5.6l2.7 2.7"/>',
+    sparkles: '<path d="M13.4 3.4l1.5 4.1 4.1 1.5-4.1 1.5-1.5 4.1-1.5-4.1-4.1-1.5 4.1-1.5z"/>' +
+              '<path d="M6.6 14.6l.9 2.2 2.2.9-2.2.9-.9 2.2-.9-2.2-2.2-.9 2.2-.9z"/>',
+    monitorLock: '<rect x="2.8" y="4.2" width="13.4" height="9.6" rx="1.8"/>' +
+                 '<path d="M9.5 13.8v3.4M6.8 17.2h5.4"/>' +
+                 '<rect x="15.4" y="12.6" width="5.8" height="5.6" rx="1.2"/>' +
+                 '<path d="M16.8 12.6v-1.3a1.5 1.5 0 0 1 3 0v1.3"/>',
+    screenshot: '<path d="M4 8.2V5.6A1.6 1.6 0 0 1 5.6 4h2.6M15.8 4h2.6A1.6 1.6 0 0 1 20 5.6v2.6' +
+                'M20 15.8v2.6a1.6 1.6 0 0 1-1.6 1.6h-2.6M8.2 20H5.6A1.6 1.6 0 0 1 4 18.4v-2.6"/>' +
+                '<circle cx="12" cy="12" r="3.3"/>',
+    clock: '<circle cx="12" cy="12" r="8.4"/>' +
+           '<path d="M12 7.6V12l3 1.9"/>' +
+           '<path d="M4.4 8.6L3.4 5.5M4.4 8.6l3.1-1"/>',
+    smiley: '<circle cx="12" cy="12" r="8.6"/>' +
+            '<circle cx="9.1" cy="10.1" r=".95" fill="currentColor" stroke="none"/>' +
+            '<circle cx="14.9" cy="10.1" r=".95" fill="currentColor" stroke="none"/>' +
+            '<path d="M8.4 14.1a4.3 4.3 0 0 0 7.2 0"/>',
+    knot: '<g fill="none" stroke="currentColor" stroke-width="1.8">' +
+          '<ellipse cx="12" cy="12" rx="8.1" ry="4.3"/>' +
+          '<ellipse cx="12" cy="12" rx="8.1" ry="4.3" transform="rotate(60 12 12)"/>' +
+          '<ellipse cx="12" cy="12" rx="8.1" ry="4.3" transform="rotate(120 12 12)"/>' +
+          '</g>',
+    star: '<path d="M12 2.8l1.9 6.05L20 10.4l-6.1 1.55L12 21.2l-1.9-9.25L4 10.4l6.1-1.55z"/>',
+    ribbon: '<path d="M9.6 5.2c-2.7 0-4.9 2.1-4.9 4.8 0 2.6 2.2 4.7 4.9 4.7 2.3 0 3.9-1.2 4.5-3"/>' +
+            '<path d="M14.4 18.8c2.7 0 4.9-2.1 4.9-4.8 0-2.6-2.2-4.7-4.9-4.7-2.3 0-3.9 1.2-4.5 3"/>'
+  };
+
+  const stage   = document.getElementById("stage");
+  const ring    = document.getElementById("ring");
+  const fit     = document.getElementById("fit");
+  const reopen  = document.getElementById("reopen");
+  const toastEl = document.getElementById("toast");
+  const aiLayer = document.getElementById("aiLayer");
+  const aiLabel = document.getElementById("aiLabel");
+  const tip     = document.getElementById("tip");
+  const hintEl  = document.getElementById("hint");
+
+  const STAGE_W = 1160, STAGE_H = 560;
+  const CX = STAGE_W / 2, CY = STAGE_H / 2;   // 580, 280
+  const RING_R = 168;
+  const PROV_R = 108;                         // provider arc, anchored on the AI slot
+  const PROV_ANGLES = [-55, 0, 55];           // degrees, from +x axis
+
+  const state = { open: false, mode: "ring", hovered: null, active: 1, aiTimer: 0, aiCooldown: 0, outTimer: 0 };
+  let keyboardMode = false;
+  document.addEventListener("keydown", () => { keyboardMode = true; }, true);
+  document.addEventListener("pointerdown", () => { keyboardMode = false; }, true);
+
+  const svg = (name) =>
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+
+  // ---- haptics -------------------------------------------------------------
+  const PATTERNS = { open: [6], hover: [2], select: [10, 26, 14], dismiss: [5], expand: [5, 18, 8] };
+
+  function haptic(kind, el) {
+    try { window.actionsRingHaptic && window.actionsRingHaptic(kind); } catch (_) {}
+    if (navigator.vibrate) { try { navigator.vibrate(PATTERNS[kind] || 4); } catch (_) {} }
+    if (el) {
+      el.classList.remove("tick");
+      void el.offsetWidth;
+      el.classList.add("tick");
+      setTimeout(() => el.classList.remove("tick"), 170);
+    }
+  }
+
+  // ---- tooltip -------------------------------------------------------------
+  let tipRaf = 0;
+  let tipTimer = 0;
+
+  function showTip(text, cx, cy, radius = 42, delay = 0) {
+    if (!text) return;
+    clearTimeout(tipTimer);
+    cancelAnimationFrame(tipRaf);
+    tip.classList.remove("show");
+
+    const paint = () => {
+      tip.textContent = text;
+      tip.classList.add("show");
+      tipRaf = requestAnimationFrame(() => {
+        const w = tip.offsetWidth || 120;
+        const h = tip.offsetHeight || 38;
+        const gap = 12;
+        const pos = (cy - radius - gap - h) >= 8 ? "above" : "below";
+        let top = pos === "above" ? cy - radius - gap - h : cy + radius + gap;
+        top = Math.max(8, Math.min(top, STAGE_H - h - 8));
+        const left = Math.max(10, Math.min(cx - w / 2, STAGE_W - w - 10));
+        tip.style.left = left + "px";
+        tip.style.top = top + "px";
+        tip.dataset.pos = pos;
+        const tail = Math.max(12, Math.min(cx - left, w - 12));
+        tip.style.setProperty("--tail", tail + "px");
+      });
+    };
+
+    if (delay > 0) tipTimer = setTimeout(paint, delay);
+    else paint();
+  }
+
+  function hideTip() {
+    clearTimeout(tipTimer);
+    cancelAnimationFrame(tipRaf);
+    tip.classList.remove("show");
+  }
+
+  // ---- main ring -----------------------------------------------------------
+  ITEMS.forEach((item, i) => {
+    const angle = (i * 2 * Math.PI) / ITEMS.length - Math.PI / 2;
+    const x = Math.round(Math.cos(angle) * RING_R);
+    const y = Math.round(Math.sin(angle) * RING_R);
+
+    const wrap = document.createElement("div");
+    wrap.className = "slot-wrap";
+    wrap.style.setProperty("--i", i);
+    wrap.style.setProperty("--x", x + "px");
+    wrap.style.setProperty("--y", y + "px");
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "slot";
+    btn.dataset.id = item.id;
+    btn.dataset.index = i;
+    btn.setAttribute("role", "menuitem");
+    btn.setAttribute("aria-label", item.label);
+    btn.innerHTML = `<span class="slot-inner">${svg(item.icon)}</span>`;
+
+    if (item.bell) {
+      const bell = document.createElement("span");
+      bell.className = "bell";
+      bell.setAttribute("aria-hidden", "true");
+      // inserted before the button so the button paints over its inner edge
+      wrap.appendChild(bell);
+    }
+
+    btn.addEventListener("pointerenter", () => {
+      if (!state.open || state.mode !== "ring") return;
+      if (state.hovered === btn) return;
+      state.hovered = btn;
+      haptic("hover", btn);
+      showTip(item.label, CX + x, CY + y, 42, item.id === "ai" ? 200 : 100);
+
+      // AI opens on hover after a short dwell, so sweeping across the ring
+      // toward another slot does not trigger it.
+      if (item.id === "ai") {
+        clearTimeout(state.aiTimer);
+        state.aiTimer = setTimeout(() => {
+          if (!state.open || state.mode !== "ring") return;
+          if (Date.now() < state.aiCooldown) return;
+          expandAI();
+        }, 120);
+      }
+    });
+    btn.addEventListener("pointerleave", () => {
+      if (state.hovered === btn) state.hovered = null;
+      if (item.id === "ai") clearTimeout(state.aiTimer);
+      hideTip();
+    });
+    btn.addEventListener("focus", () => {
+      if (keyboardMode && state.open && state.mode === "ring") showTip(item.label, CX + x, CY + y, 42);
+    });
+    btn.addEventListener("blur", hideTip);
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      clearTimeout(state.aiTimer);
+      if (item.id === "ai") expandAI();
+      else invokeItem(i, btn);
+    });
+
+    wrap.appendChild(btn);
+    ring.appendChild(wrap);
+  });
+
+  const hubWrap = document.createElement("div");
+  hubWrap.className = "hub-wrap";
+  hubWrap.innerHTML =
+    '<button class="hub" type="button" aria-label="Dismiss Actions Ring">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">' +
+    '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>' +
+    '<span class="ripple"></span></button>';
+  ring.appendChild(hubWrap);
+  const hubBtn = hubWrap.querySelector(".hub");
+  hubBtn.addEventListener("click", (e) => { e.stopPropagation(); dismiss(); });
+  // hovering the close button collapses the expansion back to the ring
+  hubBtn.addEventListener("pointerenter", () => {
+    showTip("Close", CX, CY, 29, 100);
+    if (state.mode === "ai") collapseAI();
+  });
+  hubBtn.addEventListener("pointerleave", hideTip);
+  hubBtn.addEventListener("focus", () => { if (keyboardMode) showTip("Close", CX, CY, 29); });
+  hubBtn.addEventListener("blur", hideTip);
+
+  // ---- provider cluster ----------------------------------------------------
+  const provEls = PROVIDERS.map((p, k) => {
+    const deg = (PROV_ANGLES[k] * Math.PI) / 180;
+    const px = CX + RING_R + Math.cos(deg) * PROV_R;
+    const py = CY + Math.sin(deg) * PROV_R;
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "provider";
+    btn.dataset.id = p.id;
+    btn.dataset.k = k;
+    btn.style.left = px + "px";
+    btn.style.top = py + "px";
+    btn.style.setProperty("--k", k);
+    btn.setAttribute("aria-label", `${p.verb} with ${p.name}`);
+    btn.innerHTML = svg(p.icon);
+
+    btn.addEventListener("pointerenter", () => {
+      if (state.mode !== "ai") return;
+      setActiveProvider(k);
+      haptic("hover", btn);
+    });
+    btn.addEventListener("click", (e) => { e.stopPropagation(); invokeProvider(k, btn); });
+
+    aiLayer.appendChild(btn);
+    return { el: btn, x: px, y: py, ...p };
+  });
+
+  // Hovering outside the expanded cluster collapses it after a short grace,
+  // so travelling from the AI slot to a provider does not dismiss it.
+  function inCluster(x, y) {
+    const pad = 10;
+    const hit = (el) => {
+      const r = el.getBoundingClientRect();
+      return x >= r.left - pad && x <= r.right + pad &&
+             y >= r.top - pad && y <= r.bottom + pad;
+    };
+    if (provEls.some((p) => hit(p.el))) return true;
+    const anchor = ring.querySelector('[data-id="ai"]');
+    if (anchor && hit(anchor)) return true;
+    const lr = aiLabel.getBoundingClientRect();
+    if (lr.width && x >= lr.left - pad && x <= lr.right + pad &&
+        y >= lr.top - pad && y <= lr.bottom + pad) return true;
+    return false;
+  }
+
+  function cancelOutside() {
+    clearTimeout(state.outTimer);
+    state.outTimer = 0;
+  }
+
+  document.addEventListener("pointermove", (e) => {
+    if (!state.open || state.mode !== "ai") return;
+    if (inCluster(e.clientX, e.clientY)) { cancelOutside(); return; }
+    if (state.outTimer) return;
+    state.outTimer = setTimeout(() => {
+      state.outTimer = 0;
+      if (state.open && state.mode === "ai") collapseAI();
+    }, 400);
+  });
+
+  function setActiveProvider(k) {
+    state.active = k;
+    provEls.forEach((p, i) => p.el.classList.toggle("is-active", i === k));
+
+    const p = provEls[k];
+    // label sits directly to the right of the active bubble
+    const labelX = p.x + 38 + 14;
+    const labelY = p.y;
+
+    aiLabel.textContent = `${p.verb} with ${p.name}`;
+    aiLabel.style.left = labelX + "px";
+    aiLabel.style.top = labelY + "px";
+
+    // keep the pill inside the stage
+    requestAnimationFrame(() => {
+      const w = aiLabel.offsetWidth, h = aiLabel.offsetHeight;
+      const maxLeft = STAGE_W - w - 12;
+      if (parseFloat(aiLabel.style.left) > maxLeft) aiLabel.style.left = maxLeft + "px";
+      const maxTop = STAGE_H - h / 2 - 8;
+      if (p.y > maxTop) aiLabel.style.top = maxTop + "px";
+      if (p.y < h / 2 + 8) aiLabel.style.top = h / 2 + 8 + "px";
+    });
+  }
+
+  // ---- modes ---------------------------------------------------------------
+  function expandAI() {
+    if (!state.open || state.mode === "ai") return;
+    clearTimeout(state.aiTimer);
+    hideTip();
+    state.mode = "ai";
+    stage.classList.add("ai");
+    ring.classList.add("is-ai");
+    hintEl.textContent = "1–3 · ← → · Enter · Esc back";
+    setActiveProvider(state.active);
+    haptic("expand");
+    setTimeout(() => provEls[state.active].el.focus({ preventScroll: true }), 300);
+  }
+
+  function collapseAI() {
+    if (state.mode !== "ai") return;
+    cancelOutside();
+    hideTip();
+    state.mode = "ring";
+    state.aiCooldown = Date.now() + 400;
+    stage.classList.remove("ai");
+    ring.classList.remove("is-ai");
+    hintEl.textContent = "1–8 · ← → · Enter · Esc";
+    haptic("dismiss");
+    const ai = ring.querySelector('[data-id="ai"]');
+    if (ai) ai.focus({ preventScroll: true });
+  }
+
+  function open() {
+    if (state.open) return;
+    state.open = true;
+    hideTip();
+    stage.style.display = "";
+    ring.style.display = "";
+    ring.classList.remove("is-closing");
+    stage.classList.remove("is-closing");
+    ring.querySelectorAll(".slot-wrap, .slot").forEach((el) => {
+      el.style.animation = "none";
+      void el.offsetWidth;
+      el.style.animation = "";
+    });
+    reopen.classList.remove("show");
+    haptic("open");
+    // only pull focus into the menu when it was opened from the keyboard,
+    // otherwise the focus ring shows up on a pointer-driven open
+    const first = keyboardMode ? ring.querySelector(".slot") : null;
+    if (first) first.focus({ preventScroll: true });
+  }
+
+  function dismiss() {
+    if (!state.open) return;
+    haptic("dismiss");
+    if (state.mode === "ai") {
+      stage.classList.remove("ai");
+      ring.classList.remove("is-ai");
+      state.mode = "ring";
+      state.aiCooldown = Date.now() + 400;
+    }
+    close(() => toast("Dismissed"));
+  }
+
+  function invokeItem(i, el) {
+    if (!state.open || state.mode !== "ring") return;
+    haptic("select", el);
+    el.classList.add("is-selected");
+    hubWrap.classList.add("rippling");
+    setTimeout(() => hubWrap.classList.remove("rippling"), 600);
+    close(() => toast(`Invoked: ${ITEMS[i].label}`));
+  }
+
+  function invokeProvider(k, el) {
+    if (state.mode !== "ai") return;
+    const p = provEls[k];
+    haptic("select", el);
+    el.classList.add("is-selected");
+    setActiveProvider(k);
+    close(() => toast(`${p.verb} with ${p.name}`));
+  }
+
+  function close(after) {
+    state.open = false;
+    state.mode = "ring";
+    clearTimeout(state.aiTimer);
+    cancelOutside();
+    hideTip();
+    stage.classList.add("is-closing");
+    ring.classList.add("is-closing");
+    setTimeout(() => {
+      ring.style.display = "none";
+      ring.classList.remove("is-closing", "is-ai");
+      stage.classList.remove("is-closing", "ai");
+      ring.querySelectorAll(".is-selected").forEach((n) => n.classList.remove("is-selected"));
+      provEls.forEach((p) => p.el.classList.remove("is-selected", "is-active"));
+      hintEl.textContent = "1–8 · ← → · Enter · Esc";
+      reopen.classList.add("show");
+      reopen.focus({ preventScroll: true });
+      if (after) after();
+    }, 320);
+  }
+
+  let toastTimer;
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove("show"), 1700);
+  }
+
+  // ---- keyboard ------------------------------------------------------------
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (!state.open) return;
+      if (state.mode === "ai") collapseAI();
+      else dismiss();
+      return;
+    }
+
+    if (!state.open) {
+      if (e.key === "Enter" || e.key === " " || e.key.toLowerCase() === "r") { e.preventDefault(); open(); }
+      return;
+    }
+
+    if (state.mode === "ai") {
+      if (e.key >= "1" && e.key <= "3") {
+        const k = Number(e.key) - 1;
+        e.preventDefault(); invokeProvider(k, provEls[k].el); return;
+      }
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+        e.preventDefault();
+        const k = (state.active + 1) % provEls.length;
+        setActiveProvider(k); provEls[k].el.focus({ preventScroll: true }); haptic("hover", provEls[k].el); return;
+      }
+      if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const k = (state.active - 1 + provEls.length) % provEls.length;
+        setActiveProvider(k); provEls[k].el.focus({ preventScroll: true }); haptic("hover", provEls[k].el); return;
+      }
+      if (e.key === "Backspace") { e.preventDefault(); collapseAI(); return; }
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); invokeProvider(state.active, provEls[state.active].el); }
+      return;
+    }
+
+    const list = Array.from(ring.querySelectorAll(".slot"));
+    const cur = list.indexOf(document.activeElement);
+
+    if (e.key >= "1" && e.key <= "8") {
+      const i = Number(e.key) - 1;
+      if (list[i]) {
+        e.preventDefault();
+        if (ITEMS[i].id === "ai") expandAI(); else invokeItem(i, list[i]);
+      }
+      return;
+    }
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+      e.preventDefault();
+      const next = cur < 0 ? 0 : (cur + 1) % list.length;
+      list[next].focus(); haptic("hover", list[next]); return;
+    }
+    if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const prev = cur <= 0 ? list.length - 1 : cur - 1;
+      list[prev].focus(); haptic("hover", list[prev]); return;
+    }
+    if (e.key === "Enter" || e.key === " ") {
+      if (cur >= 0) {
+        e.preventDefault();
+        if (ITEMS[cur].id === "ai") expandAI(); else invokeItem(cur, list[cur]);
+      }
+    }
+  });
+
+  reopen.addEventListener("click", open);
+  stage.addEventListener("click", (e) => {
+    if (!state.open) { open(); return; }
+    if (state.mode === "ai" && !e.target.closest(".provider")) collapseAI();
+  });
+
+  // ---- fit -----------------------------------------------------------------
+  function resize() {
+    const s = Math.min(1, (innerWidth - 48) / STAGE_W, (innerHeight - 48) / STAGE_H);
+    fit.style.setProperty("--fit", s.toFixed(3));
+  }
+  addEventListener("resize", resize);
+  resize();
+
+  requestAnimationFrame(() => {
+    open();
+    // demo hook: ?state=ai opens the submenu for screenshots
+    if (new URLSearchParams(location.search).get("state") === "ai") {
+      setTimeout(() => { expandAI(); setActiveProvider(0); }, 80);
+    }
+  });
+})();
+</script>
+</body>
+</html>
