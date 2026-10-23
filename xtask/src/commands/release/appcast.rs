@@ -1,12 +1,14 @@
-//! The Sparkle appcasts: one feed per macOS architecture, each offering that
-//! architecture's notarized DMG of this release, signed with Sparkle's EdDSA
-//! key, plus the deltas `release sparkle-deltas` made from earlier releases.
+//! A release's Sparkle feed record: one single-item appcast per macOS
+//! architecture, offering that architecture's notarized DMG of this release,
+//! signed with Sparkle's EdDSA key, plus the deltas `release sparkle-deltas`
+//! made from earlier releases. A beta's item carries `sparkle:channel`.
 //!
 //! Runs in the publish job after the DMGs are stapled — stapling rewrites the
 //! file, so a signature made before it would not match what users download.
-//! The bundles read these feeds from the URLs `support::update_feed` gives
-//! them, and the publish job uploads them there. Rendering and signing are
-//! `gpui-updater-release`'s; what OpenLogi's feed says stays here.
+//! The publish job uploads the record next to the release's artifacts, and
+//! `release channels` copies its items, unchanged, into the feeds the bundles
+//! read. Rendering and signing are `gpui-updater-release`'s; what OpenLogi's
+//! feed says stays here.
 
 use std::path::{Path, PathBuf};
 
@@ -16,10 +18,11 @@ use gpui_updater_release::sparkle::{self, SparkleDelta};
 use gpui_updater_release::{
     Appcast, AppcastItem, Enclosure, ReleaseNotes, SparkleKey, ensure_sparkle_version,
 };
+use openlogi_core::update_feed::UpdateChannel;
 use strum::VariantArray as _;
 use time::{OffsetDateTime, format_description::well_known::Rfc2822};
 
-use crate::support::release_tag::ReleaseTag;
+use crate::support::release_tag::{BUILD_VERSION_ENV, BuildVersion, ReleaseTag};
 use crate::support::update_feed::{self, MacArch};
 
 /// The base64 private key: the 32-byte seed Sparkle's `generate_keys -x`
@@ -33,13 +36,18 @@ pub(crate) struct Args {
     /// and the `<dmg>.from-<version>.sparkle.delta` files made from them.
     #[arg(long, default_value = "dist")]
     dist: PathBuf,
-    /// Directory the `appcast-<arch>.xml` feeds are written to. Keep it out
-    /// of `--dist`, whose contents are uploaded as release assets.
-    #[arg(long, default_value = ".release/appcast")]
-    output_dir: PathBuf,
+    /// Root of the tree to upload to the update host. The `appcast-<arch>.xml`
+    /// records go into the release's feed record directory under it. Keep it
+    /// out of `--dist`, whose contents are uploaded as release assets.
+    #[arg(long, default_value = ".release/stage")]
+    stage: PathBuf,
     /// Release tag, for example `v0.8.14`.
     #[arg(long, env = "GITHUB_REF_NAME")]
     tag: String,
+    /// The bundles' `CFBundleVersion`, as `release version` printed it for
+    /// the tag: `X.Y.Z` for a stable release, `B.N` for a beta.
+    #[arg(long, env = BUILD_VERSION_ENV)]
+    build_version: String,
     /// Public update base URL, for example `https://updates.openlogi.org`.
     #[arg(long, env = update_feed::BASE_URL_ENV)]
     base_url: String,
@@ -56,9 +64,13 @@ pub(crate) struct Args {
 /// Everything an appcast item says about the release besides its enclosures.
 struct Release<'a> {
     /// `CFBundleVersion` of the bundles in the DMGs, which Sparkle compares
-    /// against the running app's. `macos package` stamps the crate version
+    /// against the running app's. `macos package` stamps the build version
     /// there in place of cargo-bundle's build timestamp.
+    bundle_version: &'a str,
+    /// The version people read: the tag's, `X.Y.Z` or `X.Y.Z-beta.N`.
     version: &'a str,
+    /// The channel the release publishes to.
+    channel: UpdateChannel,
     pub_date: String,
     page_url: String,
     notes: Option<String>,
@@ -72,8 +84,11 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 }
 
 fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
-    let version = ReleaseTag::parse(&args.tag)?.version().to_string();
-    ensure_sparkle_orders(&version)?;
+    let tag = ReleaseTag::parse(&args.tag)?;
+    let build: BuildVersion = args.build_version.parse()?;
+    build.ensure_fits(&tag)?;
+    let bundle_version = build.to_string();
+    ensure_sparkle_orders(&bundle_version, tag.channel())?;
     let key = signing_key(private_key)?;
     key.expect_public_key(&args.public_key).with_context(|| {
         format!("{PRIVATE_KEY_ENV} does not belong to the public key the bundles embed")
@@ -87,32 +102,29 @@ fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
                 .with_context(|| format!("could not read release notes {}", path.display()))
         })
         .transpose()?;
+    let version = tag.version().to_string();
     let release = Release {
+        bundle_version: &bundle_version,
         version: &version,
+        channel: tag.channel(),
         pub_date: OffsetDateTime::now_utc()
             .format(&Rfc2822)
             .context("could not format the publication date")?,
-        page_url: format!(
-            "https://github.com/AprilNEA/OpenLogi/releases/tag/{}",
-            args.tag
-        ),
+        page_url: update_feed::release_page_url(&tag),
         notes,
     };
-    let release_base = format!(
-        "{}/releases/{}",
-        args.base_url.trim_end_matches('/'),
-        args.tag
-    );
+    let release_base = update_feed::release_url(&args.base_url, &tag);
+    let record_base = update_feed::record_url(&args.base_url, &tag);
 
-    // Collect every feed before writing any, so a bad delta leaves no feed
-    // half-updated next to the others.
-    let mut feeds = Vec::new();
+    // Collect every record before writing any, so a bad delta leaves no
+    // record half-written next to the others.
+    let mut records = Vec::new();
     for (arch, dmg) in release_dmgs(&args.dist)? {
         let name = file_name(&dmg)?;
         let enclosure = Enclosure::for_file(&dmg, format!("{release_base}/{name}"), Some(&key))
             .with_context(|| format!("could not sign {}", dmg.display()))?;
         let mut item = item(&release, enclosure);
-        for delta in release_deltas(&args.dist, name, &version)? {
+        for delta in release_deltas(&args.dist, name, &bundle_version)? {
             let url = format!("{release_base}/{}", file_name(&delta.path)?);
             item = item.delta(
                 delta
@@ -120,27 +132,36 @@ fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
                     .with_context(|| format!("could not sign {}", delta.path.display()))?,
             );
         }
-        let feed_url = update_feed::appcast_url(&args.base_url, arch);
-        feeds.push((arch, appcast(&feed_url, item), feed_url));
+        let record_url = format!("{record_base}/{}", arch.appcast_file_name());
+        records.push((arch, record(&record_url, &release, arch, item), record_url));
     }
 
-    fs_err::create_dir_all(&args.output_dir)
-        .with_context(|| format!("could not create {}", args.output_dir.display()))?;
-    for (arch, xml, feed_url) in feeds {
-        let feed = args.output_dir.join(arch.appcast_file_name());
-        fs_err::write(&feed, xml).with_context(|| format!("could not write {}", feed.display()))?;
-        println!("{} → {}", feed.display(), feed_url);
+    let output_dir = args.stage.join(update_feed::record_dir(&tag));
+    fs_err::create_dir_all(&output_dir)
+        .with_context(|| format!("could not create {}", output_dir.display()))?;
+    for (arch, xml, record_url) in records {
+        let path = output_dir.join(arch.appcast_file_name());
+        fs_err::write(&path, xml).with_context(|| format!("could not write {}", path.display()))?;
+        println!("{} → {}", path.display(), record_url);
     }
     Ok(())
 }
 
-/// Refuse a version Sparkle would order wrongly. Its comparator
+/// Refuse a bundle version Sparkle would order wrongly. Its comparator
 /// (`SUStandardVersionComparator`) stops at the first `-`, so it reads
-/// `1.2.0-rc.1` as `1.2.0`: whoever took the pre-release from the stable feed
-/// would never be offered the final 1.2.0.
-fn ensure_sparkle_orders(version: &str) -> Result<()> {
-    ensure_sparkle_version(version, 3, 3).with_context(|| {
-        format!("the stable appcast only carries MAJOR.MINOR.PATCH releases, not {version:?}")
+/// `1.2.0-rc.1` as `1.2.0`: whoever took the pre-release would never be
+/// offered the final 1.2.0. A stable release's bundle version is
+/// `MAJOR.MINOR.PATCH`, and a beta's has a fourth numeric field.
+fn ensure_sparkle_orders(bundle_version: &str, channel: UpdateChannel) -> Result<()> {
+    let (parts, shape) = match channel {
+        UpdateChannel::Stable => (3, "MAJOR.MINOR.PATCH"),
+        UpdateChannel::Beta => (4, "MAJOR.MINOR.PATCH.N"),
+    };
+    ensure_sparkle_version(bundle_version, parts, parts).with_context(|| {
+        format!(
+            "a {} release's bundle version is {shape}, not {bundle_version:?}",
+            channel.as_str()
+        )
     })
 }
 
@@ -198,9 +219,9 @@ fn release_dmgs(dist: &Path) -> Result<Vec<(MacArch, PathBuf)>> {
 /// The Sparkle deltas in `dist` that update to the DMG named `dmg`, in file
 /// name order. Each must carry the metadata `release sparkle-deltas` wrote
 /// next to it, be named for the version it updates from, and produce
-/// `version`: a delta to any other build would hand the app a bundle the feed
-/// does not describe.
-fn release_deltas(dist: &Path, dmg: &str, version: &str) -> Result<Vec<SparkleDelta>> {
+/// `bundle_version`: a delta to any other build would hand the app a bundle
+/// the feed does not describe.
+fn release_deltas(dist: &Path, dmg: &str, bundle_version: &str) -> Result<Vec<SparkleDelta>> {
     let prefix = format!("{dmg}.");
     let mut paths = Vec::new();
     for entry in fs_err::read_dir(dist)
@@ -230,8 +251,8 @@ fn release_deltas(dist: &Path, dmg: &str, version: &str) -> Result<Vec<SparkleDe
                 delta.from.bundle_version
             );
             ensure!(
-                delta.to_bundle_version == version,
-                "{} updates to {}, not {version}",
+                delta.to_bundle_version == bundle_version,
+                "{} updates to {}, not {bundle_version}",
                 path.display(),
                 delta.to_bundle_version
             );
@@ -242,25 +263,32 @@ fn release_deltas(dist: &Path, dmg: &str, version: &str) -> Result<Vec<SparkleDe
 
 /// The appcast item for `release`, offering `enclosure`.
 fn item(release: &Release<'_>, enclosure: Enclosure) -> AppcastItem {
-    let item = AppcastItem::new(release.version, enclosure)
+    let mut item = AppcastItem::new(release.bundle_version, enclosure)
         .title(format!("OpenLogi {}", release.version))
         .pub_date(Some(release.pub_date.clone()))
         .short_version(release.version)
         .minimum_system_version(update_feed::MACOS_MINIMUM_OS_VERSION)
         .link(&release.page_url)
         .full_release_notes_link(&release.page_url);
+    // Sparkle offers an item without a channel to everyone, and one with a
+    // channel only to apps that allow it.
+    if release.channel != update_feed::APPCAST_CHANNEL {
+        item = item.channel(release.channel.as_str());
+    }
     match &release.notes {
         Some(notes) => item.notes(ReleaseNotes::Markdown(notes.clone())),
         None => item,
     }
 }
 
-/// The appcast at `feed_url`: one item.
-fn appcast(feed_url: &str, item: AppcastItem) -> String {
-    Appcast::new("OpenLogi", feed_url)
+/// `release`'s feed record for `arch`, at `record_url`: an appcast with the
+/// one item.
+fn record(record_url: &str, release: &Release<'_>, arch: MacArch, item: AppcastItem) -> String {
+    Appcast::new("OpenLogi", record_url)
         .description(format!(
-            "OpenLogi updates ({} channel)",
-            update_feed::CHANNEL.as_str()
+            "OpenLogi {} for {} (feed record)",
+            release.version,
+            arch.as_str()
         ))
         .item(item)
         .render()

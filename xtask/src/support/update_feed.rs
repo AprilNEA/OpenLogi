@@ -1,16 +1,31 @@
-//! Where the stable channel's update feeds live on the update host.
+//! Where a release and its update feeds live on the update host.
 //!
 //! `macos package` stamps the Sparkle feed URL into the bundle's `Info.plist`,
-//! and `release appcast` writes the feed that URL names; both derive it here,
-//! so the feed an installed app reads and the file a release uploads cannot
-//! drift apart. `release latest-json` writes the built-in engine's manifest
-//! into the same channel. The channel's directory on the host is
+//! and `release channels` writes the feed that URL names; both derive it
+//! here, so the feed an installed app reads and the file a release uploads
+//! cannot drift apart. A channel's directory on the host is
 //! [`UpdateChannel`]'s, which the app reads its manifest from as well.
+//!
+//! Each release also keeps its own feed record next to its artifacts:
+//! `release latest-json` and `release appcast` write it, and
+//! `release channels` composes the channel files from the records.
 
 use openlogi_core::update_feed::UpdateChannel;
 
-/// The channel every release publishes to.
-pub(crate) const CHANNEL: UpdateChannel = UpdateChannel::Stable;
+use crate::support::release_tag::ReleaseTag;
+
+/// The channel whose directory holds the Sparkle feeds. Every bundle reads
+/// them, whatever channel it follows: Sparkle filters a beta item by its
+/// `sparkle:channel`, not by feed URL.
+pub(crate) const APPCAST_CHANNEL: UpdateChannel = UpdateChannel::Stable;
+
+/// The directory, relative to the root of the update host, that holds one
+/// directory per release.
+pub(crate) const RELEASES_DIR: &str = "releases";
+
+/// The name of a release's feed record directory, inside the release's
+/// directory.
+pub(crate) const RECORD_DIR_NAME: &str = "feed";
 
 /// The variable the update host is read from, by every command that builds
 /// or publishes a feed on it.
@@ -72,7 +87,41 @@ impl MacArch {
 /// URL of the Sparkle feed `arch`'s bundles read from the update host at
 /// `base_url`.
 pub(crate) fn appcast_url(base_url: &str, arch: MacArch) -> String {
-    format!("{}/{}", CHANNEL.dir_url(base_url), arch.appcast_file_name())
+    format!(
+        "{}/{}",
+        APPCAST_CHANNEL.dir_url(base_url),
+        arch.appcast_file_name()
+    )
+}
+
+/// The directory of `tag`'s artifacts, relative to the root of the update
+/// host. Its files never change once uploaded.
+pub(crate) fn release_dir(tag: &ReleaseTag) -> String {
+    format!("{RELEASES_DIR}/{tag}")
+}
+
+/// URL of `tag`'s artifact directory ([`release_dir`]) on the update host at
+/// `base_url`.
+pub(crate) fn release_url(base_url: &str, tag: &ReleaseTag) -> String {
+    format!("{}/{}", base_url.trim_end_matches('/'), release_dir(tag))
+}
+
+/// The directory of `tag`'s feed record, relative to the root of the update
+/// host: its single-release manifest and one single-item appcast per
+/// architecture.
+pub(crate) fn record_dir(tag: &ReleaseTag) -> String {
+    format!("{}/{RECORD_DIR_NAME}", release_dir(tag))
+}
+
+/// URL of `tag`'s feed record directory ([`record_dir`]) on the update host
+/// at `base_url`.
+pub(crate) fn record_url(base_url: &str, tag: &ReleaseTag) -> String {
+    format!("{}/{RECORD_DIR_NAME}", release_url(base_url, tag))
+}
+
+/// URL of `tag`'s GitHub Release page.
+pub(crate) fn release_page_url(tag: &ReleaseTag) -> String {
+    format!("https://github.com/AprilNEA/OpenLogi/releases/tag/{tag}")
 }
 
 #[cfg(test)]

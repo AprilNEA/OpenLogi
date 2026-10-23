@@ -4,6 +4,38 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: Channel files are composed from per-release records
+
+Beta releases share the update host with stable ones. A beta publish must
+change what `beta` offers and leave what `stable` offers as it is. A stable
+hotfix published after a newer beta must not take that beta off the beta
+channel. So each release uploads an immutable feed record to
+`releases/<tag>/feed/`: its own `latest.json` and one single-item appcast per
+architecture. Every publish then composes all channel files again from all
+records (`cargo xtask release channels`).
+
+- **Composed again, not edited in place.** Reading the current channel file,
+  adding an item and writing it back would make each file depend on the order
+  in which tags published. A failed publish would leave it wrong until someone
+  repaired it by hand. Composing from the records gives the same files in any
+  order.
+- **Newest by build version, not by tag version.** Sparkle and Windows
+  Installer compare build versions. A beta's build version is the stable
+  release it was cut from, plus its beta number. So the channels agree with
+  what installed apps accept. A beta numbered past a stable release but cut
+  before it is older, and the beta channel offers the stable release.
+- **Items copied byte for byte.** The composer never signs. The EdDSA
+  signatures stay the ones `release appcast` made, and the private key stays
+  in that one step.
+- **One appcast per architecture for both channels.** This is Sparkle's own
+  channel model: the beta item carries
+  `<sparkle:channel>beta</sparkle:channel>`, and Sparkle offers it only to an
+  app that allows the beta channel.
+- **The bucket lists the releases, not GitHub Releases.** The updater can offer
+  only what is on R2, and reading R2 needs no GitHub token. Releases up to
+  `v0.8.17` have no record. Until a stable release has one, the current stable
+  channel files stand in for it.
+
 ## 2026-10: The mock agent's console drives the agent's own indicator state
 
 `openlogi-agent-mock` reads one command per stdin line while the GUI and

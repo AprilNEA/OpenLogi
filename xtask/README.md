@@ -34,11 +34,17 @@ devenv shell -- cargo run -p xtask -- <command>
   versioned workspace dependency closure.
 - `release checkout-version-bump` — pin a release job to the commit that
   introduced the current workspace version.
-- `release latest-json` — generate the static updater manifest for the stable channel.
+- `release latest-json` — write a release's static updater manifest into its
+  feed record.
 - `release appcast` — sign the macOS DMGs and their Sparkle deltas with
-  Sparkle's EdDSA key and write one appcast per architecture.
+  Sparkle's EdDSA key and write one single-item appcast per architecture into
+  the release's feed record.
+- `release channels` — compose every channel's `latest.json` and appcasts
+  from the release records on the update host, and print what each channel
+  offers as GitHub Actions outputs.
 - `release sparkle-deltas` — make verified Sparkle deltas from the newest
-  earlier releases to a stapled DMG, with the metadata `release appcast` reads.
+  earlier stable releases to a stable release's stapled DMG, with the metadata
+  `release appcast` reads. A beta gets none.
 - `release version` — print a release tag's channel, version, build version
   and the previous tag its release notes compare with as GitHub Actions
   outputs, after checking the tagged commit's workspace version: the tag's for
@@ -109,8 +115,10 @@ SHA-256, cached under `target/sparkle/`) as `Contents/Frameworks/Sparkle.framewo
 drops its XPC services (OpenLogi is not sandboxed), and stamps the `SU*` keys
 into `Info.plist`. The feed URL comes from `support/update_feed.rs`: one appcast
 per architecture under `OPENLOGI_UPDATE_BASE_URL`, because each architecture
-ships its own DMG. `release appcast` writes those feeds from the same module,
-so the URL a bundle reads and the file a release uploads cannot drift apart.
+ships its own DMG. `release appcast` and `release channels` write those feeds
+from the same module, so the URL a bundle reads and the file a release
+uploads cannot drift apart. The module also owns where a release's files and
+feed record live on the update host.
 Sparkle orders releases by `CFBundleVersion`, so every bundle carries the
 release's build version there (`--build-version`, from `release version`) and
 the crate version in `CFBundleShortVersionString`. A stable release's build
@@ -191,10 +199,12 @@ xtask/
         sweep/tests.rs
       release.rs             # release metadata entry
       release/
-        appcast.rs           # per-architecture Sparkle feeds, EdDSA-signed
+        appcast.rs           # a release's per-architecture Sparkle items, EdDSA-signed
         appcast/tests.rs
         changelog.rs
         changelog/tests.rs
+        channels.rs          # channel files composed from the release records
+        channels/tests.rs
         checkout_version_bump.rs
         checkout_version_bump/tests.rs
         latest_json.rs
@@ -214,7 +224,7 @@ xtask/
       manifest.rs            # the root Cargo.toml's [workspace.package]
       release_tag.rs         # release tag syntax, channel and build version
       release_tag/tests.rs
-      update_feed.rs         # channel, update host and feed URLs packaging and release share
+      update_feed.rs         # update host layout and feed URLs packaging and release share
       update_feed/tests.rs
 ```
 

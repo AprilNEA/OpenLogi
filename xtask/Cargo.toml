@@ -30,6 +30,9 @@ plist = "1.10.0"
 # For `lint sweep-allows`: parsing each `allow` attribute the lexical scan finds,
 # and printing back the parts of a `cfg_attr` it keeps.
 quote = "1.0.47"
+# `release channels` reads the release records' appcasts the way an XML
+# parser (Sparkle's) sees them, and copies their items byte for byte.
+roxmltree = "0.20.0"
 semver = "1.0.28"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -42,10 +45,6 @@ time = { version = "0.3", features = ["formatting"] }
 toml.workspace = true
 which = "8.0.4"
 xshell = "0.2.7"
-
-[dev-dependencies]
-# Reading the generated appcast back the way an XML parser (Sparkle's) sees it.
-roxmltree = "0.20.0"
 
 [lints]
 workspace = true

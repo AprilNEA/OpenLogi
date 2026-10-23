@@ -1,6 +1,6 @@
 use semver::Version;
 
-use super::{FIRST_SPARKLE_RELEASE, delta_bases};
+use super::{Args, FIRST_SPARKLE_RELEASE, delta_bases, run};
 
 fn tags(list: &[&str]) -> Vec<String> {
     list.iter().map(|tag| (*tag).to_owned()).collect()
@@ -39,4 +39,22 @@ fn bases_are_the_newest_earlier_sparkle_releases() {
 fn the_first_sparkle_release_has_nothing_to_update_from() {
     let listed = tags(&["v0.8.12", "v0.8.13", "v0.8.14"]);
     assert!(delta_bases(&listed, &FIRST_SPARKLE_RELEASE, 3).is_empty());
+}
+
+#[test]
+fn a_beta_gets_no_deltas() {
+    // Neither the DMG nor GitHub is touched: the path does not exist.
+    let args = Args {
+        dmg: "/nonexistent/OpenLogi-v0.8.19-beta.2-macos-arm64.dmg".into(),
+        tag: "v0.8.19-beta.2".into(),
+        count: 3,
+        repo: "AprilNEA/OpenLogi".into(),
+    };
+    run(&args).unwrap();
+    // A tag that is not a release tag still fails.
+    let args = Args {
+        tag: "v0.8.19-rc.1".into(),
+        ..args
+    };
+    run(&args).unwrap_err();
 }

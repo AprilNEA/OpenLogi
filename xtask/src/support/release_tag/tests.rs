@@ -266,3 +266,41 @@ fn release_notes_skip_tags_that_are_not_release_tags() {
     let base = ReleaseTag::parse("v0.8.18").unwrap().notes_base(&merged);
     assert_eq!(base, Some("v0.8.16"));
 }
+
+#[test]
+fn build_versions_order_as_sparkle_compares_them() {
+    let ordered: Vec<BuildVersion> = ["0.8.16", "0.8.16.1", "0.8.16.12", "0.8.17", "0.9.0.3"]
+        .iter()
+        .map(|text| text.parse().unwrap())
+        .collect();
+    for pair in ordered.windows(2) {
+        assert!(pair[0] < pair[1], "{} < {}", pair[0], pair[1]);
+    }
+}
+
+#[test]
+fn a_build_version_fits_only_the_tag_that_built_it() {
+    let fits = |build: &str, tag: &str| {
+        build
+            .parse::<BuildVersion>()
+            .unwrap()
+            .ensure_fits(&ReleaseTag::parse(tag).unwrap())
+    };
+    fits("0.8.17", "v0.8.17").unwrap();
+    fits("0.8.17.12", "v0.8.18-beta.12").unwrap();
+    fits("0.8.16.12", "v0.9.0-beta.12").unwrap();
+    for (build, tag, says) in [
+        ("0.8.16", "v0.8.17", "its build version is 0.8.17"),
+        ("0.8.17.3", "v0.8.17", "its build version is 0.8.17"),
+        ("0.8.17", "v0.8.18-beta.12", "ends in .12"),
+        ("0.8.17.11", "v0.8.18-beta.12", "ends in .12"),
+        (
+            "0.8.18.12",
+            "v0.8.18-beta.12",
+            "starts below 0.8.18-beta.12",
+        ),
+    ] {
+        let error = fits(build, tag).unwrap_err().to_string();
+        assert!(error.contains(says), "{build} for {tag}: {error}");
+    }
+}

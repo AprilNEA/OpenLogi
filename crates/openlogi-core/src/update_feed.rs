@@ -4,10 +4,15 @@
 //! built-in engine's manifest from it, packaging stamps the Sparkle feed URL
 //! from it, and xtask writes both feeds for it. All of them derive the
 //! location here, so the URL an installed app reads and the feed xtask writes
-//! for that URL cannot drift apart. The release workflow's upload
-//! destinations (`release.yml`) still spell the layout themselves.
+//! for that URL cannot drift apart. xtask stages the channel files in the
+//! same layout, and the release workflow copies the staged tree to the host
+//! as it is.
 
 use serde::{Deserialize, Serialize};
+
+/// File name of the built-in update engine's manifest in a channel's
+/// directory.
+pub const MANIFEST_FILE_NAME: &str = "latest.json";
 
 /// A release channel: the set of releases an installation is offered.
 ///
@@ -18,7 +23,8 @@ use serde::{Deserialize, Serialize};
 pub enum UpdateChannel {
     /// Final releases, tagged `vX.Y.Z`.
     Stable,
-    /// Pre-releases, tagged `vX.Y.Z-beta.N`. Nothing publishes to it yet.
+    /// Pre-releases, tagged `vX.Y.Z-beta.N`. Its manifest offers the newest
+    /// beta, or the newest stable release when that one is newer.
     Beta,
 }
 
@@ -59,24 +65,26 @@ impl UpdateChannel {
         }
     }
 
-    /// URL of this channel's directory on the update host at `base_url`.
-    /// Every feed of the channel is a file directly inside it. Trailing
-    /// slashes on `base_url` are dropped, so `https://host/` and
-    /// `https://host` name the same directory.
+    /// This channel's directory, relative to the root of the update host.
+    /// Every feed of the channel is a file directly inside it.
+    #[must_use]
+    pub fn dir(self) -> String {
+        format!("channels/{}", self.as_str())
+    }
+
+    /// URL of this channel's directory ([`Self::dir`]) on the update host at
+    /// `base_url`. Trailing slashes on `base_url` are dropped, so
+    /// `https://host/` and `https://host` name the same directory.
     #[must_use]
     pub fn dir_url(self, base_url: &str) -> String {
-        format!(
-            "{}/channels/{}",
-            base_url.trim_end_matches('/'),
-            self.as_str()
-        )
+        format!("{}/{}", base_url.trim_end_matches('/'), self.dir())
     }
 
     /// URL of the built-in update engine's manifest for this channel on the
     /// update host at `base_url`.
     #[must_use]
     pub fn manifest_url(self, base_url: &str) -> String {
-        format!("{}/latest.json", self.dir_url(base_url))
+        format!("{}/{MANIFEST_FILE_NAME}", self.dir_url(base_url))
     }
 }
 
@@ -86,6 +94,7 @@ mod tests {
 
     #[test]
     fn each_channel_reads_its_own_directory_on_the_host() {
+        assert_eq!(UpdateChannel::Beta.dir(), "channels/beta");
         assert_eq!(
             UpdateChannel::Stable.dir_url("https://updates.openlogi.org"),
             "https://updates.openlogi.org/channels/stable"

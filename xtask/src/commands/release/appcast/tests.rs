@@ -5,9 +5,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use gpui_updater_release::Enclosure;
 
 use super::{
-    Args, Release, appcast, ensure_sparkle_orders, item, release_dmgs, signing_key, write_appcasts,
+    Args, Release, ensure_sparkle_orders, item, record, release_dmgs, signing_key, write_appcasts,
 };
 use crate::support::update_feed::MacArch;
+use openlogi_core::update_feed::UpdateChannel;
 
 /// Golden values made with Sparkle 2.10's own tools (also pinned in
 /// gpui-updater-core's verifier tests): the seed `[7; 32]` exported the way
@@ -43,12 +44,22 @@ fn only_a_32_byte_seed_is_a_signing_key() {
 }
 
 #[test]
-fn the_stable_feed_takes_final_releases_only() {
+fn a_bundle_version_has_three_fields_for_stable_and_four_for_beta() {
     for version in ["0.8.14", "1.0.0", "10.20.30"] {
-        ensure_sparkle_orders(version).unwrap();
+        ensure_sparkle_orders(version, UpdateChannel::Stable).unwrap();
     }
     for version in ["0.9.0-rc.1", "1.2", "1.2.3.4", "v1.2.3", "1..3", ""] {
-        assert!(ensure_sparkle_orders(version).is_err(), "{version:?}");
+        assert!(
+            ensure_sparkle_orders(version, UpdateChannel::Stable).is_err(),
+            "{version:?}"
+        );
+    }
+    ensure_sparkle_orders("0.8.14.3", UpdateChannel::Beta).unwrap();
+    for version in ["0.8.14", "0.9.0-beta.3", "0.8.14.3.1"] {
+        assert!(
+            ensure_sparkle_orders(version, UpdateChannel::Beta).is_err(),
+            "{version:?}"
+        );
     }
 }
 
@@ -116,7 +127,9 @@ fn text<'a>(node: roxmltree::Node<'a, 'a>, ns: Option<&str>, name: &str) -> &'a 
 
 fn release(notes: Option<&str>) -> Release<'static> {
     Release {
+        bundle_version: "0.8.14",
         version: "0.8.14",
+        channel: UpdateChannel::Stable,
         pub_date: "Mon, 12 Oct 2026 01:02:03 +0000".into(),
         page_url: "https://github.com/AprilNEA/OpenLogi/releases/tag/v0.8.14".into(),
         notes: notes.map(Into::into),
@@ -129,13 +142,16 @@ fn enclosure(url: &str, length: u64) -> Enclosure {
     enclosure
 }
 
-/// The feed OpenLogi wrote with its own template before rendering moved to
+/// The item OpenLogi wrote with its own template before rendering moved to
 /// gpui-updater-release. Installed apps have parsed exactly this shape since
-/// 0.8.14, so a release without deltas must keep producing it byte for byte.
+/// 0.8.14, and `release channels` copies the record's item into the feed they
+/// read, so a release without deltas must keep producing it byte for byte.
 #[test]
-fn a_feed_without_deltas_is_unchanged() {
-    let xml = appcast(
-        "https://u.example/channels/stable/appcast-arm64.xml",
+fn a_record_item_without_deltas_is_unchanged() {
+    let xml = record(
+        "https://u.example/releases/v0.8.14/feed/appcast-arm64.xml",
+        &release(None),
+        MacArch::Arm64,
         item(
             &release(Some("## Fixes\n- a ]]> b\n")),
             enclosure("https://u.example/a.dmg?x=1&y=2", 1234),
@@ -146,8 +162,8 @@ fn a_feed_without_deltas_is_unchanged() {
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
     <title>OpenLogi</title>
-    <link>https://u.example/channels/stable/appcast-arm64.xml</link>
-    <description>OpenLogi updates (stable channel)</description>
+    <link>https://u.example/releases/v0.8.14/feed/appcast-arm64.xml</link>
+    <description>OpenLogi 0.8.14 for arm64 (feed record)</description>
     <item>
       <title>OpenLogi 0.8.14</title>
       <pubDate>Mon, 12 Oct 2026 01:02:03 +0000</pubDate>
@@ -173,8 +189,10 @@ fn appcast_item_carries_what_sparkle_reads() {
     // Markup that must survive: XML specials and a CDATA terminator.
     let notes = "## Fixes\n- a < b && c > d\n- literal ]]> stays\n";
     let url = "https://u.example/releases/v0.8.14/OpenLogi-v0.8.14-macos-arm64.dmg?a=1&b=2";
-    let xml = appcast(
-        "https://u.example/channels/stable/appcast-arm64.xml",
+    let xml = record(
+        "https://u.example/releases/v0.8.14/feed/appcast-arm64.xml",
+        &release(None),
+        MacArch::Arm64,
         item(&release(Some(notes)), enclosure(url, 1234)),
     );
 
@@ -186,7 +204,7 @@ fn appcast_item_carries_what_sparkle_reads() {
         .children()
         .filter(|n| n.tag_name().name() == "item")
         .collect();
-    assert_eq!(items.len(), 1, "one release per feed");
+    assert_eq!(items.len(), 1, "one release per record");
     let item = items[0];
 
     assert_eq!(text(item, Some(SPARKLE_NS), "version"), "0.8.14");
@@ -219,12 +237,18 @@ fn appcast_item_carries_what_sparkle_reads() {
         !item.children().any(|n| n.tag_name().name() == "deltas"),
         "no deltas were given"
     );
+    assert!(
+        !item.children().any(|n| n.tag_name().name() == "channel"),
+        "Sparkle offers a stable item to every channel"
+    );
 }
 
 #[test]
 fn appcast_without_notes_has_no_description_item() {
-    let xml = appcast(
+    let xml = record(
         "https://u.example/feed.xml",
+        &release(None),
+        MacArch::Arm64,
         item(&release(None), enclosure("https://u.example/a.dmg", 1)),
     );
     let doc = roxmltree::Document::parse(&xml).unwrap();
@@ -236,11 +260,13 @@ fn appcast_without_notes_has_no_description_item() {
     );
 }
 
-fn args(dist: &Path, output_dir: &Path, tag: &str, public_key: &str) -> Args {
+/// Arguments for a stable `tag`, whose build version is its version.
+fn args(dist: &Path, stage: &Path, tag: &str, public_key: &str) -> Args {
     Args {
         dist: dist.to_path_buf(),
-        output_dir: output_dir.to_path_buf(),
+        stage: stage.to_path_buf(),
         tag: tag.into(),
+        build_version: tag.trim_start_matches('v').into(),
         base_url: "https://updates.example/".into(),
         public_key: public_key.into(),
         release_notes: None,
@@ -302,13 +328,18 @@ fn each_feed_offers_its_architectures_dmg_signed_with_the_embedded_key() {
         (MacArch::Arm64, golden_payload()),
         (MacArch::X86_64, b"intel dmg".to_vec()),
     ] {
-        let xml = fs_err::read_to_string(out.path().join(arch.appcast_file_name())).unwrap();
+        let xml = fs_err::read_to_string(
+            out.path()
+                .join("releases/v0.8.15/feed")
+                .join(arch.appcast_file_name()),
+        )
+        .unwrap();
         let doc = roxmltree::Document::parse(&xml).unwrap();
         let channel = child(doc.root_element(), None, "channel");
         assert_eq!(
             text(channel, None, "link"),
             format!(
-                "https://updates.example/channels/stable/appcast-{}.xml",
+                "https://updates.example/releases/v0.8.15/feed/appcast-{}.xml",
                 arch.as_str()
             )
         );
@@ -353,7 +384,8 @@ fn deltas_go_into_their_architectures_feed_signed() {
     .unwrap();
 
     let key = signing_key(PRIVATE_KEY).unwrap();
-    let xml = fs_err::read_to_string(out.path().join(MacArch::Arm64.appcast_file_name())).unwrap();
+    let records = out.path().join("releases/v0.8.15/feed");
+    let xml = fs_err::read_to_string(records.join(MacArch::Arm64.appcast_file_name())).unwrap();
     let doc = roxmltree::Document::parse(&xml).unwrap();
     let item = child(child(doc.root_element(), None, "channel"), None, "item");
     let deltas: Vec<_> = child(item, Some(SPARKLE_NS), "deltas")
@@ -388,8 +420,7 @@ fn deltas_go_into_their_architectures_feed_signed() {
         );
     }
 
-    let intel =
-        fs_err::read_to_string(out.path().join(MacArch::X86_64.appcast_file_name())).unwrap();
+    let intel = fs_err::read_to_string(records.join(MacArch::X86_64.appcast_file_name())).unwrap();
     assert!(
         !intel.contains("sparkle:deltas"),
         "an arm64 delta leaked into the x86_64 feed"
@@ -485,11 +516,51 @@ fn a_key_the_bundles_do_not_embed_signs_nothing() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("pre-release"), "{error}");
-    // A beta tag, which the stable appcast does not carry.
-    let error = write_appcasts(
-        &args(dist.path(), out.path(), "v0.9.0-beta.1", PUBLIC_KEY),
-        PRIVATE_KEY,
+    // A beta whose build version is not one `release version` gives it.
+    let mut beta = args(dist.path(), out.path(), "v0.9.0-beta.1", PUBLIC_KEY);
+    beta.build_version = "0.9.0".into();
+    let error = write_appcasts(&beta, PRIVATE_KEY).unwrap_err();
+    assert!(error.to_string().contains("ends in .1"), "{error}");
+    assert!(fs_err::read_dir(out.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn a_beta_record_offers_its_build_version_on_the_beta_channel() {
+    let dist = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    touch(
+        dist.path(),
+        "OpenLogi-v0.8.15-beta.4-macos-arm64.dmg",
+        b"arm",
+    );
+    touch(
+        dist.path(),
+        "OpenLogi-v0.8.15-beta.4-macos-x86_64.dmg",
+        b"x86",
+    );
+    let mut beta = args(dist.path(), out.path(), "v0.8.15-beta.4", PUBLIC_KEY);
+    beta.build_version = "0.8.14.4".into();
+    write_appcasts(&beta, PRIVATE_KEY).unwrap();
+
+    let xml = fs_err::read_to_string(
+        out.path()
+            .join("releases/v0.8.15-beta.4/feed")
+            .join(MacArch::Arm64.appcast_file_name()),
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("MAJOR.MINOR.PATCH"), "{error}");
+    .unwrap();
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let item = child(child(doc.root_element(), None, "channel"), None, "item");
+    assert_eq!(text(item, Some(SPARKLE_NS), "version"), "0.8.14.4");
+    assert_eq!(
+        text(item, Some(SPARKLE_NS), "shortVersionString"),
+        "0.8.15-beta.4"
+    );
+    assert_eq!(text(item, Some(SPARKLE_NS), "channel"), "beta");
+    assert_eq!(text(item, None, "title"), "OpenLogi 0.8.15-beta.4");
+    assert_eq!(
+        child(item, None, "enclosure").attribute("url"),
+        Some(
+            "https://updates.example/releases/v0.8.15-beta.4/OpenLogi-v0.8.15-beta.4-macos-arm64.dmg"
+        )
+    );
 }

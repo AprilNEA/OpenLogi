@@ -11,12 +11,16 @@
 //! costs one larger download and never an update. This holds for the shared
 //! setup too (listing releases, fetching Sparkle, reading the new DMG): only
 //! arguments that cannot name a release DMG fail the command.
+//!
+//! Only stable releases get deltas, made from earlier stable releases. A beta
+//! gets none, so a beta update always downloads the full DMG.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use gpui_updater_release::sparkle::{self, DeltaOptions, SparkleDistribution};
+use openlogi_core::update_feed::UpdateChannel;
 use semver::Version;
 use xshell::{Shell, cmd};
 
@@ -63,8 +67,15 @@ fn delta_bases<'a>(tags: &'a [String], current: &Version, count: usize) -> Vec<&
 }
 
 pub(crate) fn run(args: &Args) -> Result<()> {
-    let current = ReleaseTag::stable_version(&args.tag)
-        .with_context(|| format!("{:?} is not a final vMAJOR.MINOR.PATCH tag", args.tag))?;
+    let tag = ReleaseTag::parse(&args.tag)?;
+    if tag.channel() != UpdateChannel::Stable {
+        println!(
+            "::notice::no Sparkle deltas for {tag}: only stable releases get them, so a {} update downloads the full DMG",
+            tag.channel().as_str()
+        );
+        return Ok(());
+    }
+    let current = tag.version().clone();
     let dmg_name = args
         .dmg
         .file_name()

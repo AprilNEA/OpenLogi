@@ -164,7 +164,10 @@ impl fmt::Display for ReleaseTag {
 /// Windows Installer ignores the fourth field when it compares versions, so
 /// every beta after `B` looks like `B` to it. `OpenLogi.wxs` sets
 /// `AllowSameVersionUpgrades` for that reason.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// The order is Sparkle's: field by field, and a version without a fourth
+/// field before the same version with one.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct BuildVersion {
     base: [u64; 3],
     beta: Option<u64>,
@@ -207,6 +210,39 @@ impl BuildVersion {
         };
         build.check_msi_limits()?;
         Ok(build)
+    }
+
+    /// Check that a release tagged `tag` can carry this build version: a
+    /// stable release's is its own version, and a beta's ends in the beta's
+    /// `N`, after a stable release older than the beta.
+    pub(crate) fn ensure_fits(&self, tag: &ReleaseTag) -> Result<()> {
+        let tagged = numeric_fields(tag.version());
+        match tag.beta_number() {
+            None => ensure!(
+                *self
+                    == Self {
+                        base: tagged,
+                        beta: None
+                    },
+                "{tag} is a stable release, so its build version is {}, not {self}",
+                Self {
+                    base: tagged,
+                    beta: None
+                }
+            ),
+            Some(number) => {
+                ensure!(
+                    self.beta == Some(number),
+                    "{tag} is beta {number}, so its build version ends in .{number}, not {self}"
+                );
+                ensure!(
+                    self.base < tagged,
+                    "{tag} follows a stable release older than itself, so its build version starts below {}, not {self}",
+                    tag.version()
+                );
+            }
+        }
+        Ok(())
     }
 
     fn fields(&self) -> impl Iterator<Item = u64> + '_ {
