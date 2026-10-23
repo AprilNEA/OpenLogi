@@ -590,7 +590,44 @@ pub struct ReloadConfig {
     /// The revision of `config.toml` that the save wrote. The agent takes a
     /// file at another revision as edited after the save.
     pub revision: ConfigRevision,
-    pub(crate) contexts: Vec<ConfigReloadContext>,
+    pub(crate) contexts: Vec<SavedReloadContext>,
+}
+
+/// An acknowledgement recipient and the saved revision it needs confirmed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SavedReloadContext {
+    /// Application-wide saves retain the aggregate reload result.
+    General,
+    /// A hardware transaction must confirm its own save, not a later batch member.
+    DisableKeys {
+        context: DisableKeysRequestContext,
+        revision: ConfigRevision,
+    },
+}
+
+impl SavedReloadContext {
+    /// Identity used to replace a retry of the same transaction while batching.
+    pub(crate) fn context(&self) -> ConfigReloadContext {
+        match self {
+            Self::General => ConfigReloadContext::General,
+            Self::DisableKeys { context, .. } => ConfigReloadContext::DisableKeys(context.clone()),
+        }
+    }
+
+    fn verdict(
+        &self,
+        submitted: ConfigRevision,
+        outcome: Result<SavedConfigVerdict, ConfigReloadError>,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError> {
+        match (self, outcome) {
+            (Self::DisableKeys { revision, .. }, Ok(SavedConfigVerdict::Accepted))
+                if *revision != submitted =>
+            {
+                Ok(SavedConfigVerdict::FileChangedAfterSave)
+            }
+            (_, outcome) => outcome,
+        }
+    }
 }
 
 impl Default for ReloadConfig {
@@ -598,7 +635,7 @@ impl Default for ReloadConfig {
         Self {
             chosen: Vec::new(),
             revision: ConfigRevision::default(),
-            contexts: vec![ConfigReloadContext::General],
+            contexts: vec![SavedReloadContext::General],
         }
     }
 }
@@ -609,7 +646,7 @@ impl ReloadConfig {
         revision: ConfigRevision,
     ) -> Self {
         Self {
-            contexts: vec![ConfigReloadContext::DisableKeys(context)],
+            contexts: vec![SavedReloadContext::DisableKeys { context, revision }],
             revision,
             ..Default::default()
         }
@@ -630,7 +667,7 @@ impl Request for ReloadConfig {
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
-        report_saved_reload(self.contexts, outcome, updates);
+        report_saved_reload(self.contexts, self.revision, outcome, updates);
     }
 }
 
@@ -657,15 +694,16 @@ impl Request for LoadConfig {
 /// Report the agent's verdict on a held reload. A reload that did not happen
 /// is not one the agent refused, so it reports nothing.
 fn report_saved_reload(
-    contexts: impl IntoIterator<Item = ConfigReloadContext>,
+    contexts: impl IntoIterator<Item = SavedReloadContext>,
+    submitted: ConfigRevision,
     outcome: Result<Result<SavedConfigVerdict, ConfigReloadError>, Unavailable>,
     updates: &UpdateSender,
 ) {
     if let Ok(verdict) = outcome {
         for context in contexts {
             let _ = updates.send(GuiUpdate::ConfigReloadResult {
-                context,
-                result: verdict.clone(),
+                context: context.context(),
+                result: context.verdict(submitted, verdict.clone()),
             });
         }
     }

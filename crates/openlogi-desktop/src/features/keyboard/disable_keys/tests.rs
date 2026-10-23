@@ -12,7 +12,7 @@ use super::*;
 use crate::services::assets::AssetResolver;
 use crate::services::ipc::Command;
 use crate::services::ipc::ConfigReloadContext;
-use crate::state::{ConfigPersistence, Sources};
+use crate::state::{ConfigPersistence, Load, Sources};
 
 struct RestoreLocale(String);
 
@@ -407,7 +407,7 @@ fn take_reload(
         panic!("expected configuration reload, not a hardware write");
     };
     assert_eq!(request.contexts.len(), 1);
-    let ConfigReloadContext::DisableKeys(context) = request.contexts.remove(0) else {
+    let ConfigReloadContext::DisableKeys(context) = request.contexts.remove(0).context() else {
         panic!("expected Disable Keys reload context");
     };
     context

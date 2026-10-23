@@ -31,6 +31,16 @@ pub(crate) enum DisableKeysPersistenceStatus {
     AwaitingReload(DisableKeysRequestContext),
     SavedNotReloaded(DisableKeysRequestContext),
     SavedNotReloadedDetached(DisableKeysRecoveryToken),
+    /// The agent loaded another revision, but the GUI could not refresh it.
+    ReconcileRequired(DisableKeysRecoveryToken),
+    /// A refreshed external file needs an agent receipt and a subsequent read.
+    AwaitingReconciliationReload(DisableKeysRequestContext),
+}
+
+#[derive(Clone, Copy)]
+enum ReloadPurpose {
+    Saved,
+    Reconciled,
 }
 
 /// Recoverable failure category; the panel localizes it at render time.
@@ -105,12 +115,8 @@ impl AppState {
         Self::apply(cx, |state| state.retry_disable_keys_save_inner(key));
     }
 
-    pub(crate) fn retry_disable_keys_reload(cx: &mut App, key: DeviceKey) {
-        Self::update(cx, |state, cx| {
-            if state.retry_disable_keys_reload_inner(&key) {
-                cx.emit(StateEvent::DisableKeysChanged(key));
-            }
-        });
+    pub(crate) fn retry_disable_keys_reload(cx: &mut App, key: &DeviceKey) {
+        Self::apply(cx, |state| state.retry_disable_keys_reload_inner(key));
     }
 
     fn begin_disable_keys_write(&mut self, desired: DisableKeysMask) -> Option<DeviceKey> {
@@ -192,25 +198,40 @@ impl AppState {
             return events;
         }
 
-        self.request_disable_keys_reload(context);
+        self.request_disable_keys_reload(context, ReloadPurpose::Saved);
         events
     }
 
     /// Enter the awaiting phase only while the IPC worker can carry the
     /// request. A stopped worker cannot ever produce a reload verdict.
-    fn request_disable_keys_reload(&mut self, context: DisableKeysRequestContext) {
+    fn request_disable_keys_reload(
+        &mut self,
+        context: DisableKeysRequestContext,
+        purpose: ReloadPurpose,
+    ) {
         let key = context.key.clone();
         let state = self.devices.sessions.entry(key.clone()).or_default();
-        state.disable_keys.persistence =
-            DisableKeysPersistenceStatus::AwaitingReload(context.clone());
+        state.disable_keys.persistence = match purpose {
+            ReloadPurpose::Saved => DisableKeysPersistenceStatus::AwaitingReload(context.clone()),
+            ReloadPurpose::Reconciled => {
+                DisableKeysPersistenceStatus::AwaitingReconciliationReload(context.clone())
+            }
+        };
         state.disable_keys.error = None;
         if !self.send_ipc(ReloadConfig::disable_keys(
             context.clone(),
             self.config.revision(),
         )) {
             let state = self.devices.sessions.entry(key).or_default();
-            state.disable_keys.persistence =
-                DisableKeysPersistenceStatus::SavedNotReloaded(context);
+            state.disable_keys.persistence = match purpose {
+                ReloadPurpose::Saved => DisableKeysPersistenceStatus::SavedNotReloaded(context),
+                ReloadPurpose::Reconciled => {
+                    DisableKeysPersistenceStatus::ReconcileRequired(DisableKeysRecoveryToken {
+                        key: context.key,
+                        transaction_id: context.request_id,
+                    })
+                }
+            };
             state.disable_keys.error = Some(DisableKeysError::AgentUnavailable);
         }
     }
@@ -222,7 +243,10 @@ impl AppState {
     ) -> StateEvents {
         let events = StateEvents::from(StateEvent::DisableKeysChanged(context.key.clone()));
         let current = match self.disable_keys_status(&context.key) {
-            Some(DisableKeysPersistenceStatus::AwaitingReload(current)) => Some(current),
+            Some(
+                DisableKeysPersistenceStatus::AwaitingReload(current)
+                | DisableKeysPersistenceStatus::AwaitingReconciliationReload(current),
+            ) => Some(current),
             _ => None,
         };
         if !transaction_fences_match(
@@ -235,6 +259,16 @@ impl AppState {
         }
         match result {
             Ok(openlogi_ipc::SavedConfigVerdict::Accepted) => {
+                if matches!(
+                    self.disable_keys_status(&context.key),
+                    Some(DisableKeysPersistenceStatus::AwaitingReconciliationReload(
+                        _
+                    ))
+                ) {
+                    // A read started while refreshing the local file may have
+                    // preceded the agent reload. Only a post-receipt read is current.
+                    self.disable_keys_reads.reconcile_after_write(&context.key);
+                }
                 let state = self
                     .devices
                     .sessions
@@ -245,15 +279,10 @@ impl AppState {
             }
             Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave) => {
                 let _ = self.config.apply_reload_result(Ok(()));
-                let config_events = self.reconcile_external_config();
-                let state = self
-                    .devices
-                    .sessions
-                    .entry(context.key.clone())
-                    .or_default();
-                state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
-                state.disable_keys.error = None;
-                return events.and(config_events);
+                return self.reconcile_disable_keys_config(DisableKeysRecoveryToken {
+                    key: context.key,
+                    transaction_id: context.request_id,
+                });
             }
             Err(error) => {
                 warn!(error = %error.message, key = %context.key, "could not reload disabled keys");
@@ -262,8 +291,17 @@ impl AppState {
                     .sessions
                     .entry(context.key.clone())
                     .or_default();
-                state.disable_keys.persistence =
-                    DisableKeysPersistenceStatus::SavedNotReloaded(context);
+                state.disable_keys.persistence = if matches!(
+                    state.disable_keys.persistence,
+                    DisableKeysPersistenceStatus::AwaitingReconciliationReload(_)
+                ) {
+                    DisableKeysPersistenceStatus::ReconcileRequired(DisableKeysRecoveryToken {
+                        key: context.key,
+                        transaction_id: context.request_id,
+                    })
+                } else {
+                    DisableKeysPersistenceStatus::SavedNotReloaded(context)
+                };
                 state.disable_keys.error = Some(DisableKeysError::ReloadFailed);
             }
         }
@@ -313,7 +351,7 @@ impl AppState {
 
         let next = self.allocate_disable_keys_context(key);
         if let Some(context) = next {
-            self.request_disable_keys_reload(context);
+            self.request_disable_keys_reload(context, ReloadPurpose::Saved);
         } else {
             let state = self.devices.sessions.entry(key.clone()).or_default();
             state.disable_keys.error = None;
@@ -323,7 +361,7 @@ impl AppState {
         events
     }
 
-    fn retry_disable_keys_reload_inner(&mut self, key: &DeviceKey) -> bool {
+    fn retry_disable_keys_reload_inner(&mut self, key: &DeviceKey) -> StateEvents {
         let recovery = match self.disable_keys_status(key) {
             Some(DisableKeysPersistenceStatus::SavedNotReloaded(context)) => {
                 DisableKeysRecoveryToken {
@@ -334,16 +372,54 @@ impl AppState {
             Some(DisableKeysPersistenceStatus::SavedNotReloadedDetached(recovery)) => {
                 recovery.clone()
             }
-            _ => return false,
+            Some(DisableKeysPersistenceStatus::ReconcileRequired(recovery)) => {
+                return self.reconcile_disable_keys_config(recovery.clone());
+            }
+            _ => return StateEvents::none(),
         };
+        let events = StateEvents::from(StateEvent::DisableKeysChanged(key.clone()));
         let Some(context) = self.allocate_disable_keys_context(&recovery.key) else {
             let state = self.devices.sessions.entry(key.clone()).or_default();
             state.disable_keys.persistence =
                 DisableKeysPersistenceStatus::SavedNotReloadedDetached(recovery);
-            return true;
+            return events;
         };
-        self.request_disable_keys_reload(context);
-        true
+        self.request_disable_keys_reload(context, ReloadPurpose::Saved);
+        events
+    }
+
+    /// A mismatch identifies neither the file's present revision nor the one
+    /// the GUI will refresh. Confirm that refreshed revision before accepting
+    /// a subsequent hardware read; never persist the superseded choice here.
+    fn reconcile_disable_keys_config(&mut self, recovery: DisableKeysRecoveryToken) -> StateEvents {
+        let events = StateEvents::from(StateEvent::DisableKeysChanged(recovery.key.clone()));
+        let config_events = match self.reconcile_external_config() {
+            Ok(events) => events,
+            Err(config_events) => {
+                let state = self
+                    .devices
+                    .sessions
+                    .entry(recovery.key.clone())
+                    .or_default();
+                state.disable_keys.persistence =
+                    DisableKeysPersistenceStatus::ReconcileRequired(recovery);
+                state.disable_keys.error = Some(DisableKeysError::RefreshFailed);
+                return events.and(config_events);
+            }
+        };
+        let events = events.and(config_events);
+        let Some(context) = self.allocate_disable_keys_context(&recovery.key) else {
+            let state = self
+                .devices
+                .sessions
+                .entry(recovery.key.clone())
+                .or_default();
+            state.disable_keys.persistence =
+                DisableKeysPersistenceStatus::ReconcileRequired(recovery);
+            return events;
+        };
+        self.request_disable_keys_reload(context, ReloadPurpose::Reconciled);
+        events
     }
 
     fn allocate_disable_keys_context(
@@ -391,7 +467,15 @@ impl AppState {
             }
             DisableKeysPersistenceStatus::Idle
             | DisableKeysPersistenceStatus::AppliedNotSaved { .. }
-            | DisableKeysPersistenceStatus::SavedNotReloadedDetached(_) => {}
+            | DisableKeysPersistenceStatus::SavedNotReloadedDetached(_)
+            | DisableKeysPersistenceStatus::ReconcileRequired(_) => {}
+            DisableKeysPersistenceStatus::AwaitingReconciliationReload(context) => {
+                state.disable_keys.persistence =
+                    DisableKeysPersistenceStatus::ReconcileRequired(DisableKeysRecoveryToken {
+                        key: context.key,
+                        transaction_id: context.request_id,
+                    });
+            }
         }
     }
 
@@ -572,7 +656,7 @@ mod tests {
             panic!("expected contextual reload");
         };
         assert_eq!(contexts.len(), 1, "one transaction owns this reload");
-        let ConfigReloadContext::DisableKeys(context) = contexts.remove(0) else {
+        let ConfigReloadContext::DisableKeys(context) = contexts.remove(0).context() else {
             panic!("expected Disable Keys reload context");
         };
         context
@@ -602,6 +686,28 @@ mod tests {
         };
         assert!(receiver.try_recv().is_err(), "no extra device commands");
         read
+    }
+
+    fn take_reconciliation_commands(
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) -> (ReloadConfig, crate::services::ipc::ReadDisableKeys) {
+        let mut reload = None;
+        let mut read = None;
+        while let Ok(command) = receiver.try_recv() {
+            match command {
+                Command::ReloadConfig(request) => {
+                    assert!(reload.replace(request).is_none(), "one contextual reload");
+                }
+                Command::ReadDisableKeys(request) => {
+                    assert!(read.replace(request).is_none(), "one refresh read");
+                }
+                _ => panic!("reconciliation must not submit manual hardware writes"),
+            }
+        }
+        (
+            reload.expect("revision confirmation"),
+            read.expect("refresh read"),
+        )
     }
 
     fn refresh_inventory(
@@ -839,6 +945,10 @@ mod tests {
     }
 
     #[gpui::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep repeated external edits, stale receipts and read ordering in one lifecycle regression"
+    )]
     fn file_changed_after_save_reconciles_disable_keys_without_resaving(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -882,7 +992,13 @@ mod tests {
             openlogi_core::binding::Action::Paste,
         );
         external.set_disabled_keys(key.as_str(), BTreeSet::from([DisableKey::WindowsCommand]));
-        external.save_to_path(&path).expect("external edit");
+        external
+            .save_to_path(&path)
+            .expect("external revision B seen by the agent");
+        external.set_disabled_keys(key.as_str(), BTreeSet::new());
+        external
+            .save_to_path(&path)
+            .expect("external revision C before GUI refresh");
 
         let events = cx.update(|cx| {
             AppState::update(cx, |state, _| {
@@ -901,30 +1017,125 @@ mod tests {
                 StateEvent::DpiChanged(key.clone()),
             ]
         );
-        cx.run_until_parked();
-        let reread = take_read(&mut receiver);
         cx.read(|cx| {
             let state = AppState::try_read(cx).expect("state");
             assert_eq!(state.keyboard_bindings(), &external.keyboard.bindings);
             assert_eq!(
                 state.config.disabled_keys(key.as_str()),
-                Some(&BTreeSet::from([DisableKey::WindowsCommand]))
+                Some(&BTreeSet::new())
             );
-            assert_eq!(
-                state.disable_keys_status(&key),
-                Some(&DisableKeysPersistenceStatus::Idle)
+            assert!(
+                matches!(
+                    state.disable_keys_status(&key),
+                    Some(DisableKeysPersistenceStatus::AwaitingReconciliationReload(
+                        _
+                    ))
+                ),
+                "a valid GUI refresh must not claim the agent already loaded that revision"
             );
         });
+        cx.run_until_parked();
+        let (mut reload_c, initial_stale_read) = take_reconciliation_commands(&mut receiver);
+        assert_eq!(
+            reload_c.revision,
+            openlogi_core::config::ConfigRevision::of(&std::fs::read_to_string(&path).unwrap())
+        );
+        let ConfigReloadContext::DisableKeys(context_c) = reload_c.contexts.remove(0).context()
+        else {
+            panic!("contextual reload")
+        };
 
         let externally_confirmed = DisableKeysState {
             disabled: DisableKeysMask::WINDOWS_COMMAND,
             ..before
         };
-        reread
+        initial_stale_read
             .reply
             .send(Ok(externally_confirmed))
-            .expect("external-state read");
+            .expect("agent still reports revision B hardware");
         cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(
+                !AppState::try_read(cx)
+                    .unwrap()
+                    .disable_keys_controls_enabled(&key)
+            );
+        });
+
+        // Another edit overtakes the confirmation of C. Refreshing D must
+        // likewise retain the gate until its own receipt and subsequent read.
+        external.set_disabled_keys(key.as_str(), BTreeSet::from([DisableKey::WindowsCommand]));
+        external.save_to_path(&path).expect("external revision D");
+        let final_text = std::fs::read_to_string(&path).unwrap();
+        cx.update(|cx| {
+            AppState::apply(cx, |state| {
+                state.apply_disable_keys_reload_result(
+                    context_c.clone(),
+                    Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave),
+                )
+            });
+        });
+        cx.run_until_parked();
+        let (mut reload_d, superseded_read) = take_reconciliation_commands(&mut receiver);
+        assert_eq!(
+            reload_d.revision,
+            openlogi_core::config::ConfigRevision::of(&final_text)
+        );
+        let ConfigReloadContext::DisableKeys(context_d) = reload_d.contexts.remove(0).context()
+        else {
+            panic!("contextual reload")
+        };
+        assert_ne!(context_c.request_id, context_d.request_id);
+        superseded_read.reply.send(Ok(before)).unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            AppState::update(cx, |state, _| {
+                assert!(
+                    state
+                        .apply_disable_keys_reload_result(
+                            context_c,
+                            Ok(openlogi_ipc::SavedConfigVerdict::Accepted)
+                        )
+                        .is_empty(),
+                    "old receipt must not acknowledge D"
+                );
+                assert!(!state.disable_keys_controls_enabled(&key));
+            });
+        });
+        cx.update(|cx| {
+            AppState::apply(cx, |state| {
+                state.apply_disable_keys_reload_result(
+                    context_d,
+                    Ok(openlogi_ipc::SavedConfigVerdict::Accepted),
+                )
+            });
+        });
+        cx.run_until_parked();
+        let post_receipt_read = take_read(&mut receiver);
+        cx.read(|cx| {
+            assert!(
+                !AppState::try_read(cx)
+                    .unwrap()
+                    .disable_keys_controls_enabled(&key)
+            );
+        });
+        post_receipt_read
+            .reply
+            .send(Ok(externally_confirmed))
+            .unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .disable_keys_controls_enabled(&key)
+            );
+        });
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            final_text,
+            "reconciliation never saves a superseded policy"
+        );
         assert_eq!(
             Config::load_from_path(&path)
                 .expect("external config remains on disk")
@@ -934,7 +1145,177 @@ mod tests {
         );
         assert!(
             receiver.try_recv().is_err(),
-            "the external verdict only re-reads; it does not reload an old save"
+            "only contextual reloads and reads were required, not manual writes"
+        );
+    }
+
+    #[gpui::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the malformed-file, retry, receipt and post-receipt read lifecycle in one regression"
+    )]
+    fn failed_external_reconciliation_keeps_controls_blocked_after_a_fresh_read(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary config directory");
+        let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+        Config::default().save_to_path(&path).expect("seed config");
+        let (_, file) = ConfigFile::load_from_path(&path).expect("tracked config");
+        let inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
+        let (state, mut receiver, key) =
+            test_state(ConfigPersistence::UserFile(file), &[inventory]);
+        install_reads(state, cx);
+        let before = DisableKeysState {
+            supported: DisableKeysMask::CAPS_LOCK | DisableKeysMask::WINDOWS_COMMAND,
+            disabled: DisableKeysMask::EMPTY,
+        };
+        take_read(&mut receiver).reply.send(Ok(before)).unwrap();
+        cx.run_until_parked();
+        let context = cx.update(|cx| AppState::update(cx, |state, _| begin(state, &mut receiver)));
+        cx.update(|cx| {
+            AppState::apply(cx, |state| {
+                state.apply_disable_keys_write_result(
+                    context,
+                    Ok(DisableKeysState {
+                        disabled: DisableKeysMask::CAPS_LOCK,
+                        ..before
+                    }),
+                )
+            });
+        });
+        let reload = take_disable_keys_reload(&mut receiver);
+        // The agent accepted a valid external revision, but another editor left
+        // malformed text before the GUI could refresh that file.
+        std::fs::write(&path, "[malformed").unwrap();
+        cx.update(|cx| {
+            AppState::apply(cx, |state| {
+                state.apply_disable_keys_reload_result(
+                    reload,
+                    Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave),
+                )
+            });
+        });
+        cx.run_until_parked();
+        take_read(&mut receiver).reply.send(Ok(before)).unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(matches!(state.disable_keys_load_for(&key), Load::Ready(_)));
+            assert!(
+                !state.disable_keys_controls_enabled(&key),
+                "device freshness cannot substitute for failed config reconciliation"
+            );
+            assert_eq!(
+                state.disable_keys_error(&key),
+                Some(DisableKeysError::RefreshFailed)
+            );
+        });
+        cx.update(|cx| AppState::update_disable_keys(cx, DisableKeysMask::WINDOWS_COMMAND));
+        assert!(
+            receiver.try_recv().is_err(),
+            "no write from stale local configuration"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[malformed");
+
+        // A retry cannot turn the same parse error into an acknowledgement.
+        cx.update(|cx| AppState::retry_disable_keys_reload(cx, &key));
+        cx.run_until_parked();
+        take_read(&mut receiver).reply.send(Ok(before)).unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(!state.disable_keys_controls_enabled(&key));
+            assert_eq!(
+                state.disable_keys_error(&key),
+                Some(DisableKeysError::RefreshFailed)
+            );
+        });
+
+        let mut external = Config::default();
+        external.set_disabled_keys(key.as_str(), BTreeSet::from([DisableKey::WindowsCommand]));
+        external
+            .keyboard
+            .bindings
+            .insert("f1".parse().unwrap(), openlogi_core::binding::Action::Paste);
+        let repaired_path = directory.path().join("repaired.toml");
+        external.save_to_path(&repaired_path).unwrap();
+        std::fs::rename(repaired_path, &path).unwrap();
+        let repaired_text = std::fs::read_to_string(&path).unwrap();
+        cx.update(|cx| AppState::retry_disable_keys_reload(cx, &key));
+        cx.run_until_parked();
+        let mut receipt = None;
+        let mut early_read = None;
+        while let Ok(command) = receiver.try_recv() {
+            match command {
+                Command::ReloadConfig(mut reload) => {
+                    assert!(receipt.is_none(), "one reload for the repaired file");
+                    assert_eq!(
+                        reload.revision,
+                        openlogi_core::config::ConfigRevision::of(&repaired_text)
+                    );
+                    let ConfigReloadContext::DisableKeys(context) =
+                        reload.contexts.remove(0).context()
+                    else {
+                        panic!("contextual reload");
+                    };
+                    receipt = Some(context);
+                }
+                Command::ReadDisableKeys(read) => {
+                    assert!(early_read.replace(read).is_none(), "one refresh read");
+                }
+                _ => panic!("reconciliation must not submit manual hardware writes"),
+            }
+        }
+        // A read racing ahead of agent reload cannot make the UI writable.
+        early_read.unwrap().reply.send(Ok(before)).unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(!state.disable_keys_controls_enabled(&key));
+            assert_eq!(state.keyboard_bindings(), &external.keyboard.bindings);
+        });
+        cx.update(|cx| {
+            AppState::apply(cx, |state| {
+                state.apply_disable_keys_reload_result(
+                    receipt.unwrap(),
+                    Ok(openlogi_ipc::SavedConfigVerdict::Accepted),
+                )
+            });
+        });
+        cx.run_until_parked();
+        let final_read = take_read(&mut receiver);
+        cx.read(|cx| {
+            assert!(
+                !AppState::try_read(cx)
+                    .unwrap()
+                    .disable_keys_controls_enabled(&key)
+            );
+        });
+        final_read
+            .reply
+            .send(Ok(DisableKeysState {
+                disabled: DisableKeysMask::WINDOWS_COMMAND,
+                ..before
+            }))
+            .unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(state.disable_keys_controls_enabled(&key));
+            assert_eq!(state.disable_keys_error(&key), None);
+            assert_eq!(
+                state.config.disabled_keys(key.as_str()),
+                Some(&BTreeSet::from([DisableKey::WindowsCommand]))
+            );
+        });
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            repaired_text,
+            "recovery never overwrites external configuration"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "only reload and read commands are needed"
         );
     }
 
@@ -1477,7 +1858,7 @@ mod tests {
             Some(DisableKeysPersistenceStatus::SavedNotReloaded(_))
         ));
 
-        assert!(state.retry_disable_keys_reload_inner(&key));
+        assert!(!state.retry_disable_keys_reload_inner(&key).is_empty());
         take_disable_keys_reload(&mut receiver);
         assert!(receiver.try_recv().is_err());
     }
@@ -1508,6 +1889,63 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_reload_survives_disconnect_and_closed_ipc() {
+        let inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
+        let (mut state, mut receiver, key) =
+            test_state(ConfigPersistence::MemoryOnly, &[inventory]);
+        let context = state.allocate_disable_keys_context(&key).unwrap();
+        state.request_disable_keys_reload(context.clone(), ReloadPurpose::Reconciled);
+        assert_eq!(take_disable_keys_reload(&mut receiver), context);
+        state.invalidate_disable_keys(&key);
+        assert!(matches!(
+            state.disable_keys_status(&key),
+            Some(DisableKeysPersistenceStatus::ReconcileRequired(_))
+        ));
+        assert!(
+            state
+                .apply_disable_keys_reload_result(
+                    context.clone(),
+                    Ok(openlogi_ipc::SavedConfigVerdict::Accepted)
+                )
+                .is_empty(),
+            "late acknowledgement cannot retire detached reconciliation"
+        );
+
+        state
+            .disable_keys_reads
+            .install_generation_for_test(key.clone(), context.route_generation + 1);
+        assert!(!state.retry_disable_keys_reload_inner(&key).is_empty());
+        let current = take_disable_keys_reload(&mut receiver);
+        assert_ne!(current.route_generation, context.route_generation);
+        let _ = state.apply_disable_keys_reload_result(
+            current,
+            Err(openlogi_ipc::ConfigReloadError {
+                message: "external file changed again".into(),
+            }),
+        );
+        assert!(matches!(
+            state.disable_keys_status(&key),
+            Some(DisableKeysPersistenceStatus::ReconcileRequired(_))
+        ));
+        assert_eq!(
+            state.disable_keys_error(&key),
+            Some(DisableKeysError::ReloadFailed)
+        );
+
+        drop(receiver);
+        assert!(!state.retry_disable_keys_reload_inner(&key).is_empty());
+        assert!(matches!(
+            state.disable_keys_status(&key),
+            Some(DisableKeysPersistenceStatus::ReconcileRequired(_))
+        ));
+        assert_eq!(
+            state.disable_keys_error(&key),
+            Some(DisableKeysError::AgentUnavailable)
+        );
+        assert!(!state.disable_keys_controls_enabled(&key));
+    }
+
+    #[test]
     fn disable_keys_reload_retry_with_closed_ipc_retains_recovery() {
         let inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
         let (mut state, mut receiver, key) =
@@ -1529,7 +1967,7 @@ mod tests {
         );
         drop(receiver);
 
-        assert!(state.retry_disable_keys_reload_inner(&key));
+        assert!(!state.retry_disable_keys_reload_inner(&key).is_empty());
         assert!(matches!(
             state.disable_keys_status(&key),
             Some(DisableKeysPersistenceStatus::SavedNotReloaded(_))

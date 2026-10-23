@@ -386,6 +386,8 @@ struct OwedReloads {
 impl OwedReloads {
     /// Owe `reload`, merged into the one already owed: the file is now at
     /// the revision of this save, and its chosen controls join the others.
+    /// Each transaction still expects its own revision; a retry replaces only
+    /// that transaction's expectation, not another device's pending receipt.
     fn save(&mut self, reload: ReloadConfig) {
         let ReloadConfig {
             chosen,
@@ -398,8 +400,13 @@ impl OwedReloads {
         });
         owed.revision = revision;
         for context in contexts {
-            if !owed.contexts.contains(&context) {
-                owed.contexts.push(context);
+            match owed
+                .contexts
+                .iter_mut()
+                .find(|owed| owed.context() == context.context())
+            {
+                Some(owed) => *owed = context,
+                None => owed.contexts.push(context),
             }
         }
         for light in chosen {
@@ -689,28 +696,21 @@ mod tests {
         let mut effects = ScriptedEffects::answering([Ok(dying), Ok(successor)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
-        let context = ConfigReloadContext::DisableKeys(DisableKeysRequestContext {
+        let context = DisableKeysRequestContext {
             key: DeviceKey::from("keyboard"),
             route: some_route(),
             route_generation: 3,
             request_id: 7,
-        });
+        };
         commands
-            .send(
-                ReloadConfig {
-                    revision: ConfigRevision::of("saved"),
-                    contexts: vec![context.clone()],
-                    ..Default::default()
-                }
-                .into(),
-            )
+            .send(ReloadConfig::disable_keys(context.clone(), ConfigRevision::of("saved")).into())
             .unwrap();
 
         let verdict = tokio::select! {
             () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
-            verdict = saved_reload_verdict_for(&mut updates, context) => verdict,
+            verdict = saved_reload_verdict_for(&mut updates, ConfigReloadContext::DisableKeys(context)) => verdict,
         };
 
         assert_eq!(
@@ -906,6 +906,46 @@ mod tests {
     }
 
     #[test]
+    fn regression_coalesced_reload_must_not_accept_an_earlier_revision() {
+        let context = DisableKeysRequestContext {
+            key: DeviceKey::from("keyboard-a"),
+            route: some_route(),
+            route_generation: 3,
+            request_id: 7,
+        };
+        let mut owed = OwedReloads::default();
+        owed.save(ReloadConfig::disable_keys(
+            context.clone(),
+            ConfigRevision::of("policy A saved"),
+        ));
+        // A later save may have refreshed an external edit that replaced A.
+        // Acceptance of B says nothing about the earlier context's revision.
+        owed.save(ReloadConfig {
+            revision: ConfigRevision::of("policy B after external edit"),
+            ..Default::default()
+        });
+        let reload = owed.save.unwrap();
+        let (updates, mut received) = mpsc::unbounded_channel();
+        request::Request::deliver(reload, Ok(Ok(SavedConfigVerdict::Accepted)), &updates);
+        let mut observed = false;
+        while let Ok(update) = received.try_recv() {
+            if let GuiUpdate::ConfigReloadResult {
+                context: ConfigReloadContext::DisableKeys(actual),
+                result,
+            } = update
+            {
+                assert_eq!(actual, context);
+                observed = true;
+                assert_eq!(result.unwrap(), SavedConfigVerdict::FileChangedAfterSave);
+            }
+        }
+        assert!(
+            observed,
+            "earlier context must receive a reconciliation verdict"
+        );
+    }
+
+    #[test]
     fn owed_saves_preserve_each_transaction_context_at_the_latest_file_revision() {
         let context = DisableKeysRequestContext {
             key: DeviceKey::from("keyboard"),
@@ -939,8 +979,11 @@ mod tests {
         assert_eq!(
             reload.contexts,
             [
-                ConfigReloadContext::DisableKeys(context.clone()),
-                ConfigReloadContext::General
+                request::SavedReloadContext::DisableKeys {
+                    context: context.clone(),
+                    revision: ConfigRevision::of("third"),
+                },
+                request::SavedReloadContext::General
             ]
         );
         let (updates, mut received) = mpsc::unbounded_channel();
@@ -961,6 +1004,132 @@ mod tests {
         assert!(
             received.try_recv().is_err(),
             "a duplicate context is answered only once"
+        );
+    }
+
+    #[test]
+    fn coalesced_reload_keeps_per_device_verdicts_and_preserves_failures() {
+        let first = DisableKeysRequestContext {
+            key: DeviceKey::from("keyboard-a"),
+            route: some_route(),
+            route_generation: 3,
+            request_id: 7,
+        };
+        let second = DisableKeysRequestContext {
+            key: DeviceKey::from("keyboard-b"),
+            route: DeviceRoute::Bolt {
+                receiver_uid: "test-receiver".into(),
+                slot: 2,
+            },
+            ..first.clone()
+        };
+        for same_revision in [false, true] {
+            let mut owed = OwedReloads::default();
+            owed.save(ReloadConfig::disable_keys(
+                first.clone(),
+                ConfigRevision::of(if same_revision { "latest" } else { "earlier" }),
+            ));
+            owed.save(ReloadConfig::disable_keys(
+                second.clone(),
+                ConfigRevision::of("latest"),
+            ));
+            owed.save(ReloadConfig {
+                revision: ConfigRevision::of("latest"),
+                ..Default::default()
+            });
+            let reload = owed.save.expect("one coalesced reload");
+            for verdict in [
+                Ok(SavedConfigVerdict::Accepted),
+                Ok(SavedConfigVerdict::FileChangedAfterSave),
+                Err(ConfigReloadError {
+                    message: "invalid config".into(),
+                }),
+            ] {
+                let (updates, mut received) = mpsc::unbounded_channel();
+                request::Request::deliver(reload.clone(), Ok(verdict.clone()), &updates);
+                let first_verdict = if !same_revision && verdict == Ok(SavedConfigVerdict::Accepted)
+                {
+                    Ok(SavedConfigVerdict::FileChangedAfterSave)
+                } else {
+                    verdict.clone()
+                };
+                for (expected_context, expected_result) in [
+                    (
+                        ConfigReloadContext::DisableKeys(first.clone()),
+                        first_verdict,
+                    ),
+                    (
+                        ConfigReloadContext::DisableKeys(second.clone()),
+                        verdict.clone(),
+                    ),
+                    (ConfigReloadContext::General, verdict.clone()),
+                ] {
+                    let GuiUpdate::ConfigReloadResult { context, result } =
+                        received.try_recv().unwrap()
+                    else {
+                        panic!("expected a saved-reload verdict");
+                    };
+                    assert_eq!(context, expected_context);
+                    assert_eq!(result, expected_result);
+                }
+                assert!(received.try_recv().is_err(), "one result per recipient");
+            }
+            let (updates, mut received) = mpsc::unbounded_channel();
+            request::Request::deliver(reload, Err(request::Unavailable), &updates);
+            assert!(
+                received.try_recv().is_err(),
+                "transport failure must not acknowledge any save"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn coalesced_device_saves_deliver_independent_receipts_after_reconnect() {
+        let (agent, reloads) = scripted_agent(OnReload::Accept);
+        let mut effects = ScriptedEffects::answering([down(), Ok(agent)]);
+        let (update_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        let first = DisableKeysRequestContext {
+            key: DeviceKey::from("keyboard-a"),
+            route: some_route(),
+            route_generation: 3,
+            request_id: 7,
+        };
+        let second = DisableKeysRequestContext {
+            key: DeviceKey::from("keyboard-b"),
+            route: DeviceRoute::Bolt {
+                receiver_uid: "test-receiver".into(),
+                slot: 2,
+            },
+            ..first.clone()
+        };
+        for (context, text) in [
+            (first.clone(), "first save"),
+            (second.clone(), "second save"),
+        ] {
+            commands
+                .send(ReloadConfig::disable_keys(context, ConfigRevision::of(text)).into())
+                .unwrap();
+        }
+        let verdicts = tokio::select! {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => panic!("client stopped"),
+            verdicts = async {
+                let first = saved_reload_verdict_for(&mut updates, ConfigReloadContext::DisableKeys(first)).await;
+                let second = saved_reload_verdict_for(&mut updates, ConfigReloadContext::DisableKeys(second)).await;
+                (first, second)
+            } => verdicts,
+        };
+        assert_eq!(
+            verdicts,
+            (
+                Ok(SavedConfigVerdict::FileChangedAfterSave),
+                Ok(SavedConfigVerdict::Accepted)
+            )
+        );
+        assert_eq!(
+            reloads.load(Ordering::SeqCst),
+            1,
+            "batching still sends one RPC"
         );
     }
 

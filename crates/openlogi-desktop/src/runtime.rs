@@ -276,6 +276,10 @@ impl Runtime {
     }
 
     /// One update from the agent.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the exhaustive typed update dispatch together; each arm delegates to its state owner"
+    )]
     fn on_agent_update(&mut self, update: ipc::GuiUpdate, cx: &AsyncApp) {
         match update {
             ipc::GuiUpdate::Snapshot(snapshot) => {

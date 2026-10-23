@@ -383,10 +383,12 @@ impl AppState {
         }
     }
 
-    /// Replace local projections after another writer replaced a GUI save.
-    /// The agent already applied that file, so this path never retries the
-    /// GUI's older save.
-    fn reconcile_external_config(&mut self) -> StateEvents {
+    /// Replace local projections after another writer replaced a GUI save,
+    /// without persisting the GUI's older choice. A recovery retry must still
+    /// confirm the refreshed revision with the agent and then re-read hardware.
+    /// Both outcomes carry invalidation events; only `Ok` confirms that the
+    /// local projections adopted the external file.
+    fn reconcile_external_config(&mut self) -> Result<StateEvents, StateEvents> {
         let mut events = StateEvents::none();
         for key in self.disable_keys_reads.reconcile_external_config() {
             events = events.and(StateEvent::DisableKeysChanged(key));
@@ -394,7 +396,7 @@ impl AppState {
         let previous_language = self.config.app_settings.language.clone();
         if let Err(error) = self.config.refresh_feature() {
             warn!(%error, "could not reconcile externally edited configuration");
-            return events.and(StateEvent::SettingsChanged);
+            return Err(events.and(StateEvent::SettingsChanged));
         }
         let language_changed = self.config.app_settings.language != previous_language;
         self.restore_config_projections();
@@ -402,12 +404,12 @@ impl AppState {
             .and(StateEvent::SettingsChanged)
             .and(self.for_current_device(StateEvent::BindingsChanged))
             .and(self.for_current_device(StateEvent::DpiChanged));
-        if language_changed {
+        Ok(if language_changed {
             openlogi_core::locale::activate(self.config.app_settings.language.as_deref());
             StateEvents::from(StateEvent::LanguageChanged).and(events)
         } else {
             events
-        }
+        })
     }
 
     /// Current config failure, shown as a fail-closed whole-window notice.
@@ -439,7 +441,9 @@ impl AppState {
             }
             Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave) => {
                 let cleared_reload_error = self.config.apply_reload_result(Ok(()));
-                let events = self.reconcile_external_config();
+                let events = self
+                    .reconcile_external_config()
+                    .unwrap_or_else(|events| events);
                 if events.is_empty() && cleared_reload_error {
                     StateEvent::SettingsChanged.into()
                 } else {

@@ -90,11 +90,19 @@ fn recovery_content(
                 .into_any_element(),
         ),
         DisableKeysPersistenceStatus::SavedNotReloaded(_)
-        | DisableKeysPersistenceStatus::SavedNotReloadedDetached(_) => Some(
+        | DisableKeysPersistenceStatus::SavedNotReloadedDetached(_)
+        | DisableKeysPersistenceStatus::ReconcileRequired(_) => Some(
             v_flex()
                 .gap_2()
                 .child(status_line(
-                    tr!("keyboard.saved_but_agent_not_reloaded"),
+                    if matches!(
+                        persistence,
+                        DisableKeysPersistenceStatus::ReconcileRequired(_)
+                    ) {
+                        tr!("keyboard.disable_keys_refresh_failed")
+                    } else {
+                        tr!("keyboard.saved_but_agent_not_reloaded")
+                    },
                     pal,
                 ))
                 .child(
@@ -104,7 +112,7 @@ fn recovery_content(
                         {
                             let key = key.clone();
                             move |cx| {
-                                AppState::retry_disable_keys_reload(cx, key.clone());
+                                AppState::retry_disable_keys_reload(cx, &key);
                             }
                         },
                     )
@@ -114,7 +122,8 @@ fn recovery_content(
                 .into_any_element(),
         ),
         DisableKeysPersistenceStatus::Applying(_)
-        | DisableKeysPersistenceStatus::AwaitingReload(_) => {
+        | DisableKeysPersistenceStatus::AwaitingReload(_)
+        | DisableKeysPersistenceStatus::AwaitingReconciliationReload(_) => {
             Some(status_line(tr!("keyboard.applying_and_confirming"), pal).into_any_element())
         }
         DisableKeysPersistenceStatus::Idle => None,

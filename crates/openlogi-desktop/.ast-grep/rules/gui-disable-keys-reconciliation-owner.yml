@@ -1,0 +1,18 @@
+# Owner: AppState::reconcile_disable_keys_config. A refreshed external file
+# needs its own reload receipt and a subsequent device read before editing.
+id: gui-disable-keys-reconciliation-owner
+language: rust
+severity: error
+message: Use AppState::reconcile_disable_keys_config for Disable Keys mismatch and retry recovery; a file refresh alone does not confirm its revision.
+files:
+  - crates/openlogi-desktop/src/state/disable_keys.rs
+rule:
+  all:
+    - pattern: $STATE.reconcile_external_config()
+    - not:
+        inside:
+          kind: function_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^reconcile_disable_keys_config$'
