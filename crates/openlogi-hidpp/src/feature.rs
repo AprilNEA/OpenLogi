@@ -32,6 +32,7 @@ pub mod extended_dpi;
 pub mod extended_report_rate;
 pub mod feature_set;
 pub mod fn_inversion;
+pub mod force_sensing_button;
 pub mod gestures2;
 pub mod haptic_feedback;
 pub mod hires_wheel;
