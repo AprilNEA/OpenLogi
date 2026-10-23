@@ -7,6 +7,7 @@ use super::{
     Updater, div, h_flex, img, px, v_flex,
 };
 use crate::platform::installation::{HomebrewCask, Installation, InstallationSource, LinuxPackage};
+use crate::platform::updater::linux::LinuxUpdateStatus;
 use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::PressableStyle as _;
 use crate::ui::theme::SelectableStyle as _;
@@ -88,24 +89,51 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
         .group(source)
 }
 
-/// The Updates hero row: logo, name + version, a status pill, the live status
-/// message (or channel), and the one contextual action button.
-fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
-    let pal = crate::ui::theme::palette(cx);
-    let status = updater.read(cx).status().clone();
-    let channel = crate::platform::updater::channel_in_use(cx);
+/// A short status tag for the settled Linux-release-check states; transient
+/// states carry their detail in the message line instead.
+fn linux_pill(status: &LinuxUpdateStatus) -> Option<Tag> {
+    match status {
+        LinuxUpdateStatus::Available { .. } => {
+            Some(Tag::info().child(tr!("updates.update_available")))
+        }
+        LinuxUpdateStatus::Staged { .. } => Some(Tag::success().child(tr!("updates.update_ready"))),
+        LinuxUpdateStatus::Errored(_) => Some(Tag::danger().child(tr!("updates.update_failed"))),
+        LinuxUpdateStatus::Idle
+        | LinuxUpdateStatus::Checking
+        | LinuxUpdateStatus::UpToDate
+        | LinuxUpdateStatus::Installing => None,
+    }
+}
 
-    // A short status tag for the settled states (semantic colours from the theme);
-    // transient states carry their detail in the message line instead.
-    let pill = match &status {
+fn linux_message(status: &LinuxUpdateStatus) -> Option<gpui::SharedString> {
+    match status {
+        LinuxUpdateStatus::Checking => Some(tr!("updates.checking_for_updates")),
+        LinuxUpdateStatus::Available { version, .. } => {
+            Some(tr!("updates.update_version_available", version => version))
+        }
+        LinuxUpdateStatus::Installing => Some(tr!("updates.installing")),
+        LinuxUpdateStatus::Staged { version } => {
+            Some(tr!("updates.update_version_ready", version => version))
+        }
+        LinuxUpdateStatus::Errored(e) => {
+            Some(tr!("updates.update_failed_message", error => e.clone()))
+        }
+        LinuxUpdateStatus::Idle | LinuxUpdateStatus::UpToDate => None,
+    }
+}
+
+fn engine_pill(status: &UpdateStatus) -> Option<Tag> {
+    match status {
         UpdateStatus::UpToDate => Some(Tag::success().child(tr!("updates.up_to_date"))),
         UpdateStatus::Available(_) => Some(Tag::info().child(tr!("updates.update_available"))),
         UpdateStatus::Staged(_) => Some(Tag::success().child(tr!("updates.update_ready"))),
         UpdateStatus::Errored(_) => Some(Tag::danger().child(tr!("updates.update_failed"))),
         _ => None,
-    };
+    }
+}
 
-    let message = match &status {
+fn engine_message(status: &UpdateStatus) -> Option<gpui::SharedString> {
+    match status {
         UpdateStatus::Idle | UpdateStatus::UpToDate => None,
         UpdateStatus::Checking => Some(tr!("updates.checking_for_updates")),
         UpdateStatus::Available(v) => Some(tr!("updates.update_version_available", version => v)),
@@ -122,35 +150,101 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
         UpdateStatus::Installing => Some(tr!("updates.installing")),
         UpdateStatus::Staged(v) => Some(tr!("updates.update_version_ready", version => v)),
         UpdateStatus::Errored(e) => Some(tr!("updates.update_failed_message", error => e.clone())),
-    };
+    }
+}
 
+/// The one contextual action button for the engine-driven states (macOS,
+/// Windows, and Linux before/without a Linux-specific result to show).
+fn engine_action(updater: &Entity<Updater>, status: &UpdateStatus) -> Button {
+    let u = updater.clone();
+    match status {
+        UpdateStatus::Available(_) => Button::new("update-install")
+            .outline()
+            .label(tr!("updates.download_install"))
+            .on_click(move |_, _, cx| {
+                u.update(cx, Updater::download_and_install);
+            }),
+        UpdateStatus::Staged(_) => Button::new("update-restart")
+            .outline()
+            .label(tr!("updates.restart_to_update"))
+            .on_click(move |_, _, cx| {
+                u.update(cx, Updater::restart);
+            }),
+        _ => Button::new("update-check")
+            .outline()
+            .label(tr!("updates.check_for_updates_action"))
+            .on_click(move |_, _, cx| {
+                crate::platform::updater::linux::check_in_background(cx);
+                u.update(cx, Updater::check);
+            }),
+    }
+}
+
+/// The one contextual action button for the Linux-release-check states, once
+/// the engine's own result has been masked as [`is_expected_no_linux_asset`].
+fn linux_action(status: &LinuxUpdateStatus) -> Button {
+    match status {
+        LinuxUpdateStatus::Available { .. } => Button::new("update-install")
+            .outline()
+            .label(tr!("updates.download_install"))
+            .on_click(move |_, _, cx| {
+                crate::platform::updater::linux::install(cx);
+            }),
+        LinuxUpdateStatus::Staged { .. } => Button::new("update-restart")
+            .outline()
+            .label(tr!("updates.restart_to_update"))
+            .on_click(move |_, _, cx| {
+                crate::platform::updater::linux::restart(cx);
+            }),
+        _ => Button::new("update-check")
+            .outline()
+            .label(tr!("updates.check_for_updates_action"))
+            .on_click(move |_, _, cx| {
+                crate::platform::updater::linux::check_in_background(cx);
+            }),
+    }
+}
+
+/// The Updates hero row: logo, name + version, a status pill, the live status
+/// message (or channel), and the one contextual action button.
+fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
+    let pal = crate::ui::theme::palette(cx);
+    let status = updater.read(cx).status().clone();
+    let channel = crate::platform::updater::channel_in_use(cx);
+
+    // On Linux the update manifest deliberately carries no Linux asset — Linux
+    // installs update through the OS package manager, not this engine (see
+    // `xtask/src/commands/release/latest_json.rs`). The engine's resulting
+    // "no matching asset" error is expected there, not a failure; render the
+    // Linux-release-check state (see `platform::updater::linux`) instead of a
+    // red "Update failed" pill.
+    let benign_no_linux_asset = is_expected_no_linux_asset(&status);
+    let linux_status = cx
+        .try_global::<LinuxUpdateStatus>()
+        .cloned()
+        .unwrap_or_default();
+
+    let pill = if benign_no_linux_asset {
+        linux_pill(&linux_status)
+    } else {
+        engine_pill(&status)
+    };
+    let message = if benign_no_linux_asset {
+        linux_message(&linux_status)
+    } else {
+        engine_message(&status)
+    };
     let busy = matches!(
         status,
         UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Installing
+    ) || matches!(
+        linux_status,
+        LinuxUpdateStatus::Checking | LinuxUpdateStatus::Installing
     );
-
-    let action = {
-        let u = updater.clone();
-        match &status {
-            UpdateStatus::Available(_) => Button::new("update-install")
-                .outline()
-                .label(tr!("updates.download_install"))
-                .on_click(move |_, _, cx| {
-                    u.update(cx, Updater::download_and_install);
-                }),
-            UpdateStatus::Staged(_) => Button::new("update-restart")
-                .outline()
-                .label(tr!("updates.restart_to_update"))
-                .on_click(move |_, _, cx| {
-                    u.update(cx, Updater::restart);
-                }),
-            _ => Button::new("update-check")
-                .outline()
-                .label(tr!("updates.check_for_updates_action"))
-                .on_click(move |_, _, cx| {
-                    u.update(cx, Updater::check);
-                }),
-        }
+    let action = if benign_no_linux_asset {
+        linux_action(&linux_status)
+    } else {
+        engine_action(updater, &status)
     };
 
     h_flex()
@@ -233,6 +327,19 @@ fn channel_segment(cx: &App) -> ButtonGroup {
         }))
 }
 
+/// Whether `status` is the engine's expected "no matching asset" error on
+/// Linux, where the update manifest never carries a Linux asset by design.
+fn is_expected_no_linux_asset(status: &UpdateStatus) -> bool {
+    cfg!(target_os = "linux") && is_no_linux_asset_message(status)
+}
+
+/// The message-matching half of [`is_expected_no_linux_asset`], split out so
+/// it can be tested on every host — the `cfg!(target_os = "linux")` half is
+/// true only on a real Linux build/test host by design.
+fn is_no_linux_asset_message(status: &UpdateStatus) -> bool {
+    matches!(status, UpdateStatus::Errored(e) if e.starts_with("no release asset matched the current platform"))
+}
+
 /// Read the published snapshot only; rendering must never probe the filesystem.
 fn installation_value(cx: &App) -> gpui::Stateful<gpui::Div> {
     let label = installation_label(*cx.global::<Installation>());
@@ -306,6 +413,25 @@ mod tests {
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
     use crate::state::Sources;
     use crate::windows::settings::{SettingsPage, SettingsView};
+
+    #[test]
+    fn no_linux_asset_error_is_benign_but_other_errors_are_not() {
+        assert!(is_no_linux_asset_message(&UpdateStatus::Errored(
+            "no release asset matched the current platform (linux/x86_64)".into()
+        )));
+        assert!(!is_no_linux_asset_message(&UpdateStatus::Errored(
+            "http error: connection refused".into()
+        )));
+        assert!(!is_no_linux_asset_message(&UpdateStatus::UpToDate));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn no_linux_asset_error_is_only_benign_on_linux() {
+        assert!(is_expected_no_linux_asset(&UpdateStatus::Errored(
+            "no release asset matched the current platform (linux/x86_64)".into()
+        )));
+    }
 
     #[test]
     fn installation_labels_distinguish_sources_and_pending_from_unknown() {
