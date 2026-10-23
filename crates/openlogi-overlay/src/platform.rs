@@ -180,7 +180,8 @@ pub fn watch_clicks_outside(_on_mouse_down: impl Fn() + 'static) -> Option<Click
     None
 }
 
-/// Whether the host OS asks for reduced UI motion, read once per ring open.
+/// Whether the host OS asks for reduced UI motion. Never cached: the overlay
+/// calls this on every ring open, so a changed setting applies to the next one.
 #[must_use]
 pub fn prefers_reduced_motion() -> bool {
     #[cfg(target_os = "macos")]
@@ -205,9 +206,9 @@ pub fn prefers_reduced_motion() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        static GNOME_ANIMATIONS: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-        // No GNOME setting (other desktops, no gsettings): keep motion on.
-        *GNOME_ANIMATIONS.get_or_init(gnome_animations_enabled) == Some(false)
+        // Read on every open so a changed setting applies to the next ring. No
+        // GNOME setting (other desktops, no gsettings): keep motion on.
+        gnome_animations_enabled() == Some(false)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
@@ -223,12 +224,33 @@ fn gnome_animations_enabled() -> Option<bool> {
         .args(["get", "org.gnome.desktop.interface", "enable-animations"])
         .output();
     match output {
-        Ok(out) if out.status.success() => match String::from_utf8_lossy(&out.stdout).trim() {
-            "true" => Some(true),
-            "false" => Some(false),
-            _ => None,
-        },
+        Ok(out) if out.status.success() => {
+            parse_gsettings_bool(&String::from_utf8_lossy(&out.stdout))
+        }
         _ => None,
+    }
+}
+
+/// `gsettings get` prints a GVariant boolean; anything else is no signal.
+#[cfg(any(target_os = "linux", test))]
+fn parse_gsettings_bool(stdout: &str) -> Option<bool> {
+    match stdout.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod reduced_motion_tests {
+    use super::parse_gsettings_bool;
+
+    #[test]
+    fn gsettings_booleans_parse_and_anything_else_is_no_signal() {
+        assert_eq!(parse_gsettings_bool("true\n"), Some(true));
+        assert_eq!(parse_gsettings_bool("false\n"), Some(false));
+        assert_eq!(parse_gsettings_bool(""), None);
+        assert_eq!(parse_gsettings_bool("No such schema\n"), None);
     }
 }
 
