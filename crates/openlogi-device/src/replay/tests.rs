@@ -897,6 +897,7 @@ fn dpi_settings(route: DeviceRoute, current: u16, supported: Vec<u16>) -> Profil
         easy_switch: ProfileSetting::Unsupported,
         report_rate: ProfileSetting::Unsupported,
         pointer_speed: ProfileSetting::Unsupported,
+        force_sensing: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: ProfileSupport::Unsupported,
     }

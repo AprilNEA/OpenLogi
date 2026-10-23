@@ -203,6 +203,25 @@ fn configured_report_rate_needs_the_feature_and_a_saved_rate() {
     assert_eq!(configured_report_rate(&config, &device), None);
 }
 
+#[test]
+fn configured_force_sensing_needs_the_capability_and_a_saved_force() {
+    let mut config = Config::default();
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        force_sensing: true,
+        ..Capabilities::default()
+    });
+    // Nothing saved: the device keeps its own force.
+    assert_eq!(configured_force_sensing(&config, &device), None);
+    config.set_force_sensing("a", 4500);
+    assert_eq!(configured_force_sensing(&config, &device), Some(4500));
+    // A device whose force software may not change is never written.
+    device.capabilities = Some(Capabilities::default());
+    assert_eq!(configured_force_sensing(&config, &device), None);
+    device.capabilities = None;
+    assert_eq!(configured_force_sensing(&config, &device), None);
+}
+
 fn bolt(slot: u8) -> DeviceRoute {
     DeviceRoute::Bolt {
         receiver_uid: "AA00".into(),

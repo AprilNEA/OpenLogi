@@ -22,9 +22,9 @@ use openlogi_core::config::{ConfigFile, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation, LightCommand,
-    PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
-    WriteError,
+    ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
+    LightCommand, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -336,6 +336,26 @@ impl Agent for AgentServer {
         speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError> {
         self.shared.set_pointer_speed(&route, speed).await
+    }
+    async fn read_force_sensing(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ForceSensingInfo, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadForceSensing, |c| async move {
+                openlogi_hid::get_force_sensing_on(&c).await
+            })
+            .await
+    }
+    async fn set_force_sensing(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        force: u16,
+    ) -> Result<ForceSensingInfo, WriteError> {
+        self.shared.set_force_sensing(&route, force).await
     }
     async fn set_backlight(
         self,

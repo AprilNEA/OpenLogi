@@ -20,8 +20,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    ForceSensingInfo, LightCommand, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector,
+    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -134,7 +134,15 @@ pub use succession::Identity;
 /// v39: `AgentStatus::virtual_keyboard` and [`VirtualKeyboardStatus`]
 ///      appended — whether the agent types synthesized keys on its macOS
 ///      virtual HID keyboard.
-pub const PROTOCOL_VERSION: u32 = 39;
+/// v40: `Capabilities::force_sensing` appended — a force-sensing button,
+///      the MX Master 4's Haptic Sense Panel, whose press force HID++
+///      `0x19c0` lets software change; `Agent::{read_force_sensing,
+///      set_force_sensing}` appended — that force read and set from the
+///      settings app, with [`ForceSensingInfo`];
+///      `HidppOperation::{ReadForceSensing, WriteForceSensing}` and
+///      `WriteError::{ForceSensingUnchangeable, ForceSensingNotApplied}`
+///      appended.
+pub const PROTOCOL_VERSION: u32 = 40;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -893,4 +901,19 @@ pub trait Agent {
         route: DeviceRoute,
         speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError>;
+
+    /// Read the press force of the force-sensing button on `route` (HID++
+    /// `0x19c0`), with the range the device accepts and whether software may
+    /// change it.
+    async fn read_force_sensing(route: DeviceRoute) -> Result<ForceSensingInfo, WriteError>;
+    /// Write the press force of the force-sensing button on `route` now and
+    /// answer with what it reads back. A force outside the device's range is
+    /// clamped into it. A button that does not let software change its force
+    /// is refused with [`WriteError::ForceSensingUnchangeable`] before
+    /// anything is written; a force the device acknowledges but does not keep
+    /// with [`WriteError::ForceSensingNotApplied`].
+    async fn set_force_sensing(
+        route: DeviceRoute,
+        force: u16,
+    ) -> Result<ForceSensingInfo, WriteError>;
 }

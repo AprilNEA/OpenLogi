@@ -746,6 +746,49 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on:
     );
 }
 
+/// Spawn an OS thread that writes the press force of `op`'s force-sensing
+/// button via [`openlogi_hid::set_force_sensing_on`], unless a newer
+/// press-force write for the device was requested after `ticket`. Returns
+/// immediately; failures (incl. a button that does not let software change
+/// its force, and a read-back that disagrees with the write) are logged.
+pub(crate) fn write_force_sensing_in_background(op: DeviceOp, ticket: WriteTicket, force: u16) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "press-force write",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_force_sensing_on(&shared, force)
+                        .await
+                        .map(Some)
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "press-force write", result, |info| {
+                if let Some(info) = info {
+                    debug!(
+                        index,
+                        force,
+                        applied = info.current,
+                        min = info.min,
+                        max = info.max,
+                        "press force written"
+                    );
+                } else {
+                    debug!(index, force, "press-force write superseded by a newer one");
+                }
+            });
+        },
+    );
+}
+
 /// Spawn an OS thread that writes `target` to `op`'s mouse, a `0x2205` speed
 /// via [`openlogi_hid::set_pointer_speed_on`] or a DPI via
 /// [`openlogi_hid::set_dpi_target_on`], unless a newer pointer-speed write

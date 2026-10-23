@@ -27,8 +27,8 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, HidppOperation, HostOs,
-    PointerSpeed, ReportRate, ReportRateInfo, WriteError, commands_for_light_settings,
+    DeviceIoGate, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, ForceSensingInfo, HidppOperation,
+    HostOs, PointerSpeed, ReportRate, ReportRateInfo, WriteError, commands_for_light_settings,
     is_reserved_keyboard_control,
 };
 #[cfg(test)]
@@ -68,9 +68,9 @@ use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, assignments_changed,
     build_devices, changed_follower_cookies, config_keeps_os_layout, configured_dpi,
-    configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
-    keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
-    plan_reapply, reconnect_follower_cookies, saved_speed, settings_moved, stable_id,
+    configured_force_sensing, configured_report_rate, configured_wheel_mode, host_switch_links,
+    is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared,
+    pick_current, plan_reapply, reconnect_follower_cookies, saved_speed, settings_moved, stable_id,
     wheel_inverted,
 };
 
@@ -164,6 +164,8 @@ pub struct SharedHandles {
     /// Precision mode of the mice whose speed `0x2205` scales, and the order
     /// of every path's pointer-speed writes.
     pointer_speeds: Arc<PointerSpeeds>,
+    /// Orders every path's press-force writes per force-sensing device.
+    force_sensing_order: WriteOrder,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
@@ -312,6 +314,27 @@ impl SharedHandles {
             .await
     }
 
+    /// Write `force` to the force-sensing button of the device at `route`
+    /// and return what it reads back. When a newer press-force write for the
+    /// device is requested before this one gets its turn, this one reads the
+    /// device instead of writing a force that is about to be replaced.
+    /// Waiting for the turn does not count against the write's deadline.
+    pub async fn set_force_sensing(
+        &self,
+        route: &DeviceRoute,
+        force: u16,
+    ) -> Result<ForceSensingInfo, WriteError> {
+        let ticket = self.force_sensing_order.request(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteForceSensing,
+                &ticket,
+                |c| async move { openlogi_hid::set_force_sensing_on(&c, force).await },
+                |c| async move { openlogi_hid::get_force_sensing_on(&c).await },
+            )
+            .await
+    }
+
     /// Write `dpi` to the mouse at `route`. On a DPI mouse the write ends
     /// precision mode, so the pointer moves at the DPI the settings app
     /// shows, and darkens the DPI LED when the precision speed ends with it.
@@ -406,6 +429,16 @@ impl SharedHandles {
             self.keyboard_device(route),
             self.fn_lock_order.request(route),
             fn_lock,
+        );
+    }
+
+    /// [`Self::set_force_sensing`] without waiting, for the config-reload and
+    /// reconnect paths; the outcome is logged.
+    fn write_force_sensing_in_background(&self, route: &DeviceRoute, force: u16) {
+        crate::hardware::write_force_sensing_in_background(
+            self.device(route),
+            self.force_sensing_order.request(route),
+            force,
         );
     }
 }
@@ -553,6 +586,7 @@ impl Orchestrator {
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
             pointer_speeds: Arc::default(),
+            force_sensing_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
@@ -1181,6 +1215,9 @@ impl Orchestrator {
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
+        if let Some(force) = configured_force_sensing(&self.config, dev) {
+            self.shared.write_force_sensing_in_background(&route, force);
+        }
         if let Some(write) = speed_write {
             self.write_pointer_speed(write);
         }
@@ -1586,6 +1623,7 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_changed_force_sensing(&previous);
         self.apply_changed_pointer_speeds(&previous);
         self.apply_enabled_os_layouts(&previous);
         let writes = changed_follower_cookies(
@@ -1628,6 +1666,27 @@ impl Orchestrator {
             }
             if let Some(fn_lock) = fn_lock {
                 self.shared.write_fn_lock_in_background(&route, fn_lock);
+            }
+        }
+    }
+
+    /// Push a changed press force to the online force-sensing device it
+    /// belongs to. Only the values that differ from `previous` are written,
+    /// as for [`Self::apply_changed_fn_locks`], and a removed value writes
+    /// nothing: the device keeps the force it has. The GUI also writes
+    /// directly through [`SharedHandles::set_force_sensing`]; both writes are
+    /// ordered per device, so the newest request is the one that stays.
+    fn apply_changed_force_sensing(&self, previous: &Config) {
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
+            let force = configured_force_sensing(&self.config, dev);
+            if force == configured_force_sensing(previous, dev) {
+                continue;
+            }
+            if let Some(force) = force {
+                self.shared.write_force_sensing_in_background(&route, force);
             }
         }
     }

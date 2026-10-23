@@ -110,6 +110,16 @@ pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Opti
         .flatten()
 }
 
+/// The saved press force to push to `dev`: only when the user saved one and
+/// the probe found a force-sensing button whose force software may change,
+/// so nothing is written to a device the user never set a force for.
+pub(super) fn configured_force_sensing(config: &Config, dev: &AgentDevice) -> Option<u16> {
+    dev.capabilities
+        .is_some_and(|caps| caps.force_sensing)
+        .then(|| config.force_sensing(&dev.config_key))
+        .flatten()
+}
+
 /// How precision mode sets `dev`'s speed, with the value saved for it, or
 /// `None` when OpenLogi does not set its speed. A mouse with sensor DPI is a
 /// DPI mouse; [`Capabilities::pointer_scaling`] is never set on one.

@@ -43,10 +43,10 @@ use openlogi_core::device::{
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
     DeviceRoute, Dpi, DpiCapabilities, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
-    HidppFeatureErrorKind, HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand,
-    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget,
-    ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
-    SmartShiftThreshold, TunableTorque, WriteError,
+    ForceSensingInfo, HidppFeatureErrorKind, HidppOperation, HostConnection, HostOsInfo,
+    HostOsKind, LightCommand, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
+    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -110,7 +110,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 39);
+    assert_eq!(PROTOCOL_VERSION, 40);
 }
 
 #[test]
@@ -672,13 +672,14 @@ fn device_inventory() {
                 easy_switch: true,
                 virtual_thumbwheel: true,
                 pointer_scaling: true,
+                force_sensing: true,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010107",
     );
 }
 
@@ -1073,4 +1074,46 @@ fn pointer_speed_and_precision_mode() {
     );
     // Appended at the end of `Action`, so every earlier index is unchanged.
     assert_wire(&Action::TogglePrecisionMode, "36");
+}
+
+/// The press force of a force-sensing button (the MX Master 4's Haptic Sense
+/// Panel): raw device values as varints, all of them past one byte.
+#[test]
+fn force_sensing_dtos_and_errors() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "F00DCAFE".into(),
+        slot: 1,
+    };
+    assert_wire(
+        &AgentRequest::ReadForceSensing {
+            route: route.clone(),
+        },
+        "2a0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetForceSensing { route, force: 4500 },
+        "2b0008463030444341464501fb9411",
+    );
+    let info = ForceSensingInfo {
+        changeable: true,
+        default: 5089,
+        min: 4071,
+        max: 6768,
+        current: 4500,
+    };
+    assert_wire(&info, "01fbe113fbe70ffb701afb9411");
+    assert_wire(
+        &Ok::<ForceSensingInfo, WriteError>(info),
+        "0001fbe113fbe70ffb701afb9411",
+    );
+    assert_wire(&HidppOperation::ReadForceSensing, "18");
+    assert_wire(&HidppOperation::WriteForceSensing, "19");
+    assert_wire(&WriteError::ForceSensingUnchangeable, "1a");
+    assert_wire(
+        &WriteError::ForceSensingNotApplied {
+            requested: 4500,
+            actual: 5089,
+        },
+        "1bfb9411fbe113",
+    );
 }

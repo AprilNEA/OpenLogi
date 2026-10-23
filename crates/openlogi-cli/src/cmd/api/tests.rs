@@ -583,6 +583,24 @@ async fn unsupported_device_error_survives_the_json_boundary_without_a_write() {
 }
 
 #[test]
+fn press_force_refusals_share_the_existing_codes() {
+    for (error, code) in [
+        (WriteError::ForceSensingUnchangeable, "unsupported_feature"),
+        (
+            WriteError::ForceSensingNotApplied {
+                requested: 4500,
+                actual: 5089,
+            },
+            "readback_mismatch",
+        ),
+    ] {
+        let result = envelope(Err(error.into()));
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"]["code"], code);
+    }
+}
+
+#[test]
 fn connection_failures_have_stable_codes() {
     for (error, code) in [
         (

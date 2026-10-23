@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, EasySwitchHosts,
-    FnLockState, PointerSpeed, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    FnLockState, ForceSensingInfo, PointerSpeed, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -201,6 +201,10 @@ pub struct ProfileDeviceSettings {
     /// profiles recorded before it existed keep loading.
     #[serde(default = "ProfileSetting::unsupported")]
     pub pointer_speed: ProfileSetting<PointerSpeed>,
+    /// Force-sensing button (`0x19c0`) press-force read state. Defaults to
+    /// unsupported so profiles recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub force_sensing: ProfileSetting<ForceSensingInfo>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -646,6 +650,7 @@ fn validate_setting_support(
             || settings.report_rate.supports_feature()
             || settings.easy_switch.supports_feature()
             || settings.pointer_speed.supports_feature()
+            || settings.force_sensing.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -719,6 +724,12 @@ fn validate_setting_support(
                 "pointer speed",
                 settings.pointer_speed.supports_feature(),
                 capabilities.pointer_scaling,
+            )?;
+            validate_capability_support(
+                settings,
+                "press force",
+                settings.force_sensing.supports_feature(),
+                capabilities.force_sensing,
             )?;
         }
     }
