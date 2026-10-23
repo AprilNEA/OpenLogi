@@ -165,7 +165,25 @@ back, battery drains so poll-driven repaints are visible), an offline mouse, a
 lighting-capable keyboard, a directly-attached device, and a full Bolt pairing
 flow (discovery → passkey → paired). Its agent version carries a `-mock` suffix,
 so a mock session is identifiable in the UI. It is a dev tool only and is never
-bundled.
+bundled. The demo also simulates an older firmware version and an update through
+preparation, transfer, restart, and success. Fixture mode leaves firmware unsupported
+because recorded device profiles do not yet carry firmware facts.
+
+The firmware downloader can be checked against the pinned official package without
+opening a device:
+
+```sh
+cargo test -p openlogi-agent --bin openlogi-agent official_release_download_and_parse -- --ignored
+```
+
+Device-side updater tests use an in-memory HID++ responder; they never flash attached
+hardware. Shipping a new release entry requires independent package-signature and
+hardware validation. The current catalog supports MX Master 4 application firmware
+27.3.19. OpenLogi offers it to an older matching firmware line, or reinstalls
+the exact current release after an explicit confirmation. Downgrades are refused.
+
+The [firmware update process](FIRMWARE_UPDATES.md) documents the implementation,
+authentication boundary, hardware evidence and remaining release-discovery work.
 
 While the mock runs, type a command in its terminal and press Enter to change
 what it reports. `help` lists the commands, and `devices` numbers the devices
