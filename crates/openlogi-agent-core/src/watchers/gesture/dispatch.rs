@@ -211,7 +211,7 @@ impl InputDispatcher {
             refused = true;
             match frame.phase {
                 SpaceSwipePhase::Began => return true,
-                SpaceSwipePhase::Ended => {
+                SpaceSwipePhase::Ended { .. } => {
                     let _ = (self.post_space)(frame.progress, SpaceSwipePhase::Cancelled);
                 }
                 SpaceSwipePhase::Changed | SpaceSwipePhase::Cancelled => {}

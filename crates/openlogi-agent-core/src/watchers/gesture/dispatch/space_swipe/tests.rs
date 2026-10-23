@@ -93,6 +93,14 @@ fn phases(frames: &[Frame]) -> Vec<SpaceSwipePhase> {
     frames.iter().map(|frame| frame.phase).collect()
 }
 
+/// The hand speed an Ended frame carries; `None` for any other phase.
+fn end_speed(frame: &Frame) -> Option<f64> {
+    match frame.phase {
+        SpaceSwipePhase::Ended { speed } => Some(speed),
+        SpaceSwipePhase::Began | SpaceSwipePhase::Changed | SpaceSwipePhase::Cancelled => None,
+    }
+}
+
 /// Feed `reports` motion reports of `dx`, one every 8 ms from `start`.
 fn sweep(swipes: &mut SpaceSwipes, start: Instant, reports: u32, dx: i32) -> (Vec<Frame>, Instant) {
     let mut frames = Vec::new();
@@ -180,15 +188,15 @@ fn a_long_sweep_completes_one_switch_per_desktop_width_and_restarts_from_zero() 
     begin_right(&mut swipes, start);
     // 25 × 100 = 2500 units.
     let (frames, _) = sweep(&mut swipes, start, 25, 100);
-    let ended = frames
-        .iter()
-        .filter(|frame| frame.phase == SpaceSwipePhase::Ended)
-        .count();
-    assert_eq!(ended, 3);
+    let speeds: Vec<f64> = frames.iter().filter_map(end_speed).collect();
+    assert_eq!(speeds.len(), 3);
+    // Each switch finishes at the hand's speed: 100 units per 8 ms is about
+    // 15.6 desktops per second.
+    assert!(speeds.iter().all(|speed| *speed > 10.0), "{speeds:?}");
     // Every next transition starts from the one report that follows the
     // landing — never from the hand's travel during the switch.
     for pair in frames.windows(2) {
-        if pair[0].phase == SpaceSwipePhase::Ended {
+        if end_speed(&pair[0]).is_some() {
             assert_eq!(pair[1].phase, SpaceSwipePhase::Began);
             assert!((pair[1].progress - 100.0 / TRAVEL).abs() < 1e-9);
         }
@@ -202,10 +210,7 @@ fn motion_waits_for_the_switch_to_land_then_restarts() {
     begin_right(&mut swipes, start);
     // Cross one desktop (8 × 100 = 800 units).
     let (frames, now) = sweep(&mut swipes, start, 8, 100);
-    assert_eq!(
-        frames.last().map(|frame| frame.phase),
-        Some(SpaceSwipePhase::Ended)
-    );
+    assert!(frames.last().and_then(end_speed).is_some(), "{frames:?}");
     // The Dock never reports landing: motion inside the timeout is dropped.
     let (frames, now) = sweep(&mut swipes, now, 10, 100);
     assert!(frames.is_empty(), "no frames while the switch lands");
@@ -226,13 +231,14 @@ fn a_full_desktop_report_after_landing_finishes_at_once() {
     begin_right(&mut swipes, start);
     let (_, now) = sweep(&mut swipes, start, 8, 100);
     // A single report worth more than a desktop opens the next leg and
-    // finishes it, rather than leaving a Began past full width.
+    // finishes it, rather than leaving a Began past full width. The leg has
+    // no speed sample yet.
     let frames = swipes.motion(&session(), BUTTON, 900, now + SETTLE_TIMEOUT);
     assert_eq!(
         frames,
         vec![
             Frame::new(0.0, SpaceSwipePhase::Began),
-            Frame::new(1.0, SpaceSwipePhase::Ended),
+            Frame::new(1.0, SpaceSwipePhase::Ended { speed: 0.0 }),
         ]
     );
 }
@@ -261,10 +267,7 @@ fn a_space_change_on_another_display_does_not_end_the_settle() {
     let start = Instant::now();
     begin_right(&mut swipes, start);
     let (frames, now) = sweep(&mut swipes, start, 8, 100);
-    assert_eq!(
-        frames.last().map(|frame| frame.phase),
-        Some(SpaceSwipePhase::Ended)
-    );
+    assert!(frames.last().and_then(end_speed).is_some(), "{frames:?}");
     // Changes keep being reported, but this display's desktop never moved.
     let (frames, _) = sweep(&mut swipes, now, 10, 100);
     assert!(frames.is_empty(), "still waiting for this display's switch");
@@ -332,24 +335,28 @@ fn a_drag_past_halfway_finishes_on_release() {
     let start = Instant::now();
     begin_right(&mut swipes, start);
     let (_, now) = sweep(&mut swipes, start, 45, 10);
+    // Released 300 ms after the hand stopped: the switch finishes from rest.
     let frames = swipes.end(&session(), BUTTON, now + Duration::from_millis(300));
-    assert_eq!(phases(&frames), vec![SpaceSwipePhase::Ended]);
+    assert_eq!(phases(&frames), vec![SpaceSwipePhase::Ended { speed: 0.0 }]);
     assert!(frames[0].progress >= COMPLETE_AT);
 }
 
 #[test]
-fn a_short_flick_finishes_on_release() {
+fn a_short_flick_finishes_where_the_hand_let_go_at_its_speed() {
     let mut swipes = swipes(PROMPT);
     let start = Instant::now();
     begin_right(&mut swipes, start);
     // 5 × 30 = 150 units (about 0.19 desktop) in 40 ms, released at speed.
     let (_, now) = sweep(&mut swipes, start, 5, 30);
     let frames = swipes.end(&session(), BUTTON, now + Duration::from_millis(4));
-    assert_eq!(
-        phases(&frames),
-        vec![SpaceSwipePhase::Changed, SpaceSwipePhase::Ended]
+    let [frame] = frames.as_slice() else {
+        panic!("one Ended: {frames:?}");
+    };
+    assert!((frame.progress - 150.0 / TRAVEL).abs() < 1e-9, "{frame:?}");
+    assert!(
+        end_speed(frame).is_some_and(|speed| speed >= FLICK_SPEED),
+        "{frame:?}"
     );
-    assert!(frames.iter().all(|frame| frame.progress >= COMPLETE_AT));
 }
 
 #[test]

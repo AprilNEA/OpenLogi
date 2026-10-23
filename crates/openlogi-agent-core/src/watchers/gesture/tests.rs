@@ -922,13 +922,17 @@ async fn a_desktop_swipe_drives_one_live_transition_until_release() {
     ] {
         dispatcher.dispatch(&id, session.dispatch(), input);
     }
-    assert_eq!(
-        POSTED.with_borrow(Clone::clone),
-        vec![
-            SpaceSwipePhase::Began,
-            SpaceSwipePhase::Changed,
-            SpaceSwipePhase::Ended
-        ]
+    let posted = POSTED.with_borrow(Clone::clone);
+    assert!(
+        matches!(
+            posted.as_slice(),
+            [
+                SpaceSwipePhase::Began,
+                SpaceSwipePhase::Changed,
+                SpaceSwipePhase::Ended { .. }
+            ]
+        ),
+        "{posted:?}"
     );
 
     scroll.shutdown();
@@ -1009,13 +1013,17 @@ async fn a_refused_next_leg_drops_the_holds_live_transition() {
     ] {
         dispatcher.dispatch(&id, session.dispatch(), input);
     }
-    assert_eq!(
-        POSTED.with_borrow(Clone::clone),
-        vec![
-            SpaceSwipePhase::Began,
-            SpaceSwipePhase::Ended,
-            SpaceSwipePhase::Began
-        ]
+    let posted = POSTED.with_borrow(Clone::clone);
+    assert!(
+        matches!(
+            posted.as_slice(),
+            [
+                SpaceSwipePhase::Began,
+                SpaceSwipePhase::Ended { .. },
+                SpaceSwipePhase::Began
+            ]
+        ),
+        "{posted:?}"
     );
 
     scroll.shutdown();

@@ -397,20 +397,47 @@ fn field_swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> 
 
 /// The events of a slide in `direction`, each with its time from the first.
 fn slide_events(direction: Direction) -> Option<Vec<(Duration, CFRetained<CGEvent>)>> {
-    let frames = space_switch::slide(direction);
+    let frames: Vec<SlideFrame> = space_switch::slide(direction)
+        .into_iter()
+        .map(|frame| SlideFrame {
+            progress: dock_progress(frame.progress),
+            ..frame
+        })
+        .collect();
     match *DOCK_SWIPE_LAYOUT {
         DockSwipeLayout::HidEvent => hid_slide_events(&frames, natural_scrolling()),
         DockSwipeLayout::Fields => frames
             .into_iter()
-            .map(|frame| Some((frame.at, slide_event(frame)?)))
+            .map(|frame| Some((frame.at, slide_event(frame, EMPHATIC_EXIT)?)))
             .collect(),
     }
 }
 
+/// Dock swipe progress per desktop width of travel. The Dock draws a
+/// progress of 1.0 as 0.8 of the way to the next desktop (0.7999, measured
+/// from screen recordings on macOS 26.7), so a frame at a full desktop posts
+/// 1.25 to show that desktop whole and leave its Ended nothing to jump.
+const DOCK_PROGRESS_PER_DESKTOP: f64 = 1.25;
+
+/// `desktops` of travel as the progress a Dock swipe frame carries.
+fn dock_progress(desktops: f64) -> f64 {
+    desktops * DOCK_PROGRESS_PER_DESKTOP
+}
+
+/// Exit velocity of an Ended that should land at once: the instant switch,
+/// and a slide, whose last frame is within 5% of the desktop.
+const EMPHATIC_EXIT: f64 = 9999.0;
+
+/// Fastest exit velocity, in Dock progress per second, a live swipe passes
+/// on. Up to about 10 the Dock eases out in steps of at most 0.12 desktop per
+/// frame; from about 30 it covers the rest in a frame or two.
+const MAX_LIVE_EXIT: f64 = 10.0;
+
 /// One frame of a slide, in the fields a trackpad's three-finger swipe
 /// fills. The layout follows Mac Mouse Fix's `TouchSimulator`, as proposed in
-/// #1672.
-fn slide_event(frame: SlideFrame) -> Option<CFRetained<CGEvent>> {
+/// #1672. An Ended frame carries `exit`, an exit velocity toward the
+/// progress sign in Dock progress per second.
+fn slide_event(frame: SlideFrame, exit: f64) -> Option<CFRetained<CGEvent>> {
     let event = CGEvent::new(None)?;
     CGEvent::set_type(Some(&event), CGEventType(30));
     let phase = i64::from(slide_phase(frame.phase));
@@ -432,9 +459,10 @@ fn slide_event(frame: SlideFrame) -> Option<CFRetained<CGEvent>> {
     CGEvent::set_double_value_field(Some(&event), CGEventField(139), horizontal);
     CGEvent::set_integer_value_field(Some(&event), CGEventField(136), 1);
     if frame.phase == SlidePhase::Ended {
-        // An emphatic exit velocity toward the progress sign asks the Dock to
-        // finish the switch rather than spring back, as the instant switch does.
-        let velocity = frame.progress.signum() * 9999.0;
+        // The Dock finishes an Ended toward its progress sign at any exit
+        // velocity, easing out from it: zero takes about 470 ms, 9999 lands
+        // in one frame.
+        let velocity = frame.progress.signum() * exit;
         CGEvent::set_double_value_field(Some(&event), CGEventField(129), velocity);
         CGEvent::set_double_value_field(Some(&event), CGEventField(130), velocity);
     }
@@ -524,9 +552,10 @@ impl HidSwipe {
         })
     }
 
-    /// A swipe event at `progress`, signed the way the private fields sign it.
-    fn event(&self, phase: u32, progress: f64) -> Option<CFRetained<CGEvent>> {
-        let hid = dock_swipe_hid_event(self.class, phase, self.flip * progress)?;
+    /// A swipe event at `progress`, signed the way the private fields sign it,
+    /// with `exit` as the end phase's exit velocity (see [`slide_event`]).
+    fn event(&self, phase: u32, progress: f64, exit: f64) -> Option<CFRetained<CGEvent>> {
+        let hid = dock_swipe_hid_event(self.class, phase, self.flip * progress, exit)?;
         let event = CGEvent::new(None)?;
         CGEvent::set_type(Some(&event), CGEventType(30));
         // SAFETY: both objects are live; SkyLight retains the HID event.
@@ -544,8 +573,8 @@ impl HidSwipe {
 fn hid_swipe_events(direction: Direction, natural: bool) -> Option<[CFRetained<CGEvent>; 2]> {
     let swipe = HidSwipe::new(natural)?;
     Some([
-        swipe.event(1, direction.sign())?,
-        swipe.event(4, direction.sign())?,
+        swipe.event(1, direction.sign(), EMPHATIC_EXIT)?,
+        swipe.event(4, direction.sign(), EMPHATIC_EXIT)?,
     ])
 }
 
@@ -561,19 +590,21 @@ fn hid_slide_events(
         .map(|frame| {
             Some((
                 frame.at,
-                swipe.event(slide_phase(frame.phase), frame.progress)?,
+                swipe.event(slide_phase(frame.phase), frame.progress, EMPHATIC_EXIT)?,
             ))
         })
         .collect()
 }
 
 /// macOS 27 requires a velocity child on the end phase of a DockSwipe; it
-/// points the way `progress` does. Private fields follow Mac Mouse Fix's event
-/// investigation: <https://github.com/noah-nuebling/mac-mouse-fix/commit/f92d2d53a>.
+/// points the way `progress` does, at `exit`. Private fields follow Mac Mouse
+/// Fix's event investigation:
+/// <https://github.com/noah-nuebling/mac-mouse-fix/commit/f92d2d53a>.
 fn dock_swipe_hid_event(
     class: &AnyClass,
     phase: u32,
     progress: f64,
+    exit: f64,
 ) -> Option<Retained<AnyObject>> {
     let hid = hid_event(class, HID_TYPE_DOCK_SWIPE)?;
     // SAFETY: private `HIDEvent` setters taking (u32), (NSInteger, u32),
@@ -587,7 +618,7 @@ fn dock_swipe_hid_event(
         let _: () = msg_send![&*hid, setDoubleValue: progress, forField: HID_FIELD_PROGRESS];
         if phase == 4 {
             let velocity = hid_event(class, HID_TYPE_VELOCITY)?;
-            let speed = progress.signum() * 9999.0;
+            let speed = progress.signum() * exit;
             let _: () =
                 msg_send![&*velocity, setDoubleValue: speed, forField: HID_FIELD_VELOCITY_X];
             let _: () =
@@ -645,7 +676,7 @@ pub(in crate::inject) fn post_space_swipe(progress: f64, phase: SpaceSwipePhase)
     let finished = match phase {
         SpaceSwipePhase::Began => !posted,
         SpaceSwipePhase::Changed => false,
-        SpaceSwipePhase::Ended => posted,
+        SpaceSwipePhase::Ended { .. } => posted,
         SpaceSwipePhase::Cancelled => true,
     };
     if finished {
@@ -656,23 +687,36 @@ pub(in crate::inject) fn post_space_swipe(progress: f64, phase: SpaceSwipePhase)
 
 /// One live-swipe frame in the Dock swipe layout this macOS reads: the same
 /// frame a slide posts, at the hand's progress rather than a scheduled one.
+/// An Ended exits at the hand's speed, so the Dock eases on from where the
+/// hand let go instead of jumping the rest of the way.
 fn live_swipe_event(progress: f64, phase: SpaceSwipePhase) -> Option<CFRetained<CGEvent>> {
-    let phase = match phase {
-        SpaceSwipePhase::Began => SlidePhase::Began,
-        SpaceSwipePhase::Changed => SlidePhase::Changed,
-        SpaceSwipePhase::Ended => SlidePhase::Ended,
-        SpaceSwipePhase::Cancelled => SlidePhase::Cancelled,
+    let (phase, exit) = match phase {
+        SpaceSwipePhase::Began => (SlidePhase::Began, 0.0),
+        SpaceSwipePhase::Changed => (SlidePhase::Changed, 0.0),
+        SpaceSwipePhase::Ended { speed } => (SlidePhase::Ended, live_exit(speed)),
+        SpaceSwipePhase::Cancelled => (SlidePhase::Cancelled, 0.0),
     };
+    let progress = dock_progress(progress);
     match *DOCK_SWIPE_LAYOUT {
         DockSwipeLayout::HidEvent => {
-            HidSwipe::new(natural_scrolling())?.event(slide_phase(phase), progress)
+            HidSwipe::new(natural_scrolling())?.event(slide_phase(phase), progress, exit)
         }
-        DockSwipeLayout::Fields => slide_event(SlideFrame {
-            phase,
-            progress,
-            at: Duration::ZERO,
-        }),
+        DockSwipeLayout::Fields => slide_event(
+            SlideFrame {
+                phase,
+                progress,
+                at: Duration::ZERO,
+            },
+            exit,
+        ),
     }
+}
+
+/// The Dock exit velocity for a hand released at `speed` desktop widths per
+/// second toward the switch: the same motion in Dock progress, at rest when
+/// the hand was, and capped at [`MAX_LIVE_EXIT`].
+fn live_exit(speed: f64) -> f64 {
+    dock_progress(speed).clamp(0.0, MAX_LIVE_EXIT)
 }
 
 type Dictionary = CFDictionary<CFString, CFType>;

@@ -4,6 +4,46 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: Dock swipes post 1.25 progress per desktop and end at the hand's speed
+
+The live swipe of #1672 lagged the hand and jumped at every switch. Screen
+recordings on macOS 26.7 found two causes. The Dock draws a DockSwipe progress
+of 1.0 as 0.8 of the way to the next desktop. Every `Ended` carried an exit
+velocity of 9999, and the Dock then lands the rest in one frame. The fix is in
+`openlogi-inject`, so policy code stays in desktops.
+
+- **1.25 Dock progress per desktop.** Live frames and the slide fallback post
+  1.25 times their desktop progress (`DOCK_PROGRESS_PER_DESKTOP`). The factor
+  is the inverse of the measured 0.7999: the Dock's strip has a gap between
+  desktops, so a transition is whole on screen only at 1.25. The instant
+  switch keeps ±1.0, because it ends at once.
+- **The hand's speed, not 9999.** `SpaceSwipePhase::Ended` carries the hand's
+  speed in desktops per second. A live `Ended` exits at 1.25 times that
+  speed, at least 0 and at most 10. At 10 and below the Dock eases out like a
+  trackpad release. The instant switch and the slide keep 9999: their last
+  frame is at the desktop or within 5% of it.
+- **A flick ends where the hand let go.** `FLICK_FINISH` posted progress 0.55
+  before `Ended`, so the display jumped. The Dock completed an `Ended` from
+  0.125 and 0.2 at exit velocities from 0 to 10, so the policy now posts
+  `Ended` at the current progress. When a release finishes the switch (past
+  half way, or a flick) is unchanged.
+- **The slide trades its end jump for a stronger start.** Its last frame
+  showed 0.763 of a desktop, and `Ended` jumped the remaining 0.236. Now the
+  last frame shows 0.955 and `Ended` lands 0.045. Every frame is 1.25 times
+  larger, so the first visible step grows from 0.22 to 0.28. A gentler start
+  needs a different curve and is left open.
+- **Rejected: scaling in the policy.** `space_swipe.rs` could post 1.25 per
+  desktop itself. The slide needs the same factor, and the Dock's units
+  belong with the event encoding.
+
+Verified on macOS 26.7, one 1920 x 1080 display at 60 Hz, synthetic input.
+After a 0.7 drag, the largest step at release drops from 0.441 to 0.024, the
+follow gain rises from 0.75 to 0.94, and the lag drops from 74 ms to 23 ms. A
+flick's largest step drops from 0.56 to 0.34; that step is now the travel
+behind the commit, at the start. Unit tests check the progress and exit
+velocity of every frame. Not verified: macOS 27 (the `IOHIDEvent` layout),
+other display sizes and scales, more than one display, and real mice.
+
 ## 2026-10: Channel files are composed from per-release records
 
 Beta releases share the update host with stable ones. A beta publish must

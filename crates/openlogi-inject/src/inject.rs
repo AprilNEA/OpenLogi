@@ -668,14 +668,17 @@ pub fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
 }
 
 /// Lifecycle phase of one frame of a live, follow-the-hand Space transition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SpaceSwipePhase {
     /// First frame: the Dock starts dragging the neighbouring Space in.
     Began,
     /// The hand moved: the Dock follows to the frame's progress.
     Changed,
-    /// Finish the switch the frame's progress points toward.
-    Ended,
+    /// Finish the switch the frame's progress points toward. `speed` is the
+    /// hand's speed toward that desktop at release, in desktop widths per
+    /// second (zero or less for a hand at rest): the Dock eases the rest of
+    /// the way from it, as it does after a trackpad swipe.
+    Ended { speed: f64 },
     /// Spring back to the Space the transition started on.
     Cancelled,
 }
@@ -685,8 +688,8 @@ pub enum SpaceSwipePhase {
 /// `progress` is the cumulative travel since the transition began, in desktop
 /// widths, positive toward the next desktop. macOS posts it in whichever Dock
 /// swipe layout the running release reads. Returns `false` when nothing was
-/// posted (no such transition on this platform, or non-finite progress), so
-/// the caller can fall back to the one-shot desktop action.
+/// posted (no such transition on this platform, or a non-finite progress or
+/// speed), so the caller can fall back to the one-shot desktop action.
 ///
 /// One transition runs at a time, from an accepted [`SpaceSwipePhase::Began`]
 /// to a posted [`SpaceSwipePhase::Ended`] or any [`SpaceSwipePhase::Cancelled`].
@@ -695,7 +698,11 @@ pub enum SpaceSwipePhase {
 /// transition open for the caller's `Cancelled`.
 #[must_use]
 pub fn post_space_swipe(progress: f64, phase: SpaceSwipePhase) -> bool {
-    if !progress.is_finite() {
+    let speed_is_finite = match phase {
+        SpaceSwipePhase::Ended { speed } => speed.is_finite(),
+        SpaceSwipePhase::Began | SpaceSwipePhase::Changed | SpaceSwipePhase::Cancelled => true,
+    };
+    if !progress.is_finite() || !speed_is_finite {
         return false;
     }
     cfg_select! {

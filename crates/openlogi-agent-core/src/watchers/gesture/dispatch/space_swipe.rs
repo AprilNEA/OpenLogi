@@ -5,7 +5,8 @@
 //! Space in as the hand keeps moving, every full desktop width of travel
 //! completes one switch, and the release finishes the switch (past halfway,
 //! or flicked) or lets it spring back — a trackpad's three-finger swipe,
-//! driven by the gesture button.
+//! driven by the gesture button. A finish carries the hand's speed, so the
+//! Dock eases on from where the hand let go.
 //!
 //! The Dock takes one swipe at a time, so a long sweep settles between
 //! desktops: after a switch completes, motion is dropped until the Space
@@ -34,9 +35,6 @@ const COMPLETE_AT: f64 = 0.5;
 const FLICK_SPEED: f64 = 2.5;
 /// Least progress a flick needs, so a twitch at the commit never switches.
 const FLICK_MIN: f64 = 0.1;
-/// Where a flick that finishes short of halfway is placed before it ends, so
-/// the Dock reads it as past the midpoint and completes it.
-const FLICK_FINISH: f64 = 0.55;
 /// A motion gap this long means the hand stopped: the release carries no speed.
 const STALE_MOTION: Duration = Duration::from_millis(100);
 /// Reports closer together than this (the commit's own travel arriving with
@@ -165,7 +163,15 @@ struct Transition {
 
 /// Move a leg to `progress`: follow the hand below a full desktop, hold at the
 /// edge of the last desktop, or finish the switch at a full width and settle.
-fn step(progress: f64, bounds: Bounds, probe: SpaceProbe, now: Instant) -> (Stage, Frame) {
+/// `velocity` is the hand's speed along the transition, which a finish
+/// carries toward its desktop.
+fn step(
+    progress: f64,
+    velocity: f64,
+    bounds: Bounds,
+    probe: SpaceProbe,
+    now: Instant,
+) -> (Stage, Frame) {
     let sign = progress.signum();
     if progress.abs() < 1.0 || !bounds.allows(sign) {
         let progress = if progress.abs() < 1.0 { progress } else { sign };
@@ -179,7 +185,8 @@ fn step(progress: f64, bounds: Bounds, probe: SpaceProbe, now: Instant) -> (Stag
         changes: (probe.changes)(),
         space: (probe.position)().map(|position| position.current),
     };
-    (settling, Frame::new(sign, SpaceSwipePhase::Ended))
+    let speed = velocity * sign;
+    (settling, Frame::new(sign, SpaceSwipePhase::Ended { speed }))
 }
 
 /// Live transitions by capture session and held gesture source. A hold keeps
@@ -283,6 +290,7 @@ impl SpaceSwipes {
             t.velocity = 0.5 * t.velocity + 0.5 * delta / elapsed.as_secs_f64();
         }
         t.moved_at = now;
+        let velocity = t.velocity;
         let keep_sign = t.keep_sign;
         let hold_sign = |progress: f64| match keep_sign {
             Some(sign) if progress * sign < 0.0 => 0.0,
@@ -315,17 +323,21 @@ impl SpaceSwipes {
                 // The switch landed: the next transition starts from this
                 // report, not from wherever the hand got to meanwhile, and
                 // the report gets the same edge and completion checks as any
-                // other (a full desktop's worth finishes at once).
+                // other (a full desktop's worth finishes at once, with no
+                // speed sample yet).
                 t.velocity = 0.0;
-                let (stage, frame) = step(hold_sign(delta), Bounds::read(probe), probe, now);
+                let (stage, frame) = step(hold_sign(delta), 0.0, Bounds::read(probe), probe, now);
                 t.stage = stage;
                 match frame.phase {
-                    SpaceSwipePhase::Ended => vec![Frame::new(0.0, SpaceSwipePhase::Began), frame],
+                    SpaceSwipePhase::Ended { .. } => {
+                        vec![Frame::new(0.0, SpaceSwipePhase::Began), frame]
+                    }
                     _ => vec![Frame::new(frame.progress, SpaceSwipePhase::Began)],
                 }
             }
             Stage::InFlight { progress, bounds } => {
-                let (stage, frame) = step(hold_sign(*progress + delta), *bounds, probe, now);
+                let (stage, frame) =
+                    step(hold_sign(*progress + delta), velocity, *bounds, probe, now);
                 t.stage = stage;
                 vec![frame]
             }
@@ -334,6 +346,9 @@ impl SpaceSwipes {
 
     /// Release the hold: finish the switch in flight when it is past halfway
     /// or flicked toward a desktop that exists, otherwise let it spring back.
+    /// The Dock finishes an Ended from any progress, easing out from the
+    /// hand's speed, so a flick ends where the hand let go rather than
+    /// jumping ahead first.
     pub(super) fn end(
         &mut self,
         session: &HidppSessionId,
@@ -354,16 +369,8 @@ impl SpaceSwipes {
         };
         let past_halfway = progress.abs() >= COMPLETE_AT && speed > -FLICK_SPEED;
         let flicked = progress.abs() >= FLICK_MIN && speed >= FLICK_SPEED;
-        if !bounds.allows(sign) {
-            vec![Frame::new(progress, SpaceSwipePhase::Cancelled)]
-        } else if past_halfway {
-            vec![Frame::new(progress, SpaceSwipePhase::Ended)]
-        } else if flicked {
-            let finish = sign * FLICK_FINISH;
-            vec![
-                Frame::new(finish, SpaceSwipePhase::Changed),
-                Frame::new(finish, SpaceSwipePhase::Ended),
-            ]
+        if bounds.allows(sign) && (past_halfway || flicked) {
+            vec![Frame::new(progress, SpaceSwipePhase::Ended { speed })]
         } else {
             vec![Frame::new(progress, SpaceSwipePhase::Cancelled)]
         }
