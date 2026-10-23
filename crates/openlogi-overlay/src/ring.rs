@@ -936,17 +936,21 @@ mod tests {
                 slot: ActionRingSlot::Right
             })
         ));
-        advance_ring_clock(cx, Duration::from_millis(40));
-        assert!(
-            !window.read_with(cx, |view, _| view.label_visible).unwrap(),
-            "the first slot's dwell must not have fired"
-        );
         advance_ring_clock(cx, Duration::from_millis(70));
         assert_eq!(
             window.read_with(cx, |view, _| view.hovered).unwrap(),
             Some(ActionRingSlot::Right)
         );
+        assert!(
+            !window.read_with(cx, |view, _| view.label_visible).unwrap(),
+            "a stale Top dwell timer would have fired by now"
+        );
+        advance_ring_clock(cx, Duration::from_millis(40));
         assert!(window.read_with(cx, |view, _| view.label_visible).unwrap());
+        assert_eq!(
+            window.read_with(cx, |view, _| view.hovered).unwrap(),
+            Some(ActionRingSlot::Right)
+        );
     }
 
     #[gpui::test]
