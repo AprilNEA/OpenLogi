@@ -466,6 +466,10 @@
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       clearTimeout(state.aiTimer);
+      if (state.mode === "ai") {
+        collapseAI();
+        return;
+      }
       if (item.id === "ai") expandAI();
       else invokeItem(i, btn);
     });
