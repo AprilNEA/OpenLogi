@@ -191,19 +191,7 @@ pub fn prefers_reduced_motion() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
-        };
-
-        let mut enabled = 0i32;
-        // SAFETY: `SPI_GETCLIENTAREAANIMATION` writes one `BOOL` when the call succeeds.
-        let ok = unsafe {
-            SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut enabled).cast(), 0)
-        };
-        if ok == 0 {
-            return false;
-        }
-        enabled == 0
+        client_area_animation_enabled().is_some_and(|enabled| !enabled)
     }
     #[cfg(target_os = "linux")]
     {
@@ -214,6 +202,27 @@ pub fn prefers_reduced_motion() -> bool {
     {
         false
     }
+}
+
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    reason = "SystemParametersInfoW is plain Win32 FFI; std and windows-sys offer no safe reader for SPI_GETCLIENTAREAANIMATION"
+)]
+fn client_area_animation_enabled() -> Option<bool> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+    };
+
+    let mut enabled = 0i32;
+    // SAFETY: `SPI_GETCLIENTAREAANIMATION` writes one `BOOL` when the call succeeds.
+    let ok = unsafe {
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut enabled).cast(), 0)
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some(enabled != 0)
 }
 
 /// GNOME's `enable-animations`, read by `gsettings` off the UI thread. Each
