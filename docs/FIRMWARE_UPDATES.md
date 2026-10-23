@@ -86,7 +86,9 @@ states; they do not exercise hardware or make network requests.
 1. **Select an approved release.** Read HID++ `0x0003` on the agent's existing
    inventory channel. Match the active application prefix, firmware number and
    transport PID against the catalog. Permit only a current or newer approved
-   release. The agent admits one firmware job at a time.
+   release. Retain the route, original unit ID and approved release together in
+   an opaque `FirmwareUpdateTarget` before downloading. The agent admits one
+   firmware job at a time.
 2. **Download and authenticate.** Fetch the catalog URL using HTTPS and platform
    trust roots, with connection and total-request deadlines and a byte bound.
    Require the exact archive length and SHA-256 before opening the ZIP. Locate
@@ -101,8 +103,10 @@ states; they do not exercise hardware or make network requests.
 4. **Acquire exclusive access and preflight again.** The agent's firmware I/O
    operation pauses its capture activity and holds the receiver's exclusive
    lease and transport turn. Resolve the authoritative channel after waiting
-   for ownership; do not open a competing connection. Re-read the device,
-   require exactly two application banks with one active, and choose the other.
+   for ownership; do not open a competing connection. Re-read the device and
+   require the admitted route and unit ID before any DFU start. A replacement
+   device on the same route is refused. Require exactly two application banks
+   with one active, and choose the other.
    Require known battery percentage of at least 30%, a Good/Full battery level
    and an accepted battery status. Require resumable and forcible `0x00D1`
    capabilities, and `NotStarted` for the selected entity. An unknown staged
@@ -110,8 +114,10 @@ states; they do not exercise hardware or make network requests.
 5. **Start and transfer.** Start with the target entity and image magic. Send
    raw 16-byte packets according to the device's Ready/Ack/Wait replies.
    The transfer state machine rejects unexpected entities, acknowledgements,
-   skipped blocks and rewinds. Wait for unsolicited status events, falling back
-   to a status query when needed. Recovery queries and waits are bounded; a
+   skipped blocks and rewinds. A recovery query may request a retry of the exact
+   packet whose write failed; ordinary replies must still advance. Wait for
+   unsolicited status events, falling back to a status query when needed.
+   Recovery queries and waits are bounded; a
    20-minute transfer deadline is checked between commands.
 6. **Activate only after completion.** After the complete transfer is confirmed,
    send `ApplyDfu(entity, 0x02)`. This command causes a restart and does not echo

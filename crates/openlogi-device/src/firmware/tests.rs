@@ -30,6 +30,10 @@ enum Fault {
     WrongUnit,
     EarlyComplete,
     DropReplyOnce,
+    DropPackets {
+        packet: usize,
+        remaining: usize,
+    },
     WaitForPoll,
 }
 
@@ -37,6 +41,7 @@ enum Fault {
 struct Hardware {
     applied: bool,
     packets: usize,
+    packet_attempts: usize,
     start_count: usize,
     battery: Option<u8>,
     running_version: Option<(u8, u8)>,
@@ -125,7 +130,13 @@ impl Hardware {
                     payload[2..6]
                         .copy_from_slice(&u32::try_from(self.packets).unwrap().to_be_bytes());
                 } else {
-                    payload[1] = if self.fault == Fault::Staged { 5 } else { 1 };
+                    payload[1] = if self.start_count > 0 {
+                        2
+                    } else if self.fault == Fault::Staged {
+                        5
+                    } else {
+                        1
+                    };
                 }
             }
             (4, 1) => {
@@ -135,6 +146,14 @@ impl Hardware {
                 payload[1] = 2;
             }
             (4, 4) => {
+                self.packet_attempts += 1;
+                if let Fault::DropPackets { packet, remaining } = &mut self.fault
+                    && self.packets == *packet
+                    && *remaining > 0
+                {
+                    *remaining -= 1;
+                    return None;
+                }
                 self.packets += 1;
                 self.sent_bytes.extend_from_slice(&request[4..20]);
                 payload[0] = self.target_entity.unwrap_or(1);
@@ -205,8 +224,8 @@ async fn reads_offer_transfers_exact_inactive_payload_and_verifies_activation() 
             build: 19
         })
     );
-    let release = installable_release_on(&shared).await.unwrap().unwrap();
-    let prepared = prepare_update_on(&shared, release, &package())
+    let target = update_target_on(&shared).await.unwrap().unwrap();
+    let prepared = prepare_update_on(&shared, target, &package())
         .await
         .unwrap();
     let mut progress = Vec::new();
@@ -249,10 +268,11 @@ async fn preflight_refuses_low_battery_wrong_model_and_unknown_staged_image_with
             ..Hardware::default()
         },
     ] {
-        let (shared, hardware) = hardware(state).await;
-        let release = latest_release("RBM", 27, 0xb042).unwrap();
+        let (shared, hardware) = hardware(Hardware::default()).await;
+        let target = update_target_on(&shared).await.unwrap().unwrap();
+        *hardware.lock().unwrap() = state;
         assert!(
-            prepare_update_on(&shared, release, &package())
+            prepare_update_on(&shared, target, &package())
                 .await
                 .is_err(),
             "preflight must refuse"
@@ -269,8 +289,8 @@ async fn preflight_accepts_exactly_thirty_percent_charge() {
         ..Hardware::default()
     })
     .await;
-    let release = latest_release("RBM", 27, 0xb042).unwrap();
-    prepare_update_on(&shared, release, &package())
+    let target = update_target_on(&shared).await.unwrap().unwrap();
+    prepare_update_on(&shared, target, &package())
         .await
         .unwrap();
     assert_eq!(
@@ -282,13 +302,13 @@ async fn preflight_accepts_exactly_thirty_percent_charge() {
 
 #[tokio::test]
 async fn early_completion_and_cooperative_stop_never_apply() {
-    let release = latest_release("RBM", 27, 0xb042).unwrap();
     let (shared, state) = hardware(Hardware {
         fault: Fault::EarlyComplete,
         ..Hardware::default()
     })
     .await;
-    let prepared = prepare_update_on(&shared, release, &package())
+    let target = update_target_on(&shared).await.unwrap().unwrap();
+    let prepared = prepare_update_on(&shared, target, &package())
         .await
         .unwrap();
     assert!(matches!(
@@ -298,7 +318,8 @@ async fn early_completion_and_cooperative_stop_never_apply() {
     assert!(!state.lock().unwrap().applied);
 
     let (shared, state) = hardware(Hardware::default()).await;
-    let prepared = prepare_update_on(&shared, release, &package())
+    let target = update_target_on(&shared).await.unwrap().unwrap();
+    let prepared = prepare_update_on(&shared, target, &package())
         .await
         .unwrap();
     let stopped = AtomicBool::new(false);
@@ -324,8 +345,8 @@ async fn missed_wait_broadcast_recovers_by_polling_before_apply() {
         ..Hardware::default()
     })
     .await;
-    let release = installable_release_on(&shared).await.unwrap().unwrap();
-    prepare_update_on(&shared, release, &package())
+    let target = update_target_on(&shared).await.unwrap().unwrap();
+    prepare_update_on(&shared, target, &package())
         .await
         .unwrap()
         .install(|_| {}, || false)
@@ -342,8 +363,8 @@ async fn lost_packet_reply_recovers_from_persisted_position_without_skipping_byt
         ..Hardware::default()
     })
     .await;
-    let release = installable_release_on(&shared).await.unwrap().unwrap();
-    prepare_update_on(&shared, release, &package())
+    let target = update_target_on(&shared).await.unwrap().unwrap();
+    prepare_update_on(&shared, target, &package())
         .await
         .unwrap()
         .install(|_| {}, || false)
@@ -354,6 +375,98 @@ async fn lost_packet_reply_recovers_from_persisted_position_without_skipping_byt
         state.lock().unwrap().sent_bytes,
         package().images[0].blocks[0]
     );
+}
+
+#[tokio::test]
+async fn a_replacement_device_after_admission_never_starts_dfu() {
+    let (original, _) = hardware(Hardware::default()).await;
+    let target = update_target_on(&original).await.unwrap().unwrap();
+    drop(original);
+    let (shared, state) = hardware(Hardware {
+        fault: Fault::WrongUnit,
+        ..Hardware::default()
+    })
+    .await;
+    let result = match prepare_update_on(&shared, target, &package()).await {
+        Ok(prepared) => prepared.install(|_| {}, || false).await,
+        Err(error) => Err(error),
+    };
+    assert_eq!(result.err(), Some(FirmwareUpdateFailure::WrongDevice));
+    let state = state.lock().unwrap();
+    assert_eq!(state.start_count, 0);
+    assert_eq!(state.packet_attempts, 0);
+    assert!(!state.applied);
+}
+
+#[tokio::test]
+async fn the_admitted_device_can_reconnect_on_a_fresh_channel() {
+    let (original, _) = hardware(Hardware::default()).await;
+    let target = update_target_on(&original).await.unwrap().unwrap();
+    drop(original);
+    let (shared, state) = hardware(Hardware::default()).await;
+    let pending = prepare_update_on(&shared, target, &package())
+        .await
+        .unwrap()
+        .install(|_| {}, || false)
+        .await
+        .unwrap();
+    pending.verify_on(&shared).await.unwrap();
+    assert!(state.lock().unwrap().applied);
+}
+
+#[tokio::test(start_paused = true)]
+async fn lost_packet_retries_the_requested_position_without_skipping_bytes() {
+    for packet in [0, 1, 3] {
+        let (shared, state) = hardware(Hardware {
+            fault: Fault::DropPackets {
+                packet,
+                remaining: 1,
+            },
+            ..Hardware::default()
+        })
+        .await;
+        let target = update_target_on(&shared).await.unwrap().unwrap();
+        prepare_update_on(&shared, target, &package())
+            .await
+            .unwrap()
+            .install(|_| {}, || false)
+            .await
+            .unwrap();
+        let state = state.lock().unwrap();
+        assert!(state.applied, "lost packet {packet} must be retried");
+        assert_eq!(state.packet_attempts, 5);
+        assert_eq!(state.sent_bytes, package().images[0].blocks[0]);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_packet_loss_exhausts_recovery_without_activating() {
+    let (original, state) = hardware(Hardware::default()).await;
+    let target = update_target_on(&original).await.unwrap().unwrap();
+    let responder = Arc::clone(&state);
+    let (raw, handle) = ScriptedRawHidChannel::with_failing_writes(
+        move |request| responder.lock().unwrap().respond(request),
+        // Drop the init payload (packet 1) before the responder receives it.
+        // Native failures avoid spending real timeout intervals on each retry.
+        |request| request[2] == 4 && request[3] >> 4 == 4 && request.get(4..8) == Some(b"\x01RBM"),
+    );
+    let shared = SharedChannel::new(scripted_channel(raw).await, original.route().clone());
+    drop(original);
+    let result = prepare_update_on(&shared, target, &package())
+        .await
+        .unwrap()
+        .install(|_| {}, || false)
+        .await;
+    assert!(matches!(result, Err(FirmwareUpdateFailure::Device(_))));
+    let attempts = handle
+        .written_reports()
+        .iter()
+        .filter(|request| request[2] == 4 && request[3] >> 4 == 4)
+        .count();
+    let state = state.lock().unwrap();
+    assert_eq!(attempts, MAX_RECOVERIES + 2);
+    assert_eq!(state.packets, 1);
+    assert!(!state.applied);
 }
 
 #[tokio::test]
@@ -368,8 +481,8 @@ async fn current_release_can_be_reinstalled_into_the_inactive_bank() {
         let status = get_firmware_status_on(&shared).await.unwrap();
         assert_eq!(status.running.to_string(), "27.3.19");
         assert_eq!(status.offer, FirmwareOffer::UpToDate);
-        let release = installable_release_on(&shared).await.unwrap().unwrap();
-        let pending = prepare_update_on(&shared, release, &package())
+        let target = update_target_on(&shared).await.unwrap().unwrap();
+        let pending = prepare_update_on(&shared, target, &package())
             .await
             .unwrap()
             .install(|_| {}, || false)
@@ -389,18 +502,15 @@ async fn current_release_can_be_reinstalled_into_the_inactive_bank() {
 
 #[tokio::test]
 async fn newer_than_catalog_is_not_installable_and_never_downgrades() {
-    let (shared, hardware) = hardware(Hardware {
-        running_version: Some((3, 0x20)),
-        ..Hardware::default()
-    })
-    .await;
+    let (shared, hardware) = hardware(Hardware::default()).await;
+    let target = update_target_on(&shared).await.unwrap().unwrap();
+    hardware.lock().unwrap().running_version = Some((3, 0x20));
     let status = get_firmware_status_on(&shared).await.unwrap();
     assert_eq!(status.running.to_string(), "27.3.20");
     assert_eq!(status.offer, FirmwareOffer::Unavailable);
-    assert_eq!(installable_release_on(&shared).await.unwrap(), None);
-    let release = latest_release("RBM", 27, 0xb042).unwrap();
+    assert_eq!(update_target_on(&shared).await.unwrap(), None);
     assert!(matches!(
-        prepare_update_on(&shared, release, &package()).await,
+        prepare_update_on(&shared, target, &package()).await,
         Err(FirmwareUpdateFailure::WrongDevice)
     ));
     let state = hardware.lock().unwrap();

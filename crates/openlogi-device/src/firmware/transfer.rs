@@ -85,7 +85,11 @@ impl<'a> Transfer<'a> {
                     .ok_or_else(|| protocol("packet acknowledgement before first packet"))?;
                 let next = usize::try_from(next_packet)
                     .map_err(|_| protocol("oversized packet acknowledgement"))?;
-                if next != sent + 1 || next >= self.packets(block) {
+                // A polled status may still request the packet whose native
+                // write failed. Only recovery can resend that exact position;
+                // ordinary replies must advance and older positions stay invalid.
+                let retry = recovering && next == sent;
+                if (!retry && next != sent + 1) || next >= self.packets(block) {
                     return Err(protocol(
                         "non-monotonic packet acknowledgement or missing block transition",
                     ));
@@ -203,6 +207,44 @@ mod tests {
         assert!(matches!(
             transfer.accept(report(DfuStatus::TransferReady { block: 0 }), true),
             Err(FirmwareUpdateFailure::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn recovery_can_retry_only_the_last_attempted_packet() {
+        let image = image();
+        let mut transfer = Transfer::new(&image);
+        transfer
+            .accept(report(DfuStatus::TransferReady { block: 0 }), false)
+            .unwrap();
+        transfer
+            .accept(report(DfuStatus::PacketAck { next_packet: 1 }), false)
+            .unwrap();
+        assert!(matches!(
+            transfer.accept(report(DfuStatus::PacketAck { next_packet: 1 }), false),
+            Err(FirmwareUpdateFailure::Protocol(_))
+        ));
+        for next_packet in [0, 2, 3, u32::MAX] {
+            assert!(matches!(
+                transfer.accept(report(DfuStatus::PacketAck { next_packet }), true),
+                Err(FirmwareUpdateFailure::Protocol(_))
+            ));
+        }
+        assert!(matches!(
+            transfer
+                .accept(report(DfuStatus::PacketAck { next_packet: 1 }), true)
+                .unwrap(),
+            TransferAction::Send(bytes) if bytes == [0x11; DFU_PACKET_LEN]
+        ));
+        assert_eq!(transfer.percent(), 33, "a retry does not advance progress");
+        transfer
+            .accept(report(DfuStatus::TransferReady { block: 1 }), false)
+            .unwrap();
+        assert!(matches!(
+            transfer
+                .accept(report(DfuStatus::TransferComplete), false)
+                .unwrap(),
+            TransferAction::Complete
         ));
     }
 
