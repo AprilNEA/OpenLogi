@@ -44,6 +44,7 @@ fn snapshot(receivers: Vec<ReceiverInfo>) -> AgentSnapshot {
         pairing: None,
         foreground: ForegroundApps::default(),
         lights: Vec::new(),
+        firmware_update: None,
     }
 }
 

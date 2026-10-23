@@ -67,6 +67,7 @@ pub(crate) fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
             recent: vec![editor],
         },
         lights: Vec::new(),
+        firmware_update: None,
     }
 }
 

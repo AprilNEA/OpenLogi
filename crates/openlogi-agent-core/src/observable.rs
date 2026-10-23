@@ -79,6 +79,7 @@ impl ObservableState {
                 pairing: None,
                 foreground: ForegroundApps::default(),
                 lights: Vec::new(),
+                firmware_update: None,
             },
         });
         Self {
@@ -175,6 +176,13 @@ impl ObservableState {
             snapshot.standalone = standalone.to_vec();
             snapshot.status.hid_open_failures = hid_open_failures;
             true
+        });
+    }
+
+    /// Publish firmware progress as durable state for reconnecting clients.
+    pub fn set_firmware_update(&self, update: openlogi_core::hid::FirmwareUpdate) {
+        self.update(|snapshot| {
+            crate::firmware::record_progress(&mut snapshot.firmware_update, update)
         });
     }
 

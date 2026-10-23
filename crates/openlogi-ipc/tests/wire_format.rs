@@ -111,7 +111,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 41);
+    assert_eq!(PROTOCOL_VERSION, 42);
 }
 
 #[test]
@@ -593,15 +593,19 @@ fn agent_snapshot() {
         foreground: ForegroundApps::default(),
         // Pinned populated in `observed_light` below.
         lights: Vec::new(),
+        firmware_update: None,
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000000000");
+    assert_wire(
+        &observed,
+        "03010001010705302e362e36010000000000000000000000",
+    );
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:
@@ -1205,4 +1209,104 @@ fn disable_keys_requests_are_appended() {
         },
         "2d000846303044434146450101",
     );
+}
+
+#[test]
+fn firmware_updates_and_requests() {
+    use openlogi_core::hid::{
+        FirmwareOffer, FirmwareStatus, FirmwareUpdate, FirmwareUpdateEvent, FirmwareUpdateFailure,
+        FirmwareUpdatePhase, FirmwareUpdateRefusal, FirmwareVersion,
+    };
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "R".into(),
+        slot: 1,
+    };
+    let version = FirmwareVersion {
+        number: 27,
+        revision: 3,
+        build: 19,
+    };
+    assert_wire(&HidppOperation::ReadFirmware, "1c");
+    assert_wire(&HidppOperation::WriteFirmware, "1d");
+    assert_wire(&version, "1b0313");
+    assert_wire(&FirmwareOffer::Unavailable, "00");
+    assert_wire(&FirmwareOffer::UpToDate, "01");
+    assert_wire(&FirmwareOffer::Available(version), "021b0313");
+    assert_wire(
+        &FirmwareStatus {
+            running: version,
+            offer: FirmwareOffer::UpToDate,
+        },
+        "1b031301",
+    );
+    for (phase, golden) in [
+        (FirmwareUpdatePhase::Downloading, "00"),
+        (FirmwareUpdatePhase::Preparing, "01"),
+        (FirmwareUpdatePhase::Transferring { percent: 75 }, "024b"),
+        (FirmwareUpdatePhase::Restarting, "03"),
+        (FirmwareUpdatePhase::Succeeded, "04"),
+        (
+            FirmwareUpdatePhase::Failed(FirmwareUpdateFailure::ImageRejected),
+            "0501",
+        ),
+    ] {
+        assert_wire(&phase, golden);
+    }
+    for (failure, golden) in [
+        (FirmwareUpdateFailure::Download("x".into()), "000178"),
+        (FirmwareUpdateFailure::ImageRejected, "01"),
+        (FirmwareUpdateFailure::WrongDevice, "02"),
+        (FirmwareUpdateFailure::BatteryLow { percent: 20 }, "0314"),
+        (FirmwareUpdateFailure::Unsupported, "04"),
+        (FirmwareUpdateFailure::DeviceRefused { code: 0x80 }, "0580"),
+        (FirmwareUpdateFailure::Protocol("x".into()), "060178"),
+        (
+            FirmwareUpdateFailure::Device(WriteError::DeviceNotFound),
+            "0701",
+        ),
+        (FirmwareUpdateFailure::NotActivated, "08"),
+    ] {
+        assert_wire(&failure, golden);
+    }
+    assert_wire(&FirmwareUpdateRefusal::Busy, "00");
+    assert_wire(&FirmwareUpdateRefusal::NoUpdate, "01");
+    assert_wire(&FirmwareUpdateRefusal::DeviceNotFound, "02");
+    assert_wire(
+        &FirmwareUpdate {
+            source: None,
+            events: Vec::new(),
+            id: 7,
+            route: route.clone(),
+            target: version,
+            phase: FirmwareUpdatePhase::Preparing,
+        },
+        "000152011b031301070000",
+    );
+    let entry = FirmwareUpdateEvent {
+        timestamp_millis: 42,
+        phase: FirmwareUpdatePhase::Downloading,
+    };
+    assert_wire(&entry, "2a00");
+    assert_wire(
+        &FirmwareUpdate {
+            source: Some(openlogi_core::hid::FirmwareUpdateSource {
+                device_name: "m".into(),
+                firmware_line: "f".into(),
+                package_url: "u".into(),
+            }),
+            events: vec![entry],
+            id: 7,
+            route: route.clone(),
+            target: version,
+            phase: FirmwareUpdatePhase::Preparing,
+        },
+        "000152011b03130107012a0001016d01660175",
+    );
+    assert_wire(
+        &AgentRequest::FirmwareStatus {
+            route: route.clone(),
+        },
+        "2f00015201",
+    );
+    assert_wire(&AgentRequest::StartFirmwareUpdate { route }, "3000015201");
 }

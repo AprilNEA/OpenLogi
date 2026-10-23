@@ -24,6 +24,7 @@ struct ReceiverAccessInner {
 pub struct ReceiverRequestState {
     pairing: usize,
     host_transition: usize,
+    firmware_update: usize,
 }
 
 /// Operation requiring sole ownership of a receiver transport.
@@ -33,6 +34,8 @@ pub enum ExclusiveAccessReason {
     Pairing,
     /// Coordinated movement of linked devices to another host.
     HostTransition,
+    /// An official application firmware transfer and activation.
+    FirmwareUpdate,
 }
 
 impl ExclusiveAccessReason {
@@ -40,6 +43,7 @@ impl ExclusiveAccessReason {
         match self {
             Self::Pairing => &mut requests.pairing,
             Self::HostTransition => &mut requests.host_transition,
+            Self::FirmwareUpdate => &mut requests.firmware_update,
         }
     }
 }
@@ -48,7 +52,7 @@ impl ReceiverRequestState {
     /// Whether any exclusive operation is queued or active.
     #[must_use]
     pub fn any(self) -> bool {
-        self.pairing != 0 || self.host_transition != 0
+        self.pairing != 0 || self.host_transition != 0 || self.firmware_update != 0
     }
 
     /// Whether an operation for `reason` is queued or active.
@@ -57,6 +61,7 @@ impl ReceiverRequestState {
         match reason {
             ExclusiveAccessReason::Pairing => self.pairing != 0,
             ExclusiveAccessReason::HostTransition => self.host_transition != 0,
+            ExclusiveAccessReason::FirmwareUpdate => self.firmware_update != 0,
         }
     }
 }
