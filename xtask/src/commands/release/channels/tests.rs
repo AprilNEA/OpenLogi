@@ -502,7 +502,8 @@ type Break = fn(&Path);
 #[test]
 fn a_broken_record_stops_the_composition() {
     let broken: [(&str, Break); 5] = [
-        ("No such file", |dir| {
+        // fs_err's own words; the OS's differ between Unix and Windows.
+        ("failed to open file", |dir| {
             fs_err::remove_file(dir.join("appcast-x86_64.xml")).unwrap();
         }),
         ("not v0.8.19-beta.1's record", |dir| {
@@ -631,9 +632,14 @@ fn the_current_directory_is_not_an_output_directory() {
             "{spelled}: {err:#}"
         );
     }
+    // Unix resolves `..` on disk, so `missing/..` fails where `missing` is
+    // absent. Win32 drops `missing\..` from the path first, which leaves the
+    // current directory. Either way it is refused.
     let err = destination(Path::new("missing/.."), cwd.path()).unwrap_err();
-    assert!(
-        err.to_string().contains("does not name a directory"),
-        "{err:#}"
-    );
+    let refusal = if cfg!(windows) {
+        "is the current directory"
+    } else {
+        "does not name a directory"
+    };
+    assert!(err.to_string().contains(refusal), "{err:#}");
 }
