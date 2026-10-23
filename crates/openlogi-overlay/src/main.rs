@@ -112,7 +112,7 @@ fn main() -> Result<()> {
                     invocation,
                     &mut invocations,
                     &mut motion,
-                    platform::read_reduced_motion,
+                    async { platform::read_reduced_motion() },
                 )
                 .await
                 else {

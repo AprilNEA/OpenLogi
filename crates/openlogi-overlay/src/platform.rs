@@ -212,7 +212,7 @@ impl MotionPreference {
 /// full motion is requested, and `None` when the preference could not be read.
 ///
 /// On Linux this may block the calling thread for up to [`MOTION_QUERY_TIMEOUT`];
-/// call it from a background thread (see [`apply_motion_preference`]).
+/// call it from a background thread (see [`settle_latest_invocation`]).
 #[must_use]
 #[cfg_attr(
     target_os = "macos",
@@ -244,40 +244,51 @@ pub fn read_reduced_motion() -> Option<bool> {
     }
 }
 
-/// Run `read` off the UI thread, merge it into `preference`, and apply GPUI's
-/// `reduce_motion` before the ring's entrance animation starts.
-pub async fn apply_motion_preference(
+fn apply_fresh_motion_preference(
     cx: &mut AsyncApp,
     preference: &mut MotionPreference,
-    read: impl FnOnce() -> Option<bool> + Send + 'static,
+    fresh: Option<bool>,
 ) -> bool {
-    let fresh = cx.background_spawn(async move { read() }).await;
     let reduced = preference.resolve(fresh);
     cx.update(|cx| cx.set_reduce_motion(reduced));
     reduced
 }
 
-/// Apply the OS motion preference, then collapse any invocations that queued
-/// during that bounded read.
+/// Race a background motion read against invocation observations until the
+/// read finishes.
 ///
-/// [`apply_motion_preference`] may take up to 200 ms on Linux while the UI
-/// thread would otherwise be the only reader of dismissals and replacements.
-/// Draining the channel after the read lets the last queued message win: a
-/// dismissal that arrived during the read opens nothing; a newer invocation
-/// supersedes the one that started the read.
+/// While [`read_reduced_motion`] runs (up to 200 ms on Linux) the overlay keeps
+/// receiving on `invocations`. A dismissal (`None`) returns immediately without
+/// waiting for the read. A replacement `Some(B)` supersedes the invocation that
+/// started the settle but keeps the same in-flight read. When the read completes,
+/// the latest observation wins (including anything already queued), GPUI
+/// `reduce_motion` is applied from that read, then the result is returned. If
+/// `invocations` closes while waiting, returns `None`.
 pub(crate) async fn settle_latest_invocation<T>(
     cx: &mut AsyncApp,
     first: T,
     invocations: &mut tokio::sync::mpsc::UnboundedReceiver<Option<T>>,
     preference: &mut MotionPreference,
-    read: impl FnOnce() -> Option<bool> + Send + 'static,
+    read: impl std::future::Future<Output = Option<bool>> + Send + 'static,
 ) -> Option<T> {
-    apply_motion_preference(cx, preference, read).await;
     let mut latest = Some(first);
-    while let Ok(message) = invocations.try_recv() {
-        latest = message;
+    let mut read_task = std::pin::pin!(cx.background_spawn(read));
+    loop {
+        tokio::select! {
+            biased;
+            message = invocations.recv() => match message {
+                None | Some(None) => return None,
+                Some(Some(value)) => latest = Some(value),
+            },
+            fresh = read_task.as_mut() => {
+                apply_fresh_motion_preference(cx, preference, fresh);
+                while let Ok(message) = invocations.try_recv() {
+                    latest = message;
+                }
+                return latest;
+            }
+        }
     }
-    latest
 }
 
 #[cfg(target_os = "windows")]
@@ -363,7 +374,7 @@ mod reduced_motion_tests {
     use super::parse_gsettings_bool;
     #[cfg(unix)]
     use super::{MOTION_QUERY_TIMEOUT, read_bool_command};
-    use super::{MotionPreference, apply_motion_preference, settle_latest_invocation};
+    use super::{MotionPreference, settle_latest_invocation};
 
     #[test]
     fn motion_preference_unknown_defaults_to_motion_on() {
@@ -387,34 +398,36 @@ mod reduced_motion_tests {
         assert!(preference.resolve(None));
     }
 
+    /// Open one ring with nothing else queued and report the GPUI flag it got.
+    async fn open_with_read(
+        cx: &mut gpui::AsyncApp,
+        preference: &mut MotionPreference,
+        read: Option<bool>,
+    ) -> bool {
+        let (_sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Option<u64>>();
+        let opened =
+            settle_latest_invocation(cx, 1, &mut receiver, preference, async move { read }).await;
+        assert_eq!(opened, Some(1));
+        cx.update(|cx| cx.reduce_motion())
+    }
+
     #[gpui::test]
-    async fn apply_motion_preference_tracks_changes_between_opens(cx: &mut TestAppContext) {
+    async fn motion_turned_off_between_opens_applies_to_the_next_ring(cx: &mut TestAppContext) {
         cx.spawn(|mut async_cx| async move {
             let mut preference = MotionPreference::default();
-            let reduced =
-                apply_motion_preference(&mut async_cx, &mut preference, || Some(false)).await;
-            assert!(!reduced);
-            async_cx.update(|cx| assert!(!cx.reduce_motion()));
-            let reduced =
-                apply_motion_preference(&mut async_cx, &mut preference, || Some(true)).await;
-            assert!(reduced);
-            async_cx.update(|cx| assert!(cx.reduce_motion()));
+            assert!(!open_with_read(&mut async_cx, &mut preference, Some(false)).await);
+            assert!(open_with_read(&mut async_cx, &mut preference, Some(true)).await);
         })
         .await;
     }
 
     #[gpui::test]
-    async fn apply_motion_preference_unknown_then_reduced(cx: &mut TestAppContext) {
+    async fn unknown_motion_on_first_open_falls_back_to_motion_on(cx: &mut TestAppContext) {
         cx.spawn(|mut async_cx| async move {
             let mut preference = MotionPreference::default();
-            let reduced = apply_motion_preference(&mut async_cx, &mut preference, || None).await;
-            assert!(!reduced);
-            async_cx.update(|cx| assert!(!cx.reduce_motion()));
+            assert!(!open_with_read(&mut async_cx, &mut preference, None).await);
             assert!(!preference.resolve(None));
-            let reduced =
-                apply_motion_preference(&mut async_cx, &mut preference, || Some(true)).await;
-            assert!(reduced);
-            async_cx.update(|cx| assert!(cx.reduce_motion()));
+            assert!(open_with_read(&mut async_cx, &mut preference, Some(true)).await);
         })
         .await;
     }
@@ -449,64 +462,111 @@ mod reduced_motion_tests {
     }
 
     #[gpui::test]
-    async fn settle_dismissal_during_read_returns_none_and_applies_motion(cx: &mut TestAppContext) {
-        cx.spawn(|mut async_cx| async move {
-            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-            let during_read = sender.clone();
+    fn settle_dismissal_while_read_pending_returns_before_read_completes(cx: &mut TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (read_tx, read_rx) = tokio::sync::oneshot::channel::<Option<bool>>();
+        let settled = Rc::new(Cell::new(None::<Option<u64>>));
+        let settled_handle = settled.clone();
+        let task = cx.spawn(|mut async_cx| async move {
             let mut preference = MotionPreference::default();
-            let settled = settle_latest_invocation(
+            let value = settle_latest_invocation(
                 &mut async_cx,
                 1_u64,
                 &mut receiver,
                 &mut preference,
-                move || {
-                    let _ = during_read.send(None);
-                    Some(true)
-                },
+                async move { read_rx.await.unwrap_or(None) },
             )
             .await;
-            assert_eq!(settled, None);
+            settled_handle.set(Some(value));
+        });
+        cx.run_until_parked();
+        assert!(settled.get().is_none());
+        let _ = sender.send(None);
+        cx.run_until_parked();
+        assert_eq!(settled.get(), Some(None));
+        let _ = read_tx.send(Some(true));
+        cx.run_until_parked();
+        assert_eq!(settled.get(), Some(None));
+        drop(task);
+    }
+
+    #[gpui::test]
+    fn settle_replacement_while_read_pending_opens_latest_after_read(cx: &mut TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (read_tx, read_rx) = tokio::sync::oneshot::channel::<Option<bool>>();
+        let settled = Rc::new(Cell::new(None::<Option<u64>>));
+        let settled_handle = settled.clone();
+        let task = cx.spawn(|mut async_cx| async move {
+            let mut preference = MotionPreference::default();
+            let value = settle_latest_invocation(
+                &mut async_cx,
+                1_u64,
+                &mut receiver,
+                &mut preference,
+                async move { read_rx.await.unwrap_or(None) },
+            )
+            .await;
+            settled_handle.set(Some(value));
             async_cx.update(|cx| assert!(cx.reduce_motion()));
-        })
-        .await;
+        });
+        cx.run_until_parked();
+        assert!(settled.get().is_none());
+        let _ = sender.send(Some(2_u64));
+        cx.run_until_parked();
+        assert!(settled.get().is_none());
+        let _ = read_tx.send(Some(true));
+        cx.run_until_parked();
+        assert_eq!(settled.get(), Some(Some(2)));
+        drop(task);
     }
 
     #[gpui::test]
-    async fn settle_replacement_during_read_returns_latest(cx: &mut TestAppContext) {
-        cx.spawn(|mut async_cx| async move {
-            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-            let during_read = sender.clone();
+    fn settle_invocation_channel_closed_while_read_pending_returns_none(cx: &mut TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_read_tx, read_rx) = tokio::sync::oneshot::channel::<Option<bool>>();
+        let settled = Rc::new(Cell::new(None::<Option<u64>>));
+        let settled_handle = settled.clone();
+        let task = cx.spawn(|mut async_cx| async move {
             let mut preference = MotionPreference::default();
-            let settled = settle_latest_invocation(
+            let value = settle_latest_invocation(
                 &mut async_cx,
                 1_u64,
                 &mut receiver,
                 &mut preference,
-                move || {
-                    let _ = during_read.send(Some(2_u64));
-                    Some(false)
-                },
+                async move { read_rx.await.unwrap_or(None) },
             )
             .await;
-            assert_eq!(settled, Some(2));
-        })
-        .await;
+            settled_handle.set(Some(value));
+        });
+        cx.run_until_parked();
+        drop(sender);
+        cx.run_until_parked();
+        assert_eq!(settled.get(), Some(None));
+        drop(task);
     }
 
     #[gpui::test]
-    async fn settle_replacement_then_dismissal_returns_none(cx: &mut TestAppContext) {
+    async fn settle_replacement_then_dismissal_during_read_returns_none(cx: &mut TestAppContext) {
         cx.spawn(|mut async_cx| async move {
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-            let during_read = sender.clone();
             let mut preference = MotionPreference::default();
             let settled = settle_latest_invocation(
                 &mut async_cx,
                 1_u64,
                 &mut receiver,
                 &mut preference,
-                move || {
-                    let _ = during_read.send(Some(2_u64));
-                    let _ = during_read.send(None);
+                async move {
+                    let _ = sender.send(Some(2_u64));
+                    let _ = sender.send(None);
                     Some(false)
                 },
             )
@@ -517,24 +577,23 @@ mod reduced_motion_tests {
     }
 
     #[gpui::test]
-    async fn settle_dismissal_then_replacement_returns_latest(cx: &mut TestAppContext) {
+    async fn settle_dismissal_then_replacement_during_read_returns_none(cx: &mut TestAppContext) {
         cx.spawn(|mut async_cx| async move {
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-            let during_read = sender.clone();
             let mut preference = MotionPreference::default();
             let settled = settle_latest_invocation(
                 &mut async_cx,
                 1_u64,
                 &mut receiver,
                 &mut preference,
-                move || {
-                    let _ = during_read.send(None);
-                    let _ = during_read.send(Some(3_u64));
+                async move {
+                    let _ = sender.send(None);
+                    let _ = sender.send(Some(3_u64));
                     Some(false)
                 },
             )
             .await;
-            assert_eq!(settled, Some(3));
+            assert_eq!(settled, None);
         })
         .await;
     }
@@ -549,7 +608,7 @@ mod reduced_motion_tests {
                 7_u64,
                 &mut receiver,
                 &mut preference,
-                || Some(true),
+                async { Some(true) },
             )
             .await;
             assert_eq!(settled, Some(7));

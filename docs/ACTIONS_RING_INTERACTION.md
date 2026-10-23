@@ -39,8 +39,8 @@ overlay only reports `Hover`, `Activate` and `Cancel`.
   the entrance animation starts, and uses the last known value when a read
   fails or times out (motion on when none is known yet), so `with_animation`
   renders one static frame when motion is reduced. While that read runs the
-  previous ring is already closed, and only the newest queued request opens (a
-  dismissal that arrived during the read opens nothing).
+  overlay keeps reading requests, a dismissal cancels the pending open at once,
+  and a newer request replaces it; the previous ring is already closed.
 
 The close animation is not implemented: the overlay hides the window as soon as
 the agent dismisses the session, so animating the exit would mean delaying
@@ -179,9 +179,9 @@ is, and which actions carry a submenu.
   and applies it to GPUI `reduce_motion` before the entrance animation starts.
   A failed or timed-out read uses the last known value, or motion on when none
   is known yet, so entrance animations collapse to a single static frame when
-  reduced motion is active. While the read runs the previous ring is already
-  closed, and only the newest queued request opens (a dismissal that arrived
-  during the read opens nothing).
+  reduced motion is active. While the read runs the overlay keeps reading
+  requests, a dismissal cancels the pending open at once, and a newer request
+  replaces it; the previous ring is already closed.
 - **Submenu ownership.** The overlay holds the expanded state because it is
   presentation; the agent remains the only owner of executable actions. If a
   submenu should survive a snapshot refresh, the expanded slot has to move into
