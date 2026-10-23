@@ -86,12 +86,8 @@ impl AppState {
         });
     }
 
-    pub(crate) fn retry_disable_keys_save(cx: &mut App, key: DeviceKey) {
-        Self::update(cx, |state, cx| {
-            if state.retry_disable_keys_save_inner(&key) {
-                cx.emit(StateEvent::DisableKeysChanged(key));
-            }
-        });
+    pub(crate) fn retry_disable_keys_save(cx: &mut App, key: &DeviceKey) {
+        Self::apply(cx, |state| state.retry_disable_keys_save_inner(key));
     }
 
     pub(crate) fn retry_disable_keys_reload(cx: &mut App, key: DeviceKey) {
@@ -239,14 +235,15 @@ impl AppState {
         events
     }
 
-    fn retry_disable_keys_save_inner(&mut self, key: &DeviceKey) -> bool {
+    fn retry_disable_keys_save_inner(&mut self, key: &DeviceKey) -> StateEvents {
         let Some(DisableKeysPersistenceStatus::AppliedNotSaved {
             recovery,
             confirmed,
         }) = self.disable_keys_status(key).cloned()
         else {
-            return false;
+            return StateEvents::none();
         };
+        let events = StateEvents::from(StateEvent::DisableKeysChanged(key.clone()));
         if let Err(error) = self.config.refresh_feature() {
             self.devices
                 .sessions
@@ -254,8 +251,16 @@ impl AppState {
                 .or_default()
                 .disable_keys
                 .error = Some(error);
-            return true;
+            return events;
         }
+        // Refresh adopts the whole file, including unrelated external edits.
+        // Rebuild projections even if saving our confirmed choice fails again:
+        // that failure rolls back to the newly loaded revision, not the old one.
+        self.restore_config_projections();
+        let events = events
+            .and(StateEvent::SettingsChanged)
+            .and(self.for_current_device(StateEvent::BindingsChanged))
+            .and(self.for_current_device(StateEvent::DpiChanged));
         let known = confirmed_known_set(confirmed);
         self.config
             .edit(|config| config.set_disabled_keys(recovery.key.as_str(), known));
@@ -266,7 +271,7 @@ impl AppState {
                 .or_default()
                 .disable_keys
                 .error = Some(error);
-            return true;
+            return events;
         }
 
         let next = self.allocate_disable_keys_context(key);
@@ -278,7 +283,7 @@ impl AppState {
             state.disable_keys.persistence =
                 DisableKeysPersistenceStatus::SavedNotReloadedDetached(recovery);
         }
-        true
+        events
     }
 
     fn retry_disable_keys_reload_inner(&mut self, key: &DeviceKey) -> bool {
@@ -995,6 +1000,13 @@ mod tests {
         let (mut state, mut receiver, key) =
             test_state(ConfigPersistence::UserFile(file), &[inventory]);
         let context = begin(&mut state, &mut receiver);
+        let trigger = "f1".parse().expect("F-key trigger");
+        let mut external_config = Config::load_from_path(&path).expect("external config");
+        external_config.keyboard.bindings.insert(
+            trigger,
+            openlogi_core::binding::Action::TypeText("external binding".into()),
+        );
+        external_config.save_to_path(&path).expect("external save");
         let mut external = std::fs::read_to_string(&path).expect("read config");
         external.push_str("\n# external edit retained\n");
         std::fs::write(&path, external).expect("external edit");
@@ -1017,7 +1029,26 @@ mod tests {
         ));
         assert!(receiver.try_recv().is_err());
 
-        assert!(state.retry_disable_keys_save_inner(&key));
+        assert_eq!(
+            state.retry_disable_keys_save_inner(&key),
+            [
+                StateEvent::DisableKeysChanged(key.clone()),
+                StateEvent::SettingsChanged,
+                StateEvent::BindingsChanged(key.clone()),
+                StateEvent::DpiChanged(key.clone()),
+            ]
+        );
+        assert_eq!(
+            state.keyboard_bindings(),
+            &external_config.keyboard.bindings
+        );
+        assert_eq!(
+            state.keyboard_bindings(),
+            &Config::load_from_path(&path)
+                .expect("saved config")
+                .keyboard
+                .bindings
+        );
         take_disable_keys_reload(&mut receiver);
         assert!(receiver.try_recv().is_err());
         assert!(
@@ -1029,6 +1060,209 @@ mod tests {
             state.config.disabled_keys(key.as_str()),
             Some(&BTreeSet::from([DisableKey::CapsLock]))
         );
+    }
+
+    struct SaveRetryFixture {
+        directory: tempfile::TempDir,
+        state: AppState,
+        receiver: tokio::sync::mpsc::UnboundedReceiver<Command>,
+        key: DeviceKey,
+        external: Config,
+    }
+
+    impl SaveRetryFixture {
+        fn new(inventories: &[DeviceInventory]) -> Self {
+            let directory = tempfile::tempdir().expect("temp config");
+            let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+            Config::default().save_to_path(&path).expect("seed config");
+            let (_, file) = ConfigFile::load_from_path(&path).expect("tracked config");
+            let (mut state, mut receiver, key) =
+                test_state(ConfigPersistence::UserFile(file), inventories);
+            let context = begin(&mut state, &mut receiver);
+            // Exercise recovery for a device other than the one now on screen.
+            let _ = state.select_device(inventories.len() - 1);
+            while receiver.try_recv().is_ok() {}
+            let mut external = Config::load_from_path(&path).expect("external config");
+            external.keyboard.bindings.insert(
+                "f1".parse().expect("F-key trigger"),
+                openlogi_core::binding::Action::Paste,
+            );
+            external.app_settings.smooth_scroll = true;
+            let current = state
+                .current_record()
+                .expect("selected device")
+                .device_key();
+            external.set_dpi(current.as_str(), super::super::Dpi::new(2400));
+            external.save_to_path(&path).expect("external save");
+            let _ = state.apply_disable_keys_write_result(
+                context,
+                Ok(DisableKeysState {
+                    supported: DisableKeysMask::CAPS_LOCK,
+                    disabled: DisableKeysMask::CAPS_LOCK,
+                }),
+            );
+            assert!(matches!(
+                state.disable_keys_status(&key),
+                Some(DisableKeysPersistenceStatus::AppliedNotSaved { .. })
+            ));
+            assert!(receiver.try_recv().is_err());
+            Self {
+                directory,
+                state,
+                receiver,
+                key,
+                external,
+            }
+        }
+
+        fn path(&self) -> std::path::PathBuf {
+            self.directory
+                .path()
+                .join(openlogi_core::paths::CONFIG_FILE)
+        }
+    }
+
+    #[test]
+    fn save_retry_failed_refresh_keeps_projections_and_recovery() {
+        let mut fixture = SaveRetryFixture::new(&[keyboard_inventory(0xb35b, [1, 2, 3, 4])]);
+        let previous = fixture.state.keyboard_bindings().clone();
+        std::fs::write(fixture.path(), "[invalid TOML").expect("external invalid edit");
+        assert_eq!(
+            fixture.state.retry_disable_keys_save_inner(&fixture.key),
+            [StateEvent::DisableKeysChanged(fixture.key.clone())]
+        );
+        assert_eq!(fixture.state.keyboard_bindings(), &previous);
+        assert!(!fixture.state.app_settings().smooth_scroll);
+        assert!(fixture.state.disable_keys_error(&fixture.key).is_some());
+        assert!(matches!(
+            fixture.state.disable_keys_status(&fixture.key),
+            Some(DisableKeysPersistenceStatus::AppliedNotSaved { .. })
+        ));
+        assert!(fixture.receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn save_retry_locked_writer_keeps_refreshed_projections_and_can_retry() {
+        let mut fixture = SaveRetryFixture::new(&[keyboard_inventory(0xb35b, [1, 2, 3, 4])]);
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(fixture.path().with_added_extension("lock"))
+            .expect("existing config lock");
+        lock.try_lock().expect("hold competing writer lock");
+        let events = fixture.state.retry_disable_keys_save_inner(&fixture.key);
+        assert_eq!(
+            events,
+            [
+                StateEvent::DisableKeysChanged(fixture.key.clone()),
+                StateEvent::SettingsChanged,
+                StateEvent::BindingsChanged(fixture.key.clone()),
+                StateEvent::DpiChanged(fixture.key.clone()),
+            ]
+        );
+        assert_eq!(
+            fixture.state.keyboard_bindings(),
+            &fixture.external.keyboard.bindings
+        );
+        assert!(fixture.state.app_settings().smooth_scroll);
+        assert_eq!(fixture.state.dpi(), super::super::Dpi::new(2400));
+        assert_eq!(
+            fixture.state.config.disabled_keys(fixture.key.as_str()),
+            None
+        );
+        assert!(fixture.state.disable_keys_error(&fixture.key).is_some());
+        assert!(matches!(
+            fixture.state.disable_keys_status(&fixture.key),
+            Some(DisableKeysPersistenceStatus::AppliedNotSaved { .. })
+        ));
+        assert!(fixture.receiver.try_recv().is_err());
+        drop(lock);
+        assert_eq!(
+            fixture.state.retry_disable_keys_save_inner(&fixture.key),
+            events
+        );
+        take_disable_keys_reload(&mut fixture.receiver);
+        assert!(fixture.receiver.try_recv().is_err());
+        assert_eq!(
+            Config::load_from_path(&fixture.path())
+                .expect("saved config")
+                .disabled_keys(fixture.key.as_str()),
+            Some(&BTreeSet::from([DisableKey::CapsLock]))
+        );
+    }
+
+    #[test]
+    fn save_retry_without_recovery_is_a_noop() {
+        let (mut state, mut receiver, key) = test_state(
+            ConfigPersistence::MemoryOnly,
+            &[keyboard_inventory(0xb35b, [1, 2, 3, 4])],
+        );
+        assert!(state.retry_disable_keys_save_inner(&key).is_empty());
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn save_retry_action_delivers_projection_events_for_current_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture = SaveRetryFixture::new(&[
+            keyboard_inventory(0xb35b, [1, 2, 3, 4]),
+            keyboard_inventory(0xb35c, [5, 6, 7, 8]),
+        ]);
+        let SaveRetryFixture {
+            directory: _directory,
+            state,
+            mut receiver,
+            key,
+            external,
+        } = fixture;
+        let current = state
+            .current_record()
+            .expect("selected device")
+            .device_key();
+        assert_ne!(current, key);
+        let observer = cx.update(|cx| {
+            let state = cx.new(|_| state);
+            AppState::set_global(state.clone(), cx);
+            let observer = cx.new(|cx: &mut gpui::Context<Vec<StateEvent>>| {
+                cx.subscribe(&state, |events, source, event: &StateEvent, cx| {
+                    // Subscribers must see the refreshed values at delivery time.
+                    assert_eq!(
+                        source.read(cx).keyboard_bindings(),
+                        &source.read(cx).config.keyboard.bindings
+                    );
+                    events.push(event.clone());
+                })
+                .detach();
+                Vec::new()
+            });
+            AppState::retry_disable_keys_save(cx, &key);
+            observer
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                observer.read(cx),
+                &vec![
+                    StateEvent::DisableKeysChanged(key.clone()),
+                    StateEvent::SettingsChanged,
+                    StateEvent::BindingsChanged(current.clone()),
+                    StateEvent::DpiChanged(current.clone()),
+                ]
+            );
+            let state = AppState::try_read(cx).expect("state");
+            assert_eq!(state.keyboard_bindings(), &external.keyboard.bindings);
+            assert_eq!(
+                state
+                    .current_record()
+                    .expect("selected device")
+                    .device_key(),
+                current
+            );
+            assert_eq!(state.dpi(), super::super::Dpi::new(2400));
+        });
+        assert_eq!(take_disable_keys_reload(&mut receiver).key, key);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]
@@ -1150,7 +1384,15 @@ mod tests {
         ));
         drop(receiver);
 
-        assert!(state.retry_disable_keys_save_inner(&key));
+        assert_eq!(
+            state.retry_disable_keys_save_inner(&key),
+            [
+                StateEvent::DisableKeysChanged(key.clone()),
+                StateEvent::SettingsChanged,
+                StateEvent::BindingsChanged(key.clone()),
+                StateEvent::DpiChanged(key.clone()),
+            ]
+        );
         assert!(matches!(
             state.disable_keys_status(&key),
             Some(DisableKeysPersistenceStatus::SavedNotReloaded(_))

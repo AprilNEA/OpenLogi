@@ -80,7 +80,7 @@ fn recovery_content(
                         .label(tr!("keyboard.save_retry"))
                         .on_click({
                             let key = key.clone();
-                            move |_, _, cx| AppState::retry_disable_keys_save(cx, key.clone())
+                            move |_, _, cx| AppState::retry_disable_keys_save(cx, &key)
                         }),
                 )
                 .into_any_element(),

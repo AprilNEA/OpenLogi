@@ -241,7 +241,9 @@ the app discards its old value, reads again, and prevents further edits until
 that read succeeds. **Retry** retries an exhausted read. An unconfirmed request
 is never saved as the device's setting. **Save Retry** and **Reload Retry**
 recover their respective persistence steps without repeating the hardware
-write.
+write. Save Retry rereads the configuration to preserve external edits and
+refreshes the app's settings and binding displays from that revision, even if
+the subsequent save must be retried again.
 
 The agent reapplies a managed device's configured policy on initial discovery,
 reconnect, and wake, with bounded delayed confirmation attempts. If an
