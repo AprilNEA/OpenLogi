@@ -11,28 +11,36 @@ use thiserror::Error;
 
 use super::error::WriteError;
 use super::route::DeviceRoute;
+use crate::device::BatteryLevel;
 
-/// Whether a reported charge percentage meets the firmware installation minimum.
-/// Other battery health and live-device checks remain part of device preflight.
+/// Whether a battery reading permits a firmware installation.
+///
+/// The GUI's confirmation and the device preflight both classify through
+/// [`Self::from_reading`], so a device the dialog lets through is not refused
+/// for its charge after the download. Battery status and live-device checks
+/// remain part of device preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirmwareBatteryCharge {
-    /// A valid percentage meets the minimum.
+    /// A valid percentage meets the minimum and the device reports a
+    /// comfortable level.
     Sufficient,
-    /// A valid percentage is below the minimum.
+    /// A valid percentage is below the minimum, or the device itself reports
+    /// a low or critical level.
     Low,
-    /// No valid percentage is available yet.
+    /// No valid percentage or level is available yet.
     Unknown,
 }
 
 impl FirmwareBatteryCharge {
     /// Classifies a charge reading using the shared installation policy.
     #[must_use]
-    pub fn from_percentage(percentage: Option<u8>) -> Self {
-        match percentage {
-            Some(percent) if percent > 100 => Self::Unknown,
-            Some(percent) if percent < Self::minimum_percent() => Self::Low,
-            Some(_) => Self::Sufficient,
-            None => Self::Unknown,
+    pub fn from_reading(percentage: Option<u8>, level: BatteryLevel) -> Self {
+        match (percentage, level) {
+            (None, _) | (_, BatteryLevel::Unknown) => Self::Unknown,
+            (Some(percent), _) if percent > 100 => Self::Unknown,
+            (Some(percent), _) if percent < Self::minimum_percent() => Self::Low,
+            (Some(_), BatteryLevel::Critical | BatteryLevel::Low) => Self::Low,
+            (Some(_), BatteryLevel::Good | BatteryLevel::Full) => Self::Sufficient,
         }
     }
 
@@ -277,18 +285,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn firmware_charge_requires_a_valid_percentage_of_at_least_thirty() {
-        assert_eq!(
-            FirmwareBatteryCharge::from_percentage(None),
-            FirmwareBatteryCharge::Unknown
-        );
-        for percent in 0..=u8::MAX {
-            let charge = FirmwareBatteryCharge::from_percentage(Some(percent));
-            assert_eq!(charge.is_sufficient(), (30..=100).contains(&percent));
-            if percent < 30 {
-                assert_eq!(charge, FirmwareBatteryCharge::Low);
-            } else if percent > 100 {
-                assert_eq!(charge, FirmwareBatteryCharge::Unknown);
+    fn firmware_charge_requires_a_valid_percentage_of_at_least_thirty_and_a_good_level() {
+        for level in [
+            BatteryLevel::Critical,
+            BatteryLevel::Low,
+            BatteryLevel::Good,
+            BatteryLevel::Full,
+            BatteryLevel::Unknown,
+        ] {
+            assert_eq!(
+                FirmwareBatteryCharge::from_reading(None, level),
+                FirmwareBatteryCharge::Unknown
+            );
+            let comfortable = matches!(level, BatteryLevel::Good | BatteryLevel::Full);
+            for percent in 0..=u8::MAX {
+                let charge = FirmwareBatteryCharge::from_reading(Some(percent), level);
+                assert_eq!(
+                    charge.is_sufficient(),
+                    comfortable && (30..=100).contains(&percent),
+                    "{percent}% {level:?}"
+                );
+                let expected = if level == BatteryLevel::Unknown || percent > 100 {
+                    FirmwareBatteryCharge::Unknown
+                } else if percent < 30 || !comfortable {
+                    FirmwareBatteryCharge::Low
+                } else {
+                    FirmwareBatteryCharge::Sufficient
+                };
+                assert_eq!(charge, expected, "{percent}% {level:?}");
             }
         }
     }

@@ -49,10 +49,12 @@ The agent owns the job after admission, independently of the requesting window
 or IPC connection.
 
 The installation confirmation shows a red warning above its buttons and disables
-installation when the reported charge is below 30% or unavailable. It updates
-with battery snapshots while open, and submission checks the current reading
-again. The shared `FirmwareBatteryCharge` policy owns this percentage decision;
-device preflight still reads and validates the live battery before any DFU start.
+installation when the reported charge is below 30% or unavailable, or when the
+device reports a low or critical battery level. It updates with battery
+snapshots while open, and submission checks the current reading again. The
+shared `FirmwareBatteryCharge::from_reading` policy owns this charge-and-level
+decision for both the dialog and device preflight; preflight still reads and
+validates the live battery, including its status, before any DFU start.
 
 During installation, a compact scrollable activity log shows phase changes with
 UTC timestamps and monospaced text. It includes the catalog's device family,
