@@ -28,9 +28,9 @@ pub const GESTURE_REPEAT_DISTANCE: i32 = 12 * GESTURE_SWIPE_THRESHOLD;
 /// How long the pointer must rest mid-hold to end a stroke: the next swipe then
 /// starts fresh and may repeat the last direction at the normal threshold.
 pub const GESTURE_REARM_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
-/// Minimum time a gesture button must be held before its travel can commit to a
-/// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
-/// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
+/// Time a gesture button must be held before travel short of
+/// [`GESTURE_FLICK_DISTANCE`] can commit to a swipe. Distinguishes a deliberate
+/// hold-and-swipe from a quick click whose cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
 /// pad and the OS-hook Back/Forward buttons).
 pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
 /// Dominant-axis travel that commits a swipe before [`GESTURE_HOLD_FOR_SWIPE`]
@@ -91,7 +91,8 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 /// OS-hook Middle/Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
 /// button's hold accumulates travel; the instant the dominant axis commits a
 /// direction — after the button has been held [`GESTURE_HOLD_FOR_SWIPE`], so a
-/// quick click whose cursor drifted doesn't count — [`Self::accumulate`] returns
+/// quick click whose cursor drifted doesn't count, or sooner once travel reaches
+/// [`GESTURE_FLICK_DISTANCE`] — [`Self::accumulate`] returns
 /// that direction exactly once, like Logitech Options+. A hold that never
 /// commits is a plain click, reported by [`Self::end`].
 ///
@@ -147,8 +148,9 @@ impl SwipeAccumulator {
     }
 
     /// Feed a pointer-move / raw-XY delta into the current hold. Returns
-    /// `Some(direction)` the instant travel commits (only after the hold passes
-    /// [`GESTURE_HOLD_FOR_SWIPE`]), then restarts travel so the same hold can
+    /// `Some(direction)` the instant travel commits (once the hold passes
+    /// [`GESTURE_HOLD_FOR_SWIPE`], or earlier for travel of
+    /// [`GESTURE_FLICK_DISTANCE`]), then restarts travel so the same hold can
     /// commit again; `None` while still too short or not holding.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
         self.held_since?;
