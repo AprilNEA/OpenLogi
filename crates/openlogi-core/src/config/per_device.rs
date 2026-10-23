@@ -360,6 +360,7 @@ impl Config {
             .or_default()
             .force_sensing = Some(force);
     }
+
     /// Record the SmartShift wheel config for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).
     pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {

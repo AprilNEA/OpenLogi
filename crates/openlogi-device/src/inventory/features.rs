@@ -17,7 +17,7 @@ use hidpp::{
         reprog_controls::{ReprogControlsFeature, control_ids},
         unified_battery::UnifiedBatteryFeature,
     },
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{ErrorType, Hidpp20Error},
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -509,20 +509,16 @@ async fn probe_extra_capabilities(
             .capabilities
             .contains(MultiPlatformCapabilities::SET_HOST_PLATFORM);
     }
-    // The press force is offered only for a button the device lets software
-    // change; the write path refuses the others.
+    // An unanswered 0x19c0 read keeps the feature table's presumption and
+    // marks the set incomplete, but does not skip the control walk below.
+    let mut force_sensing_read = Ok(());
     if caps.force_sensing
         && let Some(feature) = device.get_feature::<ForceSensingButtonFeature>()
     {
-        caps.force_sensing = match feature.get_button_count().await.map_err(|_| ())? {
-            0 => false,
-            _ => match panel_button(&feature).await {
-                Ok(button) => force_button_is_changeable(&button),
-                // A reply naming no usable range is an answer, not a lost read.
-                Err(Hidpp20Error::UnsupportedResponse) => false,
-                Err(_) => return Err(()),
-            },
-        };
+        match probe_force_sensing(&feature).await {
+            Ok(changeable) => caps.force_sensing = changeable,
+            Err(()) => force_sensing_read = Err(()),
+        }
     }
     if let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
         let count = feature.get_count().await.map_err(|_| ())?;
@@ -549,7 +545,42 @@ async fn probe_extra_capabilities(
         caps.dpi_gestures = dpi_gestures;
         caps.virtual_thumbwheel = virtual_thumbwheel;
     }
-    Ok(())
+    force_sensing_read
+}
+
+/// Whether the device lets software change the [`panel_button`]'s press
+/// force; the write path refuses a button that does not.
+///
+/// `Err(())` means a read went unanswered: the channel failed or the device
+/// was busy. Any other reply, including a feature error, is an answer.
+async fn probe_force_sensing(feature: &ForceSensingButtonFeature) -> Result<bool, ()> {
+    match feature.get_button_count().await {
+        Ok(0) => Ok(false),
+        Ok(_) => match panel_button(feature).await {
+            Ok(button) => Ok(force_button_is_changeable(&button)),
+            Err(e) => force_sensing_error_answer(e),
+        },
+        Err(e) => force_sensing_error_answer(e),
+    }
+}
+
+/// Classify a failed `0x19c0` read: `Ok(false)` when the device answered it,
+/// `Err(())` when it went unanswered.
+fn force_sensing_error_answer(error: Hidpp20Error) -> Result<bool, ()> {
+    match error {
+        Hidpp20Error::Feature(ErrorType::Busy) => {
+            debug!("ForceSensingButton read refused: device busy");
+            Err(())
+        }
+        // `UnsupportedResponse` covers a short reply, one naming no usable
+        // range or a default outside it, and an error code this crate does
+        // not know; either way the device answered.
+        Hidpp20Error::Feature(_) | Hidpp20Error::UnsupportedResponse => Ok(false),
+        error => {
+            debug!(error = ?error, "ForceSensingButton read went unanswered");
+            Err(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -771,6 +802,84 @@ mod tests {
         // An unanswered read leaves the set incomplete, so it is not memoized.
         let probe = force_sensing_probe(1, None).await;
         assert!(probe.capabilities_incomplete);
+    }
+
+    /// How a `0x19c0` `getCount` read goes in [`force_sensing_count_probe`].
+    #[derive(Clone, Copy, Debug)]
+    enum CountRead {
+        /// The device answers with this HID++ error code.
+        FeatureError(u8),
+        /// The request never reaches the device.
+        TransportFailure,
+    }
+
+    /// Probe a mouse with `0x19c0` at index 2 and `0x1b04` at index 3 whose
+    /// `getCount` goes as `count` describes. Its one control is DPI-family
+    /// and divertable with raw XY, so a completed walk offers DPI gestures.
+    async fn force_sensing_count_probe(count: CountRead) -> ProbedFeatures {
+        fn is_get_count(request: &[u8]) -> bool {
+            request[2] == 2 && request[3] >> 4 == 0
+        }
+        let responder = move |request: &[u8]| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            let features = [0x0001_u16, 0x19c0, 0x1b04];
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                // The feature set's index, and the 0x1b04 control count.
+                (0 | 3, 0) => response[4] = 1,
+                (1, 0) => response[4] = 3,
+                (1, 1) => {
+                    let id = features[usize::from(request[4]) - 1];
+                    response[4..6].copy_from_slice(&id.to_be_bytes());
+                }
+                (2, 0) => match count {
+                    CountRead::FeatureError(code) => return Some(feature_error(request, code)),
+                    CountRead::TransportFailure => {
+                        panic!("a failed write must not reach the device")
+                    }
+                },
+                (3, 1) => {
+                    response[4..6].copy_from_slice(&0x00ed_u16.to_be_bytes());
+                    response[8] = 0x20;
+                    response[12] = 0x01;
+                }
+                _ => panic!("unexpected capability request: {request:02x?}"),
+            }
+            Some(response)
+        };
+        let (raw, _) = match count {
+            CountRead::TransportFailure => {
+                ScriptedRawHidChannel::with_failing_writes(responder, is_get_count)
+            }
+            CountRead::FeatureError(_) => ScriptedRawHidChannel::with_dynamic_responder(responder),
+        };
+        let channel = scripted_channel(raw).await;
+        probe_features(&channel, 0xff, None).await.0
+    }
+
+    #[tokio::test]
+    async fn force_sensing_count_failure_is_incomplete_only_when_unanswered() {
+        // Unknown (1), InvalidArgument (2), InvalidFunctionId (7) and
+        // Unsupported (9) are answers; Busy (8) and a lost write are not.
+        for (count, incomplete) in [
+            (CountRead::FeatureError(0x01), false),
+            (CountRead::FeatureError(0x02), false),
+            (CountRead::FeatureError(0x07), false),
+            (CountRead::FeatureError(0x09), false),
+            (CountRead::FeatureError(0x08), true),
+            (CountRead::TransportFailure, true),
+        ] {
+            let probe = force_sensing_count_probe(count).await;
+            assert_eq!(probe.capabilities_incomplete, incomplete, "{count:?}");
+            let caps = probe.capabilities.unwrap();
+            // An answer withdraws the button; an unanswered read keeps the
+            // feature table's presumption for the cache to repair.
+            assert_eq!(caps.force_sensing, incomplete, "{count:?}");
+            // The control walk runs regardless of how 0x19c0 went.
+            assert!(caps.dpi_gestures, "{count:?}");
+        }
     }
 
     /// A `0x1004` source as the feature table alone describes it, before the
