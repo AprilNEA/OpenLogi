@@ -10,5 +10,35 @@ files:
   - crates/**/*.rs
 ignores:
   - crates/openlogi-core/src/hid/firmware.rs
+# Matches a `FirmwareVersion` (bare, path-qualified, or `Self` inside an impl
+# for it) whose three fields are each copied from some `x.number`,
+# `x.revision` and `x.build`, in any order.
 rule:
-  pattern: 'FirmwareVersion { number: $R.number, revision: $R.revision, build: $R.build }'
+  kind: struct_expression
+  all:
+    - any:
+        - has:
+            field: name
+            regex: '(^|::)FirmwareVersion$'
+        - all:
+            - has:
+                field: name
+                regex: '^Self$'
+            - inside:
+                kind: impl_item
+                stopBy: end
+                has:
+                  field: type
+                  regex: '(^|::)FirmwareVersion$'
+    - has:
+        field: body
+        all:
+          - has:
+              kind: field_initializer
+              regex: '^number\s*:\s*[A-Za-z_][\w.]*\.number$'
+          - has:
+              kind: field_initializer
+              regex: '^revision\s*:\s*[A-Za-z_][\w.]*\.revision$'
+          - has:
+              kind: field_initializer
+              regex: '^build\s*:\s*[A-Za-z_][\w.]*\.build$'
