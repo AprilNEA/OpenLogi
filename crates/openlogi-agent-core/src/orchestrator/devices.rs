@@ -697,21 +697,21 @@ pub(super) const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 pub(super) const RECONNECT_REAPPLY_CONFIRM_RETRIES: u8 = 1;
 
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
-/// plus a bounded run of confirming re-applies, and the follow-up keys (with
-/// remaining retry counts) to confirm next refresh. `forced` re-applies to
-/// every online device carrying the caller's confirm budget (system wake
+/// plus a bounded run of confirming re-applies, and the follow-up identities
+/// (with remaining retry counts) to confirm next refresh. `forced` re-applies
+/// to every online device carrying the caller's confirm budget (system wake
 /// keeps the boot ladder, a device reconnect the single link-race confirm);
 /// first sightings always queue the full boot ladder, and plain
 /// offline→online reconnects queue the link-race confirm.
 pub(super) fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
-    followup: &HashMap<String, u8>,
+    followup: &BTreeMap<DeviceStableId, u8>,
     forced: Option<u8>,
     confirm_followup: bool,
-) -> (Vec<usize>, HashMap<String, u8>) {
+) -> (Vec<usize>, BTreeMap<DeviceStableId, u8>) {
     let mut targets = reapply_targets(prev, next, forced.is_some());
-    let mut next_followup: HashMap<String, u8> = targets
+    let mut next_followup: BTreeMap<DeviceStableId, u8> = targets
         .iter()
         .filter_map(|&idx| {
             let id = stable_id(&next[idx]);
@@ -726,30 +726,61 @@ pub(super) fn plan_reapply(
             // A new trigger can land mid-run (a reconnect while the boot
             // confirmations are still draining) — keep the larger of the
             // fresh budget and what this pass would have drained to.
-            let carried = followup.get(&next[idx].config_key).map_or(0, |remaining| {
+            let carried = followup.get(&id).map_or(0, |remaining| {
                 remaining.saturating_sub(u8::from(confirm_followup))
             });
             let budget = budget.max(carried);
-            (budget > 0).then(|| (next[idx].config_key.clone(), budget))
+            (budget > 0).then(|| (id, budget))
         })
         .collect();
     for (idx, dev) in next.iter().enumerate() {
         if dev.online
             && dev.route.is_some()
             && !targets.contains(&idx)
-            && let Some(&remaining) = followup.get(&dev.config_key)
+            && let id = stable_id(dev)
+            && let Some(&remaining) = followup.get(&id)
         {
             if confirm_followup {
                 targets.push(idx);
                 if remaining > 1 {
-                    next_followup.insert(dev.config_key.clone(), remaining - 1);
+                    next_followup.insert(id, remaining - 1);
                 }
             } else {
-                next_followup.insert(dev.config_key.clone(), remaining);
+                next_followup.insert(id, remaining);
             }
         }
     }
     (targets, next_followup)
+}
+
+/// Plan confirming writes for a failed or cancelled Disable Keys request. The
+/// request's own bounded run is separate from [`plan_reapply`], because a manual
+/// key-disable request must not replay unrelated volatile settings.
+pub(super) fn plan_disabled_keys_recovery(
+    devices: &[AgentDevice],
+    recovery: &BTreeMap<DeviceStableId, u8>,
+    confirm_recovery: bool,
+) -> (Vec<usize>, BTreeMap<DeviceStableId, u8>) {
+    let mut targets = Vec::new();
+    let mut next_recovery = BTreeMap::new();
+    for (idx, dev) in devices.iter().enumerate() {
+        let id = stable_id(dev);
+        let Some(&remaining) = recovery.get(&id) else {
+            continue;
+        };
+        if !dev.online || dev.route.is_none() {
+            continue;
+        }
+        if confirm_recovery {
+            targets.push(idx);
+            if remaining > 1 {
+                next_recovery.insert(id, remaining - 1);
+            }
+        } else {
+            next_recovery.insert(id, remaining);
+        }
+    }
+    (targets, next_recovery)
 }
 
 /// Index of the selected HID++ input device. Prefer the saved selection while

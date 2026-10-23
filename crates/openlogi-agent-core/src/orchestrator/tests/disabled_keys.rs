@@ -11,6 +11,7 @@ struct Keyboard {
     route: DeviceRoute,
     disabled: Arc<AtomicU8>,
     writes: Arc<std::sync::Mutex<Vec<u8>>>,
+    requested_features: Arc<std::sync::Mutex<Vec<u16>>>,
     reports: openlogi_device::replay::ReplayChannelHandle,
     write_notice: Arc<tokio::sync::Notify>,
 }
@@ -29,6 +30,8 @@ impl Keyboard {
         let device_disabled = Arc::clone(&disabled);
         let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let device_writes = Arc::clone(&writes);
+        let requested_features = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let device_requested_features = Arc::clone(&requested_features);
         let write_notice = Arc::new(tokio::sync::Notify::new());
         let device_notice = Arc::clone(&write_notice);
         let (_, reports) = publish_scripted_channel(
@@ -42,11 +45,12 @@ impl Keyboard {
                 let value = match (request[2], request[3] >> 4) {
                     (0, 1) => 4,
                     (0, 0) => {
-                        if request[4..6] == [0x45, 0x21] {
-                            5
-                        } else {
-                            0
-                        }
+                        let feature = u16::from_be_bytes([request[4], request[5]]);
+                        device_requested_features
+                            .lock()
+                            .expect("requested features")
+                            .push(feature);
+                        if feature == 0x4521 { 5 } else { 0 }
                     }
                     (5, 0) => 0xa1,
                     (5, 1) => device_disabled.load(Ordering::SeqCst),
@@ -66,6 +70,7 @@ impl Keyboard {
             route,
             disabled,
             writes,
+            requested_features,
             reports,
             write_notice,
         }
@@ -79,6 +84,21 @@ impl Keyboard {
 
     fn assert_writes(&self, expected: &[u8]) {
         assert_eq!(*self.writes.lock().expect("writes"), expected);
+    }
+
+    fn clear_requested_features(&self) {
+        self.requested_features
+            .lock()
+            .expect("requested features")
+            .clear();
+    }
+
+    fn assert_only_disable_keys_feature(&self) {
+        assert_eq!(
+            *self.requested_features.lock().expect("requested features"),
+            vec![0x4521],
+            "recovery must not look up any unrelated configured feature"
+        );
     }
 
     fn hold_write_readback(&self) -> openlogi_device::replay::ReplayResponseBarrier {
@@ -100,9 +120,10 @@ async fn finish(worker: Option<std::thread::JoinHandle<()>>) {
         .expect("join task");
 }
 
-/// Start after the boot ladder has drained, then install real policy via reload.
-async fn settled_keyboard() -> (Orchestrator, Keyboard, DeviceInventory) {
-    let mut orchestrator = orchestrator(Config::default());
+/// Start after the boot ladder has drained with `config` already published to
+/// the Disable Keys policy owner.
+async fn keyboard_after_boot(config: Config) -> (Orchestrator, Keyboard, DeviceInventory) {
+    let mut orchestrator = orchestrator(config);
     let mut inventory = direct_inventory(None, [1, 2, 3, 4]);
     inventory.receiver.product_id = 0xb35b;
     inventory.paired[0].kind = DeviceKind::Keyboard;
@@ -117,6 +138,13 @@ async fn settled_keyboard() -> (Orchestrator, Keyboard, DeviceInventory) {
     assert!(!orchestrator.needs_reapply_confirmation());
     let shared = orchestrator.shared();
     let keyboard = Keyboard::publish(&shared).await;
+    (orchestrator, keyboard, inventory)
+}
+
+/// Start after the boot ladder has drained, then install real policy via reload.
+async fn settled_keyboard() -> (Orchestrator, Keyboard, DeviceInventory) {
+    let (mut orchestrator, keyboard, inventory) = keyboard_after_boot(Config::default()).await;
+    let shared = orchestrator.shared();
     let mut config = Config::default();
     config.set_disabled_keys("unit:01020304", BTreeSet::from([DisableKey::CapsLock]));
     orchestrator.reload_config(config);
@@ -133,6 +161,42 @@ async fn settled_keyboard() -> (Orchestrator, Keyboard, DeviceInventory) {
     assert!(ticket.turn().await.is_some());
     keyboard.assert_writes(&[0x81]);
     (orchestrator, keyboard, inventory)
+}
+
+#[tokio::test]
+async fn failed_disable_keys_recovery_does_not_replay_fn_lock_policy() {
+    use std::time::Duration;
+
+    let mut config = Config::default();
+    config.set_disabled_keys("unit:01020304", BTreeSet::from([DisableKey::CapsLock]));
+    config.set_fn_lock("unit:01020304", true);
+    let (mut orchestrator, keyboard, inventory) = keyboard_after_boot(config).await;
+    let shared = orchestrator.shared();
+    let (refresh, requested) =
+        crate::watchers::inventory::InventoryRefresh::test_settings_confirmation();
+    shared.publish_inventory_refresh(refresh);
+
+    let error = shared
+        .set_disable_keys(&keyboard.route, DisableKeysMask::from_bits_retain(0x40))
+        .await
+        .expect_err("unsupported manual mask");
+    assert!(matches!(error, WriteError::UnsupportedMask { .. }));
+    tokio::time::timeout(Duration::from_secs(2), requested)
+        .await
+        .expect("failed request schedules production confirmation");
+
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert!(orchestrator.needs_reapply_confirmation());
+    keyboard.clear_requested_features();
+    orchestrator.refresh_inventory_for_settings_confirmation(
+        std::slice::from_ref(&inventory),
+        &[],
+        false,
+    );
+    tokio::time::timeout(Duration::from_secs(2), keyboard.write_notice.notified())
+        .await
+        .expect("production recovery writes Disable Keys");
+    keyboard.assert_only_disable_keys_feature();
 }
 
 #[tokio::test]

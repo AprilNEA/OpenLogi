@@ -270,7 +270,7 @@ fn runtime_selection_tracks_online_transition_without_device_set_change() {
 
 #[test]
 fn a_setting_changed_on_the_device_is_not_replayed_over() {
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     // Fn+Esc on the keyboard, or a DPI button, moves the settings revision.
     // The user changed the setting on the device on purpose, so the agent
     // must not write the persisted value back over it.
@@ -279,7 +279,7 @@ fn a_setting_changed_on_the_device_is_not_replayed_over() {
     inventory.paired[0].settings_revision += 1;
     let after = build_devices(&Config::default(), &[inventory], &[]);
 
-    let (targets, followup) = plan_reapply(&before, &after, &HashMap::new(), None, false);
+    let (targets, followup) = plan_reapply(&before, &after, &BTreeMap::new(), None, false);
     assert!(targets.is_empty());
     assert!(followup.is_empty());
 }

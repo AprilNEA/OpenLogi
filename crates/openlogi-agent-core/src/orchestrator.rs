@@ -24,7 +24,7 @@ use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
     LightState, StandaloneDevice, prettify_codename,
 };
-use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
+use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState, HidppOperation,
@@ -70,8 +70,8 @@ use devices::{
     build_devices, changed_follower_cookies, config_keeps_os_layout, configured_dpi,
     configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
     keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
-    plan_reapply, reconnect_follower_cookies, saved_speed, settings_moved, stable_id,
-    wheel_inverted,
+    plan_disabled_keys_recovery, plan_reapply, reconnect_follower_cookies, saved_speed,
+    settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -479,10 +479,14 @@ pub struct Orchestrator {
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
     hid_open_failures: bool,
-    /// Config keys of devices first sighted (or targeted after wake) recently,
-    /// with remaining confirming re-apply budget: the first write can race the
-    /// device's own boot or reconnect and be lost.
-    reapply_followup: HashMap<String, u8>,
+    /// Physical identities of devices first sighted (or targeted after wake)
+    /// recently, with remaining confirming re-apply budget: the first write can
+    /// race the device's own boot or reconnect and be lost.
+    reapply_followup: BTreeMap<DeviceStableId, u8>,
+    /// Physical identities of keyboards whose failed or cancelled manual
+    /// Disable Keys request needs bounded recovery. This plan excludes volatile
+    /// settings that are unrelated to the manual request.
+    disabled_keys_recovery: BTreeMap<DeviceStableId, u8>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
     camera_active: Option<bool>,
@@ -615,7 +619,8 @@ impl Orchestrator {
             inventory: InventoryState::Pending,
             forced_reapply_budget: None,
             hid_open_failures: false,
-            reapply_followup: HashMap::new(),
+            reapply_followup: BTreeMap::new(),
+            disabled_keys_recovery: BTreeMap::new(),
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
             light_states: BTreeMap::new(),
@@ -1057,6 +1062,7 @@ impl Orchestrator {
                 })
             {
                 self.shared.disabled_keys_order.retire(route);
+                self.disabled_keys_recovery.remove(&stable_id(old));
             }
         }
         for dev in &devices {
@@ -1078,22 +1084,25 @@ impl Orchestrator {
         let rearm_capture =
             any_device_needs_capture_rearm(&self.devices, &devices, forced.is_some());
         // Manual cancellation can happen long after the boot/reconnect ladder
-        // drained. Its owner requests recovery without capturing an old mask;
-        // use the same bounded confirmation run, and do not consume a request
-        // while a successor still owns the setting.
+        // drained. Its owner requests only a Disable Keys recovery, and does
+        // not consume a request while a successor still owns the setting.
         for dev in &devices {
             if dev.online
                 && let Some(route) = &dev.route
                 && self.shared.disabled_keys_order.schedule_recovery(route)
             {
-                self.reapply_followup
-                    .entry(dev.config_key.clone())
+                self.disabled_keys_recovery
+                    .entry(stable_id(dev))
                     .and_modify(|remaining| {
                         *remaining = (*remaining).max(VOLATILE_REAPPLY_CONFIRM_RETRIES);
                     })
                     .or_insert(VOLATILE_REAPPLY_CONFIRM_RETRIES);
             }
         }
+        let disabled_keys_recovery = std::mem::take(&mut self.disabled_keys_recovery);
+        let (disabled_keys_targets, next_disabled_keys_recovery) =
+            plan_disabled_keys_recovery(&devices, &disabled_keys_recovery, confirm_reapply);
+        self.disabled_keys_recovery = next_disabled_keys_recovery;
         let followup = std::mem::take(&mut self.reapply_followup);
         let (targets, next_followup) =
             plan_reapply(&self.devices, &devices, &followup, forced, confirm_reapply);
@@ -1111,12 +1120,19 @@ impl Orchestrator {
                 self.keep_os_layout(&devices[idx]);
             }
         }
-        for idx in targets {
+        for &idx in &targets {
             self.reapply_volatile_settings(&devices[idx], &devices);
+        }
+        for idx in disabled_keys_targets {
+            if !targets.contains(&idx)
+                && let Some(route) = &devices[idx].route
+            {
+                let _ = self.shared.reapply_disabled_keys(route);
+            }
         }
         for dev in &devices {
             if dev.online
-                && !self.reapply_followup.contains_key(&dev.config_key)
+                && !self.disabled_keys_recovery.contains_key(&stable_id(dev))
                 && let Some(route) = &dev.route
             {
                 self.shared.disabled_keys_order.finish_recovery(route);
@@ -1154,11 +1170,10 @@ impl Orchestrator {
         self.rebuild();
     }
 
-    /// Whether volatile-setting writes still need a delayed inventory pass to
-    /// confirm them after device boot or system resume.
+    /// Whether device settings still need a delayed inventory confirmation.
     #[must_use]
     pub fn needs_reapply_confirmation(&self) -> bool {
-        !self.reapply_followup.is_empty()
+        !self.reapply_followup.is_empty() || !self.disabled_keys_recovery.is_empty()
     }
 
     /// Show a lock key a keyboard turned on or off, unless the user turned the

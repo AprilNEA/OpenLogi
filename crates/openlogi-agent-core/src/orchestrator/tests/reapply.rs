@@ -1,6 +1,7 @@
 //! Which devices re-apply their volatile settings, and how many confirming passes they get.
 
 use super::*;
+use std::collections::BTreeMap;
 
 #[test]
 fn reapply_targets_new_arrivals_and_transitions() {
@@ -82,40 +83,47 @@ fn steady_inventory_does_not_cycle_capture() {
 
 #[test]
 fn plan_reapply_retries_a_first_sighting_for_a_bounded_run() {
-    use std::collections::HashMap;
     // First sighting: applied now, queued for VOLATILE_REAPPLY_CONFIRM_RETRIES
     // confirming re-applies. A cold restart can leave the device still
     // booting, so the initial write and a single confirm need a retry run,
     // not a one-shot confirm.
-    let (targets, followup) = plan_reapply(&[], &[dev("a", 1, true)], &HashMap::new(), None, true);
+    let (targets, followup) = plan_reapply(&[], &[dev("a", 1, true)], &BTreeMap::new(), None, true);
     assert_eq!(targets, vec![0]);
     assert_eq!(
         followup,
-        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)])
+        BTreeMap::from([(
+            stable_id(&dev("a", 1, true)),
+            VOLATILE_REAPPLY_CONFIRM_RETRIES
+        )])
     );
     // Each delayed confirmation after a first sighting re-applies once and
     // decrements the remaining retry budget — the device may still be booting.
     let prev = [dev("a", 1, true)];
-    let followup_in = HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)]);
+    let followup_in = BTreeMap::from([(
+        stable_id(&dev("a", 1, true)),
+        VOLATILE_REAPPLY_CONFIRM_RETRIES,
+    )]);
     let (targets, followup) = plan_reapply(&prev, &prev, &followup_in, None, true);
     assert_eq!(targets, vec![0]);
     assert_eq!(
         followup,
-        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES - 1)])
+        BTreeMap::from([(
+            stable_id(&dev("a", 1, true)),
+            VOLATILE_REAPPLY_CONFIRM_RETRIES - 1,
+        )])
     );
     // The budget exhausts: a last retry fires but queues no further ones.
-    let followup_in = HashMap::from([("a".to_string(), 1)]);
+    let followup_in = BTreeMap::from([(stable_id(&dev("a", 1, true)), 1)]);
     let (targets, followup) = plan_reapply(&prev, &prev, &followup_in, None, true);
     assert_eq!(targets, vec![0]);
     assert!(followup.is_empty());
     // Steady state after that: nothing.
-    let (targets, _) = plan_reapply(&prev, &prev, &HashMap::new(), None, true);
+    let (targets, _) = plan_reapply(&prev, &prev, &BTreeMap::new(), None, true);
     assert!(targets.is_empty());
 }
 
 #[test]
 fn plan_reapply_transitions_queue_one_link_race_confirm() {
-    use std::collections::HashMap;
     // A wake from device sleep re-applies now and queues exactly one
     // confirming pass: the device was already booted (no boot ladder), but
     // the immediate write races the link still re-establishing, and drowsy
@@ -123,14 +131,17 @@ fn plan_reapply_transitions_queue_one_link_race_confirm() {
     let (targets, followup) = plan_reapply(
         &[dev("a", 1, false)],
         &[dev("a", 1, true)],
-        &HashMap::new(),
+        &BTreeMap::new(),
         None,
         true,
     );
     assert_eq!(targets, vec![0]);
     assert_eq!(
         followup,
-        HashMap::from([("a".to_string(), RECONNECT_REAPPLY_CONFIRM_RETRIES)])
+        BTreeMap::from([(
+            stable_id(&dev("a", 1, true)),
+            RECONNECT_REAPPLY_CONFIRM_RETRIES,
+        )])
     );
     // The confirm drains on the next steady tick.
     let steady = [dev("a", 1, true)];
@@ -141,10 +152,12 @@ fn plan_reapply_transitions_queue_one_link_race_confirm() {
 
 #[test]
 fn plan_reapply_reconnect_mid_boot_run_keeps_the_larger_budget() {
-    use std::collections::HashMap;
     // A reconnect while boot confirmations are still draining must not shrink
     // the remaining boot ladder down to the link-race budget.
-    let followup_in = HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)]);
+    let followup_in = BTreeMap::from([(
+        stable_id(&dev("a", 1, true)),
+        VOLATILE_REAPPLY_CONFIRM_RETRIES,
+    )]);
     let (targets, followup) = plan_reapply(
         &[dev("a", 1, false)],
         &[dev("a", 1, true)],
@@ -155,13 +168,15 @@ fn plan_reapply_reconnect_mid_boot_run_keeps_the_larger_budget() {
     assert_eq!(targets, vec![0]);
     assert_eq!(
         followup,
-        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES - 1)])
+        BTreeMap::from([(
+            stable_id(&dev("a", 1, true)),
+            VOLATILE_REAPPLY_CONFIRM_RETRIES - 1,
+        )])
     );
 }
 
 #[test]
 fn plan_reapply_wake_targets_get_a_confirm_retry_run() {
-    use std::collections::HashMap;
     // A system wake re-applies to every online device *and* queues the same
     // confirm-retry run a first sighting gets: post-wake, a receiver can
     // enumerate while its mouse link is still re-establishing, so the first
@@ -171,27 +186,32 @@ fn plan_reapply_wake_targets_get_a_confirm_retry_run() {
     let (targets, followup) = plan_reapply(
         &prev,
         &prev,
-        &HashMap::new(),
+        &BTreeMap::new(),
         Some(VOLATILE_REAPPLY_CONFIRM_RETRIES),
         false,
     );
     assert_eq!(targets, vec![0]);
     assert_eq!(
         followup,
-        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)])
+        BTreeMap::from([(
+            stable_id(&dev("a", 1, true)),
+            VOLATILE_REAPPLY_CONFIRM_RETRIES
+        )])
     );
     // The run then drains at the usual cadence on steady ticks.
     let (targets, followup) = plan_reapply(&prev, &prev, &followup, None, true);
     assert_eq!(targets, vec![0]);
     assert_eq!(
         followup,
-        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES - 1)])
+        BTreeMap::from([(
+            stable_id(&dev("a", 1, true)),
+            VOLATILE_REAPPLY_CONFIRM_RETRIES - 1,
+        )])
     );
 }
 
 #[test]
 fn plan_reapply_device_wake_forces_the_link_race_budget() {
-    use std::collections::HashMap;
     // A `0x1d4b` reconnect broadcast forces a re-apply even on a snapshot
     // with no observable transition (the nap was too short for any
     // reconciliation to have seen the device offline), but queues only the
@@ -201,14 +221,17 @@ fn plan_reapply_device_wake_forces_the_link_race_budget() {
     let (targets, followup) = plan_reapply(
         &prev,
         &prev,
-        &HashMap::new(),
+        &BTreeMap::new(),
         Some(RECONNECT_REAPPLY_CONFIRM_RETRIES),
         false,
     );
     assert_eq!(targets, vec![0]);
     assert_eq!(
         followup,
-        HashMap::from([("a".to_string(), RECONNECT_REAPPLY_CONFIRM_RETRIES)])
+        BTreeMap::from([(
+            stable_id(&dev("a", 1, true)),
+            RECONNECT_REAPPLY_CONFIRM_RETRIES,
+        )])
     );
     let (targets, followup) = plan_reapply(&prev, &prev, &followup, None, true);
     assert_eq!(targets, vec![0]);
@@ -217,17 +240,55 @@ fn plan_reapply_device_wake_forces_the_link_race_budget() {
 
 #[test]
 fn plan_reapply_skips_a_followup_that_went_offline() {
-    use std::collections::HashMap;
     let prev = [dev("a", 1, true)];
     let (targets, followup) = plan_reapply(
         &prev,
         &[dev("a", 1, false)],
-        &HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)]),
+        &BTreeMap::from([(
+            stable_id(&dev("a", 1, true)),
+            VOLATILE_REAPPLY_CONFIRM_RETRIES,
+        )]),
         None,
         true,
     );
     assert!(targets.is_empty());
     assert!(followup.is_empty());
+}
+
+#[test]
+fn confirmation_budget_survives_config_key_adoption() {
+    use openlogi_core::device_order::PhysicalDeviceKey;
+
+    let legacy = "receiver:aa00:slot:1";
+    let mut config = Config::default();
+    config.set_disabled_keys(legacy, BTreeSet::from([DisableKey::CapsLock]));
+    let mut inventory = direct_inventory(None, [1, 2, 3, 4]);
+    inventory.receiver.product_id = 0xc548;
+    inventory.receiver.unique_id = Some("AA00".into());
+    inventory.paired[0].slot = 1;
+    let mut orchestrator = orchestrator(config.clone());
+
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert_eq!(orchestrator.devices[0].config_key, legacy);
+    assert!(orchestrator.needs_reapply_confirmation());
+
+    let canonical = PhysicalDeviceKey::parse("unit:01020304").expect("key");
+    assert!(config.adopt_route(&canonical, legacy, None));
+    orchestrator.reload_config(config);
+    orchestrator.refresh_inventory_for_settings_confirmation(
+        std::slice::from_ref(&inventory),
+        &[],
+        false,
+    );
+
+    assert_eq!(orchestrator.devices[0].config_key, canonical.as_str());
+    assert_eq!(
+        orchestrator
+            .reapply_followup
+            .get(&stable_id(&orchestrator.devices[0])),
+        Some(&(VOLATILE_REAPPLY_CONFIRM_RETRIES - 1)),
+        "the active physical device keeps its confirmation budget after key adoption"
+    );
 }
 
 #[test]
