@@ -8,9 +8,10 @@
 # `.github/workflows/release.yml` listens on to build the release.
 #
 # Beta tags (`v{version}-beta.{N}`) do not come from release-plz.
-# `.github/workflows/prerelease.yml` cuts them on `master` between release
-# PRs, without a version bump. `release.yml` builds and publishes both kinds of
-# tag, and `cargo xtask release version` tells them apart.
+# `.github/workflows/prerelease.yml` cuts them on `master` while a release PR
+# is open, without a version bump: `{version}` is the version that PR
+# prepares. `release.yml` builds and publishes both kinds of tag, and
+# `cargo xtask release version` tells them apart.
 #
 # release-plz cuts the tag only; it does NOT create the GitHub Release. The tag
 # triggers release.yml, which is the single owner of the GitHub Release: softprops
