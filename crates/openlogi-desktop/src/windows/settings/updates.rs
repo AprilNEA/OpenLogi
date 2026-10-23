@@ -154,7 +154,7 @@ fn engine_message(status: &UpdateStatus) -> Option<gpui::SharedString> {
 }
 
 /// The one contextual action button for the engine-driven states (macOS,
-/// Windows, and Linux before/without a Linux-specific result to show).
+/// Windows).
 fn engine_action(updater: &Entity<Updater>, status: &UpdateStatus) -> Button {
     let u = updater.clone();
     match status {
@@ -174,14 +174,12 @@ fn engine_action(updater: &Entity<Updater>, status: &UpdateStatus) -> Button {
             .outline()
             .label(tr!("updates.check_for_updates_action"))
             .on_click(move |_, _, cx| {
-                crate::platform::updater::linux::check_in_background(cx);
                 u.update(cx, Updater::check);
             }),
     }
 }
 
-/// The one contextual action button for the Linux-release-check states, once
-/// the engine's own result has been masked as [`is_expected_no_linux_asset`].
+/// The one contextual action button for the Linux-release-check states.
 fn linux_action(status: &LinuxUpdateStatus) -> Button {
     match status {
         LinuxUpdateStatus::Available { .. } => Button::new("update-install")
@@ -214,37 +212,36 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
 
     // On Linux the update manifest deliberately carries no Linux asset — Linux
     // installs update through the OS package manager, not this engine (see
-    // `xtask/src/commands/release/latest_json.rs`). The engine's resulting
-    // "no matching asset" error is expected there, not a failure; render the
-    // Linux-release-check state (see `platform::updater::linux`) instead of a
-    // red "Update failed" pill.
-    let benign_no_linux_asset = is_expected_no_linux_asset(&status);
-    let linux_status = cx
-        .try_global::<LinuxUpdateStatus>()
-        .cloned()
-        .unwrap_or_default();
-
-    let pill = if benign_no_linux_asset {
-        linux_pill(&linux_status)
+    // `xtask/src/commands/release/latest_json.rs`). Whatever the engine
+    // reports there (an expected "no matching asset" error, or a network
+    // failure) is not this install's update state; the Linux release check
+    // (see `platform::updater::linux`) is.
+    let (pill, message, busy, action) = if shows_linux_status(std::env::consts::OS) {
+        let linux_status = cx
+            .try_global::<LinuxUpdateStatus>()
+            .cloned()
+            .unwrap_or_default();
+        (
+            linux_pill(&linux_status),
+            linux_message(&linux_status),
+            matches!(
+                linux_status,
+                LinuxUpdateStatus::Checking | LinuxUpdateStatus::Installing
+            ),
+            linux_action(&linux_status),
+        )
     } else {
-        engine_pill(&status)
-    };
-    let message = if benign_no_linux_asset {
-        linux_message(&linux_status)
-    } else {
-        engine_message(&status)
-    };
-    let busy = matches!(
-        status,
-        UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Installing
-    ) || matches!(
-        linux_status,
-        LinuxUpdateStatus::Checking | LinuxUpdateStatus::Installing
-    );
-    let action = if benign_no_linux_asset {
-        linux_action(&linux_status)
-    } else {
-        engine_action(updater, &status)
+        (
+            engine_pill(&status),
+            engine_message(&status),
+            matches!(
+                status,
+                UpdateStatus::Checking
+                    | UpdateStatus::Downloading { .. }
+                    | UpdateStatus::Installing
+            ),
+            engine_action(updater, &status),
+        )
     };
 
     h_flex()
@@ -327,17 +324,10 @@ fn channel_segment(cx: &App) -> ButtonGroup {
         }))
 }
 
-/// Whether `status` is the engine's expected "no matching asset" error on
-/// Linux, where the update manifest never carries a Linux asset by design.
-fn is_expected_no_linux_asset(status: &UpdateStatus) -> bool {
-    cfg!(target_os = "linux") && is_no_linux_asset_message(status)
-}
-
-/// The message-matching half of [`is_expected_no_linux_asset`], split out so
-/// it can be tested on every host — the `cfg!(target_os = "linux")` half is
-/// true only on a real Linux build/test host by design.
-fn is_no_linux_asset_message(status: &UpdateStatus) -> bool {
-    matches!(status, UpdateStatus::Errored(e) if e.starts_with("no release asset matched the current platform"))
+/// Whether the hero shows the Linux release check instead of the engine's
+/// status: on Linux, regardless of what the engine reports.
+fn shows_linux_status(os: &str) -> bool {
+    os == "linux"
 }
 
 /// Read the published snapshot only; rendering must never probe the filesystem.
@@ -415,22 +405,10 @@ mod tests {
     use crate::windows::settings::{SettingsPage, SettingsView};
 
     #[test]
-    fn no_linux_asset_error_is_benign_but_other_errors_are_not() {
-        assert!(is_no_linux_asset_message(&UpdateStatus::Errored(
-            "no release asset matched the current platform (linux/x86_64)".into()
-        )));
-        assert!(!is_no_linux_asset_message(&UpdateStatus::Errored(
-            "http error: connection refused".into()
-        )));
-        assert!(!is_no_linux_asset_message(&UpdateStatus::UpToDate));
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn no_linux_asset_error_is_only_benign_on_linux() {
-        assert!(is_expected_no_linux_asset(&UpdateStatus::Errored(
-            "no release asset matched the current platform (linux/x86_64)".into()
-        )));
+    fn only_linux_shows_the_linux_release_check() {
+        assert!(shows_linux_status("linux"));
+        assert!(!shows_linux_status("macos"));
+        assert!(!shows_linux_status("windows"));
     }
 
     #[test]
