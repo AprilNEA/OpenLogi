@@ -312,6 +312,28 @@ impl AppState {
         if self.firmware.observed.as_ref().map(|job| &job.update) == update.as_ref() {
             return StateEvents::none();
         }
+        // A route does not identify a physical unit. Only retain an existing
+        // binding or the key captured by this GUI's own pending admission.
+        let key = update.as_ref().and_then(|update| {
+            self.firmware
+                .observed
+                .as_ref()
+                .filter(|previous| {
+                    previous.update.id == update.id && previous.update.route == update.route
+                })
+                .and_then(|previous| previous.key.clone())
+                .or_else(|| {
+                    self.firmware
+                        .start
+                        .as_ref()
+                        .filter(|start| {
+                            start.route == update.route
+                                && start.prior_job != Some(update.id)
+                                && start.result.is_ok()
+                        })
+                        .map(|start| start.key.clone())
+                })
+        });
         if let Some(job) = &update {
             if self
                 .firmware
@@ -327,41 +349,8 @@ impl AppState {
                     .retain(|_, read| read.route != job.route);
             }
         }
-        let key = update.as_ref().and_then(|update| {
-            self.firmware
-                .observed
-                .as_ref()
-                .filter(|previous| {
-                    previous.update.id == update.id && previous.update.route == update.route
-                })
-                .and_then(|previous| previous.key.clone())
-        });
         self.firmware.observed = update.map(|update| ObservedFirmware { update, key });
         StateEvent::FirmwareChanged.into()
-    }
-
-    /// Resolve each job to one physical device after the authoritative merge.
-    /// Later slot reuse must never rebind its terminal result to another device.
-    pub(super) fn bind_firmware_device(&mut self) -> StateEvents {
-        let Some(job) = self
-            .firmware
-            .observed
-            .as_mut()
-            .filter(|job| job.key.is_none())
-        else {
-            return StateEvents::none();
-        };
-        job.key = self
-            .devices
-            .records
-            .iter()
-            .find(|record| record.online && record.route.as_ref() == Some(&job.update.route))
-            .map(super::DeviceRecord::device_key);
-        if job.key.is_some() {
-            StateEvent::FirmwareChanged.into()
-        } else {
-            StateEvents::none()
-        }
     }
 
     /// Every connection fences old read flights; only a new agent run resets
@@ -389,9 +378,7 @@ pub(crate) mod tests {
     use openlogi_ipc::{AgentStatus, InventoryHealth, PROTOCOL_VERSION};
 
     fn observe(state: &mut AppState, update: Option<FirmwareUpdate>) -> StateEvents {
-        state
-            .observe_firmware(update)
-            .and(state.bind_firmware_device())
+        state.observe_firmware(update)
     }
 
     fn ready_status() -> AgentStatus {
@@ -492,6 +479,52 @@ pub(crate) mod tests {
             }),
         );
         (state, received)
+    }
+
+    #[test]
+    fn cold_start_and_new_agent_do_not_bind_history_to_a_replacement_on_the_same_route() {
+        for phase in [
+            FirmwareUpdatePhase::Preparing,
+            FirmwareUpdatePhase::Succeeded,
+        ] {
+            let (mut original, mut received) = state();
+            let read = ready(&mut original, &mut received);
+            let job = FirmwareUpdate {
+                source: None,
+                events: Vec::new(),
+                id: 10,
+                route: read.route.clone(),
+                target: target(),
+                phase,
+            };
+            let _ = original.start_firmware_update(&read.key, target());
+            let _ = observe(&mut original, Some(job.clone()));
+            let replacement = direct_inventory([1, 2, 3, 4]);
+            let (mut cold, _) = state();
+            for app in [&mut cold, &mut original] {
+                let _ = app.refresh_inventories(
+                    std::slice::from_ref(&replacement),
+                    &[],
+                    &AssetResolver::new(),
+                    &[],
+                );
+                let index = app
+                    .devices
+                    .records
+                    .iter()
+                    .position(|record| record.online && record.route.as_ref() == Some(&read.route))
+                    .unwrap();
+                let _ = app.select_device(index);
+                assert_ne!(app.current_record().unwrap().device_key(), read.key);
+                let _ = app.firmware_reconnected(identity(2));
+                let _ = observe(app, Some(job.clone()));
+                assert!(
+                    app.current_firmware_update().is_none(),
+                    "an identity-less historical job must stay unbound"
+                );
+                assert_eq!(app.firmware_busy(), !job.phase.is_finished());
+            }
+        }
     }
 
     #[test]
@@ -677,6 +710,7 @@ pub(crate) mod tests {
     fn a_completed_job_stays_with_its_device_when_another_device_reuses_the_route() {
         let (mut state, mut received) = state();
         let read = ready(&mut state, &mut received);
+        let _ = state.start_firmware_update(&read.key, target());
         let completed = FirmwareUpdate {
             source: None,
             events: Vec::new(),
@@ -686,7 +720,8 @@ pub(crate) mod tests {
             phase: FirmwareUpdatePhase::Succeeded,
         };
         let _ = observe(&mut state, Some(completed.clone()));
-        let replacement = direct_inventory([1, 2, 3, 4]);
+        let mut replacement = direct_inventory([1, 2, 3, 4]);
+        replacement.paired[0].battery = state.current_record().unwrap().battery.clone();
         let _ = state.refresh_inventories(&[replacement], &[], &AssetResolver::new(), &[]);
         let replacement_index = state
             .devices
@@ -704,6 +739,12 @@ pub(crate) mod tests {
         assert!(
             state.current_firmware_update().is_none(),
             "same-agent reconnect keeps the old physical binding"
+        );
+        let replacement = ready(&mut state, &mut received);
+        assert!(
+            !state
+                .start_firmware_update(&replacement.key, target())
+                .is_empty()
         );
         let _ = observe(
             &mut state,
@@ -727,6 +768,7 @@ pub(crate) mod tests {
     fn a_new_agent_run_resets_the_job_namespace_and_old_read_flights() {
         let (mut state, mut received) = state();
         let read = ready(&mut state, &mut received);
+        let _ = state.start_firmware_update(&read.key, target());
         let _ = observe(
             &mut state,
             Some(FirmwareUpdate {
@@ -746,6 +788,8 @@ pub(crate) mod tests {
                 .apply_firmware_read(&read.key, &read.route, read.flight, Ok(status()))
                 .is_empty()
         );
+        let _ = ready(&mut state, &mut received);
+        let _ = state.start_firmware_update(&read.key, target());
         let _ = observe(
             &mut state,
             Some(FirmwareUpdate {
@@ -767,6 +811,7 @@ pub(crate) mod tests {
     fn restart_keeps_the_device_after_normal_inventory_miss_grace() {
         let (mut state, mut received) = state();
         let read = ready(&mut state, &mut received);
+        let _ = state.start_firmware_update(&read.key, target());
         let _ = observe(
             &mut state,
             Some(FirmwareUpdate {

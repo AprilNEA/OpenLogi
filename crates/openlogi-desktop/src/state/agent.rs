@@ -78,7 +78,6 @@ impl AppState {
             self.store_inventory_snapshot(&snapshot.inventory);
         }
 
-        let firmware = firmware.and(self.bind_firmware_device());
         let agent = self.set_agent_link(AgentLink::Ready(snapshot.status.clone()));
         let camera = self.set_camera_active(snapshot.camera_active);
         let foreground = self.set_foreground(snapshot.foreground.clone());
