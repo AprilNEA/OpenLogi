@@ -50,8 +50,11 @@ fn item(tag: &str, build: &str, arch: MacArch) -> AppcastItem {
     );
     let mut enclosure = Enclosure::new(dmg, 1234, "application/x-apple-diskimage");
     enclosure.ed_signature = Some(format!("signature of {tag} for {}", arch.as_str()));
+    // A fixed date: without one the item takes the time it renders at, and
+    // two renders a second apart would differ.
     let item = AppcastItem::new(build, enclosure)
         .title(format!("OpenLogi {version}"))
+        .pub_date(Some("Fri, 23 Oct 2026 08:00:00 +0000".to_owned()))
         .short_version(version);
     if is_beta(tag) {
         item.channel("beta")
