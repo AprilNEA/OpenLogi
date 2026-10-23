@@ -510,9 +510,10 @@ pub struct HapticChange {
 ///
 /// The configuration is read first and edited, so unnamed flag bits are
 /// written back as read. Logi Options+ instead rebuilds the flag byte from
-/// its two settings, dropping any other bit. An intensity outside the
+/// its two settings, dropping any other bit. A new intensity outside the
 /// levels the capabilities accept fails with
-/// [`WriteError::HapticIntensityUnsupported`] before anything is written.
+/// [`WriteError::HapticIntensityUnsupported`] before anything is written;
+/// the intensity the device already holds is always written back.
 pub async fn set_haptics(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
@@ -539,7 +540,11 @@ async fn change_haptics_on_channel(
     };
     let mut device = open_device(channel, index).await?;
     let (feature, _) = resolve_feature(&mut device).await?;
-    if let Some(intensity) = change.intensity {
+    let config = feature.get_configuration().await.map_err(classify)?;
+    // Only a new intensity is checked against the level set: writing back
+    // the one the device holds guesses nothing onto the wire, so the
+    // switches still work on a device whose levels OpenLogi cannot list.
+    if let Some(intensity) = change.intensity.filter(|i| *i != config.intensity) {
         let capabilities = feature.get_capabilities().await.map_err(classify)?;
         if !capabilities.levels.accepts(intensity) {
             return Err(WriteError::HapticIntensityUnsupported {
@@ -547,7 +552,6 @@ async fn change_haptics_on_channel(
             });
         }
     }
-    let config = feature.get_configuration().await.map_err(classify)?;
     let mut flags = config.flags;
     if let Some(enabled) = change.enabled {
         flags.set(HapticConfigFlags::ENABLED, enabled);
@@ -1408,6 +1412,28 @@ mod tests {
         .expect("the scripted device accepts the write");
         assert_eq!(config_writes(&handle).last(), Some(&[0x82, 63, 0]));
         assert_eq!(applied.intensity.get(), 63, "intensity is kept as read");
+    }
+
+    /// A device whose level set OpenLogi cannot list still takes the
+    /// settings' switches: the intensity it holds is written back as read,
+    /// which guesses nothing onto the wire.
+    #[tokio::test]
+    async fn the_switches_work_on_a_device_whose_levels_are_unlisted() {
+        let _slot = CACHE_SLOT.lock().await;
+        let (raw, handle) = haptics_with_levels(
+            [0x01, 45, 0],
+            |_| {},
+            RING_WAVEFORMS,
+            StatusReply::Status(0),
+            None,
+            7,
+        );
+        let shared = shared_channel(raw).await;
+        let applied = set_haptics_on(&shared, user_settings(false, true, 45))
+            .await
+            .expect("keeping the held intensity is not a level the device refuses");
+        assert_eq!(applied, user_settings(false, true, 45));
+        assert_eq!(config_writes(&handle), vec![[0x02, 45, 0]]);
     }
 
     #[tokio::test]
