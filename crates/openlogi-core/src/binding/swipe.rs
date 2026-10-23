@@ -210,11 +210,15 @@ impl SwipeAccumulator {
                     self.dy = 0;
                     return Some(dir);
                 }
-                // Before any reversal this is the same stroke: drop it from
-                // the reversal travel below.
-                if reversal(dir, self.dx, self.dy) == 0 {
-                    return None;
-                }
+            }
+            // Before any reversal, a report that does not head back is the
+            // same stroke, already counted in `repeat`/`repeat_cross`: drop it
+            // from the reversal travel below. That includes a sideways-dominant
+            // report — a wrist flick ends in an arc, and summing only its
+            // sideways share (the along share is clamped away below) would
+            // commit a perpendicular swipe with no straightness check.
+            if a >= 0 && reversal(dir, self.dx, self.dy) == 0 {
+                return None;
             }
         }
         self.dx = self.dx.saturating_add(dx);
@@ -621,6 +625,23 @@ mod tests {
         assert_eq!(acc.accumulate(-30, 0), None);
         assert_eq!(acc.accumulate(25, 0), None);
         assert_eq!(acc.accumulate(-35, 0), None);
+    }
+
+    #[test]
+    fn accumulator_arc_at_the_end_of_a_swipe_does_not_turn() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        // A leftward wrist flick whose tail curves upward: once Left commits,
+        // the arc's sideways-dominant reports must not add up to Up.
+        assert_eq!(acc.accumulate(-40, -5), None);
+        assert_eq!(acc.accumulate(-60, -10), Some(GestureDirection::Left));
+        for (dx, dy) in [(-50, -20), (-20, -30), (-10, -30), (-5, -25), (0, -20)] {
+            assert_eq!(acc.accumulate(dx, dy), None, "arc report ({dx}, {dy})");
+        }
+        // Heading back still reverses at the normal threshold.
+        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
     }
 
     #[test]
