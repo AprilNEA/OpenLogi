@@ -377,8 +377,9 @@ fn pointer_tab_bounds(
 
 /// The Pointer tab's grid wraps to one column at the 720 px window minimum,
 /// where two cards do not fit beside the navigation rail, and every card
-/// stays inside the window. At the default 1280 × 853 window the top row
-/// holds two cards and Scrolling takes a full row.
+/// stays inside the window. At the default 1280 × 853 window Haptics stacks
+/// under the DPI card beside SmartShift, both columns end on one line, and
+/// Scrolling takes a full row below.
 #[gpui::test]
 fn the_pointer_grid_fits_the_window(cx: &mut gpui::TestAppContext) {
     let narrow = pointer_cards(cx, 720.);
@@ -402,11 +403,14 @@ fn the_pointer_grid_fits_the_window(cx: &mut gpui::TestAppContext) {
     };
     assert_eq!(tuning.top(), smartshift.top(), "two columns at 1280 px");
     assert!(smartshift.right() <= content.right());
-    assert!(
-        haptics.top() > smartshift.top(),
-        "Haptics starts the next row"
+    assert_eq!(haptics.left(), tuning.left(), "Haptics stacks under DPI");
+    assert!(haptics.top() > tuning.bottom());
+    assert_eq!(
+        haptics.bottom(),
+        smartshift.bottom(),
+        "both columns end on one line"
     );
-    assert!(scrolling.top() > haptics.top(), "Scrolling comes last");
+    assert!(scrolling.top() > haptics.bottom(), "Scrolling comes last");
     assert_eq!(
         scrolling.size.width, content.size.width,
         "Scrolling takes a full row"

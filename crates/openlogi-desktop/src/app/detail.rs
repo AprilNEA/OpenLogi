@@ -324,10 +324,11 @@ fn action_ring_tab(
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, haptic
 /// feedback on a device that has it, and the scroll-wheel preferences, each
-/// in a titled card. Scrolling takes a full row: its wheel-resolution
-/// control is wider than a half card in many languages. Use a responsive two-column
-/// grid that still fits the window's 720 px minimum width, so these short
-/// controls don't force a vertical scroll.
+/// in a titled card. The cards sit in two columns that wrap to one at the
+/// window's 720 px minimum: the short DPI card stacks with Haptics beside the
+/// tall SmartShift card, so neither column leaves a hole. Scrolling takes a
+/// full row below: its wheel-resolution control is wider than a half card in
+/// many languages.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
@@ -338,68 +339,76 @@ fn pointer_tab(
     let haptics = AppState::try_read(cx).is_some_and(AppState::current_haptics_supported);
     tab_body(
         ContentWidth::Large,
-        h_flex()
-            .debug_selector(|| "pointer-grid".into())
+        v_flex()
             .w_full()
-            .items_stretch()
             .gap_4()
-            .flex_wrap()
-            .child(pointer_grid_card(
-                "pointer-card-tuning",
-                PanelCard::new(
-                    tr!("device.pointer_tuning"),
-                    Icon::empty().path("action-icons/gauge.svg"),
-                    dpi_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
-            .child(pointer_grid_card(
-                "pointer-card-smartshift",
-                PanelCard::new(
-                    tr!("pointer.smartshift"),
-                    Icon::empty().path("action-icons/refresh-cw.svg"),
-                    smartshift_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
-            .when(haptics, |grid| {
-                grid.child(pointer_grid_card(
-                    "pointer-card-haptics",
-                    PanelCard::new(
-                        tr!("pointer.haptic_feedback"),
-                        Icon::empty().path("action-icons/bell.svg"),
-                        haptics_panel.clone().into_any_element(),
+            .child(
+                h_flex()
+                    .debug_selector(|| "pointer-grid".into())
+                    .w_full()
+                    .items_stretch()
+                    .gap_4()
+                    .flex_wrap()
+                    .child(
+                        pointer_grid_column()
+                            .child(pointer_grid_card(
+                                "pointer-card-tuning",
+                                PanelCard::new(
+                                    tr!("device.pointer_tuning"),
+                                    Icon::empty().path("action-icons/gauge.svg"),
+                                    dpi_panel.clone().into_any_element(),
+                                )
+                                .fill(),
+                            ))
+                            .when(haptics, |column| {
+                                column.child(pointer_grid_card(
+                                    "pointer-card-haptics",
+                                    PanelCard::new(
+                                        tr!("pointer.haptic_feedback"),
+                                        Icon::empty().path("action-icons/bell.svg"),
+                                        haptics_panel.clone().into_any_element(),
+                                    )
+                                    .fill(),
+                                ))
+                            }),
                     )
-                    .fill(),
-                ))
-            })
-            .child(pointer_grid_row(
-                "pointer-card-scrolling",
-                scrolling_card(pal, cx),
-            )),
+                    .child(
+                        pointer_grid_column().child(pointer_grid_card(
+                            "pointer-card-smartshift",
+                            PanelCard::new(
+                                tr!("pointer.smartshift"),
+                                Icon::empty().path("action-icons/refresh-cw.svg"),
+                                smartshift_panel.clone().into_any_element(),
+                            )
+                            .fill(),
+                        )),
+                    ),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "pointer-card-scrolling".into())
+                    .w_full()
+                    .child(scrolling_card(pal, cx)),
+            ),
     )
 }
 
-fn pointer_grid_card(selector: &'static str, card: impl IntoElement) -> impl IntoElement {
-    // A card never narrows below a usable slider, `POINTER_CARD_MIN_W`; the
-    // grid wraps to one column instead. Two columns need the tab body to hold
-    // two cards, the 16 px gap, and its `SCREEN_PAD` insets, beside the
-    // `DETAIL_RAIL_W` rail: at 100%, 168 + 20·2 + 332·2 + 16 = 888 px of
-    // window. The 720 px window minimum therefore shows one column.
-    div()
-        .debug_selector(move || selector.into())
-        .min_w(POINTER_CARD_MIN_W)
-        .flex_1()
-        .h_full()
-        .child(card)
+/// One column of the pointer grid. A column never narrows below a usable
+/// slider, `POINTER_CARD_MIN_W`; the grid wraps to one column instead. Two
+/// columns need the tab body to hold two cards, the 16 px gap, and its
+/// `SCREEN_PAD` insets, beside the `DETAIL_RAIL_W` rail: at 100%,
+/// 168 + 20·2 + 332·2 + 16 = 888 px of window. The 720 px window minimum
+/// therefore shows one column.
+fn pointer_grid_column() -> gpui::Div {
+    v_flex().min_w(POINTER_CARD_MIN_W).flex_1().gap_4()
 }
 
-/// A card that takes a whole row of the pointer grid, for content wider than
-/// a half card.
-fn pointer_grid_row(selector: &'static str, card: impl IntoElement) -> impl IntoElement {
+/// A card in a pointer grid column. Cards share out the height the taller
+/// column sets, so both columns end on the same line.
+fn pointer_grid_card(selector: &'static str, card: impl IntoElement) -> impl IntoElement {
     div()
         .debug_selector(move || selector.into())
-        .w_full()
+        .flex_auto()
         .child(card)
 }
 
