@@ -13,7 +13,7 @@
 use gpui::{App, Global};
 use gpui_updater::Version;
 
-use super::linux_package_install::{self, CommandRunner as _, SystemCommandRunner};
+use super::linux_package_install;
 use super::linux_release_check::{self, LinuxUpdateCheck, ReleaseAsset};
 use crate::platform::installation::{Installation, InstallationSource};
 
@@ -175,10 +175,24 @@ fn download_verify_and_install(
     version: &Version,
     source: crate::platform::installation::LinuxPackage,
 ) -> Result<(), String> {
+    #[expect(
+        clippy::expect_used,
+        reason = "CARGO_PKG_VERSION is cargo-provided and always valid semver"
+    )]
+    let current = Version::parse(env!("CARGO_PKG_VERSION")).expect("valid embedded version");
+    linux_package_install::ensure_newer(version, &current)?;
+    linux_package_install::require_install_tools(
+        source,
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )?;
     let matched = linux_package_install::match_assets(assets, version, source)?;
 
     let package_bytes = download_bytes(&matched.package.browser_download_url, PACKAGE_LIMIT)?;
-    let signature_bytes = download_bytes(&matched.signature.browser_download_url, METADATA_LIMIT)?;
+    let signature_text = String::from_utf8(download_bytes(
+        &matched.signature.browser_download_url,
+        METADATA_LIMIT,
+    )?)
+    .map_err(|error| format!("{} is not valid UTF-8: {error}", matched.signature.name))?;
     let checksums_text = String::from_utf8(download_bytes(
         &matched.checksums.browser_download_url,
         METADATA_LIMIT,
@@ -194,6 +208,8 @@ fn download_verify_and_install(
         ));
     }
 
+    linux_package_install::verify_minisign(&package_bytes, &signature_text, &matched.package.name)?;
+
     // A private, randomly-named, owner-only directory — not the shared,
     // world-writable `std::env::temp_dir()` with a predictable filename
     // (the asset's own name, known in advance from the release). A
@@ -202,19 +218,18 @@ fn download_verify_and_install(
     // Dropped (and removed) when this function returns either way.
     let download_dir = private_tempdir()?;
     let package_path = download_dir.path().join(&matched.package.name);
-    let signature_path = download_dir.path().join(&matched.signature.name);
     std::fs::write(&package_path, &package_bytes)
         .map_err(|error| format!("failed to write {}: {error}", package_path.display()))?;
-    std::fs::write(&signature_path, &signature_bytes)
-        .map_err(|error| format!("failed to write {}: {error}", signature_path.display()))?;
-
-    linux_package_install::verify_minisign(&SystemCommandRunner, &package_path, &signature_path)?;
 
     let command = linux_package_install::pkexec_install_command(source, &package_path);
     let [program, rest @ ..] = command.as_slice() else {
         return Err("empty install command".to_string());
     };
-    if !SystemCommandRunner.run(program, rest)? {
+    let status = std::process::Command::new(program)
+        .args(rest)
+        .status()
+        .map_err(|error| format!("failed to run {program}: {error}"))?;
+    if !status.success() {
         return Err("package-manager install failed".to_string());
     }
     Ok(())

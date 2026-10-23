@@ -33,6 +33,9 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Verifies Linux package update signatures in-app (already in the graph via
+# gpui-updater-core).
+minisign-verify = "0.2"
 sha2 = { workspace = true }
 tempfile = "3.27.0"
 ureq = { workspace = true }
