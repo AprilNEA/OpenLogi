@@ -206,7 +206,6 @@ pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> An
         (None, ForceSensingLoad::Failed(_)) => retry_line(
             "force-sensing-retry",
             tr!("pointer.couldnt_read_press_force_click_to_retry"),
-            pal,
             move |cx| AppState::apply(cx, |state| state.retry_force_sensing_read(&key)),
         )
         .into_any_element(),
