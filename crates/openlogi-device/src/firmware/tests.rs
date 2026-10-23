@@ -35,6 +35,9 @@ enum Fault {
         remaining: usize,
     },
     WaitForPoll,
+    DropStartReply,
+    StartNotAccepted,
+    StartWrongEntity,
 }
 
 #[derive(Default)]
@@ -43,6 +46,7 @@ struct Hardware {
     packets: usize,
     packet_attempts: usize,
     start_count: usize,
+    started: bool,
     battery: Option<u8>,
     running_version: Option<(u8, u8)>,
     active_entity: Option<u8>,
@@ -92,6 +96,22 @@ impl Hardware {
         payload
     }
 
+    fn start_dfu(&mut self, entity: u8) -> Option<[u8; 16]> {
+        self.start_count += 1;
+        if self.fault == Fault::StartNotAccepted {
+            return None;
+        }
+        self.started = true;
+        self.target_entity = Some(entity);
+        if matches!(self.fault, Fault::DropStartReply | Fault::StartWrongEntity) {
+            return None;
+        }
+        let mut payload = [0; 16];
+        payload[0] = entity;
+        payload[1] = 2;
+        Some(payload)
+    }
+
     fn respond(&mut self, request: &[u8]) -> Option<Vec<u8>> {
         if request.len() < 7 {
             return None;
@@ -130,7 +150,7 @@ impl Hardware {
                     payload[2..6]
                         .copy_from_slice(&u32::try_from(self.packets).unwrap().to_be_bytes());
                 } else {
-                    payload[1] = if self.start_count > 0 {
+                    payload[1] = if self.started {
                         2
                     } else if self.fault == Fault::Staged {
                         5
@@ -138,13 +158,11 @@ impl Hardware {
                         1
                     };
                 }
+                if self.started && self.fault == Fault::StartWrongEntity {
+                    payload[0] = 3 - request[4];
+                }
             }
-            (4, 1) => {
-                self.start_count += 1;
-                self.target_entity = Some(request[4]);
-                payload[0] = request[4];
-                payload[1] = 2;
-            }
+            (4, 1) => payload = self.start_dfu(request[4])?,
             (4, 4) => {
                 self.packet_attempts += 1;
                 if let Fault::DropPackets { packet, remaining } = &mut self.fault
@@ -209,6 +227,49 @@ async fn hardware(state: Hardware) -> (SharedChannel, Arc<Mutex<Hardware>>) {
 
 fn package() -> FirmwarePackage {
     FirmwarePackage::parse(&serde_json::to_vec(&package::tests::container()).unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn accepted_start_with_lost_response_recovers_without_starting_again() {
+    let (shared, state) = hardware(Hardware {
+        fault: Fault::DropStartReply,
+        ..Hardware::default()
+    })
+    .await;
+    let target = update_target_on(&shared).await.unwrap().unwrap();
+    let pending = prepare_update_on(&shared, target, &package())
+        .await
+        .unwrap()
+        .install(|_| {}, || false)
+        .await
+        .unwrap();
+    pending.verify_on(&shared).await.unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.start_count, 1);
+    assert_eq!(state.sent_bytes, package().images[0].blocks[0]);
+    assert!(state.applied);
+}
+
+#[tokio::test]
+async fn uncertain_start_refuses_not_started_and_wrong_entity_without_sending_packets() {
+    for fault in [Fault::StartNotAccepted, Fault::StartWrongEntity] {
+        let (shared, state) = hardware(Hardware {
+            fault,
+            ..Hardware::default()
+        })
+        .await;
+        let target = update_target_on(&shared).await.unwrap().unwrap();
+        let result = prepare_update_on(&shared, target, &package())
+            .await
+            .unwrap()
+            .install(|_| {}, || false)
+            .await;
+        assert!(matches!(result, Err(FirmwareUpdateFailure::Protocol(_))));
+        let state = state.lock().unwrap();
+        assert_eq!(state.start_count, 1);
+        assert_eq!(state.packet_attempts, 0);
+        assert!(!state.applied);
+    }
 }
 
 #[tokio::test]
