@@ -51,7 +51,7 @@ block2 = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi","Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 
 [lints]
 workspace = true

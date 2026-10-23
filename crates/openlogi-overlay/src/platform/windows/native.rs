@@ -6,14 +6,20 @@
 use anyhow::{Context as _, Result, ensure};
 use gpui::{App, Bounds, DevicePixels, DisplayId, Pixels, Point, Size, Window, point, size};
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+use tracing::debug;
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use windows_sys::Win32::Graphics::Dwm::{
+    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    DwmSetWindowAttribute,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
     MonitorFromPoint, MonitorFromWindow,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
+    GWL_STYLE, GetCursorPos, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SetWindowLongW, SetWindowPos, WS_CAPTION, WS_POPUP, WS_THICKFRAME,
 };
 
 use super::{NoticePlacement, RingPlacement};
@@ -146,14 +152,20 @@ fn place(
         anyhow::bail!("overlay window has no Win32 handle");
     };
     let hwnd = handle.hwnd.get() as HWND;
+    make_frameless(hwnd)?;
     // Pin the 1px bootstrap well inside the selected monitor (GPUI should
     // already have opened it there). If that crosses a DPI boundary,
     // SetWindowPos synchronously delivers WM_DPICHANGED; GPUI applies its
     // suggested rectangle and updates rendering scale before this returns.
     // Final geometry is applied only AFTER that transition, so the suggested
     // rectangle cannot move the window away from where it was placed.
+    // FRAMECHANGED applies the frameless style set above in the same move.
     let anchor = Bounds::new(display.center(), size(DevicePixels(1), DevicePixels(1)));
-    set_bounds(hwnd, anchor, SWP_NOACTIVATE | SWP_NOZORDER)?;
+    set_bounds(
+        hwnd,
+        anchor,
+        SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+    )?;
     // SAFETY: hwnd belongs to the still-borrowed window.
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     ensure!(dpi != 0, "could not read overlay window DPI");
@@ -168,6 +180,57 @@ fn place(
         bounds(dpi),
         SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
     )
+}
+
+/// Strip the frame GPUI leaves on a pop-up window, so only the overlay's own
+/// transparent pixels are drawn.
+///
+/// GPUI creates `WindowKind::PopUp` with a zero window style, which is
+/// `WS_OVERLAPPED`, and `CreateWindowExW` gives every overlapped window a
+/// caption. Windows 11 then draws that frame — an opaque backdrop, a border
+/// and rounded corners — around the transparent client area. The window
+/// becomes a borderless `WS_POPUP` instead; the caller's next `SetWindowPos`
+/// must pass `SWP_FRAMECHANGED` to apply it. The DWM attributes keep Windows 11
+/// from rounding or outlining it.
+#[expect(
+    unsafe_code,
+    reason = "window-style and DWM attribute writes on a borrowed HWND, with typed values"
+)]
+fn make_frameless(hwnd: HWND) -> Result<()> {
+    // GWL_STYLE is a 32-bit bit set, so the non-Ptr pair is right on every
+    // target, and the casts reinterpret it without changing bits.
+    // SAFETY: hwnd belongs to the still-borrowed window.
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) }.cast_unsigned();
+    let frameless = (style & !(WS_CAPTION | WS_THICKFRAME)) | WS_POPUP;
+    // SAFETY: as above; a zero return is only an error with a last error set,
+    // and the previous style is never zero for this captioned window.
+    if unsafe { SetWindowLongW(hwnd, GWL_STYLE, frameless.cast_signed()) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("make overlay window frameless");
+    }
+    let size = u32::try_from(std::mem::size_of::<u32>())?;
+    for (attribute, value) in [
+        (
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            DWMWCP_DONOTROUND.cast_unsigned(),
+        ),
+        (DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE),
+    ] {
+        // SAFETY: value outlives this synchronous call, and `size` is the
+        // DWORD both attributes take.
+        let hr = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                attribute.cast_unsigned(),
+                std::ptr::from_ref(&value).cast(),
+                size,
+            )
+        };
+        // Windows 10 has neither attribute, and draws neither effect.
+        if hr < 0 {
+            debug!(attribute, "DWM attribute unsupported (HRESULT {hr:#x})");
+        }
+    }
+    Ok(())
 }
 
 #[expect(
