@@ -59,7 +59,11 @@ UTC timestamps and monospaced text. It includes the catalog's device family,
 selected firmware version, official package URL, and a download-verification
 entry. Transfer history advances in 10% milestones; live progress keeps its full
 percentage precision. The agent retains up to 128 entries in the
-job snapshot, including terminal failures, so GUI reconnects preserve the log.
+job snapshot, including terminal failures. A GUI session retains its known
+physical-device binding across reconnects to the same agent. Snapshots do not
+carry physical identity, so a cold GUI or a new agent run leaves historical
+jobs unbound instead of assigning their progress to a device by route alone.
+An unbound active job still blocks another installation.
 Repeated identical phases do not add entries. Errors have an explicit error
 label and use the theme's danger color. New entries follow the bottom unless
 the user has scrolled up to read earlier activity. GPUI Kit's `MessageScroller`
@@ -113,12 +117,19 @@ states; they do not exercise hardware or make network requests.
    update is refused.
 5. **Start and transfer.** Start with the target entity and image magic. Send
    raw 16-byte packets according to the device's Ready/Ack/Wait replies.
+   If the start response is lost, query status within the same admitted
+   transaction instead of issuing another start. Only the expected entity at
+   block zero may begin transfer; `NotStarted` and other initial states fail
+   without activation.
    The transfer state machine rejects unexpected entities, acknowledgements,
    skipped blocks and rewinds. A recovery query may request a retry of the exact
    packet whose write failed; ordinary replies must still advance. Wait for
    unsolicited status events, falling back to a status query when needed.
    Recovery queries and waits are bounded; a
    20-minute transfer deadline is checked between commands.
+   Decode status from the actual wire payload: Ready and Wait require four
+   bytes, and PacketAck requires six. Short responses fail as unsupported;
+   truncated events are dropped before missing fields can become zeroes.
 6. **Activate only after completion.** After the complete transfer is confirmed,
    send `ApplyDfu(entity, 0x02)`. This command causes a restart and does not echo
    a response. Drain the native write rather than treating the missing echo as
