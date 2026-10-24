@@ -1178,31 +1178,7 @@ impl Orchestrator {
         for &idx in &targets {
             self.reapply_volatile_settings(&devices[idx], &devices);
         }
-        let mut recovery_started = false;
-        for idx in disabled_keys_targets {
-            let Some(route) = &devices[idx].route else {
-                continue;
-            };
-            // A volatile reapply above already queued this keyboard's write.
-            if !targets.contains(&idx) {
-                let _ = self.shared.reapply_disabled_keys(route);
-            }
-            bump_settings_epoch(&mut self.settings_epochs, route);
-            recovery_started = true;
-        }
-        // Each recovery write above already holds its place in the keyboard's
-        // queue, so a client's next read waits for it and sees the result.
-        if recovery_started {
-            self.publish_inventory();
-        }
-        for dev in &devices {
-            if dev.online
-                && !self.disabled_keys_recovery.contains_key(&stable_id(dev))
-                && let Some(route) = &dev.route
-            {
-                self.shared.disabled_keys_order.finish_recovery(route);
-            }
-        }
+        self.drive_disabled_keys_recovery(&devices, &targets, &disabled_keys_targets);
         let changed = next_current != self.current
             || devices.len() != self.devices.len()
             || devices.iter().zip(&self.devices).any(|(a, b)| {
@@ -1233,6 +1209,41 @@ impl Orchestrator {
         self.devices = devices;
         self.current = next_current;
         self.rebuild();
+    }
+
+    /// Start each planned Disable Keys recovery and announce it to clients,
+    /// then close the recovery of every online keyboard that no longer needs
+    /// one. A keyboard in `volatile_targets` already queued its write.
+    fn drive_disabled_keys_recovery(
+        &mut self,
+        devices: &[AgentDevice],
+        volatile_targets: &[usize],
+        recovery_targets: &[usize],
+    ) {
+        let mut recovery_started = false;
+        for &idx in recovery_targets {
+            let Some(route) = &devices[idx].route else {
+                continue;
+            };
+            if !volatile_targets.contains(&idx) {
+                let _ = self.shared.reapply_disabled_keys(route);
+            }
+            bump_settings_epoch(&mut self.settings_epochs, route);
+            recovery_started = true;
+        }
+        // Each recovery write above already holds its place in the keyboard's
+        // queue, so a client's next read waits for it and sees the result.
+        if recovery_started {
+            self.publish_inventory();
+        }
+        for dev in devices {
+            if dev.online
+                && !self.disabled_keys_recovery.contains_key(&stable_id(dev))
+                && let Some(route) = &dev.route
+            {
+                self.shared.disabled_keys_order.finish_recovery(route);
+            }
+        }
     }
 
     /// Whether device settings still need a delayed inventory confirmation.
