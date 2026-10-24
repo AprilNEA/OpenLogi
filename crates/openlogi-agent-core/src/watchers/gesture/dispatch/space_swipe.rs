@@ -156,6 +156,9 @@ struct Transition {
     /// transition swing to either neighbour.
     keep_sign: Option<f64>,
     stage: Stage,
+    /// Opened by a commit and not moved since: the commit's own travel is
+    /// still to come.
+    fresh: bool,
     /// Smoothed speed along the transition, desktop widths per second.
     velocity: f64,
     moved_at: Instant,
@@ -214,6 +217,14 @@ impl SpaceSwipes {
         self.active.contains_key(&(session.clone(), button))
     }
 
+    /// Whether `button`'s hold on `session` just opened its transition and
+    /// has not moved it yet, so the opening commit's travel is still owed.
+    pub(super) fn awaits_commit_travel(&self, session: &HidppSessionId, button: ButtonId) -> bool {
+        self.active
+            .get(&(session.clone(), button))
+            .is_some_and(|t| t.fresh)
+    }
+
     /// Open a live transition for a committed swipe bound to a desktop action,
     /// returning its first frame; `None` (nothing opened) for anything else.
     /// `opposite` is the action bound to the reverse swipe. It opens at zero:
@@ -243,6 +254,7 @@ impl SpaceSwipes {
                     progress: 0.0,
                     bounds: Bounds::read(self.probe),
                 },
+                fresh: true,
                 velocity: 0.0,
                 moved_at: now,
             },
@@ -281,6 +293,7 @@ impl SpaceSwipes {
         let Some(t) = self.active.get_mut(&(session.clone(), button)) else {
             return Vec::new();
         };
+        t.fresh = false;
         let delta = t.polarity * f64::from(dx) / travel;
         let elapsed = now.saturating_duration_since(t.moved_at);
         if elapsed >= STALE_MOTION {

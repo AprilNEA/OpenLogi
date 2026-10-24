@@ -72,6 +72,18 @@ pub enum CapturedInput {
         /// Vertical raw-XY travel, `+y` down.
         dy: i32,
     },
+    /// The travel behind a fresh swipe commit, sent right after its
+    /// [`Self::Gesture`], so a live transition that commit opens starts where
+    /// the hand already is. A consumer already following the hold has seen
+    /// that travel as [`Self::GestureMotion`] and ignores it.
+    GestureCommitTravel {
+        /// The held gesture source the travel belongs to.
+        button: ButtonId,
+        /// Horizontal raw-XY travel, `+x` right.
+        dx: i32,
+        /// Vertical raw-XY travel, `+y` down.
+        dy: i32,
+    },
     /// A diverted button's physical down edge.
     ButtonDown(ButtonId),
     /// Thumb-wheel rotation to re-synthesise on the configured scroll axis.

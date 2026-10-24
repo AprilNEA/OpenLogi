@@ -255,28 +255,28 @@ impl CaptureAccum {
         // arrives outside a hold.
         let streaming = swipe.has_committed();
         let (dx, dy) = (i32::from(dx), i32::from(dy));
-        if let Some(direction) = swipe.accumulate(dx, dy) {
-            debug!(?direction, %button, "gesture committed");
-            let _ = sink.send(CapturedInput::Gesture(*button, direction));
-            if !streaming {
-                // The hold's first commit: its travel streams too, so a live
-                // consumer starts where the hand already is.
-                let (dx, dy) = swipe.committed_travel();
-                let _ = sink.send(CapturedInput::GestureMotion {
-                    button: *button,
-                    dx,
-                    dy,
-                });
-            }
-        }
+        let committed = swipe.accumulate(dx, dy);
         // Once the hold has committed, every later report also goes out as
-        // motion for a live transition to follow.
+        // motion for a live transition to follow, ahead of any commit it
+        // makes: a transition that commit opens takes the report with the
+        // commit's travel instead, so it never sees it twice.
         if streaming {
             let _ = sink.send(CapturedInput::GestureMotion {
                 button: *button,
                 dx,
                 dy,
             });
+        }
+        if let Some(direction) = committed {
+            debug!(?direction, %button, "gesture committed");
+            let _ = sink.send(CapturedInput::Gesture(*button, direction));
+            if let Some((dx, dy)) = swipe.take_committed_travel() {
+                let _ = sink.send(CapturedInput::GestureCommitTravel {
+                    button: *button,
+                    dx,
+                    dy,
+                });
+            }
         }
     }
 

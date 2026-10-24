@@ -1024,6 +1024,120 @@ async fn an_invalidated_press_springs_its_live_transition_back_on_release() {
 }
 
 #[tokio::test]
+async fn only_a_transition_its_commit_opens_takes_the_commit_travel() {
+    use std::cell::RefCell;
+
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use openlogi_inject::SpaceSwipePhase;
+
+    thread_local! {
+        static POSTED: RefCell<Vec<(SpaceSwipePhase, f64)>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(progress: f64, phase: SpaceSwipePhase) -> bool {
+        POSTED.with_borrow_mut(|posted| posted.push((phase, progress)));
+        true
+    }
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ))
+    .with_space_output(800.0, record);
+    let button = ButtonId::GestureButton;
+    let motion = |dx| CapturedInput::GestureMotion { button, dx, dy: 0 };
+    let commit_travel = |dx| CapturedInput::GestureCommitTravel { button, dx, dy: 0 };
+
+    // Only Right is a desktop swipe: a Left first commits nothing live, and
+    // the reversal's travel reaches the transition its Right commit opens.
+    let mut right_only = plan();
+    right_only.dispatch.gesture_bindings.insert(
+        button,
+        [(GestureDirection::Right, Action::NextDesktop)].into(),
+    );
+    let session = live_session_from_plan(7, right_only);
+    let id = session.id().clone();
+    for input in [
+        CapturedInput::ButtonDown(button),
+        CapturedInput::Gesture(button, GestureDirection::Left),
+        commit_travel(-60),
+        motion(30),
+        motion(440),
+        CapturedInput::Gesture(button, GestureDirection::Right),
+        commit_travel(470),
+        CapturedInput::ButtonUp(button),
+    ] {
+        dispatcher.dispatch(&id, session.dispatch(), input);
+    }
+    let posted = POSTED.with_borrow_mut(std::mem::take);
+    assert!(
+        matches!(
+            posted.as_slice(),
+            [
+                (SpaceSwipePhase::Began, _),
+                (SpaceSwipePhase::Changed, progress),
+                (SpaceSwipePhase::Ended { .. }, _),
+            ] if (progress - 470.0 / 800.0).abs() < 1e-9
+        ),
+        "the full stroke past halfway finishes the switch: {posted:?}"
+    );
+
+    // A transition already following the hand saw the reversal as motion; a
+    // later commit's travel must not move it again.
+    let mut both = plan();
+    both.dispatch.gesture_bindings.insert(
+        button,
+        [
+            (GestureDirection::Left, Action::PreviousDesktop),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]
+        .into(),
+    );
+    let session = live_session_from_plan(8, both);
+    let id = session.id().clone();
+    for input in [
+        CapturedInput::ButtonDown(button),
+        CapturedInput::Gesture(button, GestureDirection::Right),
+        commit_travel(60),
+        motion(-30),
+        motion(-40),
+        CapturedInput::Gesture(button, GestureDirection::Left),
+        commit_travel(-70),
+    ] {
+        dispatcher.dispatch(&id, session.dispatch(), input);
+    }
+    let progress: Vec<f64> = POSTED.with_borrow(|posted| {
+        posted
+            .iter()
+            .filter(|(phase, _)| *phase == SpaceSwipePhase::Changed)
+            .map(|(_, progress)| *progress)
+            .collect()
+    });
+    assert_eq!(progress.len(), 3, "{progress:?}");
+    assert!((progress[2] - (-10.0 / 800.0)).abs() < 1e-9, "{progress:?}");
+
+    scroll.shutdown();
+    actions.shutdown();
+}
+
+#[tokio::test]
 async fn a_refused_next_leg_drops_the_holds_live_transition() {
     use std::cell::{Cell, RefCell};
 

@@ -278,6 +278,13 @@ impl InputDispatcher {
             CapturedInput::GestureMotion { button, dx, .. } => {
                 self.follow_gesture_motion(session, button, dx);
             }
+            CapturedInput::GestureCommitTravel { button, dx, .. } => {
+                // Only a transition this commit just opened takes the commit's
+                // travel; one already following the hold saw it as motion.
+                if self.spaces.awaits_commit_travel(session, button) {
+                    self.follow_gesture_motion(session, button, dx);
+                }
+            }
             CapturedInput::ButtonDown(button) => {
                 // A raw-XY gesture source owns its click/swipe map; its physical
                 // lifecycle is still tracked, but it must not also fire the

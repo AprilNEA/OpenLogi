@@ -121,7 +121,7 @@ fn motion_streams_from_the_commit_on() {
         inputs,
         vec![
             CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Right),
-            CapturedInput::GestureMotion {
+            CapturedInput::GestureCommitTravel {
                 button: ButtonId::GestureButton,
                 dx: 60,
                 dy: 0,
@@ -132,7 +132,57 @@ fn motion_streams_from_the_commit_on() {
                 dy: 0,
             },
         ],
-        "the commit streams the whole committing travel once, then each later report"
+        "the commit carries the whole committing travel once, then each later report streams"
+    );
+}
+
+#[test]
+fn a_later_fresh_commit_carries_its_own_travel_after_the_streamed_report() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    acc.backdate_hold_for_test();
+    let xy = |dx| RawControlEvent::RawXy { dx, dy: 0 };
+
+    // A fresh hold's first report predates the press and is discarded.
+    handle_reprog(&mut acc, xy(500), GESTURE, &[], &[], &tx);
+    handle_reprog(&mut acc, xy(-60), GESTURE, &[], &[], &tx);
+    // Reverse without releasing: the Right commit's travel counts from the
+    // turning point, and every report already streams.
+    handle_reprog(&mut acc, xy(30), GESTURE, &[], &[], &tx);
+    handle_reprog(&mut acc, xy(40), GESTURE, &[], &[], &tx);
+    let inputs: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|input| !matches!(input, CapturedInput::ButtonDown(_)))
+        .collect();
+    let button = ButtonId::GestureButton;
+    assert_eq!(
+        inputs,
+        vec![
+            CapturedInput::Gesture(button, GestureDirection::Left),
+            CapturedInput::GestureCommitTravel {
+                button,
+                dx: -60,
+                dy: 0
+            },
+            CapturedInput::GestureMotion {
+                button,
+                dx: 30,
+                dy: 0
+            },
+            // The committing report streams before its commit, so a transition
+            // the commit opens takes it only with the commit's travel.
+            CapturedInput::GestureMotion {
+                button,
+                dx: 40,
+                dy: 0
+            },
+            CapturedInput::Gesture(button, GestureDirection::Right),
+            CapturedInput::GestureCommitTravel {
+                button,
+                dx: 70,
+                dy: 0
+            },
+        ]
     );
 }
 
@@ -676,12 +726,12 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
     );
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::GestureMotion {
+        Ok(CapturedInput::GestureCommitTravel {
             button: ButtonId::Forward,
             dx: -120,
             dy: 5,
         }),
-        "the commit's travel streams for a live consumer"
+        "the commit carries its travel for a live consumer"
     );
     assert_eq!(
         rx.try_recv(),
@@ -756,12 +806,12 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
     );
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::GestureMotion {
+        Ok(CapturedInput::GestureCommitTravel {
             button: ButtonId::DpiToggle,
             dx: 5,
             dy: -120,
         }),
-        "the commit's travel streams for a live consumer"
+        "the commit carries its travel for a live consumer"
     );
     assert_eq!(
         rx.try_recv(),
