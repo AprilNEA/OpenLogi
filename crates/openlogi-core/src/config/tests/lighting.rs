@@ -2,6 +2,10 @@
 
 use super::*;
 
+fn period(ms: u16) -> LightingEffectPeriod {
+    LightingEffectPeriod::try_new(ms).expect("valid lighting effect period")
+}
+
 #[test]
 fn lighting_roundtrips_per_device() {
     let mut cfg = Config::default();
@@ -12,7 +16,7 @@ fn lighting_roundtrips_per_device() {
             color: "00aabb".parse().expect("valid hex"),
             brightness: 75,
             effect: LightingEffect::Breathing,
-            effect_period_ms: 3_000,
+            effect_period_ms: period(3_000),
         },
     );
     let restored = write_and_read(&cfg);
@@ -23,7 +27,7 @@ fn lighting_roundtrips_per_device() {
             color: "00aabb".parse().expect("valid hex"),
             brightness: 75,
             effect: LightingEffect::Breathing,
-            effect_period_ms: 3_000,
+            effect_period_ms: period(3_000),
         })
     );
     assert_eq!(restored.lighting("absent"), None);
@@ -62,12 +66,16 @@ fn lighting_effect_reads_its_snake_case_name() {
     .expect("a colour cycle loads");
     let lighting = cfg.lighting("g733").expect("lighting");
     assert_eq!(lighting.effect, LightingEffect::ColorCycle);
-    assert_eq!(lighting.effect_period_ms, 8_000);
+    assert_eq!(lighting.effect_period_ms, period(8_000));
 }
 
 #[test]
 fn lighting_effect_period_outside_its_range_is_rejected() {
-    for period in [0, 999, 20_001] {
+    for (period, bound) in [
+        (0, "greater or equal to 1000"),
+        (999, "greater or equal to 1000"),
+        (20_001, "less or equal to 20000"),
+    ] {
         let error = toml::from_str::<Config>(&format!(
             "
                 schema_version = 3
@@ -77,10 +85,7 @@ fn lighting_effect_period_outside_its_range_is_rejected() {
             "
         ))
         .expect_err("an out-of-range period must fail");
-        assert!(
-            error.to_string().contains("between 1000 and 20000"),
-            "{period}: {error}"
-        );
+        assert!(error.to_string().contains(bound), "{period}: {error}");
     }
 }
 

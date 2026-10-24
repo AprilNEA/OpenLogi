@@ -38,7 +38,8 @@ use openlogi_core::binding::{
     GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
 };
 use openlogi_core::config::{
-    ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, LightingEffect, ScrollResolution,
+    ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, LightingEffect, LightingEffectPeriod,
+    ScrollResolution,
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
@@ -1140,7 +1141,7 @@ fn lighting_payloads() {
             color: "8000ff".parse().expect("valid hex"),
             brightness: 80,
             effect: LightingEffect::Breathing,
-            effect_period_ms: 3_000,
+            effect_period_ms: LightingEffectPeriod::try_new(3_000).expect("valid period"),
         },
         "01063830303066665001fbb80b",
     );
