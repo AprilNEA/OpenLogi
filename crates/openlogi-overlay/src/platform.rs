@@ -1,6 +1,8 @@
 //! Native window policy for the standalone overlay: the Actions Ring and its
 //! notices.
 
+use gpui::{AppContext as _, AsyncApp};
+
 #[cfg(not(target_os = "windows"))]
 mod placement;
 // Keep Windows geometry tests runnable on the host; only native.rs needs Win32.
@@ -178,6 +180,442 @@ pub struct ClickAwayMonitor(());
 #[cfg(not(target_os = "macos"))]
 pub fn watch_clicks_outside(_on_mouse_down: impl Fn() + 'static) -> Option<ClickAwayMonitor> {
     None
+}
+
+/// Cached reduced-motion reads across ring opens.
+#[derive(Debug, Default)]
+pub struct MotionPreference {
+    last_known: Option<bool>,
+}
+
+impl MotionPreference {
+    /// Merge a fresh OS read into the cache and return the GPUI `reduce_motion`
+    /// flag to apply.
+    ///
+    /// A successful read wins and is remembered. When the read fails or times
+    /// out, the last known value is used; with no prior value, motion stays on
+    /// (`false`).
+    #[must_use]
+    pub fn resolve(&mut self, read: Option<bool>) -> bool {
+        if let Some(reduced) = read {
+            self.last_known = Some(reduced);
+            reduced
+        } else {
+            self.last_known.unwrap_or(false)
+        }
+    }
+}
+
+/// Read the host OS reduced-motion preference once.
+///
+/// Returns `Some(true)` when reduced motion is requested, `Some(false)` when
+/// full motion is requested, and `None` when the preference could not be read.
+///
+/// On Linux this may block the calling thread for up to [`MOTION_QUERY_TIMEOUT`];
+/// call it from a background thread (see [`settle_latest_invocation`]).
+#[must_use]
+#[cfg_attr(
+    target_os = "macos",
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "macOS always returns a live preference; other platforms use None for read failure"
+    )
+)]
+pub fn read_reduced_motion() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        client_area_animation_enabled().map(|enabled| !enabled)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+
+        let mut command = Command::new("gsettings");
+        command.args(["get", "org.gnome.desktop.interface", "enable-animations"]);
+        read_bool_command(command, MOTION_QUERY_TIMEOUT).map(|enabled| !enabled)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+fn apply_fresh_motion_preference(
+    cx: &mut AsyncApp,
+    preference: &mut MotionPreference,
+    fresh: Option<bool>,
+) -> bool {
+    let reduced = preference.resolve(fresh);
+    cx.update(|cx| cx.set_reduce_motion(reduced));
+    reduced
+}
+
+/// Race a background motion read against invocation observations until the
+/// read finishes.
+///
+/// While [`read_reduced_motion`] runs (up to 200 ms on Linux) the overlay keeps
+/// receiving on `invocations`. A dismissal (`None`) returns immediately without
+/// waiting for the read. A replacement `Some(B)` supersedes the invocation that
+/// started the settle but keeps the same in-flight read. When the read completes,
+/// the latest observation wins (including anything already queued), GPUI
+/// `reduce_motion` is applied from that read, then the result is returned. If
+/// `invocations` closes while waiting, returns `None`.
+pub(crate) async fn settle_latest_invocation<T>(
+    cx: &mut AsyncApp,
+    first: T,
+    invocations: &mut tokio::sync::mpsc::UnboundedReceiver<Option<T>>,
+    preference: &mut MotionPreference,
+    read: impl std::future::Future<Output = Option<bool>> + Send + 'static,
+) -> Option<T> {
+    let mut latest = Some(first);
+    let mut read_task = std::pin::pin!(cx.background_spawn(read));
+    loop {
+        tokio::select! {
+            biased;
+            message = invocations.recv() => match message {
+                None | Some(None) => return None,
+                Some(Some(value)) => latest = Some(value),
+            },
+            fresh = read_task.as_mut() => {
+                apply_fresh_motion_preference(cx, preference, fresh);
+                while let Ok(message) = invocations.try_recv() {
+                    latest = message;
+                }
+                return latest;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    reason = "SystemParametersInfoW is plain Win32 FFI; std and windows-sys offer no safe reader for SPI_GETCLIENTAREAANIMATION"
+)]
+fn client_area_animation_enabled() -> Option<bool> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+    };
+
+    let mut enabled = 0i32;
+    // SAFETY: `SPI_GETCLIENTAREAANIMATION` writes one `BOOL` when the call succeeds.
+    let ok = unsafe {
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut enabled).cast(), 0)
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some(enabled != 0)
+}
+
+/// How long a `gsettings` read may run before it is killed.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+const MOTION_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Run `command` and parse its stdout as a `gsettings` boolean, killing it if
+/// it has not exited within `timeout`. Blocks the calling (background) thread.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn read_bool_command(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<bool> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let mut stdout = String::new();
+                child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+                return parse_gsettings_bool(&stdout);
+            }
+            Ok(Some(_)) => return None,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// `gsettings get` prints a GVariant boolean; anything else is no signal.
+#[cfg(any(target_os = "linux", test))]
+fn parse_gsettings_bool(stdout: &str) -> Option<bool> {
+    match stdout.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod reduced_motion_tests {
+    #[cfg(unix)]
+    use std::process::Command;
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
+
+    use gpui::TestAppContext;
+
+    use super::parse_gsettings_bool;
+    #[cfg(unix)]
+    use super::{MOTION_QUERY_TIMEOUT, read_bool_command};
+    use super::{MotionPreference, settle_latest_invocation};
+
+    #[test]
+    fn motion_preference_unknown_defaults_to_motion_on() {
+        let mut preference = MotionPreference::default();
+        assert!(!preference.resolve(None));
+    }
+
+    #[test]
+    fn motion_preference_tracks_on_then_off_between_opens() {
+        let mut preference = MotionPreference::default();
+        assert!(!preference.resolve(Some(false)));
+        assert!(preference.resolve(Some(true)));
+    }
+
+    #[test]
+    fn motion_preference_failed_read_keeps_last_known() {
+        let mut preference = MotionPreference::default();
+        assert!(!preference.resolve(Some(false)));
+        assert!(!preference.resolve(None));
+        assert!(preference.resolve(Some(true)));
+        assert!(preference.resolve(None));
+    }
+
+    /// Open one ring with nothing else queued and report the GPUI flag it got.
+    async fn open_with_read(
+        cx: &mut gpui::AsyncApp,
+        preference: &mut MotionPreference,
+        read: Option<bool>,
+    ) -> bool {
+        let (_sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Option<u64>>();
+        let opened =
+            settle_latest_invocation(cx, 1, &mut receiver, preference, async move { read }).await;
+        assert_eq!(opened, Some(1));
+        cx.update(|cx| cx.reduce_motion())
+    }
+
+    #[gpui::test]
+    async fn motion_turned_off_between_opens_applies_to_the_next_ring(cx: &mut TestAppContext) {
+        cx.spawn(|mut async_cx| async move {
+            let mut preference = MotionPreference::default();
+            assert!(!open_with_read(&mut async_cx, &mut preference, Some(false)).await);
+            assert!(open_with_read(&mut async_cx, &mut preference, Some(true)).await);
+        })
+        .await;
+    }
+
+    #[gpui::test]
+    async fn unknown_motion_on_first_open_falls_back_to_motion_on(cx: &mut TestAppContext) {
+        cx.spawn(|mut async_cx| async move {
+            let mut preference = MotionPreference::default();
+            assert!(!open_with_read(&mut async_cx, &mut preference, None).await);
+            assert!(!preference.resolve(None));
+            assert!(open_with_read(&mut async_cx, &mut preference, Some(true)).await);
+        })
+        .await;
+    }
+
+    #[test]
+    fn gsettings_booleans_parse_and_anything_else_is_no_signal() {
+        assert_eq!(parse_gsettings_bool("true\n"), Some(true));
+        assert_eq!(parse_gsettings_bool("false\n"), Some(false));
+        assert_eq!(parse_gsettings_bool(""), None);
+        assert_eq!(parse_gsettings_bool("No such schema\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_motion_query_returns_its_parsed_answer() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo false"]);
+        assert_eq!(
+            read_bool_command(command, Duration::from_secs(5)),
+            Some(false)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_motion_query_is_killed_at_its_timeout() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5; echo false"]);
+        let started = Instant::now();
+        assert_eq!(read_bool_command(command, MOTION_QUERY_TIMEOUT), None);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[gpui::test]
+    fn settle_dismissal_while_read_pending_returns_before_read_completes(cx: &mut TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (read_tx, read_rx) = tokio::sync::oneshot::channel::<Option<bool>>();
+        let settled = Rc::new(Cell::new(None::<Option<u64>>));
+        let settled_handle = settled.clone();
+        let task = cx.spawn(|mut async_cx| async move {
+            let mut preference = MotionPreference::default();
+            let value = settle_latest_invocation(
+                &mut async_cx,
+                1_u64,
+                &mut receiver,
+                &mut preference,
+                async move { read_rx.await.unwrap_or(None) },
+            )
+            .await;
+            settled_handle.set(Some(value));
+        });
+        cx.run_until_parked();
+        assert!(settled.get().is_none());
+        let _ = sender.send(None);
+        cx.run_until_parked();
+        assert_eq!(settled.get(), Some(None));
+        let _ = read_tx.send(Some(true));
+        cx.run_until_parked();
+        assert_eq!(settled.get(), Some(None));
+        drop(task);
+    }
+
+    #[gpui::test]
+    fn settle_replacement_while_read_pending_opens_latest_after_read(cx: &mut TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (read_tx, read_rx) = tokio::sync::oneshot::channel::<Option<bool>>();
+        let settled = Rc::new(Cell::new(None::<Option<u64>>));
+        let settled_handle = settled.clone();
+        let task = cx.spawn(|mut async_cx| async move {
+            let mut preference = MotionPreference::default();
+            let value = settle_latest_invocation(
+                &mut async_cx,
+                1_u64,
+                &mut receiver,
+                &mut preference,
+                async move { read_rx.await.unwrap_or(None) },
+            )
+            .await;
+            settled_handle.set(Some(value));
+            async_cx.update(|cx| assert!(cx.reduce_motion()));
+        });
+        cx.run_until_parked();
+        assert!(settled.get().is_none());
+        let _ = sender.send(Some(2_u64));
+        cx.run_until_parked();
+        assert!(settled.get().is_none());
+        let _ = read_tx.send(Some(true));
+        cx.run_until_parked();
+        assert_eq!(settled.get(), Some(Some(2)));
+        drop(task);
+    }
+
+    #[gpui::test]
+    fn settle_invocation_channel_closed_while_read_pending_returns_none(cx: &mut TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_read_tx, read_rx) = tokio::sync::oneshot::channel::<Option<bool>>();
+        let settled = Rc::new(Cell::new(None::<Option<u64>>));
+        let settled_handle = settled.clone();
+        let task = cx.spawn(|mut async_cx| async move {
+            let mut preference = MotionPreference::default();
+            let value = settle_latest_invocation(
+                &mut async_cx,
+                1_u64,
+                &mut receiver,
+                &mut preference,
+                async move { read_rx.await.unwrap_or(None) },
+            )
+            .await;
+            settled_handle.set(Some(value));
+        });
+        cx.run_until_parked();
+        drop(sender);
+        cx.run_until_parked();
+        assert_eq!(settled.get(), Some(None));
+        drop(task);
+    }
+
+    #[gpui::test]
+    async fn settle_replacement_then_dismissal_during_read_returns_none(cx: &mut TestAppContext) {
+        cx.spawn(|mut async_cx| async move {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut preference = MotionPreference::default();
+            let settled = settle_latest_invocation(
+                &mut async_cx,
+                1_u64,
+                &mut receiver,
+                &mut preference,
+                async move {
+                    let _ = sender.send(Some(2_u64));
+                    let _ = sender.send(None);
+                    Some(false)
+                },
+            )
+            .await;
+            assert_eq!(settled, None);
+        })
+        .await;
+    }
+
+    #[gpui::test]
+    async fn settle_dismissal_then_replacement_during_read_returns_none(cx: &mut TestAppContext) {
+        cx.spawn(|mut async_cx| async move {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut preference = MotionPreference::default();
+            let settled = settle_latest_invocation(
+                &mut async_cx,
+                1_u64,
+                &mut receiver,
+                &mut preference,
+                async move {
+                    let _ = sender.send(None);
+                    let _ = sender.send(Some(3_u64));
+                    Some(false)
+                },
+            )
+            .await;
+            assert_eq!(settled, None);
+        })
+        .await;
+    }
+
+    #[gpui::test]
+    async fn settle_with_empty_queue_returns_first_and_applies_motion(cx: &mut TestAppContext) {
+        cx.spawn(|mut async_cx| async move {
+            let (_sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut preference = MotionPreference::default();
+            let settled = settle_latest_invocation(
+                &mut async_cx,
+                7_u64,
+                &mut receiver,
+                &mut preference,
+                async { Some(true) },
+            )
+            .await;
+            assert_eq!(settled, Some(7));
+            async_cx.update(|cx| assert!(cx.reduce_motion()));
+        })
+        .await;
+    }
 }
 
 /// One display's global geometry, in the same top-left-origin global point
