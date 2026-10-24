@@ -25,7 +25,7 @@ use openlogi_agent_core::watchers::pairing::{
 };
 use openlogi_hid::{DeviceRoute, DiscoveredDevice, PairingEvent, ReceiverSelector};
 use openlogi_ipc::{FoundDevice, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{info, warn};
 
 /// How long the agent holds a `next_pairing` long-poll before returning `None`.
@@ -57,6 +57,9 @@ struct ActiveSession {
     devices: DeviceCache,
     phase: ActivePhase,
     _receiver_lease: ExclusiveReceiverLease,
+    // Dropped after the receiver lease. Cancellation subscribers wait for
+    // closure, so acknowledgement cannot precede terminal resource cleanup.
+    completion: watch::Sender<()>,
 }
 
 enum ActivePhase {
@@ -94,6 +97,7 @@ impl SessionOwner {
             devices: HashMap::new(),
             phase: ActivePhase::Discovering,
             _receiver_lease: receiver_lease,
+            completion: watch::channel(()).0,
         });
         true
     }
@@ -250,23 +254,39 @@ impl PairingManager {
         })
     }
 
-    /// Cancel the in-progress session. The resulting `Failed(Cancelled)` event
-    /// releases the receiver lease via the translator — don't release it here, or
-    /// capture could re-acquire the receiver while `run_pairing` still holds it.
-    pub fn cancel(&self) -> Result<(), PairingCommandError> {
-        with_session_owner(&self.session, |owner| {
+    /// Cancel and wait for terminal cleanup to release the receiver lease.
+    /// The watcher restores receiver state before the translator ends the
+    /// session; only then may the caller admit another pairing attempt.
+    pub async fn cancel(&self) -> Result<(), PairingCommandError> {
+        let completion = with_session_owner(&self.session, |owner| {
             let Some(session) = owner.active() else {
                 // Nothing running, so this is the GUI dismissing a *finished*
                 // session's result. Clearing the phase is the whole job.
                 self.observable.set_pairing(None);
-                return Ok(());
+                return Ok(None);
             };
+            let completion = session.completion.subscribe();
             self.ctrl
                 .send(PairingControl::Cancel {
                     session: session.id,
                 })
-                .map_err(|_| PairingCommandError::WatcherUnavailable)
-        })
+                .map_err(|_| PairingCommandError::WatcherUnavailable)?;
+            Ok(Some((completion, owner.next_id)))
+        })?;
+        if let Some((mut completion, generation)) = completion {
+            // This sender never publishes values: closing it is the terminal
+            // cleanup signal, including watcher failure and process shutdown.
+            let _ = completion.changed().await;
+            with_session_owner(&self.session, |owner| {
+                // Pairing success/timeout can beat the cancellation command.
+                // Dismiss that result, but never a newer client's session or
+                // result that appeared before this waiter resumed.
+                if owner.next_id == generation && matches!(owner.state, SessionState::Idle) {
+                    self.observable.set_pairing(None);
+                }
+            });
+        }
+        Ok(())
     }
 
     /// Long-poll the next pairing step; `None` when the hold window elapses.

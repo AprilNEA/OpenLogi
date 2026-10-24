@@ -10,7 +10,7 @@ use hidpp::{
         smartshift::{SmartShiftFeature, WheelMode},
         smartshift_enhanced::{
             SmartShiftEnhancedCapabilities, SmartShiftEnhancedFeature,
-            SmartShiftEnhancedStatusChange,
+            SmartShiftEnhancedStatusChange, TorquePercent,
         },
     },
 };
@@ -107,6 +107,16 @@ fn decode_tunable_torque(value: u8) -> Result<Option<TunableTorque>, WriteError>
             operation: HidppOperation::ReadSmartShift,
             feature_hex: SmartShiftEnhancedFeature::ID,
         })
+}
+
+/// Encode a [`TunableTorque`] as the `0x2111` setter's [`TorquePercent`].
+/// Both bound the level to `1..=100`; `every_tunable_torque_is_a_torque_percent`
+/// keeps the two ranges equal.
+fn encode_tunable_torque(torque: TunableTorque) -> TorquePercent {
+    let Some(percent) = TorquePercent::new(torque.into_inner()) else {
+        unreachable!("TunableTorque and TorquePercent share the 1..=100 range");
+    };
+    percent
 }
 
 /// Map the fork's `0x2110` [`WheelMode`] onto OpenLogi's [`SmartShiftMode`].
@@ -331,7 +341,7 @@ impl SmartShift {
 async fn writable_torque(
     feature: &SmartShiftEnhancedFeature,
     torque: Option<TunableTorque>,
-) -> Result<Option<NonZeroU8>, WriteError> {
+) -> Result<Option<TorquePercent>, WriteError> {
     let Some(torque) = torque else {
         return Ok(None);
     };
@@ -346,7 +356,7 @@ async fn writable_torque(
         .capabilities
         .contains(SmartShiftEnhancedCapabilities::TUNABLE_TORQUE)
     {
-        Ok(Some(NonZeroU8::from(torque)))
+        Ok(Some(encode_tunable_torque(torque)))
     } else {
         debug!(
             %torque,

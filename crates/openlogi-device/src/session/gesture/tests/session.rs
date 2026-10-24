@@ -1,6 +1,7 @@
 //! The capture session lifecycle: arming, restore through a replacement channel, rollback, and teardown order.
 
 use super::*;
+use crate::channel::scripted::feature_error;
 
 #[tokio::test]
 async fn alternate_gesture_control_arming_respects_mode_and_capabilities() {
@@ -658,7 +659,16 @@ async fn channel_change_takes_teardown_precedence_over_ready_shutdown() {
 pub(super) fn thumbwheel_device(
     status: [u8; 2],
 ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
-    ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+    ScriptedRawHidChannel::with_dynamic_responder(thumbwheel_responder(status, true))
+}
+
+/// [`thumbwheel_device`]'s responder. Without `answers_info`, the wheel
+/// refuses `getThumbwheelInfo` with `InvalidArgument`.
+fn thumbwheel_responder(
+    status: [u8; 2],
+    answers_info: bool,
+) -> impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static {
+    move |request| {
         let mut response = vec![0; 20];
         response[..4].copy_from_slice(&request[..4]);
         response[0] = 0x11;
@@ -669,6 +679,7 @@ pub(super) fn thumbwheel_device(
                     response[4] = 3;
                 }
             }
+            (3, 0) if !answers_info => return Some(feature_error(request, 0x02)),
             // getThumbwheelInfo: native 20, diverted 120, default_dir 1.
             (3, 0) => response[4..9].copy_from_slice(&[0, 20, 0, 120, 1]),
             (3, 1) => response[4..6].copy_from_slice(&status),
@@ -676,7 +687,24 @@ pub(super) fn thumbwheel_device(
             _ => panic!("unexpected capture request: {request:02x?}"),
         }
         Some(response)
-    })
+    }
+}
+
+/// Every `setThumbwheelReporting` payload `handle` saw, in order.
+fn reporting_writes(handle: &crate::replay::ReplayChannelHandle) -> Vec<[u8; 2]> {
+    handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == 3 && report[3] >> 4 == 2)
+        .map(|report| [report[4], report[5]])
+        .collect()
+}
+
+fn thumbwheel_spec() -> CaptureSpec {
+    CaptureSpec {
+        capture_thumbwheel: true,
+        ..CaptureSpec::default()
+    }
 }
 
 /// Arm the thumb wheel, then hand it back through the capture restore path,
@@ -696,12 +724,8 @@ async fn arm_then_restore_thumbwheel(status: [u8; 2]) -> Vec<[u8; 2]> {
     );
     let shared = SharedChannel::new(channel.clone(), route);
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
-    let spec = CaptureSpec {
-        capture_thumbwheel: true,
-        ..CaptureSpec::default()
-    };
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+    arm_controls_into(&device, &channel, 0xff, &thumbwheel_spec(), &mut armed)
         .await
         .unwrap();
     let pending = armed
@@ -711,12 +735,7 @@ async fn arm_then_restore_thumbwheel(status: [u8; 2]) -> Vec<[u8; 2]> {
         pending.allow_current_channel().retry(&registry).await,
         CaptureSessionOutcome::Restored
     ));
-    handle
-        .written_reports()
-        .into_iter()
-        .filter(|report| report[2] == 3 && report[3] >> 4 == 2)
-        .map(|report| [report[4], report[5]])
-        .collect()
+    reporting_writes(&handle)
 }
 
 #[tokio::test]
@@ -734,11 +753,55 @@ async fn thumbwheel_restore_keeps_the_native_inversion_found_before_capture() {
 }
 
 #[tokio::test]
-async fn thumbwheel_left_diverted_is_restored_native_without_its_diverted_sign() {
-    // Already diverted (a session that never tore down): its invert byte is
-    // that owner's sign normalisation, so it must not become native inversion.
+async fn thumbwheel_found_diverted_is_handed_back_diverted() {
+    // Diverted before capture, e.g. by another HID++ client: teardown returns
+    // that mode and that sign rather than switching the wheel to native.
     assert_eq!(
         arm_then_restore_thumbwheel([0x01, 0x01]).await,
-        vec![[0x01, 0x00], [0x00, 0x00]]
+        vec![[0x01, 0x00], [0x01, 0x01]]
     );
+    assert_eq!(
+        arm_then_restore_thumbwheel([0x01, 0x00]).await,
+        vec![[0x01, 0x00], [0x01, 0x00]]
+    );
+}
+
+/// Without `getThumbwheelInfo` the wheel's diverted reports have no known
+/// sign or scale, so a wheel that refuses the info read stays native: arming
+/// goes on without it, owes it nothing, and never writes its reporting.
+#[tokio::test]
+async fn a_thumbwheel_refusing_its_info_read_is_left_native() {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(thumbwheel_responder([0x00, 0x00], false));
+    let channel = scripted_channel(raw).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &thumbwheel_spec(), &mut armed)
+        .await
+        .unwrap();
+    assert!(armed.thumb.is_none(), "the wheel must not be owned");
+    assert_eq!(reporting_writes(&handle), Vec::<[u8; 2]>::new());
+}
+
+/// Whether `report` is a `getThumbwheelInfo` request.
+fn is_thumbwheel_info_read(report: &[u8]) -> bool {
+    report[2] == 3 && report[3] >> 4 == 0
+}
+
+/// A transport failure on the info read fails arming before any divert, so
+/// the session retries instead of diverting the wheel blind.
+#[tokio::test]
+async fn a_transport_failure_reading_thumbwheel_info_fails_arming_before_any_divert() {
+    let (raw, handle) = ScriptedRawHidChannel::with_failing_writes(
+        thumbwheel_responder([0x00, 0x00], true),
+        is_thumbwheel_info_read,
+    );
+    let channel = scripted_channel(raw).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &thumbwheel_spec(), &mut armed)
+        .await
+        .unwrap_err();
+    assert!(armed.thumb.is_none(), "the wheel must not be owned");
+    assert_eq!(reporting_writes(&handle), Vec::<[u8; 2]>::new());
 }

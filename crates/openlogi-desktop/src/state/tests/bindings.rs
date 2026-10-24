@@ -1,6 +1,146 @@
 //! Button, thumb-wheel, gesture and Actions Ring edits, global and per-app.
 
 use super::*;
+use openlogi_core::binding::LongPressBinding;
+
+#[test]
+fn picking_a_short_action_preserves_the_long_press_binding() {
+    use openlogi_core::config::ConfigFile;
+
+    for button in [
+        ButtonId::Back,
+        ButtonId::Forward,
+        ButtonId::DpiToggle,
+        ButtonId::HapticPanel,
+        ButtonId::GestureButton,
+        ButtonId::MiddleClick,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+        let (mut config, mut file) = ConfigFile::load_from_path(&path).unwrap();
+        config.set_binding(
+            KNOWN_MOUSE_KEY,
+            button,
+            Binding::LongPress(LongPressBinding::new(Action::Copy, Action::MissionControl)),
+        );
+        file.save(&config).unwrap();
+        let resolver = AssetResolver::new();
+        let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::new(Sources {
+            inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+            persistence: ConfigPersistence::UserFile(file),
+            ..Sources::in_memory(config, &resolver, commands)
+        });
+        super::fn_lock::drain(&mut receiver);
+
+        for action in [Action::Screenshot, Action::None] {
+            let events = state.commit_binding(button, action.clone());
+
+            let expected = Binding::LongPress(LongPressBinding::new(
+                action.clone(),
+                Action::MissionControl,
+            ));
+            assert_eq!(
+                state.config.stored_bindings(KNOWN_MOUSE_KEY).get(&button),
+                Some(&expected),
+                "editing {button:?}'s short action must retain its long action"
+            );
+            assert_eq!(state.button_bindings()[&button], action);
+            assert_eq!(
+                Config::load_from_path(&path)
+                    .unwrap()
+                    .stored_bindings(KNOWN_MOUSE_KEY)
+                    .get(&button),
+                Some(&expected)
+            );
+            assert_eq!(
+                events,
+                [StateEvent::BindingsChanged(DeviceKey::from(
+                    KNOWN_MOUSE_KEY
+                ))]
+            );
+            let commands = super::fn_lock::drain(&mut receiver);
+            assert!(matches!(
+                commands.as_slice(),
+                [crate::services::ipc::Command::ReloadConfig(_)]
+            ));
+        }
+    }
+}
+
+#[test]
+fn per_app_action_edits_leave_the_global_long_press_intact() {
+    let mut config = Config::ephemeral();
+    let binding = Binding::LongPress(LongPressBinding::new(Action::Copy, Action::MissionControl));
+    config.set_binding(KNOWN_MOUSE_KEY, ButtonId::HapticPanel, binding.clone());
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+    let _ = state.set_editing_app(Some("com.apple.Safari".into()));
+
+    let _ = state.commit_binding(ButtonId::HapticPanel, Action::Paste);
+
+    assert_eq!(
+        state
+            .config
+            .stored_bindings(KNOWN_MOUSE_KEY)
+            .get(&ButtonId::HapticPanel),
+        Some(&binding)
+    );
+    assert_eq!(
+        state.button_bindings()[&ButtonId::HapticPanel],
+        Action::Paste
+    );
+    let _ = state.clear_app_binding(ButtonId::HapticPanel);
+    assert_eq!(
+        state.button_bindings()[&ButtonId::HapticPanel],
+        Action::Copy
+    );
+    assert_eq!(
+        state
+            .config
+            .stored_bindings(KNOWN_MOUSE_KEY)
+            .get(&ButtonId::HapticPanel),
+        Some(&binding)
+    );
+}
+
+#[test]
+fn failed_short_action_save_restores_both_long_press_actions() {
+    let mut config = Config::ephemeral();
+    let binding = Binding::LongPress(LongPressBinding::new(Action::Copy, Action::MissionControl));
+    config.set_binding(KNOWN_MOUSE_KEY, ButtonId::HapticPanel, binding.clone());
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        persistence: ConfigPersistence::ReadOnly("read-only".into()),
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+    super::fn_lock::drain(&mut receiver);
+
+    let _ = state.commit_binding(ButtonId::HapticPanel, Action::Paste);
+
+    assert_eq!(
+        state
+            .config
+            .stored_bindings(KNOWN_MOUSE_KEY)
+            .get(&ButtonId::HapticPanel),
+        Some(&binding)
+    );
+    assert_eq!(
+        state.button_bindings()[&ButtonId::HapticPanel],
+        Action::Copy
+    );
+    assert_eq!(state.config_issue(), Some("read-only"));
+    assert!(
+        receiver.try_recv().is_err(),
+        "a failed save must not reload the agent"
+    );
+}
 
 #[test]
 fn thumbwheel_pair_updates_both_memory_and_config_entries() {

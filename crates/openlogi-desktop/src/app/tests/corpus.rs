@@ -43,20 +43,7 @@ fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
                 assert_eq!(record.capabilities, device.capabilities);
                 assert_eq!(record.battery, device.battery);
                 assert_eq!(record.online, device.online);
-                let expected = match fixture.manifest().id.as_str() {
-                    "mx-ergo-001" => vec![
-                        DetailTab::Buttons,
-                        DetailTab::ActionsRing,
-                        DetailTab::Device,
-                    ],
-                    "mx-master-4-001" | "mx-master-3s-001" | "mx-anywhere-3s-001" => vec![
-                        DetailTab::Buttons,
-                        DetailTab::ActionsRing,
-                        DetailTab::Pointer,
-                        DetailTab::Device,
-                    ],
-                    id => panic!("{id}: add reviewed desktop panel expectations"),
-                };
+                let expected = reviewed_detail_tabs(&fixture.manifest().id);
                 assert_eq!(
                     DetailTab::tabs_for(record),
                     expected,
@@ -105,5 +92,31 @@ fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
                 .collect::<Vec<_>>(),
             keys
         );
+    }
+}
+
+/// The detail tabs reviewed for each contributed profile's devices.
+fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
+    match id {
+        // The MX Ergo has no DPI or wheel feature. Its Pointer tab carries
+        // the software scroll inversion, which Windows does not have.
+        "mx-ergo-001" if openlogi_hook::SOFTWARE_SCROLL_INVERSION => vec![
+            DetailTab::Buttons,
+            DetailTab::ActionsRing,
+            DetailTab::Pointer,
+            DetailTab::Device,
+        ],
+        "mx-ergo-001" => vec![
+            DetailTab::Buttons,
+            DetailTab::ActionsRing,
+            DetailTab::Device,
+        ],
+        "mx-master-4-001" | "mx-master-3s-001" | "mx-anywhere-3s-001" => vec![
+            DetailTab::Buttons,
+            DetailTab::ActionsRing,
+            DetailTab::Pointer,
+            DetailTab::Device,
+        ],
+        id => panic!("{id}: add reviewed desktop panel expectations"),
     }
 }

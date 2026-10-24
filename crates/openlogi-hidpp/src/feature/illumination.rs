@@ -15,12 +15,14 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
+use std::num::NonZeroU16;
+
 use openlogi_hidpp_derive::Feature;
 
 pub use event::IlluminationEvent;
 pub use types::{
-    BrightnessClampedSource, ControlCapabilities, ControlInfo, IlluminationState, LevelConfig,
-    SetLevels,
+    BrightnessClampedSource, BrightnessEffectiveMax, ControlCapabilities, ControlInfo,
+    IlluminationState, LevelConfig, SetLevels,
 };
 
 use self::types::{be16, illumination_state};
@@ -44,6 +46,9 @@ const FN_SET_COLOR_TEMPERATURE: u8 = 9;
 const FN_GET_COLOR_TEMPERATURE_LEVELS: u8 = 10;
 const FN_SET_COLOR_TEMPERATURE_LEVELS: u8 = 11;
 const FN_GET_BRIGHTNESS_EFFECTIVE_MAX: u8 = 12;
+
+/// The first feature version with `getBrightnessEffectiveMax`.
+const EFFECTIVE_MAX_MIN_VERSION: u8 = 1;
 
 /// Implements the `Illumination` / `0x1990` feature.
 #[derive(Feature)]
@@ -110,10 +115,32 @@ impl IlluminationFeature {
         self.write_levels(FN_SET_BRIGHTNESS_LEVELS, levels).await
     }
 
-    /// Retrieves the current effective maximum brightness (in Lumens), or `0`
-    /// when none is in effect. Requires feature version 1.
-    pub async fn get_brightness_effective_max(&self) -> Result<u16, Hidpp20Error> {
-        self.read_value(FN_GET_BRIGHTNESS_EFFECTIVE_MAX).await
+    /// Retrieves the current effective maximum brightness (in Lumens).
+    ///
+    /// `version` is the feature version the device reports for `0x1990`, and
+    /// `brightness` is the reply of [`Self::get_brightness_info`].
+    /// `getBrightnessEffectiveMax` exists from feature version 1, and only on
+    /// a brightness control that flags
+    /// [`ControlCapabilities::HAS_DYNAMIC_MAXIMUM`]. Logi Options+ also reads
+    /// it only under that flag (reverse-engineered). For any other light this
+    /// returns [`BrightnessEffectiveMax::Unsupported`] and sends no request.
+    pub async fn get_brightness_effective_max(
+        &self,
+        version: u8,
+        brightness: ControlInfo,
+    ) -> Result<BrightnessEffectiveMax, Hidpp20Error> {
+        if version < EFFECTIVE_MAX_MIN_VERSION
+            || !brightness
+                .capabilities
+                .contains(ControlCapabilities::HAS_DYNAMIC_MAXIMUM)
+        {
+            return Ok(BrightnessEffectiveMax::Unsupported);
+        }
+        let value = self.read_value(FN_GET_BRIGHTNESS_EFFECTIVE_MAX).await?;
+        Ok(NonZeroU16::new(value).map_or(
+            BrightnessEffectiveMax::NoLimit,
+            BrightnessEffectiveMax::Limit,
+        ))
     }
 
     /// Retrieves the color-temperature capabilities and range (in Kelvin).

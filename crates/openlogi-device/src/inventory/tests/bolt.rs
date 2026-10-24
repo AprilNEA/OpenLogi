@@ -357,3 +357,231 @@ async fn a_receiver_probe_whose_io_outruns_the_budget_is_failed() {
     assert_eq!(probe.verdict, ProbeVerdict::Failed);
     assert!(probe.inventory.is_none());
 }
+
+fn bolt_receiver_with_an_unanswered_uid(request: &[u8]) -> Option<Vec<u8>> {
+    if let [_, 0xff, 0x83, 0xfb, ..] = *request {
+        return None;
+    }
+    bolt_receiver_with_a_silent_slot(request)
+}
+
+/// A receiver UID is optional metadata. Losing that reply must not cancel
+/// the readable pairing table or prevent a slow slot from using its cache.
+#[tokio::test]
+async fn a_bolt_receiver_with_an_unanswered_uid_keeps_its_slots() {
+    let info = bolt_receiver_node("unanswered-uid");
+    let timeouts = ProbeTimeouts {
+        receiver: Duration::from_secs(2),
+        ..quick_timeouts()
+    };
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(bolt_receiver_with_an_unanswered_uid);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let (key, cache) = stale_silent_slot_cache();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &timeouts,
+    };
+
+    let probe = probe_one(info, channel, pass).await;
+
+    assert_eq!(
+        probe.verdict,
+        ProbeVerdict::Healthy { complete: true },
+        "an unanswered UID must not make readable slots disappear"
+    );
+    let inventory = probe.inventory.expect("the pairing table answered");
+    assert!(inventory.receiver.unique_id.is_none());
+    assert_eq!(inventory.paired.len(), 1);
+    let device = &inventory.paired[0];
+    assert_eq!(device.slot, 1);
+    assert!(device.online);
+    assert_eq!(device.codename.as_deref(), Some("MX Probe"));
+    assert_eq!(
+        device.model_info.as_ref().map(|model| model.unit_id),
+        Some(SILENT_SLOT_UNIT_ID),
+        "the slow slot keeps its last-good capabilities and identity"
+    );
+    assert!(
+        matches!(probe.outcomes.as_slice(), [CacheOutcome::Seen(seen)] if *seen == key),
+        "optional UID failure must not expire the slot cache"
+    );
+}
+
+fn bolt_receiver_with_an_unanswered_pairing_count(request: &[u8]) -> Option<Vec<u8>> {
+    if let [_, 0xff, 0x81, 0x02, ..] = *request {
+        return None;
+    }
+    bolt_receiver_with_a_silent_slot(request)
+}
+
+/// Check receiver liveness before metadata and stop when it does not answer.
+/// A dead channel still fails without spending the full receiver budget.
+#[tokio::test]
+async fn a_bolt_receiver_with_an_unanswered_pairing_count_stops_before_metadata() {
+    let info = bolt_receiver_node("unanswered-pairing-count");
+    let timeouts = ProbeTimeouts {
+        receiver: Duration::from_secs(2),
+        ..quick_timeouts()
+    };
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(bolt_receiver_with_an_unanswered_pairing_count);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let cache = HashMap::new();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &timeouts,
+    };
+
+    let started = Instant::now();
+    let probe = probe_one(info, channel, pass).await;
+
+    assert_eq!(probe.verdict, ProbeVerdict::Failed);
+    assert!(probe.inventory.is_none());
+    assert!(probe.outcomes.is_empty());
+    assert_eq!(
+        handle.written_reports(),
+        vec![vec![0x10, 0xff, 0x81, 0x02, 0, 0, 0]],
+        "a dead receiver must not receive metadata, arrival or slot requests"
+    );
+    assert!(
+        started.elapsed() < timeouts.receiver,
+        "liveness failure must settle before the whole-node deadline"
+    );
+}
+
+/// [`bolt_receiver_with_a_silent_slot`], but slot 1's codename register holds
+/// a 14-byte name and so returns only its first 13 bytes (#1960).
+fn bolt_receiver_with_a_truncated_codename(request: &[u8]) -> Option<Vec<u8>> {
+    if let [_, 0xff, 0x83, 0xb5, 0x61, ..] = *request {
+        let mut report = vec![0x11, 0xff, 0x83, 0xb5, 0x61, 0x01, 14];
+        report.extend_from_slice(b"MX Anywhere 3");
+        return Some(report);
+    }
+    bolt_receiver_with_a_silent_slot(request)
+}
+
+/// [`bolt_receiver_with_a_silent_slot`], but slot 1's codename register holds
+/// "MX Anywhere 3S" and answers each chunk read the way a Bolt receiver does
+/// (#1962): chunk `0x01` with the length and 13 bytes, chunk `0x02` with the
+/// rest.
+fn bolt_receiver_with_a_two_chunk_codename(request: &[u8]) -> Option<Vec<u8>> {
+    if let [_, 0xff, 0x83, 0xb5, 0x61, chunk, ..] = *request {
+        let mut report = vec![0x11, 0xff, 0x83, 0xb5, 0x61, chunk];
+        match chunk {
+            0x01 => {
+                report.push(14);
+                report.extend_from_slice(b"MX Anywhere 3");
+            }
+            0x02 => report.push(b'S'),
+            _ => return None,
+        }
+        report.resize(20, 0);
+        return Some(report);
+    }
+    bolt_receiver_with_a_silent_slot(request)
+}
+
+/// With no `0x0005` name to prefer, the receiver register's two chunks still
+/// give the whole name.
+#[tokio::test]
+async fn a_bolt_slot_without_a_marketing_name_reads_both_codename_chunks() {
+    let info = bolt_receiver_node("two-chunk-codename");
+    let timeouts = quick_timeouts();
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_two_chunk_codename);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let (_, cache) = stale_silent_slot_cache();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &timeouts,
+    };
+
+    let probe = probe_one(info, channel, pass).await;
+
+    let inventory = probe.inventory.expect("the receiver answered");
+    assert_eq!(
+        inventory.paired[0].codename.as_deref(),
+        Some("MX Anywhere 3S")
+    );
+}
+
+/// The receiver register truncates a long name; the device's own `0x0005`
+/// name, here from a fresh cache entry, is whole and wins.
+#[tokio::test]
+async fn a_bolt_slot_is_named_by_its_marketing_name_over_the_truncated_register() {
+    let info = bolt_receiver_node("truncated-codename");
+    let timeouts = quick_timeouts();
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_truncated_codename);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let mut entry = cache_entry();
+    entry.probe = probed(Some(model(SILENT_SLOT_UNIT_ID, Some("SN-1"))), false);
+    entry.probe.marketing_name = Some("MX Anywhere 3S".to_owned());
+    let cache = HashMap::from([(
+        CacheKey::Bolt {
+            unit_id: SILENT_SLOT_UNIT_ID,
+        },
+        entry,
+    )]);
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &timeouts,
+    };
+
+    let probe = probe_one(info, channel, pass).await;
+
+    let inventory = probe.inventory.expect("the receiver answered");
+    assert_eq!(
+        inventory.paired[0].codename.as_deref(),
+        Some("MX Anywhere 3S")
+    );
+}
+
+/// [`bolt_receiver_with_a_two_chunk_codename`], but the reply to chunk `0x02`
+/// is lost.
+fn bolt_receiver_losing_the_second_codename_chunk(request: &[u8]) -> Option<Vec<u8>> {
+    if let [_, 0xff, 0x83, 0xb5, 0x61, 0x02, ..] = *request {
+        return None;
+    }
+    bolt_receiver_with_a_two_chunk_codename(request)
+}
+
+/// A lost reply to the optional second codename chunk costs a short wait
+/// (plus the next register read's stale-reply grace), not the channel's
+/// five-second default: the receiver probe still finishes inside a budget the
+/// default alone would overrun, and the slot keeps the name's first 13 bytes.
+#[tokio::test]
+async fn a_lost_second_codename_chunk_keeps_the_probe_inside_its_budget() {
+    let info = bolt_receiver_node("lost-codename-chunk");
+    let timeouts = ProbeTimeouts {
+        receiver: Duration::from_secs(3),
+        ..quick_timeouts()
+    };
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(bolt_receiver_losing_the_second_codename_chunk);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let (_, cache) = stale_silent_slot_cache();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &timeouts,
+    };
+
+    let probe = probe_one(info, channel, pass).await;
+
+    let inventory = probe.inventory.expect("the receiver answered");
+    assert_eq!(
+        inventory.paired[0].codename.as_deref(),
+        Some("MX Anywhere 3")
+    );
+}

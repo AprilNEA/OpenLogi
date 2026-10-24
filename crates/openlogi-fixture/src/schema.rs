@@ -4,8 +4,9 @@ use std::collections::HashSet;
 
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, EasySwitchHosts,
-    FnLockState, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DisableKeysState, DpiInfo,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, PointerSpeed, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -197,6 +198,17 @@ pub struct ProfileDeviceSettings {
     /// recorded before it existed keep loading.
     #[serde(default = "ProfileSetting::unsupported")]
     pub easy_switch: ProfileSetting<EasySwitchHosts>,
+    /// Pointer-speed (`0x2205`) read state. Defaults to unsupported so
+    /// profiles recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub pointer_speed: ProfileSetting<PointerSpeed>,
+    /// Force-sensing button (`0x19c0`) press-force read state. Defaults to
+    /// unsupported so profiles recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub force_sensing: ProfileSetting<ForceSensingInfo>,
+    /// Fixed lock/system-key disabling read state.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub disable_keys: ProfileSetting<DisableKeysState>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -480,6 +492,8 @@ fn validate_setting_values(settings: &ProfileDeviceSettings) -> Result<(), Fixtu
     if let Some(hosts) = settings.easy_switch.value() {
         validate_easy_switch(&settings.route, hosts)?;
     }
+    // Disable Keys reads retain both raw masks, including unadvertised bits.
+    // Only a write is capability-bounded; fixture capture preserves the read.
     if settings.backlight.supports_feature() && settings.lighting.is_supported() {
         return Err(FixtureError::invalid(
             "device profile",
@@ -641,6 +655,9 @@ fn validate_setting_support(
             || settings.backlight.supports_feature()
             || settings.report_rate.supports_feature()
             || settings.easy_switch.supports_feature()
+            || settings.pointer_speed.supports_feature()
+            || settings.force_sensing.supports_feature()
+            || settings.disable_keys.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -708,6 +725,24 @@ fn validate_setting_support(
                 "Easy-Switch",
                 settings.easy_switch.supports_feature(),
                 capabilities.easy_switch,
+            )?;
+            validate_capability_support(
+                settings,
+                "pointer speed",
+                settings.pointer_speed.supports_feature(),
+                capabilities.pointer_scaling,
+            )?;
+            validate_capability_support(
+                settings,
+                "press force",
+                settings.force_sensing.supports_feature(),
+                capabilities.force_sensing,
+            )?;
+            validate_capability_support(
+                settings,
+                "Disable Keys",
+                settings.disable_keys.supports_feature(),
+                capabilities.disable_keys,
             )?;
         }
     }
@@ -1053,5 +1088,57 @@ mod optional_hex_report {
         Option::<String>::deserialize(deserializer)?
             .map(|encoded| parse_hex(&encoded).map_err(de::Error::custom))
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
+
+    use crate::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile, ProfileSetting};
+
+    #[test]
+    fn disable_keys_profile_preserves_unadvertised_raw_state() {
+        let mut profile: DeviceProfile =
+            serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile");
+        let setting = profile
+            .settings
+            .iter_mut()
+            .find(|setting| setting.disable_keys.supports_feature())
+            .expect("canonical keyboard supports Disable Keys");
+        setting.disable_keys = ProfileSetting::Supported(DisableKeysState {
+            supported: DisableKeysMask::from_bits_retain(0xa1),
+            disabled: DisableKeysMask::from_bits_retain(0xe0),
+        });
+
+        profile.validate().expect("raw reads preserve both masks");
+        let restored: DeviceProfile =
+            serde_json::from_str(&serde_json::to_string(&profile).expect("serialize profile"))
+                .expect("deserialize profile");
+        restored.validate().expect("restored raw state validates");
+        assert_eq!(restored, profile);
+    }
+
+    #[test]
+    fn disable_keys_profile_still_requires_the_feature_capability() {
+        let mut profile: DeviceProfile =
+            serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile");
+        let capabilities = profile
+            .inventories
+            .iter_mut()
+            .flat_map(|inventory| &mut inventory.paired)
+            .filter_map(|device| device.capabilities.as_mut())
+            .find(|capabilities| capabilities.disable_keys)
+            .expect("canonical keyboard supports Disable Keys");
+        capabilities.disable_keys = false;
+
+        let error = profile
+            .validate()
+            .expect_err("family mismatch remains invalid");
+        assert!(
+            error
+                .to_string()
+                .contains("Disable Keys support does not match")
+        );
     }
 }

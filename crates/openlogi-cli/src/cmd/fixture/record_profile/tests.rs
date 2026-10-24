@@ -8,9 +8,10 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
-    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Dpi,
-    DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, HostConnection, LightCommand,
-    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
+    DisableKeysMask, DisableKeysState, Dpi, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
+    ForceSensingInfo, HostConnection, LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector,
+    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -22,6 +23,7 @@ use openlogi_ipc::{
     ClientKind, ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth,
     LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
     PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -43,6 +45,9 @@ enum ReadFamily {
     FnLock,
     ReportRate,
     EasySwitch,
+    PointerSpeed,
+    ForceSensing,
+    DisableKeys,
 }
 
 #[derive(Clone)]
@@ -191,6 +196,26 @@ impl Agent for TestAgent {
         _rate: ReportRate,
     ) -> Result<ReportRateInfo, WriteError> {
         unreachable!("profile capture must never write the report rate")
+    }
+    async fn read_pointer_speed(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<PointerSpeed, WriteError> {
+        self.read(
+            ReadFamily::PointerSpeed,
+            &route,
+            |settings| &settings.pointer_speed,
+            0x2205,
+        )
+    }
+    async fn set_pointer_speed(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _speed: PointerSpeed,
+    ) -> Result<PointerSpeed, WriteError> {
+        unreachable!("profile capture must never write the pointer speed")
     }
     async fn set_backlight(
         self,
@@ -384,12 +409,64 @@ impl Agent for TestAgent {
         unreachable!("profile capture is read-only")
     }
 
+    async fn reload_saved_config_with_verdict(
+        self,
+        _: TarpcContext,
+        _saved: SavedConfig,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError> {
+        unreachable!("profile capture is read-only")
+    }
+
     async fn observe_notices(self, _: TarpcContext, _since: Generation) -> NoticeObservation {
         unreachable!("profile capture must not inspect the overlay's notices")
     }
 
     async fn observe_lock_keys(self, _: TarpcContext, _since: Generation) -> LockKeyObservation {
         unreachable!("profile capture must not inspect the lock-key indicator")
+    }
+
+    async fn read_force_sensing(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<ForceSensingInfo, WriteError> {
+        self.read(
+            ReadFamily::ForceSensing,
+            &route,
+            |settings| &settings.force_sensing,
+            0x19c0,
+        )
+    }
+
+    async fn set_force_sensing(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _force: u16,
+    ) -> Result<ForceSensingInfo, WriteError> {
+        unreachable!("profile capture must never write the press force")
+    }
+
+    async fn read_disable_keys(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<DisableKeysState, WriteError> {
+        self.read(
+            ReadFamily::DisableKeys,
+            &route,
+            |settings| &settings.disable_keys,
+            0x4521,
+        )
+    }
+
+    async fn set_disable_keys(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _desired: DisableKeysMask,
+    ) -> Result<DisableKeysState, WriteError> {
+        unreachable!("profile capture must never write Disable Keys")
     }
 }
 
@@ -461,6 +538,8 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             agent_version: "/private/Agent.app".to_string(),
             input_monitoring_granted: false,
             hid_open_failures: true,
+            secure_input: openlogi_ipc::SecureInput::Off,
+            virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
         },
         inventory: profile.inventories.clone(),
         standalone: profile.standalone.clone(),
@@ -490,6 +569,25 @@ fn args(output: PathBuf, device: Option<&str>) -> RecordProfileArgs {
     }
 }
 
+fn assert_receiver_capture_observations(inspection: &TestAgent) {
+    // Declaring is the handshake's job in `openlogi_ipc::client`, tested there.
+    let declared = inspection.declared.lock().expect("declaration lock");
+    assert!(declared.is_empty(), "capture must not grow its own declare");
+    assert_eq!(*inspection.snapshots.lock().expect("snapshot lock"), 1);
+    let calls = inspection.calls.lock().expect("calls lock").clone();
+    assert_eq!(
+        calls.iter().map(|(family, _)| *family).collect::<Vec<_>>(),
+        [
+            ReadFamily::Dpi,
+            ReadFamily::Smartshift,
+            ReadFamily::Wheel,
+            // A mouse has no `0x1982`, so no backlight read is issued.
+            ReadFamily::Smartshift,
+            ReadFamily::DisableKeys,
+        ]
+    );
+}
+
 #[tokio::test]
 async fn receiver_capture_uses_agent_reads_and_writes_validated_profile_only() {
     let directory = tempfile::tempdir().expect("tempdir");
@@ -505,22 +603,7 @@ async fn receiver_capture_uses_agent_reads_and_writes_validated_profile_only() {
     .await
     .expect("semantic capture succeeds");
 
-    // Declaring is the handshake's job in `openlogi_ipc::client`, tested there.
-    let declared = inspection.declared.lock().expect("declaration lock");
-    assert!(declared.is_empty(), "capture must not grow its own declare");
-    assert_eq!(*inspection.snapshots.lock().expect("snapshot lock"), 1);
-    let calls = inspection.calls.lock().expect("calls lock").clone();
-    assert_eq!(
-        calls.iter().map(|(family, _)| *family).collect::<Vec<_>>(),
-        [
-            ReadFamily::Dpi,
-            ReadFamily::Smartshift,
-            ReadFamily::Wheel,
-            // A mouse has no `0x1982`, so its backlight is recorded
-            // unsupported without asking the agent.
-            ReadFamily::Smartshift,
-        ]
-    );
+    assert_receiver_capture_observations(&inspection);
 
     let bytes = std::fs::read(&output).expect("profile output");
     assert!(bytes.ends_with(b"\n"));
@@ -953,6 +1036,63 @@ async fn capture_replaces_every_easy_switch_computer_name() {
         .map(|slot| slot.name.as_deref())
         .collect();
     assert_eq!(names, [Some("Computer 1"), Some("Computer"), None]);
+}
+
+#[tokio::test]
+async fn capture_reads_the_press_force_of_a_force_sensing_mouse() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = directory.path().join("profile.json");
+    let force = ForceSensingInfo {
+        changeable: true,
+        default: 5089,
+        min: 4071,
+        max: 6768,
+        current: 4500,
+    };
+    let agent = fixture_agent_with(|profile| {
+        let mouse = profile.inventories[0]
+            .paired
+            .iter_mut()
+            .find(|device| device.slot == 1)
+            .expect("mouse");
+        mouse
+            .capabilities
+            .as_mut()
+            .expect("mouse capabilities")
+            .force_sensing = true;
+        let settings = profile
+            .settings
+            .iter_mut()
+            .find(|settings| matches!(settings.route, DeviceRoute::Bolt { slot: 1, .. }))
+            .expect("mouse settings");
+        settings.force_sensing = ProfileSetting::Supported(force);
+    });
+    let inspection = agent.clone();
+    capture_connected(
+        args(output.clone(), Some("synthetic performance mouse")),
+        test_client(agent),
+    )
+    .await
+    .expect("semantic capture succeeds");
+
+    assert!(
+        inspection
+            .calls
+            .lock()
+            .expect("calls lock")
+            .iter()
+            .any(|(family, _)| *family == ReadFamily::ForceSensing)
+    );
+    let profile: DeviceProfile =
+        serde_json::from_slice(&std::fs::read(output).expect("profile output"))
+            .expect("typed profile");
+    profile.validate().expect("published profile validates");
+    let captured = profile
+        .settings
+        .iter()
+        .find_map(|settings| settings.force_sensing.value())
+        .expect("captured press force");
+    assert_eq!(*captured, force);
 }
 
 #[tokio::test]

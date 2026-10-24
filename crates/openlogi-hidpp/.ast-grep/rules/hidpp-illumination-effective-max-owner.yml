@@ -1,0 +1,19 @@
+# Owner: hidpp::feature::illumination::IlluminationFeature::get_brightness_effective_max
+# decides whether a light has getBrightnessEffectiveMax (function 12): feature
+# version 1 or later, and HAS_DYNAMIC_MAXIMUM on the brightness control.
+id: hidpp-illumination-effective-max-owner
+language: rust
+severity: error
+message: IlluminationFeature::get_brightness_effective_max owns the version and HAS_DYNAMIC_MAXIMUM gate of function 12; pass it the feature version and the brightness info, and use the BrightnessEffectiveMax it returns.
+note: |
+  The Litra bridge once tested the feature version and HAS_DYNAMIC_MAXIMUM
+  itself, while the public wrapper sent function 12 to any light. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-hidpp/src/feature/illumination.rs
+  - crates/openlogi-hidpp/src/feature/illumination/**
+rule:
+  kind: identifier
+  regex: '^HAS_DYNAMIC_MAXIMUM$'

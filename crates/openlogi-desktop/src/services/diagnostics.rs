@@ -9,7 +9,8 @@ use openlogi_core::diagnostics::{
     ReceiverDiag, RenderState,
 };
 use openlogi_core::hid::DeviceRoute;
-use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION};
+use openlogi_core::update_feed::UpdateChannel;
+use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION, VirtualKeyboardStatus};
 
 use crate::services::assets::AssetResolver;
 use crate::state::{AppState, DpiLoad};
@@ -21,7 +22,11 @@ pub fn collect(cx: &App) -> DiagnosticsReport {
     let assets = asset_info(&resolver);
     let state = AppState::try_global(cx);
     let state = state.as_ref().map(|state| state.read(cx));
-    let app = app_info(state, resolver.has_bundle_root());
+    let app = app_info(
+        state,
+        crate::platform::updater::channel_in_use(cx),
+        resolver.has_bundle_root(),
+    );
     let (receivers, devices) = match state {
         Some(state) => (collect_receivers(state), collect_devices(state)),
         None => (Vec::new(), Vec::new()),
@@ -34,7 +39,13 @@ pub fn collect(cx: &App) -> DiagnosticsReport {
     }
 }
 
-fn app_info(state: Option<&AppState>, running_from_bundle: bool) -> AppInfo {
+/// `update_channel` is the channel this launch's updater follows. A channel
+/// picked since then applies at the next launch, so the report does not name it.
+fn app_info(
+    state: Option<&AppState>,
+    update_channel: UpdateChannel,
+    running_from_bundle: bool,
+) -> AppInfo {
     // The live agent link, not a retained copy: a report copied while the
     // agent is down must say "not connected", not replay the last status.
     let status = state.and_then(AppState::agent_status);
@@ -59,9 +70,11 @@ fn app_info(state: Option<&AppState>, running_from_bundle: bool) -> AppInfo {
         ui_language: state.and_then(AppState::language).map(str::to_string),
         accessibility_granted: status.map(|s| s.accessibility_granted),
         hook_installed: status.map(|s| s.hook_installed),
+        virtual_keyboard: status.and_then(|s| virtual_keyboard_state(s.virtual_keyboard)),
         launch_at_login: status.map(|s| s.launch_at_login),
         show_in_menu_bar: settings.map(|s| s.show_in_menu_bar),
         check_for_updates: settings.map(|s| s.check_for_updates),
+        update_channel: Some(update_channel),
         thumbwheel_sensitivity: settings.map(|s| s.thumbwheel_sensitivity.into()),
         config_schema_version: config.map(|(version, _)| version),
         configured_device_count: config.map(|(_, count)| count),
@@ -74,6 +87,16 @@ fn inventory_state(health: InventoryHealth) -> InventoryState {
         InventoryHealth::Scanning => InventoryState::Scanning,
         InventoryHealth::Ready => InventoryState::Ready,
         InventoryHealth::Unavailable => InventoryState::Unavailable,
+    }
+}
+
+/// `None` where the platform has no virtual keyboard, so the report leaves
+/// the line out instead of calling it missing.
+const fn virtual_keyboard_state(status: VirtualKeyboardStatus) -> Option<bool> {
+    match status {
+        VirtualKeyboardStatus::Active => Some(true),
+        VirtualKeyboardStatus::Unavailable => Some(false),
+        VirtualKeyboardStatus::Unsupported => None,
     }
 }
 

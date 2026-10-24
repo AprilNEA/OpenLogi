@@ -22,7 +22,7 @@ use std::process::Command;
 use std::{env, fs};
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=OPENLOGI_UPDATE_MANIFEST_URL");
+    println!("cargo:rerun-if-env-changed=OPENLOGI_UPDATE_BASE_URL");
     println!("cargo:rerun-if-env-changed=OPENLOGI_THEMES_DIR");
 
     // `rust_i18n::i18n!` in `main.rs` reads `../openlogi-ui/locales` at macro

@@ -3,16 +3,20 @@
 //! A capture session arms a device-specific set of controls and then does the
 //! same thing whatever those controls are: publish its channel for hardware
 //! writes to reuse, listen for diverted reports, re-arm when the device
-//! reconnects, stop when asked or when inventory replaces the channel, and
-//! hand every control back before it stops listening. [`run_capture`] is that
-//! sequence. [`ArmedCapture`] is what differs between the gesture and the
-//! keyboard session: which controls are armed and what their reports mean.
+//! reconnects or another client hands a control back, stop when asked or when
+//! inventory replaces the channel, and hand every control back before it
+//! stops listening. [`run_capture`] is that sequence. [`ArmedCapture`] is what
+//! differs between the gesture and the keyboard session: which controls are
+//! armed and what their reports mean.
 
 mod liveness;
+mod redivert;
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_lite::Stream;
 use hidpp::{
     device::Device,
     feature::{
@@ -27,13 +31,15 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
+use redivert::ReportingChanges;
 
 use super::capture_restore::{
-    CaptureChannelSlot, CaptureError, CaptureSessionOutcome, CaptureSessionStop, CaptureStop,
-    PendingCaptureRestore, drop_listener_after, restore_after_stop, stop_for_current_publication,
-    wait_for_channel_change,
+    ArmedReporting, CaptureChannelSlot, CaptureError, CaptureSessionOutcome, CaptureSessionStop,
+    CaptureStop, PendingCaptureRestore, drop_listener_after, restore_after_stop,
+    stop_for_current_publication, wait_for_channel_change,
 };
 use super::gesture::CapturedInput;
+use crate::reprog_controls::{CidReportingChangeEcho, ReprogControlsV4};
 use crate::{ChannelRegistry, DeviceIoGate, DeviceRoute, SharedChannel};
 
 /// How long a reconnected device gets before its diversions are re-issued.
@@ -105,6 +111,22 @@ pub(super) enum Liveness {
     Unwatched,
 }
 
+/// The reporting changes that other clients make on one capture's `0x1b04`
+/// feature (see [`ReprogControlsV4::reporting_changes`]). `Sync` because the
+/// armed capture that holds it is shared across the session's awaits.
+pub(super) type ReportingChangeStream =
+    Pin<Box<dyn Stream<Item = CidReportingChangeEcho> + Send + Sync>>;
+
+/// Subscribe to the reporting changes that other clients make on `controls`.
+///
+/// The event stream does not replay a change made before the subscription.
+/// Arming therefore subscribes before its first diversion write: a change to
+/// an armed control while arming continues then waits in the stream until
+/// [`run_capture`] answers it.
+pub(super) fn subscribe_reporting_changes(controls: &ReprogControlsV4) -> ReportingChangeStream {
+    Box::pin(controls.reporting_changes())
+}
+
 /// The device-specific half of a capture session: the controls one session
 /// armed, what their reports mean, and how they are re-armed and handed back.
 /// [`run_capture`] owns the rest.
@@ -132,6 +154,16 @@ pub(super) trait ArmedCapture {
     /// logged, not propagated: the next reconnection broadcast retries.
     async fn rearm(&self);
 
+    /// The `0x1b04` accessor and every control armed through it, or `None`
+    /// when this capture armed no `0x1b04` control. The session diverts one
+    /// of these again when another client hands it back.
+    fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])>;
+
+    /// Take the subscription to the reporting changes that other clients
+    /// make, which arming took before its first diversion write. `None` when
+    /// this capture armed no `0x1b04` control, or once taken.
+    fn take_reporting_changes(&mut self) -> Option<ReportingChangeStream>;
+
     /// Convert all armed firmware state into the one capability that can
     /// release it. Consuming `self` prevents a session and a restore retry
     /// from both claiming ownership at once.
@@ -146,7 +178,7 @@ pub(super) trait ArmedCapture {
 /// for the caller to retry on the current inventory channel.
 pub(super) async fn run_capture<A: ArmedCapture>(
     shared: SharedChannel,
-    armed: A,
+    mut armed: A,
     host: CaptureHost<'_>,
 ) -> CaptureSessionOutcome {
     let CaptureHost {
@@ -185,6 +217,7 @@ pub(super) async fn run_capture<A: ArmedCapture>(
             on_report(&v20::Message::from(raw));
         }
     });
+    let changes = ReportingChanges::new(armed.take_reporting_changes());
 
     // Wireless devices drop their diverted-control state when they
     // power-cycle (idle sleep, power switch, Easy-Switch host change) — the
@@ -209,6 +242,7 @@ pub(super) async fn run_capture<A: ArmedCapture>(
             activity: activity.as_deref(),
         },
         wireless,
+        changes,
         shutdown,
         device_io,
     )
@@ -291,11 +325,13 @@ async fn idle_deadline(watchdog: Option<&Watchdog<'_>>) {
 }
 
 /// Keep a capture session alive and reapply its volatile diversions whenever
-/// the device announces a reconnect. Returns only the typed reason capture
-/// stopped; restoration performs a fresh registry lookup after monitoring.
+/// the device announces a reconnect or another client hands a control back.
+/// Returns only the typed reason capture stopped; restoration performs a
+/// fresh registry lookup after monitoring.
 async fn monitor<A: ArmedCapture>(
     context: CaptureMonitor<'_, A>,
     wireless: Option<WirelessDeviceStatusFeature>,
+    mut changes: ReportingChanges,
     shutdown: oneshot::Receiver<CaptureSessionStop>,
     mut device_io: DeviceIoGate,
 ) -> CaptureStop {
@@ -365,6 +401,11 @@ async fn monitor<A: ArmedCapture>(
                     context.armed.rearm().await;
                 }
             }
+            echo = changes.next() => {
+                if device_io.allows_io() {
+                    changes.answer(context.armed, echo).await;
+                }
+            }
             seq = next_activity(watchdog.as_ref()) => {
                 if let Some(watchdog) = &mut watchdog {
                     watchdog.liveness.record_activity(Instant::now(), seq);
@@ -380,20 +421,7 @@ async fn monitor<A: ArmedCapture>(
                 {
                     continue;
                 }
-                let outcome = match context.root.ping(0x5a).await {
-                    Err(v20::Hidpp20Error::Channel(
-                        hidpp::channel::ChannelError::Timeout
-                        | hidpp::channel::ChannelError::NoResponse,
-                    )) => PingOutcome::AllSilent,
-                    // A pong, feature error, or unsupported response all prove
-                    // that this channel still receives device replies.
-                    Ok(_)
-                    | Err(
-                        v20::Hidpp20Error::Feature(_)
-                        | v20::Hidpp20Error::UnsupportedResponse,
-                    ) => PingOutcome::Delivered,
-                    Err(_) => PingOutcome::ChannelFailed,
-                };
+                let outcome = ping_outcome(context.root).await;
                 if watchdog.liveness.finish_ping(
                     Instant::now(),
                     watchdog.activity.seq(),
@@ -404,5 +432,20 @@ async fn monitor<A: ArmedCapture>(
                 }
             }
         }
+    }
+}
+
+/// Ping the device through the session's channel, and classify the result.
+async fn ping_outcome(root: &RootFeature) -> PingOutcome {
+    match root.ping(0x5a).await {
+        Err(v20::Hidpp20Error::Channel(
+            hidpp::channel::ChannelError::Timeout | hidpp::channel::ChannelError::NoResponse,
+        )) => PingOutcome::AllSilent,
+        // A pong, feature error, or unsupported response all prove that this
+        // channel still receives device replies.
+        Ok(_) | Err(v20::Hidpp20Error::Feature(_) | v20::Hidpp20Error::UnsupportedResponse) => {
+            PingOutcome::Delivered
+        }
+        Err(_) => PingOutcome::ChannelFailed,
     }
 }

@@ -66,6 +66,17 @@ impl Message {
         }
     }
 
+    /// How many payload bytes the message carried on the wire: 3 in a short
+    /// report, 16 in a long one. [`Self::extend_payload`] fills the rest
+    /// with zeroes the device never sent.
+    #[must_use]
+    pub const fn payload_len(&self) -> usize {
+        match self {
+            Message::Short(..) => SHORT_REPORT_LENGTH - 4,
+            Message::Long(..) => LONG_REPORT_LENGTH - 4,
+        }
+    }
+
     /// The feature error this message reports against a request sent with
     /// `request`, or [`None`] when it is not an error for that request.
     ///

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use openlogi_core::config::AppSettings;
 use openlogi_core::device::LockKey;
 use openlogi_ipc::{LockKeyChange, OBSERVE_HOLD};
 
@@ -120,4 +121,44 @@ async fn an_unchanged_indicator_is_answered_after_the_hold() {
 
     assert_eq!(answer, current);
     assert_eq!(asked.elapsed(), OBSERVE_HOLD);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_announced_change_shows_only_while_the_user_wants_the_indicator() {
+    let indicator = LockKeyIndicator::default();
+    let off = AppSettings {
+        lock_key_notifications: false,
+        ..AppSettings::default()
+    };
+    assert!(!indicator.announce(CAPS_ON, &off));
+    assert_eq!(indicator.published.borrow().generation, 1, "nothing shown");
+
+    let on = AppSettings {
+        language: Some("fr".into()),
+        ..AppSettings::default()
+    };
+    assert!(on.lock_key_notifications, "the indicator is on by default");
+    assert!(indicator.announce(CAPS_ON, &on));
+    let shown = indicator.observe(1).await;
+    assert_eq!(shown.shown, Some(CAPS_ON));
+    assert_eq!(shown.language.as_deref(), Some("fr"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_key_is_announced_only_where_the_platform_indicates_it() {
+    let indicator = LockKeyIndicator::default();
+    let num_lock = LockKeyChange {
+        key: LockKey::NumLock,
+        engaged: true,
+    };
+    // macOS gives Num Lock no indicator; Windows and Linux do.
+    let indicated = LockKey::NumLock.is_indicated_here();
+    assert_eq!(
+        indicator.announce(num_lock, &AppSettings::default()),
+        indicated
+    );
+    assert_eq!(
+        indicator.published.borrow().shown,
+        indicated.then_some(num_lock)
+    );
 }

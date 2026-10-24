@@ -63,7 +63,6 @@ pub(super) fn backlight_card(facts: Option<BacklightFacts>, pal: Palette) -> Opt
         BacklightLoad::Failed(_) => retry_line(
             "backlight-retry",
             tr!("device.couldnt_read_backlight_click_to_retry"),
-            pal,
             move |cx| AppState::apply(cx, |state| state.retry_backlight_read(&key)),
         )
         .into_any_element(),

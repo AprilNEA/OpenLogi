@@ -28,6 +28,20 @@ fn config_reload_publishes_scroll_preferences_without_restarting_the_hook() {
     );
 }
 
+#[test]
+fn desktop_switches_follow_the_animation_setting() {
+    let mut settings = Config::default().app_settings;
+    assert_eq!(
+        desktop_switch(&settings),
+        openlogi_inject::DesktopSwitch::Animated
+    );
+    settings.animate_desktop_switch = false;
+    assert_eq!(
+        desktop_switch(&settings),
+        openlogi_inject::DesktopSwitch::Instant
+    );
+}
+
 /// The published capture plan's Back binding for the first device, if any.
 fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
     let published = orch.shared.capture_plans.borrow();

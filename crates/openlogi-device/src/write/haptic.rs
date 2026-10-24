@@ -6,9 +6,10 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature,
+        device_information::DeviceInformationFeature,
         haptic_feedback::{
-            HapticConfigFlags, HapticFeedbackFeature, HapticStatus, HapticWaveform,
-            SupportedWaveforms,
+            HapticConfigFlags, HapticConfiguration, HapticFeedbackFeature, HapticStatus,
+            HapticWaveform, SupportedWaveforms,
         },
     },
 };
@@ -18,7 +19,7 @@ use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
-use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
+use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
 /// How long the advisory haptic-status read may take.
 ///
@@ -54,18 +55,20 @@ impl Haptics {
     }
 }
 
-/// Resolve the haptic feature on `channel`, read which waveforms it
-/// advertises and its haptic status. Logi Options+ reads the same mask when
-/// it starts the feature.
-async fn open_haptics(
-    channel: &Arc<HidppChannel>,
-    device_index: u8,
-) -> Result<Haptics, WriteError> {
-    let mut device = Device::new(Arc::clone(channel), device_index)
+/// Open the device at `device_index` on `channel`: a device ping.
+async fn open_device(channel: &Arc<HidppChannel>, device_index: u8) -> Result<Device, WriteError> {
+    Device::new(Arc::clone(channel), device_index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable {
             index: device_index,
-        })?;
+        })
+}
+
+/// Resolve the haptic feature on `device`: a root lookup. Returns the
+/// accessor and the feature index.
+async fn resolve_feature(
+    device: &mut Device,
+) -> Result<(Arc<HapticFeedbackFeature>, u8), WriteError> {
     let info = device
         .root()
         .get_feature(HapticFeedbackFeature::ID)
@@ -76,7 +79,41 @@ async fn open_haptics(
         .ok_or(WriteError::FeatureUnsupported {
             feature_hex: HapticFeedbackFeature::ID,
         })?;
-    let feature = device.add_feature::<HapticFeedbackFeature>(info.index);
+    Ok((
+        device.add_feature::<HapticFeedbackFeature>(info.index),
+        info.index,
+    ))
+}
+
+/// The unit ID `device` reports through `0x0003`, which tells apart two
+/// devices on one receiver slot, or two units of one model on a direct
+/// route. `None` when the device has no `DeviceInformation` feature. The
+/// RGB control hand-back checks the same identity.
+async fn unit_id(device: &mut Device) -> Result<Option<[u8; 4]>, WriteError> {
+    let feature = match open_feature::<DeviceInformationFeature>(device).await {
+        Ok(feature) => feature,
+        Err(WriteError::FeatureUnsupported { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let info = feature.get_device_info().await.map_err(|error| {
+        classify_hidpp_error(
+            error,
+            HidppOperation::PlayHaptic,
+            DeviceInformationFeature::ID,
+        )
+    })?;
+    Ok(Some(info.unit_id))
+}
+
+/// Resolve the haptic feature on `channel`, read which waveforms it
+/// advertises and its haptic status. Logi Options+ reads the same mask when
+/// it starts the feature.
+async fn open_haptics(
+    channel: &Arc<HidppChannel>,
+    device_index: u8,
+) -> Result<Haptics, WriteError> {
+    let mut device = open_device(channel, device_index).await?;
+    let (feature, feature_index) = resolve_feature(&mut device).await?;
     let capabilities = feature.get_capabilities().await.map_err(|error| {
         classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
     })?;
@@ -97,7 +134,7 @@ async fn open_haptics(
     };
     Ok(Haptics {
         feature,
-        feature_index: info.index,
+        feature_index,
         waveforms: capabilities.waveforms,
         status,
     })
@@ -206,23 +243,57 @@ fn clear_cached_location() {
     }
 }
 
+/// Proof that [`ensure_haptics_armed_on`] turned the device-wide enable flag
+/// on: which device it turned on, and the configuration that device
+/// reported after the write.
+///
+/// Only arming creates one, and only when its own write set the flag, so
+/// [`restore_haptics_on`] can undo nothing but an enable OpenLogi made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HapticRestore {
+    /// The `0x0003` unit ID, or `None` for a device without that feature.
+    unit: Option<[u8; 4]>,
+    armed: HapticConfiguration,
+}
+
+/// What [`restore_haptics_on`] found on the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HapticRestoreOutcome {
+    /// The configuration was still the one arming left, and the enable flag
+    /// is clear again.
+    Restored,
+    /// The configuration differs from the one arming left: another writer
+    /// (another app or host, or the firmware) changed it after OpenLogi, so
+    /// it is theirs now. Nothing was written.
+    Superseded,
+    /// Another device answers on the route: one paired to the same receiver
+    /// slot since, or another unit of the same model. Arming did not turn
+    /// its engine on. Nothing was written.
+    OtherDevice,
+}
+
 /// Ensure the firmware haptic engine is armed: the enable flag set. Returns
-/// `true` when a repair write was needed.
+/// the [`HapticRestore`] the caller owes the device when this call turned the
+/// flag on, and `None` when it wrote nothing.
 ///
 /// Nothing else in the stack ever asserts this state — devices historically
 /// inherited it from Logi Options+, and some power transitions clear the
 /// enable flag, after which `play` calls are accepted but produce no physical
 /// feedback. The repair sets that flag only: intensity, power save, and
 /// unnamed bits are the user's (Options+ writes them) and are written back as
-/// read. A zero intensity is the user's "off" and is left alone. Callers
-/// arm once per Actions Ring session, before the first hover — which is why
-/// this deliberately bypasses the cached location and re-resolves the
-/// feature: the cache key (channel identity + device index) cannot see a
-/// *different device* re-paired into the same receiver slot, so each session
-/// starts by overwriting the entry with a freshly-proven location, and the
-/// per-hover plays then reuse it for the session's lifetime. The fresh open
-/// also re-reads the haptic status, so each session plays, or refuses to,
-/// by what the device reports when it starts.
+/// read. A zero intensity is the user's "off" and is left alone. The enable
+/// flag is device-wide, so a clear flag may also be the user's choice in
+/// another app: hand the returned restore to [`restore_haptics_on`] when the
+/// session that needed the engine is over.
+///
+/// Callers arm once per Actions Ring session, before the first hover —
+/// which is why this deliberately bypasses the cached location and
+/// re-resolves the feature: the cache key (channel identity + device index)
+/// cannot see a *different device* re-paired into the same receiver slot, so
+/// each session starts by overwriting the entry with a freshly-proven
+/// location, and the per-hover plays then reuse it for the session's
+/// lifetime. The fresh open also re-reads the haptic status, so each session
+/// plays, or refuses to, by what the device reports when it starts.
 ///
 /// The repair counts only once the device's reply to the write reports the
 /// enable flag. The reply is the device's state after the write, so a
@@ -230,7 +301,13 @@ fn clear_cached_location() {
 /// as a repair would leave the session playing into a disabled engine. The
 /// rest of the reply is the firmware's to settle: a normalized intensity or
 /// a changed power-save bit is accepted, as Logi Options+ adopts the reply.
-pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, WriteError> {
+///
+/// Before the write, the repair reads the device's `0x0003` unit ID for the
+/// restore to check. When that read fails, nothing is written: an enable
+/// with no record of which device it went to could not be handed back.
+pub async fn ensure_haptics_armed_on(
+    shared: &SharedChannel,
+) -> Result<Option<HapticRestore>, WriteError> {
     let channel = shared.channel();
     let index = shared.device_index();
     let haptics = open_haptics(channel, index).await?;
@@ -241,8 +318,14 @@ pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, Wri
         classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
     })?;
     if config.flags.contains(HapticConfigFlags::ENABLED) || config.intensity.get() == 0 {
-        return Ok(false);
+        return Ok(None);
     }
+    let mut device = open_device(channel, index)
+        .await
+        .inspect_err(|_| clear_cached_location())?;
+    let unit = unit_id(&mut device)
+        .await
+        .inspect_err(|_| clear_cached_location())?;
     let applied = feature
         .set_configuration(config.flags | HapticConfigFlags::ENABLED, config.intensity)
         .await
@@ -257,7 +340,56 @@ pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, Wri
             feature_hex: HapticFeedbackFeature::ID,
         });
     }
-    Ok(true)
+    Ok(Some(HapticRestore {
+        unit,
+        armed: applied,
+    }))
+}
+
+/// Undo the enable that `restore` proves: clear the device-wide enable flag
+/// again, and write power save, unnamed bits, and intensity back as read.
+///
+/// The device is read first. Another device on the route, which reports
+/// another `0x0003` unit ID, is left alone
+/// ([`HapticRestoreOutcome::OtherDevice`]). The device is written only while
+/// its configuration is still exactly the one arming left. Any difference
+/// means another writer changed it since, so the state is no longer
+/// OpenLogi's to undo and is left alone
+/// ([`HapticRestoreOutcome::Superseded`]). The restore counts only once the
+/// device's reply reports the flag clear; a reply that still shows it set
+/// fails with [`WriteError::UnsupportedResponse`].
+///
+/// The feature is resolved fresh and the plays' cached location is neither
+/// used nor changed: a restore runs after the session that played from it.
+pub async fn restore_haptics_on(
+    shared: &SharedChannel,
+    restore: HapticRestore,
+) -> Result<HapticRestoreOutcome, WriteError> {
+    let classify =
+        |error| classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID);
+    let mut device = open_device(shared.channel(), shared.device_index()).await?;
+    if unit_id(&mut device).await? != restore.unit {
+        return Ok(HapticRestoreOutcome::OtherDevice);
+    }
+    let (feature, _) = resolve_feature(&mut device).await?;
+    let config = feature.get_configuration().await.map_err(classify)?;
+    if config != restore.armed {
+        return Ok(HapticRestoreOutcome::Superseded);
+    }
+    let applied = feature
+        .set_configuration(
+            config.flags.difference(HapticConfigFlags::ENABLED),
+            config.intensity,
+        )
+        .await
+        .map_err(classify)?;
+    if applied.flags.contains(HapticConfigFlags::ENABLED) {
+        return Err(WriteError::UnsupportedResponse {
+            operation: HidppOperation::PlayHaptic,
+            feature_hex: HapticFeedbackFeature::ID,
+        });
+    }
+    Ok(HapticRestoreOutcome::Restored)
 }
 
 /// Play a waveform immediately on an open capture channel.
@@ -367,10 +499,51 @@ mod tests {
         waveforms: u32,
         status: StatusReply,
     ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
+        haptics_identified(initial, firmware, waveforms, status, None)
+    }
+
+    /// Where the scripted device keeps `0x0003`.
+    const DEVICE_INFO_INDEX: u8 = 0x02;
+
+    /// The unit ID a scripted device reports through `0x0003`. Holding
+    /// `None`, `getDeviceInfo` answers with an error.
+    type Unit = Arc<StdMutex<Option<[u8; 4]>>>;
+
+    /// [`haptics_reporting`] that also has `0x0003` when `unit` is given, and
+    /// reports the unit ID it holds at the time of each read.
+    fn haptics_identified(
+        initial: [u8; 3],
+        firmware: fn(&mut [u8; 3]),
+        waveforms: u32,
+        status: StatusReply,
+        unit: Option<Unit>,
+    ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
         let state = StdMutex::new(initial);
         ScriptedRawHidChannel::with_dynamic_responder(move |request| {
             if request.len() < 7 || request[0] != 0x10 {
                 return None;
+            }
+            if let Some(unit) = &unit {
+                let lookup = u16::from_be_bytes([request[4], request[5]]);
+                if (request[2], request[3] >> 4) == (0x00, 0x00)
+                    && lookup == DeviceInformationFeature::ID
+                {
+                    let mut response = request[..4].to_vec();
+                    response.extend_from_slice(&[DEVICE_INFO_INDEX, 0, 0]);
+                    return Some(response);
+                }
+                if (request[2], request[3] >> 4) == (DEVICE_INFO_INDEX, 0x00) {
+                    let Some(id) = *unit.lock().expect("unit") else {
+                        // A HID++ 2.0 error: InvalidArgument (2).
+                        return Some(vec![0x10, request[1], 0xff, request[2], request[3], 2, 0]);
+                    };
+                    // getDeviceInfo: a long reply, the unit ID in payload
+                    // bytes 1..5.
+                    let mut response = vec![0x11, request[1], request[2], request[3], 1];
+                    response.extend_from_slice(&id);
+                    response.resize(20, 0);
+                    return Some(response);
+                }
             }
             if (request[2], request[3] >> 4) == (HAPTIC_INDEX, 0x03) {
                 let raw = match status {
@@ -423,18 +596,59 @@ mod tests {
     async fn arm_with(
         initial: [u8; 3],
         firmware: fn(&mut [u8; 3]),
-    ) -> (Result<bool, WriteError>, Vec<[u8; 3]>, bool) {
+    ) -> (
+        Result<Option<HapticRestore>, WriteError>,
+        Vec<[u8; 3]>,
+        bool,
+    ) {
         let (raw, handle) = stateful_haptics(initial, firmware, RING_WAVEFORMS);
         let shared = shared_channel(raw).await;
         let result = ensure_haptics_armed_on(&shared).await;
-        let writes = handle
+        let writes = config_writes(&handle);
+        let cached = cached_feature(shared.channel(), shared.device_index()).is_some();
+        (result, writes, cached)
+    }
+
+    /// The `setConfiguration` payloads `handle` saw, in order.
+    fn config_writes(handle: &crate::replay::ReplayChannelHandle) -> Vec<[u8; 3]> {
+        handle
             .written_reports()
             .into_iter()
             .filter(|report| report[2] == HAPTIC_INDEX && report[3] >> 4 == 0x02)
             .map(|report| [report[4], report[5], report[6]])
-            .collect();
-        let cached = cached_feature(shared.channel(), shared.device_index()).is_some();
-        (result, writes, cached)
+            .collect()
+    }
+
+    /// What the device behind `shared` reports as its configuration now.
+    async fn configuration(shared: &SharedChannel) -> HapticConfiguration {
+        let (feature, _) = resolve_feature(&mut scripted_device(shared).await)
+            .await
+            .expect("the scripted device resolves");
+        feature
+            .get_configuration()
+            .await
+            .expect("the scripted device answers")
+    }
+
+    /// Another app or host writing the configuration after OpenLogi armed.
+    async fn write_elsewhere(shared: &SharedChannel, flags: u8, intensity: u8) {
+        let (feature, _) = resolve_feature(&mut scripted_device(shared).await)
+            .await
+            .expect("the scripted device resolves");
+        feature
+            .set_configuration(
+                HapticConfigFlags::from_bits_retain(flags),
+                hidpp::feature::haptic_feedback::HapticIntensity::new(intensity)
+                    .expect("a valid intensity"),
+            )
+            .await
+            .expect("the scripted device accepts the write");
+    }
+
+    async fn scripted_device(shared: &SharedChannel) -> Device {
+        open_device(shared.channel(), shared.device_index())
+            .await
+            .expect("the scripted device answers the ping")
     }
 
     async fn shared_channel(raw: ScriptedRawHidChannel) -> SharedChannel {
@@ -469,7 +683,7 @@ mod tests {
     async fn arm(initial: [u8; 3]) -> (bool, Vec<[u8; 3]>) {
         let (result, writes, _) = arm_with(initial, |_| {}).await;
         let repaired = result.expect("the scripted device answers every haptic call");
-        (repaired, writes)
+        (repaired.is_some(), writes)
     }
 
     #[tokio::test]
@@ -514,11 +728,144 @@ mod tests {
             state[0] &= !0x02;
         })
         .await;
-        assert_matches!(result, Ok(true));
+        assert_matches!(result, Ok(Some(_)));
         assert_eq!(writes, vec![[0x83, 63, 0]]);
         assert!(
             cached,
             "a confirmed repair keeps the location for the plays"
+        );
+    }
+
+    #[tokio::test]
+    async fn restoring_clears_only_the_enable_bit_arming_set() {
+        let _slot = CACHE_SLOT.lock().await;
+        // The user turned haptics off elsewhere; power save and an unnamed
+        // bit are on. The session turns the engine on, and its end turns it
+        // off again with everything else as the user left it.
+        let (raw, handle) = stateful_haptics([0x82, 60, 0x34], |_| {}, RING_WAVEFORMS);
+        let shared = shared_channel(raw).await;
+        let before = configuration(&shared).await;
+        let restore = ensure_haptics_armed_on(&shared)
+            .await
+            .expect("arming succeeds")
+            .expect("arming turned the engine on");
+        assert_matches!(
+            restore_haptics_on(&shared, restore).await,
+            Ok(HapticRestoreOutcome::Restored)
+        );
+        assert_eq!(config_writes(&handle), vec![[0x83, 60, 0], [0x82, 60, 0]]);
+        assert_eq!(configuration(&shared).await, before);
+        clear_cached_location();
+    }
+
+    #[tokio::test]
+    async fn a_configuration_changed_after_arming_is_left_alone() {
+        let _slot = CACHE_SLOT.lock().await;
+        // Another writer changed the intensity, or turned the engine off
+        // itself: either way the state is theirs, and nothing is written.
+        for (flags, intensity) in [(0x83, 40), (0x82, 60)] {
+            let (raw, handle) = stateful_haptics([0x82, 60, 0x34], |_| {}, RING_WAVEFORMS);
+            let shared = shared_channel(raw).await;
+            let restore = ensure_haptics_armed_on(&shared)
+                .await
+                .expect("arming succeeds")
+                .expect("arming turned the engine on");
+            write_elsewhere(&shared, flags, intensity).await;
+            assert_matches!(
+                restore_haptics_on(&shared, restore).await,
+                Ok(HapticRestoreOutcome::Superseded)
+            );
+            assert_eq!(
+                config_writes(&handle),
+                vec![[0x83, 60, 0], [flags, intensity, 0]],
+                "the restore wrote nothing after {flags:#04x}/{intensity}"
+            );
+        }
+        clear_cached_location();
+    }
+
+    #[tokio::test]
+    async fn a_restore_fails_when_the_reply_shows_the_engine_still_on() {
+        let _slot = CACHE_SLOT.lock().await;
+        // The firmware keeps the engine enabled whatever is written.
+        let (raw, handle) =
+            stateful_haptics([0x82, 60, 0x34], |state| state[0] |= 0x01, RING_WAVEFORMS);
+        let shared = shared_channel(raw).await;
+        let restore = ensure_haptics_armed_on(&shared)
+            .await
+            .expect("arming succeeds")
+            .expect("arming turned the engine on");
+        assert_matches!(
+            restore_haptics_on(&shared, restore).await,
+            Err(WriteError::UnsupportedResponse {
+                operation: HidppOperation::PlayHaptic,
+                feature_hex: HapticFeedbackFeature::ID,
+            })
+        );
+        assert_eq!(config_writes(&handle), vec![[0x83, 60, 0], [0x82, 60, 0]]);
+        clear_cached_location();
+    }
+
+    #[tokio::test]
+    async fn a_restore_leaves_another_device_on_the_route_alone() {
+        let _slot = CACHE_SLOT.lock().await;
+        // Another mouse took the receiver slot after the session, with the
+        // same configuration. It is left alone; the mouse arming turned on
+        // is handed its engine back once it answers on the route again.
+        let armed_unit = Some([0x12, 0x34, 0x56, 0x78]);
+        let unit: Unit = Arc::new(StdMutex::new(armed_unit));
+        let (raw, handle) = haptics_identified(
+            [0x82, 60, 0x34],
+            |_| {},
+            RING_WAVEFORMS,
+            StatusReply::Status(0),
+            Some(Arc::clone(&unit)),
+        );
+        let shared = shared_channel(raw).await;
+        let restore = ensure_haptics_armed_on(&shared)
+            .await
+            .expect("arming succeeds")
+            .expect("arming turned the engine on");
+        *unit.lock().expect("unit") = Some([0x9a, 0xbc, 0xde, 0xf0]);
+        assert_matches!(
+            restore_haptics_on(&shared, restore).await,
+            Ok(HapticRestoreOutcome::OtherDevice)
+        );
+        assert_eq!(config_writes(&handle), vec![[0x83, 60, 0]]);
+        *unit.lock().expect("unit") = armed_unit;
+        assert_matches!(
+            restore_haptics_on(&shared, restore).await,
+            Ok(HapticRestoreOutcome::Restored)
+        );
+        assert_eq!(config_writes(&handle), vec![[0x83, 60, 0], [0x82, 60, 0]]);
+        clear_cached_location();
+    }
+
+    #[tokio::test]
+    async fn arming_writes_nothing_when_the_device_does_not_say_which_it_is() {
+        let _slot = CACHE_SLOT.lock().await;
+        // `0x0003` is there but refuses the read: an enable with no record of
+        // its device could not be handed back, so it is never made.
+        let (raw, handle) = haptics_identified(
+            [0x82, 60, 0x34],
+            |_| {},
+            RING_WAVEFORMS,
+            StatusReply::Status(0),
+            Some(Arc::new(StdMutex::new(None))),
+        );
+        let shared = shared_channel(raw).await;
+        assert_matches!(
+            ensure_haptics_armed_on(&shared).await,
+            Err(WriteError::HidppFeature {
+                operation: HidppOperation::PlayHaptic,
+                feature_hex: DeviceInformationFeature::ID,
+                ..
+            })
+        );
+        assert!(config_writes(&handle).is_empty(), "nothing was written");
+        assert!(
+            cached_feature(shared.channel(), shared.device_index()).is_none(),
+            "a refused repair leaves no cached location behind"
         );
     }
 
@@ -624,7 +971,7 @@ mod tests {
         let _slot = CACHE_SLOT.lock().await;
         let (raw, handle) = stateful_haptics([0x03, 40, 0x34], |_| {}, RING_WAVEFORMS);
         let shared = shared_channel(raw).await;
-        assert_matches!(ensure_haptics_armed_on(&shared).await, Ok(false));
+        assert_matches!(ensure_haptics_armed_on(&shared).await, Ok(None));
         let capability_reads = |handle: &crate::replay::ReplayChannelHandle| {
             handle
                 .written_reports()
@@ -686,7 +1033,7 @@ mod tests {
         let _slot = CACHE_SLOT.lock().await;
         let (raw, handle) = stateful_haptics([0x03, 40, 0x34], |_| {}, RING_WAVEFORMS);
         let shared = shared_channel(raw).await;
-        assert_matches!(ensure_haptics_armed_on(&shared).await, Ok(false));
+        assert_matches!(ensure_haptics_armed_on(&shared).await, Ok(None));
         assert_eq!(status_reads(&handle), 1, "arming reads the status once");
         for waveform in [
             HapticWaveform::SubtleCollision,
@@ -710,7 +1057,7 @@ mod tests {
             StatusReply::Status(1),
         );
         let shared = shared_channel(raw).await;
-        assert_matches!(ensure_haptics_armed_on(&shared).await, Ok(false));
+        assert_matches!(ensure_haptics_armed_on(&shared).await, Ok(None));
         assert_matches!(
             play_haptic_on(&shared, HapticWaveform::SubtleCollision).await,
             Err(WriteError::HapticsUnavailable { status: 1 })
@@ -752,7 +1099,7 @@ mod tests {
         let shared = shared_channel(raw).await;
         let started = std::time::Instant::now();
         let started_paused = tokio::time::Instant::now();
-        assert_matches!(ensure_haptics_armed_on(&shared).await, Ok(false));
+        assert_matches!(ensure_haptics_armed_on(&shared).await, Ok(None));
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "arming does not wait for the channel's response timeout, took {:?}",

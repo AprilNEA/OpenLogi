@@ -21,7 +21,8 @@ use hidpp::{
     device::{Device, DeviceError},
     feature::EmittingFeature,
     feature::illumination::{
-        ControlCapabilities, ControlInfo, IlluminationEvent, IlluminationFeature, IlluminationState,
+        BrightnessEffectiveMax, ControlInfo, IlluminationEvent, IlluminationFeature,
+        IlluminationState,
     },
     protocol::v20::Hidpp20Error,
 };
@@ -176,23 +177,21 @@ impl Illumination {
 
     /// The brightness limit in effect, if one lowers the top of the range.
     ///
-    /// `getBrightnessEffectiveMax` is a version-1 function, and only a light
-    /// whose brightness info flags a dynamic maximum has one — Logi Options+
-    /// reads it under the same flag. `0` means no limit is in effect.
+    /// [`IlluminationFeature::get_brightness_effective_max`] decides whether
+    /// the light has an effective maximum at all; one at or above the top of
+    /// the range lowers nothing.
     async fn brightness_limit(&self, info: ControlInfo) -> Result<Option<u16>, WriteError> {
-        if self.version < 1
-            || !info
-                .capabilities
-                .contains(ControlCapabilities::HAS_DYNAMIC_MAXIMUM)
-        {
-            return Ok(None);
-        }
-        let limit = self
+        let effective_max = self
             .feature
-            .get_brightness_effective_max()
+            .get_brightness_effective_max(self.version, info)
             .await
             .map_err(hidpp_failed)?;
-        Ok((limit != 0 && limit < info.max).then_some(limit))
+        Ok(match effective_max {
+            BrightnessEffectiveMax::Limit(limit) if limit.get() < info.max => Some(limit.get()),
+            BrightnessEffectiveMax::Unsupported
+            | BrightnessEffectiveMax::NoLimit
+            | BrightnessEffectiveMax::Limit(_) => None,
+        })
     }
 
     async fn is_on(&self) -> Result<bool, WriteError> {

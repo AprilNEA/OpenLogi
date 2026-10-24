@@ -20,6 +20,8 @@ use openlogi_core::scroll::ScrollDelta;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::{VirtualKeyboard, is_virtual_keyboard_product};
 
 #[cfg(any(target_os = "macos", test))]
 mod space_switch;
@@ -266,8 +268,11 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// handled at the hook/HID layer, logging a trace here.
 ///
 /// macOS `PreviousDesktop` / `NextDesktop` send a DockSwipe without modifying
-/// system shortcuts. This call waits for posting (or cancellation), preserving
-/// event order for sequential callers, but not for the desktop animation to end.
+/// system shortcuts: two frames that switch at once, or, with
+/// [`DesktopSwitch::Animated`], a timed series of frames the Dock slides along
+/// (see [`set_desktop_switch`]). This call waits for posting (or
+/// cancellation), including every frame of a slide, preserving event order
+/// for sequential callers, but not for the Dock's animation to end.
 /// A dedicated worker confirms the pointer display's Space; the process must
 /// remain alive to receive that diagnostic. Overlapping switches are skipped,
 /// not queued. Call from an action worker, never an input-tap callback.
@@ -337,6 +342,32 @@ pub fn execute(action: &Action) {
                 action = action.label(),
                 "execute unsupported on this platform"
             );
+        }
+    }
+}
+
+/// How [`Action::PreviousDesktop`] and [`Action::NextDesktop`] reach the
+/// neighbouring desktop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesktopSwitch {
+    /// Switch at once, with no slide.
+    Instant,
+    /// Slide over the way a three-finger swipe does. macOS types the user's
+    /// Space shortcut for the Dock's own slide, or posts swipe frames when
+    /// that shortcut is off. Elsewhere this switches like [`Self::Instant`].
+    Animated,
+}
+
+/// Choose how later [`Action::PreviousDesktop`] and [`Action::NextDesktop`]
+/// actions switch. They switch instantly until a host calls this; a switch
+/// already under way keeps the style it started with.
+pub fn set_desktop_switch(switch: DesktopSwitch) {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::set_desktop_switch(switch);
+        }
+        _ => {
+            let _ = switch;
         }
     }
 }
@@ -443,6 +474,18 @@ fn hold_transition(
             );
         }
     }
+}
+
+/// Run `post` with the synthetic modifiers held chords keep down, under the
+/// lock that orders held-chord edges.
+///
+/// A one-shot keystroke posted through this sees exactly which modifiers held
+/// chords own, restores any it lifts before returning, and never interleaves
+/// with a held transition.
+#[cfg(target_os = "macos")]
+fn with_held_modifiers<R>(post: impl FnOnce(HeldModifiers) -> R) -> R {
+    let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    post(output.modifiers())
 }
 
 /// Let the frontmost app's menus answer shortcuts the keyboard layout

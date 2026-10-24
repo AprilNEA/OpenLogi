@@ -18,6 +18,124 @@ use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend,
 use crate::{ChannelRegistry, get_dpi};
 
 #[tokio::test]
+async fn empty_receiver_inventory_preserves_its_selected_open_error_after_channels_close() {
+    let fixture = bolt_fixture("pairing-open-error", &[], 1);
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .unwrap(),
+    );
+    let identities = crate::pairing::ReceiverIdentityCache::default();
+    let mut enumerator =
+        Enumerator::with_backend(backend.clone()).with_receiver_identity_cache(identities.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    let inventory = enumerator.enumerate().await.unwrap();
+    assert_eq!(inventory.len(), 1);
+    assert!(inventory[0].paired.is_empty());
+    assert_eq!(inventory[0].receiver.unique_id.as_deref(), Some(BOLT_UID));
+    // Pairing retains identity evidence after exclusive ownership closes the
+    // inventory channels. It must not need a paired-device route to do so.
+    drop(enumerator);
+    backend
+        .set_open_outcome(&node_id, OpenOutcome::Denied)
+        .unwrap();
+    let (_commands, command_rx) = mpsc::unbounded_channel();
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let result = crate::pairing::run_pairing_with_inventory(
+        &*backend,
+        crate::pairing::ReceiverSelector::ReceiverUid {
+            product_id: 0xc548,
+            uid: BOLT_UID.to_ascii_lowercase(),
+        },
+        command_rx,
+        events,
+        Some(&identities),
+    )
+    .await;
+    assert!(matches!(result, Err(crate::pairing::PairingError::Hid(_))));
+    assert!(matches!(
+        event_rx.recv().await,
+        Some(crate::pairing::PairingEvent::Failed(
+            crate::pairing::PairingError::Hid(_)
+        ))
+    ));
+    assert_eq!(backend.open_count(&node_id).unwrap(), 2);
+    backend.require_complete().unwrap();
+}
+
+#[tokio::test]
+async fn receiver_identity_evidence_is_removed_on_confirmed_disconnect() {
+    let fixture = bolt_fixture("pairing-identity-disconnect", &[], 1);
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .unwrap(),
+    );
+    let identities = crate::pairing::ReceiverIdentityCache::default();
+    let mut enumerator =
+        Enumerator::with_backend(backend.clone()).with_receiver_identity_cache(identities.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    assert_eq!(enumerator.enumerate().await.unwrap().len(), 1);
+    assert_eq!(
+        identities.identity(&node_id),
+        Some((0xc548, BOLT_UID.into()))
+    );
+    backend
+        .set_node_presence(&node_id, NodePresence::Absent)
+        .unwrap();
+    backend
+        .set_channel_connection(BOLT_CHANNEL, ChannelConnection::Disconnected)
+        .unwrap();
+    assert!(enumerator.enumerate().await.unwrap().is_empty());
+    assert!(identities.identity(&node_id).is_none());
+    backend.require_complete().unwrap();
+}
+
+#[tokio::test]
+async fn a_missing_receiver_uid_requests_repair_without_retiring_a_healthy_channel() {
+    let mut fixture = bolt_fixture("uid-repair", &[], 2);
+    fixture.cassette.exchanges[1].response = Some(vec![0x10, 0xff, 0x8f, 0x83, 0xfb, 0x02, 0]);
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .unwrap(),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    let (first, _, healthy) = enumerator.enumerate_reporting_completeness().await.unwrap();
+    assert!(healthy, "a missing UID must not suspend healthy devices");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].receiver.unique_id, None);
+    assert!(
+        enumerator.retry_needed_last_tick(),
+        "identity needs a bounded repair pass"
+    );
+    let (second, _, healthy) = enumerator.enumerate_reporting_completeness().await.unwrap();
+    assert!(healthy);
+    assert_eq!(second[0].receiver.unique_id.as_deref(), Some(BOLT_UID));
+    assert!(!enumerator.retry_needed_last_tick());
+    assert_eq!(backend.open_count(&node_id).unwrap(), 1);
+    backend.require_complete().unwrap();
+}
+
+#[tokio::test]
 async fn receiver_slots_interleave_on_one_channel_and_lifecycle_events_coalesce() {
     let slots = [
         BoltSlot {
@@ -203,6 +321,10 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
             .channel_completion(BOLT_CHANNEL)
             .expect("known channel")
     );
+    assert!(
+        !enumerator.replaced_channels_last_tick(),
+        "a first open replaces nothing"
+    );
     let stale = registry.lookup(&route).expect("receiver route published");
 
     backend
@@ -213,6 +335,7 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
     assert!(enumerator.ledger.contains_last_good(&node_id));
     assert!(!stale.channel().is_connected());
     assert!(registry.is_current(&stale));
+    assert!(!enumerator.replaced_channels_last_tick());
 
     let second_failure = enumerator
         .enumerate()
@@ -222,6 +345,7 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
     assert!(enumerator.channels.is_retiring(&node_id));
     assert!(!registry.is_current(&stale));
     assert!(registry.lookup(&route).is_none());
+    assert!(!enumerator.replaced_channels_last_tick());
     drop(stale);
 
     backend
@@ -232,11 +356,16 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
         .await
         .expect("quiescent retirement is deferred for one pass");
     assert_eq!(draining, std::slice::from_ref(&expected));
+    assert!(!enumerator.replaced_channels_last_tick());
     let repaired = enumerator
         .enumerate()
         .await
         .expect("replacement probe succeeds");
 
+    assert!(
+        enumerator.replaced_channels_last_tick(),
+        "the pass that reopens a retired channel must report the replacement"
+    );
     assert_eq!(repaired, [expected]);
     let replacement = registry.lookup(&route).expect("replacement published");
     assert!(replacement.channel().is_connected());
@@ -256,6 +385,185 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
     completion
         .require_complete()
         .expect("both successful probe cassettes consumed");
+}
+
+/// A node the OS keeps listing but that stops answering — a wedged receiver,
+/// or a powered-off Bluetooth mouse whose node lingers — keeps being retired
+/// and reopened. Its replay grace runs out on the first reopen, so the agent
+/// sees it go offline: no reopen after that is an unobserved reconnect, and
+/// reporting one would re-apply every online device's settings and re-arm
+/// every capture on each cycle.
+#[tokio::test]
+async fn reopening_a_channel_the_agent_saw_go_offline_reports_no_replacement() {
+    let fixture = bolt_fixture(
+        "persistently-dead-channel",
+        &[BoltSlot {
+            slot: 1,
+            online: true,
+        }],
+        2,
+    );
+    let expected = fixture.inventory.clone();
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid Bolt replay"),
+    );
+    let registry = ChannelRegistry::default();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    let initial = enumerator
+        .enumerate()
+        .await
+        .expect("initial probe succeeds");
+    assert_eq!(initial, std::slice::from_ref(&expected));
+
+    // Two retire/reopen cycles on a dead channel: the first reopen exhausts
+    // the replay grace, the second finds the node already surfaced offline.
+    backend
+        .set_channel_connection(BOLT_CHANNEL, ChannelConnection::Disconnected)
+        .expect("known channel");
+    for _ in 0..16 {
+        if backend.open_count(&node_id).expect("known node") == 3 {
+            break;
+        }
+        enumerator
+            .enumerate()
+            .await
+            .expect("a dead channel still enumerates");
+        assert!(
+            !enumerator.replaced_channels_last_tick(),
+            "a reopen past the replay grace is not an unobserved reconnect"
+        );
+    }
+    assert_eq!(
+        backend.open_count(&node_id).expect("known node"),
+        3,
+        "the dead channel must have been reopened twice"
+    );
+    assert!(!enumerator.ledger.contains_last_good(&node_id));
+
+    // The receiver answers again on the next reopen. The agent saw it go
+    // offline, so its offline→online transition re-applies the settings.
+    backend
+        .set_channel_connection(BOLT_CHANNEL, ChannelConnection::Connected)
+        .expect("known channel");
+    let mut recovered = Vec::new();
+    for _ in 0..16 {
+        if backend.open_count(&node_id).expect("known node") == 4 {
+            break;
+        }
+        recovered = enumerator
+            .enumerate()
+            .await
+            .expect("the reopened channel enumerates");
+        assert!(
+            !enumerator.replaced_channels_last_tick(),
+            "a node already surfaced offline comes back as a transition"
+        );
+    }
+    assert_eq!(backend.open_count(&node_id).expect("known node"), 4);
+    assert_eq!(recovered, [expected]);
+    assert!(enumerator.ledger.contains_last_good(&node_id));
+    backend
+        .channel_completion(BOLT_CHANNEL)
+        .expect("known channel")
+        .require_complete()
+        .expect("both successful probe cassettes consumed");
+}
+
+/// The direct-device counterpart of the receiver case above. Windows can drop
+/// and re-create a Bluetooth HID node faster than one reconciliation, so the
+/// node never leaves the OS listing while its handle is dead. Node-vanish
+/// retirement cannot fire, and a still-fresh cached probe asks the device
+/// nothing: the transport's disconnect is the only evidence left, and the
+/// probe must report it so the ledger retires the channel.
+#[tokio::test]
+async fn disconnected_direct_channel_replays_last_good_then_opens_a_replacement() {
+    let fixture = direct_fixture(OpenOutcome::Hidpp, 1);
+    let expected = fixture.inventory.clone();
+    let route = crate::DeviceRoute::Direct {
+        vendor_id: expected.receiver.vendor_id,
+        product_id: expected.receiver.product_id,
+    };
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid direct replay"),
+    );
+    let registry = ChannelRegistry::default();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+    let initial = enumerator
+        .enumerate()
+        .await
+        .expect("initial probe succeeds");
+    assert_eq!(initial, std::slice::from_ref(&expected));
+    let stale = registry.lookup(&route).expect("direct route published");
+
+    backend
+        .set_channel_connection(DIRECT_CHANNEL, ChannelConnection::Disconnected)
+        .expect("known channel");
+    let first_failure = enumerator.enumerate().await.expect("failed probe replays");
+    assert_eq!(first_failure, std::slice::from_ref(&expected));
+    assert!(enumerator.ledger.contains_last_good(&node_id));
+    assert!(!stale.channel().is_connected());
+    assert!(registry.is_current(&stale));
+
+    let second_failure = enumerator
+        .enumerate()
+        .await
+        .expect("second failed probe retires");
+    assert_eq!(second_failure, std::slice::from_ref(&expected));
+    assert!(
+        enumerator.channels.is_retiring(&node_id),
+        "a disconnected direct channel must be retired, not served from the probe cache"
+    );
+    assert!(!registry.is_current(&stale));
+    assert!(registry.lookup(&route).is_none());
+    drop(stale);
+
+    backend
+        .set_channel_connection(DIRECT_CHANNEL, ChannelConnection::Connected)
+        .expect("known channel");
+    let draining = enumerator
+        .enumerate()
+        .await
+        .expect("quiescent retirement is deferred for one pass");
+    assert_eq!(draining, std::slice::from_ref(&expected));
+    let repaired = enumerator
+        .enumerate()
+        .await
+        .expect("replacement probe succeeds");
+
+    assert_eq!(repaired, [expected]);
+    let replacement = registry.lookup(&route).expect("replacement published");
+    assert!(replacement.channel().is_connected());
+    assert!(registry.is_current(&replacement));
+    assert_eq!(backend.open_count(&node_id).expect("known node"), 2);
+    assert_eq!(
+        backend
+            .channel_lifetime_count(DIRECT_CHANNEL)
+            .expect("known channel"),
+        1,
+        "the disconnected lifetime must be retired before replacement"
+    );
+    backend
+        .channel_completion(DIRECT_CHANNEL)
+        .expect("known channel")
+        .require_complete()
+        .expect("the initial probe cassette is consumed");
 }
 
 #[tokio::test]
@@ -756,12 +1064,12 @@ async fn voltage_battery_broadcast_reports_charging_while_holding_the_percentage
 }
 
 /// Probe a [`setting_fixture`] node carrying `feature_id` (at index 3), emit
-/// that feature's long `broadcast` (function, then payload) on its channel,
-/// and return the node's settings revision before and after the
-/// reconciliation it requests.
+/// that feature's long `broadcasts` (each a function, then its payload) on
+/// its channel in one burst, and return the node's settings revision before
+/// and after the one reconciliation they request together.
 async fn setting_broadcast_revisions(
     feature_id: u16,
-    broadcast: [u8; 4],
+    broadcasts: &[&[u8]],
     source: HidppEventSource,
 ) -> (u64, u64) {
     const PRODUCT_ID: u16 = 0xb369;
@@ -790,20 +1098,24 @@ async fn setting_broadcast_revisions(
     };
     let before = revision(&mut enumerator).await;
 
-    let [function, payload @ ..] = broadcast;
-    let mut report = vec![0x11, 0xff, 0x03, function << 4];
-    report.extend_from_slice(&payload);
-    report.extend_from_slice(&[0; 13]);
-    assert_eq!(
-        backend
-            .emit_channel_report(HEADSET_CHANNEL, &report)
-            .expect("known channel"),
-        1
-    );
-    tokio::time::timeout(Duration::from_secs(2), observed.wait_for(1))
+    for broadcast in broadcasts {
+        let (function, payload) = broadcast.split_first().expect("a function id");
+        let mut report = vec![0x11, 0xff, 0x03, function << 4];
+        report.extend_from_slice(payload);
+        report.resize(4 + 16, 0);
+        assert_eq!(
+            backend
+                .emit_channel_report(HEADSET_CHANNEL, &report)
+                .expect("known channel"),
+            1
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(2), observed.wait_for(broadcasts.len()))
         .await
-        .expect("the broadcast must be recognised as a reconciliation request");
+        .expect("each broadcast must be recognised as a reconciliation request");
+    // However many arrived, one reconciliation is due.
     assert_eq!(events.try_recv(), Ok(source));
+    assert_eq!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 
     let after = revision(&mut enumerator).await;
     backend
@@ -819,7 +1131,7 @@ async fn fn_lock_toggled_on_the_keyboard_moves_its_settings_revision() {
     assert_eq!(
         setting_broadcast_revisions(
             0x40a3,
-            [0x00, 0x00, 0x01, 0x00],
+            &[&[0x00, 0x00, 0x01, 0x00]],
             HidppEventSource::FnInversion
         )
         .await,
@@ -833,8 +1145,56 @@ async fn a_dpi_button_moves_the_mouses_settings_revision() {
     assert_eq!(
         setting_broadcast_revisions(
             0x2202,
-            [0x00, 0x00, 0x06, 0x40],
+            &[&[0x00, 0x00, 0x06, 0x40]],
             HidppEventSource::ExtendedDpi
+        )
+        .await,
+        (0, 1)
+    );
+}
+
+/// 0x2202 event 1: sensor 0, X axis, correction +100, perpendicular delta -1.
+const CALIBRATION_COMPLETED: &[u8] = &[0x01, 0x00, 0x00, 0x00, 0x64, 0xff, 0xff];
+
+#[tokio::test]
+async fn a_finished_sensor_calibration_moves_the_mouses_settings_revision() {
+    assert_eq!(
+        setting_broadcast_revisions(
+            0x2202,
+            &[CALIBRATION_COMPLETED],
+            HidppEventSource::ExtendedDpi
+        )
+        .await,
+        (0, 1)
+    );
+}
+
+#[tokio::test]
+async fn a_dpi_button_and_a_calibration_in_one_burst_ask_for_one_reconciliation() {
+    // Event 0 (sensor 0 now at 1600 DPI), then event 1: each moves the
+    // revision, and together they queue one reconciliation request.
+    assert_eq!(
+        setting_broadcast_revisions(
+            0x2202,
+            &[&[0x00, 0x00, 0x06, 0x40], CALIBRATION_COMPLETED],
+            HidppEventSource::ExtendedDpi
+        )
+        .await,
+        (0, 2)
+    );
+}
+
+#[tokio::test]
+async fn a_disabled_key_change_from_elsewhere_moves_the_keyboards_settings_revision() {
+    // 0x4521 function 2, unsolicited: software on another host replaced the
+    // disabled-key set. Byte 0 would name Caps Lock and Windows, but it is
+    // not decoded — the report only asks for the reconciliation, and the
+    // revision tells clients to re-read the set.
+    assert_eq!(
+        setting_broadcast_revisions(
+            0x4521,
+            &[&[0x02, 0x11, 0x00, 0x00]],
+            HidppEventSource::DisableKeys
         )
         .await,
         (0, 1)

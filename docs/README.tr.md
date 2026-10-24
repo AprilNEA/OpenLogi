@@ -1,8 +1,6 @@
 > [!WARNING]
 > **OpenLogi hâlâ aktif geliştirme aşamasında** ve henüz kararlı değil — özellikler ve ayarlar değişebilir. Yeni bir sürüm çıktığında haberdar olmak için depoya **Star** ⭐ verin ve **Watch** 👀 edin.
 
-<h4 align="right"><a href="../README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a> | <a href="README.es.md">Español</a> | <a href="README.pt-BR.md">Português</a> | <strong>Türkçe</strong></h4>
-
 <p align="center">
     <img src="https://assets.openlogi.org/brand/openlogi-icon.png" width="138" alt="OpenLogi"/>
 </p>
@@ -11,15 +9,45 @@
 <p align="center"><strong>⚡️ Rust 🦀 ile yazılmış, Logitech Options+'a yerel ve tamamen çevrimdışı çalışan bir alternatif<br/>Logitech fare, klavye ve web kameralarının tüm gücünü HID++ ve UVC üzerinden açığa çıkarır</strong></p>
 
 <div align="center">
-    <a href="https://twitter.com/AprilNEA" target="_blank">
-    <img alt="twitter" src="https://img.shields.io/badge/follow-AprilNEA-green?style=social&logo=Twitter"></a>
-    <a href="https://t.me/+VDtkR5OSAT04NzVh" target="_blank">
-    <img alt="telegram" src="https://img.shields.io/badge/chat-telegram-blueviolet?style=flat&logo=Telegram"></a>
+    <a href="https://github.com/AprilNEA/OpenLogi/releases/latest" target="_blank">
+    <img alt="GitHub release" src="https://img.shields.io/github/v/release/AprilNEA/OpenLogi?style=flat"></a>
     <a href="https://github.com/AprilNEA/OpenLogi/releases" target="_blank">
     <img alt="GitHub downloads" src="https://img.shields.io/github/downloads/AprilNEA/OpenLogi/total.svg?style=flat"></a>
     <a href="https://github.com/AprilNEA/OpenLogi/commits" target="_blank">
     <img alt="GitHub commit" src="https://img.shields.io/github/commit-activity/m/AprilNEA/OpenLogi?style=flat"></a>
+    <a href="#lisans">
+    <img alt="License" src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue?style=flat"></a>
     <img alt="Hits" src="https://hits.aprilnea.com/hits?url=https://github.com/aprilnea/openlogi">
+</div>
+
+<div align="center">
+    <a href="https://x.com/AprilNEA" target="_blank">
+    <img alt="X" src="https://img.shields.io/badge/follow-AprilNEA-black?style=flat&logo=x"></a>
+    <a href="https://t.me/+VDtkR5OSAT04NzVh" target="_blank">
+    <img alt="telegram" src="https://img.shields.io/badge/chat-telegram-blueviolet?style=flat&logo=Telegram"></a>
+</div>
+
+<div align="center">
+    <a href="../README.md">
+    <img alt="English" src="https://img.shields.io/badge/English-lightgrey?style=flat"></a>
+    <a href="README.zh-CN.md">
+    <img alt="简体中文" src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-lightgrey?style=flat"></a>
+    <a href="README.ja.md">
+    <img alt="日本語" src="https://img.shields.io/badge/%E6%97%A5%E6%9C%AC%E8%AA%9E-lightgrey?style=flat"></a>
+    <a href="README.de.md">
+    <img alt="Deutsch" src="https://img.shields.io/badge/Deutsch-lightgrey?style=flat"></a>
+    <a href="README.fr.md">
+    <img alt="Français" src="https://img.shields.io/badge/Fran%C3%A7ais-lightgrey?style=flat"></a>
+    <a href="README.ko.md">
+    <img alt="한국어" src="assets/badge-lang-ko.svg"></a>
+    <a href="README.ru.md">
+    <img alt="Русский" src="https://img.shields.io/badge/%D0%A0%D1%83%D1%81%D1%81%D0%BA%D0%B8%D0%B9-lightgrey?style=flat"></a>
+    <a href="README.es.md">
+    <img alt="Español" src="https://img.shields.io/badge/Espa%C3%B1ol-lightgrey?style=flat"></a>
+    <a href="README.pt-BR.md">
+    <img alt="Português" src="https://img.shields.io/badge/Portugu%C3%AAs-lightgrey?style=flat"></a>
+    <a href="README.tr.md">
+    <img alt="Türkçe" src="https://img.shields.io/badge/T%C3%BCrk%C3%A7e-blue?style=flat"></a>
 </div>
 
 <p align="center">
@@ -47,152 +75,151 @@ OpenLogi'nin Options+'ta bulamayacağınız özellikleri:
 - **Linux'ta çalışır.** Linux, OpenLogi'de birinci sınıf bir platformdur.
 - **Desteklenen tuşlarda jestler.** Desteklenen kontrollere jest eylemleri atayın — isterseniz jestleri tamamen kapatın.
 - **Düz metin ayar dosyası.** Her şey tek bir TOML dosyasında; makineler arasında istediğiniz şekilde senkronize edin.
-- **Betiklenebilir.** Arayüzün yanında gerçek bir CLI; DPI, imleç ölçekleme ve SmartShift için [donanım tanılama](USAGE.md) araçlarıyla birlikte.
+- **Betiklenebilir.** Arayüzün yanında gerçek bir CLI: DPI, SmartShift, Fn-lock ve raporlama hızı için JSON tabanlı bir [otomasyon API'si](USAGE.md#automation-api), ayrıca donanım tanılama araçları.
 
 ## Özellikler
 
-- Logi Bolt alıcıları, Unifying alıcıları, Bluetooth veya kablolu bağlantı üzerinden tanınan cihazlar; pil yüzdesi ve şarj durumu dahil
-- İşletim sistemi giriş kancası üzerinden tuş yeniden atama: hazır eylem kataloğu ve TOML ayar dosyasında tanımlanan özel klavye kısayolları, bağımsız kısa/uzun basış eylemleri ve bas-konuş için basılı tutma kombinasyonları¹ dahil
-- Uygulama odaklandığında otomatik geçiş yapan uygulama başına profil katmanları (macOS + Windows; Linux'ta sadece X11 / XWayland)
-- Litra ışıkları: güç, parlaklık ve renk sıcaklığı; kamera etkinliğini takip eden isteğe bağlı otomatik güç özelliğiyle
+<p align="center">
+    <img src="https://assets.openlogi.org/screenshots/macos/light/devices-grid.png" width="860" alt="Altı Logitech cihazını gösteren OpenLogi cihaz listesi: fareler, bir klavye ve bir Litra ışığı">
+</p>
 
-**Fare**
+### Cihazlar
 
-- Orta tuş, mod değiştirme ve parmak tekerleği tuşlarını yakalayıp yeniden atama (orta tuş her yerde, diğerleri cihazın desteklediği yerlerde)
-- Desteklenen tuşlarda canlı yakalamalı, yöne göre jest atamaları: Geri/İleri, DPI/ModeShift, özel jest tuşu ve dokunsal panel
-  - DPI/ModeShift jestleri, cihazın yönlendirme (diversion) ve ham XY desteği bildirmesini gerektirir.
-  - Birincil tıklamalara ve tekerlek kontrollerine yeni jest ataması yapılamaz; mevcut Orta Tık jest atamaları korunur.
-- Actions Ring: imleç merkezli, sekiz yuvalı eylem overlay'i (`ShowActionsRing`), uygulama başına düzenlerle
-- Önayarlı DPI kontrolü ve Döngü / Önayar-Belirle eylemleri (`0x2201`)
-- SmartShift tekerleği: mod geçişi, hassasiyet ve kalıcı mandal (ratchet) paneli (`0x2111`)
-- Cihaza özel yerel kaydırma yönü ters çevirme (`0x2121`, desteklenen cihazlarda)
+- Logi Bolt ve Unifying alıcıları, Bluetooth ve kablolu bağlantılar; pil seviyesi ve şarj durumu dahil
+- Ekranın altında düşük pil uyarıları; her deşarjda bir kez gösterilir ve işletim sisteminden bildirim izni gerektirmez
+- Bir klavye Caps Lock'u açıp kapattığında ekranda bir gösterge; Windows ve Linux'ta Num Lock ve Scroll Lock için de
 
-**Klavye**
+<table>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/easy-switch.png" width="400" alt="Eşleştirilmiş üç bilgisayarı listeleyen Easy-Switch kartı"></td>
+        <td width="50%"><b>Easy-Switch</b><ul><li>Her kanalda hangi bilgisayarın eşleştirildiğini, işletim sistemi ve bağlantısıyla birlikte görün</li><li>İzin veren cihazlarda bir kanalı yeniden adlandırın</li></ul></td>
+    </tr>
+</table>
 
-- Genel F-tuşu yeniden atama: farenin kullandığı aynı eylem kataloğu, ayrıca ileri düzey kullanıcı eylemleri — yazılı metin, tuş kombinasyonları, çok adımlı iş akışları (macOS + Windows)
-- Statik RGB aydınlatma (`0x8070` / `0x8080`, desteklenen cihazlarda)
+### Tuşlar ve eylemler
 
-**Kamera**
+<table>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/buttons.png" width="400" alt="MX Master 4 için tuş eşleme ekranı, jest tuşu denetçisi açık"></td>
+        <td width="50%"><b>Herhangi bir tuşu yeniden atayın</b><ul><li>Hazır eylem kataloğu, özel kısayollar, yazılı metin veya çok adımlı iş akışları</li><li>Ayrı dokunma ve basılı tutma eylemleri; tuş bırakılınca serbest kalan bas-konuş kombinasyonları</li><li>Orta Tık, Geri/İleri, DPI/ModeShift, jest tuşu ve dokunsal panelde jestler</li></ul></td>
+    </tr>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/actions-ring.png" width="400" alt="İmlecin etrafında sekiz yuvalı Actions Ring düzenleyicisi"></td>
+        <td width="50%"><b>Actions Ring</b><ul><li>İmlecin etrafında halka şeklinde sekiz eylem</li><li>Her uygulama için ayrı bir düzen</li></ul></td>
+    </tr>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys.png" width="400" alt="Üç tuşu Launchpad, Ekranı Kilitle ve Ekran Görüntüsü eylemlerine atanmış MX Keys S"></td>
+        <td width="50%"><b>Klavye tuşları</b><ul><li>Medya, emoji, ekran görüntüsü ve diğer özel tuşları fare tuşları gibi atayın</li><li>Tek bir tuşu cihaz varsayılanına döndürün veya tüm satırı sıfırlayın</li></ul></td>
+    </tr>
+</table>
 
-- Herhangi bir Logitech UVC web kamerası (Brio, StreamCam, C920 serisi vb.), tak-çalıştır
-- Sadece izlediğiniz sürece kamerayı açan canlı önizleme — pencereyi kapattığınızda kamera tamamen serbest kalır ve LED söner
-- Doğrudan UVC donanımına yazılan görüntü kontrolleri — yakınlaştırma, kaydırma, eğme, odak, pozlama, parlaklık, kontrast, doygunluk, netlik, kazanç, arka ışık dengelemesi, beyaz dengesi, ton, flicker önleme ve düşük ışık dengelemesi; odak / pozlama / beyaz dengesi için otomatik mod anahtarlarıyla — değişiklikler Meet / Zoom / OBS ve kamerayı kullanan tüm diğer uygulamalarda hemen uygulanır
-- Tek tıkla profiller: yerleşik Varsayılan / Yayın / Görüntülü arama profilleri ile özel anlık görüntüler; ayarlar kamera başına saklanır ve bir sonraki görüntülemede donanıma geri yazılır
+Uygulama başına profiller, odaktaki uygulamayla birlikte değişir. Bir `[apps]` takma adı, tek bir profilin bir uygulamayı tüm platformlarda takip etmesini sağlar.
 
-¹ Medya tuşu eylemleri Linux'ta D-Bus MPRIS kullanır; bazı macOS'a özel eylemlerin Linux'ta evrensel bir karşılığı yoktur ve bu platformda hiçbir şey yapmaz. Windows, platform eylemlerini mevcut olduğunda yerel karşılıklarına eşler.
+### İşaretçi ve kaydırma
+
+<table>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/dpi.png" width="400" alt="DPI kaydırıcısı içeren işaretçi ayar kartı"></td>
+        <td width="50%"><b>İşaretçi</b><ul><li>Döngü ve Önayar-Belirle eylemleriyle DPI önayarları</li><li>İşaretçi hızı ve raporlama hızı</li><li>Hassas Mod: tek bir tuş fareyi en yavaş hızına alır ve geri döndürür</li></ul></td>
+    </tr>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/smartshift.png" width="400" alt="Tekerlek modu, hassasiyet ve kaydırma kuvveti içeren SmartShift kartı"></td>
+        <td width="50%"><b>SmartShift</b><ul><li>Tekerlek modu ve hassasiyet</li><li>SmartShift Enhanced farelerde kaydırma kuvveti</li><li>Kalıcı kademeli mod anahtarı</li></ul></td>
+    </tr>
+    <tr>
+        <td colspan="2"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/scrolling.png" width="820" alt="Ters çevirme, tekerlek çözünürlüğü ve yumuşak tekerlek içeren kaydırma kartı"><br><b>Kaydırma</b><ul><li>Cihaz başına kaydırma yönü ters çevirme, yerel olarak veya yazılımla</li><li>Tekerlek çözünürlüğü ve yumuşak tekerlek kaydırma</li><li>Parmak tekerleği olmayan farelerde Geri veya İleri'yi basılı tutup tekerleği çevirerek yatay kaydırma</li></ul></td>
+    </tr>
+</table>
+
+### Klavye ve aydınlatma
+
+<table>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="MX Keys S için Tuşlar ve Arka aydınlatma kartları"></td>
+        <td width="50%"><b>Klavye</b><ul><li>Fn Lock ve ana bilgisayarın işletim sistemi düzeninde kalan çok platformlu klavyeler</li><li>Arka aydınlatma seviyesi, otomatik parlaklık ve pil tasarrufu</li><li>Arka aydınlatma seviyesi değiştikçe ekranda gösterilir</li><li>Desteklenen klavyelerde statik RGB</li></ul></td>
+    </tr>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Parlaklık ve renk sıcaklığı içeren Litra Glow aydınlatma paneli"></td>
+        <td width="50%"><b>Litra ışıkları</b><ul><li>Güç, parlaklık ve renk sıcaklığı</li><li>İsterseniz kamerayla birlikte açılır</li><li>Işığın kendisi üzerinde yapılan değişikliği korur</li></ul></td>
+    </tr>
+</table>
+
+### Web kameraları
+
+- Herhangi bir Logitech UVC web kamerası (Brio, StreamCam, C920 serisi, …), tak-çalıştır
+- Kamerayı yalnızca siz izlerken kullanan canlı önizleme; ekrandan çıktığınızda LED söner
+- Yakınlaştırma, kaydırma, eğme, odak, pozlama, beyaz dengesi ve diğer tüm UVC kontrolleri; donanıma yazılır, böylece Meet, Zoom ve OBS değişikliği görür
+- Yerleşik Varsayılan / Yayın / Görüntülü arama profilleri ile kendi anlık görüntüleriniz; kamera başına saklanır
+
+Özellik kapsamı her cihazın bildirdiklerine bağlıdır; uygulama yalnızca cihazın desteklediği kontrolleri gösterir.
+
+### Platform desteği
+
+| Özellik | macOS | Windows | Linux |
+| --- | --- | --- | --- |
+| Fare tuşu yeniden atama ve jestler | ✓ | ✓ | ✓ |
+| Klavye F-tuşu yeniden atama | ✓ | ✓ | — |
+| Uygulama başına profiller | ✓ | ✓ | X11, wlroots (sway, Hyprland), [yardımcı eklentiyle](../crates/openlogi-hook/gnome-shell-extension/README.md) GNOME |
+| Fare profili işaretçinin altındaki pencereyi takip eder | ✓ | ✓ | Yalnızca X11 |
+| Medya tuşları | Yerel | Yerel | D-Bus MPRIS |
+| Pencere yöneticisi eylemleri (masaüstleri, Mission Control, …) | Yerel | Yerel karşılıklar | GNOME, KDE (KWin), Hyprland; macOS'a özel bazı eylemler hiçbir şey yapmaz |
+| Menü çubuğu / sistem tepsisi simgesi | ✓ | ✓ | — |
+| Uygulama içi güncellemeler | Sparkle | Yerleşik | Yerleşik |
 
 ## Kurulum
 
 > [!IMPORTANT]
-> Önce **Logi Options+**'tan çıkın: iki uygulama da HID++ erişimi için rekabet eder ve bir alıcıyı aynı anda yalnızca biri kullanabilir.
+> Önce **Logi Options+**'tan (Linux'ta Solaar'dan da) çıkın. Bir alıcıyı aynı anda yalnızca bir uygulama kullanabilir.
+
+| Platform | Sistem | Mimari |
+| --- | --- | --- |
+| macOS | macOS 13 veya üzeri | Apple silicon, Intel |
+| Linux | GLIBC 2.35 veya üzeri | x86_64, arm64 |
+| Windows | Windows 11'de test edildi | x86_64, arm64 |
+
+Her indirmenin bir minisign imzası ve `SHA256SUMS` içinde bir girdisi vardır. Kaynaktan derlemek için [DEVELOPMENT.md](DEVELOPMENT.md)'ye bakın.
 
 ### macOS
 
-macOS 13 veya üzeri gerektirir.
+<p>
+    <a href="https://openlogi.org/download/mac-arm64"><img src="https://assets.openlogi.org/brand/buttons/download-macos-arm64.png" width="260" alt="Mac için indir: Apple silicon (.dmg)"></a>
+    &nbsp;
+    <a href="https://openlogi.org/download/mac-x64"><img src="https://assets.openlogi.org/brand/buttons/download-macos-x64.png" width="260" alt="Mac için indir: Intel (.dmg)"></a>
+</p>
 
-İmzalı ve notarize edilmiş `.dmg` dosyasını [son sürümden](https://github.com/AprilNEA/OpenLogi/releases/latest) indirip `OpenLogi.app`'i `/Applications`'a sürükleyin.
-
-Veya [Homebrew](https://brew.sh) ile kurun:
+Veya Homebrew ile:
 
 ```sh
 brew install --cask openlogi
 ```
 
-Resmi Homebrew cask'i varsayılan kurulum yoludur. `aprilnea/tap`'ten en son
-GitHub sürümünü doğrudan takip etmek isterseniz:
-
-```sh
-brew tap aprilnea/tap
-brew install --cask aprilnea/tap/openlogi@latest
-```
-
-`openlogi@latest`, OpenLogi'nin release iş akışı tarafından yönetilir ve
-resmi cask'in otomatik güncellemesinden önce güncellenebilir. `openlogi`
-veya `openlogi@latest`'ten yalnızca birini kurun, ikisini birden değil.
+OpenLogi'yi açın ve macOS sorduğunda **Erişilebilirlik** ve **Girdi İzleme** izinlerini verin. Ardından OpenLogi kendini Sparkle ile günceller.
 
 ### Linux
 
-Kurulum betiğini HTTPS üzerinden indirin, inceleyin, sonra çalıştırın. Doğrudan
-bir kabuğa (shell) pipe'lamayın:
+<p>
+    <a href="https://openlogi.org/download/linux"><img src="https://assets.openlogi.org/brand/buttons/download-linux-deb.png" width="260" alt="Linux için indir: Debian, Ubuntu (.deb)"></a>
+    &nbsp;
+    <a href="https://openlogi.org/download/linux-rpm"><img src="https://assets.openlogi.org/brand/buttons/download-linux-rpm.png" width="260" alt="Linux için indir: Fedora, SUSE (.rpm)"></a>
+    &nbsp;
+    <a href="https://openlogi.org/download/linux-arch"><img src="https://assets.openlogi.org/brand/buttons/download-linux-arch.png" width="260" alt="Linux için indir: Arch (.pkg.tar.zst)"></a>
+</p>
+
+Veya dağıtımınıza uygun paketi tek bir komutla kurun. Komut minisign imzasını doğrular ve ajanı başlatır; önce `minisign`'ı kurun:
 
 ```sh
-curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  --fail --location --silent --show-error \
-  --retry 3 --retry-connrefused \
-  --output openlogi-install.sh \
-  https://raw.githubusercontent.com/AprilNEA/OpenLogi/master/packaging/linux/install.sh
-less openlogi-install.sh
-sh openlogi-install.sh
-rm openlogi-install.sh
+curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-Betik; apt, dnf, yum, zypper, rpm veya pacman'ı tespit eder, makineye uygun
-`.deb`, `.rpm` ya da `.pkg.tar.zst` dosyasını seçer, OpenLogi'nin gömülü
-minisign açık anahtarıyla ayrık imzayı doğrular ve paket yöneticisini
-`sudo` ile çağırmadan önce dosyanın release `SHA256SUMS` listesindeki
-girdiyle eşleştiğini kontrol eder. Önce dağıtımınızın paket yöneticisinden
-`minisign`'ı kurun. Betiği normal kullanıcınızla çalıştırın, `sudo` ile değil.
-Varsayılan olarak en son sürümü kurar. Gerektiğinde `--version`,
-`--package-manager`, `--no-start` veya `--dry-run` seçeneklerini kullanın.
-
-Paketler hem `x86_64`/`amd64` hem de `arm64`/`aarch64` için yayınlanır.
-Hazır paketler GLIBC 2.35 veya daha yenisini gerektirir (Ubuntu 22.04 tabanı).
-
-NixOS kullanıcıları, paketi ve udev kurallarını kuran ve grafik oturumuyla
-birlikte ajanı başlatan deponun modülünü doğrudan içe aktarabilir:
-
-```nix
-{
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.openlogi = {
-    url = "github:AprilNEA/OpenLogi";
-    inputs.nixpkgs.follows = "nixpkgs";
-  };
-
-  outputs = { nixpkgs, openlogi, ... }: {
-    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux"; # veya aarch64-linux
-      modules = [
-        openlogi.nixosModules.default
-        { programs.openlogi.enable = true; }
-      ];
-    };
-  };
-}
-```
-
-Tüm Linux paketleri, kullanıcınıza `sudo` gerekmeden `/dev/hidraw*`,
-`/dev/uinput` ve Logitech farenizin `/dev/input/event*` düğümüne erişim
-veren udev kuralları kurar. Kurulum betiği ve NixOS modülü ajanı otomatik
-başlatır; elle paket kurulumundan sonra kendi kullanıcınız için etkinleştirin:
-
-```sh
-systemctl --user enable --now openlogi-agent.service
-```
-
-Sabit sürüm kurulumları, eksiksiz NixOS seçenekleri, kaynaktan kurulum ve
-systemd olmayan dağıtımlar için [docs/INSTALL-linux.md](INSTALL-linux.md)'ye bakın.
+Betiği çalıştırmadan önce okumak ve Flatpak, NixOS ile systemd olmayan dağıtımlar için [INSTALL-linux.md](INSTALL-linux.md)'ye bakın.
 
 ### Windows
 
-İmzalı taşınabilir `.zip` arşivleri ve kullanıcı başına `.msi` kurulum
-dosyaları (x86_64 ve arm64) her sürüme eklenir. Her ikisi de arayüzü
-(`OpenLogi.exe`) tüm cihaz G/Ç'sini üstlenen arka plan ajanıyla
-(`openlogi-agent.exe`) birlikte içerir. Taşınabilir zip'i kullanırken iki
-dosyayı aynı klasörde tutun, aksi halde arayüzün bağlanacağı bir şey olmaz.
-
-Windows desteği, gerçek donanımla (kablolu bir klavye ve Unifying alıcılı
-bir fare) Windows 11'de kurulum, yerinde güncelleme ve MSI kaldırma dahil
-uçtan uca doğrulanmıştır. macOS yapısından daha yenidir; sorunla
-karşılaşırsanız lütfen [bildirin](https://github.com/AprilNEA/OpenLogi/issues).
-Ajan, ana pencere kapatıldıktan sonra uygulamaya erişimi sürdürmek için
-sistem tepsisinde bir simge gösterir (Ana Pencereyi Göster / Çıkış).
-Windows'ta bunu kapatmak için TOML dosyasındaki `[app_settings]` bloğunda
-`show_in_menu_bar = false` ayarlayıp ajanı yeniden başlatın; arayüz anahtarı
-şu an için yalnızca macOS'ta mevcuttur.
-
-Kaynaktan derlemek için [DEVELOPMENT.md](DEVELOPMENT.md)'ye bakın.
-
+<p>
+    <a href="https://openlogi.org/download/windows"><img src="https://assets.openlogi.org/brand/buttons/download-windows-msi.png" width="260" alt="Windows için indir: kurulum dosyası (.msi)"></a>
+    &nbsp;
+    <a href="https://openlogi.org/download/windows-zip"><img src="https://assets.openlogi.org/brand/buttons/download-windows-zip.png" width="260" alt="Windows için indir: taşınabilir (.zip)"></a>
+</p>
 
 ## Kullanım (CLI)
 
@@ -200,8 +227,7 @@ Kaynaktan derlemek için [DEVELOPMENT.md](DEVELOPMENT.md)'ye bakın.
 
 ## Yapılandırma
 
-Ayarlar düz TOML kullanır; kaydetme işlemleri sembolik bağlı (symlink) ayar
-dosyalarını korur. [CONFIGURATION.md](CONFIGURATION.md)'ye bakın.
+Ayarlar düz TOML kullanır; kaydetme işlemleri sembolik bağlı (symlink) ayar dosyalarını korur. [CONFIGURATION.md](CONFIGURATION.md)'ye bakın.
 
 ## Geliştirme
 

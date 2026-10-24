@@ -345,7 +345,6 @@ impl Render for SmartShiftPanel {
             SmartShiftLoad::Failed(_) => retry_line(
                 "smartshift-retry",
                 tr!("pointer.couldnt_read_smartshift_click_to_retry"),
-                pal,
                 retry_smartshift_closure(key.clone()),
             )
             .into_any_element(),
@@ -387,7 +386,6 @@ fn smartshift_write_feedback(
             retry_line(
                 "smartshift-confirm-retry",
                 tr!("pointer.couldnt_read_smartshift_click_to_retry"),
-                pal,
                 retry_smartshift_closure(key),
             )
             .into_any_element(),

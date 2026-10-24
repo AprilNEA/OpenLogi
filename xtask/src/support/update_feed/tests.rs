@@ -1,4 +1,20 @@
-use super::{MacArch, appcast_url};
+use super::{MacArch, appcast_url, record_dir, release_dir, release_page_url, release_url};
+use crate::support::release_tag::ReleaseTag;
+
+#[test]
+fn a_release_keeps_its_artifacts_and_its_feed_record_in_its_own_directory() {
+    let tag = ReleaseTag::parse("v0.8.18-beta.3").unwrap();
+    assert_eq!(release_dir(&tag), "releases/v0.8.18-beta.3");
+    assert_eq!(record_dir(&tag), "releases/v0.8.18-beta.3/feed");
+    assert_eq!(
+        release_url("https://updates.openlogi.org//", &tag),
+        "https://updates.openlogi.org/releases/v0.8.18-beta.3"
+    );
+    assert_eq!(
+        release_page_url(&tag),
+        "https://github.com/AprilNEA/OpenLogi/releases/tag/v0.8.18-beta.3"
+    );
+}
 
 #[test]
 fn each_architecture_reads_its_own_feed_on_the_channel() {

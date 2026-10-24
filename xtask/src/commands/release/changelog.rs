@@ -6,6 +6,7 @@ use xshell::{Shell, cmd};
 
 use crate::support::fs::ensure_command;
 use crate::support::manifest::workspace_package;
+use crate::support::release_tag::ReleaseTag;
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -75,20 +76,9 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 /// and must not become the changelog's lower bound.
 fn latest_release_tag(tags: &str) -> Option<String> {
     tags.lines()
-        .filter_map(|tag| Some((release_version(tag)?, tag)))
+        .filter_map(|tag| Some((ReleaseTag::stable_version(tag)?, tag)))
         .max()
         .map(|(_, tag)| tag.to_owned())
-}
-
-/// `v1.2.3` as its three numeric fields, or `None` for any other shape.
-fn release_version(tag: &str) -> Option<[u64; 3]> {
-    let mut fields = tag.strip_prefix('v')?.split('.');
-    let version = [
-        fields.next()?.parse().ok()?,
-        fields.next()?.parse().ok()?,
-        fields.next()?.parse().ok()?,
-    ];
-    fields.next().is_none().then_some(version)
 }
 
 /// The changelog without its `## [version]` section, or `None` when it has no

@@ -61,14 +61,9 @@ const KEYS_PER_FRAME: u8 = 0x0e;
 // avoiding flash wear on every colour pick.
 //
 // Each zone lists its own effects, so the fixed colour's index is read from
-// that list. Index 0x01 is only the legacy guess, kept where no list can be
-// read: a device reporting zero zones, and a zone whose info is rejected.
-const LEGACY_FIXED_EFFECT_INDEX: u8 = 0x01;
-// The old raw `0x8070` path intentionally wrote only zones 0..4: enough for the
-// keyboards this path targets and bounded by a small, predictable delay budget.
-// Keep that cap even though the typed wrapper can query the reported zone count;
-// a malformed or unexpectedly large count should not stall a color apply.
-const MAX_COLOR_LED_EFFECT_ZONES: u8 = 4;
+// that list. A zone whose list cannot be read is left alone, because no index
+// there is known to be the fixed colour.
+//
 // Zones are paced apart because the controller can drop closely-spaced reports.
 const FRAME_GAP: Duration = Duration::from_millis(8);
 
@@ -350,12 +345,14 @@ async fn resolve_feature_index(
 /// Set a solid colour via `ColorLedEffects` (`0x8070`): a fixed effect per zone,
 /// stored in RAM only (overrides the running onboard profile without touching
 /// flash). `FeatureUnsupported` when the device exposes no `0x8070` or none of
-/// its zones offers a fixed colour.
+/// its zones offers a fixed colour, including a device that reports no zones.
 ///
 /// Uses the typed [`ColorLedEffectsFeature`] wrapper: the real zone count is read
 /// first so only existing zones are driven (a typed `set_zone_effect` awaits the
 /// device's reply, so unlike the former raw fire-and-forget path a write to a
 /// non-existent zone would surface as an error rather than a silent no-op).
+/// Every reported zone is enumerated, as Logi Options+ and Solaar do; the
+/// caller's write deadline, not a zone cap, bounds a malformed count.
 /// Every target is located before the first write, so a keyboard without a
 /// fixed colour is left untouched for the next path.
 async fn set_color_effects(
@@ -379,25 +376,7 @@ async fn set_color_effects(
     params[0] = r;
     params[1] = g;
     params[2] = b;
-    let targets: Vec<(u8, u8)> = if zone_count == 0 {
-        debug!(
-            index,
-            "0x8070 reported zero zones; applying legacy 4-zone fallback"
-        );
-        (0..MAX_COLOR_LED_EFFECT_ZONES)
-            .map(|zone| (zone, LEGACY_FIXED_EFFECT_INDEX))
-            .collect()
-    } else {
-        if zone_count > MAX_COLOR_LED_EFFECT_ZONES {
-            debug!(
-                index,
-                zone_count,
-                capped_zone_count = MAX_COLOR_LED_EFFECT_ZONES,
-                "0x8070 zone count capped to legacy write limit"
-            );
-        }
-        fixed_color_targets(&feature, index, zone_count.min(MAX_COLOR_LED_EFFECT_ZONES)).await?
-    };
+    let targets = fixed_color_targets(&feature, index, zone_count).await?;
     if targets.is_empty() {
         debug!(index, zone_count, "no 0x8070 zone offers a fixed colour");
         return Err(WriteError::FeatureUnsupported {
@@ -429,8 +408,9 @@ async fn set_color_effects(
 /// effect sits there with RGB bytes as its parameters.
 ///
 /// An effect id this crate does not model is not the fixed colour, so it is
-/// passed over. A zone whose info is rejected (an unmodelled location) keeps
-/// the legacy index rather than going dark.
+/// passed over. A zone whose info is rejected (an unmodelled location) is
+/// skipped too: its effect list cannot be read, so no index is known to be
+/// the fixed colour.
 async fn fixed_color_targets(
     feature: &ColorLedEffectsFeature,
     index: u8,
@@ -443,9 +423,8 @@ async fn fixed_color_targets(
             Err(Hidpp20Error::UnsupportedResponse) => {
                 debug!(
                     index,
-                    zone, "0x8070 zone info rejected; using the legacy fixed-colour index"
+                    zone, "0x8070 zone info rejected; leaving the zone unwritten"
                 );
-                targets.push((zone, LEGACY_FIXED_EFFECT_INDEX));
                 continue;
             }
             Err(error) => return Err(classify_lighting_error(error)),

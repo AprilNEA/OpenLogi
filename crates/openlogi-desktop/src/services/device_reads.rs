@@ -1,5 +1,6 @@
 //! SWR-backed device-setting reads (DPI, SmartShift, Fn lock, report rate,
-//! backlight, Easy-Switch hosts) keyed by device identity.
+//! pointer speed, press force, backlight, Easy-Switch hosts) keyed by device
+//! identity.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -7,8 +8,8 @@ use std::time::Duration;
 
 use gpui::{Context, Subscription};
 use openlogi_core::hid::{
-    BacklightChange, BacklightState, DeviceRoute, DpiInfo, EasySwitchHosts, FnLockState,
-    ReportRateInfo, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    ForceSensingInfo, PointerSpeed, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use swr_core::{
     MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
@@ -18,12 +19,12 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::{
-    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadReportRate,
-    ReadSmartShift,
+    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadForceSensing,
+    ReadPointerSpeed, ReadReportRate, ReadSmartShift,
 };
 use crate::state::{
-    AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, HostRenameRefusal,
-    Load, ReportRateLoad, SmartShiftLoad, StateEvent,
+    AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
+    HostRenameRefusal, Load, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad, StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -31,6 +32,8 @@ const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
 const FN_LOCK: &str = "fn-lock";
 const REPORT_RATE: &str = "report-rate";
+const POINTER_SPEED: &str = "pointer-speed";
+const FORCE_SENSING: &str = "force-sensing";
 const BACKLIGHT: &str = "backlight";
 const EASY_SWITCH: &str = "easy-switch";
 
@@ -68,6 +71,8 @@ pub(crate) struct DeviceReads {
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
     fn_lock: BTreeMap<DeviceKey, DeviceRead<FnLockState>>,
     report_rate: BTreeMap<DeviceKey, DeviceRead<ReportRateInfo>>,
+    pointer_speed: BTreeMap<DeviceKey, DeviceRead<PointerSpeed>>,
+    force_sensing: BTreeMap<DeviceKey, DeviceRead<ForceSensingInfo>>,
     backlight: BTreeMap<DeviceKey, DeviceRead<BacklightState>>,
     /// The backlight changes sent per keyboard, for the read on the route
     /// they went out on; cleared with that read.
@@ -157,6 +162,8 @@ impl DeviceReads {
     }
 
     /// Start the DPI query unless the same device route is already subscribed.
+    /// A write answers through [`Self::set_dpi_current`] with the DPI the
+    /// device reports, or [`Self::refresh_dpi`] when that is not known.
     pub(crate) fn ensure_dpi(
         &mut self,
         key: DeviceKey,
@@ -536,6 +543,228 @@ impl DeviceReads {
         self.report_rate.get(key).map(|read| &read.load)
     }
 
+    /// Start the pointer-speed query unless the same mouse route is already
+    /// subscribed. A write answers through [`Self::set_pointer_speed_ready`],
+    /// or [`Self::refresh_pointer_speed`] when the mouse refused it.
+    pub(crate) fn ensure_pointer_speed(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .pointer_speed
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_pointer_speed(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| ReadPointerSpeed { route, reply }.into(),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !unsupported_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(POINTER_SPEED, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        read_through(&client, POINTER_SPEED, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), unsupported_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), unsupported_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_pointer_speed(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::PointerSpeedChanged(observed_key.clone()));
+            }
+        });
+        self.pointer_speed.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Show `speed` as `key`'s pointer-speed reading now: the speed the GUI
+    /// just asked for, then what the mouse read back. Like
+    /// [`Self::set_fn_lock_ready`], a local write supersedes a fetch still in
+    /// flight. The speed belongs to the mouse, not to the connection, so an
+    /// answer from a route the mouse has since left still holds.
+    pub(crate) fn set_pointer_speed_ready(&mut self, key: &DeviceKey, speed: PointerSpeed) {
+        let value = Arc::new(speed);
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<PointerSpeed>, WriteError>(
+                query_key(POINTER_SPEED, key),
+                Some(value.clone()),
+            );
+        }
+        if let Some(read) = self.pointer_speed.get_mut(key) {
+            read.load = Load::Ready(value);
+        }
+    }
+
+    /// Re-read `key`'s pointer speed from the mouse, keeping the last value
+    /// on screen while it answers. The fallback after a write the mouse
+    /// refused, when the shown value is no longer known to be its own.
+    pub(crate) fn refresh_pointer_speed(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.pointer_speed.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    /// Retry an exhausted pointer-speed query.
+    pub(crate) fn retry_pointer_speed(&mut self, key: &DeviceKey) {
+        let Some(read) = self.pointer_speed.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
+    /// `key`'s pointer-speed load, or `None` while nothing has subscribed to
+    /// it.
+    #[must_use]
+    pub(crate) fn pointer_speed_load(&self, key: &DeviceKey) -> Option<&PointerSpeedLoad> {
+        self.pointer_speed.get(key).map(|read| &read.load)
+    }
+
+    /// Start the press-force query unless the same device route is already
+    /// subscribed. A write answers through [`Self::set_force_sensing_ready`],
+    /// or [`Self::refresh_force_sensing`] when the device refused it.
+    pub(crate) fn ensure_force_sensing(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .force_sensing
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_force_sensing(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| ReadForceSensing { route, reply }.into(),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !unsupported_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(FORCE_SENSING, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        read_through(&client, FORCE_SENSING, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), unsupported_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), unsupported_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_force_sensing(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::ForceSensingChanged(observed_key.clone()));
+            }
+        });
+        self.force_sensing.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Show `info` as `key`'s press-force reading now: the force the GUI
+    /// just asked for, then what the device read back. Like
+    /// [`Self::set_pointer_speed_ready`], a local write supersedes a fetch
+    /// still in flight, and an answer from a route the device has since left
+    /// still holds: the force belongs to the device, not to the connection.
+    pub(crate) fn set_force_sensing_ready(&mut self, key: &DeviceKey, info: ForceSensingInfo) {
+        let value = Arc::new(info);
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<ForceSensingInfo>, WriteError>(
+                query_key(FORCE_SENSING, key),
+                Some(value.clone()),
+            );
+        }
+        if let Some(read) = self.force_sensing.get_mut(key) {
+            read.load = Load::Ready(value);
+        }
+    }
+
+    /// Re-read `key`'s press force from the device, keeping the last value
+    /// on screen while it answers. The fallback after a write the device
+    /// refused, when the shown value is no longer known to be its own.
+    pub(crate) fn refresh_force_sensing(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.force_sensing.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    /// Retry an exhausted press-force query.
+    pub(crate) fn retry_force_sensing(&mut self, key: &DeviceKey) {
+        let Some(read) = self.force_sensing.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
+    /// `key`'s press-force load, or `None` while nothing has subscribed to
+    /// it.
+    #[must_use]
+    pub(crate) fn force_sensing_load(&self, key: &DeviceKey) -> Option<&ForceSensingLoad> {
+        self.force_sensing.get(key).map(|read| &read.load)
+    }
+
     /// Start the backlight query unless the same keyboard route is already
     /// subscribed. A change goes out through [`Self::begin_backlight_write`]
     /// and is answered through [`Self::finish_backlight_write`].
@@ -568,7 +797,7 @@ impl DeviceReads {
             },
             READ_RETRY_POLICY,
         )
-        .retry_if(|error| !backlight_error_is_permanent(error));
+        .retry_if(|error| !unsupported_error_is_permanent(error));
         let handle = client.subscribe(
             query_key(BACKLIGHT, &key),
             fetcher,
@@ -576,10 +805,10 @@ impl DeviceReads {
         );
         read_through(&client, BACKLIGHT, &key, &handle);
         let query = Query::new(&client, handle, cx);
-        let load = project_load(query.read(cx), backlight_error_is_permanent);
+        let load = project_load(query.read(cx), unsupported_error_is_permanent);
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
-            let load = project_load(query_state.read(cx), backlight_error_is_permanent);
+            let load = project_load(query_state.read(cx), unsupported_error_is_permanent);
             if state
                 .device_reads_mut()
                 .update_backlight(&observed_key, flight, load)
@@ -888,14 +1117,22 @@ impl DeviceReads {
 
     /// Re-read `key`'s settings after the device reported changing one
     /// itself, keeping the shown values while it answers. Covers the settings
-    /// such a report can concern — DPI, Fn lock, report rate and backlight (see
-    /// [`PairedDevice::settings_revision`]); a read nothing subscribed to
-    /// stays unsubscribed.
+    /// such a report can concern — DPI, Fn lock, report rate, backlight and
+    /// the SmartShift wheel mode (see [`PairedDevice::settings_revision`]); a
+    /// read nothing subscribed to stays unsubscribed.
     ///
     /// [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
     pub(crate) fn revalidate_device_settings(&mut self, key: &DeviceKey) {
         if let Some(read) = self.dpi.get_mut(key) {
             read.query.revalidate();
+        }
+        if self.smartshift.contains_key(key)
+            && let Some(client) = &self.client
+        {
+            // A SmartShift read already in flight may predate the change, so
+            // it is discarded rather than joined. The shown mode stays until
+            // the new read answers.
+            client.invalidate(query_key(SMARTSHIFT, key));
         }
         self.refresh_fn_lock(key);
         if let Some(read) = self.report_rate.get_mut(key) {
@@ -935,6 +1172,36 @@ impl DeviceReads {
         read.query.revalidate();
     }
 
+    /// Show `current` as `key`'s DPI reading now: the value the device
+    /// reported after a write. Like [`Self::set_fn_lock_ready`], a local
+    /// write supersedes a fetch still in flight. Only a ready reading takes
+    /// it, because the supported values come from the device's own read.
+    pub(crate) fn set_dpi_current(&mut self, key: &DeviceKey, current: Dpi) {
+        let Some(read) = self.dpi.get_mut(key) else {
+            return;
+        };
+        let Load::Ready(info) = &read.load else {
+            return;
+        };
+        let value = Arc::new(DpiInfo {
+            current,
+            capabilities: info.capabilities.clone(),
+        });
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<DpiInfo>, WriteError>(query_key(DPI, key), Some(value.clone()));
+        }
+        read.load = Load::Ready(value);
+    }
+
+    /// Re-read `key`'s DPI from the device, keeping the last value on screen
+    /// while it answers. The fallback after a write that did not land, when
+    /// the device's value is not known.
+    pub(crate) fn refresh_dpi(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.dpi.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
     /// Retry an exhausted initial SmartShift query.
     pub(crate) fn retry_smartshift(&mut self, key: &DeviceKey) {
         let Some(read) = self.smartshift.get_mut(key) else {
@@ -966,6 +1233,8 @@ impl DeviceReads {
         self.remove_smartshift(key);
         self.remove_fn_lock(key);
         self.remove_report_rate(key);
+        self.remove_pointer_speed(key);
+        self.remove_force_sensing(key);
         self.remove_backlight(key);
         self.remove_easy_switch(key);
     }
@@ -998,6 +1267,20 @@ impl DeviceReads {
         }
     }
 
+    fn remove_pointer_speed(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.pointer_speed.remove(key) {
+            drop(read);
+            self.clear::<PointerSpeed>(POINTER_SPEED, key);
+        }
+    }
+
+    fn remove_force_sensing(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.force_sensing.remove(key) {
+            drop(read);
+            self.clear::<ForceSensingInfo>(FORCE_SENSING, key);
+        }
+    }
+
     fn remove_backlight(&mut self, key: &DeviceKey) {
         self.backlight_writes.remove(key);
         if let Some(read) = self.backlight.remove(key) {
@@ -1022,6 +1305,8 @@ impl DeviceReads {
             .chain(self.smartshift.keys())
             .chain(self.fn_lock.keys())
             .chain(self.report_rate.keys())
+            .chain(self.pointer_speed.keys())
+            .chain(self.force_sensing.keys())
             .chain(self.backlight.keys())
             .chain(self.easy_switch.keys())
             .filter(|key| !present(key.as_str()))
@@ -1089,6 +1374,46 @@ impl DeviceReads {
     fn update_report_rate(&mut self, key: &DeviceKey, flight: u64, load: ReportRateLoad) -> bool {
         let Some(read) = self
             .report_rate
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_pointer_speed(
+        &mut self,
+        key: &DeviceKey,
+        flight: u64,
+        load: PointerSpeedLoad,
+    ) -> bool {
+        let Some(read) = self
+            .pointer_speed
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_force_sensing(
+        &mut self,
+        key: &DeviceKey,
+        flight: u64,
+        load: ForceSensingLoad,
+    ) -> bool {
+        let Some(read) = self
+            .force_sensing
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {
@@ -1240,7 +1565,7 @@ fn report_rate_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
-fn backlight_error_is_permanent(error: &WriteError) -> bool {
+fn unsupported_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 

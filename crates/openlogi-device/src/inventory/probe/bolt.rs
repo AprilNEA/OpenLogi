@@ -18,7 +18,10 @@ use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverI
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
-use super::{MAX_BOLT_SLOTS, NodeProbe, PassContext, ProbeVerdict};
+use super::{
+    MAX_BOLT_SLOTS, NodeProbe, PassContext, ProbeVerdict, RECEIVER_OPERATION_TIMEOUT,
+    RECEIVER_UID_TIMEOUT,
+};
 use crate::backend::NodeInfo;
 use crate::host_lock::ReceiverRegisterPhase;
 use crate::inventory::cache::{CacheKey, CacheOutcome, probe_or_reuse, seen};
@@ -37,9 +40,23 @@ pub(super) async fn probe_bolt_receiver(
     registers: ReceiverRegisterPhase,
     pass: PassContext<'_>,
 ) -> NodeProbe {
-    let unique_id = bolt.get_unique_id().await.ok();
-    let pairing_count = bolt.count_pairings().await.ok();
+    // Pairing count proves receiver liveness. Check it before optional metadata,
+    // and stop on failure instead of consuming the whole-node budget on a dead
+    // channel. Use the same receiver-operation policy as the Unifying path.
+    let pairing_count = match timeout(RECEIVER_OPERATION_TIMEOUT, bolt.count_pairings()).await {
+        Ok(Ok(count)) => count,
+        result => {
+            debug!(?result, "Bolt receiver pairing-count read failed");
+            return NodeProbe::failed();
+        }
+    };
     debug!(?pairing_count, "receiver reports pairing count");
+    // UID is cache metadata, not a liveness gate. A missing reply must leave
+    // time for the readable pairing table and per-slot cache fallback (#454).
+    let unique_id = timeout(RECEIVER_UID_TIMEOUT, bolt.get_unique_id())
+        .await
+        .ok()
+        .and_then(Result::ok);
 
     let connections =
         drain_device_arrival(&bolt, pass.subscriptions, pass.timeouts.arrival_drain).await;
@@ -55,9 +72,7 @@ pub(super) async fn probe_bolt_receiver(
     // serializing them costs little.
     let mut identities = Vec::new();
     for slot in 1u8..=MAX_BOLT_SLOTS {
-        if let Some(identity) =
-            read_bolt_slot_identity(&bolt, &channel, by_slot.get(&slot), slot).await
-        {
+        if let Some(identity) = read_bolt_slot_identity(&bolt, by_slot.get(&slot), slot).await {
             identities.push(identity);
         }
     }
@@ -82,7 +97,7 @@ pub(super) async fn probe_bolt_receiver(
         product_id: info.product_id,
         unique_id,
     };
-    assemble_bolt_probe(receiver, pairing_count, slot_results)
+    assemble_bolt_probe(receiver, Some(pairing_count), slot_results)
 }
 
 /// Fold a Bolt receiver's per-slot results into a [`NodeProbe`].
@@ -186,7 +201,6 @@ struct BoltSlotIdentity {
 /// [`probe_bolt_receiver`].
 async fn read_bolt_slot_identity(
     bolt: &BoltReceiver,
-    channel: &Arc<HidppChannel>,
     event: Option<&BoltDeviceConnection>,
     slot: u8,
 ) -> Option<BoltSlotIdentity> {
@@ -197,7 +211,7 @@ async fn read_bolt_slot_identity(
             return None;
         }
     };
-    let codename = read_codename(channel, slot).await;
+    let codename = bolt.get_device_codename(slot).await.ok();
     // Prefer event data when present — it's a live response. Fall back to the
     // pairing register for sleeping devices that didn't reply.
     let online = event.map_or(pairing.online, |c| c.online);
@@ -291,7 +305,13 @@ async fn walk_bolt_slot(
 
     let device = PairedDevice {
         slot,
-        codename: identity.codename.clone(),
+        // The device's own `0x0005` name comes first, as on Unifying; the cache
+        // keeps it for a slot that is asleep. The receiver register's name is
+        // the fallback, and stays cut at 27 bytes (#1960).
+        codename: probe
+            .marketing_name
+            .clone()
+            .or_else(|| identity.codename.clone()),
         wpid,
         // Prefer the device's own `0x0005` type; the register kind is the
         // offline fallback.
@@ -343,24 +363,4 @@ async fn drain_device_arrival(
         }
     }
     out
-}
-
-/// Reads a paired device's codename, working around a slicing bug in
-/// `hidpp 0.2`'s `BoltReceiver::get_device_codename` that truncates names
-/// longer than 8 characters (it treats `response[2]` as an end-index when it
-/// is actually the byte length — see Solaar's `device_codename` for the
-/// correct slice). 16-byte long-register response is `[sub, chunk, len,
-/// data..13]`; we cap at 13 to stay in-bounds. Long names (>13 chars) would
-/// need multi-chunk reads with chunk param > 0x01; not needed for v0.0.x.
-async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
-    // 0xFF = receiver device index, 0xB5 = ReceiverInfo register,
-    // 0x60+slot = DeviceCodename sub-register, 0x01 = first chunk.
-    let response = channel
-        .read_long_sub_register(0xFF, 0xB5, 0x60 + slot, [0x01, 0x00])
-        .await
-        .ok()?;
-    let len = usize::from(response[2]).min(13);
-    core::str::from_utf8(&response[3..3 + len])
-        .ok()
-        .map(str::to_string)
 }

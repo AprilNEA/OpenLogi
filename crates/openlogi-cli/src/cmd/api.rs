@@ -18,7 +18,7 @@ use crate::agent;
 
 mod output;
 mod persistence;
-use output::{ApiError, devices, envelope, inventory_health, select_device};
+use output::{ApiError, devices, envelope, inventory_health, select_device, virtual_keyboard};
 use persistence::Save;
 
 /// Options shared by the JSON automation commands.
@@ -199,6 +199,7 @@ async fn execute(
             "hook_installed": snapshot.status.hook_installed,
             "hid_open_failures": snapshot.status.hid_open_failures,
             "launch_at_login": snapshot.status.launch_at_login,
+            "virtual_keyboard": virtual_keyboard(snapshot.status.virtual_keyboard),
         })),
         ApiCommand::Devices => Ok(json!({
             "inventory": inventory_health(snapshot.status.inventory),
@@ -489,7 +490,8 @@ impl From<WriteError> for ApiError {
             WriteError::FeatureUnsupported { .. }
             | WriteError::LightUnsupported { .. }
             | WriteError::HapticWaveformUnsupported { .. }
-            | WriteError::HostRenameUnsupported => "unsupported_feature",
+            | WriteError::HostRenameUnsupported
+            | WriteError::ForceSensingUnchangeable => "unsupported_feature",
             WriteError::DeviceNotFound => "device_not_found",
             WriteError::DeviceUnreachable { .. } => "device_offline",
             WriteError::AgentUnavailable => "agent_unavailable",
@@ -503,7 +505,8 @@ impl From<WriteError> for ApiError {
             | WriteError::HostNameRejected { .. } => "invalid_value",
             WriteError::DpiNotApplied { .. }
             | WriteError::ReportRateNotApplied { .. }
-            | WriteError::HostNameNotApplied { .. } => "readback_mismatch",
+            | WriteError::HostNameNotApplied { .. }
+            | WriteError::ForceSensingNotApplied { .. } => "readback_mismatch",
             _ => "device_error",
         };
         Self::new(code, error.to_string())

@@ -184,12 +184,45 @@ impl SwIdPolicy {
     pub fn rotating() -> Self {
         Self::Rotating(AtomicU8::new(0x01))
     }
+
+    /// The ids a request sent under this policy can carry.
+    pub(crate) fn request_sw_ids(&self) -> RequestSwIds {
+        match self {
+            Self::Fixed(id) | Self::Leased { id, .. } => RequestSwIds::only(*id),
+            Self::Rotating(_) => RequestSwIds::ALL,
+        }
+    }
 }
 
 impl Default for SwIdPolicy {
     /// Fixed id `1`, matching the protocol's conventional default.
     fn default() -> Self {
         Self::Fixed(RequestSwId(U4::from_lo(0x01)))
+    }
+}
+
+/// The software ids that one channel's requests can carry.
+///
+/// A response echoes the software id of its request. A response with a
+/// nonzero id outside this set therefore answers a request that another
+/// client sent: another application, or another OpenLogi channel to the same
+/// HID node. [`crate::feature::EventSource`] uses this set to keep such a
+/// response, and to drop every response that this channel may have asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RequestSwIds(u16);
+
+impl RequestSwIds {
+    /// Every request id, `1..=15`: the ids a rotating channel may have sent.
+    const ALL: Self = Self(0xfffe);
+
+    fn only(id: RequestSwId) -> Self {
+        Self(1 << id.get().to_lo())
+    }
+
+    /// Whether a request from the channel can carry `id`. Always `false` for
+    /// the notification id `0`, which no request carries.
+    pub(crate) fn contains(self, id: U4) -> bool {
+        self.0 & (1 << id.to_lo()) != 0
     }
 }
 
@@ -381,6 +414,16 @@ impl HidppChannel {
                 U4::from_lo(previous)
             }
         }
+    }
+
+    /// The software ids that this channel's requests can carry.
+    ///
+    /// The value stays correct for as long as the channel is shared: only
+    /// [`Self::set_sw_id_policy`] changes the policy, and it needs `&mut self`,
+    /// which no holder of an `Arc<HidppChannel>` can get while a feature keeps
+    /// its own clone.
+    pub(crate) fn request_sw_ids(&self) -> RequestSwIds {
+        self.sw_id_policy.request_sw_ids()
     }
 
     /// Checks whether the channel supports the given HID++ message.

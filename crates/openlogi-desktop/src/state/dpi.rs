@@ -1,9 +1,15 @@
 //! DPI presets and live writes. Capability discovery is an swr-backed query
 //! owned by the device-read service.
+//!
+//! A DPI write persists nothing until the device answers. The agent writes
+//! the saved DPI again at every reconnect, so saving a value the device
+//! refused or did not apply would show that value and re-send it at each
+//! reconnect. Only a write the device took is saved. After any other answer
+//! the editor shows the DPI the device reports, or the last one it reported.
 
 use gpui::Context;
-use openlogi_core::hid::{Dpi, DpiCapabilities};
-use tracing::debug;
+use openlogi_core::hid::{Dpi, DpiCapabilities, WriteError};
+use tracing::{debug, warn};
 
 use crate::state::devices::DeviceRecord;
 
@@ -113,10 +119,10 @@ impl AppState {
         self.active_dpi_capabilities()
             .map_or(dpi, |caps| caps.nearest(dpi))
     }
-    /// Apply `dpi` to the active device (best-effort, via the agent) and
-    /// persist it per device — the sensor value lives in device RAM and resets
-    /// on a power cycle (#189), so the agent re-applies it on reconnect.
-    /// Updates the displayed value even with no device selected.
+    /// Show `dpi` for the active device and write it through the agent. The
+    /// device's answer arrives as [`Self::apply_dpi_written`], which persists
+    /// `dpi` only if the device took it. With no device selected, or none
+    /// reachable to write, the value is shown and kept in memory only.
     pub fn commit_dpi(&mut self, dpi: Dpi) -> StateEvents {
         let events = self.for_current_device(StateEvent::DpiChanged);
         self.pointer.dpi = dpi;
@@ -124,24 +130,98 @@ impl AppState {
             debug!("no active device — DPI change kept in memory only");
             return events;
         };
-        let persistent_key = record.persistent_config_key().map(str::to_string);
-        let route = record.route.clone();
-        if let Some(persistent_key) = persistent_key {
-            self.config
-                .edit(|config| config.set_dpi(&persistent_key, dpi));
-            if !self.persist_and_reload("DPI") {
-                return events;
-            }
-        } else {
-            debug!(
-                key = record.config_key.as_str(),
-                "transient device DPI applied without persistence"
-            );
-        }
-        if let Some(route) = route {
-            self.send_ipc(crate::services::ipc::SetDpi { route, dpi });
-        }
+        let key = record.device_key();
+        let Some(route) = record.route.clone() else {
+            debug!(key = %key, "device unreachable — DPI change kept in memory only");
+            return events;
+        };
+        let write = self.pointer.next_dpi_write;
+        self.pointer.next_dpi_write = write.saturating_add(1);
+        self.pointer.pending_dpi_writes.insert(key.clone(), write);
+        self.send_ipc(crate::services::ipc::SetDpi {
+            route,
+            dpi,
+            key,
+            write,
+        });
         events
+    }
+
+    /// The device's answer to a [`Self::commit_dpi`] write of `dpi`.
+    ///
+    /// `Ok` persists `dpi` per device, because the sensor value lives in
+    /// device RAM and resets on a power cycle (#189): the agent writes the
+    /// saved value again on reconnect. A failure saves nothing.
+    /// [`WriteError::DpiNotApplied`] shows the DPI the device reports instead.
+    /// [`WriteError::DpiUnsupported`] wrote nothing, so the device's last
+    /// known DPI is shown again. Any other failure also shows that value and
+    /// reads the device again, because the write may or may not have reached
+    /// it.
+    ///
+    /// The agent answers writes in the order they were sent. An older write's
+    /// answer still records what the device did, but only the newest write's
+    /// answer changes the shown DPI.
+    ///
+    /// The agent also answers `Ok` for a write that a newer one at the mouse,
+    /// such as a precision-mode press, superseded before its turn. That write
+    /// is saved too, because the answer cannot tell the two apart.
+    pub fn apply_dpi_written(
+        &mut self,
+        key: &DeviceKey,
+        write: u64,
+        dpi: Dpi,
+        result: Result<(), WriteError>,
+    ) -> StateEvents {
+        let newest = self.pointer.pending_dpi_writes.get(key) == Some(&write);
+        if newest {
+            self.pointer.pending_dpi_writes.remove(key);
+        }
+        // `None` shows the DPI the device is known to run at.
+        let reported = match result {
+            Ok(()) => {
+                self.pointer.reads.set_dpi_current(key, dpi);
+                self.persist_dpi(key, dpi);
+                Some(dpi)
+            }
+            Err(WriteError::DpiNotApplied { actual, .. }) => {
+                warn!(key = %key, requested = %dpi, %actual, "device kept another DPI — not saving the request");
+                self.pointer.reads.set_dpi_current(key, actual);
+                Some(actual)
+            }
+            Err(error @ WriteError::DpiUnsupported { .. }) => {
+                warn!(%error, key = %key, "device refused the DPI — not saving it");
+                None
+            }
+            Err(error) => {
+                warn!(%error, key = %key, requested = %dpi, "DPI write did not land — not saving it, re-reading the device");
+                self.pointer.reads.refresh_dpi(key);
+                None
+            }
+        };
+        if newest && self.is_current_device(key) {
+            self.pointer.dpi = reported.unwrap_or_else(|| self.dpi_for_current());
+        }
+        StateEvent::DpiChanged(key.clone()).into()
+    }
+
+    /// Save `dpi` for `key`'s device after the device took it. A device with
+    /// a transient identity, or one forgotten while the write was in flight,
+    /// has nothing to save under.
+    fn persist_dpi(&mut self, key: &DeviceKey, dpi: Dpi) {
+        let Some(persistent_key) = self
+            .devices
+            .records
+            .iter()
+            .find(|record| record.config_key == key.as_str())
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!(key = %key, "transient device DPI applied without persistence");
+            return;
+        };
+        self.config
+            .edit(|config| config.set_dpi(&persistent_key, dpi));
+        self.persist_and_reload("DPI");
     }
 
     /// The DPI value currently shown by the active pointer editor.

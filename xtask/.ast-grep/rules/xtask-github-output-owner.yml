@@ -1,0 +1,15 @@
+# Owner: xtask's `support::github_output` — writing a step's GitHub Actions
+# outputs.
+id: xtask-github-output-owner
+language: rust
+severity: error
+message: GitHub Actions step outputs are written by xtask's support::github_output::write; call it instead of opening GITHUB_OUTPUT here.
+note: |
+  `release checkout-version-bump` and `release version` both write step
+  outputs. See "Single source of truth" in AGENTS.md.
+files:
+  - xtask/**/*.rs
+ignores:
+  - xtask/src/support/github_output.rs
+rule:
+  pattern: '"GITHUB_OUTPUT"'

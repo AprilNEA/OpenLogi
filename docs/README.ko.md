@@ -1,8 +1,6 @@
 > [!WARNING]
 > **OpenLogi는 활발히 개발 중**이며 아직 안정 단계가 아닙니다 — 기능과 설정이 변경될 수 있습니다. 저장소에 **Star** ⭐ 와 **Watch** 👀 를 눌러 두면 새 릴리스가 나올 때 알림을 받을 수 있습니다.
 
-<h4 align="right"><a href="../README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a> | <strong>한국어</strong> | <a href="README.ru.md">Русский</a> | <a href="README.es.md">Español</a> | <a href="README.pt-BR.md">Português</a> | <a href="README.tr.md">Türkçe</a></h4>
-
 <p align="center">
     <img src="https://assets.openlogi.org/brand/openlogi-icon.png" width="138" alt="OpenLogi"/>
 </p>
@@ -12,20 +10,56 @@
 
 
 <div align="center">
-    <a href="https://twitter.com/AprilNEA" target="_blank">
-    <img alt="twitter" src="https://img.shields.io/badge/follow-AprilNEA-green?style=social&logo=Twitter"></a>
-    <a href="https://t.me/+VDtkR5OSAT04NzVh" target="_blank">
-    <img alt="telegram" src="https://img.shields.io/badge/chat-telegram-blueviolet?style=flat&logo=Telegram"></a>
+    <a href="https://github.com/AprilNEA/OpenLogi/releases/latest" target="_blank">
+    <img alt="GitHub release" src="https://img.shields.io/github/v/release/AprilNEA/OpenLogi?style=flat"></a>
     <a href="https://github.com/AprilNEA/OpenLogi/releases" target="_blank">
     <img alt="GitHub downloads" src="https://img.shields.io/github/downloads/AprilNEA/OpenLogi/total.svg?style=flat"></a>
     <a href="https://github.com/AprilNEA/OpenLogi/commits" target="_blank">
     <img alt="GitHub commit" src="https://img.shields.io/github/commit-activity/m/AprilNEA/OpenLogi?style=flat"></a>
+    <a href="#라이선스">
+    <img alt="License" src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue?style=flat"></a>
     <img alt="Hits" src="https://hits.aprilnea.com/hits?url=https://github.com/aprilnea/openlogi">
+</div>
+
+<div align="center">
+    <a href="https://x.com/AprilNEA" target="_blank">
+    <img alt="X" src="https://img.shields.io/badge/follow-AprilNEA-black?style=flat&logo=x"></a>
+    <a href="https://t.me/+VDtkR5OSAT04NzVh" target="_blank">
+    <img alt="telegram" src="https://img.shields.io/badge/chat-telegram-blueviolet?style=flat&logo=Telegram"></a>
+</div>
+
+<div align="center">
+    <a href="../README.md">
+    <img alt="English" src="https://img.shields.io/badge/English-lightgrey?style=flat"></a>
+    <a href="README.zh-CN.md">
+    <img alt="简体中文" src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-lightgrey?style=flat"></a>
+    <a href="README.ja.md">
+    <img alt="日本語" src="https://img.shields.io/badge/%E6%97%A5%E6%9C%AC%E8%AA%9E-lightgrey?style=flat"></a>
+    <a href="README.de.md">
+    <img alt="Deutsch" src="https://img.shields.io/badge/Deutsch-lightgrey?style=flat"></a>
+    <a href="README.fr.md">
+    <img alt="Français" src="https://img.shields.io/badge/Fran%C3%A7ais-lightgrey?style=flat"></a>
+    <a href="README.ko.md">
+    <img alt="한국어" src="assets/badge-lang-ko-current.svg"></a>
+    <a href="README.ru.md">
+    <img alt="Русский" src="https://img.shields.io/badge/%D0%A0%D1%83%D1%81%D1%81%D0%BA%D0%B8%D0%B9-lightgrey?style=flat"></a>
+    <a href="README.es.md">
+    <img alt="Español" src="https://img.shields.io/badge/Espa%C3%B1ol-lightgrey?style=flat"></a>
+    <a href="README.pt-BR.md">
+    <img alt="Português" src="https://img.shields.io/badge/Portugu%C3%AAs-lightgrey?style=flat"></a>
+    <a href="README.tr.md">
+    <img alt="Türkçe" src="https://img.shields.io/badge/T%C3%BCrk%C3%A7e-lightgrey?style=flat"></a>
 </div>
 
 <p align="center">
     <a href="https://trendshift.io/repositories/42303" target="_blank">
-    <img src="https://trendshift.io/api/badge/trendshift/repositories/42303/daily?language=Rust" alt="AprilNEA%2FOpenLogi | Trendshift" width="250" height="55"/></a>
+    <img src="https://trendshift.io/api/badge/repositories/42303" alt="AprilNEA%2FOpenLogi | Trendshift" width="250" height="55"/></a>
+    <a href="https://www.producthunt.com/products/openlogi?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-openlogi" target="_blank" rel="noopener noreferrer">
+    <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=openlogi&amp;theme=dark&amp;period=daily">
+        <source media="(prefers-color-scheme: light)" srcset="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=openlogi&amp;theme=light&amp;period=daily">
+        <img alt="OpenLogi - A local-first alternative to Logitech Options+ | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=openlogi&amp;theme=light&amp;period=daily">
+    </picture></a>
 </p>
 
 > **Options+가 지긋지긋하다면? OpenLogi를 써 보세요.**
@@ -42,99 +76,151 @@ OpenLogi는 되고 Options+는 안 되는 것들:
 - **Linux 지원.** Linux는 OpenLogi의 일급 플랫폼입니다.
 - **지원되는 버튼에서 제스처 사용.** 지원되는 컨트롤에 제스처 동작을 지정하거나, 제스처를 아예 끌 수 있습니다.
 - **순수 텍스트 설정.** 모든 설정이 TOML 파일 하나에 담겨 원하는 방법으로 기기 간 동기화할 수 있습니다.
-- **스크립트 가능.** GUI 외에 진짜 CLI도 제공합니다.
+- **스크립트 가능.** GUI 외에 진짜 CLI도 제공합니다. DPI, SmartShift, Fn Lock, 보고율을 다루는 JSON [자동화 API](USAGE.md#automation-api)와 하드웨어 진단 기능을 갖추고 있습니다.
 
 ## 기능 목록
 
-- Logi Bolt 수신기, Unifying 수신기, Bluetooth, 유선으로 연결된 기기를 지원하며 배터리 잔량과 충전 상태 표시
-- OS 입력 훅을 통한 버튼 리매핑: 내장 액션 카탈로그 + 사용자 지정 키보드 단축키(TOML 작성)¹
-- 앱 포커스 시 자동 전환되는 앱별 프로필 오버레이(macOS + Windows; Linux는 X11 / XWayland 전용)
-- Litra 조명: 전원, 밝기, 색온도 제어와 카메라 사용에 연동한 자동 켜기 / 끄기
+<p align="center">
+    <img src="https://assets.openlogi.org/screenshots/macos/light/devices-grid.png" width="860" alt="마우스, 키보드, Litra 조명 등 Logitech 기기 6대가 표시된 OpenLogi 기기 목록">
+</p>
 
-**마우스**
+### 기기
 
-- 가운데 버튼, 모드 시프트, 썸휠 버튼의 캡처와 리매핑(가운데 버튼은 모든 플랫폼, 나머지는 기기 기능에 따라 다름)
-- 지원되는 뒤로/앞으로 버튼, DPI/모드 시프트 버튼, 전용 제스처 버튼, 햅틱 패널에서 방향별 제스처 바인딩과 실시간 캡처 지원
-  - DPI/모드 시프트 제스처는 기기가 이벤트 전달(diversion)과 raw-XY 지원을 보고해야 사용할 수 있습니다.
-  - 왼쪽/오른쪽 기본 버튼과 휠 관련 컨트롤에는 제스처를 새로 지정할 수 없으며, 기존 가운데 버튼 제스처 바인딩은 유지됩니다.
-- Actions Ring: 커서 중심의 8슬롯 액션 오버레이(`ShowActionsRing`), 앱별 레이아웃 지원
-- DPI 제어: 프리셋 + 사이클 / 프리셋 지정 액션(`0x2201`)
-- SmartShift 휠: 모드 전환, 감도, 영구 래칫 패널(`0x2111`)
-- 기기별 네이티브 스크롤 반전(`0x2121`, 지원 기기)
+- Logi Bolt 수신기, Unifying 수신기, Bluetooth, 유선 연결을 지원하며 배터리 잔량과 충전 상태 표시
+- 배터리 부족 알림을 화면 하단에 방전당 한 번만 표시하며, OS 알림 권한은 필요 없음
+- 키보드에서 Caps Lock을 켜거나 끄면 화면에 표시기를 띄움. Windows와 Linux에서는 Num Lock과 Scroll Lock도 지원
 
-**키보드**
+<table>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/easy-switch.png" width="400" alt="페어링된 컴퓨터 3대를 보여 주는 Easy-Switch 카드"></td>
+        <td width="50%"><b>Easy-Switch</b><ul><li>채널마다 페어링된 컴퓨터를 OS, 연결 방식과 함께 확인</li><li>지원 기기에서는 채널 이름 변경 가능</li></ul></td>
+    </tr>
+</table>
 
-- F 키 전역 리매핑: 마우스와 같은 액션 카탈로그에 더해 텍스트 입력, 키 조합, 다단계 워크플로 등 파워 유저 액션 제공(macOS + Windows)
-- 정적 RGB 조명(`0x8070` / `0x8080`, 지원 기기)
+### 버튼과 액션
 
-**카메라**
+<table>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/buttons.png" width="400" alt="제스처 버튼 인스펙터가 열린 MX Master 4 버튼 매핑 화면"></td>
+        <td width="50%"><b>모든 버튼 리매핑</b><ul><li>내장 액션 카탈로그, 사용자 지정 단축키, 텍스트 입력, 다단계 워크플로</li><li>탭과 길게 누르기에 각각 다른 액션, 버튼을 놓으면 해제되는 누르고 말하기용 키 조합</li><li>가운데 클릭, 뒤로/앞으로, DPI/모드 시프트, 제스처 버튼, 햅틱 패널에서 제스처 사용</li></ul></td>
+    </tr>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/actions-ring.png" width="400" alt="커서 주위에 슬롯 8개가 배치된 Actions Ring 편집기"></td>
+        <td width="50%"><b>Actions Ring</b><ul><li>커서 주위에 링 형태로 배치되는 액션 8개</li><li>앱마다 별도 레이아웃</li></ul></td>
+    </tr>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys.png" width="400" alt="키 3개를 Launchpad, 화면 잠금, 스크린샷에 지정한 MX Keys S"></td>
+        <td width="50%"><b>키보드 키</b><ul><li>미디어, 이모지, 스크린샷 등 전용 키를 마우스 버튼처럼 지정</li><li>키 하나만 기기 기본값으로 되돌리거나 행 전체를 재설정</li></ul></td>
+    </tr>
+</table>
+
+앱별 프로필은 포커스된 앱에 따라 전환됩니다. `[apps]` 별칭을 쓰면 프로필 하나가 여러 플랫폼에서 같은 앱을 따라갑니다.
+
+### 포인터와 스크롤
+
+<table>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/dpi.png" width="400" alt="DPI 슬라이더가 있는 포인터 조정 카드"></td>
+        <td width="50%"><b>포인터</b><ul><li>DPI 프리셋과 사이클 / 프리셋 지정 액션</li><li>포인터 속도와 보고율</li><li>정밀 모드: 버튼 하나로 마우스를 가장 느린 속도로 바꾸고 다시 원래대로 복귀</li></ul></td>
+    </tr>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/smartshift.png" width="400" alt="휠 모드, 민감도, 스크롤 압력을 설정하는 SmartShift 카드"></td>
+        <td width="50%"><b>SmartShift</b><ul><li>휠 모드와 민감도</li><li>SmartShift Enhanced 마우스의 스크롤 압력</li><li>래칫 고정 스위치</li></ul></td>
+    </tr>
+    <tr>
+        <td colspan="2"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/scrolling.png" width="820" alt="스크롤 반전, 휠 해상도, 부드러운 휠을 설정하는 스크롤 카드"><br><b>스크롤</b><ul><li>기기별 스크롤 반전(네이티브 또는 소프트웨어)</li><li>휠 해상도와 부드러운 휠 스크롤</li><li>썸휠이 없는 마우스에서도 뒤로 또는 앞으로 버튼을 누른 채 휠을 굴리면 가로 스크롤</li></ul></td>
+    </tr>
+</table>
+
+### 키보드와 조명
+
+<table>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="MX Keys S의 키 카드와 백라이트 카드"></td>
+        <td width="50%"><b>키보드</b><ul><li>Fn Lock, 그리고 호스트 OS 레이아웃을 유지하는 멀티 플랫폼 키보드</li><li>백라이트 밝기, 자동 밝기, 배터리 절약</li><li>백라이트 밝기를 바꿀 때 화면에 표시</li><li>지원 키보드의 정적 RGB</li></ul></td>
+    </tr>
+    <tr>
+        <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="밝기와 색온도를 설정하는 Litra Glow 조명 패널"></td>
+        <td width="50%"><b>Litra 조명</b><ul><li>전원, 밝기, 색온도</li><li>원하면 카메라 사용에 맞춰 자동으로 켜기</li><li>조명 본체에서 바꾼 설정을 유지</li></ul></td>
+    </tr>
+</table>
+
+### 웹캠
 
 - 모든 Logitech UVC 웹캠(Brio, StreamCam, C920 시리즈 등) 플러그 앤 플레이 지원
-- 실시간 미리보기: 보고 있는 동안에만 카메라를 켜고, 벗어나면 완전히 해제되어 LED도 꺼집니다
-- 화면 조절 값을 UVC 하드웨어에 직접 기록: 줌, 초점, 노출, 밝기, 대비, 채도, 선명도, 화이트 밸런스, 색조 — 초점 / 노출 / 화이트 밸런스는 자동 모드 전환 지원, Meet / Zoom / OBS 등 카메라를 쓰는 모든 앱에 적용
-- 원클릭 프로필: 기본값 / 스트리밍 / 영상 통화 3종 내장 + 사용자 스냅숏 저장; 설정은 카메라별로 저장되며 다음에 볼 때 하드웨어에 다시 기록됩니다
+- 실시간 미리보기는 보고 있는 동안에만 카메라를 사용하며, 벗어나면 LED도 꺼집니다
+- 줌, 팬, 틸트, 초점, 노출, 화이트 밸런스 등 모든 UVC 컨트롤을 하드웨어에 기록하므로 Meet, Zoom, OBS에도 변경 사항이 적용됩니다
+- 기본값 / 스트리밍 / 영상 통화 내장 프로필과 사용자 스냅숏을 카메라별로 저장
 
-¹ Linux의 미디어 키 액션은 D-Bus MPRIS를 사용합니다. 일부 macOS 전용 액션은 Linux에 범용 대응 기능이 없어 아무 동작도 하지 않습니다. Windows는 가능한 경우 플랫폼 액션을 네이티브 기능에 매핑합니다.
+지원 기능은 각 기기가 보고하는 내용에 따라 다르며, 앱은 기기가 지원하는 컨트롤만 표시합니다.
+
+### 플랫폼 지원
+
+| 기능 | macOS | Windows | Linux |
+| --- | --- | --- | --- |
+| 마우스 버튼 리매핑과 제스처 | ✓ | ✓ | ✓ |
+| 키보드 F 키 리매핑 | ✓ | ✓ | — |
+| 앱별 프로필 | ✓ | ✓ | X11, wlroots(sway, Hyprland), GNOME([동반 확장](../crates/openlogi-hook/gnome-shell-extension/README.md) 필요) |
+| 포인터 아래 창을 따라가는 마우스 프로필 | ✓ | ✓ | X11 전용 |
+| 미디어 키 | 네이티브 | 네이티브 | D-Bus MPRIS |
+| 창 관리자 액션(데스크톱, Mission Control 등) | 네이티브 | 네이티브 대응 기능 | GNOME, KDE (KWin), Hyprland; 일부 macOS 전용 액션은 동작하지 않음 |
+| 메뉴 막대 / 트레이 아이콘 | ✓ | ✓ | — |
+| 앱 내 업데이트 | Sparkle | 내장 | 내장 |
 
 ## 설치
 
 > [!IMPORTANT]
-> 먼저 **Logi Options+** 를 종료하세요 — 두 애플리케이션은 HID++ 접근을 두고 경합하며, 하나의 수신기는 한쪽만 소유할 수 있습니다.
+> 먼저 **Logi Options+**(Linux에서는 Solaar도)를 종료하세요. 하나의 수신기는 한 번에 하나의 애플리케이션만 소유할 수 있습니다.
+
+| 플랫폼 | 시스템 | 아키텍처 |
+| --- | --- | --- |
+| macOS | macOS 13 이상 | Apple 실리콘, Intel |
+| Linux | GLIBC 2.35 이상 | x86_64, arm64 |
+| Windows | Windows 11에서 테스트됨 | x86_64, arm64 |
+
+모든 다운로드에는 minisign 서명과 `SHA256SUMS` 항목이 함께 제공됩니다. 소스에서 빌드하려면 [DEVELOPMENT.md](DEVELOPMENT.md)를 참고하세요.
 
 ### macOS
 
-macOS 13 이상이 필요합니다.
+<p>
+    <a href="https://openlogi.org/download/mac-arm64"><img src="https://assets.openlogi.org/brand/buttons/download-macos-arm64.png" width="260" alt="Mac용 다운로드: Apple silicon (.dmg)"></a>
+    &nbsp;
+    <a href="https://openlogi.org/download/mac-x64"><img src="https://assets.openlogi.org/brand/buttons/download-macos-x64.png" width="260" alt="Mac용 다운로드: Intel (.dmg)"></a>
+</p>
 
-[최신 릴리스](https://github.com/AprilNEA/OpenLogi/releases/latest)에서 서명·공증된 `.dmg`를 내려받아 `OpenLogi.app`을 `/Applications`로 드래그하세요.
-
-또는 [Homebrew](https://brew.sh)로 설치:
+또는 Homebrew로 설치:
 
 ```sh
 brew install --cask openlogi
 ```
 
-공식 Homebrew cask가 기본 설치 경로입니다. 대신 `aprilnea/tap`으로 GitHub 최신 릴리스를 명시적으로 따라가려면:
-
-```sh
-brew tap aprilnea/tap
-brew install --cask aprilnea/tap/openlogi@latest
-```
-
-`openlogi@latest`는 OpenLogi 릴리스 워크플로가 관리하며 공식 cask의 autobump보다 먼저 갱신될 수 있습니다. `openlogi`와 `openlogi@latest` 중 하나만 설치하세요.
+OpenLogi를 열고 macOS가 요청하면 **손쉬운 사용**과 **입력 모니터링** 권한을 허용하세요. 이후 OpenLogi는 Sparkle로 스스로 업데이트합니다.
 
 ### Linux
 
-[최신 릴리스](https://github.com/AprilNEA/OpenLogi/releases/latest)에서 `.deb` 또는 `.rpm`을 내려받으세요:
+<p>
+    <a href="https://openlogi.org/download/linux"><img src="https://assets.openlogi.org/brand/buttons/download-linux-deb.png" width="260" alt="Linux용 다운로드: Debian, Ubuntu (.deb)"></a>
+    &nbsp;
+    <a href="https://openlogi.org/download/linux-rpm"><img src="https://assets.openlogi.org/brand/buttons/download-linux-rpm.png" width="260" alt="Linux용 다운로드: Fedora, SUSE (.rpm)"></a>
+    &nbsp;
+    <a href="https://openlogi.org/download/linux-arch"><img src="https://assets.openlogi.org/brand/buttons/download-linux-arch.png" width="260" alt="Linux용 다운로드: Arch (.pkg.tar.zst)"></a>
+</p>
+
+또는 명령 하나로 배포판에 맞는 패키지를 설치할 수 있습니다. 스크립트는 minisign 서명을 검증하고 agent를 시작합니다. 먼저 `minisign`을 설치하세요:
 
 ```sh
-# Debian / Ubuntu
-sudo dpkg -i openlogi-*.deb
-
-# Fedora / RHEL
-sudo rpm -i openlogi-*.rpm
-
-# Arch Linux
-sudo pacman -U openlogi-*.pkg.tar.zst
+curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-패키지는 `x86_64`/`amd64`와 `arm64`/`aarch64` 두 아키텍처로 제공됩니다.
-
-패키지는 `sudo` 없이 `/dev/hidraw*`와 `/dev/uinput`에 접근할 수 있게 해 주는 udev 규칙을 설치합니다. 설치 후 사용자용 백그라운드 에이전트를 활성화하세요:
-
-```sh
-systemctl --user enable --now openlogi-agent.service
-```
-
-수동 / 소스 설치와 systemd가 없는 배포판은 [INSTALL-linux.md](INSTALL-linux.md)를 참고하세요.
+실행 전에 스크립트를 확인하는 방법과 Flatpak, NixOS, systemd가 없는 배포판에 대해서는 [INSTALL-linux.md](INSTALL-linux.md)를 참고하세요.
 
 ### Windows
 
-각 릴리스에는 서명된 휴대용 `.zip` 아카이브와 사용자별 `.msi` 설치 파일(x86_64 및 arm64)이 포함됩니다. 둘 다 GUI(`OpenLogi.exe`)와 모든 기기 I/O를 소유하는 백그라운드 agent(`openlogi-agent.exe`)를 함께 제공합니다. 휴대용 zip을 사용할 때 두 파일을 같은 위치에 두지 않으면 GUI가 연결할 대상이 없습니다.
-
-Windows 지원은 정상 작동하며 유선 키보드와 Unifying 수신기 마우스를 사용해 MSI 설치, 인플레이스 업그레이드, 제거까지 Windows 11 실제 하드웨어에서 엔드투엔드 검증했습니다. macOS 포트보다 최신이므로 문제가 있으면 [제보](https://github.com/AprilNEA/OpenLogi/issues)해 주세요. agent는 시스템 트레이 아이콘(메인 창 표시 / 종료)을 표시하므로 메인 창을 닫은 뒤에도 앱에 접근할 수 있습니다. Windows에서 비활성화하려면 TOML `[app_settings]` 블록에 `show_in_menu_bar = false`를 설정하고 agent를 다시 시작하세요. GUI 토글은 현재 macOS 전용입니다.
-
-소스에서 빌드하려면 [DEVELOPMENT.md](DEVELOPMENT.md)를 참고하세요.
-
+<p>
+    <a href="https://openlogi.org/download/windows"><img src="https://assets.openlogi.org/brand/buttons/download-windows-msi.png" width="260" alt="Windows용 다운로드: 설치 프로그램 (.msi)"></a>
+    &nbsp;
+    <a href="https://openlogi.org/download/windows-zip"><img src="https://assets.openlogi.org/brand/buttons/download-windows-zip.png" width="260" alt="Windows용 다운로드: 휴대용 (.zip)"></a>
+</p>
 
 ## 사용법 (CLI)
 
@@ -142,11 +228,11 @@ Windows 지원은 정상 작동하며 유선 키보드와 Unifying 수신기 마
 
 ## 설정
 
-[CONFIGURATION.md](CONFIGURATION.md) 참고
+설정은 순수 TOML을 사용하며, 저장할 때 심볼릭 링크된 설정 파일을 그대로 유지합니다. [CONFIGURATION.md](CONFIGURATION.md) 참고.
 
 ## 개발
 
-[DEVELOPMENT.md](DEVELOPMENT.md) 참고
+[macOS 입력 훅 안전성](DEVELOPMENT.md#macos-input-hook-safety)을 포함해 [DEVELOPMENT.md](DEVELOPMENT.md) 참고.
 
 ## 감사의 말
 

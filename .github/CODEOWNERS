@@ -30,7 +30,6 @@
 /rustfmt.toml                   @AprilNEA
 /prek.toml                      @AprilNEA
 /flake.nix                      @AprilNEA
-/flake.lock                     @AprilNEA
 /devenv.nix                     @AprilNEA
 /devenv.yaml                    @AprilNEA
 /devenv.lock                    @AprilNEA

@@ -24,6 +24,7 @@ use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
 use super::commit_slider::{CommitSlider, SliderRange};
 use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle, toggle_row};
+use super::status::{retry_line, status_line};
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
 
 const TITLE: &str = "OpenLogi Component Gallery";
@@ -202,6 +203,19 @@ impl ComponentGallery {
             .child(self.preset_panel(pal, cx))
             .child(self.slider_panel(pal))
             .child(Self::battery_panel(pal))
+            .child(gallery_panel(
+                "Status and retry",
+                IconName::Settings,
+                v_flex()
+                    .gap_2()
+                    .child(status_line("Reading…", pal))
+                    .child(retry_line("gallery-retry", "Retry", |_| {}))
+                    .child(
+                        retry_line("gallery-retry-disabled", "Retry (offline)", |_| {})
+                            .disabled(true),
+                    ),
+                pal,
+            ))
     }
 
     fn choice_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {

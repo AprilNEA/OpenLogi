@@ -37,7 +37,8 @@ impl TryFrom<ReprogControlsEvent> for RawControlEvent {
             }
             ReprogControlsEvent::DivertedRawMouseXy { dx, dy } => Ok(Self::RawXy { dx, dy }),
             ReprogControlsEvent::AnalyticsKeyEvents(_)
-            | ReprogControlsEvent::DivertedRawWheel { .. } => Err(event),
+            | ReprogControlsEvent::DivertedRawWheel { .. }
+            | ReprogControlsEvent::ReportingChangedElsewhere(_) => Err(event),
         }
     }
 }
@@ -89,7 +90,8 @@ pub fn decode_raw_wheel_event(
         }),
         ReprogControlsEvent::DivertedButtons(_)
         | ReprogControlsEvent::DivertedRawMouseXy { .. }
-        | ReprogControlsEvent::AnalyticsKeyEvents(_) => None,
+        | ReprogControlsEvent::AnalyticsKeyEvents(_)
+        | ReprogControlsEvent::ReportingChangedElsewhere(_) => None,
     }
 }
 

@@ -24,6 +24,11 @@ trait Sensor: Send + 'static {
     /// Feature index that lookup returns.
     const INDEX: u8;
 
+    /// Feature version that lookup reports.
+    fn version(&self) -> u8 {
+        0
+    }
+
     /// The payload answering one request to [`Self::INDEX`].
     fn respond(&mut self, request: &[u8]) -> Option<[u8; 16]>;
 }
@@ -31,7 +36,13 @@ trait Sensor: Send + 'static {
 /// A `0x2201` sensor that supports 800 and 1600 DPI.
 #[derive(Clone, Copy)]
 struct AdjustableSensor {
+    /// The `0x2201` version the feature lookup reports. The default DPI
+    /// field exists from version 1.
+    version: u8,
     current: u16,
+    /// The value `getSensorDpi` puts in its default-DPI bytes; 0 reports
+    /// none.
+    default: u16,
     /// When set, every write is acknowledged but the sensor keeps this value.
     stuck_at: Option<u16>,
 }
@@ -40,13 +51,20 @@ impl Sensor for AdjustableSensor {
     const FEATURE_ID: u16 = 0x2201;
     const INDEX: u8 = ADJUSTABLE_INDEX;
 
+    fn version(&self) -> u8 {
+        self.version
+    }
+
     fn respond(&mut self, request: &[u8]) -> Option<[u8; 16]> {
         let mut payload = [0u8; 16];
         payload[0] = request[4];
         match request[3] >> 4 {
             GET_SENSOR_COUNT => payload[0] = 1,
             GET_DPI_LIST => payload[1..7].copy_from_slice(&[0x03, 0x20, 0x06, 0x40, 0x00, 0x00]),
-            GET_DPI => payload[1..3].copy_from_slice(&self.current.to_be_bytes()),
+            GET_DPI => {
+                payload[1..3].copy_from_slice(&self.current.to_be_bytes());
+                payload[3..5].copy_from_slice(&self.default.to_be_bytes());
+            }
             SET_DPI => {
                 self.current = self
                     .stuck_at
@@ -130,11 +148,10 @@ fn respond<S: Sensor>(sensor: &mut S, request: &[u8]) -> Option<Vec<u8>> {
         (0x00, 0x01) => payload[0] = 4,
         (0x00, 0x00) => {
             let feature_id = u16::from_be_bytes([request[4], request[5]]);
-            payload[0] = if feature_id == S::FEATURE_ID {
-                S::INDEX
-            } else {
-                0
-            };
+            if feature_id == S::FEATURE_ID {
+                payload[0] = S::INDEX;
+                payload[2] = sensor.version();
+            }
         }
         (index, _) if index == S::INDEX => payload = sensor.respond(request)?,
         _ => return None,
@@ -261,7 +278,9 @@ async fn a_dpi_outside_the_reported_list_is_rejected_before_any_write() {
     });
 
     let adjustable = Harness::new(AdjustableSensor {
+        version: 1,
         current: 800,
+        default: 800,
         stuck_at: None,
     })
     .await;
@@ -282,7 +301,9 @@ async fn a_dpi_outside_the_reported_list_is_rejected_before_any_write() {
 #[tokio::test]
 async fn a_dpi_the_device_keeps_after_one_retry_is_reported_as_not_applied() {
     let harness = Harness::new(AdjustableSensor {
+        version: 1,
         current: 800,
+        default: 800,
         stuck_at: Some(800),
     })
     .await;
@@ -302,7 +323,9 @@ async fn a_dpi_the_device_keeps_after_one_retry_is_reported_as_not_applied() {
 #[tokio::test]
 async fn a_supported_dpi_the_device_applies_is_written_once() -> Result<(), WriteError> {
     let harness = Harness::new(AdjustableSensor {
+        version: 1,
         current: 800,
+        default: 800,
         stuck_at: None,
     })
     .await;
@@ -310,5 +333,126 @@ async fn a_supported_dpi_the_device_applies_is_written_once() -> Result<(), Writ
     set_dpi_on(&harness.shared, Dpi::new(1600)).await?;
 
     assert_eq!(harness.dpi_writes(), [1600]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_lowest_target_writes_the_smallest_listed_dpi() -> Result<(), WriteError> {
+    let adjustable = Harness::new(AdjustableSensor {
+        version: 1,
+        current: 1600,
+        default: 1600,
+        stuck_at: None,
+    })
+    .await;
+    assert_eq!(
+        set_dpi_target_on(&adjustable.shared, DpiTarget::Lowest).await?,
+        Some(Dpi::new(800))
+    );
+    assert_eq!(adjustable.dpi_writes(), [800]);
+
+    let extended = Harness::new(ExtendedSensor::new(SensorCapabilities::empty())).await;
+    assert_eq!(
+        set_dpi_target_on(&extended.shared, DpiTarget::Lowest).await?,
+        Some(Dpi::new(400))
+    );
+    assert_eq!(
+        extended.parameter_writes(),
+        [(400, 0, u8::from(Lod::NotSupported))]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_default_target_writes_the_reported_default() -> Result<(), WriteError> {
+    let adjustable = Harness::new(AdjustableSensor {
+        version: 1,
+        current: 800,
+        default: 1600,
+        stuck_at: None,
+    })
+    .await;
+    assert_eq!(
+        set_dpi_target_on(&adjustable.shared, DpiTarget::Default).await?,
+        Some(Dpi::new(1600))
+    );
+    assert_eq!(adjustable.dpi_writes(), [1600]);
+
+    // The scripted 0x2202 sensor reports 800 as its default.
+    let mut sensor = ExtendedSensor::new(SensorCapabilities::empty());
+    sensor.dpi_x = 1600;
+    let extended = Harness::new(sensor).await;
+    assert_eq!(
+        set_dpi_target_on(&extended.shared, DpiTarget::Default).await?,
+        Some(Dpi::new(800))
+    );
+    assert_eq!(
+        extended.parameter_writes(),
+        [(800, 0, u8::from(Lod::NotSupported))]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unlisted_default_writes_the_nearest_listed_dpi() -> Result<(), WriteError> {
+    let harness = Harness::new(AdjustableSensor {
+        version: 1,
+        current: 800,
+        default: 1500,
+        stuck_at: None,
+    })
+    .await;
+
+    assert_eq!(
+        set_dpi_target_on(&harness.shared, DpiTarget::Default).await?,
+        Some(Dpi::new(1600))
+    );
+    assert_eq!(harness.dpi_writes(), [1600]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_default_target_writes_nothing_without_a_reported_default() -> Result<(), WriteError> {
+    let harness = Harness::new(AdjustableSensor {
+        version: 1,
+        current: 800,
+        default: 0,
+        stuck_at: None,
+    })
+    .await;
+
+    assert_eq!(
+        set_dpi_target_on(&harness.shared, DpiTarget::Default).await?,
+        None
+    );
+    assert!(harness.dpi_writes().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_default_target_takes_the_feature_version_from_the_feature_table()
+-> Result<(), WriteError> {
+    // Every sensor puts 1600 in the default-DPI bytes. Only the version its
+    // feature lookup reports decides whether those bytes are a default.
+    for (version, written) in [(0, None), (1, Some(1600)), (2, Some(1600))] {
+        let harness = Harness::new(AdjustableSensor {
+            version,
+            current: 800,
+            default: 1600,
+            stuck_at: None,
+        })
+        .await;
+
+        assert_eq!(
+            set_dpi_target_on(&harness.shared, DpiTarget::Default).await?,
+            written.map(Dpi::new),
+            "version {version}"
+        );
+        assert_eq!(
+            harness.dpi_writes(),
+            Vec::from_iter(written),
+            "version {version}"
+        );
+    }
     Ok(())
 }

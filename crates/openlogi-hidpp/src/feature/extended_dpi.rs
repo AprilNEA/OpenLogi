@@ -64,10 +64,28 @@ impl ExtendedDpiFeature {
     /// `BatteryStatusFeature::is_status_broadcast`: a listener that only needs
     /// to know *that* the DPI changed re-reads it with
     /// [`Self::get_sensor_dpi_parameters`]. A calibration result (event `1`)
-    /// changes no setting and is not one.
+    /// is [`Self::is_calibration_broadcast`] instead.
     #[must_use]
     pub const fn is_parameters_broadcast(function_id: u8) -> bool {
         function_id == 0
+    }
+
+    /// Whether an unsolicited report with `function_id` is the device's
+    /// calibration-result broadcast (event `1`, decoded as
+    /// [`ExtendedDpiEvent::CalibrationCompleted`]), sent when a sensor
+    /// calibration finishes or times out.
+    ///
+    /// Logi Options+ 2.8 (static analysis, not a spec) decodes event `1` with
+    /// this layout and publishes it beside event `0`. A correction scales the
+    /// sensor resolution ([`DpiCalibrationCorrection::Adjust`]), and a
+    /// [`CalibrationType::Hardware`] result needs no
+    /// [`Self::set_dpi_calibration`], so the sensor state a listener read
+    /// before may be stale. Deliberately independent of the payload, like
+    /// [`Self::is_parameters_broadcast`]: a listener re-reads that state with
+    /// [`Self::get_sensor_dpi_parameters`].
+    #[must_use]
+    pub const fn is_calibration_broadcast(function_id: u8) -> bool {
+        function_id == 1
     }
 
     /// Retrieves the number of motion sensors the device exposes.

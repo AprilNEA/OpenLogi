@@ -10,7 +10,9 @@ use tokio::sync::mpsc;
 
 use crate::backend::{BackendError, RawWriter};
 
-use super::barrier::{RequestKey, ResponseGates};
+use super::barrier::{
+    ReplayResponseBarrier, ReplayWriteBarrier, RequestKey, ResponseGates, WriteCompletionGates,
+};
 use super::slots::ReceiverSlots;
 use super::{ReceiverSlot, ReceiverSlotState, ReplayError};
 
@@ -272,6 +274,8 @@ pub struct ReplayChannelHandle {
     cassette: Option<Arc<CassetteState>>,
     written: Arc<Mutex<Vec<Vec<u8>>>>,
     connected: Arc<AtomicBool>,
+    response_gates: Arc<ResponseGates>,
+    write_completion_gates: Arc<WriteCompletionGates>,
 }
 
 impl ReplayChannelHandle {
@@ -279,12 +283,40 @@ impl ReplayChannelHandle {
         cassette: Arc<CassetteState>,
         written: Arc<Mutex<Vec<Vec<u8>>>>,
         connected: Arc<AtomicBool>,
+        response_gates: Arc<ResponseGates>,
+        write_completion_gates: Arc<WriteCompletionGates>,
     ) -> Self {
         Self {
             cassette: Some(cassette),
             written,
             connected,
+            response_gates,
+            write_completion_gates,
         }
+    }
+
+    /// Hold the next matching response on this channel lifetime. This uses
+    /// the same response barrier as [`super::ReplayBackend`], including on
+    /// dynamic scripted channels that have no cassette topology.
+    #[must_use]
+    pub fn hold_next_response(
+        &self,
+        request_match: RequestMatch,
+        request: &[u8],
+    ) -> ReplayResponseBarrier {
+        self.response_gates.hold(request_match, request)
+    }
+
+    /// Hold the completion of the next matching raw write after the transport
+    /// accepts its report. This models a native write that keeps running after
+    /// a caller drops its Rust future.
+    #[must_use]
+    pub fn hold_next_write_completion(
+        &self,
+        request_match: RequestMatch,
+        request: &[u8],
+    ) -> ReplayWriteBarrier {
+        self.write_completion_gates.hold(request_match, request)
     }
 
     /// Every report written through this logical channel.
@@ -327,6 +359,18 @@ impl ReplayChannelHandle {
     }
 }
 
+/// Shared cassette state and transport metadata for one channel lifetime.
+pub(super) struct ReplayChannelParts {
+    pub(super) vendor_id: u16,
+    pub(super) product_id: u16,
+    pub(super) report_support: ReportSupport,
+    pub(super) cassette: Arc<CassetteState>,
+    pub(super) written: Arc<Mutex<Vec<Vec<u8>>>>,
+    pub(super) connected: Arc<AtomicBool>,
+    pub(super) response_gates: Arc<ResponseGates>,
+    pub(super) write_completion_gates: Arc<WriteCompletionGates>,
+}
+
 /// A strict cassette-backed implementation of the production raw HID contract.
 pub struct ReplayRawHidChannel {
     vendor_id: u16,
@@ -337,6 +381,7 @@ pub struct ReplayRawHidChannel {
     written: Arc<Mutex<Vec<Vec<u8>>>>,
     cassette: Option<Arc<CassetteState>>,
     response_gates: Arc<ResponseGates>,
+    write_completion_gates: Arc<WriteCompletionGates>,
     responder: Option<Responder>,
     connected: Arc<AtomicBool>,
     fails: Option<fn(&[u8]) -> bool>,
@@ -354,28 +399,38 @@ impl ReplayRawHidChannel {
         let written = Arc::new(Mutex::new(Vec::new()));
         let connected = Arc::new(AtomicBool::new(true));
         let response_gates = Arc::new(ResponseGates::default());
-        let channel = Self::from_parts(
+        let write_completion_gates = Arc::new(WriteCompletionGates::default());
+        let channel = Self::from_parts(ReplayChannelParts {
             vendor_id,
             product_id,
             report_support,
-            Arc::clone(&cassette),
-            Arc::clone(&written),
-            Arc::clone(&connected),
+            cassette: Arc::clone(&cassette),
+            written: Arc::clone(&written),
+            connected: Arc::clone(&connected),
+            response_gates: Arc::clone(&response_gates),
+            write_completion_gates: Arc::clone(&write_completion_gates),
+        });
+        let handle = ReplayChannelHandle::from_parts(
+            cassette,
+            written,
+            connected,
             response_gates,
+            write_completion_gates,
         );
-        let handle = ReplayChannelHandle::from_parts(cassette, written, connected);
         Ok((channel, handle))
     }
 
-    pub(super) fn from_parts(
-        vendor_id: u16,
-        product_id: u16,
-        report_support: ReportSupport,
-        cassette: Arc<CassetteState>,
-        written: Arc<Mutex<Vec<Vec<u8>>>>,
-        connected: Arc<AtomicBool>,
-        response_gates: Arc<ResponseGates>,
-    ) -> Self {
+    pub(super) fn from_parts(parts: ReplayChannelParts) -> Self {
+        let ReplayChannelParts {
+            vendor_id,
+            product_id,
+            report_support,
+            cassette,
+            written,
+            connected,
+            response_gates,
+            write_completion_gates,
+        } = parts;
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         Self {
             vendor_id,
@@ -386,6 +441,7 @@ impl ReplayRawHidChannel {
             written,
             cassette: Some(cassette),
             response_gates,
+            write_completion_gates,
             responder: None,
             connected,
             fails: None,
@@ -403,7 +459,7 @@ impl ReplayRawHidChannel {
         Self::build_scripted(responder, None)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_dynamic_responder(
         responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
     ) -> (Self, ReplayChannelHandle) {
@@ -425,7 +481,7 @@ impl ReplayRawHidChannel {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn build_scripted(
         responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
         fails: Option<fn(&[u8]) -> bool>,
@@ -433,6 +489,8 @@ impl ReplayRawHidChannel {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let written = Arc::new(Mutex::new(Vec::new()));
         let connected = Arc::new(AtomicBool::new(true));
+        let response_gates = Arc::new(ResponseGates::default());
+        let write_completion_gates = Arc::new(WriteCompletionGates::default());
         (
             Self {
                 vendor_id: 0x046d,
@@ -442,7 +500,8 @@ impl ReplayRawHidChannel {
                 incoming_rx: tokio::sync::Mutex::new(incoming_rx),
                 written: Arc::clone(&written),
                 cassette: None,
-                response_gates: Arc::new(ResponseGates::default()),
+                response_gates: Arc::clone(&response_gates),
+                write_completion_gates: Arc::clone(&write_completion_gates),
                 responder: Some(Arc::new(responder)),
                 connected: Arc::clone(&connected),
                 fails,
@@ -451,6 +510,8 @@ impl ReplayRawHidChannel {
                 cassette: None,
                 written,
                 connected,
+                response_gates,
+                write_completion_gates,
             },
         )
     }
@@ -467,6 +528,7 @@ impl RawHidChannel for ReplayRawHidChannel {
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        let write_completion = self.write_completion_gates.take(src);
         self.written
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -484,12 +546,14 @@ impl RawHidChannel for ReplayRawHidChannel {
         };
         if let Some(gate) = self.response_gates.take(src) {
             gate.request_written(self.incoming_tx.clone(), response);
-            return Ok(src.len());
-        }
-        if let Some(response) = response {
+        } else if let Some(response) = response {
             self.incoming_tx
                 .send(response)
                 .map_err(|_| disconnected_error())?;
+        }
+        if let Some(gate) = write_completion {
+            gate.accept();
+            gate.wait_for_release().await;
         }
         Ok(src.len())
     }
