@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::application_target::ApplicationTarget;
 use super::category::Category;
+use super::click::AdvancedClick;
 use super::key_combo::KeyCombo;
 
 /// What pressing a [`ButtonId`](crate::binding::ButtonId) should do.
@@ -219,6 +220,13 @@ pub enum Action {
     /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
     /// lit while the mode is on. Does nothing on other devices.
     TogglePrecisionMode,
+    /// Click a mouse button once, twice, or three times in a row with
+    /// modifier keys held around the clicks, as Logi Options+'s "Advanced
+    /// click" does. The OS counts the clicks as one double or triple click.
+    ///
+    /// The clicks are instantaneous output: they all happen when the press
+    /// starts, and the release does nothing.
+    AdvancedClick(AdvancedClick),
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -368,6 +376,7 @@ macro_rules! derive_action_core {
                         }
                         None => format!("Tap {}", combo.rendered_key()),
                     },
+                    Action::AdvancedClick(click) => click.rendered_label(),
                 }
             }
 
@@ -388,7 +397,8 @@ macro_rules! derive_action_core {
                     | Action::Workflow(_)
                     | Action::OpenApplication(_)
                     | Action::HoldShortcut(_)
-                    | Action::TapKeyHoldingModifiers(_) => None,
+                    | Action::TapKeyHoldingModifiers(_)
+                    | Action::AdvancedClick(_) => None,
                 }
             }
 
@@ -421,6 +431,7 @@ macro_rules! derive_action_core {
                     | Action::TapKeyHoldingModifiers(_) => Category::Editing,
                     Action::SetDpiPreset(_) => Category::Dpi,
                     Action::OpenApplication(_) => Category::System,
+                    Action::AdvancedClick(_) => Category::Mouse,
                 }
             }
 

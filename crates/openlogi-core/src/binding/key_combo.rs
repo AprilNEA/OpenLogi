@@ -116,13 +116,184 @@ const fn validate_keyboard_usage(value: &u8) -> Result<(), KeyboardUsageError> {
     }
 }
 
+/// One modifier key a synthesized chord can hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ChordModifier {
+    /// The cross-platform primary modifier, written `Cmd`: Command on macOS,
+    /// Control on Linux and Windows.
+    Command,
+    /// The platform logo key, written `Super`, `Win`, or `Meta`: Command on
+    /// macOS, the Windows key, `KEY_LEFTMETA` on Linux. Unlike
+    /// [`Self::Command`], it never becomes Control.
+    Super,
+    /// Control, written `Ctrl`.
+    Control,
+    /// Option on macOS and Alt elsewhere, written `Alt`.
+    Option,
+    /// Shift.
+    Shift,
+}
+
+impl ChordModifier {
+    /// Every modifier, in the order a rendered chord lists them.
+    pub const ALL: [Self; 5] = [
+        Self::Command,
+        Self::Super,
+        Self::Control,
+        Self::Option,
+        Self::Shift,
+    ];
+
+    /// Canonical label, as a rendered chord writes this modifier.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Command => "Cmd",
+            Self::Super => "Super",
+            Self::Control => "Ctrl",
+            Self::Option => "Alt",
+            Self::Shift => "Shift",
+        }
+    }
+
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Command => MOD_COMMAND,
+            Self::Super => MOD_SUPER,
+            Self::Control => MOD_CONTROL,
+            Self::Option => MOD_OPTION,
+            Self::Shift => MOD_SHIFT,
+        }
+    }
+
+    fn parse(token: &str) -> Option<Self> {
+        match token.to_ascii_lowercase().as_str() {
+            "cmd" | "command" => Some(Self::Command),
+            "super" | "win" | "meta" => Some(Self::Super),
+            "shift" => Some(Self::Shift),
+            "ctrl" | "control" => Some(Self::Control),
+            "alt" | "option" => Some(Self::Option),
+            _ => None,
+        }
+    }
+}
+
+/// The modifier keys a synthesized chord holds: the modifiers of a
+/// [`KeyCombo`], or those held around an
+/// [`AdvancedClick`](super::AdvancedClick).
+///
+/// Human-readable formats store the canonical text (`"Cmd+Shift"`, or `""`
+/// for none); binary IPC stores the validated modifier bits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ChordModifiers(u8);
+
+impl ChordModifiers {
+    /// No modifier.
+    pub const NONE: Self = Self(0);
+
+    /// Whether `modifier` is in the set.
+    #[must_use]
+    pub const fn contains(self, modifier: ChordModifier) -> bool {
+        self.0 & modifier.bit() != 0
+    }
+
+    /// The set with `modifier` added.
+    #[must_use]
+    pub const fn with(self, modifier: ChordModifier) -> Self {
+        Self(self.0 | modifier.bit())
+    }
+
+    /// The set with `modifier` added if it was absent and removed if it was
+    /// present.
+    #[must_use]
+    pub const fn toggled(self, modifier: ChordModifier) -> Self {
+        Self(self.0 ^ modifier.bit())
+    }
+
+    /// Whether the set holds no modifier.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Canonical label for the set, such as `Cmd+Shift`, or `None` when it
+    /// is empty.
+    #[must_use]
+    pub fn rendered(self) -> Option<String> {
+        let parts: Vec<&str> = ChordModifier::ALL
+            .into_iter()
+            .filter(|modifier| self.contains(*modifier))
+            .map(ChordModifier::label)
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("+"))
+    }
+
+    const fn bits(self) -> u8 {
+        self.0
+    }
+
+    const fn from_bits(bits: u8) -> Result<Self, KeyComboParseError> {
+        if bits & !ALL_MODIFIERS == 0 {
+            Ok(Self(bits))
+        } else {
+            Err(KeyComboParseError::InvalidModifiers(bits))
+        }
+    }
+}
+
+/// Parses `+`-separated modifier names, the same names a [`KeyCombo`]
+/// accepts. A blank string is the empty set.
+impl FromStr for ChordModifiers {
+    type Err = KeyComboParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Ok(Self::NONE);
+        }
+        input.split('+').try_fold(Self::NONE, |modifiers, raw| {
+            ChordModifier::parse(raw.trim())
+                .map(|modifier| modifiers.with(modifier))
+                .ok_or_else(|| KeyComboParseError::UnknownToken(raw.to_string()))
+        })
+    }
+}
+
+impl Serialize for ChordModifiers {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.rendered().unwrap_or_default())
+        } else {
+            serializer.serialize_u8(self.bits())
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChordModifiers {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            String::deserialize(deserializer)?
+                .parse()
+                .map_err(de::Error::custom)
+        } else {
+            Self::from_bits(u8::deserialize(deserializer)?).map_err(de::Error::custom)
+        }
+    }
+}
+
 /// A platform-neutral keyboard chord.
 ///
 /// Human-readable formats store the canonical text chord; binary IPC stores
 /// validated modifier bits and a USB HID usage.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct KeyCombo {
-    modifiers: u8,
+    modifiers: ChordModifiers,
     key: KeyboardUsage,
 }
 
@@ -136,11 +307,8 @@ impl TryFrom<KeyComboWire> for KeyCombo {
     type Error = KeyComboParseError;
 
     fn try_from(value: KeyComboWire) -> Result<Self, Self::Error> {
-        if value.modifiers & !ALL_MODIFIERS != 0 {
-            return Err(KeyComboParseError::InvalidModifiers(value.modifiers));
-        }
         Ok(Self {
-            modifiers: value.modifiers,
+            modifiers: ChordModifiers::from_bits(value.modifiers)?,
             key: value.key,
         })
     }
@@ -149,7 +317,7 @@ impl TryFrom<KeyComboWire> for KeyCombo {
 impl From<KeyCombo> for KeyComboWire {
     fn from(value: KeyCombo) -> Self {
         Self {
-            modifiers: value.modifiers,
+            modifiers: value.modifiers.bits(),
             key: value.key,
         }
     }
@@ -164,7 +332,7 @@ impl Serialize for KeyCombo {
             serializer.serialize_str(&self.rendered_label())
         } else {
             KeyComboWire {
-                modifiers: self.modifiers,
+                modifiers: self.modifiers.bits(),
                 key: self.key,
             }
             .serialize(serializer)
@@ -194,29 +362,35 @@ impl KeyCombo {
         self.key
     }
 
+    /// The modifiers held with the ordinary key.
+    #[must_use]
+    pub const fn modifiers(&self) -> ChordModifiers {
+        self.modifiers
+    }
+
     /// Whether the chord includes Command, the cross-platform primary modifier:
     /// Command on macOS, Control on Linux and Windows.
     #[must_use]
     pub const fn has_command(&self) -> bool {
-        self.modifiers & MOD_COMMAND != 0
+        self.modifiers.contains(ChordModifier::Command)
     }
 
     /// Whether the chord includes Shift.
     #[must_use]
     pub const fn has_shift(&self) -> bool {
-        self.modifiers & MOD_SHIFT != 0
+        self.modifiers.contains(ChordModifier::Shift)
     }
 
     /// Whether the chord includes Control.
     #[must_use]
     pub const fn has_control(&self) -> bool {
-        self.modifiers & MOD_CONTROL != 0
+        self.modifiers.contains(ChordModifier::Control)
     }
 
     /// Whether the chord includes Option/Alt.
     #[must_use]
     pub const fn has_option(&self) -> bool {
-        self.modifiers & MOD_OPTION != 0
+        self.modifiers.contains(ChordModifier::Option)
     }
 
     /// Whether the chord includes the logo key, written `Super`, `Win`, or
@@ -224,7 +398,7 @@ impl KeyCombo {
     /// Unlike [`Self::has_command`], it never becomes Control.
     #[must_use]
     pub const fn has_super(&self) -> bool {
-        self.modifiers & MOD_SUPER != 0
+        self.modifiers.contains(ChordModifier::Super)
     }
 
     /// Canonical user-facing chord label.
@@ -241,23 +415,7 @@ impl KeyCombo {
     /// ordinary key separately labels the two halves separately too.
     #[must_use]
     pub fn rendered_modifiers(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if self.has_command() {
-            parts.push("Cmd");
-        }
-        if self.has_super() {
-            parts.push("Super");
-        }
-        if self.has_control() {
-            parts.push("Ctrl");
-        }
-        if self.has_option() {
-            parts.push("Alt");
-        }
-        if self.has_shift() {
-            parts.push("Shift");
-        }
-        (!parts.is_empty()).then(|| parts.join("+"))
+        self.modifiers.rendered()
     }
 
     /// Canonical label for the chord's ordinary key alone.
@@ -267,7 +425,8 @@ impl KeyCombo {
     }
 }
 
-/// Why a user-entered keyboard shortcut could not be parsed.
+/// Why a user-entered keyboard shortcut, or a set of its modifiers, could not
+/// be parsed.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum KeyComboParseError {
     /// The shortcut field was blank.
@@ -296,15 +455,15 @@ impl FromStr for KeyCombo {
             return Err(KeyComboParseError::Empty);
         }
 
-        let mut modifiers = 0;
+        let mut modifiers = ChordModifiers::NONE;
         let mut key = None;
         for raw in input.split('+') {
             let token = raw.trim();
             if token.is_empty() {
                 return Err(KeyComboParseError::UnknownToken(raw.to_string()));
             }
-            if let Some(modifier) = parse_modifier(token) {
-                modifiers |= modifier;
+            if let Some(modifier) = ChordModifier::parse(token) {
+                modifiers = modifiers.with(modifier);
                 continue;
             }
             if key.is_some() {
@@ -316,17 +475,6 @@ impl FromStr for KeyCombo {
             return Err(KeyComboParseError::MissingKey);
         };
         Ok(Self { modifiers, key })
-    }
-}
-
-fn parse_modifier(token: &str) -> Option<u8> {
-    match token.to_ascii_lowercase().as_str() {
-        "cmd" | "command" => Some(MOD_COMMAND),
-        "super" | "win" | "meta" => Some(MOD_SUPER),
-        "shift" => Some(MOD_SHIFT),
-        "ctrl" | "control" => Some(MOD_CONTROL),
-        "alt" | "option" => Some(MOD_OPTION),
-        _ => None,
     }
 }
 
@@ -501,5 +649,57 @@ mod tests {
         let encoded = toml::to_string(&wrapper).expect("shortcut serialization failed");
         assert_eq!(encoded, "shortcut = \"Cmd+Shift+P\"\n");
         assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
+    }
+
+    #[test]
+    fn chord_modifiers_share_the_chord_vocabulary() {
+        let modifiers = "shift+Option+cmd"
+            .parse::<ChordModifiers>()
+            .expect("valid modifiers failed");
+        assert_eq!(modifiers.rendered().as_deref(), Some("Cmd+Alt+Shift"));
+        let combo = "Cmd+Alt+Shift+K"
+            .parse::<KeyCombo>()
+            .expect("valid shortcut failed");
+        assert_eq!(combo.modifiers(), modifiers);
+
+        assert_eq!("".parse::<ChordModifiers>(), Ok(ChordModifiers::NONE));
+        assert_eq!(" ".parse::<ChordModifiers>(), Ok(ChordModifiers::NONE));
+        assert_eq!(ChordModifiers::NONE.rendered(), None);
+        assert!(matches!(
+            "Shift+K".parse::<ChordModifiers>(),
+            Err(KeyComboParseError::UnknownToken(token)) if token == "K"
+        ));
+        assert!(matches!(
+            "Shift+".parse::<ChordModifiers>(),
+            Err(KeyComboParseError::UnknownToken(_))
+        ));
+    }
+
+    #[test]
+    fn toggling_a_chord_modifier_flips_only_that_modifier() {
+        let modifiers = ChordModifiers::NONE
+            .toggled(ChordModifier::Shift)
+            .toggled(ChordModifier::Control);
+        assert!(modifiers.contains(ChordModifier::Shift));
+        assert!(modifiers.contains(ChordModifier::Control));
+        assert!(!modifiers.contains(ChordModifier::Command));
+        let modifiers = modifiers.toggled(ChordModifier::Shift);
+        assert!(!modifiers.contains(ChordModifier::Shift));
+        assert_eq!(modifiers.rendered().as_deref(), Some("Ctrl"));
+        assert!(modifiers.toggled(ChordModifier::Control).is_empty());
+    }
+
+    #[test]
+    fn chord_modifiers_reject_unknown_bits() {
+        assert_eq!(
+            ChordModifiers::from_bits(ALL_MODIFIERS),
+            Ok(ChordModifier::ALL
+                .into_iter()
+                .fold(ChordModifiers::NONE, ChordModifiers::with))
+        );
+        assert_eq!(
+            ChordModifiers::from_bits(128),
+            Err(KeyComboParseError::InvalidModifiers(128))
+        );
     }
 }

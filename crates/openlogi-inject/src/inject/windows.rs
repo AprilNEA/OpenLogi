@@ -13,7 +13,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction, Shortcut,
+    Action, ClickButton, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction,
+    Shortcut,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -93,6 +94,7 @@ pub(super) fn execute(action: &Action) {
     match action.effect() {
         Effect::None => {}
         Effect::Click(button) => post_click(button),
+        Effect::AdvancedClick(click) => super::advanced_click(click),
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
@@ -205,15 +207,44 @@ pub(super) fn run_shell_command(cmd: &str) {
 }
 
 fn post_click(button: MouseButton) {
-    let (down, up, data) = match button {
+    let (down, up, data) = button_flags(button);
+    send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
+}
+
+/// Press `modifiers`, post `count` clicks of `button`, and release
+/// `modifiers`, all in one `SendInput` call so no other input lands between
+/// them.
+///
+/// Windows counts clicks as one double click by the time and distance
+/// between them, so clicks posted together at one position count as one
+/// double or triple click.
+pub(super) fn post_clicks(button: ClickButton, count: u8, modifiers: &[HeldKey]) {
+    let layout = ForegroundLayout::current();
+    let keys: Vec<_> = modifiers
+        .iter()
+        .filter_map(|key| held_key(*key, layout))
+        .collect();
+    let (down, up, data) = button_flags(button.into());
+    let mut inputs = Vec::with_capacity(keys.len() * 2 + usize::from(count) * 2);
+    inputs.extend(keys.iter().map(|key| key_input(*key, false)));
+    for _ in 0..count {
+        inputs.push(mouse_input(down, data));
+        inputs.push(mouse_input(up, data));
+    }
+    inputs.extend(keys.iter().rev().map(|key| key_input(*key, true)));
+    send_inputs(&inputs);
+}
+
+/// The down flag, up flag, and `mouseData` that post `button`.
+fn button_flags(button: MouseButton) -> (u32, u32, i32) {
+    match button {
         MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
         MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
         MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
         // Extra buttons share the X flag pair; mouseData carries which one.
         MouseButton::Back => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, i32::from(XBUTTON1)),
         MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, i32::from(XBUTTON2)),
-    };
-    send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
+    }
 }
 
 fn post_key(key: impl Into<Key>, modifiers: &[u16]) {

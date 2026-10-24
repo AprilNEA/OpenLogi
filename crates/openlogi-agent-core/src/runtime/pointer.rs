@@ -76,6 +76,7 @@ fn pointer_action_allowed(
         | Effect::Native(NativeAction::AppExpose) => true,
         Effect::None
         | Effect::Click(_)
+        | Effect::AdvancedClick(_)
         | Effect::Scroll { .. }
         | Effect::Media(_)
         | Effect::Native(_)

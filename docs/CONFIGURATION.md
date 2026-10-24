@@ -396,6 +396,7 @@ Back = { CustomShortcut = "Cmd+Shift+P" }
 Forward = { HoldShortcut = "Ctrl+Space" }
 GestureButton = { TapKeyHoldingModifiers = "Cmd+Tab" }
 MiddleClick = { OpenApplication = { path = "~/Downloads", display_name = "Downloads" } }
+WheelTiltLeft = { AdvancedClick = { button = "Left", count = "Double", modifiers = "Shift" } }
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 ```
 
@@ -421,6 +422,19 @@ and dismiss it. The same shape covers ``Cmd+` ``, `Alt+Tab`, and an IDE's
 `Ctrl+Tab`. A chord with no modifier degrades to a plain tap of its key. If
 another button is already holding the same key through `HoldShortcut`, the tap
 is skipped and only the modifiers go down, so that button keeps its key held.
+
+`AdvancedClick` clicks a mouse button more than once, or with modifiers held,
+like the Advanced Click action of Logi Options+. `button` is `Left`, `Right`,
+or `Middle`. `count` is `Single`, `Double`, or `Triple`. `modifiers` takes the
+chord modifier names above joined by `+`, and may be left out. The modifiers
+go down before the first click and come up after the last one. A modifier
+that another button already holds through `HoldShortcut` or
+`TapKeyHoldingModifiers` stays down. The clicks land at the pointer. On macOS
+each click carries its click count, so apps see one double or triple click.
+On Linux the clicks are 40 ms apart, so that libinput does not merge them. On
+Windows they go out together in one batch. The desktop app saves a `Single`
+click without modifiers as the plain `LeftClick`, `RightClick`, or
+`MiddleClick`.
 
 A `{ short = ..., long = ... }` binding waits for the button's outcome instead
 of firing on press. Releasing before 500 ms fires `short`; keeping the button

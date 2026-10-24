@@ -147,7 +147,9 @@ pub use succession::Identity;
 ///      v40 press-force methods, together with raw-preserving masks and
 ///      guarded-write/superseded errors; `Agent::reload_saved_config_with_verdict`
 ///      and [`SavedConfigVerdict`] appended, so a GUI distinguishes its accepted
-///      saved revision from an external edit that replaced it before reload.
+///      saved revision from an external edit that replaced it before reload;
+///      `Action::AdvancedClick` appended — a double or triple click, or a
+///      click with modifiers held, bound to a button.
 pub const PROTOCOL_VERSION: u32 = 41;
 
 /// Environment variable through which the agent hands a supervised helper the

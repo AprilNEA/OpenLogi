@@ -12,7 +12,10 @@ use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{
+    Action, AdvancedClick, ButtonId, ChordModifier, ClickButton, ClickCount, GestureDirection,
+    default_binding,
+};
 
 use super::force_sensing::{PressForce, force_sensing_row};
 use super::hotspots::MouseControlId;
@@ -58,6 +61,7 @@ pub(super) struct ActionPickerContext<'a> {
     pub shortcut_invalid: bool,
     pub shortcut_mode: ShortcutMode,
     pub application_invalid: bool,
+    pub advanced_click: AdvancedClick,
     pub view: &'a Entity<MouseModelView>,
 }
 
@@ -797,6 +801,13 @@ fn action_library(
             on_pick,
             pal,
         ))
+        .child(advanced_click_editor(
+            id_prefix,
+            picker.advanced_click,
+            picker.view,
+            on_pick,
+            pal,
+        ))
         .child(editor_section(tr!("actions.actions"), pal))
         .child(control_input(picker.search).cleanable(true))
         .child(
@@ -948,6 +959,113 @@ fn custom_application_editor(
                     .child(tr!("action_ring.custom_action_invalid_input")),
             )
         })
+}
+
+/// The buttons the advanced click editor offers, with their selector ids and
+/// catalog keys.
+pub(super) const CLICK_BUTTONS: [(ClickButton, &str, &str); 3] = [
+    (ClickButton::Left, "left", "actions.click_button_left"),
+    (ClickButton::Right, "right", "actions.click_button_right"),
+    (ClickButton::Middle, "middle", "actions.click_button_middle"),
+];
+
+/// The click counts the advanced click editor offers, with their selector ids
+/// and catalog keys.
+pub(super) const CLICK_COUNTS: [(ClickCount, &str, &str); 3] = [
+    (ClickCount::Single, "single", "actions.click_count_single"),
+    (ClickCount::Double, "double", "actions.click_count_double"),
+    (ClickCount::Triple, "triple", "actions.click_count_triple"),
+];
+
+/// The modifiers the advanced click editor offers, in Logi Options+'s order.
+/// macOS has Command; the other platforms have the logo key instead, and
+/// their Ctrl is Control itself.
+const CLICK_MODIFIERS: [ChordModifier; 4] = if cfg!(target_os = "macos") {
+    [
+        ChordModifier::Shift,
+        ChordModifier::Command,
+        ChordModifier::Option,
+        ChordModifier::Control,
+    ]
+} else {
+    [
+        ChordModifier::Shift,
+        ChordModifier::Control,
+        ChordModifier::Option,
+        ChordModifier::Super,
+    ]
+};
+
+/// An "Advanced Click" editor, after the Logi Options+ panel of that name:
+/// the button, how many times it clicks, and the modifiers held around the
+/// clicks. "Add" binds the draft; a single click without modifiers binds the
+/// plain click action.
+fn advanced_click_editor(
+    id_prefix: &'static str,
+    draft: AdvancedClick,
+    view: &Entity<MouseModelView>,
+    on_pick: &PickFn,
+    pal: Palette,
+) -> impl IntoElement {
+    let choice = |id: String, selected: bool, next: AdvancedClick| {
+        let view = view.clone();
+        let id = format!("{id_prefix}-advanced-click-{id}");
+        let selector = id.clone();
+        control_button(id)
+            .debug_selector(move || selector.clone())
+            .selected(selected)
+            .on_click(move |_, _, cx| {
+                view.update(cx, |view, cx| {
+                    view.advanced_click = next;
+                    cx.notify();
+                });
+            })
+    };
+    let buttons = CLICK_BUTTONS.map(|(button, id, key)| {
+        choice(
+            format!("button-{id}"),
+            draft.button == button,
+            AdvancedClick { button, ..draft },
+        )
+        .label(tr!(key))
+    });
+    let counts = CLICK_COUNTS.map(|(count, id, key)| {
+        choice(
+            format!("count-{id}"),
+            draft.count == count,
+            AdvancedClick { count, ..draft },
+        )
+        .label(tr!(key))
+    });
+    let modifiers = CLICK_MODIFIERS.map(|modifier| {
+        choice(
+            format!("modifier-{}", modifier.label().to_ascii_lowercase()),
+            draft.modifiers.contains(modifier),
+            AdvancedClick {
+                modifiers: draft.modifiers.toggled(modifier),
+                ..draft
+            },
+        )
+        .label(modifier.label())
+    });
+    let on_pick = on_pick.clone();
+    v_flex()
+        .gap_1()
+        .child(editor_section(tr!("actions.advanced_click"), pal))
+        .child(h_flex().gap_2().children(buttons))
+        .child(h_flex().gap_2().children(counts))
+        .child(h_flex().gap_2().children(modifiers))
+        .child(
+            h_flex().justify_end().child(
+                Button::new(format!("{id_prefix}-advanced-click-add"))
+                    .debug_selector(move || format!("{id_prefix}-advanced-click-add"))
+                    .compact()
+                    .label(tr!("common.add"))
+                    .on_click(move |_, window, cx| {
+                        (on_pick)(Action::from(draft), window, cx);
+                    }),
+            ),
+        )
 }
 
 fn gesture_action(

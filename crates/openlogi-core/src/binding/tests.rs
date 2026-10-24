@@ -381,10 +381,10 @@ fn all_catalog_variants_roundtrip_toml() {
     }
 }
 
-#[test]
-fn persisted_action_variant_names_are_stable() {
-    let mut actions = Action::catalog();
-    actions.extend([
+/// One action of every variant [`Action::catalog`] leaves out, because each
+/// carries a payload.
+fn payload_actions() -> [Action; 10] {
+    [
         Action::SetDpiPreset(0),
         Action::CustomShortcut(
             "F1".parse()
@@ -407,7 +407,14 @@ fn persisted_action_variant_names_are_stable() {
                 .parse()
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
-    ]);
+        Action::AdvancedClick(AdvancedClick::default()),
+    ]
+}
+
+#[test]
+fn persisted_action_variant_names_are_stable() {
+    let mut actions = Action::catalog();
+    actions.extend(payload_actions());
     let mut actual: Vec<String> = actions
         .into_iter()
         .map(
@@ -424,6 +431,7 @@ fn persisted_action_variant_names_are_stable() {
         .collect();
     actual.sort();
     let mut expected = [
+        "AdvancedClick",
         "AppExpose",
         "BrowserBack",
         "BrowserForward",
@@ -488,6 +496,125 @@ fn persisted_action_variant_names_are_stable() {
 fn custom_shortcut_roundtrips_toml() {
     let action = Action::CustomShortcut("Cmd+Shift+P".parse().expect("valid shortcut failed"));
     assert_eq!(roundtrip(&action), action);
+}
+
+// ── Advanced click ────────────────────────────────────────────────────────
+
+fn shift_double_click() -> AdvancedClick {
+    AdvancedClick {
+        button: ClickButton::Left,
+        count: ClickCount::Double,
+        modifiers: "Shift"
+            .parse()
+            .unwrap_or_else(|error| panic!("valid modifiers failed: {error}")),
+    }
+}
+
+#[test]
+fn advanced_click_is_a_named_table_in_toml() {
+    let toml = r#"bindings.Back = { AdvancedClick = { button = "Right", count = "Triple", modifiers = "Cmd+Shift" } }"#;
+    let parsed = toml::from_str::<BindingWrapper>(toml).expect("deserialize");
+    let click = AdvancedClick {
+        button: ClickButton::Right,
+        count: ClickCount::Triple,
+        modifiers: "Cmd+Shift"
+            .parse()
+            .unwrap_or_else(|error| panic!("valid modifiers failed: {error}")),
+    };
+    assert_eq!(
+        parsed.bindings[&ButtonId::Back],
+        Binding::Single(Action::AdvancedClick(click))
+    );
+    assert_eq!(
+        roundtrip(&Action::AdvancedClick(click)),
+        Action::AdvancedClick(click)
+    );
+}
+
+#[test]
+fn advanced_click_modifiers_may_be_left_out() {
+    let toml = r#"bindings.Back = { AdvancedClick = { button = "Middle", count = "Double" } }"#;
+    let parsed = toml::from_str::<BindingWrapper>(toml).expect("deserialize");
+    assert_eq!(
+        parsed.bindings[&ButtonId::Back],
+        Binding::Single(Action::AdvancedClick(AdvancedClick {
+            button: ClickButton::Middle,
+            count: ClickCount::Double,
+            modifiers: ChordModifiers::NONE,
+        }))
+    );
+}
+
+#[test]
+fn a_plain_single_advanced_click_is_the_plain_click_action() {
+    for (button, plain) in [
+        (ClickButton::Left, Action::LeftClick),
+        (ClickButton::Right, Action::RightClick),
+        (ClickButton::Middle, Action::MiddleClick),
+    ] {
+        let click = AdvancedClick {
+            button,
+            ..AdvancedClick::default()
+        };
+        assert_eq!(Action::from(click), plain);
+    }
+    let double = AdvancedClick {
+        count: ClickCount::Double,
+        ..AdvancedClick::default()
+    };
+    assert_eq!(Action::from(double), Action::AdvancedClick(double));
+    let shift_click = AdvancedClick {
+        count: ClickCount::Single,
+        ..shift_double_click()
+    };
+    assert_eq!(
+        Action::from(shift_click),
+        Action::AdvancedClick(shift_click)
+    );
+}
+
+#[test]
+fn advanced_click_is_a_mouse_action_outside_the_catalog() {
+    let action = Action::AdvancedClick(shift_double_click());
+    assert_eq!(action.label(), "Shift+Double Click");
+    assert_eq!(action.translation_key(), None);
+    assert_eq!(action.category(), Category::Mouse);
+    assert_eq!(ActionRingIcon::for_action(&action), ActionRingIcon::Pointer);
+    assert_matches!(action.effect(), Effect::AdvancedClick(click) if click == shift_double_click());
+    assert!(
+        !Action::catalog()
+            .iter()
+            .any(|action| matches!(action, Action::AdvancedClick(_)))
+    );
+}
+
+#[test]
+fn advanced_click_labels_name_button_and_count() {
+    let label = |button, count| {
+        AdvancedClick {
+            button,
+            count,
+            modifiers: ChordModifiers::NONE,
+        }
+        .rendered_label()
+    };
+    assert_eq!(label(ClickButton::Left, ClickCount::Single), "Left Click");
+    assert_eq!(label(ClickButton::Left, ClickCount::Triple), "Triple Click");
+    assert_eq!(
+        label(ClickButton::Right, ClickCount::Double),
+        "Right Double Click"
+    );
+    assert_eq!(
+        label(ClickButton::Middle, ClickCount::Triple),
+        "Middle Triple Click"
+    );
+    // A single click shares the plain click action's name and catalog key.
+    let single = AdvancedClick::default();
+    assert_eq!(single.click_label(), Action::LeftClick.label());
+    assert_eq!(
+        Some(single.click_translation_key()),
+        Action::LeftClick.translation_key()
+    );
 }
 
 #[test]

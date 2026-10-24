@@ -11,9 +11,9 @@ use std::collections::HashMap;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::sync::{LazyLock, Mutex, PoisonError};
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use openlogi_core::binding::KeyboardUsage;
 use openlogi_core::binding::{Action, HeldKeys, KeyCombo};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use openlogi_core::binding::{AdvancedClick, ChordModifier, ChordModifiers, KeyboardUsage};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::{Script, WorkflowStep};
 use openlogi_core::scroll::ScrollDelta;
@@ -181,33 +181,75 @@ static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn held_keys(combo: &KeyCombo, held: HeldKeys) -> Vec<HeldKey> {
-    let mut keys = Vec::with_capacity(4);
-    #[cfg(target_os = "macos")]
-    if combo.has_command() || combo.has_super() {
-        keys.push(HeldKey::Command);
-    }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    if combo.has_command() || combo.has_control() {
-        keys.push(HeldKey::Control);
-    }
-    #[cfg(target_os = "macos")]
-    if combo.has_control() {
-        keys.push(HeldKey::Control);
-    }
-    if combo.has_shift() {
-        keys.push(HeldKey::Shift);
-    }
-    if combo.has_option() {
-        keys.push(HeldKey::Alt);
-    }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    if combo.has_super() {
-        keys.push(HeldKey::Super);
-    }
+    let mut keys = modifier_keys(combo.modifiers());
     if held == HeldKeys::WholeChord {
         keys.push(HeldKey::Key(combo.key()));
     }
     keys
+}
+
+/// The physical keys that hold `modifiers` on this platform, in press order.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn modifier_keys(modifiers: ChordModifiers) -> Vec<HeldKey> {
+    let mut keys = Vec::with_capacity(4);
+    #[cfg(target_os = "macos")]
+    if modifiers.contains(ChordModifier::Command) || modifiers.contains(ChordModifier::Super) {
+        keys.push(HeldKey::Command);
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if modifiers.contains(ChordModifier::Command) || modifiers.contains(ChordModifier::Control) {
+        keys.push(HeldKey::Control);
+    }
+    #[cfg(target_os = "macos")]
+    if modifiers.contains(ChordModifier::Control) {
+        keys.push(HeldKey::Control);
+    }
+    if modifiers.contains(ChordModifier::Shift) {
+        keys.push(HeldKey::Shift);
+    }
+    if modifiers.contains(ChordModifier::Option) {
+        keys.push(HeldKey::Alt);
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if modifiers.contains(ChordModifier::Super) {
+        keys.push(HeldKey::Super);
+    }
+    keys
+}
+
+/// Post `click`'s clicks with its modifiers held around them, under the lock
+/// that orders held-chord edges.
+///
+/// A modifier a held chord already owns is left alone: pressing it again
+/// would change nothing, and releasing it would end that hold early. The
+/// lock stays held for the whole burst, so no hold starts or ends between
+/// the modifier edges and the clicks.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn advanced_click(click: AdvancedClick) {
+    let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    let modifiers: Vec<HeldKey> = modifier_keys(click.modifiers)
+        .into_iter()
+        .filter(|key| !output.owners.contains_key(key))
+        .collect();
+    let count = click.count.get();
+    cfg_select! {
+        target_os = "macos" => {
+            // The same event-ordering cursor as `hold_transition`: it starts
+            // at the held state and must end there, since the burst owns
+            // nothing once it returns.
+            let held = output.modifiers();
+            let pressed = macos::hold_keys(&modifiers, KeyPhase::Down, held);
+            macos::post_clicks(click.button, count, pressed);
+            let released = macos::hold_keys(&modifiers, KeyPhase::Up, pressed);
+            debug_assert_eq!(released, held);
+        }
+        target_os = "linux" => {
+            linux::post_clicks(click.button, count, &modifiers);
+        }
+        target_os = "windows" => {
+            windows::post_clicks(click.button, count, &modifiers);
+        }
+    }
 }
 
 /// A shortcut-table entry, parsed once into the chord it names. The tables are
@@ -488,6 +530,17 @@ fn with_held_modifiers<R>(post: impl FnOnce(HeldModifiers) -> R) -> R {
     post(output.modifiers())
 }
 
+/// Run `post` under the lock that orders held-chord edges and click bursts.
+///
+/// A one-shot chord posted through this never lands between the clicks of an
+/// advanced click burst, where its modifier-up edge would lift the modifiers
+/// the burst holds, and never inside a held transition.
+#[cfg(target_os = "linux")]
+fn serialized_with_held_output<R>(post: impl FnOnce() -> R) -> R {
+    let _output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    post()
+}
+
 /// Let the frontmost app's menus answer shortcuts the keyboard layout
 /// remaps, such as Back and Forward on Spanish or German layouts. Call once
 /// on the main thread before its run loop starts.
@@ -741,6 +794,32 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::{HeldKey, HeldOutput, HoldTransition};
     use super::{QuantizedScroll, ScrollQuantizer};
+
+    /// A one-shot chord waits while a click burst holds the lock, so its
+    /// modifier-up edge cannot land between the burst's clicks.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_one_shot_chord_waits_for_a_click_burst() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, PoisonError};
+
+        let burst = super::HELD_OUTPUT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let posted = Arc::new(AtomicBool::new(false));
+        let chord = std::thread::spawn({
+            let posted = Arc::clone(&posted);
+            move || super::serialized_with_held_output(|| posted.store(true, Ordering::SeqCst))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !posted.load(Ordering::SeqCst),
+            "the chord must not post during the burst"
+        );
+        drop(burst);
+        chord.join().expect("chord thread");
+        assert!(posted.load(Ordering::SeqCst));
+    }
 
     /// Synthetic high-resolution input: eight eighth-ticks must total exactly
     /// one Windows/Linux wheel detent (120 raw units). This is deterministic
