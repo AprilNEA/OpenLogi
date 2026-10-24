@@ -123,6 +123,10 @@ pub struct SwipeAccumulator {
     /// [`GESTURE_HOLD_FOR_SWIPE`]; a quicker value lets a fast hold-and-flick
     /// register as a swipe instead of falling back to a plain click on release.
     hold_for_swipe: Duration,
+    /// Whether a hold that keeps travelling the committed way may fire that
+    /// direction again (per-device `gesture_repeat`). Off means one swipe per
+    /// press, however far the hand carries the motion.
+    repeat_enabled: bool,
 }
 
 impl Default for SwipeAccumulator {
@@ -137,6 +141,7 @@ impl Default for SwipeAccumulator {
             repeat_cross: 0,
             moved_at: None,
             hold_for_swipe: GESTURE_HOLD_FOR_SWIPE,
+            repeat_enabled: true,
         }
     }
 }
@@ -162,6 +167,11 @@ impl SwipeAccumulator {
         self.repeat = 0;
         self.repeat_cross = 0;
         self.moved_at = None;
+    }
+
+    /// Whether a hold in progress may repeat its committed direction.
+    pub fn set_repeat_enabled(&mut self, enabled: bool) {
+        self.repeat_enabled = enabled;
     }
 
     /// Whether a hold is in progress (between [`Self::begin`] and [`Self::end`]),
@@ -217,7 +227,7 @@ impl SwipeAccumulator {
                 // committed direction's frame (`Right` = along it).
                 let straight =
                     detect_swipe(self.repeat, self.repeat_cross) == Some(GestureDirection::Right);
-                if self.repeat >= GESTURE_REPEAT_DISTANCE && straight {
+                if self.repeat_enabled && self.repeat >= GESTURE_REPEAT_DISTANCE && straight {
                     // Carry the excess, so a report spanning two repeat
                     // distances fires again on the next report. The excess is
                     // the stroke's tail, so it keeps the tail's drift: this
@@ -398,6 +408,21 @@ mod tests {
         assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0), None);
         // Releasing before the gate is what a bound gesture reads as a click.
         assert!(acc.end());
+    }
+
+    #[test]
+    fn an_abandoned_repeat_keeps_one_swipe_per_press() {
+        let mut acc = SwipeAccumulator::default();
+        acc.set_repeat_enabled(false);
+        acc.begin_with(Duration::ZERO);
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        // Carrying on past the repeat distance is the case that used to fire the
+        // same direction again: with repeat off it must stay silent, so one press
+        // is one swipe however long the hand travels.
+        assert_eq!(acc.accumulate(GESTURE_REPEAT_DISTANCE + 10, 0), None);
     }
 
     #[test]

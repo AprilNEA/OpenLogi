@@ -669,6 +669,10 @@ impl Orchestrator {
                 .and_then(|key| self.config.devices.get(key))
                 .and_then(|device| device.gesture_hold)
                 .unwrap_or_default(),
+            gesture_repeat: key
+                .and_then(|key| self.config.devices.get(key))
+                .and_then(|device| device.gesture_repeat)
+                .unwrap_or(true),
             ..HookMaps::default()
         }
     }

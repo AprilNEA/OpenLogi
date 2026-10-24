@@ -194,6 +194,9 @@ pub struct CaptureSpec {
     /// `gesture_hold` setting, or [`GestureHold::DEFAULT`] (160 ms) when the
     /// config leaves it unset.
     pub gesture_hold: GestureHold,
+    /// Whether carrying a gesture past its first commit fires the direction
+    /// again (per-device `gesture_repeat`, on by default).
+    pub gesture_repeat: bool,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
@@ -226,7 +229,12 @@ pub async fn run_capture_session(
     if let Some(direction) = armed.thumbwheel_direction() {
         let _ = host.sink.send(direction);
     }
-    Ok(run_capture(shared, GestureCapture::new(armed, spec.gesture_hold), host).await)
+    Ok(run_capture(
+        shared,
+        GestureCapture::new(armed, spec.gesture_hold, spec.gesture_repeat),
+        host,
+    )
+    .await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the
@@ -242,11 +250,11 @@ struct GestureCapture {
 }
 
 impl GestureCapture {
-    fn new(armed: ArmedControls, gesture_hold: GestureHold) -> Self {
+    fn new(armed: ArmedControls, gesture_hold: GestureHold, gesture_repeat: bool) -> Self {
         Self {
             armed,
             accum: Arc::new(Mutex::new(
-                CaptureAccum::default().with_gesture_hold(gesture_hold),
+                CaptureAccum::default().with_gesture_settings(gesture_hold, gesture_repeat),
             )),
             thumb_status: Arc::new(Mutex::new(RotationStatus::Inactive)),
         }
@@ -363,7 +371,8 @@ impl ArmedCapture for GestureCapture {
     fn reset_input_state(&self) {
         let mut accum = self.accum.lock().unwrap_or_else(PoisonError::into_inner);
         let gesture_hold = accum.gesture_hold();
-        *accum = CaptureAccum::default().with_gesture_hold(gesture_hold);
+        let gesture_repeat = accum.gesture_repeat();
+        *accum = CaptureAccum::default().with_gesture_settings(gesture_hold, gesture_repeat);
         // A power cycle ends any roll in progress; carrying it over would
         // swallow the first tap after the reconnect.
         *self

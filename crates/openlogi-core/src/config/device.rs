@@ -284,6 +284,13 @@ pub struct DeviceConfig {
     /// hold-and-flick register as a swipe instead of a plain click on release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gesture_hold: Option<GestureHold>,
+    /// Whether carrying a gesture on past the first commit fires that direction
+    /// again, the way Logi Options+ steps through desktops. **On by default**;
+    /// `false` limits one press to a single swipe, so a long hold-and-drag can
+    /// never fire twice. `None` keeps the runtime default (on) and is omitted
+    /// from `config.toml`, like every other unset per-device switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gesture_repeat: Option<bool>,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -420,6 +427,7 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             smooth_wheel: false,
             gesture_hold: None,
+            gesture_repeat: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
             keep_os_layout: None,
@@ -546,6 +554,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     gesture_hold: Option<GestureHold>,
     #[serde(default)]
+    gesture_repeat: Option<bool>,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
@@ -615,6 +625,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             smooth_wheel: raw.smooth_wheel,
             gesture_hold: raw.gesture_hold,
+            gesture_repeat: raw.gesture_repeat,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
@@ -627,6 +638,18 @@ impl From<RawDeviceConfig> for DeviceConfig {
 #[cfg(test)]
 mod tests {
     use super::DeviceConfig;
+
+    #[test]
+    fn gesture_repeat_defaults_on_and_can_be_disabled() {
+        let on: DeviceConfig = toml::from_str("").expect("empty table is valid");
+        assert_eq!(
+            on.gesture_repeat, None,
+            "unset keeps the runtime default: on"
+        );
+        let off: DeviceConfig =
+            toml::from_str("gesture_repeat = false").expect("valid explicit opt-out");
+        assert_eq!(off.gesture_repeat, Some(false));
+    }
 
     #[test]
     fn gesture_hold_round_trips_and_rejects_out_of_range() {

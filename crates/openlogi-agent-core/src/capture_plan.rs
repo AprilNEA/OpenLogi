@@ -305,6 +305,9 @@ pub fn plan_for_device(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    let device = config.devices.get(config_key);
+    let gesture_hold = device.and_then(|d| d.gesture_hold).unwrap_or_default();
+    let gesture_repeat = device.and_then(|d| d.gesture_repeat).unwrap_or(true);
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -323,11 +326,8 @@ pub fn plan_for_device(
                 // Needs the device's wheel capabilities and the settings of
                 // its current link, so the orchestrator fills it in.
                 divert_main_wheel: None,
-                gesture_hold: config
-                    .devices
-                    .get(config_key)
-                    .and_then(|device| device.gesture_hold)
-                    .unwrap_or_default(),
+                gesture_hold,
+                gesture_repeat,
             },
             rearm_generation,
         },

@@ -51,6 +51,9 @@ pub struct HookMaps {
     /// How long a gesture button must be held before its travel commits,
     /// from the selected device's `gesture_hold` (default 160 ms).
     pub(crate) gesture_hold: GestureHold,
+    /// Whether a held gesture may repeat its direction (per-device
+    /// `gesture_repeat`, on by default).
+    pub(crate) gesture_repeat: bool,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -120,12 +123,19 @@ impl HoldState {
     }
 
     /// Store the token returned by the accepted lifecycle `Down`.
-    fn begin(&mut self, button: ButtonId, press: PressToken, gesture_hold: GestureHold) {
+    fn begin(
+        &mut self,
+        button: ButtonId,
+        press: PressToken,
+        gesture_hold: GestureHold,
+        gesture_repeat: bool,
+    ) {
         self.current = Some(GestureHoldState {
             button,
             started_at: Instant::now(),
             press,
         });
+        self.swipe.set_repeat_enabled(gesture_repeat);
         self.swipe.begin_with(gesture_hold.duration());
     }
 
@@ -254,17 +264,17 @@ fn handle_button(
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
-    let (binding, is_gesture, pointer_target, gesture_hold) =
-        hooks
-            .try_read()
-            .map_or((None, false, None, GestureHold::DEFAULT), |maps| {
-                (
-                    maps.bindings.get(&id).cloned(),
-                    maps.gestures.contains_key(&id),
-                    maps.pointer_target,
-                    maps.gesture_hold,
-                )
-            });
+    let (binding, is_gesture, pointer_target, gesture_hold, gesture_repeat) = hooks
+        .try_read()
+        .map_or((None, false, None, GestureHold::DEFAULT, true), |maps| {
+            (
+                maps.bindings.get(&id).cloned(),
+                maps.gestures.contains_key(&id),
+                maps.pointer_target,
+                maps.gesture_hold,
+                maps.gesture_repeat,
+            )
+        });
     let action_target = if pressed {
         ActionDispatchTarget::for_pointer(pointer_target, capture_safari_pid)
     } else {
@@ -280,7 +290,7 @@ fn handle_button(
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None, action_target) {
-                HOLD.with_borrow_mut(|h| h.begin(id, press, gesture_hold));
+                HOLD.with_borrow_mut(|h| h.begin(id, press, gesture_hold, gesture_repeat));
                 return EventDisposition::Suppress;
             }
             return SUPPRESSED_PRESSES

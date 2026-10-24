@@ -52,8 +52,10 @@ fn begin_hold(
     overlap: bool,
     skip_first_raw_xy: bool,
     gesture_hold: GestureHold,
+    gesture_repeat: bool,
 ) -> HoldState {
     let mut swipe = SwipeAccumulator::default();
+    swipe.set_repeat_enabled(gesture_repeat);
     swipe.begin_with(gesture_hold.duration());
     HoldState::Holding {
         cid,
@@ -73,6 +75,9 @@ pub(super) struct CaptureAccum {
     /// Gate applied to every hold this accumulator begins, from the device's
     /// `gesture_hold` setting.
     gesture_hold: GestureHold,
+    /// Whether a hold may repeat its committed direction, from the device's
+    /// `gesture_repeat` setting.
+    gesture_repeat: bool,
     /// The armed gesture sources held in the last event, for edge detection:
     /// a source not previously held that becomes the holder is a fresh touch
     /// (its first raw-XY sample is then stale and discarded).
@@ -117,16 +122,26 @@ fn captured_gesture_button(cid: u16, gesture_button_cids: &[(u16, ButtonId)]) ->
 }
 
 impl CaptureAccum {
-    /// Apply the device's configured hold gate to every hold this accumulator
+    /// Apply the device's gesture settings to every hold this accumulator
     /// begins from now on.
-    pub(super) fn with_gesture_hold(mut self, gesture_hold: GestureHold) -> Self {
+    pub(super) fn with_gesture_settings(
+        mut self,
+        gesture_hold: GestureHold,
+        gesture_repeat: bool,
+    ) -> Self {
         self.gesture_hold = gesture_hold;
+        self.gesture_repeat = gesture_repeat;
         self
     }
 
     /// The hold gate this accumulator currently applies.
     pub(super) fn gesture_hold(&self) -> GestureHold {
         self.gesture_hold
+    }
+
+    /// Whether this accumulator lets a hold repeat its direction.
+    pub(super) fn gesture_repeat(&self) -> bool {
+        self.gesture_repeat
     }
 
     /// Update the accumulator and emit on a decoded `0x1b04` event: preserve
@@ -199,6 +214,7 @@ impl CaptureAccum {
                                 held.len() > 1,
                                 !self.gestures_down.contains(&cid),
                                 self.gesture_hold,
+                                self.gesture_repeat,
                             ),
                             None => HoldState::Idle,
                         }
