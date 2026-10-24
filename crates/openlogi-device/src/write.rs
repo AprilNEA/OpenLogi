@@ -44,9 +44,10 @@ mod smartshift;
 pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
 pub use button_spy::{ButtonSpyError, ButtonSpyWatch, watch_button_spy};
 pub use diagnostics::{
-    FeatureEntry, FirmwareEntity, FirmwareEntityInfo, RAW_BATTERY_FEATURES, RAW_FEATURE_PARAMS,
-    RawFeatureAnswers, RawFeatureCall, RawFeatureReply, ReprogControlEntry, dump_features,
-    dump_firmware_entities, dump_reprog_controls, raw_feature_calls, read_battery_raw,
+    ColorLedZoneEntry, FeatureEntry, FirmwareEntity, FirmwareEntityInfo, RAW_BATTERY_FEATURES,
+    RAW_FEATURE_PARAMS, RawFeatureAnswers, RawFeatureCall, RawFeatureReply, ReprogControlEntry,
+    dump_color_led_zones, dump_features, dump_firmware_entities, dump_reprog_controls,
+    raw_feature_calls, read_battery_raw,
 };
 pub use disable_keys::{
     get_disable_keys, get_disable_keys_on, set_disable_keys, set_disable_keys_on,
@@ -78,9 +79,9 @@ pub use hires_wheel::{
 };
 pub use key_display::{KeyDisplay, KeyImageJpeg, key_display_for, write_key_image_on};
 pub use lighting::{
-    LightingMethod, LightingWrite, LitZone, RgbControlLease, ZoneWalkStep, release_rgb_control,
-    set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
-    walk_per_key_zones, walk_per_key_zones_on,
+    LightingAnimation, LightingMethod, LightingWrite, LitZone, RgbControlLease, ZoneWalkStep,
+    release_rgb_control, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
+    set_keyboard_color_with_on, walk_per_key_zones, walk_per_key_zones_on,
 };
 pub(crate) use litra::litra_capabilities;
 pub use litra::{
