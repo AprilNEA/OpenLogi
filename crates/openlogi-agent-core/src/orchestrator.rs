@@ -383,20 +383,25 @@ impl SharedHandles {
     /// order: each rewrites the whole configuration it read, so two that
     /// overlapped would undo one another, and a newer change to another
     /// control does not make an older one moot. Waiting for the earlier
-    /// changes does not count against the write's deadline.
-    pub async fn set_backlight(
+    /// changes does not count against the write's deadline. Reserves its
+    /// place before returning, so an owned task cannot reorder admission by
+    /// polling a later request first.
+    pub fn set_backlight(
         &self,
         route: &DeviceRoute,
         change: BacklightChange,
-    ) -> Result<BacklightState, WriteError> {
+    ) -> impl Future<Output = Result<BacklightState, WriteError>> + Send + 'static + use<> {
         let ticket = self.backlight_order.request(route);
-        self.device(route)
-            .run_in_order(
-                HidppOperation::WriteBacklight,
-                ticket,
-                move |c| async move { openlogi_hid::update_backlight_on(&c, change).await },
-            )
-            .await
+        let device = self.device(route);
+        async move {
+            device
+                .run_in_order(
+                    HidppOperation::WriteBacklight,
+                    ticket,
+                    move |c| async move { openlogi_hid::update_backlight_on(&c, change).await },
+                )
+                .await
+        }
     }
 
     /// Name the computer on Easy-Switch `slot` of the device at `route` and
@@ -538,10 +543,10 @@ pub struct Orchestrator {
     /// Disable Keys request needs bounded recovery. This plan excludes volatile
     /// settings that are unrelated to the manual request.
     disabled_keys_recovery: BTreeMap<DeviceStableId, u8>,
-    /// Disable Keys recoveries started on each route, added to the published
+    /// Agent-owned settings changes on each route, added to the published
     /// [`PairedDevice::settings_revision`](openlogi_core::device::PairedDevice::settings_revision).
-    /// A recovery changes the keyboard without a `0x4521` report, so a client
-    /// that read the abandoned mask needs this move to read again.
+    /// Disable Keys recovery and backlight writes can change the keyboard
+    /// without a firmware broadcast, so clients need this move to read again.
     settings_epochs: Vec<(DeviceRoute, u64)>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
@@ -1620,11 +1625,32 @@ impl Orchestrator {
         }
     }
 
+    /// Ask clients to re-read settings after an agent-owned hardware attempt.
+    ///
+    /// An error can follow a successful device write, so this announces
+    /// invalidation, not success or a returned value. A disappeared route
+    /// stays absent; a replacement route can only publish its own fresh read.
+    /// This does not rescan inventory or re-apply persisted settings.
+    pub fn announce_settings_changed(&mut self, route: &DeviceRoute) {
+        let InventoryState::Ready { inventories, .. } = &self.inventory else {
+            return;
+        };
+        if inventories.iter().any(|inventory| {
+            inventory.paired.iter().any(|device| {
+                device.online
+                    && DeviceRoute::for_slot(inventory, device.slot).as_ref() == Some(route)
+            })
+        }) {
+            bump_settings_epoch(&mut self.settings_epochs, route);
+            self.publish_inventory();
+        }
+    }
+
     /// Republish the device facts the GUI observes, reading the one field that
     /// holds them so this can never disagree with the `inventory` /
     /// `standalone` / `inventory_health` accessors. Called by every mutator
-    /// that touches the `inventory` field, and after a Disable Keys recovery
-    /// starts. It clones to add recovery epochs, and otherwise only when
+    /// that touches the `inventory` field, and after an agent-owned settings
+    /// change. It clones to add settings epochs, and otherwise only when
     /// something actually changed.
     fn publish_inventory(&self) {
         let health = self.inventory_health();

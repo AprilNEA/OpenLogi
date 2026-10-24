@@ -132,6 +132,9 @@ struct BacklightWrites {
     /// Oldest first.
     pending: Vec<(u64, BacklightChange)>,
     answered: u64,
+    /// An observed revision may be newer than an outstanding RPC's readback.
+    /// Read again once local intent settles rather than trusting that reply.
+    refresh_after_pending: bool,
 }
 
 impl BacklightWrites {
@@ -874,7 +877,9 @@ impl DeviceReads {
     ///
     /// Like [`Self::set_report_rate_ready`], only the read subscribed on
     /// `route` takes the answer, and an answer older than one already taken
-    /// is dropped: it says nothing the newer one did not. Returns whether
+    /// is dropped: it says nothing the newer one did not. A settings revision
+    /// received during local writes requires a fresh read after the last
+    /// reply: that reply may predate another client's write. Returns whether
     /// the answer was taken.
     pub(crate) fn finish_backlight_write(
         &mut self,
@@ -896,6 +901,12 @@ impl DeviceReads {
         }
         writes.answered = write;
         writes.pending.retain(|&(pending, _)| pending > write);
+        if writes.pending.is_empty() && std::mem::take(&mut writes.refresh_after_pending) {
+            if let Some(client) = &self.client {
+                client.invalidate(query_key(BACKLIGHT, key));
+            }
+            return true;
+        }
         match read_back {
             Some(state) => {
                 let value = Arc::new(state);
@@ -1115,8 +1126,8 @@ impl DeviceReads {
         self.easy_switch.get(key).map(|read| &read.load)
     }
 
-    /// Re-read `key`'s settings after the device reported changing one
-    /// itself, keeping the shown values while it answers. Covers the settings
+    /// Re-read `key`'s settings after the device or agent announced a change,
+    /// keeping the shown values while it answers. Covers the settings
     /// such a report can concern — DPI, Fn lock, report rate, backlight and
     /// the SmartShift wheel mode (see [`PairedDevice::settings_revision`]); a
     /// read nothing subscribed to stays unsubscribed.
@@ -1138,8 +1149,17 @@ impl DeviceReads {
         if let Some(read) = self.report_rate.get_mut(key) {
             read.query.revalidate();
         }
-        if let Some(read) = self.backlight.get_mut(key) {
-            read.query.revalidate();
+        if self.backlight.contains_key(key) {
+            if let Some(writes) = self.backlight_writes.get_mut(key)
+                && !writes.pending.is_empty()
+            {
+                writes.refresh_after_pending = true;
+            }
+            if let Some(client) = &self.client {
+                // Do not join a read begun before this revision. Its answer
+                // predates the device change, even when it arrives later.
+                client.invalidate(query_key(BACKLIGHT, key));
+            }
         }
     }
 

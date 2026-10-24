@@ -103,6 +103,46 @@ mod tests {
     }
 
     #[test]
+    fn backlight_existing_actions_and_global_name_filter_remain_compatible() {
+        for (action, expected) in [
+            (vec!["status"], "Status"),
+            (vec!["on"], "On"),
+            (vec!["off"], "Off"),
+            (vec!["auto", "on"], "Auto { set: On }"),
+            (vec!["auto", "off"], "Auto { set: Off }"),
+            (vec!["level", "3"], "Level { level: 3 }"),
+            (vec!["battery-saving", "on"], "BatterySaving { set: On }"),
+            (vec!["battery-saving", "off"], "BatterySaving { set: Off }"),
+        ] {
+            let mut args = vec!["openlogi", "backlight"];
+            args.extend(action);
+            args.extend(["--device", "Test keyboard"]);
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Some(Command::Backlight(args)) = cli.cmd else {
+                panic!("expected backlight command");
+            };
+            assert_eq!(args.device.as_deref(), Some("Test keyboard"));
+            assert_eq!(format!("{:?}", args.action.unwrap()), expected);
+        }
+    }
+
+    #[test]
+    fn backlight_help_explains_agent_requirement_and_selection_changes() {
+        let help = Cli::try_parse_from(["openlogi", "backlight", "--help"]).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let text = help.to_string();
+        for expected in [
+            openlogi_core::env::PROFILE,
+            "No direct hardware fallback",
+            "Ambiguous matches",
+            "measured backlight support",
+            "unknown support requires an explicit name",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+    }
+
+    #[test]
     fn smartshift_leave_flipped_conflicts_with_sensitivity() {
         let result = Cli::try_parse_from([
             "openlogi",

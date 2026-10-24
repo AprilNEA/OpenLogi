@@ -4,26 +4,29 @@
 //! to the keyboard's non-volatile memory, so every change here survives
 //! reconnects, host switches, and power cycles with nothing re-applying it.
 
-use anyhow::{Context, Result};
+use std::io::{self, Write};
+
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
+use openlogi_core::device::Capabilities;
 use openlogi_core::hid::backlight::max_backlight_level;
-use openlogi_hid::{
+use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, DeviceRoute,
 };
+use openlogi_ipc::client::ConnectError;
+use openlogi_ipc::{AgentClient, AgentSnapshot, InventoryHealth};
+use tarpc::context;
 
+use crate::agent::{self, CallFailure};
 use crate::cmd::api::Switch;
-use crate::cmd::diag::select_device;
-
-/// HID++ `Backlight` — the white, level-adjustable backlight on the MX Keys
-/// line. RGB keyboards use `0x8070` / `0x8080` instead and are driven by
-/// `diag lighting`.
-const BACKLIGHT_FEATURE: u16 = 0x1982;
 
 #[derive(Debug, Args)]
+#[command(
+    after_help = "Requires a running, compatible OpenLogi agent in the same OPENLOGI_PROFILE. No direct hardware fallback. Without --device, selects only one online device with measured backlight support. Ambiguous matches are refused; unknown support requires an explicit name."
+)]
 pub struct BacklightArgs {
-    /// Run against the device whose name contains this string
-    /// (case-insensitive) instead of auto-selecting. Useful when several
-    /// keyboards are paired.
+    /// Select exactly one online device by a case-insensitive name substring.
+    /// Refuses ambiguous matches instead of choosing the first keyboard.
     #[arg(long, value_name = "NAME", global = true)]
     pub device: Option<String>,
 
@@ -76,13 +79,32 @@ impl BacklightAction {
 }
 
 pub async fn run(args: BacklightArgs) -> Result<()> {
-    let (route, name) = select_device(args.device.as_deref(), &[BACKLIGHT_FEATURE]).await?;
-    println!("device: {name} ({route})");
+    let connection = agent::connect().await;
+    execute(args, connection, &mut io::stdout()).await
+}
 
-    let before = read_state(&route).await?;
-    print_state("current", before);
+/// Keep connection failures on the same no-fallback path as device operations.
+/// The output sink and connection result also let tests exercise that boundary
+/// without a socket, running agent, or hardware.
+async fn execute(
+    args: BacklightArgs,
+    connection: Result<AgentClient, ConnectError>,
+    out: &mut impl Write,
+) -> Result<()> {
+    let client = connection.context(
+        "backlight requires a running, compatible OpenLogi agent; start the matching OpenLogi build with the same OPENLOGI_PROFILE (no direct hardware fallback)",
+    )?;
+    let snapshot = agent::snapshot(&client).await?;
+    let (route, name) = select_device(&snapshot, args.device.as_deref())?;
+    writeln!(out, "device: {name} ({route})")?;
+
+    let before = agent::call(client.read_backlight(context::current(), route.clone()))
+        .await
+        .map_err(call_error)?
+        .context("read backlight state")?;
+    print_state(out, "current", before)?;
     let Some(change) = args.action.unwrap_or(BacklightAction::Status).change() else {
-        println!("  offers: {}", offers(before.controls));
+        writeln!(out, "  offers: {}", offers(before.controls))?;
         return Ok(());
     };
 
@@ -90,17 +112,109 @@ pub async fn run(args: BacklightArgs) -> Result<()> {
     // setBacklightConfig cannot write it back, so say so rather than let the
     // mode change look like a side effect of an unrelated change.
     if before.mode == BacklightMode::TemporaryManual && keeps_the_mode(change) {
-        println!(
+        writeln!(
+            out,
             "  note: the level came from the keyboard's backlight keys, a mode software cannot write back — it returns to automatic (ambient-light sensor)"
-        );
+        )?;
     }
 
-    let after = openlogi_hid::update_backlight(&route, change)
+    let after = agent::call(client.set_backlight(context::current(), route, change))
         .await
+        .map_err(call_error)
+        .context("backlight write outcome is unconfirmed; read status before deciding whether to try again")?
         .with_context(|| format!("set {change}"))?;
-    print_state("read-back", after);
-    println!("✓ {change} — persisted to the keyboard, survives reconnect and power cycle");
+    print_state(out, "read-back", after)?;
+    writeln!(
+        out,
+        "✓ {change} — persisted to the keyboard, survives reconnect and power cycle"
+    )?;
     Ok(())
+}
+
+fn call_error(failure: CallFailure) -> anyhow::Error {
+    match failure {
+        CallFailure::TimedOut => anyhow!("agent backlight call timed out"),
+        CallFailure::Disconnected => anyhow!("agent disconnected during backlight call"),
+    }
+}
+
+/// Human-readable selection differs from the JSON API's exact opaque IDs.
+/// Only the agent's HID++ inventory is eligible, never standalone raw-HID lights.
+fn select_device(snapshot: &AgentSnapshot, query: Option<&str>) -> Result<(DeviceRoute, String)> {
+    if snapshot.status.inventory != InventoryHealth::Ready {
+        bail!("agent inventory is not ready; wait for OpenLogi to finish scanning and try again");
+    }
+    let devices: Vec<_> = snapshot
+        .inventory
+        .iter()
+        .flat_map(|inventory| {
+            inventory
+                .paired
+                .iter()
+                .filter(|device| device.online)
+                .map(|device| {
+                    (
+                        DeviceRoute::for_slot(inventory, device.slot),
+                        device
+                            .codename
+                            .clone()
+                            .unwrap_or_else(|| format!("Slot {}", device.slot)),
+                        device.capabilities.as_ref(),
+                    )
+                })
+        })
+        .collect();
+    let needle = query.map(str::to_lowercase);
+    let matches: Vec<_> = devices
+        .iter()
+        .filter(|(_, name, caps)| {
+            needle.as_ref().map_or_else(
+                || caps.is_some_and(|caps: &Capabilities| caps.backlight),
+                |needle| name.to_lowercase().contains(needle),
+            )
+        })
+        .collect();
+    let selected = if let [selected] = matches.as_slice() {
+        *selected
+    } else {
+        let reason = if matches.is_empty() {
+            "no matching online backlight device"
+        } else {
+            "ambiguous backlight device selection"
+        };
+        let list = devices
+            .iter()
+            .map(|(route, name, _)| {
+                format!(
+                    "  - {name} ({})",
+                    route
+                        .as_ref()
+                        .map_or_else(|| "route unavailable".into(), ToString::to_string)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "{reason}; use --device <unique name substring>. Automatic selection requires measured backlight support.\nOnline HID++ devices:\n{list}"
+        );
+    };
+    let (route, name, caps) = selected;
+    let route = route
+        .as_ref()
+        .context("selected device has no resolvable agent route")?;
+    // Distinct names cannot disambiguate identical direct VID/PID routes.
+    if devices
+        .iter()
+        .filter(|(candidate, _, _)| candidate.as_ref() == Some(route))
+        .count()
+        != 1
+    {
+        bail!("ambiguous agent route for {name} ({route}); no operation was attempted");
+    }
+    if caps.is_some_and(|caps| !caps.backlight) {
+        bail!("{name} does not advertise HID++ Backlight2 support");
+    }
+    Ok((route.clone(), name.clone()))
 }
 
 /// Whether `change` writes the stored mode back as it was read.
@@ -111,14 +225,9 @@ fn keeps_the_mode(change: BacklightChange) -> bool {
     )
 }
 
-async fn read_state(route: &DeviceRoute) -> Result<BacklightState> {
-    openlogi_hid::get_backlight(route)
-        .await
-        .context("read backlight state")
-}
-
-fn print_state(label: &str, state: BacklightState) {
-    println!(
+fn print_state(out: &mut impl Write, label: &str, state: BacklightState) -> io::Result<()> {
+    writeln!(
+        out,
         "  {label}: enabled={} mode={} status={} level={}/{} battery-saving={}",
         state.enabled,
         mode_label(state.mode),
@@ -126,7 +235,7 @@ fn print_state(label: &str, state: BacklightState) {
         state.current_level,
         max_backlight_level(state.nb_levels),
         state.power_save,
-    );
+    )
 }
 
 /// The subcommands beyond `on` / `off` this keyboard accepts.
@@ -169,6 +278,8 @@ fn status_label(status: BacklightStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod agent_routing;
 
     #[test]
     fn each_action_writes_its_own_change() {

@@ -5,6 +5,7 @@
 //! The agent owns all device I/O, so the GUI never opens a device — it routes
 //! "apply now" / "read" commands here, and polls snapshots.
 
+mod backlight;
 mod haptic_restore;
 
 use std::sync::{Arc, PoisonError};
@@ -393,7 +394,7 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         change: BacklightChange,
     ) -> Result<BacklightState, WriteError> {
-        self.shared.set_backlight(&route, change).await
+        backlight::write(self.orchestrator, &self.shared, route, change).await
     }
 
     async fn read_easy_switch_hosts(
