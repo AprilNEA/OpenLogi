@@ -45,15 +45,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::Parser;
-use gpui_updater_release::Appcast;
 use gpui_updater_release::appcast::SPARKLE_NAMESPACE;
+use gpui_updater_release::{Appcast, Manifest};
 use openlogi_core::update_feed::{MANIFEST_FILE_NAME, UpdateChannel};
 use strum::VariantArray as _;
 
-use super::latest_json::Manifest;
+use super::latest_json;
 use crate::support::github_output;
 use crate::support::release_tag::{BuildVersion, ReleaseTag};
-use crate::support::update_feed::{self, APPCAST_CHANNEL, MacArch};
+use crate::support::update_feed::{self, APPCAST_CHANNEL, KEYS_ONLY, MacArch};
 
 /// How every feed `Appcast::render` writes ends. Items go right before it.
 const FEED_END: &str = "  </channel>\n</rss>\n";
@@ -226,25 +226,23 @@ fn read_records(mirror: &Path) -> Result<Vec<Record>> {
                     entry.path().display()
                 )
             })?;
-        records.push(read_record(
-            &mirror.join(update_feed::record_dir(&tag)),
-            tag,
-        )?);
+        records.push(read_record(mirror, tag)?);
     }
     records.sort_by(|a, b| a.build.cmp(&b.build));
     Ok(records)
 }
 
-/// The record of `tag` in `dir`: its manifest, and one appcast per
+/// The record of `tag` in `mirror`: its manifest, and one appcast per
 /// architecture holding the one item.
-fn read_record(dir: &Path, tag: ReleaseTag) -> Result<Record> {
-    let manifest_path = dir.join(MANIFEST_FILE_NAME);
+fn read_record(mirror: &Path, tag: ReleaseTag) -> Result<Record> {
+    let layout = update_feed::record_layout(KEYS_ONLY, &tag);
+    let manifest_path = mirror.join(layout.manifest_path());
     let (manifest, manifest_text) = read_manifest(&manifest_path)?;
     check_manifest(&manifest, &tag, &manifest_path)?;
     let mut build = None;
     let mut items = Vec::new();
     for arch in MacArch::VARIANTS {
-        let path = dir.join(arch.appcast_file_name());
+        let path = mirror.join(layout.appcast_path(arch.as_str()));
         let found = feed_items(&fs_err::read_to_string(&path)?)
             .with_context(|| format!("could not read {}", path.display()))?;
         let [item] = &found[..] else {
@@ -274,13 +272,17 @@ fn read_record(dir: &Path, tag: ReleaseTag) -> Result<Record> {
 /// manifest. A beta item composed into the stable feed beside the release's
 /// is not part of it.
 fn stable_stand_in(mirror: &Path) -> Result<Option<Record>> {
-    let dir = mirror.join(UpdateChannel::Stable.dir());
-    let manifest_path = dir.join(MANIFEST_FILE_NAME);
+    let layout = update_feed::channel_layout(KEYS_ONLY, UpdateChannel::Stable);
+    let manifest_path = mirror.join(layout.manifest_path());
     if !manifest_path.is_file() {
         return Ok(None);
     }
     let (manifest, manifest_text) = read_manifest(&manifest_path)?;
-    let tag = ReleaseTag::parse(&manifest.tag)
+    let tag = manifest
+        .tag
+        .as_deref()
+        .map(ReleaseTag::parse)
+        .transpose()?
         .with_context(|| format!("{} names no release tag", manifest_path.display()))?;
     ensure!(
         tag.channel() == UpdateChannel::Stable,
@@ -292,7 +294,7 @@ fn stable_stand_in(mirror: &Path) -> Result<Option<Record>> {
     let mut build = None;
     let mut items = Vec::new();
     for arch in MacArch::VARIANTS {
-        let path = dir.join(arch.appcast_file_name());
+        let path = mirror.join(layout.appcast_path(arch.as_str()));
         let mut found = feed_items(&fs_err::read_to_string(&path)?)
             .with_context(|| format!("could not read {}", path.display()))?
             .into_iter()
@@ -384,17 +386,15 @@ struct ChannelFile {
 
 fn compose(selection: &Selection<'_>, base_url: &str) -> Result<Vec<ChannelFile>> {
     let mut beta_manifest = selection.beta_channel().manifest.clone();
-    UpdateChannel::Beta
-        .as_str()
-        .clone_into(&mut beta_manifest.channel);
+    beta_manifest.channel = Some(UpdateChannel::Beta.as_str().to_owned());
     let mut files = vec![
         ChannelFile {
-            path: format!("{}/{MANIFEST_FILE_NAME}", UpdateChannel::Stable.dir()),
+            path: update_feed::channel_layout(KEYS_ONLY, UpdateChannel::Stable).manifest_path(),
             contents: selection.stable.manifest_text.clone(),
         },
         ChannelFile {
-            path: format!("{}/{MANIFEST_FILE_NAME}", UpdateChannel::Beta.dir()),
-            contents: beta_manifest.render()?,
+            path: update_feed::channel_layout(KEYS_ONLY, UpdateChannel::Beta).manifest_path(),
+            contents: latest_json::render(&beta_manifest)?,
         },
     ];
     // Newest first, as Sparkle's feeds list them.
@@ -412,7 +412,8 @@ fn compose(selection: &Selection<'_>, base_url: &str) -> Result<Vec<ChannelFile>
         check_feed(&contents, &offered)
             .with_context(|| format!("the composed {} feed is wrong", arch.as_str()))?;
         files.push(ChannelFile {
-            path: format!("{}/{}", APPCAST_CHANNEL.dir(), arch.appcast_file_name()),
+            path: update_feed::channel_layout(KEYS_ONLY, APPCAST_CHANNEL)
+                .appcast_path(arch.as_str()),
             contents,
         });
     }
@@ -539,7 +540,7 @@ fn destination(output_dir: &Path, cwd: &Path) -> Result<PathBuf> {
 /// The version `channel` offers now, from its manifest in `mirror`. `None`
 /// when it has none, or the manifest does not say.
 fn served_version(mirror: &Path, channel: UpdateChannel) -> Option<String> {
-    let path = mirror.join(channel.dir()).join(MANIFEST_FILE_NAME);
+    let path = mirror.join(update_feed::channel_layout(KEYS_ONLY, channel).manifest_path());
     let text = fs_err::read_to_string(path).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
     manifest.get("version")?.as_str().map(str::to_owned)
@@ -547,25 +548,38 @@ fn served_version(mirror: &Path, channel: UpdateChannel) -> Option<String> {
 
 fn read_manifest(path: &Path) -> Result<(Manifest, String)> {
     let text = fs_err::read_to_string(path)?;
-    let manifest = serde_json::from_str(&text)
+    let manifest: Manifest = serde_json::from_str(&text)
         .with_context(|| format!("{} is not an OpenLogi update manifest", path.display()))?;
+    // The engine's manifest type keeps fields it does not know; a record
+    // `release latest-json` wrote has none, so one that does is not its.
+    let unknown: Vec<&String> = manifest
+        .extra
+        .keys()
+        .chain(manifest.assets.iter().flat_map(|asset| asset.extra.keys()))
+        .collect();
+    ensure!(
+        unknown.is_empty(),
+        "{} is not an OpenLogi update manifest: it has the unknown fields {unknown:?}",
+        path.display()
+    );
     Ok((manifest, text))
 }
 
 /// Check that the manifest at `path` is `tag`'s, labelled with its channel.
 fn check_manifest(manifest: &Manifest, tag: &ReleaseTag, path: &Path) -> Result<()> {
     ensure!(
-        manifest.tag == tag.to_string() && manifest.version == tag.version().to_string(),
+        manifest.tag.as_deref() == Some(tag.to_string().as_str())
+            && manifest.version == tag.version().to_string(),
         "{} is the manifest of {} ({}), not {tag}",
         path.display(),
-        manifest.tag,
+        manifest.tag.as_deref().unwrap_or("no release"),
         manifest.version
     );
     ensure!(
-        manifest.channel == tag.channel().as_str(),
+        manifest.channel.as_deref() == Some(tag.channel().as_str()),
         "{} labels {tag} {:?}, not {:?}",
         path.display(),
-        manifest.channel,
+        manifest.channel.as_deref().unwrap_or_default(),
         tag.channel().as_str()
     );
     Ok(())

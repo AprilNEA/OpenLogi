@@ -1,16 +1,19 @@
 //! Where a release and its update feeds live on the update host.
 //!
-//! `macos package` stamps the Sparkle feed URL into the bundle's `Info.plist`,
-//! and `release channels` writes the feed that URL names; both derive it
-//! here, so the feed an installed app reads and the file a release uploads
-//! cannot drift apart. A channel's directory on the host is
-//! [`UpdateChannel`]'s, which the app reads its manifest from as well.
+//! The paths and URLs are gpui-updater-release's [`FeedLayout`], set up here
+//! with OpenLogi's names. `macos package` stamps the Sparkle feed URL into
+//! the bundle's `Info.plist`, and `release channels` writes the feed that URL
+//! names; both derive it here, so the feed an installed app reads and the
+//! file a release uploads cannot drift apart. A channel's directory is
+//! [`UpdateChannel::dir`], which the app reads its manifest from as well.
 //!
 //! Each release also keeps its own feed record next to its artifacts:
 //! `release latest-json` and `release appcast` write it, and
-//! `release channels` composes the channel files from the records.
+//! `release channels` composes the channel files from the records. A record
+//! is laid out like a channel directory ([`record_layout`]).
 
-use openlogi_core::update_feed::UpdateChannel;
+use gpui_updater_release::FeedLayout;
+use openlogi_core::update_feed::{MANIFEST_FILE_NAME, UpdateChannel};
 
 use crate::support::release_tag::ReleaseTag;
 
@@ -26,6 +29,15 @@ pub(crate) const RELEASES_DIR: &str = "releases";
 /// The name of a release's feed record directory, inside the release's
 /// directory.
 pub(crate) const RECORD_DIR_NAME: &str = "feed";
+
+/// File name of an architecture's Sparkle feed, in a channel directory and
+/// in a record alike; `{arch}` is [`MacArch::as_str`].
+const APPCAST_NAME: &str = "appcast-{arch}.xml";
+
+/// The base URL of a layout used only for object keys (its `*_path`
+/// methods), which do not depend on it: the paths `release channels` reads
+/// from a mirror, and the ones the release commands write under the stage.
+pub(crate) const KEYS_ONLY: &str = "";
 
 /// The variable the update host is read from, by every command that builds
 /// or publishes a feed on it.
@@ -77,46 +89,41 @@ impl MacArch {
             _ => None,
         }
     }
+}
 
-    /// File name of this architecture's Sparkle feed on the channel.
-    pub(crate) fn appcast_file_name(self) -> String {
-        format!("appcast-{}.xml", self.as_str())
-    }
+/// The update host at `base_url` as `channel` serves it: the channel's
+/// manifest and Sparkle feeds, and every release's files.
+pub(crate) fn channel_layout(base_url: &str, channel: UpdateChannel) -> FeedLayout {
+    FeedLayout::new(base_url, channel.as_str())
+        .channel_dir(channel.dir())
+        .manifest_name(MANIFEST_FILE_NAME)
+        .appcast_name(APPCAST_NAME)
+        .release_dir(format!("{RELEASES_DIR}/{{tag}}"))
+}
+
+/// `tag`'s feed record on the update host at `base_url`: its single-release
+/// manifest and one single-item appcast per architecture, named as a channel
+/// directory names them, in [`record_dir`].
+pub(crate) fn record_layout(base_url: &str, tag: &ReleaseTag) -> FeedLayout {
+    channel_layout(base_url, tag.channel()).channel_dir(record_dir(tag))
 }
 
 /// URL of the Sparkle feed `arch`'s bundles read from the update host at
 /// `base_url`.
 pub(crate) fn appcast_url(base_url: &str, arch: MacArch) -> String {
-    format!(
-        "{}/{}",
-        APPCAST_CHANNEL.dir_url(base_url),
-        arch.appcast_file_name()
-    )
+    channel_layout(base_url, APPCAST_CHANNEL).appcast_url(arch.as_str())
 }
 
 /// The directory of `tag`'s artifacts, relative to the root of the update
 /// host. Its files never change once uploaded.
 pub(crate) fn release_dir(tag: &ReleaseTag) -> String {
-    format!("{RELEASES_DIR}/{tag}")
+    channel_layout(KEYS_ONLY, tag.channel()).release_path(&tag.to_string())
 }
 
-/// URL of `tag`'s artifact directory ([`release_dir`]) on the update host at
-/// `base_url`.
-pub(crate) fn release_url(base_url: &str, tag: &ReleaseTag) -> String {
-    format!("{}/{}", base_url.trim_end_matches('/'), release_dir(tag))
-}
-
-/// The directory of `tag`'s feed record, relative to the root of the update
-/// host: its single-release manifest and one single-item appcast per
-/// architecture.
+/// The directory of `tag`'s feed record ([`record_layout`]), relative to the
+/// root of the update host.
 pub(crate) fn record_dir(tag: &ReleaseTag) -> String {
     format!("{}/{RECORD_DIR_NAME}", release_dir(tag))
-}
-
-/// URL of `tag`'s feed record directory ([`record_dir`]) on the update host
-/// at `base_url`.
-pub(crate) fn record_url(base_url: &str, tag: &ReleaseTag) -> String {
-    format!("{}/{RECORD_DIR_NAME}", release_url(base_url, tag))
 }
 
 /// URL of `tag`'s GitHub Release page.

@@ -13,13 +13,13 @@ publish = false
 anyhow = { workspace = true }
 # Clearing the custom icon a run of the app may have left on a bundle.
 appicon = { git = "https://github.com/AprilNEA/appicon", tag = "v0.1.1" }
-# Sparkle's keys are base64 (the bundle checks the embedded public key).
-base64 = "0.22.1"
 clap = { workspace = true }
 comfy-table = { version = "8.0.0", default-features = false }
 fs-err = "3.3.0"
-# The release side of gpui-updater: the Sparkle appcast (with its deltas),
-# EdDSA signing, and verified Sparkle deltas made with Sparkle's BinaryDelta.
+# The release side of gpui-updater: the update host's layout, the built-in
+# engine's manifest, the Sparkle appcast (with its deltas), EdDSA signing,
+# fetching and embedding Sparkle.framework, and verified Sparkle deltas made
+# with Sparkle's BinaryDelta.
 gpui-updater-release = { version = "0.4.4", default-features = false }
 # For `brand`: the bundle-identifier family stamped into every Info.plist and
 # advertised by the update manifest. The app reads the same constants at
@@ -36,7 +36,6 @@ roxmltree = "0.20.0"
 semver = "1.0.28"
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2_hasher = { version = "0.3.2", features = ["sync"] }
 strum = { version = "0.27", features = ["derive"] }
 syn = "2.0.117"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
@@ -46,6 +45,10 @@ toml.workspace = true
 toml_edit = "0.22"
 which = "8.0.4"
 xshell = "0.2.7"
+
+[dev-dependencies]
+# The tests build Sparkle keys and malformed ones byte by byte.
+base64 = "0.22.1"
 
 [lints]
 workspace = true

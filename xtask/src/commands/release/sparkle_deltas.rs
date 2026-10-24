@@ -117,7 +117,7 @@ fn make_deltas(
         return Ok(());
     }
 
-    let dist = SparkleDistribution::from_dir(&bundled_sparkle::fetch_release(&repo_root()?)?)?;
+    let dist = bundled_sparkle::fetch_release(&repo_root()?)?;
     let scratch = tempfile::tempdir().context("could not create a scratch directory")?;
     let new_app = sparkle::extract_app(&args.dmg, &scratch.path().join("new"), None)
         .with_context(|| format!("could not copy the app out of {}", args.dmg.display()))?;
