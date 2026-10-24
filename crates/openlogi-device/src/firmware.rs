@@ -256,8 +256,6 @@ pub async fn update_target_on(
 /// the DFU feature; consuming it is the only path to activation.
 pub struct PreparedFirmwareUpdate {
     feature: Arc<DfuResumableFeature>,
-    /// Preflight found an earlier run's transfer state for the target bank.
-    interrupted: bool,
     /// Damage an earlier run left on the target bank, reported to the
     /// activity log before the transfer starts.
     warnings: Vec<FirmwareUpdateWarning>,
@@ -364,7 +362,6 @@ pub async fn prepare_update_on(
     .collect();
     Ok(PreparedFirmwareUpdate {
         feature,
-        interrupted,
         warnings,
         image: image.clone(),
         pending: PendingFirmwareActivation {
@@ -418,6 +415,13 @@ async fn check_battery(device: &mut Device) -> Result<(), FirmwareUpdateFailure>
 }
 
 impl PreparedFirmwareUpdate {
+    /// Preflight found an earlier run's transfer state for the target bank.
+    fn interrupted(&self) -> bool {
+        self.warnings
+            .iter()
+            .any(|w| matches!(w, FirmwareUpdateWarning::UnfinishedTransfer { .. }))
+    }
+
     /// Transfers the validated image and activates it only after every packet
     /// was acknowledged. The caller must drive this future to completion and
     /// retain its I/O lease; cancellation is cooperative between native writes.
@@ -449,7 +453,7 @@ impl PreparedFirmwareUpdate {
             Ok(reply) => (reply, false),
             // After an interruption, a status query cannot tell this run's
             // restart apart from the state the earlier run left behind.
-            Err(Hidpp20Error::Channel(_)) if self.interrupted => {
+            Err(Hidpp20Error::Channel(_)) if self.interrupted() => {
                 return Err(FirmwareUpdateFailure::Protocol(
                     "restarting an interrupted update was not confirmed".into(),
                 ));
