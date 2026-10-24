@@ -19,6 +19,8 @@ openlogi diag smartshift                # toggle SmartShift and restore (smoke t
 openlogi diag smartshift --torque 60    # set scrolling force / feedback intensity (1-100%)
 openlogi diag lighting ff0000           # solid colour for a wired RGB keyboard (any RRGGBB hex)
 openlogi diag host-switch --device "MX Master 3S" --host 1   # move a device to Easy-Switch channel 2
+openlogi diag lighting ff0000 --effect breathing --period-ms 3000   # animate it (0x8070 devices)
+openlogi diag lighting-zones            # list the 0x8070 lighting zones and the effects each offers
 ```
 
 Running `openlogi` with no subcommand defaults to `list`. Set
