@@ -743,6 +743,11 @@ applying_light_setting = "Tillämpar ljusinställning…"
 auto_on_with_camera = "Tänd automatiskt med kameran"
 camera_light_auto_description = "Tänd lampan när en kamera används och släck den när ingen kamera är aktiv."
 keyboard_lighting_description = "Tillämpas av OpenLogi medan det körs och sparas inte i tangentbordet."
+effect = "Effekt"
+effect_static = "Statisk"
+effect_breathing = "Andning"
+effect_color_cycle = "Färgcykel"
+effect_period = "Cykellängd"
 
 [action_ring]
 actions_ring = "Åtgärdsring"

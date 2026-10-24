@@ -743,6 +743,11 @@ applying_light_setting = "ライト設定を適用中…"
 auto_on_with_camera = "カメラ使用時に自動点灯"
 camera_light_auto_description = "いずれかのカメラを使用している間はライトを点灯し、すべてのカメラが停止すると消灯します。"
 keyboard_lighting_description = "OpenLogi の実行中に適用され、キーボードには保存されません。"
+effect = "エフェクト"
+effect_static = "固定"
+effect_breathing = "ブリージング"
+effect_color_cycle = "カラーサイクル"
+effect_period = "1 周期の長さ"
 
 [action_ring]
 actions_ring = "アクションリング"
