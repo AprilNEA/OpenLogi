@@ -136,7 +136,7 @@ Per-application profiles switch with the focused app. An `[apps]` alias lets one
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="Keys and Backlight cards for an MX Keys S"></td>
-        <td width="50%"><b>Keyboard</b><ul><li>Fn Lock, and multi-platform keyboards that stay on the host OS layout</li><li>Backlight level, automatic brightness, and battery saving</li><li>The backlight level shown on screen as it changes</li><li>Static RGB on supported keyboards</li></ul></td>
+        <td width="50%"><b>Keyboard</b><ul><li>Fn Lock, and multi-platform keyboards that stay on the host OS layout</li><li>Backlight level, automatic brightness, and battery saving</li><li>The backlight level shown on screen as it changes</li><li>Static RGB on supported keyboards, plus breathing and color cycle on 0x8070 devices such as G203 mice and G733 headsets</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Litra Glow lighting panel with brightness and color temperature"></td>
