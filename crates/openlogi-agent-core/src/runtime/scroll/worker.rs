@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use openlogi_core::config::VerticalScrollSensitivity;
+use openlogi_core::config::{MomentumScrolling, VerticalScrollSensitivity};
 use openlogi_core::scroll::ScrollDelta;
 use tracing::warn;
 
@@ -36,6 +36,10 @@ struct ScrollPreferenceSnapshot {
 /// consistent settings snapshot instead of two independently changing values.
 pub struct ScrollPreferences {
     encoded: AtomicU8,
+    /// Momentum scrolling, read by the worker once per turn. Independent of
+    /// `encoded`: it only shapes the diverted main wheel's output, so no
+    /// joint snapshot with the smoothing switch is needed.
+    momentum: Mutex<MomentumScrolling>,
 }
 
 impl ScrollPreferences {
@@ -44,7 +48,19 @@ impl ScrollPreferences {
     pub fn new(smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) -> Self {
         Self {
             encoded: AtomicU8::new(Self::encode(smooth_scroll, vertical_sensitivity)),
+            momentum: Mutex::new(MomentumScrolling::default()),
         }
+    }
+
+    /// Publish the momentum-scrolling settings.
+    pub fn publish_momentum(&self, momentum: MomentumScrolling) {
+        *self.momentum.lock().unwrap_or_else(PoisonError::into_inner) = momentum;
+    }
+
+    /// The current momentum-scrolling settings.
+    #[must_use]
+    pub fn momentum(&self) -> MomentumScrolling {
+        *self.momentum.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Publish both settings as one snapshot.
@@ -100,6 +116,9 @@ enum ScrollOutputMode {
     /// whose own per-device switch asked for smoothing by diverting it.
     Eased {
         at: Instant,
+        /// The raw signed wheel notches before sensitivity scaling, which
+        /// momentum scrolling's free-spin detector measures speed in.
+        notches: f64,
     },
     Direct,
 }
@@ -135,7 +154,7 @@ impl ScrollInput {
     /// recognizers need.
     fn output_under(&self, smoothing: bool) -> ScrollOutputMode {
         match (self.output, &self.source) {
-            (ScrollOutputMode::Eased { at }, _) => ScrollOutputMode::Eased { at },
+            (ScrollOutputMode::Eased { at, notches }, _) => ScrollOutputMode::Eased { at, notches },
             (
                 ScrollOutputMode::Smooth { at } | ScrollOutputMode::Phased { at },
                 ScrollSource::Hidpp(_),
@@ -154,6 +173,8 @@ enum ScrollCommand {
     Input(ScrollInput),
     CancelSource(ScrollSource),
     Wake,
+    /// The display refreshed: step momentum scrolling's output by one frame.
+    DisplayFrame,
 }
 
 struct ShutdownRequest {
@@ -317,7 +338,10 @@ impl ScrollInputHandle {
             && self.try_enqueue(
                 ScrollSource::Hidpp(session.clone()),
                 scaled,
-                ScrollOutputMode::Eased { at: Instant::now() },
+                ScrollOutputMode::Eased {
+                    at: Instant::now(),
+                    notches: impulse.y,
+                },
             );
         if queued { Ok(()) } else { Err(scaled.into()) }
     }
@@ -401,15 +425,38 @@ pub struct ScrollRuntime {
 impl ScrollRuntime {
     /// Start the dedicated output worker using the live scroll settings.
     pub fn spawn(preferences: Arc<ScrollPreferences>) -> io::Result<Self> {
-        Self::spawn_with(preferences, ScrollFrame::post, WheelDelta::post)
+        Self::spawn_inner(preferences, ScrollFrame::post, WheelDelta::post, true)
     }
 
+    #[cfg(test)]
     pub(super) fn spawn_with(
+        preferences: Arc<ScrollPreferences>,
+        emit_smooth: impl FnMut(ScrollFrame) + Send + 'static,
+        emit_direct: impl FnMut(WheelDelta) + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::spawn_inner(preferences, emit_smooth, emit_direct, false)
+    }
+
+    /// `display_paced`: pace momentum scrolling's output by the display's
+    /// refresh where the platform has a display clock (production), or by
+    /// the worker's own timer (tests, which drive time themselves).
+    fn spawn_inner(
         preferences: Arc<ScrollPreferences>,
         mut emit_smooth: impl FnMut(ScrollFrame) + Send + 'static,
         mut emit_direct: impl FnMut(WheelDelta) + Send + 'static,
+        display_paced: bool,
     ) -> io::Result<Self> {
         let (commands, command_rx) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
+        let display = display_paced
+            .then(|| {
+                let frames = commands.clone();
+                openlogi_inject::display_link::DisplayLink::new(move || {
+                    // A full queue skips this frame; the next one catches up,
+                    // since every step is measured from absolute time.
+                    let _ = frames.try_send(ScrollCommand::DisplayFrame);
+                })
+            })
+            .flatten();
         let (controls, control_rx) = mpsc::channel();
         let generation = Arc::new(AtomicU64::new(0));
         let input = ScrollInputHandle {
@@ -429,6 +476,7 @@ impl ScrollRuntime {
                     &preferences,
                     &mut emit_smooth,
                     &mut emit_direct,
+                    display,
                 );
             })?;
         Ok(Self {
@@ -505,6 +553,7 @@ fn run_worker(
     preferences: &ScrollPreferences,
     emit_smooth: &mut impl FnMut(ScrollFrame),
     emit_direct: &mut impl FnMut(WheelDelta),
+    mut display: Option<openlogi_inject::display_link::DisplayLink>,
 ) {
     let mut engine = ScrollEngine::default();
     let mut observed_smoothing = preferences.smooth_scroll_enabled();
@@ -544,6 +593,7 @@ fn run_worker(
         // new setting after receiving, so a toggle cancels the previous gesture
         // before the first input under the new setting starts another one.
         let smoothing = preferences.smooth_scroll_enabled();
+        engine.set_momentum(preferences.momentum());
         let toggled = smoothing != observed_smoothing;
         observed_smoothing = smoothing;
         if cancellations.advance_to(shared_generation.load(Ordering::Acquire)) {
@@ -559,8 +609,11 @@ fn run_worker(
         match command {
             Ok(ScrollCommand::Input(input)) if cancellations.accepts(&input) => {
                 match input.output_under(smoothing) {
-                    ScrollOutputMode::Smooth { at } | ScrollOutputMode::Eased { at } => {
+                    ScrollOutputMode::Smooth { at } => {
                         engine.impulse(input.source, input.impulse, at, emit_smooth);
+                    }
+                    ScrollOutputMode::Eased { at, notches } => {
+                        engine.wheel_impulse(input.source, input.impulse, notches, at, emit_smooth);
                     }
                     ScrollOutputMode::Phased { at } => {
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
@@ -574,6 +627,9 @@ fn run_worker(
             Ok(ScrollCommand::CancelSource(source)) => {
                 engine.cancel_source(&source, emit_smooth);
             }
+            Ok(ScrollCommand::DisplayFrame) => {
+                engine.on_display_frame(Instant::now(), emit_smooth);
+            }
             Ok(ScrollCommand::Input(_) | ScrollCommand::Wake) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 engine.advance_due(Instant::now(), emit_smooth);
@@ -581,6 +637,24 @@ fn run_worker(
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 engine.cancel_all(emit_smooth);
                 return;
+            }
+        }
+        // Run the display clock only while momentum scrolling has something
+        // moving, so an idle worker takes no wakeups.
+        if let Some(clock) = display.as_ref() {
+            let needs = engine.needs_frames();
+            if needs != engine.display_driven() {
+                let running = if needs {
+                    clock.start()
+                } else {
+                    clock.stop();
+                    false
+                };
+                if needs && !running {
+                    tracing::warn!("display clock did not start; keeping the scroll timer");
+                    display = None;
+                }
+                engine.set_display_driven(running, Instant::now());
             }
         }
     }
@@ -893,6 +967,7 @@ mod tests {
                         .expect("test frame receiver remains open");
                 },
                 &mut |_| panic!("horizontal HID++ input must carry scroll phases"),
+                None,
             );
         });
 
@@ -970,6 +1045,7 @@ mod tests {
                         .expect("test frame receiver remains open");
                 },
                 &mut |_| panic!("a horizontal HID++ tick must keep its scroll phases"),
+                None,
             );
         });
 
@@ -1090,6 +1166,7 @@ mod tests {
             &preferences,
             &mut |frame| frames.push(frame),
             &mut |delta| direct.push(delta),
+            None,
         );
 
         assert!(
@@ -1166,6 +1243,7 @@ mod tests {
                     emitted.send(frame).expect("frame receiver remains open");
                 },
                 &mut |_| {},
+                None,
             );
         });
 
@@ -1257,6 +1335,7 @@ mod tests {
                 &preferences,
                 &mut |frame| emitted.send(frame).expect("frame receiver remains open"),
                 &mut |_| {},
+                None,
             );
         });
 
@@ -1357,6 +1436,7 @@ mod tests {
                 }
                 emitted.push(delta);
             },
+            None,
         );
 
         assert_eq!(
