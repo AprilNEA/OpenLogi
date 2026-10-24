@@ -387,6 +387,97 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
         .expect("both successful probe cassettes consumed");
 }
 
+/// A node the OS keeps listing but that stops answering — a wedged receiver,
+/// or a powered-off Bluetooth mouse whose node lingers — keeps being retired
+/// and reopened. Its replay grace runs out on the first reopen, so the agent
+/// sees it go offline: no reopen after that is an unobserved reconnect, and
+/// reporting one would re-apply every online device's settings and re-arm
+/// every capture on each cycle.
+#[tokio::test]
+async fn reopening_a_channel_the_agent_saw_go_offline_reports_no_replacement() {
+    let fixture = bolt_fixture(
+        "persistently-dead-channel",
+        &[BoltSlot {
+            slot: 1,
+            online: true,
+        }],
+        2,
+    );
+    let expected = fixture.inventory.clone();
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid Bolt replay"),
+    );
+    let registry = ChannelRegistry::default();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    let initial = enumerator
+        .enumerate()
+        .await
+        .expect("initial probe succeeds");
+    assert_eq!(initial, std::slice::from_ref(&expected));
+
+    // Two retire/reopen cycles on a dead channel: the first reopen exhausts
+    // the replay grace, the second finds the node already surfaced offline.
+    backend
+        .set_channel_connection(BOLT_CHANNEL, ChannelConnection::Disconnected)
+        .expect("known channel");
+    for _ in 0..16 {
+        if backend.open_count(&node_id).expect("known node") == 3 {
+            break;
+        }
+        enumerator
+            .enumerate()
+            .await
+            .expect("a dead channel still enumerates");
+        assert!(
+            !enumerator.replaced_channels_last_tick(),
+            "a reopen past the replay grace is not an unobserved reconnect"
+        );
+    }
+    assert_eq!(
+        backend.open_count(&node_id).expect("known node"),
+        3,
+        "the dead channel must have been reopened twice"
+    );
+    assert!(!enumerator.ledger.contains_last_good(&node_id));
+
+    // The receiver answers again on the next reopen. The agent saw it go
+    // offline, so its offline→online transition re-applies the settings.
+    backend
+        .set_channel_connection(BOLT_CHANNEL, ChannelConnection::Connected)
+        .expect("known channel");
+    let mut recovered = Vec::new();
+    for _ in 0..16 {
+        if backend.open_count(&node_id).expect("known node") == 4 {
+            break;
+        }
+        recovered = enumerator
+            .enumerate()
+            .await
+            .expect("the reopened channel enumerates");
+        assert!(
+            !enumerator.replaced_channels_last_tick(),
+            "a node already surfaced offline comes back as a transition"
+        );
+    }
+    assert_eq!(backend.open_count(&node_id).expect("known node"), 4);
+    assert_eq!(recovered, [expected]);
+    assert!(enumerator.ledger.contains_last_good(&node_id));
+    backend
+        .channel_completion(BOLT_CHANNEL)
+        .expect("known channel")
+        .require_complete()
+        .expect("both successful probe cassettes consumed");
+}
+
 /// The direct-device counterpart of the receiver case above. Windows can drop
 /// and re-create a Bluetooth HID node faster than one reconciliation, so the
 /// node never leaves the OS listing while its handle is dead. Node-vanish

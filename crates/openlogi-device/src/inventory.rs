@@ -106,7 +106,7 @@ pub struct Enumerator {
     /// Nodes whose channel was retired for failing probes and not yet reopened.
     evicted_nodes: HashSet<NodeId>,
     /// Nodes the most recent pass reopened after retiring their channel for
-    /// failing probes.
+    /// failing probes, while the ledger replayed them as online throughout.
     replaced_last_tick: Vec<NodeId>,
     /// Coalesced lifecycle-event sink installed on newly opened channels.
     event_notifier: Option<EventNotifier>,
@@ -361,7 +361,11 @@ impl Enumerator {
     /// inventory ever showing it offline — the ledger replayed it as online
     /// throughout — so no offline→online transition will prompt a re-apply,
     /// yet its firmware may have lost its volatile settings. `false` before
-    /// the first pass.
+    /// the first pass, and for a node whose replay grace expired before or on
+    /// the reopening pass: the agent has seen that one go offline and
+    /// re-applies on its offline→online transition, so reporting it would
+    /// re-apply every online device on each retire/reopen cycle of a node
+    /// that never answers again.
     #[must_use]
     pub fn replaced_channels_last_tick(&self) -> bool {
         !self.replaced_last_tick.is_empty()
@@ -495,7 +499,9 @@ impl Enumerator {
                     // Inventory replay remains bounded until a probe produces
                     // a new authoritative snapshot.
                     self.ledger.reset_channel_failures_after_open(&node);
-                    if self.evicted_nodes.remove(&node) {
+                    // Only a node still replayed as online can come back
+                    // unobserved; the pass's own settle confirms it below.
+                    if self.evicted_nodes.remove(&node) && self.ledger.contains_last_good(&node) {
                         replaced.push(node.clone());
                     }
                     // Attach before the first feature/register check. Receiver
@@ -610,10 +616,9 @@ impl Enumerator {
             active,
             open_failures,
             retiring: retiring_nodes,
-            replaced,
+            mut replaced,
         } = self.prepare_nodes(&*backend, candidates).await;
         self.open_failures_last_tick = !open_failures.is_empty();
-        self.replaced_last_tick = replaced;
 
         // Probe each open channel concurrently, sharing `&cache` read-only;
         // updates are collected and applied afterwards (no `RefCell`). Each
@@ -713,6 +718,11 @@ impl Enumerator {
                 &mut all_healthy,
             ));
         }
+        // A replacement whose probe exhausted the replay grace surfaced the
+        // node offline in this very snapshot: its return is an ordinary
+        // offline→online transition, not an unobserved reconnect.
+        replaced.retain(|node| self.ledger.contains_last_good(node));
+        self.replaced_last_tick = replaced;
 
         let seen_keys = self.apply_outcomes(outcomes);
         self.evict_unseen(&seen_keys, &frozen_keys);
