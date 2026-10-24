@@ -601,9 +601,15 @@ fn rel_ev(axis: RelativeAxisCode, value: i32) -> InputEvent {
 /// Two separate frames give the kernel distinct timestamps for press and
 /// release, which matches what the kernel `uinput` docs show and avoids
 /// toolkits treating a zero-duration event as invalid.
+///
+/// Both frames go out under the held-output lock. A workflow runs on its own
+/// thread, and its chord must not release a modifier between the clicks of an
+/// advanced click burst.
 fn press_key(mods: &[KeyCode], key: KeyCode) {
-    emit(&key_phase_events(mods, key, KeyPhase::Down));
-    emit(&key_phase_events(mods, key, KeyPhase::Up));
+    super::serialized_with_held_output(|| {
+        emit(&key_phase_events(mods, key, KeyPhase::Down));
+        emit(&key_phase_events(mods, key, KeyPhase::Up));
+    });
 }
 
 /// Build one `SYN_REPORT` frame. Down order is modifiers then key; up order

@@ -530,6 +530,17 @@ fn with_held_modifiers<R>(post: impl FnOnce(HeldModifiers) -> R) -> R {
     post(output.modifiers())
 }
 
+/// Run `post` under the lock that orders held-chord edges and click bursts.
+///
+/// A one-shot chord posted through this never lands between the clicks of an
+/// advanced click burst, where its modifier-up edge would lift the modifiers
+/// the burst holds, and never inside a held transition.
+#[cfg(target_os = "linux")]
+fn serialized_with_held_output<R>(post: impl FnOnce() -> R) -> R {
+    let _output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    post()
+}
+
 /// Let the frontmost app's menus answer shortcuts the keyboard layout
 /// remaps, such as Back and Forward on Spanish or German layouts. Call once
 /// on the main thread before its run loop starts.
@@ -783,6 +794,32 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::{HeldKey, HeldOutput, HoldTransition};
     use super::{QuantizedScroll, ScrollQuantizer};
+
+    /// A one-shot chord waits while a click burst holds the lock, so its
+    /// modifier-up edge cannot land between the burst's clicks.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_one_shot_chord_waits_for_a_click_burst() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, PoisonError};
+
+        let burst = super::HELD_OUTPUT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let posted = Arc::new(AtomicBool::new(false));
+        let chord = std::thread::spawn({
+            let posted = Arc::clone(&posted);
+            move || super::serialized_with_held_output(|| posted.store(true, Ordering::SeqCst))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !posted.load(Ordering::SeqCst),
+            "the chord must not post during the burst"
+        );
+        drop(burst);
+        chord.join().expect("chord thread");
+        assert!(posted.load(Ordering::SeqCst));
+    }
 
     /// Synthetic high-resolution input: eight eighth-ticks must total exactly
     /// one Windows/Linux wheel detent (120 raw units). This is deterministic
