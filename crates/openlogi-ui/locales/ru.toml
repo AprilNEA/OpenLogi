@@ -641,6 +641,11 @@ colour_temperature = "Цветовая температура"
 applying_light_setting = "Применение настройки освещения…"
 auto_on_with_camera = "Автовключение с камерой"
 camera_light_auto_description = "Включать свет при использовании любой камеры и выключать, когда камеры неактивны."
+effect = "Эффект"
+effect_static = "Статичный"
+effect_breathing = "Дыхание"
+effect_color_cycle = "Смена цветов"
+effect_period = "Длина цикла"
 
 [action_ring]
 actions_ring = "Кольцо действий"

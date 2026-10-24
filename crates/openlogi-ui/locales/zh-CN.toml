@@ -641,6 +641,11 @@ colour_temperature = "色温"
 applying_light_setting = "正在应用灯光设置…"
 auto_on_with_camera = "随摄像头自动开启"
 camera_light_auto_description = "任意摄像头使用时开灯，所有摄像头均未使用时关灯。"
+effect = "效果"
+effect_static = "静态"
+effect_breathing = "呼吸"
+effect_color_cycle = "色彩循环"
+effect_period = "循环时长"
 
 [action_ring]
 actions_ring = "操作环"

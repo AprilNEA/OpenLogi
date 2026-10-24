@@ -641,6 +641,11 @@ colour_temperature = "Renk sıcaklığı"
 applying_light_setting = "Işık ayarı uygulanıyor…"
 auto_on_with_camera = "Kamerayla otomatik aç"
 camera_light_auto_description = "Herhangi bir kamera kullanılırken bu ışık açılır, kameralar durunca kapatılır."
+effect = "Efekt"
+effect_static = "Sabit"
+effect_breathing = "Nefes alma"
+effect_color_cycle = "Renk döngüsü"
+effect_period = "Döngü süresi"
 
 [action_ring]
 actions_ring = "Eylem Halkası"

@@ -641,6 +641,11 @@ colour_temperature = "색온도"
 applying_light_setting = "조명 설정 적용 중…"
 auto_on_with_camera = "카메라 사용 시 자동 켜기"
 camera_light_auto_description = "카메라를 하나라도 사용 중이면 조명을 켜고 모든 카메라가 비활성 상태이면 끕니다."
+effect = "효과"
+effect_static = "고정"
+effect_breathing = "숨쉬기"
+effect_color_cycle = "색상 순환"
+effect_period = "주기 길이"
 
 [action_ring]
 actions_ring = "액션 링"
