@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use hidpp::feature::color_led_effects::ColorLedInfo;
 use openlogi_core::device::{DeviceInventory, LightState, StandaloneDevice};
 use openlogi_core::hid::{FnLockState, LightCommand, PairingError, WriteError};
 
@@ -26,8 +27,9 @@ use openlogi_device::backlight::{BacklightChange, BacklightState};
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    self as device, ColorLedZoneEntry, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform,
+    LightingMethod, LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution,
+    ScrollWheelMode,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -186,21 +188,35 @@ pub async fn set_keyboard_color_with(
     g: u8,
     b: u8,
 ) -> Result<(), WriteError> {
-    let target = route.clone();
-    let gate = device_io_gate();
-    crate::lighting::LightingJob::spawn(route, move |cancel| async move {
+    write_lighting(
+        route,
         device::LightingWrite {
             method,
             color: openlogi_core::color::Rgb::new(r, g, b),
-        }
-        .apply(
-            &*native_backend(),
-            &target,
-            || cancel.is_cancelled(),
-            || gate.allows_io(),
-        )
-        .await
-        .map(drop)
+            animation: device::LightingAnimation::Static,
+        },
+    )
+    .await
+}
+
+/// Apply one lighting `write` — a colour and its animation — to the device
+/// `route` reaches.
+pub async fn write_lighting(
+    route: &DeviceRoute,
+    write: device::LightingWrite,
+) -> Result<(), WriteError> {
+    let target = route.clone();
+    let gate = device_io_gate();
+    crate::lighting::LightingJob::spawn(route, move |cancel| async move {
+        write
+            .apply(
+                &*native_backend(),
+                &target,
+                || cancel.is_cancelled(),
+                || gate.allows_io(),
+            )
+            .await
+            .map(drop)
     })?
     .finish()
     .await
@@ -242,6 +258,14 @@ pub async fn watch_litra(
 /// Walk the HID++ feature table of the device `route` reaches.
 pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, WriteError> {
     device::dump_features(&*native_backend(), route).await
+}
+
+/// Walk the `0x8070` lighting zones of the device `route` reaches and the
+/// effects each one lists.
+pub async fn dump_color_led_zones(
+    route: &DeviceRoute,
+) -> Result<(ColorLedInfo, Vec<ColorLedZoneEntry>), WriteError> {
+    device::dump_color_led_zones(&*native_backend(), route).await
 }
 
 /// Walk the firmware entities of the device `route` reaches.

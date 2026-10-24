@@ -208,6 +208,13 @@ pub struct Capabilities {
     /// `force_sensing`: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub disable_keys: bool,
+    /// The lighting can play an animated effect — breathing or a colour
+    /// cycle — through HID++ `0x8070 ColorLedEffects`. Measured only from
+    /// feature-table presence; a zone that lists neither effect shows the
+    /// colour instead. Appended after `disable_keys`: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub lighting_effects: bool,
 }
 
 impl Capabilities {
@@ -248,6 +255,7 @@ impl Capabilities {
             // force; the feature table alone cannot say.
             force_sensing: ids.contains(&0x19c0),
             disable_keys: ids.contains(&0x4521),
+            lighting_effects: ids.contains(&0x8070),
         }
     }
 
@@ -765,6 +773,7 @@ mod tests {
                     pointer_scaling: false,
                     force_sensing: false,
                     disable_keys: false,
+                    lighting_effects: false,
                 }),
                 settings_revision: 0,
             }],
@@ -886,6 +895,7 @@ mod tests {
                 pointer_scaling: false,
                 force_sensing: false,
                 disable_keys: false,
+                lighting_effects: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -912,6 +922,7 @@ mod tests {
                 pointer_scaling: false,
                 force_sensing: false,
                 disable_keys: false,
+                lighting_effects: false,
             }
         );
         // No driving features → nothing offered.
@@ -956,6 +967,14 @@ mod tests {
         }
         // Backlight (0x198x) stays out — the panel cannot drive it.
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
+        // Only the 0x8070 effect engine plays breathing and colour cycles.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8070]).lighting_effects);
+        for id in [0x8071, 0x8080, 0x8081] {
+            assert!(
+                !Capabilities::from_feature_ids(&[0x0001, id]).lighting_effects,
+                "0x{id:04x} draws only a colour"
+            );
+        }
         // Any fn-inversion feature gives the keyboard an Fn-lock control.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a3]).fn_lock);
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a2]).fn_lock);

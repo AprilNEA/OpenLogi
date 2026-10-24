@@ -6,8 +6,8 @@ use openlogi_core::color::Rgb;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 use crate::write::lighting::rgb::RgbControlLease;
 use crate::write::{
-    HidppFeatureErrorKind, HidppOperation, LightingMethod, LightingWrite, WriteError,
-    release_rgb_control,
+    HidppFeatureErrorKind, HidppOperation, LightingAnimation, LightingMethod, LightingWrite,
+    WriteError, release_rgb_control,
 };
 use crate::{DeviceRoute, SharedChannel};
 use hidpp::feature::rgb_effects::{EventsNotificationFlags, SwControlFlags};
@@ -16,6 +16,7 @@ fn write() -> LightingWrite {
     LightingWrite {
         method: LightingMethod::Auto,
         color: Rgb::new(0x17, 0x82, 0xc4),
+        animation: LightingAnimation::Static,
     }
 }
 

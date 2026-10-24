@@ -3,6 +3,7 @@
 //! [`SmartShift`], and the legacy [`GestureOwner`], plus their serde helpers.
 
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 
 use az::SaturatingAs;
 use nutype::nutype;
@@ -528,8 +529,8 @@ fn default_true() -> bool {
     true
 }
 
-/// Per-device RGB lighting: a single static color, brightness, and on/off.
-/// Deliberately basic — per-key effects are a later addition.
+/// Per-device RGB lighting: one color, brightness, on/off, and the effect that
+/// plays it. Per-key effects are a later addition.
 ///
 /// Crosses the agent↔GUI IPC (`set_lighting`), so field order is wire format —
 /// changes require a `PROTOCOL_VERSION` bump (guarded by
@@ -554,6 +555,39 @@ pub struct Lighting {
         deserialize_with = "deserialize_brightness"
     )]
     pub brightness: u8,
+    /// How the lighting animates. Configs written before effects existed
+    /// load as [`LightingEffect::Static`].
+    #[serde(default)]
+    pub effect: LightingEffect,
+    /// One cycle of an animated [`Self::effect`] — a breath, or a turn of the
+    /// colour wheel — in milliseconds, within [`Lighting::EFFECT_PERIOD_MS`].
+    /// Kept while the effect is static, so switching back restores the pace.
+    #[serde(
+        default = "default_lighting_effect_period_ms",
+        deserialize_with = "deserialize_effect_period_ms"
+    )]
+    pub effect_period_ms: u16,
+}
+
+impl Lighting {
+    /// The effect periods the UI and the config accept, in milliseconds.
+    pub const EFFECT_PERIOD_MS: RangeInclusive<u16> = 1_000..=20_000;
+}
+
+/// How a device's [`Lighting`] animates.
+///
+/// Crosses the agent↔GUI IPC inside [`Lighting`]; variants are append-only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightingEffect {
+    /// The color, held steady. Every RGB device draws it.
+    #[default]
+    Static,
+    /// The color fading in and out, once per [`Lighting::effect_period_ms`].
+    Breathing,
+    /// Every hue in turn, once per [`Lighting::effect_period_ms`]; the color
+    /// is not used.
+    ColorCycle,
 }
 
 /// Persisted settings for a standalone light such as Logitech Litra.
@@ -643,6 +677,8 @@ impl Default for Lighting {
             enabled: default_lighting_enabled(),
             color: default_lighting_color(),
             brightness: default_lighting_brightness(),
+            effect: LightingEffect::Static,
+            effect_period_ms: default_lighting_effect_period_ms(),
         }
     }
 }
@@ -657,6 +693,27 @@ fn default_lighting_color() -> Rgb {
 
 fn default_lighting_brightness() -> u8 {
     100
+}
+
+fn default_lighting_effect_period_ms() -> u16 {
+    5_000
+}
+
+/// Reject an effect period outside [`Lighting::EFFECT_PERIOD_MS`].
+fn deserialize_effect_period_ms<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u16::deserialize(deserializer)?;
+    if Lighting::EFFECT_PERIOD_MS.contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format_args!(
+            "effect_period_ms must be between {} and {}, got {value}",
+            Lighting::EFFECT_PERIOD_MS.start(),
+            Lighting::EFFECT_PERIOD_MS.end()
+        )))
+    }
 }
 
 /// Reject brightness outside the UI and hardware contract.

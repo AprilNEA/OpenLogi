@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use openlogi_core::color::Rgb;
-use openlogi_device::write::LightingWrite;
+use openlogi_device::write::{LightingAnimation, LightingWrite};
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
@@ -163,6 +163,7 @@ pub async fn set_keyboard_color_with_on(
         LightingWrite {
             method,
             color: Rgb::new(r, g, b),
+            animation: LightingAnimation::Static,
         }
         .apply_on(&channel, || cancel.is_cancelled(), || gate.allows_io())
         .await

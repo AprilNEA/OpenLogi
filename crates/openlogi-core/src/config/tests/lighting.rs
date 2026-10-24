@@ -11,6 +11,8 @@ fn lighting_roundtrips_per_device() {
             enabled: true,
             color: "00aabb".parse().expect("valid hex"),
             brightness: 75,
+            effect: LightingEffect::Breathing,
+            effect_period_ms: 3_000,
         },
     );
     let restored = write_and_read(&cfg);
@@ -20,9 +22,66 @@ fn lighting_roundtrips_per_device() {
             enabled: true,
             color: "00aabb".parse().expect("valid hex"),
             brightness: 75,
+            effect: LightingEffect::Breathing,
+            effect_period_ms: 3_000,
         })
     );
     assert_eq!(restored.lighting("absent"), None);
+}
+
+#[test]
+fn lighting_saved_before_effects_loads_as_a_static_colour() {
+    let cfg = toml::from_str::<Config>(
+        r#"
+            schema_version = 3
+            [devices.g203.lighting]
+            enabled = true
+            color = "00ff00"
+            brightness = 40
+        "#,
+    )
+    .expect("a config without an effect still loads");
+    let lighting = cfg.lighting("g203").expect("lighting");
+    assert_eq!(lighting.effect, LightingEffect::Static);
+    assert_eq!(
+        lighting.effect_period_ms,
+        Lighting::default().effect_period_ms
+    );
+}
+
+#[test]
+fn lighting_effect_reads_its_snake_case_name() {
+    let cfg = toml::from_str::<Config>(
+        r#"
+            schema_version = 3
+            [devices.g733.lighting]
+            effect = "color_cycle"
+            effect_period_ms = 8000
+        "#,
+    )
+    .expect("a colour cycle loads");
+    let lighting = cfg.lighting("g733").expect("lighting");
+    assert_eq!(lighting.effect, LightingEffect::ColorCycle);
+    assert_eq!(lighting.effect_period_ms, 8_000);
+}
+
+#[test]
+fn lighting_effect_period_outside_its_range_is_rejected() {
+    for period in [0, 999, 20_001] {
+        let error = toml::from_str::<Config>(&format!(
+            "
+                schema_version = 3
+                [devices.g203.lighting]
+                effect = \"breathing\"
+                effect_period_ms = {period}
+            "
+        ))
+        .expect_err("an out-of-range period must fail");
+        assert!(
+            error.to_string().contains("between 1000 and 20000"),
+            "{period}: {error}"
+        );
+    }
 }
 
 #[test]
