@@ -53,3 +53,8 @@ mach2 = "0.5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse"] }
+
+# The Windows regression test for the extended-key injection watches the
+# system-wide keyboard hook, which lives in the windowing API.
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
