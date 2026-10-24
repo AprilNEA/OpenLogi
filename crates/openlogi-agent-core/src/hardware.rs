@@ -442,11 +442,7 @@ impl DeviceOp {
             ..
         } = self.access;
         let route = self.route.clone();
-        let (r, g, b) = lighting_rgb(lighting);
-        let write = openlogi_hid::write::LightingWrite {
-            method: openlogi_hid::LightingMethod::Auto,
-            color: openlogi_core::color::Rgb::new(r, g, b),
-        };
+        let write = openlogi_hid::write::LightingWrite::for_settings(lighting);
         openlogi_hid::lighting::LightingJob::spawn(&self.route, move |cancel| async move {
             let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
                 .await
@@ -1418,30 +1414,16 @@ async fn write_native_wheel_mode(
     Ok(NativeWheelWrite::Written)
 }
 
-/// Apply `lighting` to the keyboard at `op`'s device on a background thread.
+/// Apply `lighting` to the device at `op` on a background thread.
 ///
-/// Resolves the configured colour (scaled by brightness, or black when the
-/// lighting is off) and writes every key over HID++ via
-/// [`openlogi_hid::set_keyboard_color_on`]. A registry miss and write
-/// failures are logged, not surfaced.
+/// Resolves the configured colour and effect with
+/// [`openlogi_hid::write::LightingWrite::for_settings`] and writes them over
+/// HID++. A registry miss and write failures are logged, not surfaced.
 pub fn set_lighting_in_background(op: DeviceOp, lighting: &Lighting) {
     match op.lighting(lighting) {
         Ok(job) => job.detach(),
         Err(error) => warn!(?error, "could not start background lighting"),
     }
-}
-
-/// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured
-/// colour scaled by brightness, or black when lighting is off.
-#[must_use]
-pub fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
-    if !lighting.enabled {
-        return (0, 0, 0);
-    }
-    let (r, g, b) = lighting.color.components();
-    let scale =
-        |c: u8| u8::try_from(u16::from(c) * u16::from(lighting.brightness) / 100).unwrap_or(c);
-    (scale(r), scale(g), scale(b))
 }
 
 /// Bound any single HID++ call by [`WRITE_TIMEOUT`] so an asleep / unresponsive

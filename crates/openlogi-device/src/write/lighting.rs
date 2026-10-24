@@ -7,7 +7,8 @@ use hidpp::{
     feature::{
         CreatableFeature,
         color_led_effects::{
-            ColorLedEffectsFeature, EffectId, Persistence, ZONE_EFFECT_PARAM_COUNT,
+            BreathingWaveform, ColorLedEffectsFeature, EffectIntensity, Persistence,
+            ZoneEffectParams,
         },
         per_key_lighting::{
             FramePersistence, MAX_SINGLE_VALUE_ZONES, PerKeyLightingFeature, Rgb,
@@ -18,6 +19,7 @@ use hidpp::{
     nibble::U4,
     protocol::v20::{self, Hidpp20Error},
 };
+use openlogi_core::config::{Lighting, LightingEffect, LightingEffectPeriod};
 use tracing::debug;
 
 use crate::SharedChannel;
@@ -114,22 +116,80 @@ pub async fn set_keyboard_color_with(
     LightingWrite {
         method,
         color: openlogi_core::color::Rgb::new(r, g, b),
+        animation: LightingAnimation::Static,
     }
     .apply(backend, route, || false, || true)
     .await
     .map(drop)
 }
 
-/// One complete solid-colour transaction, including RGB ownership rollback.
+/// One complete lighting transaction, including RGB ownership rollback.
 #[derive(Clone, Copy)]
 pub struct LightingWrite {
     /// Preferred protocol path.
     pub method: LightingMethod,
     /// The colour after applying the configured brightness.
     pub color: openlogi_core::color::Rgb,
+    /// How [`Self::color`] animates. Only `0x8070` plays an animation; every
+    /// other path, and a device whose zones list none, shows the colour.
+    pub animation: LightingAnimation,
+}
+
+/// The animation a [`LightingWrite`] asks for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LightingAnimation {
+    /// The colour held steady.
+    #[default]
+    Static,
+    /// The colour fading in and out once every `period`.
+    Breathing {
+        /// One breath.
+        period: LightingEffectPeriod,
+    },
+    /// The colour wheel, once every `period`, at `intensity` — it has no
+    /// colour to carry the brightness.
+    ColorCycle {
+        /// One turn of the colour wheel.
+        period: LightingEffectPeriod,
+        /// The configured brightness.
+        intensity: EffectIntensity,
+    },
 }
 
 impl LightingWrite {
+    /// The write that shows `lighting`, choosing the protocol path
+    /// automatically. Off, or at zero brightness, is a black static colour.
+    /// Brightness scales the colour, except in a colour cycle, which has no
+    /// colour and takes it as the effect's intensity.
+    #[must_use]
+    pub fn for_settings(lighting: &Lighting) -> Self {
+        let dark = Self {
+            method: LightingMethod::Auto,
+            color: openlogi_core::color::Rgb::new(0, 0, 0),
+            animation: LightingAnimation::Static,
+        };
+        if !lighting.enabled || lighting.brightness == 0 {
+            return dark;
+        }
+        let (r, g, b) = lighting.color.components();
+        let scale =
+            |c: u8| u8::try_from(u16::from(c) * u16::from(lighting.brightness) / 100).unwrap_or(c);
+        let period = lighting.effect_period_ms;
+        let animation = match lighting.effect {
+            LightingEffect::Static => LightingAnimation::Static,
+            LightingEffect::Breathing => LightingAnimation::Breathing { period },
+            LightingEffect::ColorCycle => LightingAnimation::ColorCycle {
+                period,
+                intensity: EffectIntensity::from_percent(lighting.brightness),
+            },
+        };
+        Self {
+            color: openlogi_core::color::Rgb::new(scale(r), scale(g), scale(b)),
+            animation,
+            ..dark
+        }
+    }
+
     /// Open a standalone route and apply with the same ownership contract as
     /// [`Self::apply_on`]. The native worker owns this channel through cleanup.
     pub async fn apply(
@@ -175,6 +235,10 @@ impl LightingWrite {
         let channel = shared.channel();
         let index = shared.device_index();
         let (r, g, b) = self.color.components();
+        let fixed = ZoneEffectParams::FixedColor {
+            color: color_led_rgb(self.color),
+        };
+        let wanted = self.zone_effect().unwrap_or(fixed);
         match self.method {
             LightingMethod::PerKey => {
                 return scope
@@ -190,13 +254,16 @@ impl LightingWrite {
             }
             LightingMethod::Effects => {
                 return scope
-                    .read(set_color_effects(channel, index, r, g, b))
+                    .read(set_zone_effects(channel, index, wanted, fixed))
                     .await
                     .map(|()| None);
             }
             LightingMethod::Auto => {}
         }
-        match scope.read(set_color_effects(channel, index, r, g, b)).await {
+        match scope
+            .read(set_zone_effects(channel, index, wanted, fixed))
+            .await
+        {
             Err(WriteError::FeatureUnsupported { feature_hex })
                 if feature_hex == COLOR_LED_EFFECTS_FEATURE =>
             {
@@ -224,6 +291,26 @@ impl LightingWrite {
                     .map(|()| None)
             }
             other => other,
+        }
+    }
+
+    /// The `0x8070` parameters of [`Self::animation`], or `None` for a static
+    /// colour.
+    fn zone_effect(self) -> Option<ZoneEffectParams> {
+        match self.animation {
+            LightingAnimation::Static => None,
+            LightingAnimation::Breathing { period } => Some(ZoneEffectParams::Breathing {
+                color: color_led_rgb(self.color),
+                period_ms: period.into_inner(),
+                waveform: BreathingWaveform::Default,
+                intensity: EffectIntensity::FULL,
+            }),
+            LightingAnimation::ColorCycle { period, intensity } => {
+                Some(ZoneEffectParams::Cycling {
+                    period_ms: period.into_inner(),
+                    intensity,
+                })
+            }
         }
     }
 
@@ -342,10 +429,15 @@ async fn resolve_feature_index(
     Ok(info.map(|i| i.index))
 }
 
-/// Set a solid colour via `ColorLedEffects` (`0x8070`): a fixed effect per zone,
-/// stored in RAM only (overrides the running onboard profile without touching
-/// flash). `FeatureUnsupported` when the device exposes no `0x8070` or none of
-/// its zones offers a fixed colour, including a device that reports no zones.
+/// Play `wanted` through `ColorLedEffects` (`0x8070`): on every zone that
+/// lists its effect, and `fallback` on a zone that lists only that one — a
+/// zone that cannot breathe still shows the colour, and so does a device none
+/// of whose zones can. Stored in RAM only (overrides the running onboard
+/// profile without touching flash). `FeatureUnsupported` when the device
+/// exposes no `0x8070` or no zone lists either effect, including a device that
+/// reports no zones.
+///
+/// For a solid colour `wanted` and `fallback` are the same fixed colour.
 ///
 /// Uses the typed [`ColorLedEffectsFeature`] wrapper: the real zone count is read
 /// first so only existing zones are driven (a typed `set_zone_effect` awaits the
@@ -353,14 +445,13 @@ async fn resolve_feature_index(
 /// non-existent zone would surface as an error rather than a silent no-op).
 /// Every reported zone is enumerated, as Logi Options+ and Solaar do; the
 /// caller's write deadline, not a zone cap, bounds a malformed count.
-/// Every target is located before the first write, so a keyboard without a
-/// fixed colour is left untouched for the next path.
-async fn set_color_effects(
+/// Every target is located before the first write, so a device that cannot
+/// play `wanted` is left untouched for the next path.
+async fn set_zone_effects(
     channel: &Arc<HidppChannel>,
     index: u8,
-    r: u8,
-    g: u8,
-    b: u8,
+    wanted: ZoneEffectParams,
+    fallback: ZoneEffectParams,
 ) -> Result<(), WriteError> {
     let mut device = Device::new(Arc::clone(channel), index)
         .await
@@ -372,20 +463,27 @@ async fn set_color_effects(
         .map_err(classify_lighting_error)?
         .zone_count;
 
-    let mut params = [0u8; ZONE_EFFECT_PARAM_COUNT];
-    params[0] = r;
-    params[1] = g;
-    params[2] = b;
-    let targets = fixed_color_targets(&feature, index, zone_count).await?;
+    let targets = zone_targets(&feature, index, zone_count, wanted, fallback).await?;
     if targets.is_empty() {
-        debug!(index, zone_count, "no 0x8070 zone offers a fixed colour");
+        debug!(
+            index,
+            zone_count, "no 0x8070 zone offers the effect or the colour"
+        );
         return Err(WriteError::FeatureUnsupported {
             feature_hex: COLOR_LED_EFFECTS_FEATURE,
         });
     }
-    for &(zone, effect) in &targets {
+    if !targets.iter().any(|&(_, _, params)| params == wanted) {
+        debug!(
+            index,
+            zone_count,
+            effect = ?wanted.effect_id(),
+            "no 0x8070 zone lists the effect — showing the colour"
+        );
+    }
+    for &(zone, effect, params) in &targets {
         feature
-            .set_zone_effect(zone, effect, params, Persistence::Volatile)
+            .set_zone_effect(zone, effect, params.to_params(), Persistence::Volatile)
             .await
             .map_err(classify_lighting_error)?;
         tokio::time::sleep(FRAME_GAP).await;
@@ -394,28 +492,30 @@ async fn set_color_effects(
         index,
         zone_count,
         zones_written = targets.len(),
-        r,
-        g,
-        b,
-        "set keyboard colour via typed 0x8070"
+        ?wanted,
+        "set lighting via typed 0x8070"
     );
     Ok(())
 }
 
-/// The `(zone, effect index)` of the fixed-colour effect in each of zones
-/// `0..zone_count`, read from the device's own effect lists as Logi Options+
-/// does. A zone without one is skipped: a guessed index would drive whatever
-/// effect sits there with RGB bytes as its parameters.
+/// The `(zone, effect index, parameters)` to write in each of zones
+/// `0..zone_count`: `wanted` where the zone lists its effect, else `fallback`
+/// where it lists that one. Each index is read from the zone's own effect
+/// list, as Logi Options+ does — the lists are not in one order across
+/// devices (a G203 lists the colour cycle before breathing, a G733 after). A
+/// zone listing neither is skipped: a guessed index would drive whatever
+/// effect sits there with these bytes as its parameters.
 ///
-/// An effect id this crate does not model is not the fixed colour, so it is
-/// passed over. A zone whose info is rejected (an unmodelled location) is
-/// skipped too: its effect list cannot be read, so no index is known to be
-/// the fixed colour.
-async fn fixed_color_targets(
+/// An effect id this crate does not model is neither, so it is passed over.
+/// A zone whose info is rejected (an unmodelled location) is skipped too: its
+/// effect list cannot be read, so no index is known to hold either effect.
+async fn zone_targets(
     feature: &ColorLedEffectsFeature,
     index: u8,
     zone_count: u8,
-) -> Result<Vec<(u8, u8)>, WriteError> {
+    wanted: ZoneEffectParams,
+    fallback: ZoneEffectParams,
+) -> Result<Vec<(u8, u8, ZoneEffectParams)>, WriteError> {
     let mut targets = Vec::new();
     for zone in 0..zone_count {
         let effects_number = match feature.get_zone_info(zone).await {
@@ -429,18 +529,30 @@ async fn fixed_color_targets(
             }
             Err(error) => return Err(classify_lighting_error(error)),
         };
+        let mut fallback_index = None;
+        let mut target = None;
         for effect in 0..effects_number {
             match feature.get_zone_effect_info(zone, effect).await {
-                Ok(info) if info.effect_id == EffectId::FixedColor => {
-                    targets.push((zone, effect));
+                Ok(info) if info.effect_id == wanted.effect_id() => {
+                    target = Some((zone, effect, wanted));
                     break;
+                }
+                Ok(info) if info.effect_id == fallback.effect_id() => {
+                    fallback_index.get_or_insert(effect);
                 }
                 Ok(_) | Err(Hidpp20Error::UnsupportedResponse) => {}
                 Err(error) => return Err(classify_lighting_error(error)),
             }
         }
+        targets.extend(target.or_else(|| fallback_index.map(|effect| (zone, effect, fallback))));
     }
     Ok(targets)
+}
+
+/// The `0x8070` form of a colour.
+fn color_led_rgb(color: openlogi_core::color::Rgb) -> hidpp::feature::color_led_effects::Rgb {
+    let (red, green, blue) = color.components();
+    hidpp::feature::color_led_effects::Rgb { red, green, blue }
 }
 
 /// Classify a HID++ error from the `ColorLedEffects` functions.
@@ -747,6 +859,7 @@ pub async fn set_keyboard_color_with_on(
     LightingWrite {
         method,
         color: openlogi_core::color::Rgb::new(r, g, b),
+        animation: LightingAnimation::Static,
     }
     .apply_on(shared, || false, || shared.channel().is_connected())
     .await

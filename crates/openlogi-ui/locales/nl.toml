@@ -641,6 +641,11 @@ colour_temperature = "Kleurtemperatuur"
 applying_light_setting = "Verlichtingsinstelling toepassen…"
 auto_on_with_camera = "Automatisch aan met camera"
 camera_light_auto_description = "Schakel de verlichting in zodra een camera wordt gebruikt en uit wanneer geen camera actief is."
+effect = "Effect"
+effect_static = "Statisch"
+effect_breathing = "Ademen"
+effect_color_cycle = "Kleurencyclus"
+effect_period = "Cyclusduur"
 
 [action_ring]
 actions_ring = "Actiering"

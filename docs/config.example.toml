@@ -83,6 +83,11 @@ Bottom = { action = "ShowDesktop", label = "Desktop" }
 enabled = true
 color = "ff0000"
 brightness = 80
+# "static" (default), "breathing", or "color_cycle". Breathing and the colour
+# cycle play on devices with HID++ 0x8070; others show the colour.
+effect = "breathing"
+# One breath or turn of the colour wheel, 1000–20000 ms.
+effect_period_ms = 4000
 
 [devices."receiver:aabbccdd:slot:1".smartshift]
 mode = "ratchet"

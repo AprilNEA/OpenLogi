@@ -641,6 +641,11 @@ colour_temperature = "Color temperature"
 applying_light_setting = "Applying light setting…"
 auto_on_with_camera = "Auto-on with camera"
 camera_light_auto_description = "Turn the light on when any camera is in use and off when all cameras are inactive."
+effect = "Effect"
+effect_static = "Static"
+effect_breathing = "Breathing"
+effect_color_cycle = "Color cycle"
+effect_period = "Cycle length"
 
 [action_ring]
 actions_ring = "Actions Ring"

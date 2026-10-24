@@ -641,6 +641,11 @@ colour_temperature = "Farvetemperatur"
 applying_light_setting = "Anvender lysindstilling…"
 auto_on_with_camera = "Tænd automatisk med kameraet"
 camera_light_auto_description = "Tænd lyset, når et kamera er i brug, og sluk det, når ingen kameraer er aktive."
+effect = "Effekt"
+effect_static = "Statisk"
+effect_breathing = "Åndedræt"
+effect_color_cycle = "Farvecyklus"
+effect_period = "Cykluslængde"
 
 [action_ring]
 actions_ring = "Handlingsring"
