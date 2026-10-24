@@ -337,7 +337,6 @@ fn slider_element(
         (DpiLoad::Failed(_), _) => retry_line(
             "dpi-retry",
             tr!("pointer.couldnt_read_dpi_click_to_retry"),
-            pal,
             move |cx| {
                 if let Some(key) = &key {
                     AppState::apply(cx, |state| state.retry_dpi_read(key));

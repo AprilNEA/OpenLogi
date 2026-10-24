@@ -19,9 +19,10 @@ use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PairingError, PasskeyMethod,
+    PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -134,7 +135,20 @@ pub use succession::Identity;
 /// v39: `AgentStatus::virtual_keyboard` and [`VirtualKeyboardStatus`]
 ///      appended — whether the agent types synthesized keys on its macOS
 ///      virtual HID keyboard.
-pub const PROTOCOL_VERSION: u32 = 39;
+/// v40: `Capabilities::force_sensing` appended — a force-sensing button,
+///      the MX Master 4's Haptic Sense Panel, whose press force HID++
+///      `0x19c0` lets software change; `Agent::{read_force_sensing,
+///      set_force_sensing}` appended — that force read and set from the
+///      settings app, with [`ForceSensingInfo`];
+///      `HidppOperation::{ReadForceSensing, WriteForceSensing}` and
+///      `WriteError::{ForceSensingUnchangeable, ForceSensingNotApplied}`
+///      appended.
+/// v41: Disable Keys capability and read/write methods appended after the
+///      v40 press-force methods, together with raw-preserving masks and
+///      guarded-write/superseded errors; `Agent::reload_saved_config_with_verdict`
+///      and [`SavedConfigVerdict`] appended, so a GUI distinguishes its accepted
+///      saved revision from an external edit that replaced it before reload.
+pub const PROTOCOL_VERSION: u32 = 41;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -296,6 +310,18 @@ pub struct SavedConfig {
     pub revision: ConfigRevision,
     /// The controls of lights the user set in the save without a write.
     pub chosen: Vec<ChosenLight>,
+}
+
+/// How the agent treated a GUI save when it re-read `config.toml`.
+///
+/// Variants are append-only because this type crosses the IPC boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SavedConfigVerdict {
+    /// The agent read the exact revision the GUI saved.
+    Accepted,
+    /// Another writer changed the file after the GUI saved it. The agent
+    /// applied that external revision without restoring the GUI's older save.
+    FileChangedAfterSave,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -893,4 +919,34 @@ pub trait Agent {
         route: DeviceRoute,
         speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError>;
+
+    /// Read the press force of the force-sensing button on `route` (HID++
+    /// `0x19c0`), with the range the device accepts and whether software may
+    /// change it.
+    async fn read_force_sensing(route: DeviceRoute) -> Result<ForceSensingInfo, WriteError>;
+    /// Write the press force of the force-sensing button on `route` now and
+    /// answer with what it reads back. A force outside the device's range is
+    /// clamped into it. A button that does not let software change its force
+    /// is refused with [`WriteError::ForceSensingUnchangeable`] before
+    /// anything is written; a force the device acknowledges but does not keep
+    /// with [`WriteError::ForceSensingNotApplied`].
+    async fn set_force_sensing(
+        route: DeviceRoute,
+        force: u16,
+    ) -> Result<ForceSensingInfo, WriteError>;
+    /// Read raw Disable Keys capabilities and current state for `route`.
+    async fn read_disable_keys(route: DeviceRoute) -> Result<DisableKeysState, WriteError>;
+    /// Replace the desired known disabled-key set for `route`.
+    async fn set_disable_keys(
+        route: DeviceRoute,
+        desired: DisableKeysMask,
+    ) -> Result<DisableKeysState, WriteError>;
+    /// Re-read a GUI save and report whether its exact revision was still on
+    /// disk. Unlike [`Self::reload_saved_config`], callers use this to
+    /// reconcile presentation after another writer replaced the saved file.
+    ///
+    /// This method is appended to preserve the existing service-method order.
+    async fn reload_saved_config_with_verdict(
+        saved: SavedConfig,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError>;
 }

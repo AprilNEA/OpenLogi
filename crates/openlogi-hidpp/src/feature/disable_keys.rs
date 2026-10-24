@@ -54,14 +54,14 @@ impl DisableKeysFeature {
 
     /// Retrieves the set of keys the device allows software to disable.
     pub async fn get_capabilities(&self) -> Result<DisableableKeys, Hidpp20Error> {
-        let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
-        Ok(DisableableKeys::from_bits_retain(payload[0]))
+        self.keys(0, [0; 3], crate::protocol::WriteCompletion::Bounded)
+            .await
     }
 
     /// Retrieves the set of keys currently disabled.
     pub async fn get_disabled_keys(&self) -> Result<DisableableKeys, Hidpp20Error> {
-        let payload = self.endpoint.call(1, [0; 3]).await?.extend_payload();
-        Ok(DisableableKeys::from_bits_retain(payload[0]))
+        self.keys(1, [0; 3], crate::protocol::WriteCompletion::Bounded)
+            .await
     }
 
     /// Replaces the set of disabled keys and returns the device's echo.
@@ -72,11 +72,39 @@ impl DisableKeysFeature {
         &self,
         keys: DisableableKeys,
     ) -> Result<DisableableKeys, Hidpp20Error> {
-        let payload = self
-            .endpoint
-            .call(2, [keys.bits(), 0, 0])
-            .await?
-            .extend_payload();
+        self.keys(
+            2,
+            [keys.bits(), 0, 0],
+            crate::protocol::WriteCompletion::Drain,
+        )
+        .await
+    }
+
+    /// Capability query for an owner that drains every submitted native report.
+    pub async fn get_capabilities_write_through(&self) -> Result<DisableableKeys, Hidpp20Error> {
+        self.keys(0, [0; 3], crate::protocol::WriteCompletion::Drain)
+            .await
+    }
+
+    /// State query for an owner that drains every submitted native report.
+    pub async fn get_disabled_keys_write_through(&self) -> Result<DisableableKeys, Hidpp20Error> {
+        self.keys(1, [0; 3], crate::protocol::WriteCompletion::Drain)
+            .await
+    }
+
+    async fn keys(
+        &self,
+        function: u8,
+        args: [u8; 3],
+        completion: crate::protocol::WriteCompletion,
+    ) -> Result<DisableableKeys, Hidpp20Error> {
+        let response = match completion {
+            crate::protocol::WriteCompletion::Bounded => self.endpoint.call(function, args).await,
+            crate::protocol::WriteCompletion::Drain => {
+                self.endpoint.call_write_through(function, args).await
+            }
+        }?;
+        let payload = response.extend_payload();
         Ok(DisableableKeys::from_bits_retain(payload[0]))
     }
 }

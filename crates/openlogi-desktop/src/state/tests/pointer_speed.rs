@@ -100,7 +100,7 @@ fn answer_speed_read(
 
 /// Install `state` with live swr-backed reads, as the app does, and have it
 /// read the selected mouse.
-fn install(state: AppState, cx: &mut gpui::TestAppContext) {
+pub(crate) fn install(state: AppState, cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
         let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
         let client = swr_core::SwrClient::builder().build(runtime.clone());

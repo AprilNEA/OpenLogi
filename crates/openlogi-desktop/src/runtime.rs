@@ -32,6 +32,28 @@ use crate::{app, windows};
 /// one thing here that still has to be asked on a timer.
 const CAMERA_SCAN_PERIOD: Duration = Duration::from_secs(2);
 
+/// Deliver a saved-reload verdict only to the transaction that requested it.
+fn apply_saved_config_reload(
+    context: ipc::ConfigReloadContext,
+    result: Result<openlogi_ipc::SavedConfigVerdict, openlogi_ipc::ConfigReloadError>,
+    cx: &mut gpui::App,
+) {
+    AppState::apply(cx, |state| match context {
+        ipc::ConfigReloadContext::General => state.apply_saved_config_reload_result(result),
+        ipc::ConfigReloadContext::DisableKeys(context) => {
+            state.apply_disable_keys_reload_result(context, result)
+        }
+        ipc::ConfigReloadContext::Reconciled(request_id) => {
+            state.apply_reconciled_config_reload_result(request_id, result)
+        }
+    });
+}
+
+/// Deliver a plain config-load result to the general configuration state.
+fn apply_config_load(result: Result<(), openlogi_ipc::ConfigReloadError>, cx: &mut gpui::App) {
+    AppState::apply(cx, |state| state.apply_config_reload_result(result));
+}
+
 /// What process startup hands the event loop.
 pub(crate) struct Startup {
     pub(crate) config: Config,
@@ -257,6 +279,10 @@ impl Runtime {
     }
 
     /// One update from the agent.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per agent update, each handing it to its AppState owner"
+    )]
     fn on_agent_update(&mut self, update: ipc::GuiUpdate, cx: &AsyncApp) {
         match update {
             ipc::GuiUpdate::Snapshot(snapshot) => {
@@ -281,16 +307,22 @@ impl Runtime {
                     });
                 });
             }
+            ipc::GuiUpdate::DisableKeysWriteResult { context, result } => cx.update(|cx| {
+                AppState::apply(cx, |state| {
+                    state.apply_disable_keys_write_result(context, result)
+                });
+            }),
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
             }
             ipc::GuiUpdate::PairingCancelled => {
                 cx.update(windows::add_device::apply_cancelled);
             }
-            ipc::GuiUpdate::ConfigReloadResult(result) => {
-                cx.update(|cx| {
-                    AppState::apply(cx, |state| state.apply_config_reload_result(result));
-                });
+            ipc::GuiUpdate::ConfigLoadResult { result } => {
+                cx.update(|cx| apply_config_load(result, cx));
+            }
+            ipc::GuiUpdate::ConfigReloadResult { context, result } => {
+                cx.update(|cx| apply_saved_config_reload(context, result, cx));
             }
             ipc::GuiUpdate::DpiWritten {
                 key,
@@ -319,6 +351,18 @@ impl Runtime {
             ipc::GuiUpdate::PointerSpeedWritten { key, result } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| state.apply_pointer_speed_written(&key, result));
+                });
+            }
+            ipc::GuiUpdate::ForceSensingWritten {
+                key,
+                write,
+                force,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_force_sensing_written(&key, write, force, result)
+                    });
                 });
             }
             ipc::GuiUpdate::BacklightWritten {

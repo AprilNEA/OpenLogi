@@ -44,6 +44,29 @@ behind the commit, at the start. Unit tests check the progress and exit
 velocity of every frame. Not verified: macOS 27 (the `IOHIDEvent` layout),
 other display sizes and scales, more than one display, and real mice.
 
+## 2026-10: Backlight writes invalidate other clients' device readings
+
+A successful CLI backlight write could leave the already-open GUI showing the
+previous setting: the write's readback went only to its requester, and firmware
+does not guarantee a settings broadcast for that write.
+
+The agent uses the existing orchestrator-owned `settings_revision` epoch to
+invalidate client readings after a backlight transaction settles. It announces
+errors too, because a write may have reached hardware before confirmation failed.
+No returned value is broadcast as truth and no configuration file is changed.
+An agent-owned task finishes the transaction and publication if its requesting
+client disconnects. Admission reserves the existing per-route write order before
+task scheduling; hardware execution keeps its existing timeout, excluding queue
+wait. The orchestrator lock is never held over hardware I/O.
+
+Desktop invalidates its existing backlight cache rather than joining a read
+started before the revision. If a revision arrives while local writes are still
+pending, it reads again after their replies settle: a delayed local reply may
+predate a newer write from another client. This reconciliation issues no write,
+preserves later local intent, and is discarded with the old route's read state.
+The notification uses the existing snapshot contract, not a new wire field or
+polling timer.
+
 ## 2026-10: Channel files are composed from per-release records
 
 Beta releases share the update host with stable ones. A beta publish must

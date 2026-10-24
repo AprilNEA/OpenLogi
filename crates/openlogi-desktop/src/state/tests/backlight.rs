@@ -1,6 +1,8 @@
 //! Backlight: a change writes the keyboard through the agent — only one its
 //! last reading accepts — and nothing is persisted on this computer.
 
+mod freshness;
+
 use super::fn_lock::drain;
 use super::*;
 use crate::services::ipc::{Command, ReadBacklight, SetBacklight};

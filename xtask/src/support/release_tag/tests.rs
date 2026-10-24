@@ -322,3 +322,24 @@ fn a_build_version_fits_only_the_tag_that_built_it() {
         assert!(error.contains(says), "{build} for {tag}: {error}");
     }
 }
+
+#[test]
+fn a_beta_tag_is_spelled_from_its_release_and_number() {
+    let release = Version::parse("0.8.18").unwrap();
+    let tag = ReleaseTag::beta(&release, 12).unwrap();
+    assert_eq!(tag.to_string(), "v0.8.18-beta.12");
+    assert_eq!(tag, ReleaseTag::parse("v0.8.18-beta.12").unwrap());
+    assert_eq!(tag.channel(), UpdateChannel::Beta);
+    assert!(
+        ReleaseTag::beta(&release, 0).is_err(),
+        "beta.0 would equal the release before it"
+    );
+    for release in ["0.8.18-beta.1", "0.8.18+meta"] {
+        let release = Version::parse(release).unwrap();
+        let error = ReleaseTag::beta(&release, 1).unwrap_err();
+        assert!(
+            error.to_string().contains("is not `X.Y.Z`"),
+            "{release}: {error}"
+        );
+    }
+}

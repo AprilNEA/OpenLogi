@@ -1,6 +1,7 @@
 //! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, the smooth wheel, keeping the OS layout, the report rate, and the stored bindings.
 
 use super::*;
+use std::collections::BTreeSet;
 
 #[test]
 fn dpi_roundtrips_per_device() {
@@ -9,6 +10,20 @@ fn dpi_roundtrips_per_device() {
     let restored = write_and_read(&cfg);
     assert_eq!(restored.dpi("2b042"), Some(Dpi::new(1600)));
     assert_eq!(restored.dpi("absent"), None);
+}
+
+#[test]
+fn disabled_keys_roundtrip_and_clear_per_device() {
+    let mut cfg = Config::default();
+    let desired = BTreeSet::from([DisableKey::CapsLock, DisableKey::WindowsCommand]);
+
+    assert_eq!(cfg.disabled_keys("keyboard"), None);
+    cfg.set_disabled_keys("keyboard", desired.clone());
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.disabled_keys("keyboard"), Some(&desired));
+
+    cfg.clear_disabled_keys("keyboard");
+    assert_eq!(cfg.disabled_keys("keyboard"), None);
 }
 
 #[test]
@@ -331,6 +346,41 @@ fn a_pointer_speed_outside_the_safe_range_does_not_load() {
     // than written to the mouse.
     toml::from_str::<Config>("[devices.2b042]\npointer_speed = 1\n")
         .expect_err("a pointer speed below 32 is refused");
+}
+
+#[test]
+fn force_sensing_roundtrips_as_the_raw_device_value() {
+    let mut cfg = Config::default();
+    cfg.set_force_sensing("2b042", 4500);
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(
+        toml.contains("force_sensing = 4500"),
+        "the force is stored as the raw device value: {toml}"
+    );
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.force_sensing("2b042"), Some(4500));
+    assert_eq!(restored.force_sensing("absent"), None);
+}
+
+#[test]
+fn unset_force_sensing_is_omitted_from_toml() {
+    // Absent means the agent never writes the force, so it must not appear
+    // just because another setting was saved.
+    let mut cfg = Config::default();
+    cfg.set_dpi("2b042", Dpi::new(1600));
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(!toml.contains("force_sensing"), "{toml}");
+    assert_eq!(write_and_read(&cfg).force_sensing("2b042"), None);
+}
+
+#[test]
+fn a_saved_force_sensing_survives_route_adoption() {
+    let route = "receiver:82839805:slot:2";
+    let mut config = Config::default();
+    config.set_force_sensing(route, 6000);
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:a393cae0").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert_eq!(config.force_sensing("unit:a393cae0"), Some(6000));
 }
 
 #[test]

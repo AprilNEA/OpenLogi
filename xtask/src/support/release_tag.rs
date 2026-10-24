@@ -1,11 +1,14 @@
 //! What a release tag says about the release it names, and the version
 //! installers compare.
 //!
-//! release-plz tags a stable release `vX.Y.Z`. A beta is tagged
-//! `vX.Y.Z-beta.N` on `master`, without a version bump: `X.Y.Z` is the stable
-//! release it leads to, and `N` counts the commits since the stable release
-//! before it, so a later beta has a larger `N`. Every command that reads a
-//! release tag parses it here.
+//! release-plz tags a stable release `vX.Y.Z`. The prerelease workflow tags
+//! a beta `vX.Y.Z-beta.N` on `master`, without a version bump: `X.Y.Z` is the
+//! stable release it leads to, and `N` counts the commits since the stable
+//! release before it. Within one stable release's cycle, a later beta has a
+//! larger `N`; the count starts again after the next stable release.
+//!
+//! Every command that reads a release tag parses it here, and
+//! [`ReleaseTag::beta`] spells the beta tag `release next-beta` names.
 
 use std::fmt;
 use std::str::FromStr;
@@ -46,6 +49,17 @@ impl ReleaseTag {
             "release tag {tag:?} is a pre-release other than `beta.N` with N at least 1"
         );
         Ok(parsed)
+    }
+
+    /// The beta tag `v<release>-beta.<number>`: beta `number` of the stable
+    /// release `release` will be. Fails unless `release` is `X.Y.Z` and
+    /// `number` is at least 1, the shapes [`Self::parse`] accepts.
+    pub(crate) fn beta(release: &Version, number: u64) -> Result<Self> {
+        ensure!(
+            release.pre.is_empty() && release.build.is_empty(),
+            "a beta leads to a stable release, and {release} is not `X.Y.Z`"
+        );
+        Self::parse(&format!("v{release}-{BETA_PREFIX}{number}"))
     }
 
     /// The version of a stable release tag; `None` for a beta tag or any

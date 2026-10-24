@@ -707,7 +707,7 @@ Only `vX.Y.Z` and `vX.Y.Z-beta.N` are release tags.
 `xtask/src/support/release_tag.rs` owns the syntax and the encoding.
 
 The publish side follows the channel. A beta becomes a GitHub prerelease and
-never the latest release. It leaves the installer site and the Homebrew cask
+never the latest release. It leaves the installer site and `openlogi@latest`
 as they are. Publishing recomposes the channel files in build-version order.
 The beta channel offers the beta with the highest build version if it is
 above the newest stable release's; otherwise it offers that stable release.
@@ -715,11 +715,57 @@ The appcasts contain the stable item and any beta item the beta channel
 offers, and only apps on `beta` receive the beta item. The stable channel's
 `latest.json` keeps its bytes.
 
+The Homebrew tap gets one event per channel. A stable release sends
+`update-openlogi` for `openlogi@latest`. A publish that changes what the beta
+channel offers sends `update-openlogi-beta` for `openlogi@beta`, with the tag
+the beta channel now serves: the new beta, or a stable release newer than
+every beta. A tap workflow that listens only for `update-openlogi` ignores
+`update-openlogi-beta`, so a beta event cannot change `openlogi@latest`
+through it.
+
 A stable release's notes compare with the previous stable tag, so they cover
 its betas too. A beta's notes compare with the highest-version release tag
 below it that its commit can reach, betas included.
 `cargo xtask release version` picks that tag and prints it as
 `previous_tag`; publish passes it to GitHub's release-notes API.
+
+### Cutting a beta
+
+Run the Prerelease workflow (`.github/workflows/prerelease.yml`) from
+`master` in the Actions tab. It tags the `master` commit the run was
+dispatched on, and does not move to a newer commit when `master` advances.
+Nobody tags a beta by hand. It finds the open release-plz PR whose head
+contains that commit, the way `release-plz.yml` finds it, and stops if there
+is none. Then it runs
+`cargo xtask release next-beta --release-ref <the PR's head>`. The beta's
+version is that PR's workspace version, the next stable release. Its number
+is the count of commits since the stable release before it. With the release
+PR at 0.8.18 and `master` three commits after `v0.8.17`, the tag is
+`v0.8.18-beta.3`, and its build version is `0.8.17.3`.
+
+`release next-beta` refuses to name a beta when:
+
+- the release PR's version is not above the stable release before the beta;
+- `master` carries a version that has no stable tag yet;
+- the commit is that stable release, or already has a beta tag;
+- the tag exists, is not above the newest beta, or the newest beta is not on
+  the commit's history;
+- the build version does not fit an MSI `ProductVersion`.
+
+`release version` checks the first, second and last of these again on the
+pushed tag. They check the tag's version only, so a build, signature or
+publish can still fail. The others keep betas rising, one per commit.
+
+`release next-beta` reads the `HEAD` commit and the tags, not the working
+tree, so an uncommitted edit cannot change its answer. It needs the whole
+history and every `v*` tag, and refuses a shallow repository, because a
+shallow history can hide commits from the count. To run it outside the
+workflow, run `git fetch --tags` in a full clone first.
+
+The workflow creates the tag with the GitHub App's token, because a tag that
+`GITHUB_TOKEN` pushes starts no workflow. The tag push runs `release.yml`. A
+dry run prints the tag and creates nothing. Only one cut runs at a time, and
+a newer pending run replaces an older pending one.
 
 ## Crowdin translation sync
 

@@ -1,17 +1,21 @@
 //! Schema versions and the strictness of the current one.
 
+use std::collections::BTreeSet;
+
 use super::*;
 
 #[test]
-fn rejects_newer_schema_version_but_accepts_v1() {
+fn rejects_next_schema_version_but_accepts_v1() {
     // A future version is rejected loudly; the current and older versions
     // load (older ones migrate through the shim).
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");
-    fs::write(&path, "schema_version = 99\n").expect("write");
+    let future = SCHEMA_VERSION + 1;
+    fs::write(&path, format!("schema_version = {future}\n")).expect("write");
+    let error = Config::load_from_path(&path).expect_err("next schema should fail");
     assert_matches!(
-        Config::load_from_path(&path).expect_err("v99 should fail"),
-        ConfigError::UnsupportedSchemaVersion { found: 99, .. }
+        error,
+        ConfigError::UnsupportedSchemaVersion { found, .. } if found == future
     );
 
     fs::write(&path, "schema_version = 1\n").expect("write");
@@ -34,6 +38,33 @@ fn future_version_is_rejected_before_incompatible_fields_are_parsed() {
         Config::load_from_path(&path).expect_err("future schema must fail by version"),
         ConfigError::UnsupportedSchemaVersion { found: 99, .. }
     );
+}
+
+#[test]
+fn v9_without_disabled_keys_loads_and_a_save_stamps_v10() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 9\n[devices.keyboard]\nfn_lock = true\n",
+    )
+    .expect("write v9 config");
+
+    let (mut config, mut file) = ConfigFile::load_from_path(&path).expect("load v9 config");
+    assert_eq!(config.schema_version, SCHEMA_VERSION);
+    assert_eq!(config.disabled_keys("keyboard"), None);
+
+    let disabled_keys = BTreeSet::from([DisableKey::CapsLock, DisableKey::WindowsCommand]);
+    config.set_disabled_keys("keyboard", disabled_keys.clone());
+    file.save(&config).expect("save v10 config");
+
+    let saved = fs::read_to_string(&path).expect("read saved config");
+    assert!(
+        saved.starts_with(&format!("schema_version = {SCHEMA_VERSION}\n")),
+        "saved header: {saved}"
+    );
+    let reloaded = Config::load_from_path(&path).expect("reload v10 config");
+    assert_eq!(reloaded.disabled_keys("keyboard"), Some(&disabled_keys));
 }
 
 #[test]

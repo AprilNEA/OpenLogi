@@ -32,6 +32,7 @@ pub mod extended_dpi;
 pub mod extended_report_rate;
 pub mod feature_set;
 pub mod fn_inversion;
+pub mod force_sensing_button;
 pub mod gestures2;
 pub mod haptic_feedback;
 pub mod hires_wheel;
@@ -256,6 +257,19 @@ impl FeatureEndpoint {
             .await
     }
 
+    /// Short-report call that drains its native write before the response
+    /// deadline. The owner must drive it to completion after cancellation.
+    /// Unlike RGB ownership commands, it does not require a payload echo.
+    pub(crate) async fn call_write_through(
+        &self,
+        function: u8,
+        args: [u8; 3],
+    ) -> Result<v20::Message, Hidpp20Error> {
+        self.chan
+            .send_v20_write_through(v20::Message::Short(self.header(function), args), |_| true)
+            .await
+    }
+
     /// [`Self::call`], choosing what to do about a reply still owed to an
     /// abandoned call with the same header. Only a function that reads
     /// state no write can change should pass
@@ -419,9 +433,21 @@ bitflags::bitflags! {
     }
 }
 
+impl FeatureType {
+    /// Whether end-user configuration software may manage a feature with these flags.
+    ///
+    /// The HID++ feature-type contract requires host software to ignore hidden
+    /// and engineering features. Other flags, including obsolete, do not make a
+    /// feature unavailable to existing user software.
+    #[must_use]
+    pub const fn is_end_user_configurable(self) -> bool {
+        !self.contains(Self::HIDDEN) && !self.contains(Self::ENGINEERING)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DecodeEvent, InboundReport, inbound_report};
+    use super::{DecodeEvent, FeatureType, InboundReport, inbound_report};
     use crate::{
         channel::{HidppMessage, RequestSwIds, SwIdPolicy},
         nibble::U4,
@@ -431,6 +457,14 @@ mod tests {
     /// The default policy's set: id `1` only.
     fn own() -> RequestSwIds {
         SwIdPolicy::default().request_sw_ids()
+    }
+
+    #[test]
+    fn hidden_and_engineering_features_are_not_end_user_configurable() {
+        for typ in [FeatureType::HIDDEN, FeatureType::ENGINEERING] {
+            assert!(!typ.is_end_user_configurable(), "{typ:?}");
+        }
+        assert!(FeatureType::OBSOLETE.is_end_user_configurable());
     }
 
     fn header(device_index: u8, feature_index: u8, function: u8, software: u8) -> MessageHeader {

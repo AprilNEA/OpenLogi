@@ -180,9 +180,10 @@ loaded for any Rust or `Cargo.toml` edit.
 
 ## Releases
 
-release-plz drives releases: one unified workspace version, ONE root `CHANGELOG.md`
-(never per-crate changelogs), and a single `v{version}` tag that only release-plz
-creates — **never hand-create the tag**. Published GitHub releases are immutable:
+release-plz drives releases: one unified workspace version and ONE root `CHANGELOG.md`
+(never per-crate changelogs). Only release-plz creates a stable `v{version}` tag, and
+only `.github/workflows/prerelease.yml` creates a beta `v{version}-beta.{N}` tag —
+**never hand-create either tag**. Published GitHub releases are immutable:
 never re-run a failed release job or re-dispatch on an existing tag.
 `release-plz.toml` is the versioning contract — don't trim it.
 
