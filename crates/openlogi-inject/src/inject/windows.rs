@@ -57,7 +57,7 @@ const XBUTTON2: i32 = 2;
 pub(super) fn execute(action: &Action) {
     match action.effect() {
         Effect::None => {}
-        Effect::Click(button) => post_click(button),
+        Effect::Click(button) => super::click_mouse(button),
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
@@ -169,16 +169,85 @@ pub(super) fn run_shell_command(cmd: &str) {
     let _ = std::process::Command::new("cmd").args(["/C", cmd]).output();
 }
 
-fn post_click(button: MouseButton) {
-    let (down, up, data) = match button {
-        MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
-        MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
-        MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MouseButtonEvent {
+    flags: u32,
+    data: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MouseButtonMapping {
+    down_flags: u32,
+    up_flags: u32,
+    data: i32,
+}
+
+fn mouse_button_mapping(button: MouseButton) -> MouseButtonMapping {
+    match button {
+        MouseButton::Left => MouseButtonMapping {
+            down_flags: MOUSEEVENTF_LEFTDOWN,
+            up_flags: MOUSEEVENTF_LEFTUP,
+            data: 0,
+        },
+        MouseButton::Right => MouseButtonMapping {
+            down_flags: MOUSEEVENTF_RIGHTDOWN,
+            up_flags: MOUSEEVENTF_RIGHTUP,
+            data: 0,
+        },
+        MouseButton::Middle => MouseButtonMapping {
+            down_flags: MOUSEEVENTF_MIDDLEDOWN,
+            up_flags: MOUSEEVENTF_MIDDLEUP,
+            data: 0,
+        },
         // Extra buttons share the X flag pair; mouseData carries which one.
-        MouseButton::Back => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON1),
-        MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON2),
+        MouseButton::Back => MouseButtonMapping {
+            down_flags: MOUSEEVENTF_XDOWN,
+            up_flags: MOUSEEVENTF_XUP,
+            data: XBUTTON1,
+        },
+        MouseButton::Forward => MouseButtonMapping {
+            down_flags: MOUSEEVENTF_XDOWN,
+            up_flags: MOUSEEVENTF_XUP,
+            data: XBUTTON2,
+        },
+    }
+}
+
+fn mouse_button_events(buttons: &[MouseButton], phase: KeyPhase) -> Vec<MouseButtonEvent> {
+    let button_event = |button| {
+        let mapping = mouse_button_mapping(button);
+        MouseButtonEvent {
+            flags: match phase {
+                KeyPhase::Down => mapping.down_flags,
+                KeyPhase::Up => mapping.up_flags,
+            },
+            data: mapping.data,
+        }
     };
-    send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
+    match phase {
+        KeyPhase::Down => buttons.iter().copied().map(button_event).collect(),
+        KeyPhase::Up => buttons.iter().rev().copied().map(button_event).collect(),
+    }
+}
+
+/// Emit one edge for the mouse buttons whose ownership changed.
+pub(super) fn hold_mouse_buttons(buttons: &[MouseButton], phase: KeyPhase) {
+    post_mouse_events(&mouse_button_events(buttons, phase));
+}
+
+/// Keep an instantaneous click's down/up pair in the same SendInput call.
+pub(super) fn click_mouse(button: MouseButton) {
+    let mut events = mouse_button_events(&[button], KeyPhase::Down);
+    events.extend(mouse_button_events(&[button], KeyPhase::Up));
+    post_mouse_events(&events);
+}
+
+fn post_mouse_events(events: &[MouseButtonEvent]) {
+    let inputs: Vec<_> = events
+        .iter()
+        .map(|event| mouse_input(event.flags, event.data))
+        .collect();
+    send_inputs(&inputs);
 }
 
 fn post_key(vk: u16, modifiers: &[u16]) {
@@ -360,9 +429,73 @@ fn mouse_input(flags: u32, data: i32) -> INPUT {
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::binding::Shortcut;
+    use openlogi_core::binding::{MouseButton, Shortcut};
 
-    use super::{VK_BROWSER_BACK, VK_BROWSER_FORWARD, combo};
+    use super::{
+        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP,
+        MouseButtonEvent, VK_BROWSER_BACK, VK_BROWSER_FORWARD, XBUTTON1, XBUTTON2, combo,
+        mouse_button_events,
+    };
+    use crate::inject::KeyPhase;
+
+    #[test]
+    fn held_mouse_buttons_map_to_one_selected_sendinput_edge() {
+        for (button, down, up, data) in [
+            (
+                MouseButton::Left,
+                MOUSEEVENTF_LEFTDOWN,
+                MOUSEEVENTF_LEFTUP,
+                0,
+            ),
+            (
+                MouseButton::Right,
+                MOUSEEVENTF_RIGHTDOWN,
+                MOUSEEVENTF_RIGHTUP,
+                0,
+            ),
+            (
+                MouseButton::Middle,
+                MOUSEEVENTF_MIDDLEDOWN,
+                MOUSEEVENTF_MIDDLEUP,
+                0,
+            ),
+            (
+                MouseButton::Back,
+                MOUSEEVENTF_XDOWN,
+                MOUSEEVENTF_XUP,
+                XBUTTON1,
+            ),
+            (
+                MouseButton::Forward,
+                MOUSEEVENTF_XDOWN,
+                MOUSEEVENTF_XUP,
+                XBUTTON2,
+            ),
+        ] {
+            assert_eq!(
+                mouse_button_events(&[button], KeyPhase::Down),
+                vec![MouseButtonEvent { flags: down, data }]
+            );
+            assert_eq!(
+                mouse_button_events(&[button], KeyPhase::Up),
+                vec![MouseButtonEvent { flags: up, data }]
+            );
+        }
+        assert_eq!(
+            mouse_button_events(&[MouseButton::Left, MouseButton::Right], KeyPhase::Up),
+            vec![
+                MouseButtonEvent {
+                    flags: MOUSEEVENTF_RIGHTUP,
+                    data: 0,
+                },
+                MouseButtonEvent {
+                    flags: MOUSEEVENTF_LEFTUP,
+                    data: 0,
+                },
+            ]
+        );
+    }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
     /// edit to the table can't silently change what Ctrl+C sends.

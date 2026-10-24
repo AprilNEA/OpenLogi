@@ -1,7 +1,10 @@
-use core_graphics::event::{CGEventFlags, EventField};
-use openlogi_core::binding::Shortcut;
+use core_graphics::event::{CGEventFlags, CGEventType, CGMouseButton, EventField};
+use openlogi_core::binding::{MouseButton, Shortcut};
 
-use super::{LOCK_SCREEN_CHORD, combo, held_key_event, hid_usage_to_macos, key_event};
+use super::{
+    LOCK_SCREEN_CHORD, combo, held_key_event, hid_usage_to_macos, key_event, mouse_button_spec,
+    mouse_event_type,
+};
 use crate::inject::{HeldKey, HeldModifiers, KeyPhase, parse_shortcut};
 
 #[test]
@@ -12,6 +15,59 @@ fn hid_usages_map_to_macos_virtual_keys() {
     assert_eq!(hid_usage_to_macos(0x3a), Some(0x7a));
     assert_eq!(hid_usage_to_macos(0x6f), Some(0x5a));
     assert_eq!(hid_usage_to_macos(0xff), None);
+}
+
+#[test]
+fn held_mouse_buttons_map_to_one_selected_cgevent_edge() {
+    for (button, native, number, down, up) in [
+        (
+            MouseButton::Left,
+            CGMouseButton::Left,
+            None,
+            CGEventType::LeftMouseDown,
+            CGEventType::LeftMouseUp,
+        ),
+        (
+            MouseButton::Right,
+            CGMouseButton::Right,
+            None,
+            CGEventType::RightMouseDown,
+            CGEventType::RightMouseUp,
+        ),
+        (
+            MouseButton::Middle,
+            CGMouseButton::Center,
+            None,
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+        ),
+        (
+            MouseButton::Back,
+            CGMouseButton::Center,
+            Some(3),
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+        ),
+        (
+            MouseButton::Forward,
+            CGMouseButton::Center,
+            Some(4),
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+        ),
+    ] {
+        let spec = mouse_button_spec(button);
+        assert_eq!(spec.button as u32, native as u32);
+        assert_eq!(spec.button_number, number);
+        assert_eq!(
+            mouse_event_type(spec.button, KeyPhase::Down) as u32,
+            down as u32
+        );
+        assert_eq!(
+            mouse_event_type(spec.button, KeyPhase::Up) as u32,
+            up as u32
+        );
+    }
 }
 
 /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
