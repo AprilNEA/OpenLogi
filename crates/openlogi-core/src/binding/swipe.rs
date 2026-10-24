@@ -3,7 +3,7 @@
 //! shared by both gesture-capture paths. This is input processing, distinct
 //! from the `Action` vocabulary the parent [`binding`](super) module defines.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::GestureDirection;
 
@@ -94,7 +94,7 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 /// that and embeds this for the shared travel logic. Keeping the logic in one
 /// place is deliberate: the two copies it replaced had already drifted apart
 /// (one resolved a swipe only on release), which mis-fired the click.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SwipeAccumulator {
     /// When the current hold began, or `None` when not holding. Gates a
     /// deliberate swipe against a quick click whose cursor happened to move.
@@ -118,12 +118,43 @@ pub struct SwipeAccumulator {
     repeat_cross: i32,
     /// When the last motion arrived, to detect the pause that ends a stroke.
     moved_at: Option<Instant>,
+    /// How long this hold must last before its travel may commit to a
+    /// direction. Per-device via `gesture_hold`, defaulting to
+    /// [`GESTURE_HOLD_FOR_SWIPE`]; a quicker value lets a fast hold-and-flick
+    /// register as a swipe instead of falling back to a plain click on release.
+    hold_for_swipe: Duration,
+}
+
+impl Default for SwipeAccumulator {
+    fn default() -> Self {
+        Self {
+            held_since: None,
+            dx: 0,
+            dy: 0,
+            fired: false,
+            last: None,
+            repeat: 0,
+            repeat_cross: 0,
+            moved_at: None,
+            hold_for_swipe: GESTURE_HOLD_FOR_SWIPE,
+        }
+    }
 }
 
 impl SwipeAccumulator {
-    /// Begin a fresh hold, resetting the travel accumulator and commit state.
+    /// Begin a fresh hold with the default [`GESTURE_HOLD_FOR_SWIPE`] gate.
     pub fn begin(&mut self) {
+        self.begin_with(GESTURE_HOLD_FOR_SWIPE);
+    }
+
+    /// Begin a fresh hold whose travel may commit after `hold_for_swipe`.
+    ///
+    /// Resets the travel accumulator and commit state; the gate applies to this
+    /// hold only, so a device can use a shorter one than the default without
+    /// changing the shared constant.
+    pub fn begin_with(&mut self, hold_for_swipe: Duration) {
         self.held_since = Some(Instant::now());
+        self.hold_for_swipe = hold_for_swipe;
         self.dx = 0;
         self.dy = 0;
         self.fired = false;
@@ -231,7 +262,7 @@ impl SwipeAccumulator {
         }
         let held_long_enough = self
             .held_since
-            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
+            .is_some_and(|t| t.elapsed() >= self.hold_for_swipe);
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
             self.last = Some(dir);
@@ -346,6 +377,27 @@ mod tests {
         // Past the threshold but too diagonal (cross axis beyond the band).
         assert_eq!(detect_swipe(60, 60), None);
         assert_eq!(detect_swipe(-60, -60), None);
+    }
+
+    #[test]
+    fn a_hold_gate_of_zero_commits_on_the_first_report() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_with(Duration::ZERO);
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+    }
+
+    #[test]
+    fn the_default_hold_gate_still_withholds_a_quick_swipe() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        // Travel well past the threshold, but the hold is younger than the
+        // default gate, so this first report may not commit.
+        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0), None);
+        // Releasing before the gate is what a bound gesture reads as a click.
+        assert!(acc.end());
     }
 
     #[test]

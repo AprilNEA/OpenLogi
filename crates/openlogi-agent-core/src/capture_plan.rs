@@ -323,6 +323,11 @@ pub fn plan_for_device(
                 // Needs the device's wheel capabilities and the settings of
                 // its current link, so the orchestrator fills it in.
                 divert_main_wheel: None,
+                gesture_hold: config
+                    .devices
+                    .get(config_key)
+                    .and_then(|device| device.gesture_hold)
+                    .unwrap_or_default(),
             },
             rearm_generation,
         },

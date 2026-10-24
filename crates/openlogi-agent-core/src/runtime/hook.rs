@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{
     Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
-use openlogi_core::config::KeyTrigger;
+use openlogi_core::config::{GestureHold, KeyTrigger};
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
@@ -48,6 +48,9 @@ pub struct HookMaps {
     /// Entries survive map rebuilds because they are hardware observations,
     /// not configuration.
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
+    /// How long a gesture button must be held before its travel commits,
+    /// from the selected device's `gesture_hold` (default 160 ms).
+    pub(crate) gesture_hold: GestureHold,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -72,11 +75,11 @@ const HOLD_STALE_AFTER: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct HoldState {
-    current: Option<GestureHold>,
+    current: Option<GestureHoldState>,
     swipe: SwipeAccumulator,
 }
 
-struct GestureHold {
+struct GestureHoldState {
     button: ButtonId,
     started_at: Instant,
     press: PressToken,
@@ -117,13 +120,13 @@ impl HoldState {
     }
 
     /// Store the token returned by the accepted lifecycle `Down`.
-    fn begin(&mut self, button: ButtonId, press: PressToken) {
-        self.current = Some(GestureHold {
+    fn begin(&mut self, button: ButtonId, press: PressToken, gesture_hold: GestureHold) {
+        self.current = Some(GestureHoldState {
             button,
             started_at: Instant::now(),
             press,
         });
-        self.swipe.begin();
+        self.swipe.begin_with(gesture_hold.duration());
     }
 
     /// Feed a pointer-move delta into the active hold, tagging a committed swipe
@@ -251,14 +254,17 @@ fn handle_button(
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
-    let (binding, is_gesture, pointer_target) =
-        hooks.try_read().map_or((None, false, None), |maps| {
-            (
-                maps.bindings.get(&id).cloned(),
-                maps.gestures.contains_key(&id),
-                maps.pointer_target,
-            )
-        });
+    let (binding, is_gesture, pointer_target, gesture_hold) =
+        hooks
+            .try_read()
+            .map_or((None, false, None, GestureHold::DEFAULT), |maps| {
+                (
+                    maps.bindings.get(&id).cloned(),
+                    maps.gestures.contains_key(&id),
+                    maps.pointer_target,
+                    maps.gesture_hold,
+                )
+            });
     let action_target = if pressed {
         ActionDispatchTarget::for_pointer(pointer_target, capture_safari_pid)
     } else {
@@ -274,7 +280,7 @@ fn handle_button(
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None, action_target) {
-                HOLD.with_borrow_mut(|h| h.begin(id, press));
+                HOLD.with_borrow_mut(|h| h.begin(id, press, gesture_hold));
                 return EventDisposition::Suppress;
             }
             return SUPPRESSED_PRESSES

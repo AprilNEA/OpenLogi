@@ -380,6 +380,70 @@ impl Default for VerticalScrollSensitivity {
     }
 }
 
+const GESTURE_HOLD_MIN_MS: u16 = 40;
+const GESTURE_HOLD_MAX_MS: u16 = 1000;
+const GESTURE_HOLD_DEFAULT_MS: u16 = 160;
+
+/// How long a gesture button must be held before its travel may commit to a
+/// swipe direction, in milliseconds.
+///
+/// The runtime default is [`GESTURE_HOLD_FOR_SWIPE`](crate::binding::GESTURE_HOLD_FOR_SWIPE)
+/// (160 ms). A shorter value suits users who flick the gesture button and
+/// release before that gate, which otherwise reads the press as a plain click.
+/// The range keeps a value above sensor noise while never exceeding one second.
+#[nutype(
+    const_fn,
+    validate(
+        greater_or_equal = GESTURE_HOLD_MIN_MS,
+        less_or_equal = GESTURE_HOLD_MAX_MS
+    ),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct GestureHold(u16);
+
+impl GestureHold {
+    /// Shortest selectable hold.
+    pub const MIN: Self = match Self::try_new(GESTURE_HOLD_MIN_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum gesture hold"),
+    };
+    /// Longest selectable hold.
+    pub const MAX: Self = match Self::try_new(GESTURE_HOLD_MAX_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum gesture hold"),
+    };
+    /// Out-of-the-box hold: the shared runtime constant.
+    pub const DEFAULT: Self = match Self::try_new(GESTURE_HOLD_DEFAULT_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default gesture hold"),
+    };
+
+    /// This hold as a [`Duration`](std::time::Duration).
+    #[must_use]
+    pub fn duration(self) -> std::time::Duration {
+        std::time::Duration::from_millis(u64::from(u16::from(self)))
+    }
+}
+
+impl Default for GestureHold {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 impl From<VerticalScrollSensitivity> for f32 {
     fn from(sensitivity: VerticalScrollSensitivity) -> Self {
         Self::from(sensitivity.into_inner())
