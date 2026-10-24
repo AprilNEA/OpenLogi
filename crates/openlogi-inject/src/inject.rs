@@ -11,9 +11,9 @@ use std::collections::HashMap;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::sync::{LazyLock, Mutex, PoisonError};
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use openlogi_core::binding::KeyboardUsage;
 use openlogi_core::binding::{Action, HeldKeys, KeyCombo};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use openlogi_core::binding::{AdvancedClick, ChordModifier, ChordModifiers, KeyboardUsage};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::{Script, WorkflowStep};
 use openlogi_core::scroll::ScrollDelta;
@@ -181,33 +181,75 @@ static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn held_keys(combo: &KeyCombo, held: HeldKeys) -> Vec<HeldKey> {
-    let mut keys = Vec::with_capacity(4);
-    #[cfg(target_os = "macos")]
-    if combo.has_command() || combo.has_super() {
-        keys.push(HeldKey::Command);
-    }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    if combo.has_command() || combo.has_control() {
-        keys.push(HeldKey::Control);
-    }
-    #[cfg(target_os = "macos")]
-    if combo.has_control() {
-        keys.push(HeldKey::Control);
-    }
-    if combo.has_shift() {
-        keys.push(HeldKey::Shift);
-    }
-    if combo.has_option() {
-        keys.push(HeldKey::Alt);
-    }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    if combo.has_super() {
-        keys.push(HeldKey::Super);
-    }
+    let mut keys = modifier_keys(combo.modifiers());
     if held == HeldKeys::WholeChord {
         keys.push(HeldKey::Key(combo.key()));
     }
     keys
+}
+
+/// The physical keys that hold `modifiers` on this platform, in press order.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn modifier_keys(modifiers: ChordModifiers) -> Vec<HeldKey> {
+    let mut keys = Vec::with_capacity(4);
+    #[cfg(target_os = "macos")]
+    if modifiers.contains(ChordModifier::Command) || modifiers.contains(ChordModifier::Super) {
+        keys.push(HeldKey::Command);
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if modifiers.contains(ChordModifier::Command) || modifiers.contains(ChordModifier::Control) {
+        keys.push(HeldKey::Control);
+    }
+    #[cfg(target_os = "macos")]
+    if modifiers.contains(ChordModifier::Control) {
+        keys.push(HeldKey::Control);
+    }
+    if modifiers.contains(ChordModifier::Shift) {
+        keys.push(HeldKey::Shift);
+    }
+    if modifiers.contains(ChordModifier::Option) {
+        keys.push(HeldKey::Alt);
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if modifiers.contains(ChordModifier::Super) {
+        keys.push(HeldKey::Super);
+    }
+    keys
+}
+
+/// Post `click`'s clicks with its modifiers held around them, under the lock
+/// that orders held-chord edges.
+///
+/// A modifier a held chord already owns is left alone: pressing it again
+/// would change nothing, and releasing it would end that hold early. The
+/// lock stays held for the whole burst, so no hold starts or ends between
+/// the modifier edges and the clicks.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn advanced_click(click: AdvancedClick) {
+    let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    let modifiers: Vec<HeldKey> = modifier_keys(click.modifiers)
+        .into_iter()
+        .filter(|key| !output.owners.contains_key(key))
+        .collect();
+    let count = click.count.get();
+    cfg_select! {
+        target_os = "macos" => {
+            // The same event-ordering cursor as `hold_transition`: it starts
+            // at the held state and must end there, since the burst owns
+            // nothing once it returns.
+            let held = output.modifiers();
+            let pressed = macos::hold_keys(&modifiers, KeyPhase::Down, held);
+            macos::post_clicks(click.button, count, pressed);
+            let released = macos::hold_keys(&modifiers, KeyPhase::Up, pressed);
+            debug_assert_eq!(released, held);
+        }
+        target_os = "linux" => {
+            linux::post_clicks(click.button, count, &modifiers);
+        }
+        target_os = "windows" => {
+            windows::post_clicks(click.button, count, &modifiers);
+        }
+    }
 }
 
 /// A shortcut-table entry, parsed once into the chord it names. The tables are

@@ -60,7 +60,9 @@ pub(crate) fn gesture_direction_icon(direction: GestureDirection) -> Icon {
 pub(crate) fn action_icon_path(action: &Action) -> &'static str {
     match action {
         Action::None => "action-icons/ban.svg",
-        Action::LeftClick | Action::RightClick => "action-icons/mouse-pointer-click.svg",
+        Action::LeftClick | Action::RightClick | Action::AdvancedClick(_) => {
+            "action-icons/mouse-pointer-click.svg"
+        }
         Action::MiddleClick => "action-icons/mouse.svg",
         Action::MouseBack => "action-icons/circle-arrow-left.svg",
         Action::MouseForward => "action-icons/circle-arrow-right.svg",
@@ -261,7 +263,7 @@ mod tests {
     #[test]
     fn every_reachable_action_icon_is_embedded() {
         use gpui::AssetSource as _;
-        use openlogi_core::binding::ApplicationTarget;
+        use openlogi_core::binding::{AdvancedClick, ApplicationTarget};
         use openlogi_ui::action_icons::ActionIcons;
 
         let combo = || "Ctrl+A".parse().expect("Ctrl+A is a valid combo");
@@ -277,6 +279,7 @@ mod tests {
             Action::OpenApplication(
                 ApplicationTarget::new("/usr/bin/true", "true").expect("non-empty path"),
             ),
+            Action::AdvancedClick(AdvancedClick::default()),
         ];
         for action in Action::catalog().into_iter().chain(uncataloged) {
             let path = action_icon_path(&action);

@@ -1,5 +1,6 @@
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ButtonId, GestureDirection, KNOWN_CONTROLS, KeyCombo,
+    Action, ActionRingIcon, AdvancedClick, ButtonId, ClickButton, ClickCount, GestureDirection,
+    KNOWN_CONTROLS, KeyCombo,
 };
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
@@ -76,6 +77,44 @@ fn chord_action_labels_resolve() {
     assert_eq!(hold, "按住 Cmd+Tab");
     assert_eq!(switcher, "按住 Cmd，点按 Tab");
     assert_eq!(bare_key, "点按 F5");
+}
+
+/// Advanced clicks carry a payload too, and name their click through a key of
+/// their own for every button and count.
+#[test]
+fn advanced_click_labels_resolve() {
+    let _locale = super::LOCALE_LOCK.lock();
+    let label = |button, count, modifiers: &str| {
+        localized_action_label(&Action::AdvancedClick(AdvancedClick {
+            button,
+            count,
+            modifiers: modifiers.parse().expect("test modifiers must be valid"),
+        }))
+        .to_string()
+    };
+
+    rust_i18n::set_locale("en");
+    for button in [ClickButton::Left, ClickButton::Right, ClickButton::Middle] {
+        for count in [ClickCount::Single, ClickCount::Double, ClickCount::Triple] {
+            let click = AdvancedClick {
+                button,
+                count,
+                ..AdvancedClick::default()
+            };
+            assert_eq!(
+                label(button, count, ""),
+                click.click_label(),
+                "{button:?} {count:?}"
+            );
+        }
+    }
+    rust_i18n::set_locale("zh-CN");
+    let shift_right_double = label(ClickButton::Right, ClickCount::Double, "Shift");
+    let cmd_alt_triple = label(ClickButton::Left, ClickCount::Triple, "Alt+Cmd");
+    rust_i18n::set_locale("en");
+
+    assert_eq!(shift_right_double, "Shift+右键双击");
+    assert_eq!(cmd_alt_triple, "Cmd+Alt+三击");
 }
 
 /// Czech must resolve in the actual desktop backend, including the pairing

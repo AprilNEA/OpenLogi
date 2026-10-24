@@ -1144,6 +1144,21 @@ fn pointer_speed_and_precision_mode() {
     assert_wire(&Action::TogglePrecisionMode, "36");
 }
 
+/// An advanced click: the button and count as variant indexes, then the
+/// modifiers as the same bits a `KeyCombo` carries.
+#[test]
+fn advanced_click() {
+    use openlogi_core::binding::{Action, AdvancedClick, ClickButton, ClickCount};
+    let click = AdvancedClick {
+        button: ClickButton::Right,
+        count: ClickCount::Triple,
+        modifiers: "Cmd+Shift".parse().expect("valid modifiers"),
+    };
+    // Appended after `TogglePrecisionMode`, so every earlier index is
+    // unchanged.
+    assert_wire(&Action::AdvancedClick(click), "37010203");
+}
+
 /// The press force of a force-sensing button (the MX Master 4's Haptic Sense
 /// Panel): raw device values as varints, all of them past one byte.
 #[test]

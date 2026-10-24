@@ -19,6 +19,7 @@
 //! compile rather than silently no-op-ing.
 
 use super::action::{Action, WorkflowStep};
+use super::click::AdvancedClick;
 use super::key_combo::KeyCombo;
 
 /// What firing an [`Action`] should do, independent of platform.
@@ -31,6 +32,12 @@ pub enum Effect<'a> {
     None,
     /// Synthesise a physical mouse button click.
     Click(MouseButton),
+    /// Synthesise `count` clicks of one button that the OS counts as one
+    /// double or triple click, with the modifiers held around them.
+    ///
+    /// A modifier another held chord already keeps down stays down: the
+    /// click neither presses nor releases it.
+    AdvancedClick(AdvancedClick),
     /// Fire a named shortcut. Each backend maps this to its own platform
     /// chord (or, for the rare shortcut with no chord at all on some OS, a
     /// dedicated native code path) — see that backend's `combo` table.
@@ -290,6 +297,8 @@ impl Action {
             Action::RunAppleScript(src) => Effect::Script(Script::AppleScript(src)),
             Action::RunShellCommand(cmd) => Effect::Script(Script::ShellCommand(cmd)),
             Action::Workflow(steps) => Effect::Script(Script::Workflow(steps)),
+
+            Action::AdvancedClick(click) => Effect::AdvancedClick(*click),
         }
     }
 }

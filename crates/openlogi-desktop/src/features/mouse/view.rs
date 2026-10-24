@@ -13,7 +13,7 @@ use gpui_component::{
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection};
+use openlogi_core::binding::{Action, AdvancedClick, ButtonId, GestureDirection};
 
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
@@ -143,6 +143,8 @@ pub struct MouseModelView {
     pub(super) custom_shortcut_invalid: bool,
     pub(super) shortcut_mode: ShortcutMode,
     pub(super) custom_application_invalid: bool,
+    /// The click the advanced click editor adds, edited one choice at a time.
+    pub(super) advanced_click: AdvancedClick,
     /// The press-force slider while the haptic panel's inspector shows it.
     pub(super) force_sensing: Option<ForceSensingSlider>,
     _state_obs: Subscription,
@@ -206,14 +208,16 @@ impl MouseModelView {
             custom_shortcut_invalid: false,
             shortcut_mode: ShortcutMode::Tap,
             custom_application_invalid: false,
+            advanced_click: AdvancedClick::default(),
             force_sensing: None,
             _state_obs: state_obs,
         }
     }
 
-    /// Clear both custom-action drafts (text and any invalid state) — called
-    /// whenever the picker opens for a new target, so a shortcut or
-    /// application typed for one button doesn't reappear for another.
+    /// Clear every custom-action draft (text, choices, and any invalid
+    /// state) — called whenever the picker opens for a new target, so a
+    /// shortcut, application, or click set up for one button doesn't
+    /// reappear for another.
     pub(super) fn clear_custom_action_drafts(
         &mut self,
         window: &mut Window,
@@ -226,6 +230,7 @@ impl MouseModelView {
         self.custom_shortcut_invalid = false;
         self.custom_application_invalid = false;
         self.shortcut_mode = ShortcutMode::Tap;
+        self.advanced_click = AdvancedClick::default();
     }
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
@@ -326,6 +331,21 @@ impl MouseModelView {
         ForceSensingSlider::sync(&mut self.force_sensing, facts.as_ref(), window, cx);
         facts
     }
+
+    /// The action picker's inputs and drafts, as the inspector renders them.
+    fn action_picker<'a>(&'a self, view: &'a Entity<Self>) -> ActionPickerContext<'a> {
+        ActionPickerContext {
+            open: self.action_picker_open,
+            search: &self.action_search,
+            shortcut_input: &self.custom_shortcut_input,
+            application_input: &self.custom_application_input,
+            shortcut_invalid: self.custom_shortcut_invalid,
+            shortcut_mode: self.shortcut_mode,
+            application_invalid: self.custom_application_invalid,
+            advanced_click: self.advanced_click,
+            view,
+        }
+    }
 }
 
 impl Render for MouseModelView {
@@ -422,16 +442,7 @@ impl Render for MouseModelView {
                 overridden,
                 press_force: PressForce::of(force_sensing.as_ref(), self.force_sensing.as_ref()),
             },
-            ActionPickerContext {
-                open: self.action_picker_open,
-                search: &self.action_search,
-                shortcut_input: &self.custom_shortcut_input,
-                application_input: &self.custom_application_input,
-                shortcut_invalid: self.custom_shortcut_invalid,
-                shortcut_mode: self.shortcut_mode,
-                application_invalid: self.custom_application_invalid,
-                view: &view,
-            },
+            self.action_picker(&view),
             cx,
         );
         workspace_layout(canvas, profile_status, inspector, &self.focus_handle)

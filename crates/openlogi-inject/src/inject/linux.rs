@@ -19,7 +19,7 @@ use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
+    Action, ClickButton, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -44,6 +44,7 @@ pub(super) fn execute(action: &Action) {
         // Extra mouse buttons: BTN_SIDE/BTN_EXTRA are the evdev side
         // buttons ("back"/"forward") browsers handle natively.
         Effect::Click(button) => click(mouse_button_code(button)),
+        Effect::AdvancedClick(click) => super::advanced_click(click),
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
@@ -633,6 +634,28 @@ fn held_key_events(keys: &[KeyCode], phase: KeyPhase) -> Vec<InputEvent> {
 fn click(button: KeyCode) {
     emit(&[key_ev(button, 1), syn()]);
     emit(&[key_ev(button, 0), syn()]);
+}
+
+/// The pause between the clicks of a burst.
+///
+/// libinput debounces buttons: a press that follows a release within its
+/// 25 ms bounce timeout is dropped with that release, which would merge a
+/// double click into one long click. Desktop double-click timeouts start at
+/// 400 ms, so a burst at this pace still counts as one gesture.
+const CLICK_GAP: Duration = Duration::from_millis(40);
+
+/// Press `modifiers`, post `count` clicks of `button`, then release
+/// `modifiers`.
+pub(super) fn post_clicks(button: ClickButton, count: u8, modifiers: &[HeldKey]) {
+    let button = mouse_button_code(button.into());
+    hold_keys(modifiers, KeyPhase::Down);
+    for index in 0..count {
+        if index > 0 {
+            std::thread::sleep(CLICK_GAP);
+        }
+        click(button);
+    }
+    hold_keys(modifiers, KeyPhase::Up);
 }
 
 pub(super) fn post_scroll(delta: ScrollDelta) {

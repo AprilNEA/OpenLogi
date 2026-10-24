@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction, Shortcut,
+    Action, ClickButton, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction,
+    Shortcut,
 };
 
 use super::{HeldKey, HeldModifiers, KeyPhase};
@@ -112,6 +113,7 @@ pub(super) fn execute(action: &Action) {
         // MiddleClick). A button left on its own native click never reaches
         // this — the hook passes it straight through to the OS.
         Effect::Click(button) => dispatch_click(button),
+        Effect::AdvancedClick(click) => super::advanced_click(click),
         Effect::Shortcut(shortcut) if MENU_SHORTCUTS.contains(&shortcut) => {
             press_menu_shortcut(&combo(shortcut));
         }
@@ -299,6 +301,27 @@ fn nx_key(key: MediaKey) -> i32 {
 /// (the tap never owns the primary buttons), and a `MiddleClick` is left
 /// alone unless the user has *also* remapped the middle button.
 fn post_click(button: CGMouseButton) {
+    post_click_burst(button, 1, CGEventFlags::CGEventFlagNull);
+}
+
+/// Post `count` clicks of `button` at the cursor location, each carrying the
+/// flags of the synthetic `modifiers` held around them.
+pub(super) fn post_clicks(button: ClickButton, count: u8, modifiers: HeldModifiers) {
+    let button = match button {
+        ClickButton::Left => CGMouseButton::Left,
+        ClickButton::Right => CGMouseButton::Right,
+        ClickButton::Middle => CGMouseButton::Center,
+    };
+    post_click_burst(button, count, held_modifier_flags(modifiers));
+}
+
+/// Post `count` down + up pairs for `button` at the cursor location, with
+/// `flags` added to the flags each event already carries.
+///
+/// AppKit takes an event's click count from its click state, not from the
+/// time between clicks, so the `n`th pair carries click state `n`. A real
+/// single click carries click state 1 as well.
+fn post_click_burst(button: CGMouseButton, count: u8, flags: CGEventFlags) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for click");
         return;
@@ -312,12 +335,18 @@ fn post_click(button: CGMouseButton) {
         CGMouseButton::Right => (CGEventType::RightMouseDown, CGEventType::RightMouseUp),
         CGMouseButton::Center => (CGEventType::OtherMouseDown, CGEventType::OtherMouseUp),
     };
-    for (kind, phase) in [(down, "down"), (up, "up")] {
-        if let Ok(ev) = CGEvent::new_mouse_event(src.clone(), kind, location, button) {
-            tag_synthetic(&ev);
-            ev.post(CGEventTapLocation::HID);
-        } else {
-            tracing::warn!(phase, "CGEvent::new_mouse_event failed");
+    for click_state in 1..=i64::from(count) {
+        for (kind, phase) in [(down, "down"), (up, "up")] {
+            if let Ok(ev) = CGEvent::new_mouse_event(src.clone(), kind, location, button) {
+                ev.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
+                if !flags.is_empty() {
+                    ev.set_flags(ev.get_flags() | flags);
+                }
+                tag_synthetic(&ev);
+                ev.post(CGEventTapLocation::HID);
+            } else {
+                tracing::warn!(phase, "CGEvent::new_mouse_event failed");
+            }
         }
     }
 }
