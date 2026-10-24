@@ -28,10 +28,11 @@ use openlogi_hidpp_derive::Feature;
 
 pub use event::ColorLedEffectsEvent;
 pub use types::{
-    ColorLedInfo, CyclingDirection, EffectId, EffectSettings, ExtCapabilities, LedBinIndex,
-    LedBinInfo, LocationEffect, NvCapabilities, NvCapabilityState, NvConfig, Persistence,
-    PersistenceSource, PersistencyCapabilities, Rgb, SwControl, SwControlState,
-    ZONE_EFFECT_PARAM_COUNT, ZoneEffect, ZoneEffectInfo, ZoneInfo,
+    BreathingWaveform, ColorLedInfo, CyclingDirection, EffectId, EffectIntensity, EffectSettings,
+    ExtCapabilities, LedBinIndex, LedBinInfo, LocationEffect, NvCapabilities, NvCapabilityState,
+    NvConfig, Persistence, PersistenceSource, PersistencyCapabilities, Rgb, SwControl,
+    SwControlState, ZONE_EFFECT_PARAM_COUNT, ZoneEffect, ZoneEffectInfo, ZoneEffectParams,
+    ZoneInfo,
 };
 
 use self::types::be16;
@@ -98,7 +99,8 @@ impl ColorLedEffectsFeature {
     /// The meaning of each parameter byte depends on the effect's
     /// [`EffectId`] (discoverable with [`Self::get_zone_effect_info`]). For
     /// example, the [`EffectId::FixedColor`] effect uses the first three
-    /// parameters as red, green and blue.
+    /// parameters as red, green and blue. [`ZoneEffectParams::to_params`]
+    /// encodes the effects whose layout is known.
     pub async fn set_zone_effect(
         &self,
         zone_index: u8,
