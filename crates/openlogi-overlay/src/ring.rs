@@ -1,57 +1,41 @@
 //! The ring itself: the GPUI view, and the window it is drawn in.
 //!
-//! Where a client can place its own windows, the window is the ring: a 360×360
+//! Where a client can place its own windows, the window is the ring: a 480×480
 //! panel centred on the cursor and clamped to its display. Wayland allows
 //! neither half of that, so there each display gets a window covering it and
 //! the same panel is drawn at the pointer, in the one window that heard it last.
+//! What the panel looks like, and how it moves, is [`skin`]; this module owns
+//! placement, hover state, and the window.
+
+mod skin;
 
 use gpui::{
-    Bounds, Context, Div, Entity, Hsla, InteractiveElement, IntoElement, MouseMoveEvent,
-    ParentElement, Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions,
-    div, point, prelude::FluentBuilder as _, px, svg,
+    Bounds, Context, Entity, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement,
+    Pixels, Point, Render, Size, StatefulInteractiveElement as _, Styled, Subscription, Window,
+    WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions, div, point,
+    prelude::FluentBuilder as _, px,
 };
-use openlogi_core::binding::{Action, ActionRingSlot};
+use openlogi_core::binding::ActionRingSlot;
 use openlogi_ipc::ActionRingInvocation;
-use openlogi_ui::action_icons::RING_CANCEL_ICON;
-use openlogi_ui::color;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::ipc::OverlayCommand;
 use crate::session::{self, ClickAwaySession, ShowingRing};
 
-pub(crate) const WINDOW_SIZE: f32 = 360.0;
-pub(crate) const SLOT_SIZE: f32 = 54.0;
-pub(crate) const RADIUS: f32 = 122.0;
+pub(crate) const WINDOW_SIZE: f32 = 480.0;
+
+/// The ring's edge on a display that may be shorter than it: [`WINDOW_SIZE`],
+/// or the display's shorter side when that is smaller. A 1280×720 display at
+/// 200% is 360 logical pixels tall, and a 480 px ring anchored to its top
+/// would put the bottom slot off screen; the skin scales its layout to
+/// whatever edge this returns. Every placement path and the panel itself
+/// size the ring through this one decision.
+pub(crate) fn panel_edge(available: Size<Pixels>) -> Pixels {
+    px(WINDOW_SIZE).min(available.width.min(available.height))
+}
 /// Identifies the ring's windows to the compositor, whatever kind they are.
 pub(crate) const RING_APP_ID: &str = "openlogi-action-ring";
-
-/// The ring's own neutral scale. It floats over whatever is on the desktop, so
-/// unlike the settings app it cannot take its surfaces from the OS appearance —
-/// it commits to a dark panel and rides its own contrast. Only the accent is
-/// shared (`openlogi_ui::color`); these greys are local by nature.
-const PANEL: Hsla = neutral(0.06, 0.82);
-const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
-const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
-const GLYPH: Hsla = neutral(0.98, 1.0);
-const LABEL: Hsla = neutral(0.94, 1.0);
-const CANCEL_GLYPH: Hsla = neutral(0.82, 1.0);
-
-const fn neutral(lightness: f32, alpha: f32) -> Hsla {
-    Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: lightness,
-        a: alpha,
-    }
-}
-
-/// The accent deepened for the dark panel: the brand lightness sits too close to
-/// the white glyph a selected slot carries, so the fill drops to `0.48` and the
-/// ring around it rises to `0.78`. Both keep the brand hue and saturation.
-const SELECTED_FILL_L: f32 = 0.48;
-const SELECTED_BORDER_L: f32 = 0.78;
 
 /// Where the ring's panel sits inside the window it was given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +97,7 @@ pub(crate) struct RingView {
     _pointer_changes: Subscription,
     /// Publishes click-away identity for exactly this view's lifetime.
     _showing: ShowingRing,
+    skin: skin::Motion,
 }
 
 impl RingView {
@@ -147,6 +132,7 @@ impl RingView {
             pointer,
             _pointer_changes: pointer_changes,
             _showing: showing,
+            skin: skin::Motion::default(),
         }
     }
 
@@ -162,137 +148,6 @@ impl RingView {
             session_id: self.invocation.session_id,
         });
     }
-
-    fn slot_element(
-        &self,
-        slot: ActionRingSlot,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let presentation = self.invocation.slots.get(&slot)?;
-        let icon_path = presentation.icon.asset_path();
-        let selected = self.hovered == Some(slot);
-        let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
-        let session_id = self.invocation.session_id;
-        let activate = self.commands.clone();
-        Some(
-            div()
-                .id(("ring-slot", slot.index()))
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .size(px(SLOT_SIZE))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(if selected {
-                    color::accent_at_lightness(SELECTED_FILL_L)
-                } else {
-                    SLOT_RESTING
-                })
-                .when(selected, |slot| {
-                    slot.border_2()
-                        .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
-                })
-                .shadow_md()
-                .text_color(GLYPH)
-                .cursor_pointer()
-                .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
-                .on_hover(cx.listener(move |this, hovered, _, cx| {
-                    if *hovered && this.hovered != Some(slot) {
-                        this.hovered = Some(slot);
-                        let _ = this
-                            .commands
-                            .send(OverlayCommand::Hover { session_id, slot });
-                        cx.notify();
-                    } else if !*hovered && this.hovered == Some(slot) {
-                        this.hovered = None;
-                        cx.notify();
-                    }
-                }))
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    let _ = activate.send(OverlayCommand::Activate { session_id, slot });
-                    session::dismiss_from_window(cx, window, session_id);
-                })
-                .into_any_element(),
-        )
-    }
-}
-
-impl RingView {
-    /// The fixed 360×360 ring. Both placements anchor this same element.
-    fn panel(&self, cx: &mut Context<Self>) -> Div {
-        let session_id = self.invocation.session_id;
-        let center_commands = self.commands.clone();
-        let hovered_label = self.hovered.and_then(|slot| {
-            let presentation = self.invocation.slots.get(&slot)?;
-            // User-authored labels render verbatim: passing them through the
-            // localization table would translate any label that happens to
-            // collide with a known key ("Copy" → "Copier" under fr).
-            let label = if presentation.literal {
-                presentation.label.clone()
-            } else if let Some(key) = Action::translation_key_for_label(&presentation.label) {
-                rust_i18n::t!(key).into_owned()
-            } else {
-                presentation.label.clone()
-            };
-            Some(SharedString::from(label))
-        });
-        let slots = ActionRingSlot::ALL
-            .into_iter()
-            .filter_map(|slot| self.slot_element(slot, cx))
-            .collect::<Vec<_>>();
-
-        div()
-            .relative()
-            .size(px(WINDOW_SIZE))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(18.0))
-                    .top(px(18.0))
-                    .size(px(WINDOW_SIZE - 36.0))
-                    .rounded_full()
-                    .bg(PANEL)
-                    .shadow_lg(),
-            )
-            .children(slots)
-            .child(
-                div()
-                    .id("ring-cancel")
-                    .absolute()
-                    .left(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .top(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .size(px(48.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(CANCEL_RESTING)
-                    .text_color(CANCEL_GLYPH)
-                    .cursor_pointer()
-                    .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        let _ = center_commands.send(OverlayCommand::Cancel { session_id });
-                        session::dismiss_from_window(cx, window, session_id);
-                    }),
-            )
-            .when_some(hovered_label, |ring, label| {
-                ring.child(
-                    div()
-                        .absolute()
-                        .left(px(WINDOW_SIZE / 2.0 - 80.0))
-                        .top(px(WINDOW_SIZE / 2.0 + 34.0))
-                        .w(px(160.0))
-                        .text_center()
-                        .text_sm()
-                        .text_color(LABEL)
-                        .child(label),
-                )
-            })
-    }
 }
 
 impl Render for RingView {
@@ -304,12 +159,14 @@ impl Render for RingView {
             .pointer
             .read(cx)
             .center_in(window.window_handle().window_id());
-        let panel = panel_origin(placement, center, window.viewport_size()).map(|origin| {
+        let viewport = window.viewport_size();
+        let edge = panel_edge(viewport);
+        let panel = panel_origin(placement, center, viewport).map(|origin| {
             div()
                 .absolute()
                 .left(origin.x)
                 .top(origin.y)
-                .child(self.panel(cx))
+                .child(self.skinned_panel(edge, cx))
         });
 
         div()
@@ -365,7 +222,8 @@ fn panel_origin(
         Placement::Window => return Some(Point::default()),
         Placement::AtPointer => center?,
     };
-    let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
+    let edge = panel_edge(viewport);
+    let size = Size::new(edge, edge);
     Some(clamp_window_origin(
         point(center.x - size.width / 2.0, center.y - size.height / 2.0),
         size,
@@ -417,7 +275,7 @@ mod tests {
     #[test]
     fn a_window_sized_ring_fills_its_window() {
         assert_eq!(
-            panel_origin(Placement::Window, None, Size::new(px(360.0), px(360.0))),
+            panel_origin(Placement::Window, None, Size::new(px(480.0), px(480.0))),
             Some(Point::default())
         );
     }
@@ -442,7 +300,7 @@ mod tests {
                 Some(point(px(900.0), px(500.0))),
                 Size::new(px(1920.0), px(1080.0))
             ),
-            Some(point(px(720.0), px(320.0)))
+            Some(point(px(660.0), px(260.0)))
         );
     }
 
@@ -454,7 +312,28 @@ mod tests {
                 Some(point(px(4.0), px(1076.0))),
                 Size::new(px(1920.0), px(1080.0))
             ),
-            Some(point(px(0.0), px(720.0)))
+            Some(point(px(0.0), px(600.0)))
+        );
+    }
+
+    #[test]
+    fn a_display_shorter_than_the_ring_shrinks_the_panel_to_its_short_side() {
+        // 1280×720 at 200%: 640×360 logical. The panel becomes 360 px and
+        // sits flush with the top and bottom edges instead of overhanging.
+        let viewport = Size::new(px(640.0), px(360.0));
+        assert_eq!(panel_edge(viewport), px(360.0));
+        assert_eq!(
+            panel_origin(
+                Placement::AtPointer,
+                Some(point(px(320.0), px(180.0))),
+                viewport
+            ),
+            Some(point(px(140.0), px(0.0)))
+        );
+        assert_eq!(
+            panel_edge(Size::new(px(1920.0), px(1080.0))),
+            px(WINDOW_SIZE),
+            "a display taller than the ring leaves it at full size"
         );
     }
 
@@ -529,10 +408,10 @@ mod tests {
     /// Where the `Top` slot's centre lands when the panel centres on `center`
     /// well away from every edge.
     fn top_slot_at(center: Point<Pixels>) -> Point<Pixels> {
-        let (left, top) = ActionRingSlot::Top.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let (x, y) = skin::slot_center(ActionRingSlot::Top);
         point(
-            center.x - px(WINDOW_SIZE / 2.0) + px(left + SLOT_SIZE / 2.0),
-            center.y - px(WINDOW_SIZE / 2.0) + px(top + SLOT_SIZE / 2.0),
+            center.x - px(WINDOW_SIZE / 2.0) + px(x),
+            center.y - px(WINDOW_SIZE / 2.0) + px(y),
         )
     }
 

@@ -18,6 +18,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::{NoticePlacement, RingPlacement};
 
+mod chrome;
+
 impl RingPlacement {
     pub(crate) fn capture(_cx: &mut App) -> Result<Self> {
         let sample = sample_monitor()?;
@@ -30,9 +32,14 @@ impl RingPlacement {
     }
 
     pub(crate) fn show(self, window: &mut Window) -> Result<()> {
-        place(window, self.display_id, self.display, |dpi| {
+        let hwnd = place(window, self.display_id, self.display, |dpi| {
             self.bounds(dpi)
-        })
+        })?;
+        // Only after the final size: the ellipse region is taken from the
+        // window rect, and one taken from the 1px bootstrap would clip the
+        // ring to a point.
+        chrome::clear_square_fill(hwnd);
+        Ok(())
     }
 }
 
@@ -52,6 +59,7 @@ impl NoticePlacement {
         place(window, self.display_id, self.display, |dpi| {
             self.bounds(dpi)
         })
+        .map(drop)
     }
 }
 
@@ -127,7 +135,7 @@ fn device_bounds(rect: RECT) -> Bounds<DevicePixels> {
 }
 
 /// Move a bootstrap window onto its monitor, then to `bounds` at the DPI it
-/// ends up with.
+/// ends up with. Returns the placed HWND for per-window chrome.
 #[expect(
     unsafe_code,
     reason = "borrow the live GPUI HWND on its owning UI thread"
@@ -137,7 +145,7 @@ fn place(
     display_id: DisplayId,
     display: Bounds<DevicePixels>,
     bounds: impl FnOnce(u32) -> Bounds<DevicePixels>,
-) -> Result<()> {
+) -> Result<HWND> {
     let RawWindowHandle::Win32(handle) = window
         .window_handle()
         .map_err(|error| anyhow::anyhow!("get overlay HWND: {error}"))?
@@ -167,7 +175,8 @@ fn place(
         hwnd,
         bounds(dpi),
         SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
-    )
+    )?;
+    Ok(hwnd)
 }
 
 #[expect(

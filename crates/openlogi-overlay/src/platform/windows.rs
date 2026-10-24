@@ -57,7 +57,14 @@ impl RingPlacement {
         reason = "360 DIP scaled by a native display DPI fits in screen-sized i32 pixels"
     )]
     fn bounds(&self, dpi: u32) -> Bounds<DevicePixels> {
-        let edge = DevicePixels((f64::from(WINDOW_SIZE) * f64::from(dpi) / 96.0).round() as i32);
+        let full = (f64::from(WINDOW_SIZE) * f64::from(dpi) / 96.0).round() as i32;
+        // The physical half of `ring::panel_edge`: a display shorter than the
+        // ring gets a ring the size of its shorter side, and the skin scales
+        // its layout to match.
+        let edge = DevicePixels(
+            full.min(self.display.size.width.0)
+                .min(self.display.size.height.0),
+        );
         let half = DevicePixels(edge.0 / 2);
         let desired = self.cursor - point(half, half);
         // If the display is smaller than the ring, anchor to its top-left
@@ -203,8 +210,8 @@ mod tests {
         );
         assert_bootstrap_on_display(&placement);
         let bounds = placement.bounds(192);
-        assert_eq!(bounds.origin, point(DevicePixels(1920), DevicePixels(440)));
-        assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
+        assert_eq!(bounds.origin, point(DevicePixels(1920), DevicePixels(320)));
+        assert_eq!(bounds.size, size(DevicePixels(960), DevicePixels(960)));
     }
 
     #[test]
@@ -226,17 +233,23 @@ mod tests {
     #[test]
     fn physical_center_is_independent_of_monitor_scale_and_global_origin() {
         for (cursor, rect, dpi, origin, edge) in [
-            ((3000, 850), (1920, 0, 4480, 1440), 192, (2640, 490), 720),
-            ((900, 600), (0, 0, 1920, 1080), 96, (720, 420), 360),
+            ((3000, 850), (1920, 0, 4480, 1440), 192, (2520, 370), 960),
+            ((900, 600), (0, 0, 1920, 1080), 96, (660, 360), 480),
             // 150% left, 125% above, and 175% below-left with nonzero X/Y.
-            ((-1400, 450), (-2560, -200, 0, 1240), 144, (-1670, 180), 540),
-            ((-300, -700), (-640, -1440, 1920, 0), 120, (-525, -925), 450),
+            ((-1400, 450), (-2560, -200, 0, 1240), 144, (-1760, 90), 720),
+            (
+                (-300, -700),
+                (-640, -1440, 1920, 0),
+                120,
+                (-600, -1000),
+                600,
+            ),
             (
                 (-1200, 1600),
                 (-1920, 1080, 0, 2520),
                 168,
-                (-1515, 1285),
-                630,
+                (-1620, 1180),
+                840,
             ),
         ] {
             let bounds = placement(cursor, rect).bounds(dpi);
@@ -251,13 +264,13 @@ mod tests {
     #[test]
     fn monitor_seams_and_outer_edges_clamp_on_the_selected_side() {
         for (cursor, rect, dpi, origin) in [
-            ((1919, 600), (0, 0, 1920, 1080), 96, (1560, 420)),
-            ((1920, 600), (1920, 0, 4480, 1440), 192, (1920, 240)),
-            ((4479, 1439), (1920, 0, 4480, 1440), 192, (3760, 720)),
-            ((-1, 600), (-2560, -200, 0, 1240), 144, (-540, 330)),
-            ((0, 600), (0, 0, 1920, 1080), 96, (0, 420)),
-            ((600, -1), (-640, -1440, 1920, 0), 120, (375, -450)),
-            ((600, 0), (0, 0, 1920, 1080), 96, (420, 0)),
+            ((1919, 600), (0, 0, 1920, 1080), 96, (1440, 360)),
+            ((1920, 600), (1920, 0, 4480, 1440), 192, (1920, 120)),
+            ((4479, 1439), (1920, 0, 4480, 1440), 192, (3520, 480)),
+            ((-1, 600), (-2560, -200, 0, 1240), 144, (-720, 240)),
+            ((0, 600), (0, 0, 1920, 1080), 96, (0, 360)),
+            ((600, -1), (-640, -1440, 1920, 0), 120, (300, -600)),
+            ((600, 0), (0, 0, 1920, 1080), 96, (360, 0)),
             ((-640, -1440), (-640, -1440, 1920, 0), 120, (-640, -1440)),
         ] {
             let bounds = placement(cursor, rect).bounds(dpi);
@@ -269,10 +282,22 @@ mod tests {
     }
 
     #[test]
-    fn undersized_display_keeps_a_valid_clamp_range() {
-        let bounds = placement((-100, -50), (-200, -100, 0, 0)).bounds(192);
-        assert_eq!(bounds.origin, point(DevicePixels(-200), DevicePixels(-100)));
+    fn a_display_shorter_than_the_ring_gets_a_ring_its_own_height() {
+        // 1280×720 at 200%: the full ring would be 960 px on a 720 px display,
+        // with its bottom slot below the screen. It shrinks to 720 instead
+        // and spans the display top to bottom.
+        let bounds = placement((640, 360), (0, 0, 1280, 720)).bounds(192);
+        assert_eq!(bounds.origin, point(DevicePixels(280), DevicePixels(0)));
         assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
+    }
+
+    #[test]
+    fn undersized_display_keeps_a_valid_clamp_range() {
+        // Narrower than tall: the shorter side wins, and the clamp range
+        // stays valid on the long side too.
+        let bounds = placement((-100, -50), (-200, -100, 0, 0)).bounds(192);
+        assert_eq!(bounds.origin, point(DevicePixels(-150), DevicePixels(-100)));
+        assert_eq!(bounds.size, size(DevicePixels(100), DevicePixels(100)));
     }
 
     fn rect_bounds(rect: (i32, i32, i32, i32)) -> Bounds<DevicePixels> {

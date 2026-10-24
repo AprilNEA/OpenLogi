@@ -6,7 +6,7 @@ use gpui::{
 use tracing::warn;
 
 use crate::notice::{bottom_centre, notice_window_options};
-use crate::ring::{Placement, WINDOW_SIZE, clamp_window_origin, ring_window_options};
+use crate::ring::{Placement, clamp_window_origin, panel_edge, ring_window_options};
 
 /// Captured placement for one invocation, before its windows are opened.
 pub(crate) struct RingPlacement {
@@ -162,8 +162,12 @@ fn cursor_screen(cx: &gpui::App) -> CursorScreen {
 }
 
 fn positioned_window(cx: &gpui::App) -> (WindowOptions, Placement) {
-    let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
     let screen = cursor_screen(cx);
+    let edge = screen.bounds.map_or_else(
+        || px(crate::ring::WINDOW_SIZE),
+        |bounds| panel_edge(bounds.size),
+    );
+    let size = Size::new(edge, edge);
     let center = screen
         .cursor
         .or_else(|| screen.bounds.map(|bounds| bounds.center()))
