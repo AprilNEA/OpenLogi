@@ -514,7 +514,12 @@ impl Running {
                 levels,
                 visible,
             } => {
-                self.backlight_overlay.show(current_level, levels, visible);
+                self.orchestrator.lock().await.announce_backlight(
+                    &self.backlight_overlay,
+                    current_level,
+                    levels,
+                    visible,
+                );
             }
             InventoryEvent::LockKeyChanged(change) => {
                 self.orchestrator.lock().await.announce_lock_key(change);

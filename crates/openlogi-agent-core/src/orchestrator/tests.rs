@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use crate::observable::ObservableState;
 
+mod backlight;
 mod camera;
 mod capture_plans;
 mod device_list;
