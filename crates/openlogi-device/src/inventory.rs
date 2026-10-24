@@ -669,9 +669,7 @@ impl Enumerator {
             // return is an ordinary offline→online transition. A partial live
             // result still publishes the node's online devices, so it keeps
             // the wake.
-            if settled.inventory.is_none() {
-                replaced.retain(|reopened| reopened != &node);
-            }
+            replaced.retain(|reopened| reopened != &node || settled.inventory.is_some());
             // Every node waits for the ledger's consecutive-failure threshold,
             // receivers included. One full-budget timeout is not evidence of
             // dead delivery: [`RECEIVER_PROBE_TIMEOUT`] leaves barely a second
