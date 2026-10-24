@@ -54,8 +54,10 @@ contents:
       mode: 0644
 
   # ── XDG desktop entry ───────────────────────────────────────────────────────
+  # Installed under the window's Wayland app_id (`brand::APP_ID`): compositors
+  # resolve a window's icon from the desktop file of that exact basename.
   - src: packaging/linux/desktop/openlogi.desktop
-    dst: /usr/share/applications/openlogi.desktop
+    dst: /usr/share/applications/org.openlogi.openlogi.desktop
     file_info:
       mode: 0644
 

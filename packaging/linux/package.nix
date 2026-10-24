@@ -169,8 +169,9 @@ rustPlatform.buildRustPackage {
       install -Dm755 "$releaseDir/$binary" "$out/bin/$binary"
     done
 
+    # Named for the window's Wayland app_id, so compositors find its icon.
     install -Dm644 packaging/linux/desktop/openlogi.desktop \
-      "$out/share/applications/openlogi.desktop"
+      "$out/share/applications/org.openlogi.openlogi.desktop"
     # Every standard indexed hicolor size: a stock `hicolor/index.theme`
     # stops at 512x512, so an icon installed only under `1024x1024/apps` is
     # invisible to launchers that resolve by theme index.
@@ -207,7 +208,7 @@ rustPlatform.buildRustPackage {
     done
     test ! -e "$out/bin/openlogi-agent-mock"
     test -f "$out/lib/udev/rules.d/70-openlogi.rules"
-    test -f "$out/share/applications/openlogi.desktop"
+    test -f "$out/share/applications/org.openlogi.openlogi.desktop"
     for size in 1024 512 256 128 64 48 32 16; do
       test -f "$out/share/icons/hicolor/''${size}x''${size}/apps/openlogi.png"
     done

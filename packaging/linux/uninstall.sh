@@ -66,6 +66,8 @@ sudo rm -f /usr/lib/systemd/user/openlogi-agent.service
 # ── desktop entry + icon ──────────────────────────────────────────────────────
 
 echo "Removing desktop entry and icon …"
+sudo rm -f /usr/share/applications/org.openlogi.openlogi.desktop
+# The name earlier releases installed it under.
 sudo rm -f /usr/share/applications/openlogi.desktop
 for size in 1024 512 256 128 64 48 32 16; do
   sudo rm -f "/usr/share/icons/hicolor/${size}x${size}/apps/openlogi.png"
