@@ -37,6 +37,13 @@ pub(crate) fn localized_action_label(action: &Action) -> SharedString {
         Action::OpenApplication(target) => {
             tr!("actions.open_named_target", name => target.display_name())
         }
+        Action::AdvancedClick(click) => {
+            let click_name = tr!(click.click_translation_key());
+            match click.modifiers.rendered() {
+                Some(modifiers) => format!("{modifiers}+{click_name}").into(),
+                None => click_name,
+            }
+        }
         _ => tr!(action
             .translation_key()
             .expect("every payload-free action has a translation key")),

@@ -193,6 +193,7 @@ fn needs_focus(action: &Action) -> bool {
         | Effect::Native(NativeAction::AppExpose) => true,
         Effect::None
         | Effect::Click(_)
+        | Effect::AdvancedClick(_)
         | Effect::Scroll { .. }
         | Effect::Media(_)
         | Effect::Native(_)

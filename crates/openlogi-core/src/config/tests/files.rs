@@ -26,6 +26,15 @@ fn canonical_configuration_example_parses() {
             .enabled,
         "a device without one follows the documented app-wide table"
     );
+    let shift_double_click = crate::binding::AdvancedClick {
+        button: crate::binding::ClickButton::Left,
+        count: crate::binding::ClickCount::Double,
+        modifiers: "Shift".parse().expect("valid modifiers"),
+    };
+    assert_eq!(
+        bindings.get(&ButtonId::WheelTiltLeft),
+        Some(&Binding::Single(Action::AdvancedClick(shift_double_click)))
+    );
 }
 
 #[test]

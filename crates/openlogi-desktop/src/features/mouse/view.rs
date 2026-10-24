@@ -14,7 +14,7 @@ use gpui_kit::component::{
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection};
+use openlogi_core::binding::{Action, AdvancedClick, ButtonId, GamingLayout, GestureDirection};
 
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
@@ -203,6 +203,8 @@ pub struct MouseModelView {
     shortcut_recorder: Option<ShortcutRecorder>,
     /// The Record button's area; a recording lasts while focus stays in it.
     shortcut_record_focus: FocusHandle,
+    /// The click the advanced click editor adds, edited one choice at a time.
+    pub(super) advanced_click: AdvancedClick,
     /// The press-force slider while the haptic panel's inspector shows it.
     pub(super) force_sensing: Option<ForceSensingSlider>,
     /// The canvas area as last laid out, which the model and its cards fit
@@ -282,15 +284,17 @@ impl MouseModelView {
             shortcut_mode: ShortcutMode::Tap,
             shortcut_recorder: None,
             shortcut_record_focus: cx.focus_handle(),
+            advanced_click: AdvancedClick::default(),
             force_sensing: None,
             canvas_room: None,
             _state_obs: state_obs,
         }
     }
 
-    /// Clear every custom-action draft (text and any invalid state) — called
-    /// whenever the picker opens for a new target, so a shortcut, application
-    /// or command typed for one button doesn't reappear for another.
+    /// Clear every custom-action draft (text, choices, and any invalid
+    /// state) — called whenever the picker opens for a new target, so a
+    /// shortcut, application, command, or click set up for one button
+    /// doesn't reappear for another.
     pub(super) fn clear_custom_action_drafts(
         &mut self,
         window: &mut Window,
@@ -305,6 +309,7 @@ impl MouseModelView {
         self.invalid_drafts = InvalidDrafts::default();
         self.shortcut_mode = ShortcutMode::Tap;
         self.shortcut_recorder = None;
+        self.advanced_click = AdvancedClick::default();
     }
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
@@ -351,6 +356,7 @@ impl MouseModelView {
             shortcut_recording: self.shortcut_recorder.is_some(),
             shortcut_record_focus: &self.shortcut_record_focus,
             invalid: self.invalid_drafts,
+            advanced_click: self.advanced_click,
             view,
         }
     }

@@ -14,6 +14,7 @@ mod action_ring;
 mod application_target;
 mod button;
 mod category;
+mod click;
 mod control;
 mod defaults;
 mod effect;
@@ -35,6 +36,7 @@ pub use action_ring::{
 pub use application_target::{ApplicationTarget, ApplicationTargetError};
 pub use button::{ButtonId, GridKey, GridSlot, KeypadPage, ParseButtonIdError};
 pub use category::Category;
+pub use click::{AdvancedClick, ClickButton, ClickCount};
 pub use control::{Cid, KNOWN_CONTROLS, KnownControl, UNKNOWN_CONTROL_TRANSLATION_KEY};
 pub use defaults::{
     default_binding, default_binding_for, default_binding_on, default_gesture_binding,
@@ -45,7 +47,9 @@ pub use gaming::{
     G502_LIGHTSPEED, G903_LIGHTSPEED, GamingButtons, GamingLayout, STANDARD_BUTTONS, Slot,
 };
 pub use gesture::GestureDirection;
-pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
+pub use key_combo::{
+    ChordModifier, ChordModifiers, KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError,
+};
 pub use swipe::{
     GESTURE_HOLD_FOR_SWIPE, GESTURE_REARM_PAUSE, GESTURE_REPEAT_DISTANCE, GESTURE_SWIPE_DEADZONE,
     GESTURE_SWIPE_THRESHOLD, SwipeAccumulator, detect_swipe,
