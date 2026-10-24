@@ -339,12 +339,43 @@ impl DeviceOp {
             return Err(WriteError::DeviceNotFound);
         }
         let turn = self.access.transport_turns.turn_for(&self.route);
-        let _lease = self.access.receiver_access.acquire_for_io().await;
+        let _lease = self.access.receiver_access.acquire_for_io().await?;
         after_transport_turn(&turn, async {
             let shared = self.resolve()?;
             timed(op, f(shared)).await
         })
         .await
+    }
+
+    /// Hold sole receiver access and this transport's turn for a firmware
+    /// transaction. Resolve after both waits, so queued work never pins a
+    /// retired channel. The updater owns request deadlines and cooperatively
+    /// observes the device-I/O gate between commands; it must finish an
+    /// in-flight native write before releasing these leases.
+    pub async fn firmware<F, Fut, T>(
+        self,
+        work: F,
+    ) -> Result<T, openlogi_core::hid::FirmwareUpdateFailure>
+    where
+        F: FnOnce(SharedChannel) -> Fut,
+        Fut: Future<Output = Result<T, openlogi_core::hid::FirmwareUpdateFailure>>,
+    {
+        use openlogi_core::hid::FirmwareUpdateFailure;
+
+        if !self.access.device_io.allows_io() {
+            return Err(FirmwareUpdateFailure::Device(WriteError::DeviceNotFound));
+        }
+        let turn = self.access.transport_turns.turn_for(&self.route);
+        let _lease = self
+            .access
+            .receiver_access
+            .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::FirmwareUpdate)
+            .await;
+        let _turn = turn.lock().await;
+        let shared = self
+            .resolve()
+            .map_err(|_| FirmwareUpdateFailure::Device(WriteError::DeviceNotFound))?;
+        work(shared).await
     }
 
     /// [`Self::run`] for a write ordered by `ticket`: lease the receiver,
@@ -373,7 +404,7 @@ impl DeviceOp {
             return Err(WriteError::DeviceNotFound);
         }
         let turn = self.access.transport_turns.turn_for(&self.route);
-        let _lease = self.access.receiver_access.acquire_for_io().await;
+        let _lease = self.access.receiver_access.acquire_for_io().await?;
         within_turn(
             ticket,
             &turn,
@@ -409,7 +440,7 @@ impl DeviceOp {
         let turn = self.access.transport_turns.turn_for(&self.route);
         ticket
             .in_order(|| async {
-                let _lease = self.access.receiver_access.acquire_for_io().await;
+                let _lease = self.access.receiver_access.acquire_for_io().await?;
                 after_transport_turn(&turn, async {
                     let shared = self.resolve()?;
                     timed(op, write(shared)).await
@@ -452,7 +483,7 @@ impl DeviceOp {
                 .await
                 .map_err(|_| WriteError::RequestTimedOut {
                     operation: HidppOperation::Lighting,
-                })?;
+                })??;
             if !device_io.allows_io() {
                 return Err(WriteError::DeviceNotFound);
             }
@@ -494,7 +525,7 @@ impl DeviceOp {
                 .await
                 .map_err(|_| WriteError::RequestTimedOut {
                     operation: HidppOperation::Lighting,
-                })?;
+                })??;
             if !device_io.allows_io() {
                 return Err(WriteError::DeviceNotFound);
             }
@@ -1020,7 +1051,9 @@ where
     Fut: Future,
 {
     let leased = || async move {
-        let _lease = op.access.receiver_access.acquire_for_io().await;
+        let Ok(_lease) = op.access.receiver_access.acquire_for_io().await else {
+            return None;
+        };
         if !op.access.device_io.allows_io() {
             return None;
         }
@@ -1209,7 +1242,13 @@ pub(crate) fn reapply_mouse_volatile_in_background(
             return;
         };
         rt.block_on(async move {
-            let _lease = access.receiver_access.acquire_for_io().await;
+            let Ok(_lease) = access.receiver_access.acquire_for_io().await else {
+                debug!(
+                    index,
+                    "firmware update in progress — volatile reapply skipped"
+                );
+                return;
+            };
             if !access.device_io.allows_io() {
                 debug!(
                     index,
@@ -2338,6 +2377,64 @@ mod tests {
         })
         .await
         .expect("the reapply thread reaches the transport queue");
+    }
+
+    #[tokio::test]
+    async fn firmware_waits_for_capture_and_refuses_ordinary_writes_until_cleanup() {
+        let published = publish_direct_mouse().await;
+        let receiver_access = ReceiverAccess::default();
+        let access = DeviceAccess {
+            channel: Arc::new(RwLock::new(None)),
+            registry: published.registry.clone(),
+            receiver_access: receiver_access.clone(),
+            device_io: published.device_io.clone(),
+            transport_turns: TransportTurns::default(),
+        };
+        let capture = receiver_access.try_acquire_for_session().unwrap();
+        let mut requests = receiver_access.subscribe_requests();
+        let (started_tx, mut started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let firmware = tokio::spawn(access.op(&published.route).firmware(|_channel| async move {
+            started_tx.send(()).unwrap();
+            finish_rx.await.unwrap();
+            Ok(())
+        }));
+        requests.changed().await.unwrap();
+        assert!(
+            requests
+                .borrow()
+                .requested(crate::receiver_access::ExclusiveAccessReason::FirmwareUpdate)
+        );
+        assert!(
+            started_rx.try_recv().is_err(),
+            "capture still owns its lease"
+        );
+        assert!(receiver_access.try_acquire_for_session().is_none());
+        drop(capture);
+        started_rx.await.unwrap();
+        // A write would wait minutes behind the transfer, longer than any
+        // requester's deadline: it is refused at once and never runs.
+        let refused = tokio::time::timeout(
+            Duration::from_millis(100),
+            access
+                .op(&published.route)
+                .run(HidppOperation::WriteDpi, |_channel| async move {
+                    panic!("no ordinary write runs during a firmware transfer");
+                    #[expect(unreachable_code, reason = "names the future's output type")]
+                    Ok::<(), WriteError>(())
+                }),
+        )
+        .await
+        .expect("refused immediately, not after the transfer");
+        assert_eq!(refused, Err(WriteError::FirmwareUpdateInProgress));
+        finish_tx.send(()).unwrap();
+        firmware.await.unwrap().unwrap();
+        assert!(!receiver_access.exclusive_requested());
+        access
+            .op(&published.route)
+            .run(HidppOperation::WriteDpi, |_channel| async move { Ok(()) })
+            .await
+            .expect("writes resume after cleanup");
     }
 
     /// The timeout every [`DeviceOp::run`] call relies on: a write that never

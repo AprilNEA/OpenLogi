@@ -1,0 +1,19 @@
+# Owner: openlogi_agent_core::firmware::record_progress timestamps, deduplicates
+# and bounds firmware history for both the real agent and mock producer.
+id: agent-core-firmware-activity-owner
+language: rust
+severity: error
+message: Call openlogi_agent_core::firmware::record_progress to record firmware activity.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-agent-core/src/firmware.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - pattern: FirmwareUpdateEvent { $$$FIELDS }
+    - not:
+        inside:
+          pattern: mod tests { $$$BODY }
+          stopBy: end

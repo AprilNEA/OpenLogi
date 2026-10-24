@@ -197,6 +197,23 @@ impl Agent for TestAgent {
     ) -> Result<ReportRateInfo, WriteError> {
         unreachable!("profile capture must never write the report rate")
     }
+    async fn firmware_status(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::FirmwareStatus, WriteError> {
+        unreachable!("profile capture does not record firmware yet")
+    }
+
+    async fn start_firmware_update(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _request: openlogi_core::hid::FirmwareRequest,
+    ) -> Result<u64, openlogi_core::hid::FirmwareUpdateRefusal> {
+        unreachable!("profile capture must never update firmware")
+    }
+
     async fn read_pointer_speed(
         self,
         _: TarpcContext,
@@ -555,6 +572,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             recent: Vec::new(),
         },
         lights: Vec::new(),
+        firmware_update: None,
     };
     TestAgent::from_profile(profile, snapshot)
 }

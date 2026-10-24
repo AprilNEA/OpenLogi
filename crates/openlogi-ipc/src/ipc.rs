@@ -20,9 +20,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PairingError, PasskeyMethod,
-    PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
-    WriteError,
+    EasySwitchHosts, FirmwareRequest, FirmwareStatus, FirmwareUpdate, FirmwareUpdateRefusal,
+    FnLockState, ForceSensingInfo, LightCommand, PairingError, PasskeyMethod, PointerSpeed,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -148,7 +148,15 @@ pub use succession::Identity;
 ///      guarded-write/superseded errors; `Agent::reload_saved_config_with_verdict`
 ///      and [`SavedConfigVerdict`] appended, so a GUI distinguishes its accepted
 ///      saved revision from an external edit that replaced it before reload.
-pub const PROTOCOL_VERSION: u32 = 41;
+/// v42: firmware status/start methods and `AgentSnapshot::firmware_update`
+///      appended for official device firmware updates, with job identity,
+///      the requester's admission identity, timestamped activity history,
+///      approved package provenance, and
+///      `HidppOperation::{ReadFirmware, WriteFirmware}` and
+///      `WriteError::FirmwareUpdateInProgress` appended, and
+///      `FirmwareUpdatePhase::Warning` appended for damage an interrupted
+///      update left behind.
+pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -270,6 +278,8 @@ pub struct AgentSnapshot {
     /// light reached only through its raw report reads nothing back and is
     /// not listed.
     pub lights: Vec<ObservedLight>,
+    /// The active or most recent device firmware update.
+    pub firmware_update: Option<FirmwareUpdate>,
 }
 
 /// A standalone light as it reported itself to the agent.
@@ -949,4 +959,15 @@ pub trait Agent {
     async fn reload_saved_config_with_verdict(
         saved: SavedConfig,
     ) -> Result<SavedConfigVerdict, ConfigReloadError>;
+    /// Read the running application firmware and the newest supported official release.
+    async fn firmware_status(route: DeviceRoute) -> Result<FirmwareStatus, WriteError>;
+    /// Admit an update to the newest supported official release, answering
+    /// with the admitted job's id. Progress survives client disconnects in
+    /// [`AgentSnapshot::firmware_update`], whose `request` names the admitted
+    /// request so the requester can recognize its job even if this reply is
+    /// lost, and whose `id` tells it when a later job has replaced its own.
+    async fn start_firmware_update(
+        route: DeviceRoute,
+        request: FirmwareRequest,
+    ) -> Result<u64, FirmwareUpdateRefusal>;
 }

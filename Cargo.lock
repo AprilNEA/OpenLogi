@@ -2201,6 +2201,7 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -5563,6 +5564,7 @@ dependencies = [
  "openlogi-agent-core",
  "openlogi-core",
  "openlogi-device",
+ "openlogi-device-registry",
  "openlogi-fixture",
  "openlogi-hid",
  "openlogi-hook",
@@ -5570,6 +5572,7 @@ dependencies = [
  "openlogi-ipc",
  "rust-i18n",
  "serde_json",
+ "sha2 0.10.9",
  "succession",
  "sysinfo 0.38.4",
  "tarpc",
@@ -5578,9 +5581,11 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "ureq",
  "windows-sys 0.61.2",
  "winreg",
  "zbus",
+ "zip",
 ]
 
 [[package]]
@@ -5756,6 +5761,7 @@ version = "0.8.17"
 dependencies = [
  "futures-concurrency",
  "futures-lite",
+ "hex",
  "openlogi-core",
  "openlogi-device-registry",
  "openlogi-fixture",
@@ -8703,6 +8709,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-path"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10904,6 +10916,26 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
+
+[[package]]
+name = "zip"
+version = "9.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap",
+ "memchr",
+ "nix 0.31.3",
+ "typed-path",
+]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

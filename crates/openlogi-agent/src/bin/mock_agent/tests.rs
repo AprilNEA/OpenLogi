@@ -1036,3 +1036,103 @@ async fn disable_keys_write_mismatch_is_retained_and_reported() {
         0xa0
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn firmware_job_survives_the_request_and_finishes_in_the_snapshot() {
+    use openlogi_core::hid::{FirmwareOffer, FirmwareUpdatePhase, FirmwareUpdateRefusal};
+    let server = MockAgent::new(demo_state());
+    let route = mouse_route();
+    assert!(matches!(
+        server
+            .clone()
+            .firmware_status(tarpc::context::current(), route.clone())
+            .await
+            .unwrap()
+            .offer,
+        FirmwareOffer::Available(_)
+    ));
+    server
+        .clone()
+        .start_firmware_update(
+            tarpc::context::current(),
+            route.clone(),
+            openlogi_core::hid::FirmwareRequest(7),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        server
+            .clone()
+            .start_firmware_update(
+                tarpc::context::current(),
+                route.clone(),
+                openlogi_core::hid::FirmwareRequest(7),
+            )
+            .await,
+        Err(FirmwareUpdateRefusal::Busy)
+    );
+    for _ in 0..6 {
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    let finished = server.current().await.snapshot.firmware_update.unwrap();
+    assert_eq!(finished.phase, FirmwareUpdatePhase::Succeeded);
+    assert_eq!(
+        finished.request,
+        openlogi_core::hid::FirmwareRequest(7),
+        "the job names the request that started it"
+    );
+    assert_eq!(finished.events.len(), 15);
+    assert_eq!(finished.source.as_ref().unwrap().device_name, "MX Master 4");
+    assert_eq!(
+        finished.events.first().unwrap().phase,
+        FirmwareUpdatePhase::Downloading
+    );
+    assert_eq!(
+        finished.events.last().unwrap().phase,
+        FirmwareUpdatePhase::Succeeded
+    );
+    assert_eq!(
+        server
+            .clone()
+            .firmware_status(tarpc::context::current(), route.clone())
+            .await
+            .unwrap()
+            .offer,
+        FirmwareOffer::UpToDate
+    );
+    let previous_id = server.current().await.snapshot.firmware_update.unwrap().id;
+    let admitted = server
+        .clone()
+        .start_firmware_update(
+            tarpc::context::current(),
+            route.clone(),
+            openlogi_core::hid::FirmwareRequest(7),
+        )
+        .await
+        .unwrap();
+    assert!(admitted > previous_id);
+    assert_eq!(
+        server.current().await.snapshot.firmware_update.unwrap().id,
+        admitted,
+        "the reply names the job the snapshot publishes"
+    );
+    assert_eq!(
+        server
+            .clone()
+            .firmware_status(tarpc::context::current(), route)
+            .await
+            .unwrap()
+            .offer,
+        FirmwareOffer::UpToDate,
+        "reinstalling does not revert the reported running version"
+    );
+}
+
+#[test]
+fn the_scripted_mouse_installs_only_its_own_catalog_release() {
+    let (prefix, number, product_id) = MOCK_FIRMWARE;
+    let release = mock_release().expect("the catalog carries the scripted mouse's release");
+    assert!(release.fits(prefix, number, product_id));
+}

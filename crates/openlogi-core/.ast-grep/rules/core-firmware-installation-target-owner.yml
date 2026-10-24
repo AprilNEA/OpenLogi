@@ -1,0 +1,23 @@
+# Owner: openlogi_core::hid::FirmwareStatus::installation_target chooses a new
+# release or the exact running release for an explicit reinstall request.
+id: core-firmware-installation-target-owner
+language: rust
+severity: error
+message: Call FirmwareStatus::installation_target; core owns the update/reinstall target decision.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/hid/firmware.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern:
+        context: 'match offer { FirmwareOffer::UpToDate => Some($TARGET) }'
+        selector: match_arm
+    - pattern:
+        context: 'match offer { FirmwareOffer::Available($TARGET) => Some($TARGET) }'
+        selector: match_arm
+    - pattern:
+        context: 'match offer { FirmwareOffer::UpToDate => $STATUS.running }'
+        selector: match_arm

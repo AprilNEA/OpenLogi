@@ -1,0 +1,44 @@
+# Owner: `impl From<&FirmwareRelease> for FirmwareVersion` in
+# openlogi_core::hid::firmware converts a catalog release into the version it
+# installs. Consumers call `FirmwareVersion::from(release)` / `release.into()`
+# instead of rebuilding the version from the release's fields.
+id: core-firmware-release-version-owner
+language: rust
+severity: error
+message: Use FirmwareVersion::from(release); openlogi_core::hid::firmware owns the release-to-version conversion.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/hid/firmware.rs
+# Matches a `FirmwareVersion` (bare, path-qualified, or `Self` inside an impl
+# for it) whose three fields are each copied from some `x.number`,
+# `x.revision` and `x.build`, in any order.
+rule:
+  kind: struct_expression
+  all:
+    - any:
+        - has:
+            field: name
+            regex: '(^|::)FirmwareVersion$'
+        - all:
+            - has:
+                field: name
+                regex: '^Self$'
+            - inside:
+                kind: impl_item
+                stopBy: end
+                has:
+                  field: type
+                  regex: '(^|::)FirmwareVersion$'
+    - has:
+        field: body
+        all:
+          - has:
+              kind: field_initializer
+              regex: '^number\s*:\s*[A-Za-z_][\w.]*\.number$'
+          - has:
+              kind: field_initializer
+              regex: '^revision\s*:\s*[A-Za-z_][\w.]*\.revision$'
+          - has:
+              kind: field_initializer
+              regex: '^build\s*:\s*[A-Za-z_][\w.]*\.build$'

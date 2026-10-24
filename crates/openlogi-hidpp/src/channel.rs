@@ -686,6 +686,10 @@ impl HidppChannel {
 
     /// Registers a listener that will be called for every incoming message.
     ///
+    /// A listener never sees a report that answered a request before it was
+    /// registered, so one registered after a reply returns starts strictly
+    /// after that reply.
+    ///
     /// Returns a handle that can be used to remove the listener using a call to
     /// [`Self::remove_msg_listener`].
     pub fn add_msg_listener(
@@ -767,6 +771,14 @@ async fn read_loop(
             continue;
         };
 
+        // Collected before the report resolves its request: the requester can
+        // wake and register its next listener before dispatch, and a report
+        // must never reach a listener registered after it answered a request.
+        // A same-header follow-up would otherwise mistake the previous reply
+        // for its own. Collecting outside the call also lets a listener add or
+        // remove listeners without deadlocking on the lock.
+        let listeners: Vec<_> = lock(message_listeners).values().cloned().collect();
+
         let mut matched_id = None;
         let mut stale = false;
         let pending_count;
@@ -825,9 +837,6 @@ async fn read_loop(
             "raw report received"
         );
 
-        // Collected before dispatch so a listener may add or remove listeners
-        // without deadlocking on the lock it is being called under.
-        let listeners: Vec<_> = lock(message_listeners).values().cloned().collect();
         for listener in listeners {
             listener(msg, matched_id.is_some());
         }
