@@ -5,6 +5,7 @@
 use std::num::NonZeroU8;
 
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::config::GestureHold;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
@@ -43,10 +44,19 @@ enum HoldState {
     },
 }
 
-/// Begin a hold for `cid`, its swipe accumulator started fresh.
-fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
+/// Begin a hold for `cid`, its swipe accumulator started fresh and gated by the
+/// device's configured [`GestureHold`].
+fn begin_hold(
+    cid: u16,
+    button: ButtonId,
+    overlap: bool,
+    skip_first_raw_xy: bool,
+    gesture_hold: GestureHold,
+    gesture_repeat: bool,
+) -> HoldState {
     let mut swipe = SwipeAccumulator::default();
-    swipe.begin();
+    swipe.set_repeat_enabled(gesture_repeat);
+    swipe.begin_with(gesture_hold.duration());
     HoldState::Holding {
         cid,
         button,
@@ -62,6 +72,12 @@ fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool
 pub(super) struct CaptureAccum {
     /// The hold owning raw-XY motion, if any (see [`HoldState`]).
     hold: HoldState,
+    /// Gate applied to every hold this accumulator begins, from the device's
+    /// `gesture_hold` setting.
+    gesture_hold: GestureHold,
+    /// Whether a hold may repeat its committed direction, from the device's
+    /// `gesture_repeat` setting.
+    gesture_repeat: bool,
     /// The armed gesture sources held in the last event, for edge detection:
     /// a source not previously held that becomes the holder is a fresh touch
     /// (its first raw-XY sample is then stale and discarded).
@@ -106,6 +122,28 @@ fn captured_gesture_button(cid: u16, gesture_button_cids: &[(u16, ButtonId)]) ->
 }
 
 impl CaptureAccum {
+    /// Apply the device's gesture settings to every hold this accumulator
+    /// begins from now on.
+    pub(super) fn with_gesture_settings(
+        mut self,
+        gesture_hold: GestureHold,
+        gesture_repeat: bool,
+    ) -> Self {
+        self.gesture_hold = gesture_hold;
+        self.gesture_repeat = gesture_repeat;
+        self
+    }
+
+    /// The hold gate this accumulator currently applies.
+    pub(super) fn gesture_hold(&self) -> GestureHold {
+        self.gesture_hold
+    }
+
+    /// Whether this accumulator lets a hold repeat its direction.
+    pub(super) fn gesture_repeat(&self) -> bool {
+        self.gesture_repeat
+    }
+
     /// Update the accumulator and emit on a decoded `0x1b04` event: preserve
     /// physical button edges, and commit a gesture swipe the instant it
     /// crosses the threshold (mid-swipe, like Options+) rather than on release.
@@ -175,6 +213,8 @@ impl CaptureAccum {
                                 button,
                                 held.len() > 1,
                                 !self.gestures_down.contains(&cid),
+                                self.gesture_hold,
+                                self.gesture_repeat,
                             ),
                             None => HoldState::Idle,
                         }
