@@ -10,6 +10,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
     MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
 
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction, Shortcut,
@@ -47,12 +48,6 @@ const VK_VOLUME_UP: u16 = 0xAF;
 const VK_MEDIA_NEXT_TRACK: u16 = 0xB0;
 const VK_MEDIA_PREV_TRACK: u16 = 0xB1;
 const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
-
-// XBUTTON1/XBUTTON2 from WinUser.h — windows-sys puts them behind the
-// Win32_UI_WindowsAndMessaging feature; not worth enabling for two
-// integers (same treatment as the VK_* codes above).
-const XBUTTON1: i32 = 1;
-const XBUTTON2: i32 = 2;
 
 /// One key as [`key_input`] posts it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,8 +210,8 @@ fn post_click(button: MouseButton) {
         MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
         MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
         // Extra buttons share the X flag pair; mouseData carries which one.
-        MouseButton::Back => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON1),
-        MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON2),
+        MouseButton::Back => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, i32::from(XBUTTON1)),
+        MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, i32::from(XBUTTON2)),
     };
     send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
 }
