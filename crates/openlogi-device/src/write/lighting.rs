@@ -19,7 +19,7 @@ use hidpp::{
     nibble::U4,
     protocol::v20::{self, Hidpp20Error},
 };
-use openlogi_core::config::{Lighting, LightingEffect};
+use openlogi_core::config::{Lighting, LightingEffect, LightingEffectPeriod};
 use tracing::debug;
 
 use crate::SharedChannel;
@@ -141,16 +141,16 @@ pub enum LightingAnimation {
     /// The colour held steady.
     #[default]
     Static,
-    /// The colour fading in and out once every `period_ms`.
+    /// The colour fading in and out once every `period`.
     Breathing {
-        /// One breath, in milliseconds.
-        period_ms: u16,
+        /// One breath.
+        period: LightingEffectPeriod,
     },
-    /// The colour wheel, once every `period_ms`, at `intensity` — it has no
+    /// The colour wheel, once every `period`, at `intensity` — it has no
     /// colour to carry the brightness.
     ColorCycle {
-        /// One turn of the colour wheel, in milliseconds.
-        period_ms: u16,
+        /// One turn of the colour wheel.
+        period: LightingEffectPeriod,
         /// The configured brightness.
         intensity: EffectIntensity,
     },
@@ -174,12 +174,12 @@ impl LightingWrite {
         let (r, g, b) = lighting.color.components();
         let scale =
             |c: u8| u8::try_from(u16::from(c) * u16::from(lighting.brightness) / 100).unwrap_or(c);
-        let period_ms = lighting.effect_period_ms;
+        let period = lighting.effect_period_ms;
         let animation = match lighting.effect {
             LightingEffect::Static => LightingAnimation::Static,
-            LightingEffect::Breathing => LightingAnimation::Breathing { period_ms },
+            LightingEffect::Breathing => LightingAnimation::Breathing { period },
             LightingEffect::ColorCycle => LightingAnimation::ColorCycle {
-                period_ms,
+                period,
                 intensity: EffectIntensity::from_percent(lighting.brightness),
             },
         };
@@ -260,24 +260,8 @@ impl LightingWrite {
             }
             LightingMethod::Auto => {}
         }
-        if wanted != fixed {
-            match scope
-                .read(set_zone_effects(channel, index, wanted, fixed))
-                .await
-            {
-                Err(WriteError::FeatureUnsupported { feature_hex })
-                    if feature_hex == COLOR_LED_EFFECTS_FEATURE =>
-                {
-                    debug!(
-                        animation = ?self.animation,
-                        "no 0x8070 zone plays the animation — showing the colour"
-                    );
-                }
-                other => return other.map(|()| None),
-            }
-        }
         match scope
-            .read(set_zone_effects(channel, index, fixed, fixed))
+            .read(set_zone_effects(channel, index, wanted, fixed))
             .await
         {
             Err(WriteError::FeatureUnsupported { feature_hex })
@@ -315,19 +299,18 @@ impl LightingWrite {
     fn zone_effect(self) -> Option<ZoneEffectParams> {
         match self.animation {
             LightingAnimation::Static => None,
-            LightingAnimation::Breathing { period_ms } => Some(ZoneEffectParams::Breathing {
+            LightingAnimation::Breathing { period } => Some(ZoneEffectParams::Breathing {
                 color: color_led_rgb(self.color),
-                period_ms,
+                period_ms: period.into_inner(),
                 waveform: BreathingWaveform::Default,
                 intensity: EffectIntensity::FULL,
             }),
-            LightingAnimation::ColorCycle {
-                period_ms,
-                intensity,
-            } => Some(ZoneEffectParams::Cycling {
-                period_ms,
-                intensity,
-            }),
+            LightingAnimation::ColorCycle { period, intensity } => {
+                Some(ZoneEffectParams::Cycling {
+                    period_ms: period.into_inner(),
+                    intensity,
+                })
+            }
         }
     }
 
@@ -448,10 +431,11 @@ async fn resolve_feature_index(
 
 /// Play `wanted` through `ColorLedEffects` (`0x8070`): on every zone that
 /// lists its effect, and `fallback` on a zone that lists only that one — a
-/// zone that cannot breathe still shows the colour. Stored in RAM only
-/// (overrides the running onboard profile without touching flash).
-/// `FeatureUnsupported` when the device exposes no `0x8070` or no zone lists
-/// `wanted`'s effect, including a device that reports no zones.
+/// zone that cannot breathe still shows the colour, and so does a device none
+/// of whose zones can. Stored in RAM only (overrides the running onboard
+/// profile without touching flash). `FeatureUnsupported` when the device
+/// exposes no `0x8070` or no zone lists either effect, including a device that
+/// reports no zones.
 ///
 /// For a solid colour `wanted` and `fallback` are the same fixed colour.
 ///
@@ -480,16 +464,22 @@ async fn set_zone_effects(
         .zone_count;
 
     let targets = zone_targets(&feature, index, zone_count, wanted, fallback).await?;
+    if targets.is_empty() {
+        debug!(
+            index,
+            zone_count, "no 0x8070 zone offers the effect or the colour"
+        );
+        return Err(WriteError::FeatureUnsupported {
+            feature_hex: COLOR_LED_EFFECTS_FEATURE,
+        });
+    }
     if !targets.iter().any(|&(_, _, params)| params == wanted) {
         debug!(
             index,
             zone_count,
             effect = ?wanted.effect_id(),
-            "no 0x8070 zone lists the effect"
+            "no 0x8070 zone lists the effect — showing the colour"
         );
-        return Err(WriteError::FeatureUnsupported {
-            feature_hex: COLOR_LED_EFFECTS_FEATURE,
-        });
     }
     for &(zone, effect, params) in &targets {
         feature

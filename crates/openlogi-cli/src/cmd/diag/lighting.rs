@@ -5,7 +5,7 @@
 use anyhow::Result;
 use clap::{Args, ValueEnum};
 use openlogi_core::color::Rgb;
-use openlogi_core::config::{Lighting, LightingEffect};
+use openlogi_core::config::{Lighting, LightingEffect, LightingEffectPeriod};
 use openlogi_hid::LightingMethod;
 use openlogi_hid::write::LightingWrite;
 
@@ -77,14 +77,20 @@ pub struct LightingArgs {
     pub effect: Effect,
 
     /// One breath or colour-wheel turn, in milliseconds (1000–20000).
-    #[arg(long, value_name = "MS", default_value_t = 5_000,
-          value_parser = clap::value_parser!(u16).range(1_000..=20_000))]
-    pub period_ms: u16,
+    #[arg(long, value_name = "MS", default_value_t = LightingEffectPeriod::DEFAULT,
+          value_parser = parse_period)]
+    pub period_ms: LightingEffectPeriod,
 
     /// Brightness percent (0–100), applied as the GUI applies it.
     #[arg(long, value_name = "PERCENT", default_value_t = 100,
           value_parser = clap::value_parser!(u8).range(0..=100))]
     pub brightness: u8,
+}
+
+/// A `--period-ms` value, refused with the period's own bounds message.
+fn parse_period(raw: &str) -> Result<LightingEffectPeriod, String> {
+    let ms: u16 = raw.parse().map_err(|e| format!("{e}"))?;
+    LightingEffectPeriod::try_new(ms).map_err(|e| e.to_string())
 }
 
 pub async fn run(args: LightingArgs) -> Result<()> {
@@ -118,6 +124,8 @@ pub async fn run(args: LightingArgs) -> Result<()> {
 mod color_validation_tests {
     use openlogi_core::color::RgbParseError;
 
+    use openlogi_core::config::LightingEffectPeriod;
+
     use super::{Effect, LightingArgs, Method, run};
 
     fn args(color: &str) -> LightingArgs {
@@ -126,7 +134,7 @@ mod color_validation_tests {
             device: None,
             method: Method::Auto,
             effect: Effect::Static,
-            period_ms: 5_000,
+            period_ms: LightingEffectPeriod::DEFAULT,
             brightness: 100,
         }
     }

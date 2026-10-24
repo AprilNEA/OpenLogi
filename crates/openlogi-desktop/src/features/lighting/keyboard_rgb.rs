@@ -15,7 +15,7 @@ use gpui_base::Button as BaseButton;
 use gpui_component::button::{Button, ButtonGroup};
 use gpui_component::{Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::color::Rgb;
-use openlogi_core::config::{Lighting, LightingEffect};
+use openlogi_core::config::{Lighting, LightingEffect, LightingEffectPeriod};
 
 use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
@@ -40,7 +40,7 @@ const PALETTE: &[Rgb] = &[
 
 pub struct LightingPanel {
     brightness: CommitSlider<u8>,
-    period: CommitSlider<u16>,
+    period: CommitSlider<LightingEffectPeriod>,
     _state_obs: Subscription,
 }
 
@@ -62,23 +62,18 @@ impl LightingPanel {
                 });
             },
         );
-        let initial_period = AppState::try_read(cx).map_or_else(
-            || Lighting::default().effect_period_ms,
-            |s| s.lighting().effect_period_ms,
-        );
-        let (shortest, longest) = (
-            *Lighting::EFFECT_PERIOD_MS.start(),
-            *Lighting::EFFECT_PERIOD_MS.end(),
-        );
+        let initial_period = AppState::try_read(cx).map_or(LightingEffectPeriod::DEFAULT, |s| {
+            s.lighting().effect_period_ms
+        });
         let period = CommitSlider::new(
-            SliderRange::new(shortest, longest).step(500.),
+            SliderRange::new(LightingEffectPeriod::MIN, LightingEffectPeriod::MAX).step(500.),
             initial_period,
             cx,
-            |_, period_ms, cx| {
+            |_, period, cx| {
                 AppState::apply(cx, |state| {
                     let mut lighting = state.lighting();
                     lighting.enabled = true;
-                    lighting.effect_period_ms = period_ms;
+                    lighting.effect_period_ms = period;
                     state.commit_lighting(lighting)
                 });
             },
@@ -230,8 +225,8 @@ fn effect_segment(current: LightingEffect) -> ButtonGroup {
 }
 
 /// A cycle length in seconds, to the half second the slider steps by.
-fn seconds(period_ms: u16) -> String {
-    format!("{:.1} s", f32::from(period_ms) / 1000.)
+fn seconds(period: LightingEffectPeriod) -> String {
+    format!("{:.1} s", f32::from(period) / 1000.)
 }
 
 /// One color swatch. Clicking it turns lighting on and sets that color.

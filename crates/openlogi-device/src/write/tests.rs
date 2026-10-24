@@ -6,6 +6,7 @@ use hidpp::feature::color_led_effects::EffectIntensity;
 use hidpp::feature::extended_dpi::{DpiRange, Lod, SensorCapabilities};
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
+use openlogi_core::config::LightingEffectPeriod;
 
 use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
@@ -1625,14 +1626,36 @@ fn zone_effect_params(handle: &crate::replay::ReplayChannelHandle) -> Vec<(u8, u
         .collect()
 }
 
+fn period(ms: u16) -> LightingEffectPeriod {
+    LightingEffectPeriod::try_new(ms).expect("valid lighting effect period")
+}
+
+/// Every `getZoneInfo` the device received: one per zone per walk of the list.
+fn zone_info_reads(handle: &crate::replay::ReplayChannelHandle) -> usize {
+    handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == COLOR_LED_EFFECTS_INDEX && report[3] >> 4 == 0x01)
+        .count()
+}
+
 /// A write of the colour `11 22 33` playing `animation`, the way the agent
 /// sends it.
 async fn animate(
     shared: &SharedChannel,
     animation: LightingAnimation,
 ) -> Result<Option<RgbControlLease>, WriteError> {
+    animate_with(shared, LightingMethod::Auto, animation).await
+}
+
+/// [`animate`] over a chosen lighting path.
+async fn animate_with(
+    shared: &SharedChannel,
+    method: LightingMethod,
+    animation: LightingAnimation,
+) -> Result<Option<RgbControlLease>, WriteError> {
     LightingWrite {
-        method: LightingMethod::Auto,
+        method,
         color: openlogi_core::color::Rgb::new(0x11, 0x22, 0x33),
         animation,
     }
@@ -1650,7 +1673,9 @@ const G733_ZONES: ScriptedZones = &[
 
 #[tokio::test]
 async fn breathing_targets_each_devices_own_breathing_index() -> Result<(), WriteError> {
-    let breathing = LightingAnimation::Breathing { period_ms: 4_000 };
+    let breathing = LightingAnimation::Breathing {
+        period: period(4_000),
+    };
     // Colour 11 22 33, 4000 ms = 0x0fa0, default waveform, full intensity.
     let params = [0x11, 0x22, 0x33, 0x0f, 0xa0, 0, 0, 0, 0, 0];
 
@@ -1670,7 +1695,7 @@ async fn breathing_targets_each_devices_own_breathing_index() -> Result<(), Writ
 #[tokio::test]
 async fn a_colour_cycle_carries_its_period_and_intensity() -> Result<(), WriteError> {
     let cycle = LightingAnimation::ColorCycle {
-        period_ms: 10_000,
+        period: period(10_000),
         intensity: EffectIntensity::from_percent(40),
     };
     // 10000 ms = 0x2710 at bytes 5–6, intensity at byte 7.
@@ -1699,7 +1724,13 @@ async fn a_zone_without_the_animation_shows_the_colour() -> Result<(), WriteErro
     ];
     let (shared, handle) = color_led_effects_shared(ZONES).await;
 
-    animate(&shared, LightingAnimation::Breathing { period_ms: 2_000 }).await?;
+    animate(
+        &shared,
+        LightingAnimation::Breathing {
+            period: period(2_000),
+        },
+    )
+    .await?;
 
     assert_eq!(
         zone_effect_params(&handle),
@@ -1713,22 +1744,25 @@ async fn a_zone_without_the_animation_shows_the_colour() -> Result<(), WriteErro
 
 #[tokio::test]
 async fn a_device_that_cannot_animate_shows_the_colour_instead() -> Result<(), WriteError> {
-    // No zone lists a colour cycle: nothing animated is written, and Auto
-    // falls through to the fixed colour on every zone that has one.
+    // No zone lists a colour cycle: nothing animated is written, and every
+    // zone that has a fixed colour shows it, from one walk of the zones.
     const ZONES: ScriptedZones = &[(0x0002, &[0x0000, 0x0001]), (0x0001, &[0x0001, 0x000a])];
-    let (shared, handle) = color_led_effects_shared(ZONES).await;
-
-    animate(
-        &shared,
-        LightingAnimation::ColorCycle {
-            period_ms: 5_000,
-            intensity: EffectIntensity::FULL,
-        },
-    )
-    .await?;
-
+    let cycle = LightingAnimation::ColorCycle {
+        period: period(5_000),
+        intensity: EffectIntensity::FULL,
+    };
     let fixed = [0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0, 0];
-    assert_eq!(zone_effect_params(&handle), [(0, 1, fixed), (1, 0, fixed)]);
+
+    for method in [LightingMethod::Auto, LightingMethod::Effects] {
+        let (shared, handle) = color_led_effects_shared(ZONES).await;
+        animate_with(&shared, method, cycle).await?;
+        assert_eq!(
+            zone_effect_params(&handle),
+            [(0, 1, fixed), (1, 0, fixed)],
+            "{method:?}"
+        );
+        assert_eq!(zone_info_reads(&handle), ZONES.len(), "{method:?}");
+    }
     Ok(())
 }
 
@@ -1741,7 +1775,7 @@ fn settings_scale_the_colour_and_give_a_colour_cycle_the_brightness() {
         color: openlogi_core::color::Rgb::new(200, 100, 50),
         brightness,
         effect,
-        effect_period_ms: 3_000,
+        effect_period_ms: period(3_000),
     };
     let write = |lighting: &Lighting| {
         let write = LightingWrite::for_settings(lighting);
@@ -1756,13 +1790,15 @@ fn settings_scale_the_colour_and_give_a_colour_cycle_the_brightness() {
         write(&lighting(LightingEffect::Breathing, true, 50)),
         (
             (100, 50, 25),
-            LightingAnimation::Breathing { period_ms: 3_000 }
+            LightingAnimation::Breathing {
+                period: period(3_000)
+            }
         )
     );
     assert_eq!(
         write(&lighting(LightingEffect::ColorCycle, true, 50)).1,
         LightingAnimation::ColorCycle {
-            period_ms: 3_000,
+            period: period(3_000),
             intensity: EffectIntensity::from_percent(50),
         }
     );

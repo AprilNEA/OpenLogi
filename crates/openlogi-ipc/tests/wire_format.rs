@@ -34,7 +34,9 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
-use openlogi_core::config::{ConfigRevision, Lighting, LightingEffect, ScrollResolution};
+use openlogi_core::config::{
+    ConfigRevision, Lighting, LightingEffect, LightingEffectPeriod, ScrollResolution,
+};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
     DeviceKind, DeviceModelInfo, DeviceTransports, LightCapabilities, LightState, LightValueRange,
@@ -869,7 +871,7 @@ fn lighting_payloads() {
             color: "8000ff".parse().expect("valid hex"),
             brightness: 80,
             effect: LightingEffect::Breathing,
-            effect_period_ms: 3_000,
+            effect_period_ms: LightingEffectPeriod::try_new(3_000).expect("valid period"),
         },
         "01063830303066665001fbb80b",
     );

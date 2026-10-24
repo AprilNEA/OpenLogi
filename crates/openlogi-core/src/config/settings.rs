@@ -3,7 +3,6 @@
 //! [`SmartShift`], and the legacy [`GestureOwner`], plus their serde helpers.
 
 use std::collections::BTreeMap;
-use std::ops::RangeInclusive;
 
 use az::SaturatingAs;
 use nutype::nutype;
@@ -560,18 +559,89 @@ pub struct Lighting {
     #[serde(default)]
     pub effect: LightingEffect,
     /// One cycle of an animated [`Self::effect`] — a breath, or a turn of the
-    /// colour wheel — in milliseconds, within [`Lighting::EFFECT_PERIOD_MS`].
-    /// Kept while the effect is static, so switching back restores the pace.
-    #[serde(
-        default = "default_lighting_effect_period_ms",
-        deserialize_with = "deserialize_effect_period_ms"
-    )]
-    pub effect_period_ms: u16,
+    /// colour wheel. Kept while the effect is static, so switching back
+    /// restores the pace.
+    #[serde(default)]
+    pub effect_period_ms: LightingEffectPeriod,
 }
 
-impl Lighting {
-    /// The effect periods the UI and the config accept, in milliseconds.
-    pub const EFFECT_PERIOD_MS: RangeInclusive<u16> = 1_000..=20_000;
+const EFFECT_PERIOD_MIN_MS: u16 = 1_000;
+const EFFECT_PERIOD_MAX_MS: u16 = 20_000;
+const EFFECT_PERIOD_DEFAULT_MS: u16 = 5_000;
+
+/// One cycle of an animated [`LightingEffect`], in milliseconds, within
+/// `1_000..=20_000`: what the UI offers and the `u16` the `0x8070` effects
+/// carry.
+#[nutype(
+    const_fn,
+    validate(
+        greater_or_equal = EFFECT_PERIOD_MIN_MS,
+        less_or_equal = EFFECT_PERIOD_MAX_MS
+    ),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        Hash,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct LightingEffectPeriod(u16);
+
+impl LightingEffectPeriod {
+    /// Shortest selectable period.
+    pub const MIN: Self = match Self::try_new(EFFECT_PERIOD_MIN_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum lighting effect period"),
+    };
+    /// Longest selectable period.
+    pub const MAX: Self = match Self::try_new(EFFECT_PERIOD_MAX_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum lighting effect period"),
+    };
+    /// Out-of-the-box period.
+    pub const DEFAULT: Self = match Self::try_new(EFFECT_PERIOD_DEFAULT_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default lighting effect period"),
+    };
+
+    /// Round and clamp a floating-point slider value into the valid range.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the value is rounded and clamped into the u16 period range before the cast"
+    )]
+    pub fn from_rounded(value: f32) -> Self {
+        let raw = value.round().clamp(
+            f32::from(EFFECT_PERIOD_MIN_MS),
+            f32::from(EFFECT_PERIOD_MAX_MS),
+        ) as u16;
+        let Ok(value) = Self::try_new(raw) else {
+            unreachable!("clamped lighting effect period is always valid");
+        };
+        value
+    }
+}
+
+impl Default for LightingEffectPeriod {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<LightingEffectPeriod> for f32 {
+    fn from(period: LightingEffectPeriod) -> Self {
+        Self::from(period.into_inner())
+    }
 }
 
 /// How a device's [`Lighting`] animates.
@@ -678,7 +748,7 @@ impl Default for Lighting {
             color: default_lighting_color(),
             brightness: default_lighting_brightness(),
             effect: LightingEffect::Static,
-            effect_period_ms: default_lighting_effect_period_ms(),
+            effect_period_ms: LightingEffectPeriod::DEFAULT,
         }
     }
 }
@@ -693,27 +763,6 @@ fn default_lighting_color() -> Rgb {
 
 fn default_lighting_brightness() -> u8 {
     100
-}
-
-fn default_lighting_effect_period_ms() -> u16 {
-    5_000
-}
-
-/// Reject an effect period outside [`Lighting::EFFECT_PERIOD_MS`].
-fn deserialize_effect_period_ms<'de, D>(deserializer: D) -> Result<u16, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = u16::deserialize(deserializer)?;
-    if Lighting::EFFECT_PERIOD_MS.contains(&value) {
-        Ok(value)
-    } else {
-        Err(serde::de::Error::custom(format_args!(
-            "effect_period_ms must be between {} and {}, got {value}",
-            Lighting::EFFECT_PERIOD_MS.start(),
-            Lighting::EFFECT_PERIOD_MS.end()
-        )))
-    }
 }
 
 /// Reject brightness outside the UI and hardware contract.
