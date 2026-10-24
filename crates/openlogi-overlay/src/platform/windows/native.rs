@@ -6,7 +6,7 @@
 use anyhow::{Context as _, Result, ensure};
 use gpui::{App, Bounds, DevicePixels, DisplayId, Pixels, Point, Size, Window, point, size};
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
-use tracing::debug;
+use tracing::{debug, warn};
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
@@ -152,7 +152,11 @@ fn place(
         anyhow::bail!("overlay window has no Win32 handle");
     };
     let hwnd = handle.hwnd.get() as HWND;
-    make_frameless(hwnd)?;
+    // The frame is cosmetic: a framed overlay is better than none, so a
+    // failure here must not abort placement.
+    if let Err(error) = make_frameless(hwnd) {
+        warn!(%error, "could not remove the overlay window frame");
+    }
     // Pin the 1px bootstrap well inside the selected monitor (GPUI should
     // already have opened it there). If that crosses a DPI boundary,
     // SetWindowPos synchronously delivers WM_DPICHANGED; GPUI applies its
