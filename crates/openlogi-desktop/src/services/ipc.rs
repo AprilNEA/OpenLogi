@@ -377,7 +377,11 @@ async fn observe_loop(
                         | Command::CancelPairing(_)
                         | Command::StartFirmwareUpdate(_)
                 );
-                let client = link.ensure(effects, update_tx).await;
+                link.ensure(effects, update_tx).await;
+                let client = match cmd.bound_agent() {
+                    Some(agent) => link.client_of(agent),
+                    None => link.client(),
+                };
                 if cmd.run(client, update_tx).await.is_err() {
                     link.lose(Instant::now());
                 } else if pairing_transition {
@@ -1403,5 +1407,73 @@ pub(crate) mod tests {
         };
 
         assert_eq!(seen, [Box::new(snapshot(false)), Box::new(snapshot(true))]);
+    }
+
+    /// The start the GUI confirmed against agent run 1, answered by the loop
+    /// connected to `reached`, and how many starts that agent received.
+    async fn firmware_start_reaching(
+        reached: openlogi_ipc::Identity,
+    ) -> (Result<u64, crate::state::FirmwareStartFailure>, usize) {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let counted = starts.clone();
+        let agent = in_memory_agent(
+            move |request| {
+                let counted = counted.clone();
+                Box::pin(async move {
+                    match request {
+                        AgentRequest::Identity {} => Ok(AgentResponse::Identity(reached)),
+                        AgentRequest::StartFirmwareUpdate { .. } => {
+                            counted.fetch_add(1, Ordering::SeqCst);
+                            Ok(AgentResponse::StartFirmwareUpdate(Ok(7)))
+                        }
+                        AgentRequest::Observe { .. } => std::future::pending().await,
+                        other => panic!("the client loop sent an unexpected request: {other:?}"),
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+        let mut effects = ScriptedEffects::answering([Ok(agent)]);
+        let (update_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        // Queued before the loop runs: whether it connects on its reconnect
+        // tick or on demand for this command, the run it reaches is `reached`.
+        commands
+            .send(
+                StartFirmwareUpdate {
+                    route: some_route(),
+                    key: crate::state::DeviceKey::from("firmware-test"),
+                    request: openlogi_core::hid::FirmwareRequest(0x2a),
+                    agent: agent_identity(1),
+                }
+                .into(),
+            )
+            .unwrap();
+        let result = tokio::select! {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+                panic!("the loop ends only once the GUI hangs up")
+            }
+            result = async {
+                loop {
+                    match updates.recv().await {
+                        Some(GuiUpdate::FirmwareStarted { result, .. }) => return result,
+                        Some(_) => {}
+                        None => panic!("the loop dropped its update channel"),
+                    }
+                }
+            } => result,
+        };
+        (result, starts.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_firmware_start_never_reaches_an_agent_it_was_not_confirmed_against() {
+        // The GUI drops its admission once it hears of another agent run, so
+        // a job that run started would install without showing progress.
+        assert_eq!(
+            firmware_start_reaching(agent_identity(2)).await,
+            (Err(crate::state::FirmwareStartFailure::NotSent), 0)
+        );
+        assert_eq!(firmware_start_reaching(agent_identity(1)).await, (Ok(7), 1));
     }
 }

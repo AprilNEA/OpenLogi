@@ -647,6 +647,10 @@ pub struct StartFirmwareUpdate {
     pub key: DeviceKey,
     /// Echoed in the job this request starts, and returned with the answer.
     pub request: openlogi_core::hid::FirmwareRequest,
+    /// The agent run the user confirmed against. The GUI drops its admission
+    /// when it learns of another run, so a job that run started could never
+    /// show its progress; the loop answers the request as not sent instead.
+    pub agent: openlogi_ipc::Identity,
 }
 
 impl Request for StartFirmwareUpdate {
@@ -1030,6 +1034,16 @@ macro_rules! commands {
             }
         }
     };
+}
+
+impl Command {
+    /// The agent run this command may reach, when it must not reach another.
+    pub(super) fn bound_agent(&self) -> Option<openlogi_ipc::Identity> {
+        match self {
+            Self::StartFirmwareUpdate(start) => Some(start.agent),
+            _ => None,
+        }
+    }
 }
 
 commands! {

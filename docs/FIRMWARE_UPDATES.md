@@ -75,7 +75,10 @@ same agent and binds when its job appears. An admitted request's reply names
 its job id; if a later job replaces that job before the GUI sees it, the wait
 ends instead of holding the firmware actions. A request that was never sent, or
 that the agent refused, cannot start a job; it is dropped on reconnect and can
-never bind one. An unsent request tells the user that no update was requested
+never bind one. A request is sent only to the agent run the user confirmed
+against; if the GUI reconnects to a new run first, the request is not sent and
+reported that way, because the GUI could not follow a job the new run started
+from it. An unsent request tells the user that no update was requested
 and to reconnect and start it again; a lost reply tells them to reconnect and
 check the progress of the job that may exist. Snapshots do not carry physical identity, so a cold GUI or a
 new agent run leaves historical jobs unbound. An unbound active job still
