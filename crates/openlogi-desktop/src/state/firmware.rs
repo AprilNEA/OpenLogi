@@ -320,6 +320,9 @@ impl AppState {
         else {
             return StateEvents::none();
         };
+        let Some(agent) = self.firmware.agent_identity else {
+            return StateEvents::none();
+        };
         let request = FirmwareRequest::generate();
         self.firmware.start = Some(Start {
             key: key.clone(),
@@ -331,6 +334,7 @@ impl AppState {
             key: key.clone(),
             route,
             request,
+            agent,
         }) && let Some(start) = &mut self.firmware.start
         {
             start.admission = Admission::Failed(FirmwareStartFailure::NotSent);
@@ -338,7 +342,9 @@ impl AppState {
         StateEvent::FirmwareChanged.into()
     }
 
-    /// Apply admission acknowledgement without replacing newer observed progress.
+    /// Apply admission acknowledgement without replacing newer observed
+    /// progress. Each request is answered once; a start no longer awaiting its
+    /// answer ignores any other.
     pub(crate) fn apply_firmware_started(
         &mut self,
         key: &DeviceKey,
@@ -346,11 +352,12 @@ impl AppState {
         request: FirmwareRequest,
         result: Result<u64, FirmwareStartFailure>,
     ) -> StateEvents {
-        let Some(start) =
-            self.firmware.start.as_mut().filter(|start| {
-                start.key == *key && start.route == *route && start.request == request
-            })
-        else {
+        let Some(start) = self.firmware.start.as_mut().filter(|start| {
+            start.key == *key
+                && start.route == *route
+                && start.request == request
+                && matches!(start.admission, Admission::Pending)
+        }) else {
             return StateEvents::none();
         };
         let refresh = matches!(
@@ -423,7 +430,9 @@ impl AppState {
     /// Every connection fences old read flights. Bound jobs and admissions
     /// the agent may have taken survive reconnects to the same agent; an
     /// unsent or refused admission cannot start a job and is dropped. A new
-    /// agent resets both.
+    /// agent resets both. An admission still awaiting its answer stays to
+    /// report that it was not sent: the loop sends a start only to the agent
+    /// it was confirmed against, so this agent never receives it.
     pub(crate) fn firmware_reconnected(&mut self, identity: openlogi_ipc::Identity) -> StateEvents {
         self.firmware.reads.clear();
         if self.firmware.agent_identity == Some(identity) {
@@ -436,7 +445,15 @@ impl AppState {
                 self.firmware.start = None;
             }
         } else {
-            self.firmware.start = None;
+            self.firmware.start = self
+                .firmware
+                .start
+                .take()
+                .filter(|start| matches!(start.admission, Admission::Pending))
+                .map(|start| Start {
+                    admission: Admission::Failed(FirmwareStartFailure::NotSent),
+                    ..start
+                });
             self.firmware.observed = None;
         }
         self.firmware.agent_identity = Some(identity);
@@ -671,6 +688,38 @@ pub(crate) mod tests {
                 assert!(!state.current_firmware_starting());
             }
         }
+    }
+
+    #[test]
+    fn a_start_confirmed_before_a_new_agent_reports_that_it_was_not_sent() {
+        // The loop connects the new agent, announcing it, before it dequeues
+        // the start, and then refuses to send it there.
+        let (mut state, mut received) = state();
+        let read = ready(&mut state, &mut received);
+        let start = admit(&mut state, &mut received, &read.key);
+        assert_eq!(start.agent, identity(1));
+        let _ = state.firmware_reconnected(identity(2));
+        assert_eq!(
+            state.current_firmware_start_failure(),
+            Some(&FirmwareStartFailure::NotSent)
+        );
+        assert!(!state.firmware_busy());
+        // The loop's own answer follows and changes nothing.
+        assert!(
+            state
+                .apply_firmware_started(
+                    &start.key,
+                    &start.route,
+                    start.request,
+                    Err(FirmwareStartFailure::NotSent),
+                )
+                .is_empty()
+        );
+        let _ = observe(
+            &mut state,
+            Some(job(FOREIGN, 1, &read.route, FirmwareUpdatePhase::Preparing)),
+        );
+        assert!(state.current_firmware_update().is_none());
     }
 
     #[test]

@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use openlogi_ipc::client::{ConnectError, Observer, ProtocolSkew};
-use openlogi_ipc::{AgentClient, AgentSnapshot, Observation};
+use openlogi_ipc::{AgentClient, AgentSnapshot, Identity, Observation};
 use tarpc::client::RpcError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -26,8 +26,9 @@ const UNREACHABLE_AFTER: Duration = Duration::from_secs(15);
 /// The connection to the agent, or the outage in its place.
 pub(super) enum Link {
     Down(Down),
-    /// A declared, version-matched connection with its observe call in flight.
-    Up(Observer<Observation>),
+    /// A declared, version-matched connection with its observe call in flight,
+    /// and the agent run it reached.
+    Up(Observer<Observation>, Identity),
 }
 
 /// Why there is no connection. The two differ in who else might act.
@@ -123,7 +124,7 @@ impl Link {
     /// The live connection dropped. A no-op while already down: the original
     /// outage keeps its start.
     pub(super) fn lose(&mut self, now: Instant) {
-        if matches!(self, Self::Up(_)) {
+        if matches!(self, Self::Up(..)) {
             *self = Self::Down(Down::new(Outage::Lost, now));
         }
     }
@@ -135,7 +136,7 @@ impl Link {
     /// Discard an observation begun before a pairing command. Its buffered
     /// phase must not overwrite the command's completion or newly started flow.
     pub(super) fn refresh_state(&mut self) {
-        if let Self::Up(observer) = self {
+        if let Self::Up(observer, _) = self {
             *observer = Observer::state(observer.client().clone());
         }
     }
@@ -143,15 +144,24 @@ impl Link {
     pub(super) fn down_mut(&mut self) -> Option<&mut Down> {
         match self {
             Self::Down(down) => Some(down),
-            Self::Up(_) => None,
+            Self::Up(..) => None,
         }
     }
 
     /// The live client, if any.
     pub(super) fn client(&self) -> Option<&AgentClient> {
         match self {
-            Self::Up(observer) => Some(observer.client()),
+            Self::Up(observer, _) => Some(observer.client()),
             Self::Down(_) => None,
+        }
+    }
+
+    /// The live client, if it reached the agent run `agent`. A request
+    /// confirmed against one run must not reach its replacement.
+    pub(super) fn client_of(&self, agent: Identity) -> Option<&AgentClient> {
+        match self {
+            Self::Up(observer, reached) if *reached == agent => Some(observer.client()),
+            Self::Up(..) | Self::Down(_) => None,
         }
     }
 
@@ -173,7 +183,7 @@ impl Link {
                         }
                     };
                     debug!("connected to agent IPC socket");
-                    *self = Self::Up(Observer::state(client));
+                    *self = Self::Up(Observer::state(client), identity);
                     let _ = updates.send(GuiUpdate::Connected(identity));
                 }
                 Err(error) => {
@@ -194,7 +204,7 @@ impl Link {
     /// like the [`Observer::next`] it waits on.
     pub(super) async fn observed(&mut self) -> Result<Option<AgentSnapshot>, RpcError> {
         match self {
-            Self::Up(observer) => Ok(observer.next().await?.map(|observed| observed.snapshot)),
+            Self::Up(observer, _) => Ok(observer.next().await?.map(|observed| observed.snapshot)),
             Self::Down(_) => std::future::pending().await,
         }
     }
@@ -285,7 +295,10 @@ mod tests {
     #[tokio::test]
     async fn losing_the_link_starts_one_fresh_outage() {
         let client = in_memory_agent(|_| Box::pin(std::future::pending()), std::future::pending());
-        let mut link = Link::Up(Observer::state(client));
+        let mut link = Link::Up(
+            Observer::state(client),
+            super::super::tests::agent_identity(1),
+        );
         let lost_at = Instant::now();
 
         link.lose(lost_at);
