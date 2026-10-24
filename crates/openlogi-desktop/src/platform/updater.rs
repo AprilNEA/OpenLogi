@@ -48,6 +48,10 @@ use openlogi_core::update_feed::UpdateChannel;
 
 use crate::state::AppState;
 
+pub mod linux;
+pub mod linux_package_install;
+pub mod linux_release_check;
+
 /// The update host, embedded at build time by the release workflow. A build
 /// without one reads the official host. So does a build with an empty one,
 /// which is what an unsigned CI build gets.
@@ -231,6 +235,7 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
 
     if settings.check_for_updates {
         start_background_check(&updater, settings.auto_install_updates, cx);
+        linux::check_in_background(cx);
     }
     cx.set_global(SharedUpdater(updater));
 }
@@ -250,6 +255,7 @@ pub(crate) fn check_in_background(cx: &mut App) {
     let auto_install =
         AppState::try_read(cx).is_some_and(|state| state.app_settings().auto_install_updates);
     start_background_check(&updater, auto_install, cx);
+    linux::check_in_background(cx);
 }
 
 fn start_background_check(updater: &Entity<Updater>, auto_install: bool, cx: &mut App) {

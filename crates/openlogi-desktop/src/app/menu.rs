@@ -124,6 +124,7 @@ pub fn check_for_updates(cx: &mut App) {
     if let Some(updater) = &updater {
         updater.update(cx, gpui_updater::Updater::check);
     }
+    crate::platform::updater::linux::check_in_background(cx);
     if !updater.is_some_and(|updater| updater.read(cx).is_driver_backed()) {
         crate::windows::settings::open_at(crate::windows::settings::SettingsPage::Updates, cx);
     }
