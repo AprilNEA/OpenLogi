@@ -61,6 +61,8 @@ fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAp
 
 #[gpui::test]
 fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContext) {
+    use std::{cell::Cell, rc::Rc};
+
     use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, div};
     use gpui_component::{Root, WindowExt as _};
 
@@ -85,15 +87,20 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
         let view = cx.new(|cx| AppView::new(window, cx));
         Root::new(view, window, cx)
     });
+    let dialog_renders = Rc::new(Cell::new(0));
     cx.update(|window, cx| {
-        window.open_alert_dialog(cx, |alert, _, _| {
+        let renders = dialog_renders.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            renders.set(renders.get() + 1);
             alert.confirm().title(
                 div()
                     .debug_selector(|| "profile-confirmation".into())
                     .child("Remove Safari profile?"),
             )
         });
+        dialog_renders.set(0);
         window.draw(cx).clear(cx);
+        assert_eq!(dialog_renders.get(), 1, "mount the dialog once per frame");
     });
     assert!(
         cx.debug_bounds("profile-confirmation").is_some(),
@@ -974,6 +981,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         driver_id: None,
         registry_model_id: None,
         route: None,
+        receiver_brand: None,
         capture_id: None,
         kind,
         capabilities,
@@ -1263,6 +1271,8 @@ mod corpus;
 /// device's Easy-Switch channel; a direct device has no slot to name.
 #[test]
 fn receiver_slot_is_named_only_for_receiver_routes() {
+    use openlogi_core::hid::ReceiverBrand;
+
     use super::widgets::{connection_summary, receiver_slot_label};
     use crate::services::i18n::LOCALE_LOCK;
 
@@ -1276,6 +1286,21 @@ fn receiver_slot_is_named_only_for_receiver_routes() {
     bolt.slot = 4;
     assert_eq!(receiver_slot_label(&bolt).as_deref(), Some("Slot 4"));
     assert_eq!(connection_summary(&bolt), "Bolt receiver · Slot 4");
+
+    let mut compatible = bolt.clone();
+    compatible.route = Some(DeviceRoute::Unifying {
+        receiver_uid: "OL-RECEIVER-UID-0001".to_string(),
+        slot: 4,
+    });
+    for (brand, label) in [
+        (ReceiverBrand::Unifying, "Unifying receiver"),
+        (ReceiverBrand::Nano, "Nano receiver"),
+        (ReceiverBrand::Lightspeed, "Lightspeed receiver"),
+    ] {
+        compatible.receiver_brand = Some(brand);
+        assert_eq!(receiver_slot_label(&compatible).as_deref(), Some("Slot 4"));
+        assert_eq!(connection_summary(&compatible), format!("{label} · Slot 4"));
+    }
 
     let mut direct = record(DeviceKind::Mouse, None);
     direct.route = Some(DeviceRoute::Direct {
