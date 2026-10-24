@@ -234,8 +234,8 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
     }
 
     /// Whether the node's last complete inventory is still served — live, or
-    /// replayed within its grace — so the published snapshot still carries
-    /// the node. `false` once the grace expired and the live result surfaced.
+    /// replayed within its grace. `false` once the grace expired and the live
+    /// result surfaced instead.
     pub(super) fn contains_last_good(&self, node: &K) -> bool {
         self.last_good.contains_key(node)
     }

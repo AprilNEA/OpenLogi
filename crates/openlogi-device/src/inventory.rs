@@ -361,11 +361,11 @@ impl Enumerator {
     /// inventory ever showing it offline — the ledger replayed it as online
     /// throughout — so no offline→online transition will prompt a re-apply,
     /// yet its firmware may have lost its volatile settings. `false` before
-    /// the first pass, and for a node whose replay grace expired before or on
-    /// the reopening pass: the agent has seen that one go offline and
-    /// re-applies on its offline→online transition, so reporting it would
-    /// re-apply every online device on each retire/reopen cycle of a node
-    /// that never answers again.
+    /// the first pass, for a node whose replay grace expired before the
+    /// reopening pass, and for one the reopening pass publishes nothing for:
+    /// the agent has seen that node go offline and re-applies on its
+    /// offline→online transition, so reporting it would re-apply every online
+    /// device on each retire/reopen cycle of a node that never answers again.
     #[must_use]
     pub fn replaced_channels_last_tick(&self) -> bool {
         !self.replaced_last_tick.is_empty()
@@ -664,6 +664,14 @@ impl Enumerator {
                 identities.observe(&node, &inventory.receiver);
             }
             let settled = settle_probe(&mut self.ledger, &node, probe.verdict, probe.inventory);
+            // A replacement whose probe exhausted the replay grace with nothing
+            // to show surfaces the node offline in this very snapshot: its
+            // return is an ordinary offline→online transition. A partial live
+            // result still publishes the node's online devices, so it keeps
+            // the wake.
+            if settled.inventory.is_none() {
+                replaced.retain(|reopened| reopened != &node);
+            }
             // Every node waits for the ledger's consecutive-failure threshold,
             // receivers included. One full-budget timeout is not evidence of
             // dead delivery: [`RECEIVER_PROBE_TIMEOUT`] leaves barely a second
@@ -718,10 +726,6 @@ impl Enumerator {
                 &mut all_healthy,
             ));
         }
-        // A replacement whose probe exhausted the replay grace surfaced the
-        // node offline in this very snapshot: its return is an ordinary
-        // offline→online transition, not an unobserved reconnect.
-        replaced.retain(|node| self.ledger.contains_last_good(node));
         self.replaced_last_tick = replaced;
 
         let seen_keys = self.apply_outcomes(outcomes);
