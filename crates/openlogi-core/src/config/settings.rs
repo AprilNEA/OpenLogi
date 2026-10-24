@@ -615,16 +615,19 @@ impl LightingEffectPeriod {
 
     /// Round and clamp a floating-point slider value into the valid range.
     #[must_use]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the value is rounded and clamped into the u16 period range before the cast"
-    )]
     pub fn from_rounded(value: f32) -> Self {
-        let raw = value.round().clamp(
-            f32::from(EFFECT_PERIOD_MIN_MS),
-            f32::from(EFFECT_PERIOD_MAX_MS),
-        ) as u16;
+        let value = if value.is_nan() {
+            f32::from(EFFECT_PERIOD_MIN_MS)
+        } else {
+            value
+        };
+        let raw = value
+            .clamp(
+                f32::from(EFFECT_PERIOD_MIN_MS),
+                f32::from(EFFECT_PERIOD_MAX_MS),
+            )
+            .round()
+            .saturating_as::<u16>();
         let Ok(value) = Self::try_new(raw) else {
             unreachable!("clamped lighting effect period is always valid");
         };
@@ -989,6 +992,26 @@ mod tests {
         assert_eq!(
             VerticalScrollSensitivity::from_rounded(f32::INFINITY),
             VerticalScrollSensitivity::MAX
+        );
+    }
+
+    #[test]
+    fn floating_lighting_effect_period_rounds_and_saturates_into_the_domain() {
+        assert_eq!(
+            u16::from(LightingEffectPeriod::from_rounded(2_749.6)),
+            2_750
+        );
+        assert_eq!(
+            LightingEffectPeriod::from_rounded(f32::NAN),
+            LightingEffectPeriod::MIN
+        );
+        assert_eq!(
+            LightingEffectPeriod::from_rounded(f32::NEG_INFINITY),
+            LightingEffectPeriod::MIN
+        );
+        assert_eq!(
+            LightingEffectPeriod::from_rounded(f32::INFINITY),
+            LightingEffectPeriod::MAX
         );
     }
 }
