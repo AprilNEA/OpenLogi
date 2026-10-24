@@ -1766,10 +1766,9 @@ impl Orchestrator {
         levels: u8,
         visible: bool,
     ) {
-        if !self.config.app_settings.backlight_notifications {
-            return;
+        if overlay.announce(current_level, levels, visible, &self.config.app_settings) {
+            debug!(current_level, levels, "showing a backlight level");
         }
-        overlay.show(current_level, levels, visible);
     }
 
     /// Post a low-battery notice for each online device whose battery has just
