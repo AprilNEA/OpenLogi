@@ -278,7 +278,9 @@ The agent reapplies a managed device's configured policy on initial discovery,
 reconnect, and wake, with bounded delayed confirmation attempts. If an
 unconfirmed manual write may have changed hardware, it schedules restoration
 of the latest confirmed choice (including a choice not yet saved by the app),
-without overtaking a newer pending request. New configuration or a retired
+without overtaking a newer pending request. Once a restoring write is queued,
+the agent moves the keyboard's published settings revision, so an open app reads
+the keyboard again after that write. New configuration or a retired
 connection invalidates obsolete work. Failed inventory scans do not count as
 successful confirmation: they use bounded delayed retries, retaining pending
 confirmation for the normal recovery scan after those retries are exhausted.
