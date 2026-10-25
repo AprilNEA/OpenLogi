@@ -10,6 +10,8 @@ use openlogi_core::config::{Config, ConfigFile};
 const KEY: &str = "unit:4f4c4402";
 const CALCULATOR: ButtonId = ButtonId::control(0x000a);
 
+mod selection;
+
 /// Render the real selected-key inspector without image/depot downloads.
 struct CalculatorInspector {
     view: Entity<FunctionRowView>,
@@ -69,7 +71,7 @@ fn keyboard_native_row_click_removes_the_persisted_binding(cx: &mut gpui::TestAp
     cx.read(|cx| {
         let state = AppState::try_read(cx).unwrap();
         assert_eq!(bound_action(state, &KeyTarget::Control(CALCULATOR)), None);
-        assert!(key_uses_default(state, &KeyTarget::Control(CALCULATOR)));
+        assert!(selected_key_action(state, &KeyTarget::Control(CALCULATOR)).is_none());
     });
     let commands: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
     assert!(matches!(commands.as_slice(), [Command::ReloadConfig(_)]));
@@ -121,7 +123,7 @@ fn keyboard_native_removes_the_saved_control_and_reloads_once() {
         "native means an absent assignment, not an explicit suppress action"
     );
     assert_eq!(bound_action(&state, &target), None);
-    assert!(key_uses_default(&state, &target));
+    assert!(selected_key_action(&state, &target).is_none());
     assert!(!state.button_bindings().contains_key(&CALCULATOR));
     assert_eq!(events, [StateEvent::BindingsChanged(DeviceKey::from(KEY))]);
     let commands: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
@@ -139,7 +141,7 @@ fn keyboard_native_does_not_disguise_explicit_suppression() {
     let _ = commit_key_action(&mut state, &target, Some(Action::None));
 
     assert_eq!(bound_action(&state, &target), Some(Action::None));
-    assert!(!key_uses_default(&state, &target));
+    assert!(selected_key_action(&state, &target).is_some());
     assert_eq!(
         Config::load_from_path(&path)
             .unwrap()
@@ -149,7 +151,7 @@ fn keyboard_native_does_not_disguise_explicit_suppression() {
     );
     // Repair a suppression entry from either an intentional choice or the old GUI.
     let _ = commit_key_action(&mut state, &target, None);
-    assert!(key_uses_default(&state, &target));
+    assert!(selected_key_action(&state, &target).is_none());
     assert!(
         !Config::load_from_path(&path)
             .unwrap()
@@ -169,7 +171,7 @@ fn keyboard_native_reselecting_the_current_action_clears_it() {
         assert_eq!(picked, None);
         let _ = commit_key_action(&mut state, &target, picked);
         assert!(!state.button_bindings().contains_key(&CALCULATOR));
-        assert!(key_uses_default(&state, &target));
+        assert!(selected_key_action(&state, &target).is_none());
     }
     assert_eq!(std::iter::from_fn(|| receiver.try_recv().ok()).count(), 4);
 }
@@ -227,14 +229,14 @@ fn keyboard_native_in_app_scope_inherits_default_without_clearing_other_scopes()
         let _ = state.set_editing_app(Some("com.example.Editor".into()));
         let target = KeyTarget::Control(CALCULATOR);
         assert_eq!(bound_action(&state, &target), Some(Action::Paste));
-        assert!(!key_uses_default(&state, &target));
+        assert!(selected_key_action(&state, &target).is_some());
 
         let events = commit_key_action(&mut state, &target, None);
 
         assert_eq!(state.editing_app(), Some("com.example.Editor"));
         assert_eq!(bound_action(&state, &target), default);
         assert!(
-            key_uses_default(&state, &target),
+            selected_key_action(&state, &target).is_none(),
             "inheritance is selected even when the default is assigned"
         );
         let saved = Config::load_from_path(&path).unwrap();
@@ -276,7 +278,7 @@ fn keyboard_native_failed_save_keeps_assignment_and_does_not_reload() {
                 Action::Copy
             })
         );
-        assert!(!key_uses_default(&state, &target));
+        assert!(selected_key_action(&state, &target).is_some());
         assert_eq!(state.editing_app(), app);
         assert_eq!(state.config_issue(), Some("read-only"));
         assert_eq!(events, [StateEvent::BindingsChanged(DeviceKey::from(KEY))]);
@@ -298,10 +300,11 @@ fn keyboard_native_f_key_clear_stays_global_even_with_an_app_profile_open() {
     let _ = state.set_editing_app(Some("com.example.Editor".into()));
     let _ = commit_key_action(&mut state, &target, Some(Action::Copy));
     assert_eq!(bound_action(&state, &target), Some(Action::Copy));
+    assert_eq!(selected_key_action(&state, &target), Some(Action::Copy));
 
     let _ = commit_key_action(&mut state, &target, None);
 
-    assert!(key_uses_default(&state, &target));
+    assert!(selected_key_action(&state, &target).is_none());
     assert!(state.keyboard_bindings().is_empty());
     assert!(
         Config::load_from_path(&path)

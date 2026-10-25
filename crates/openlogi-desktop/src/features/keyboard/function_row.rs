@@ -329,14 +329,15 @@ pub(super) fn commit_key_action(
     }
 }
 
-/// In an app profile, default means no override, even when the inherited
-/// action is assigned. In the device/global scope it means no assignment.
-fn key_uses_default(state: &AppState, target: &KeyTarget) -> bool {
+/// The explicit action in the scope edited by the inspector. In an app profile,
+/// an inherited action is not selected; `None` selects the default-profile row.
+fn selected_key_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
     match target {
-        KeyTarget::Control(button) if state.editing_app().is_some() => !state
+        KeyTarget::Control(button) if state.editing_app().is_some() => state
             .editing_app_overrides()
-            .is_some_and(|overrides| overrides.contains_key(button)),
-        _ => bound_action(state, target).is_none(),
+            .and_then(|overrides| overrides.get(button))
+            .cloned(),
+        _ => bound_action(state, target),
     }
 }
 
@@ -807,8 +808,8 @@ impl FunctionRowView {
         }
 
         let state = AppState::try_read(cx);
-        let current = state.and_then(|state| bound_action(state, &target));
-        let uses_default = state.is_none_or(|state| key_uses_default(state, &target));
+        let current = state.and_then(|state| selected_key_action(state, &target));
+        let uses_default = current.is_none();
         // A control binds inside the open app profile, like a mouse button.
         let app = match target {
             KeyTarget::Control(_) => {
@@ -862,9 +863,15 @@ impl FunctionRowView {
                     )
                     .when(uses_default, |row| {
                         row.child(
-                            gpui_component::Icon::new(gpui_component::IconName::Check)
+                            div()
+                                .debug_selector(|| "key-panel-native-check".into())
+                                .flex_none()
                                 .size_3()
-                                .text_color(rgb(ACCENT_BLUE)),
+                                .child(
+                                    gpui_component::Icon::new(gpui_component::IconName::Check)
+                                        .size_3()
+                                        .text_color(rgb(ACCENT_BLUE)),
+                                ),
                         )
                     })
                     .on_click(move |_ev, _window, cx| {

@@ -144,6 +144,12 @@ Common device fields are:
   function** removes the device-default assignment. **Use the default profile**
   in an app scope removes only that app's override and inherits the device
   default, which may itself be assigned. **Do Nothing** keeps an explicit `None`.
+  The selected row shows the assignment in the scope being edited, not the
+  inherited action. For example, when an app inherits **Copy**, only **Use the
+  default profile** is selected. Choosing **Copy** creates an explicit app
+  override even though the effective action is unchanged; choosing **Copy**
+  again or **Use the default profile** removes that override. The keyboard
+  illustration continues to show the effective action, including inheritance.
   To undo an older GUI's Native selection that saved `None`, select Native again;
   existing `None` entries are not migrated because they may be intentional.
   Naming one control under both spellings in the same table is an error, not a merge
