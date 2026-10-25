@@ -287,6 +287,7 @@ impl ArmedCapture for GestureCapture {
             buttons = armed.button_cids.len(),
             wheel_buttons = armed.wheel_button_cids.len(),
             thumbwheel = armed.thumb.is_some(),
+            gesture_thumbwheel = armed.gesture_thumb.is_some(),
             main_wheel = armed.main_wheel.is_some(),
             spy_buttons = armed
                 .onboard
@@ -316,6 +317,10 @@ impl ArmedCapture for GestureCapture {
             .thumb
             .as_ref()
             .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
+        let gesture_thumb_index = armed
+            .gesture_thumb
+            .as_ref()
+            .map(|gesture| gesture.feature_index);
         let dpi_set = armed.dpi_cids.clone();
         // A wheel-hold button's press and release are ordinary button edges;
         // only the raw wheel it unlocks needs its own attribution.
@@ -382,6 +387,17 @@ impl ArmedCapture for GestureCapture {
                 if let Some(input) = thumbwheel_input(event, previous, thumb_resolution) {
                     let _ = sink.send(input);
                 }
+                return;
+            }
+            if let Some(idx) = gesture_thumb_index
+                && let Some(step) = thumbwheel::decode_gesture46_step(msg, device_index, idx)
+            {
+                // Gesture 46 reports no resolution, so its steps pass through
+                // as increments; the sign already reads positive-is-up.
+                let _ = sink.send(CapturedInput::Scroll {
+                    increments: step,
+                    resolution: WheelResolution::UNKNOWN,
+                });
                 return;
             }
             if let Some((idx, per_notch)) = main_wheel
