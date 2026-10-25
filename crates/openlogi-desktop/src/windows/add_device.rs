@@ -468,7 +468,6 @@ fn device_row(device: &FoundDevice, pal: Palette) -> impl IntoElement {
         .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
-        .cursor_pointer()
         .bg(pal.control)
         .hover(|s| s.bg(pal.control_hover))
         .focus_visible(move |style| style.focus_ring(pal))

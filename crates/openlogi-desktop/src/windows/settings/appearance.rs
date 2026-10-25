@@ -213,7 +213,6 @@ fn mode_card(
         .selected(selected)
         .gap(px(6.))
         .items_center()
-        .cursor_pointer()
         .focus_visible(move |style| style.focus_ring(pal))
         .child(thumb)
         .child(
@@ -248,7 +247,6 @@ fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl 
         .selected(selected)
         .gap(px(6.))
         .items_center()
-        .cursor_pointer()
         .focus_visible(move |style| style.focus_ring(pal))
         .child(
             div()
@@ -557,7 +555,6 @@ fn theme_card(
         .border_color(if selected { swatch.primary } else { pal.border })
         .bg(pal.panel)
         .shadow_xs()
-        .cursor_pointer()
         .hover(move |style| {
             let style = style.shadow_sm();
             if selected {
@@ -660,7 +657,6 @@ fn filter_chip(
         .rounded_full()
         .border_1()
         .text_caption()
-        .cursor_pointer()
         .map(|this| {
             if selected {
                 this.border_color(pal.text_primary)

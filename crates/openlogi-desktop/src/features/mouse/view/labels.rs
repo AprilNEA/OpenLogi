@@ -146,7 +146,6 @@ impl RenderOnce for LabelTrigger {
             } else {
                 pal.control
             })
-            .cursor_pointer()
             .hover(move |s| {
                 s.bg(if highlighted {
                     pal.accent_tint_hover

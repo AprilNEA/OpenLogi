@@ -263,6 +263,8 @@ fn installation_label(installation: Installation) -> gpui::SharedString {
 fn release_link(cx: &App) -> Link {
     let pal = crate::ui::theme::palette(cx);
     let link_color = cx.theme().link;
+    // Opens the releases page in the browser, so it keeps the link cursor.
+    // ast-grep-ignore: gui-pointer-cursor-owner
     Link::new("update-changelog")
         .href(RELEASES_URL)
         .accessibility_label(tr!("updates.view_changelog"))

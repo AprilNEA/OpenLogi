@@ -360,7 +360,6 @@ fn slot_button(
         } else {
             pal.text_muted
         })
-        .cursor_pointer()
         .accessibility_label(accessible_label)
         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
         .when_some(icon_path, |button, path| {

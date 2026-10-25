@@ -159,7 +159,6 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
         // A swatch's fill is the colour it picks, not a theme colour.
         // ast-grep-ignore: gui-theme-color-owner
         .bg(rgb(color.packed()))
-        .cursor_pointer()
         .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_event, _window, cx| {
             AppState::apply(cx, |state| {

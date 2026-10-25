@@ -234,7 +234,6 @@ fn device_card_element(
     .accessibility_label(record.display_name.clone())
     .aria_description(device_accessibility_description(record))
     .aria_selected(active)
-    .cursor_pointer()
     .hover(move |card| card.border_color(pal.accent).shadow_sm())
     .focus_visible(move |style| style.focus_ring(pal))
     .on_click(move |_, _, cx| {
@@ -339,7 +338,6 @@ fn device_list_row(
         .accessibility_label(record.display_name.clone())
         .aria_description(device_accessibility_description(record))
         .aria_selected(active)
-        .cursor_pointer()
         .hover(move |row| row.border_color(pal.accent).shadow_sm())
         .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_, _, cx| {

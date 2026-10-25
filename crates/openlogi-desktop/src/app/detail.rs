@@ -206,7 +206,6 @@ fn detail_navigation(
                 .px_3()
                 .py_2()
                 .rounded(pal.control_radius)
-                .cursor_pointer()
                 .text_body()
                 .text_color(if selected {
                     pal.text_primary

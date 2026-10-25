@@ -534,7 +534,6 @@ impl RenderOnce for KeyCallout {
             } else {
                 pal.control
             })
-            .cursor_pointer()
             .hover(move |s| {
                 s.bg(if highlighted {
                     pal.accent_tint_hover
@@ -623,7 +622,6 @@ fn key_click_target(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .when(highlighted, |el| {
             el.child(
                 div()

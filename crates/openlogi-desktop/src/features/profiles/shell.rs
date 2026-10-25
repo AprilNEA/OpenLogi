@@ -171,7 +171,6 @@ fn profile_tab(
         .h(px(theme::CONTROL_H))
         .px_2p5()
         .rounded(pal.control_radius)
-        .cursor_pointer()
         .text_body()
         .text_color(pal.text_primary)
         .selected_fill(selected, pal)

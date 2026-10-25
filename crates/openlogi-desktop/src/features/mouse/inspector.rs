@@ -707,7 +707,6 @@ fn selection_card(
         .border_color(pal.border)
         .bg(pal.control)
         .p_3()
-        .cursor_pointer()
         .hover(move |card| card.bg(pal.control_hover))
         .focus_visible(move |style| style.focus_ring(pal))
         .child(
