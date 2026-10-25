@@ -143,3 +143,19 @@ fn inversion_and_natural_scrolling_each_reverse_a_diverted_main_wheel() {
         );
     }
 }
+
+/// With macOS natural scrolling off the native thumb wheel scrolls opposite
+/// to its default bindings, so the posted horizontal scroll follows it: the
+/// default binding keeps matching the native wheel and its reversal still
+/// reverses it (#1570). Vertical bindings have no native wheel to follow.
+#[test]
+fn a_diverted_thumb_wheel_follows_the_native_horizontal_direction() {
+    let left = ScrollDelta::wheel_ticks(-2.0, 0.0);
+    assert_eq!(thumbwheel_scroll(left, false), left);
+    assert_eq!(
+        thumbwheel_scroll(left, true),
+        ScrollDelta::wheel_ticks(2.0, 0.0)
+    );
+    let up = ScrollDelta::wheel_ticks(0.0, 1.5);
+    assert_eq!(thumbwheel_scroll(up, true), up);
+}
