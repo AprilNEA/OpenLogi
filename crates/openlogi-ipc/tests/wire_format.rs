@@ -1152,6 +1152,15 @@ fn pointer_speed_and_precision_mode() {
     assert_wire(&Action::TogglePrecisionMode, "36");
 }
 
+/// The display-brightness actions, appended after `TogglePrecisionMode`. The
+/// TOML name test sorts the names, so only these bytes catch a swapped pair.
+#[test]
+fn display_brightness_actions() {
+    use openlogi_core::binding::Action;
+    assert_wire(&Action::BrightnessUp, "37");
+    assert_wire(&Action::BrightnessDown, "38");
+}
+
 /// The press force of a force-sensing button (the MX Master 4's Haptic Sense
 /// Panel): raw device values as varints, all of them past one byte.
 #[test]
