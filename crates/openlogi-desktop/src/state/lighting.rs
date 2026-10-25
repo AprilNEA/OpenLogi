@@ -19,6 +19,14 @@ impl AppState {
             })
             .unwrap_or_default()
     }
+    /// Whether the active device can play an animated lighting effect, as
+    /// its measured or last-good capabilities say.
+    #[must_use]
+    pub fn lighting_effects_supported(&self) -> bool {
+        self.current_record()
+            .and_then(|record| record.capabilities)
+            .is_some_and(|capabilities| capabilities.lighting_effects)
+    }
     /// The stored lighting config for `key` on `route_key`, or `None` when
     /// unset (or overridden to unset on that link).
     #[must_use]

@@ -528,8 +528,8 @@ fn default_true() -> bool {
     true
 }
 
-/// Per-device RGB lighting: a single static color, brightness, and on/off.
-/// Deliberately basic — per-key effects are a later addition.
+/// Per-device RGB lighting: one color, brightness, on/off, and the effect that
+/// plays it. Per-key effects are a later addition.
 ///
 /// Crosses the agent↔GUI IPC (`set_lighting`), so field order is wire format —
 /// changes require a `PROTOCOL_VERSION` bump (guarded by
@@ -554,6 +554,113 @@ pub struct Lighting {
         deserialize_with = "deserialize_brightness"
     )]
     pub brightness: u8,
+    /// How the lighting animates. Configs written before effects existed
+    /// load as [`LightingEffect::Static`].
+    #[serde(default)]
+    pub effect: LightingEffect,
+    /// One cycle of an animated [`Self::effect`] — a breath, or a turn of the
+    /// colour wheel. Kept while the effect is static, so switching back
+    /// restores the pace.
+    #[serde(default)]
+    pub effect_period_ms: LightingEffectPeriod,
+}
+
+const EFFECT_PERIOD_MIN_MS: u16 = 1_000;
+const EFFECT_PERIOD_MAX_MS: u16 = 20_000;
+const EFFECT_PERIOD_DEFAULT_MS: u16 = 5_000;
+
+/// One cycle of an animated [`LightingEffect`], in milliseconds, within
+/// `1_000..=20_000`: what the UI offers and the `u16` the `0x8070` effects
+/// carry.
+#[nutype(
+    const_fn,
+    validate(
+        greater_or_equal = EFFECT_PERIOD_MIN_MS,
+        less_or_equal = EFFECT_PERIOD_MAX_MS
+    ),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        Hash,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct LightingEffectPeriod(u16);
+
+impl LightingEffectPeriod {
+    /// Shortest selectable period.
+    pub const MIN: Self = match Self::try_new(EFFECT_PERIOD_MIN_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum lighting effect period"),
+    };
+    /// Longest selectable period.
+    pub const MAX: Self = match Self::try_new(EFFECT_PERIOD_MAX_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum lighting effect period"),
+    };
+    /// Out-of-the-box period.
+    pub const DEFAULT: Self = match Self::try_new(EFFECT_PERIOD_DEFAULT_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default lighting effect period"),
+    };
+
+    /// Round and clamp a floating-point slider value into the valid range.
+    #[must_use]
+    pub fn from_rounded(value: f32) -> Self {
+        let value = if value.is_nan() {
+            f32::from(EFFECT_PERIOD_MIN_MS)
+        } else {
+            value
+        };
+        let raw = value
+            .clamp(
+                f32::from(EFFECT_PERIOD_MIN_MS),
+                f32::from(EFFECT_PERIOD_MAX_MS),
+            )
+            .round()
+            .saturating_as::<u16>();
+        let Ok(value) = Self::try_new(raw) else {
+            unreachable!("clamped lighting effect period is always valid");
+        };
+        value
+    }
+}
+
+impl Default for LightingEffectPeriod {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<LightingEffectPeriod> for f32 {
+    fn from(period: LightingEffectPeriod) -> Self {
+        Self::from(period.into_inner())
+    }
+}
+
+/// How a device's [`Lighting`] animates.
+///
+/// Crosses the agent↔GUI IPC inside [`Lighting`]; variants are append-only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightingEffect {
+    /// The color, held steady. Every RGB device draws it.
+    #[default]
+    Static,
+    /// The color fading in and out, once per [`Lighting::effect_period_ms`].
+    Breathing,
+    /// Every hue in turn, once per [`Lighting::effect_period_ms`]; the color
+    /// is not used.
+    ColorCycle,
 }
 
 /// Persisted settings for a standalone light such as Logitech Litra.
@@ -643,6 +750,8 @@ impl Default for Lighting {
             enabled: default_lighting_enabled(),
             color: default_lighting_color(),
             brightness: default_lighting_brightness(),
+            effect: LightingEffect::Static,
+            effect_period_ms: LightingEffectPeriod::DEFAULT,
         }
     }
 }
@@ -883,6 +992,26 @@ mod tests {
         assert_eq!(
             VerticalScrollSensitivity::from_rounded(f32::INFINITY),
             VerticalScrollSensitivity::MAX
+        );
+    }
+
+    #[test]
+    fn floating_lighting_effect_period_rounds_and_saturates_into_the_domain() {
+        assert_eq!(
+            u16::from(LightingEffectPeriod::from_rounded(2_749.6)),
+            2_750
+        );
+        assert_eq!(
+            LightingEffectPeriod::from_rounded(f32::NAN),
+            LightingEffectPeriod::MIN
+        );
+        assert_eq!(
+            LightingEffectPeriod::from_rounded(f32::NEG_INFINITY),
+            LightingEffectPeriod::MIN
+        );
+        assert_eq!(
+            LightingEffectPeriod::from_rounded(f32::INFINITY),
+            LightingEffectPeriod::MAX
         );
     }
 }

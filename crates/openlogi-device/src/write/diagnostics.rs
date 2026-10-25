@@ -7,6 +7,7 @@ use hidpp::{
     feature::FeatureType,
     feature::adc_measurement::AdcMeasurementFeature,
     feature::battery_status::BatteryStatusFeature,
+    feature::color_led_effects::{ColorLedEffectsFeature, ColorLedInfo, ZoneEffectInfo, ZoneInfo},
     feature::device_information::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
@@ -139,6 +140,62 @@ pub async fn dump_reprog_controls(
             entries.push(control.into());
         }
         Ok(entries)
+    })
+    .await
+}
+
+/// One `0x8070` `ColorLedEffects` zone as the device describes it. Returned
+/// by [`dump_color_led_zones`] for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorLedZoneEntry {
+    /// Zone index.
+    pub zone: u8,
+    /// The zone's info, or `None` when the device answered with a location
+    /// this crate does not model.
+    pub info: Option<ZoneInfo>,
+    /// Every effect the zone lists, in index order. An effect whose id this
+    /// crate does not model is left out.
+    pub effects: Vec<ZoneEffectInfo>,
+}
+
+/// Walk the `0x8070` `ColorLedEffects` zones of the device on `route` and the
+/// effects each one lists — used by `openlogi diag lighting-zones` to show
+/// which effects a device offers before any of them is written. Reads only.
+pub async fn dump_color_led_zones(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<(ColorLedInfo, Vec<ColorLedZoneEntry>), WriteError> {
+    let index = route.device_index();
+    let classify =
+        |e| classify_hidpp_error(e, HidppOperation::DumpFeatures, ColorLedEffectsFeature::ID);
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<ColorLedEffectsFeature>(&mut device).await?;
+        let info = feature.get_info().await.map_err(classify)?;
+        let mut zones = Vec::with_capacity(usize::from(info.zone_count));
+        for zone in 0..info.zone_count {
+            let zone_info = match feature.get_zone_info(zone).await {
+                Ok(zone_info) => Some(zone_info),
+                Err(Hidpp20Error::UnsupportedResponse) => None,
+                Err(e) => return Err(classify(e)),
+            };
+            let mut effects = Vec::new();
+            for effect in 0..zone_info.map_or(0, |zone_info| zone_info.effects_number) {
+                match feature.get_zone_effect_info(zone, effect).await {
+                    Ok(effect_info) => effects.push(effect_info),
+                    Err(Hidpp20Error::UnsupportedResponse) => {}
+                    Err(e) => return Err(classify(e)),
+                }
+            }
+            zones.push(ColorLedZoneEntry {
+                zone,
+                info: zone_info,
+                effects,
+            });
+        }
+        Ok((info, zones))
     })
     .await
 }

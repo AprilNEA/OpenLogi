@@ -56,6 +56,150 @@ pub enum EffectId {
     Ripple = 11,
 }
 
+/// The waveform of an [`EffectId::PulsingBreathingWaveform`] effect.
+///
+/// Values as Solaar names them; no Logitech specification was available to
+/// check them against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum BreathingWaveform {
+    /// Whatever the firmware draws by default.
+    #[default]
+    Default = 0,
+    /// Sine.
+    Sine = 1,
+    /// Square.
+    Square = 2,
+    /// Triangle.
+    Triangle = 3,
+    /// Sawtooth.
+    Sawtooth = 4,
+    /// Shark fin.
+    SharkFin = 5,
+    /// Exponential.
+    Exponential = 6,
+}
+
+/// The parameters of a zone effect whose byte layout is known, encoded with
+/// [`Self::to_params`] into the ten bytes
+/// [`set_zone_effect`](super::ColorLedEffectsFeature::set_zone_effect) takes.
+///
+/// The layouts are not from a Logitech specification. Solaar's
+/// `LEDEffects` table and libratbag's `hidpp20_internal_led` (the same
+/// record, used in onboard profiles) agree on them, and a G203 Prodigy
+/// (`046d:c084`, `0x8070` v4) and a G733 headset (`046d:0ab5`, `0x8070` v0)
+/// play them as described. Multi-byte fields are big-endian like the rest of
+/// the feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ZoneEffectParams {
+    /// [`EffectId::Disabled`]: the zone dark. No parameters.
+    Disabled,
+    /// [`EffectId::FixedColor`]: `color` held steady (bytes 0–2).
+    FixedColor {
+        /// The colour.
+        color: Rgb,
+    },
+    /// [`EffectId::PulsingBreathingWaveform`]: `color` (bytes 0–2) fading in
+    /// and out once every `period_ms` (bytes 3–4), shaped by `waveform`
+    /// (byte 5), peaking at `intensity` (byte 6).
+    Breathing {
+        /// The colour.
+        color: Rgb,
+        /// One breath, in milliseconds.
+        period_ms: u16,
+        /// The fade's shape.
+        waveform: BreathingWaveform,
+        /// Peak brightness; see [`EffectIntensity`].
+        intensity: EffectIntensity,
+    },
+    /// [`EffectId::Cycling`]: the colour wheel, once every `period_ms`
+    /// (bytes 5–6), at `intensity` (byte 7). Bytes 0–4 are unused.
+    Cycling {
+        /// One turn of the colour wheel, in milliseconds.
+        period_ms: u16,
+        /// Brightness; see [`EffectIntensity`].
+        intensity: EffectIntensity,
+    },
+}
+
+impl ZoneEffectParams {
+    /// The effect these parameters belong to. A zone plays them only from the
+    /// index its own effect list gives this id.
+    #[must_use]
+    pub const fn effect_id(&self) -> EffectId {
+        match self {
+            Self::Disabled => EffectId::Disabled,
+            Self::FixedColor { .. } => EffectId::FixedColor,
+            Self::Breathing { .. } => EffectId::PulsingBreathingWaveform,
+            Self::Cycling { .. } => EffectId::Cycling,
+        }
+    }
+
+    /// The ten parameter bytes of `setZoneEffect`.
+    #[must_use]
+    pub fn to_params(&self) -> [u8; ZONE_EFFECT_PARAM_COUNT] {
+        let mut params = [0; ZONE_EFFECT_PARAM_COUNT];
+        match *self {
+            Self::Disabled => {}
+            Self::FixedColor { color } => {
+                params[..3].copy_from_slice(&[color.red, color.green, color.blue]);
+            }
+            Self::Breathing {
+                color,
+                period_ms,
+                waveform,
+                intensity,
+            } => {
+                params[..3].copy_from_slice(&[color.red, color.green, color.blue]);
+                params[3..5].copy_from_slice(&period_ms.to_be_bytes());
+                params[5] = waveform.into();
+                params[6] = intensity.to_byte();
+            }
+            Self::Cycling {
+                period_ms,
+                intensity,
+            } => {
+                params[5..7].copy_from_slice(&period_ms.to_be_bytes());
+                params[7] = intensity.to_byte();
+            }
+        }
+        params
+    }
+}
+
+/// The brightness of an animated effect, as a percentage.
+///
+/// On the wire `0` asks for the firmware's default, which is full
+/// brightness, so 100% is sent as `0`; libratbag does the same and never
+/// sends 100.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EffectIntensity(u8);
+
+impl EffectIntensity {
+    /// Full brightness.
+    pub const FULL: Self = Self(100);
+
+    /// `percent` clamped to `1..=100`: an effect cannot be asked to play dark,
+    /// and the byte cannot express more than full.
+    #[must_use]
+    pub fn from_percent(percent: u8) -> Self {
+        Self(percent.clamp(1, 100))
+    }
+
+    /// The percentage.
+    #[must_use]
+    pub const fn percent(self) -> u8 {
+        self.0
+    }
+
+    fn to_byte(self) -> u8 {
+        if self.0 >= 100 { 0 } else { self.0 }
+    }
+}
+
 /// The physical location a zone covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]

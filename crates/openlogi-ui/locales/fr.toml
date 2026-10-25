@@ -641,6 +641,11 @@ colour_temperature = "Température de couleur"
 applying_light_setting = "Application du réglage d’éclairage…"
 auto_on_with_camera = "Allumage automatique avec la caméra"
 camera_light_auto_description = "Allume l’éclairage lorsqu’une caméra est utilisée et l’éteint lorsqu’aucune ne l’est."
+effect = "Effet"
+effect_static = "Statique"
+effect_breathing = "Respiration"
+effect_color_cycle = "Cycle de couleurs"
+effect_period = "Durée du cycle"
 
 [action_ring]
 actions_ring = "Anneau d’actions"

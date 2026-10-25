@@ -641,6 +641,11 @@ colour_temperature = "Teplota barev"
 applying_light_setting = "Používání nastavení světla…"
 auto_on_with_camera = "Automaticky zapínat s kamerou"
 camera_light_auto_description = "Zapnout světlo, když se používá některá kamera, a vypnout ho, když jsou všechny kamery neaktivní."
+effect = "Efekt"
+effect_static = "Statický"
+effect_breathing = "Dýchání"
+effect_color_cycle = "Cyklus barev"
+effect_period = "Délka cyklu"
 
 [action_ring]
 actions_ring = "Kruh akcí"

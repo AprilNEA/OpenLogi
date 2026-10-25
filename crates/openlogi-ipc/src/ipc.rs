@@ -148,6 +148,10 @@ pub use succession::Identity;
 ///      guarded-write/superseded errors; `Agent::reload_saved_config_with_verdict`
 ///      and [`SavedConfigVerdict`] appended, so a GUI distinguishes its accepted
 ///      saved revision from an external edit that replaced it before reload.
+///      `Lighting::{effect, effect_period_ms}` appended, with
+///      [`LightingEffect`](openlogi_core::config::LightingEffect) — a static,
+///      breathing or colour-cycle effect and its pace — and
+///      `Capabilities::lighting_effects` appended after `disable_keys`.
 pub const PROTOCOL_VERSION: u32 = 41;
 
 /// Environment variable through which the agent hands a supervised helper the
