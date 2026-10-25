@@ -204,6 +204,10 @@ pub(crate) enum ThumbwheelRestore {
         feature_index: u8,
         status: ThumbwheelStatus,
     },
+    /// Teardown selects native reporting, like the main wheel. A diversion bit
+    /// found set at arming belongs to a session that never tore down, so
+    /// restoring it would leave the wheel diverted indefinitely.
+    ///
     /// Gesture 46 is looked up again at teardown, not kept from arming: a
     /// feature table that changed in between (firmware update) must not turn
     /// the write into one aimed at another feature.
@@ -219,13 +223,6 @@ impl ThumbwheelRestore {
             feature_index,
             status: thumbwheel::status_to_restore(original),
         }
-    }
-
-    /// Teardown selects native reporting, like the main wheel. A diversion bit
-    /// found set at arming belongs to a session that never tore down, so
-    /// restoring it would leave the wheel diverted indefinitely.
-    pub(crate) fn gesture46() -> Self {
-        Self::Gesture46
     }
 }
 
