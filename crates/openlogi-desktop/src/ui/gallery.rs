@@ -390,7 +390,9 @@ impl ComponentGallery {
                     BaseButton::new("gallery-preset-remove")
                         .accessibility_label("Remove preset")
                         .px_1()
+                        .rounded(pal.radius_full)
                         .text_color(pal.text_muted)
+                        .focus_visible(move |style| style.focus_ring(pal))
                         .child(Icon::new(IconName::Close).size_3()),
                 ),
             pal,
@@ -490,6 +492,7 @@ impl ComponentGallery {
                         .items_center()
                         .justify_center()
                         .text_body()
+                        .focus_visible(move |style| style.focus_ring(pal))
                         .child(format!("Card {}", index + 1))
                         .on_click(move |_, _, cx| {
                             view.update(cx, |this, cx| {

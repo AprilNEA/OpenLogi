@@ -153,6 +153,8 @@ pub(super) fn control_row(
                 } else {
                     pal.accent
                 })
+                .rounded(pal.control_radius)
+                .focus_visible(move |style| style.focus_ring(pal))
                 .accessibility_label(tr!("camera.set_value_label", label => slider.label.clone()))
                 .child(format!("{value}"))
                 .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {

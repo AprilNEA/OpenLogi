@@ -660,6 +660,7 @@ fn filter_chip(
         .rounded_full()
         .border_1()
         .text_caption()
+        .focus_visible(move |style| style.focus_ring(pal))
         .map(|this| {
             if selected {
                 this.border_color(pal.text_primary)
