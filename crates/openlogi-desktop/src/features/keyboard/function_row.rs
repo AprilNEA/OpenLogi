@@ -548,11 +548,7 @@ impl RenderOnce for KeyCallout {
                     .text_ellipsis()
                     .text_caption()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if highlighted {
-                        pal.accent
-                    } else {
-                        pal.text_primary
-                    })
+                    .text_color(pal.text_primary)
                     .child(self.slot.label.clone()),
             )
             .child(
@@ -578,7 +574,7 @@ impl RenderOnce for KeyCallout {
                             .whitespace_nowrap()
                             .text_caption()
                             .text_color(if highlighted {
-                                pal.accent
+                                pal.text_primary
                             } else {
                                 pal.text_muted
                             })

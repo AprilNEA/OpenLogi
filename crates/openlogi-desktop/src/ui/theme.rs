@@ -180,10 +180,11 @@ pub struct Palette {
     pub text_muted: Hsla,
     /// Selection and emphasis ink — a selected item's border, check mark, or
     /// value text. The theme's `primary`, made legible as text on the page and
-    /// panel surfaces.
+    /// panel surfaces. It is not legible as text on [`Palette::accent_tint`]
+    /// or its hover shade, which pull the background toward it.
     pub accent: Hsla,
-    /// Faint fill marking a selected row or chip. The label on it stays
-    /// `text_primary`.
+    /// Faint fill marking a selected row or chip. Text on it stays
+    /// `text_primary`; only borders and marks on it take the accent.
     pub accent_tint: Hsla,
     /// [`Palette::accent_tint`] deepened for hover on an already-selected item.
     pub accent_tint_hover: Hsla,

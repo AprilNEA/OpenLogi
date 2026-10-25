@@ -111,14 +111,11 @@ impl RenderOnce for LabelTrigger {
         let view = self.view;
         let click_view = view.clone();
         let pal = theme::palette(cx);
-        let binding_color = if highlighted {
-            pal.accent
-        } else {
-            pal.text_primary
-        };
-        // Always show the action the button actually performs. Default and
-        // customised bindings use the same neutral value colour; only the
-        // actively highlighted control takes the accent.
+        // Always show the action the button actually performs, in the same
+        // neutral value colour whether it is a default or a custom binding. A
+        // highlighted card already carries the accent in its border and tint,
+        // and accent text on that tint falls below text contrast.
+        let binding_color = pal.text_primary;
         let binding_description = self.binding.text.clone();
         let button_name = tr!(self.label.id.translation_key());
         BaseButton::new(self.id)
