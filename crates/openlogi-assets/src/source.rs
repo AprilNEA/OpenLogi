@@ -11,6 +11,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -31,6 +32,15 @@ const ASSET_LINE: &str = "0.1";
 
 /// jsDelivr prefix shared by every npm asset package.
 const JSDELIVR_PACKAGE_ROOT: &str = "https://cdn.jsdelivr.net/npm";
+
+/// jsDelivr data API root. It resolves a range within seconds of an npm
+/// publish; the CDN caches a range for up to 12 hours.
+const JSDELIVR_DATA_ROOT: &str = "https://data.jsdelivr.com/v1/packages/npm";
+
+/// How long the jsDelivr probe waits for the data API after the CDN range
+/// has answered. The lookup can only move the probe to a newer release, so a
+/// slow or blocked API costs at most this much.
+const JSDELIVR_RESOLVE_WAIT: Duration = Duration::from_secs(1);
 
 /// npm package that carries `index.json` and the shard routes.
 const CATALOG_PACKAGE: &str = "@logi-assets/catalog";
@@ -54,12 +64,14 @@ fn jsdelivr_catalog_base(version: &str) -> String {
     format!("{JSDELIVR_PACKAGE_ROOT}/{CATALOG_PACKAGE}@{version}")
 }
 
-/// Whether `version` is a `<ASSET_LINE>.<patch>` release this build can read.
-fn is_in_asset_line(version: &str) -> bool {
-    version
-        .strip_prefix(ASSET_LINE)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .is_some_and(|patch| !patch.is_empty() && patch.bytes().all(|byte| byte.is_ascii_digit()))
+/// Patch number of `version` when it is a `<ASSET_LINE>.<patch>` release
+/// this build can read, or `None` for any other version.
+fn asset_line_patch(version: &str) -> Option<u64> {
+    let patch = version
+        .strip_prefix(ASSET_LINE)?
+        .strip_prefix('.')
+        .filter(|patch| !patch.is_empty() && patch.bytes().all(|byte| byte.is_ascii_digit()))?;
+    patch.parse().ok()
 }
 
 /// Asset endpoint selected for one synchronization run.
@@ -173,6 +185,7 @@ struct NpmRoutes {
 /// `<line>.<patch>` that is safe to put in a URL.
 struct NpmRelease {
     version: String,
+    patch: u64,
     devices: HashMap<String, String>,
 }
 
@@ -186,14 +199,15 @@ impl TryFrom<NpmRoutes> for NpmRelease {
                 found: routes.schema_version,
             });
         }
-        if !is_in_asset_line(&routes.package_version) {
+        let Some(patch) = asset_line_patch(&routes.package_version) else {
             return Err(AssetError::NpmRoutesVersionMismatch {
                 expected: format!("{ASSET_LINE}.x"),
                 found: routes.package_version,
             });
-        }
+        };
         Ok(Self {
             version: routes.package_version,
+            patch,
             devices: routes.devices,
         })
     }
@@ -203,6 +217,11 @@ impl NpmRelease {
     /// jsDelivr catalog URL of exactly this release.
     fn catalog_base(&self) -> String {
         jsdelivr_catalog_base(&self.version)
+    }
+
+    /// Whether `version` is a release of [`ASSET_LINE`] newer than this one.
+    fn is_older_than(&self, version: &str) -> bool {
+        asset_line_patch(version).is_some_and(|patch| patch > self.patch)
     }
 
     /// Client that fetches every depot in `index` from this release's shards.
@@ -330,21 +349,32 @@ fn probe_uniform(base: &str) -> Result<ProbeSuccess, AssetError> {
 
 /// Probe the newest jsDelivr release of [`ASSET_LINE`].
 ///
-/// Only `npm-routes.json` is read through the `catalog@<line>` range. It
-/// names the exact release, and `index.json` and every shard file come from
-/// that release, so one run never mixes two releases. jsDelivr caches the
-/// range for up to 12 hours, so this mirror can trail a new release by that
-/// long; production and the Pages alias carry it immediately.
+/// The CDN resolves the `catalog@<line>` range but caches the answer for up
+/// to 12 hours. The data API answers within seconds of a publish, so a
+/// background thread asks it while the range loads. The probe waits for that
+/// answer at most [`JSDELIVR_RESOLVE_WAIT`] and uses it only when it names a
+/// newer release; otherwise the range release stands.
+///
+/// The chosen `npm-routes.json` names the exact release, and `index.json` and
+/// every shard file come from that release, so one run never mixes releases.
 fn probe_jsdelivr() -> Result<ProbeSuccess, AssetError> {
-    let line_base = jsdelivr_catalog_base(ASSET_LINE);
-    let routes_bytes =
-        AssetClient::new(&line_base).get_bytes(&format!("{line_base}/{NPM_ROUTES_NAME}"))?;
-    let routes: NpmRoutes =
-        serde_json::from_slice(&routes_bytes).map_err(|source| AssetError::ParseJson {
-            what: "fetched npm-routes.json".to_owned(),
-            source,
-        })?;
-    let release = NpmRelease::try_from(routes)?;
+    let (sender, newest) = mpsc::channel();
+    thread::spawn(move || {
+        if sender.send(resolve_newest_release()).is_err() {
+            debug!("jsDelivr data API answered after the probe stopped waiting");
+        }
+    });
+    let mut release = fetch_npm_release(&jsdelivr_catalog_base(ASSET_LINE))?;
+    if let Ok(Some(version)) = newest.recv_timeout(JSDELIVR_RESOLVE_WAIT)
+        && release.is_older_than(&version)
+    {
+        match fetch_npm_release(&jsdelivr_catalog_base(&version)) {
+            Ok(newer) => release = newer,
+            Err(error) => {
+                warn!(%version, error = %error, "newest jsDelivr asset release unavailable; using the cached range");
+            }
+        }
+    }
     debug!(version = %release.version, "jsDelivr asset release resolved");
     let (index_bytes, index) = AssetClient::new(&release.catalog_base()).fetch_index_raw()?;
     let client = release.client(&index)?;
@@ -355,13 +385,54 @@ fn probe_jsdelivr() -> Result<ProbeSuccess, AssetError> {
     })
 }
 
+/// `npm-routes.json` under `catalog_base`, validated as a release of
+/// [`ASSET_LINE`].
+fn fetch_npm_release(catalog_base: &str) -> Result<NpmRelease, AssetError> {
+    let routes_bytes =
+        AssetClient::new(catalog_base).get_bytes(&format!("{catalog_base}/{NPM_ROUTES_NAME}"))?;
+    let routes: NpmRoutes =
+        serde_json::from_slice(&routes_bytes).map_err(|source| AssetError::ParseJson {
+            what: "fetched npm-routes.json".to_owned(),
+            source,
+        })?;
+    NpmRelease::try_from(routes)
+}
+
+/// Newest release of [`ASSET_LINE`] according to the jsDelivr data API, or
+/// `None` when the API fails or names no release in the line.
+fn resolve_newest_release() -> Option<String> {
+    let url = format!("{JSDELIVR_DATA_ROOT}/{CATALOG_PACKAGE}/resolved?specifier={ASSET_LINE}");
+    match AssetClient::new(JSDELIVR_DATA_ROOT).get_bytes(&url) {
+        Ok(bytes) => newest_release_in(&bytes),
+        Err(error) => {
+            debug!(error = %error, "jsDelivr data API lookup failed");
+            None
+        }
+    }
+}
+
+/// Data API answer for one npm version range.
+#[derive(Deserialize)]
+struct ResolvedVersion {
+    /// Newest matching version; `null` when nothing matches.
+    version: Option<String>,
+}
+
+/// Release named by a data API `body`, when it belongs to [`ASSET_LINE`].
+fn newest_release_in(body: &[u8]) -> Option<String> {
+    let version = serde_json::from_slice::<ResolvedVersion>(body)
+        .ok()?
+        .version?;
+    asset_line_patch(&version).map(|_| version)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use crate::{AssetError, DeviceEntry, Index};
 
-    use super::{AssetSource, NPM_ROUTES_SCHEMA, NpmRelease, NpmRoutes};
+    use super::{AssetSource, NPM_ROUTES_SCHEMA, NpmRelease, NpmRoutes, newest_release_in};
 
     fn one_device_index() -> Index {
         Index {
@@ -477,5 +548,35 @@ mod tests {
             NpmRelease::try_from(routes).and_then(|release| release.client(&index)),
             Err(AssetError::MissingNpmRoute { depot }) if depot == "mx_master_3s"
         ));
+    }
+
+    #[test]
+    fn data_api_answers_outside_the_asset_line_are_ignored() {
+        let answer = |body: &str| newest_release_in(body.as_bytes());
+
+        assert_eq!(
+            answer(r#"{"type":"npm","name":"@logi-assets/catalog","version":"0.1.4","links":{}}"#)
+                .as_deref(),
+            Some("0.1.4")
+        );
+        assert_eq!(answer(r#"{"version":null}"#), None);
+        assert_eq!(answer(r#"{"version":"0.2.0"}"#), None);
+        assert_eq!(answer(r#"{"version":"0.1.4/../../x"}"#), None);
+        assert_eq!(answer("<html>rate limited</html>"), None);
+    }
+
+    #[test]
+    fn only_a_newer_patch_replaces_the_range_release() {
+        let release = NpmRelease::try_from(routes_for("0.1.9")).ok();
+        let replaces = |version: &str| {
+            release
+                .as_ref()
+                .is_some_and(|release| release.is_older_than(version))
+        };
+
+        assert!(replaces("0.1.10"));
+        assert!(!replaces("0.1.9"));
+        assert!(!replaces("0.1.8"));
+        assert!(!replaces("0.2.0"));
     }
 }
