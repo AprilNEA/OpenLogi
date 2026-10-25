@@ -172,6 +172,9 @@ impl SwipeAccumulator {
             self.repeat_cross = 0;
         }
         self.moved_at = Some(now);
+        let held_long_enough = self
+            .held_since
+            .is_some_and(|t| now.saturating_duration_since(t) >= GESTURE_HOLD_FOR_SWIPE);
         if let Some(dir) = self.last {
             // Net travel continuing the committed way fires it again every
             // GESTURE_REPEAT_DISTANCE, so a continuous motion keeps stepping.
@@ -179,44 +182,51 @@ impl SwipeAccumulator {
             // wobble never repeats and a corrected stroke isn't held to drift
             // it has undone.
             let (a, c) = (along(dir, dx, dy), across(dir, dx, dy));
-            let earlier = self.repeat;
-            let total = earlier.saturating_add(a);
-            // Only backtracking to the start clears drift: a purely
-            // sideways report at zero progress is still part of the stroke.
-            self.repeat_cross = if a < 0 && total <= 0 {
-                0
-            } else {
-                self.repeat_cross.saturating_add(c)
-            };
-            self.repeat = total.max(0);
-            if continues(dir, dx, dy) {
-                // The same straightness rule as a fresh swipe, seen in the
-                // committed direction's frame (`Right` = along it).
-                let straight =
-                    detect_swipe(self.repeat, self.repeat_cross) == Some(GestureDirection::Right);
-                if self.repeat >= GESTURE_REPEAT_DISTANCE && straight {
-                    // Carry the excess, so a report spanning two repeat
-                    // distances fires again on the next report. The excess is
-                    // the stroke's tail, so it keeps the tail's drift: this
-                    // report's share first, then earlier travel's.
-                    let excess = self.repeat - GESTURE_REPEAT_DISTANCE;
-                    let tail = excess.min(a);
-                    let mut carried = i64::from(c) * i64::from(tail) / i64::from(a);
-                    if excess > a && earlier > 0 {
-                        carried += i64::from(self.repeat_cross.saturating_sub(c))
-                            * i64::from(excess - a)
-                            / i64::from(earlier);
+            // Only a flick commits inside the hold gate, and travel that
+            // keeps going there is the rest of the same flick. A gated swipe
+            // spends all its gate travel on the first commit, and
+            // GESTURE_REPEAT_DISTANCE is tuned against that (#1652), so a
+            // flick's gate travel must not count toward a repeat either.
+            if held_long_enough || a < 0 {
+                let earlier = self.repeat;
+                let total = earlier.saturating_add(a);
+                // Only backtracking to the start clears drift: a purely
+                // sideways report at zero progress is still part of the stroke.
+                self.repeat_cross = if a < 0 && total <= 0 {
+                    0
+                } else {
+                    self.repeat_cross.saturating_add(c)
+                };
+                self.repeat = total.max(0);
+                if continues(dir, dx, dy) {
+                    // The same straightness rule as a fresh swipe, seen in the
+                    // committed direction's frame (`Right` = along it).
+                    let straight = detect_swipe(self.repeat, self.repeat_cross)
+                        == Some(GestureDirection::Right);
+                    if self.repeat >= GESTURE_REPEAT_DISTANCE && straight {
+                        // Carry the excess, so a report spanning two repeat
+                        // distances fires again on the next report. The excess is
+                        // the stroke's tail, so it keeps the tail's drift: this
+                        // report's share first, then earlier travel's.
+                        let excess = self.repeat - GESTURE_REPEAT_DISTANCE;
+                        let tail = excess.min(a);
+                        let mut carried = i64::from(c) * i64::from(tail) / i64::from(a);
+                        if excess > a && earlier > 0 {
+                            carried += i64::from(self.repeat_cross.saturating_sub(c))
+                                * i64::from(excess - a)
+                                / i64::from(earlier);
+                        }
+                        self.repeat = excess;
+                        self.repeat_cross = i32::try_from(carried).unwrap_or(if carried < 0 {
+                            i32::MIN
+                        } else {
+                            i32::MAX
+                        });
+                        // The stroke went back past any partial reversal.
+                        self.dx = 0;
+                        self.dy = 0;
+                        return Some(dir);
                     }
-                    self.repeat = excess;
-                    self.repeat_cross = i32::try_from(carried).unwrap_or(if carried < 0 {
-                        i32::MIN
-                    } else {
-                        i32::MAX
-                    });
-                    // The stroke went back past any partial reversal.
-                    self.dx = 0;
-                    self.dy = 0;
-                    return Some(dir);
                 }
             }
             // Before any reversal, a report that does not head back is the
@@ -241,9 +251,6 @@ impl SwipeAccumulator {
             Some(GestureDirection::Up) => self.dy = self.dy.max(0),
             Some(GestureDirection::Click) | None => {}
         }
-        let held_long_enough = self
-            .held_since
-            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
         let flick =
             self.dx.saturating_abs().max(self.dy.saturating_abs()) >= GESTURE_FLICK_DISTANCE;
         if (held_long_enough || flick)
@@ -528,8 +535,7 @@ mod tests {
         );
         // 1.2 repeat distances along: the last report's drift alone is
         // straight enough to repeat, but with the sideways report at zero
-        // progress the stroke is too diagonal. The sideways report stays
-        // under the threshold so it commits no Up of its own.
+        // progress the stroke is too diagonal.
         let half = GESTURE_REPEAT_DISTANCE * 3 / 5;
         assert_eq!(acc.accumulate(0, -40), None);
         assert_eq!(acc.accumulate(half, 0), None);
@@ -700,38 +706,72 @@ mod tests {
         assert!(acc.end(), "an uncommitted hold is a click");
     }
 
+    /// Raw-XY reports of a rightward wrist flick on an MX Master 3S, released
+    /// 165 ms after the press: every report lands inside the hold gate. They
+    /// sum to 894 units.
+    const MX_MASTER_3S_FLICK: [(i32, i32); 17] = [
+        (23, 2),
+        (14, 1),
+        (26, 1),
+        (32, 0),
+        (35, 0),
+        (46, 0),
+        (93, 0),
+        (60, -1),
+        (63, -1),
+        (56, -2),
+        (71, -4),
+        (61, -3),
+        (63, -4),
+        (72, -4),
+        (62, -4),
+        (63, -4),
+        (54, -4),
+    ];
+
     #[test]
     fn accumulator_recorded_mx_master_3s_wrist_flick_is_a_swipe() {
-        // Raw-XY reports of a rightward wrist flick on an MX Master 3S,
-        // released 165 ms after the press: every report lands inside
-        // the hold gate, which used to turn it into a click.
-        let reports = [
-            (23, 2),
-            (14, 1),
-            (26, 1),
-            (32, 0),
-            (35, 0),
-            (46, 0),
-            (93, 0),
-            (60, -1),
-            (63, -1),
-            (56, -2),
-            (71, -4),
-            (61, -3),
-            (63, -4),
-            (72, -4),
-            (62, -4),
-            (63, -4),
-            (54, -4),
-        ];
+        // Its last report lands inside the hold gate, which used to turn the
+        // flick into a click.
         let mut acc = SwipeAccumulator::default();
         acc.begin();
-        let fired: Vec<_> = reports
+        let fired: Vec<_> = MX_MASTER_3S_FLICK
             .into_iter()
             .filter_map(|(dx, dy)| acc.accumulate(dx, dy))
             .collect();
         assert_eq!(fired, [GestureDirection::Right]);
         assert!(!acc.end(), "the flick is not a click");
+    }
+
+    #[test]
+    fn accumulator_flick_inside_the_hold_gate_fires_once() {
+        // The recorded flick scaled to the top of its 800-1000 range and
+        // beyond: travel after the flick commits but still inside the hold
+        // gate is the same flick, so it must not reach the repeat distance.
+        for target in [950, 1000, 2000] {
+            let mut acc = SwipeAccumulator::default();
+            acc.begin();
+            let fired: Vec<_> = MX_MASTER_3S_FLICK
+                .into_iter()
+                .filter_map(|(dx, dy)| acc.accumulate(dx * target / 894, dy * target / 894))
+                .collect();
+            assert_eq!(fired, [GestureDirection::Right], "flick of {target} units");
+        }
+    }
+
+    #[test]
+    fn accumulator_flick_repeats_once_past_the_hold_gate() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        assert_eq!(
+            acc.accumulate(GESTURE_FLICK_DISTANCE, 0),
+            Some(GestureDirection::Right)
+        );
+        assert_eq!(acc.accumulate(GESTURE_REPEAT_DISTANCE, 0), None);
+        // A hold that keeps going past the gate steps on as usual.
+        acc.backdate_hold_for_test();
+        assert_eq!(acc.accumulate(GESTURE_REPEAT_DISTANCE - 1, 0), None);
+        assert_eq!(acc.accumulate(1, 0), Some(GestureDirection::Right));
     }
 
     #[test]
