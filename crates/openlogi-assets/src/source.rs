@@ -1,9 +1,10 @@
 //! Built-in asset mirror discovery and npm shard routing.
 //!
-//! A synchronization run races the production custom domain, its versioned
-//! Cloudflare Pages alias, and the fixed jsDelivr npm release. The first
-//! source with a complete valid catalog supplies both `index.json` and every
-//! subsequent file URL for that run, so caches never mix mirrors mid-sync.
+//! A synchronization run races the production custom domain, the Cloudflare
+//! Pages alias of this build's asset release line, and the newest jsDelivr
+//! npm release of that line. The first source with a complete valid catalog
+//! supplies both `index.json` and every subsequent file URL for that run, so
+//! caches never mix mirrors mid-sync.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -21,30 +22,55 @@ use crate::index::{INDEX_NAME, Index};
 /// Mutable production endpoint behind the OpenLogi custom domain.
 const PRODUCTION_BASE: &str = "https://assets.openlogi.org";
 
-/// Stable Cloudflare Pages branch alias for asset release 0.1.0.
-const PAGES_BASE: &str = "https://v0-1-0.openlogi-assets.pages.dev";
+/// Asset release line this OpenLogi build reads: every `0.1.<patch>` release.
+///
+/// The asset repository releases each catalog change as the next patch of its
+/// line, so a build follows new devices without an app update. A new minor
+/// release may change the layout, so a build never leaves its line.
+const ASSET_LINE: &str = "0.1";
 
-/// Exact jsDelivr catalog package for asset release 0.1.0.
-const JSDELIVR_CATALOG_BASE: &str = "https://cdn.jsdelivr.net/npm/@logi-assets/catalog@0.1.0";
-
-/// jsDelivr prefix shared by every npm asset shard.
+/// jsDelivr prefix shared by every npm asset package.
 const JSDELIVR_PACKAGE_ROOT: &str = "https://cdn.jsdelivr.net/npm";
 
-/// npm asset release this OpenLogi build understands.
-const ASSET_VERSION: &str = "0.1.0";
+/// npm package that carries `index.json` and the shard routes.
+const CATALOG_PACKAGE: &str = "@logi-assets/catalog";
 
 /// Filename and schema of the depot-to-package routing catalog.
 const NPM_ROUTES_NAME: &str = "npm-routes.json";
 const NPM_ROUTES_SCHEMA: u32 = 1;
+
+/// Cloudflare Pages alias of [`ASSET_LINE`] (`v0-1`). The asset release
+/// workflow moves it to the newest release of the line.
+fn pages_base() -> String {
+    format!(
+        "https://v{}.openlogi-assets.pages.dev",
+        ASSET_LINE.replace('.', "-")
+    )
+}
+
+/// jsDelivr catalog URL for `version`: one exact release, or the
+/// [`ASSET_LINE`] range that jsDelivr resolves to its newest release.
+fn jsdelivr_catalog_base(version: &str) -> String {
+    format!("{JSDELIVR_PACKAGE_ROOT}/{CATALOG_PACKAGE}@{version}")
+}
+
+/// Whether `version` is a `<ASSET_LINE>.<patch>` release this build can read.
+fn is_in_asset_line(version: &str) -> bool {
+    version
+        .strip_prefix(ASSET_LINE)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .is_some_and(|patch| !patch.is_empty() && patch.bytes().all(|byte| byte.is_ascii_digit()))
+}
 
 /// Asset endpoint selected for one synchronization run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssetSource {
     /// Mutable production custom domain.
     Production,
-    /// Versioned Cloudflare Pages branch alias matching the npm release.
+    /// Cloudflare Pages alias of this build's asset release line.
     Pages,
-    /// Versioned npm packages served through jsDelivr.
+    /// Newest npm release of this build's asset release line, served through
+    /// jsDelivr.
     JsDelivr,
     /// Explicit `OPENLOGI_ASSETS` or CLI `--base` override.
     Override(String),
@@ -77,8 +103,8 @@ impl fmt::Display for AssetSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Production => formatter.write_str(PRODUCTION_BASE),
-            Self::Pages => formatter.write_str(PAGES_BASE),
-            Self::JsDelivr => formatter.write_str(JSDELIVR_CATALOG_BASE),
+            Self::Pages => formatter.write_str(&pages_base()),
+            Self::JsDelivr => formatter.write_str(&jsdelivr_catalog_base(ASSET_LINE)),
             Self::Override(base) => formatter.write_str(base),
         }
     }
@@ -95,8 +121,9 @@ impl AssetRegistry {
     /// Load a registry into `dir`.
     ///
     /// An explicit `base` uses that uniform origin. Without an override, the
-    /// production domain, versioned Pages alias, and versioned jsDelivr
-    /// mirror are probed concurrently; the first complete valid catalog wins.
+    /// production domain, the release-line Pages alias, and the release-line
+    /// jsDelivr mirror are probed concurrently; the first complete valid
+    /// catalog wins.
     pub fn load(base: Option<&str>, dir: &Path) -> Result<Self, AssetError> {
         Self::load_source(base.map(|base| AssetSource::Override(base.to_owned())), dir)
     }
@@ -140,6 +167,68 @@ struct NpmRoutes {
     devices: HashMap<String, String>,
 }
 
+/// `npm-routes.json` of one release in [`ASSET_LINE`].
+///
+/// Only [`TryFrom<NpmRoutes>`] builds it, so its version is a validated
+/// `<line>.<patch>` that is safe to put in a URL.
+struct NpmRelease {
+    version: String,
+    devices: HashMap<String, String>,
+}
+
+impl TryFrom<NpmRoutes> for NpmRelease {
+    type Error = AssetError;
+
+    fn try_from(routes: NpmRoutes) -> Result<Self, AssetError> {
+        if routes.schema_version != NPM_ROUTES_SCHEMA {
+            return Err(AssetError::UnsupportedNpmRoutesSchema {
+                expected: NPM_ROUTES_SCHEMA,
+                found: routes.schema_version,
+            });
+        }
+        if !is_in_asset_line(&routes.package_version) {
+            return Err(AssetError::NpmRoutesVersionMismatch {
+                expected: format!("{ASSET_LINE}.x"),
+                found: routes.package_version,
+            });
+        }
+        Ok(Self {
+            version: routes.package_version,
+            devices: routes.devices,
+        })
+    }
+}
+
+impl NpmRelease {
+    /// jsDelivr catalog URL of exactly this release.
+    fn catalog_base(&self) -> String {
+        jsdelivr_catalog_base(&self.version)
+    }
+
+    /// Client that fetches every depot in `index` from this release's shards.
+    fn client(&self, index: &Index) -> Result<AssetClient, AssetError> {
+        let mut package_by_asset_path = HashMap::with_capacity(index.devices.len());
+        for (depot, entry) in &index.devices {
+            let package = self
+                .devices
+                .get(depot)
+                .ok_or_else(|| AssetError::MissingNpmRoute {
+                    depot: depot.clone(),
+                })?;
+            package_by_asset_path.insert(
+                entry.asset_path.trim_start_matches('/').to_owned(),
+                package.clone(),
+            );
+        }
+        Ok(AssetClient::new_jsdelivr(
+            &self.catalog_base(),
+            JSDELIVR_PACKAGE_ROOT,
+            &self.version,
+            package_by_asset_path,
+        ))
+    }
+}
+
 struct ProbeSuccess {
     client: AssetClient,
     index_bytes: Vec<u8>,
@@ -149,7 +238,7 @@ struct ProbeSuccess {
 fn load_selected_source(source: AssetSource, dir: &Path) -> Result<AssetRegistry, AssetError> {
     let probe = match &source {
         AssetSource::Production => probe_uniform(PRODUCTION_BASE),
-        AssetSource::Pages => probe_uniform(PAGES_BASE),
+        AssetSource::Pages => probe_uniform(&pages_base()),
         AssetSource::JsDelivr => probe_jsdelivr(),
         AssetSource::Override(base) => probe_uniform(base),
     }?;
@@ -174,12 +263,12 @@ fn probe_default_sources(dir: &Path) -> Result<AssetRegistry, AssetError> {
     let (sender, receiver) = mpsc::channel();
 
     for (source, base) in [
-        (BuiltInSource::Production, PRODUCTION_BASE),
-        (BuiltInSource::Pages, PAGES_BASE),
+        (BuiltInSource::Production, PRODUCTION_BASE.to_owned()),
+        (BuiltInSource::Pages, pages_base()),
     ] {
         let sender = sender.clone();
         thread::spawn(move || {
-            let result = probe_uniform(base);
+            let result = probe_uniform(&base);
             if sender.send((source, result)).is_err() {
                 debug!(%source, "asset source probe finished after a winner was selected");
             }
@@ -239,56 +328,31 @@ fn probe_uniform(base: &str) -> Result<ProbeSuccess, AssetError> {
     })
 }
 
+/// Probe the newest jsDelivr release of [`ASSET_LINE`].
+///
+/// Only `npm-routes.json` is read through the `catalog@<line>` range. It
+/// names the exact release, and `index.json` and every shard file come from
+/// that release, so one run never mixes two releases. jsDelivr caches the
+/// range for up to 12 hours, so this mirror can trail a new release by that
+/// long; production and the Pages alias carry it immediately.
 fn probe_jsdelivr() -> Result<ProbeSuccess, AssetError> {
-    let catalog_client = AssetClient::new(JSDELIVR_CATALOG_BASE);
-    let (index_bytes, index) = catalog_client.fetch_index_raw()?;
-    let routes_url = format!("{JSDELIVR_CATALOG_BASE}/{NPM_ROUTES_NAME}");
-    let routes_bytes = catalog_client.get_bytes(&routes_url)?;
+    let line_base = jsdelivr_catalog_base(ASSET_LINE);
+    let routes_bytes =
+        AssetClient::new(&line_base).get_bytes(&format!("{line_base}/{NPM_ROUTES_NAME}"))?;
     let routes: NpmRoutes =
         serde_json::from_slice(&routes_bytes).map_err(|source| AssetError::ParseJson {
             what: "fetched npm-routes.json".to_owned(),
             source,
         })?;
-    let client = build_jsdelivr_client(&index, &routes)?;
+    let release = NpmRelease::try_from(routes)?;
+    debug!(version = %release.version, "jsDelivr asset release resolved");
+    let (index_bytes, index) = AssetClient::new(&release.catalog_base()).fetch_index_raw()?;
+    let client = release.client(&index)?;
     Ok(ProbeSuccess {
         client,
         index_bytes,
         index,
     })
-}
-
-fn build_jsdelivr_client(index: &Index, routes: &NpmRoutes) -> Result<AssetClient, AssetError> {
-    if routes.schema_version != NPM_ROUTES_SCHEMA {
-        return Err(AssetError::UnsupportedNpmRoutesSchema {
-            expected: NPM_ROUTES_SCHEMA,
-            found: routes.schema_version,
-        });
-    }
-    if routes.package_version != ASSET_VERSION {
-        return Err(AssetError::NpmRoutesVersionMismatch {
-            expected: ASSET_VERSION.to_owned(),
-            found: routes.package_version.clone(),
-        });
-    }
-    let mut package_by_asset_path = HashMap::with_capacity(index.devices.len());
-    for (depot, entry) in &index.devices {
-        let package = routes
-            .devices
-            .get(depot)
-            .ok_or_else(|| AssetError::MissingNpmRoute {
-                depot: depot.clone(),
-            })?;
-        package_by_asset_path.insert(
-            entry.asset_path.trim_start_matches('/').to_owned(),
-            package.clone(),
-        );
-    }
-    Ok(AssetClient::new_jsdelivr(
-        JSDELIVR_CATALOG_BASE,
-        JSDELIVR_PACKAGE_ROOT,
-        ASSET_VERSION,
-        package_by_asset_path,
-    ))
 }
 
 #[cfg(test)]
@@ -297,7 +361,7 @@ mod tests {
 
     use crate::{AssetError, DeviceEntry, Index};
 
-    use super::{ASSET_VERSION, NPM_ROUTES_SCHEMA, NpmRoutes, build_jsdelivr_client};
+    use super::{AssetSource, NPM_ROUTES_SCHEMA, NpmRelease, NpmRoutes};
 
     fn one_device_index() -> Index {
         Index {
@@ -327,13 +391,28 @@ mod tests {
         }
     }
 
+    /// #1995: a pinned release went stale while production kept adding
+    /// devices, so the fallbacks must track the release line instead.
     #[test]
-    fn npm_route_preserves_the_cloudflare_path_inside_its_shard() {
-        let index = one_device_index();
-        let routes = routes_for(ASSET_VERSION);
+    fn built_in_fallbacks_follow_the_asset_release_line() {
+        assert_eq!(
+            AssetSource::Pages.to_string(),
+            "https://v0-1.openlogi-assets.pages.dev"
+        );
+        assert_eq!(
+            AssetSource::JsDelivr.to_string(),
+            "https://cdn.jsdelivr.net/npm/@logi-assets/catalog@0.1"
+        );
+    }
 
-        let url = build_jsdelivr_client(&index, &routes)
-            .ok()
+    #[test]
+    fn npm_release_pins_the_catalog_and_shards_to_its_exact_version() {
+        let index = one_device_index();
+        let release = NpmRelease::try_from(routes_for("0.1.17")).ok();
+
+        let catalog = release.as_ref().map(NpmRelease::catalog_base);
+        let url = release
+            .and_then(|release| release.client(&index).ok())
             .and_then(|client| {
                 client
                     .asset_url("v1/devices/mx_master_3s/", "front_core.png")
@@ -341,21 +420,48 @@ mod tests {
             });
 
         assert_eq!(
+            catalog.as_deref(),
+            Some("https://cdn.jsdelivr.net/npm/@logi-assets/catalog@0.1.17")
+        );
+        assert_eq!(
             url.as_deref(),
             Some(
-                "https://cdn.jsdelivr.net/npm/@logi-assets/pointing@0.1.0/v1/devices/mx_master_3s/front_core.png"
+                "https://cdn.jsdelivr.net/npm/@logi-assets/pointing@0.1.17/v1/devices/mx_master_3s/front_core.png"
             )
         );
     }
 
     #[test]
-    fn npm_routes_must_match_the_pinned_asset_version() {
-        let index = one_device_index();
-        let routes = routes_for("0.0.2");
+    fn npm_routes_outside_the_asset_line_are_rejected() {
+        for version in [
+            "0.2.0",
+            "1.1.0",
+            "0.10.1",
+            "0.1",
+            "0.1.",
+            "0.1.0-rc.1",
+            "0.1.1/../2",
+        ] {
+            assert!(
+                matches!(
+                    NpmRelease::try_from(routes_for(version)),
+                    Err(AssetError::NpmRoutesVersionMismatch { found, .. }) if found == version
+                ),
+                "{version} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn npm_routes_with_an_unknown_schema_are_rejected() {
+        let routes = NpmRoutes {
+            schema_version: NPM_ROUTES_SCHEMA + 1,
+            ..routes_for("0.1.1")
+        };
 
         assert!(matches!(
-            build_jsdelivr_client(&index, &routes),
-            Err(AssetError::NpmRoutesVersionMismatch { .. })
+            NpmRelease::try_from(routes),
+            Err(AssetError::UnsupportedNpmRoutesSchema { .. })
         ));
     }
 
@@ -363,13 +469,12 @@ mod tests {
     fn every_catalog_depot_requires_an_npm_route() {
         let index = one_device_index();
         let routes = NpmRoutes {
-            schema_version: NPM_ROUTES_SCHEMA,
-            package_version: ASSET_VERSION.to_owned(),
             devices: HashMap::new(),
+            ..routes_for("0.1.1")
         };
 
         assert!(matches!(
-            build_jsdelivr_client(&index, &routes),
+            NpmRelease::try_from(routes).and_then(|release| release.client(&index)),
             Err(AssetError::MissingNpmRoute { depot }) if depot == "mx_master_3s"
         ));
     }
