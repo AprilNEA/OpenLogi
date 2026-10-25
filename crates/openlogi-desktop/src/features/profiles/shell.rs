@@ -209,6 +209,8 @@ pub(super) fn application_mark(
                 .chars()
                 .find(|character| !character.is_whitespace())
                 .map_or_else(|| "?".to_string(), |character| character.to_string());
+            // An app icon's squircle keeps its proportion at every size and theme.
+            // ast-grep-ignore: gui-theme-radius-owner
             slot.rounded(px(edge / 4.))
                 .bg(pal.muted)
                 .map(|tile| {

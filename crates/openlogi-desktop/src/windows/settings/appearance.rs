@@ -304,6 +304,9 @@ fn mini_window(dark: bool) -> impl IntoElement {
         .bg(wallpaper)
         .p(px(7.))
         .child(
+            // The thumbnail draws a macOS window, whose corners do not follow
+            // the app's radius setting.
+            // ast-grep-ignore: gui-theme-radius-owner
             v_flex()
                 .size_full()
                 .rounded(px(4.))

@@ -190,7 +190,7 @@ fn icon_button(
 ) -> Button {
     Button::new(id)
         .size(px(32.0))
-        .rounded(px(16.0))
+        .rounded(pal.radius_full)
         .selected(selected)
         .icon(Icon::empty().path(path).text_color(pal.text_muted))
         .tooltip(label)

@@ -426,6 +426,7 @@ fn mouse_pairing_click_icon_resolves_text_color() {
         ring: black,
         card_radius: gpui::px(8.),
         control_radius: gpui::px(4.),
+        radius_full: gpui::px(9999.),
     };
     for click in [Click::Left, Click::Right] {
         let mut icon = click_icon_svg(click, pal);

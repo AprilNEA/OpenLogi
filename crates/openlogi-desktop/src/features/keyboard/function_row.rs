@@ -522,7 +522,7 @@ impl RenderOnce for KeyCallout {
             .justify_center()
             .items_center()
             .gap(px(1.))
-            .rounded_md()
+            .rounded(pal.control_radius)
             .border_1()
             .border_color(if highlighted {
                 pal.accent
@@ -1000,7 +1000,7 @@ fn image_or_fallback(
         Some(_) | None => div()
             .w(px(img_w))
             .h(px(160.))
-            .rounded_md()
+            .rounded(pal.card_radius)
             .border_1()
             .border_color(pal.border)
             .bg(pal.panel)

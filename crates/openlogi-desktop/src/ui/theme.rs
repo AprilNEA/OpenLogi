@@ -204,6 +204,10 @@ pub struct Palette {
     /// [`Palette::card_radius`] so a control's corner sits concentrically inside
     /// its card's.
     pub control_radius: Pixels,
+    /// The radius of a circle or a pill — a round icon button, a status dot.
+    /// The theme's `radius_full`, which drops to zero when the user picks
+    /// square corners, so nothing stays round in a square UI.
+    pub radius_full: Pixels,
 }
 
 fn contrast_ratio(foreground: Hsla, background: Hsla) -> f32 {
@@ -317,6 +321,7 @@ pub fn palette(cx: &App) -> Palette {
         ring: t.ring,
         card_radius: t.radius * 1.5,
         control_radius: t.radius,
+        radius_full: t.radius_full(),
     }
 }
 

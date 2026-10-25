@@ -668,7 +668,8 @@ fn hotspots_layer(
 ///
 /// Its `rounded_*` values are illustration proportions — the body shell and the
 /// two drawn side buttons — not UI chrome, so they stay fixed rather than
-/// tracking the `Palette` radius tokens the way real cards and controls do.
+/// tracking the `Palette` radius tokens the way real cards and controls do
+/// (each is exempted from `gui-theme-radius-owner`).
 #[derive(IntoElement)]
 struct Silhouette {
     w: f32,
@@ -679,6 +680,7 @@ impl RenderOnce for Silhouette {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Self { w, h } = self;
         let pal = theme::palette(cx);
+        // ast-grep-ignore: gui-theme-radius-owner
         div()
             .absolute()
             .inset_0()
@@ -689,6 +691,7 @@ impl RenderOnce for Silhouette {
             .border_color(pal.text_muted)
             .bg(pal.muted)
             .child(
+                // ast-grep-ignore: gui-theme-radius-owner
                 div()
                     .absolute()
                     .left(px(w / 2. - 14.))
@@ -708,6 +711,7 @@ impl RenderOnce for Silhouette {
                     .bg(pal.border),
             )
             .child(
+                // ast-grep-ignore: gui-theme-radius-owner
                 div()
                     .absolute()
                     .left(px(8.))
