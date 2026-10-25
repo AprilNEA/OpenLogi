@@ -1,15 +1,13 @@
 //! Assets (device-image cache) settings page.
 
-use crate::ui::theme::Typography as _;
-use gpui_base::Button as BaseButton;
 use std::time::Duration;
 
 use crate::ui::components::control_select;
 
 use super::{
-    App, AppState, AssetCommand, AssetControl, AssetSourcePreference, Entity, IconName, IndexPath,
-    InteractiveElement, IntoElement, Palette, ParentElement, SelectItem, SelectState, SettingField,
-    SettingGroup, SettingItem, SettingPage, SettingsView, SharedString, Styled, div, px,
+    App, AppState, AssetCommand, AssetControl, AssetSourcePreference, Button, Entity, IconName,
+    IndexPath, IntoElement, ParentElement, SelectItem, SelectState, SettingField, SettingGroup,
+    SettingItem, SettingPage, SettingsView, SharedString, Styled, div, px,
 };
 
 #[derive(Clone)]
@@ -95,10 +93,9 @@ pub(super) fn assets_page(
         .item(
             SettingItem::new(
                 tr!("assets.refresh_assets"),
-                SettingField::render(move |_, _, cx| {
+                SettingField::render(move |_, _, _| {
                     let view = refresh_view.clone();
-                    let pal = crate::ui::theme::palette(cx);
-                    action_button("assets-refresh", tr!("common.refresh"), pal, move |cx| {
+                    action_button("assets-refresh", tr!("common.refresh"), move |cx| {
                         send_asset_command(cx, AssetCommand::Refresh);
                         // Give the spawned sync a moment to land small fetches,
                         // then re-quote the size row so the click visibly did
@@ -113,10 +110,9 @@ pub(super) fn assets_page(
         .item(
             SettingItem::new(
                 tr!("assets.clear_cache"),
-                SettingField::render(move |_, _, cx| {
+                SettingField::render(move |_, _, _| {
                     let view = view.clone();
-                    let pal = crate::ui::theme::palette(cx);
-                    action_button("assets-clear", tr!("common.clear"), pal, move |cx| {
+                    action_button("assets-clear", tr!("common.clear"), move |cx| {
                         send_asset_command(cx, AssetCommand::ClearCache);
                         // The wipe runs on the main loop's channel arm, not
                         // synchronously here — without a recompute the row
@@ -131,9 +127,8 @@ pub(super) fn assets_page(
         .item(
             SettingItem::new(
                 tr!("assets.cache_location"),
-                SettingField::render(move |_, _, cx| {
-                    let pal = crate::ui::theme::palette(cx);
-                    action_button("assets-open", tr!("common.open"), pal, |_| {
+                SettingField::render(move |_, _, _| {
+                    action_button("assets-open", tr!("common.open"), |_| {
                         crate::services::assets::reveal_cache_in_file_manager();
                     })
                 }),
@@ -193,27 +188,16 @@ pub(super) fn cache_size_description() -> SharedString {
     tr!("assets.downloaded_images_size", size => format!("{mb:.1} MB"))
 }
 
-/// A small bordered text button matching the permission rows' "Open" control.
+/// An outlined command button, matching the page's other row actions.
 fn action_button(
     id: &'static str,
     label: SharedString,
-    pal: Palette,
     on_click: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
-    BaseButton::new(id)
-        .accessibility_label(label.clone())
+    Button::new(id)
+        .outline()
         .flex_shrink_0()
-        .px_2()
-        .py_1()
-        .rounded(pal.control_radius)
-        .border_1()
-        .border_color(pal.border)
-        .text_caption()
-        .cursor_pointer()
-        .bg(pal.control)
-        .hover(move |s| s.bg(pal.control_hover))
-        .focus_visible(move |s| s.bg(pal.control_hover))
-        .child(label)
+        .label(label)
         .on_click(move |_, _, cx| on_click(cx))
 }
 

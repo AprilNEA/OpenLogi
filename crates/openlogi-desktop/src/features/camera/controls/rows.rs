@@ -9,7 +9,9 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::Button as BaseButton;
-use gpui_component::{IconName, Selectable as _, h_flex, slider::Slider};
+use gpui_component::{
+    IconName, Selectable as _, Sizable as _, button::Button, h_flex, slider::Slider,
+};
 use openlogi_camera::CameraControl;
 
 use super::{BUILTIN_PROFILES, CameraControlsPanel, ControlSlider};
@@ -326,21 +328,11 @@ fn binary_control_row(
 }
 
 pub(super) fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
-    let pal = theme::palette(cx);
     h_flex().w_full().justify_end().child(
-        BaseButton::new("camera-controls-reset")
-            .accessibility_label(tr!("camera.reset_to_defaults"))
-            .px_2p5()
-            .py_0p5()
-            .rounded_md()
-            .border_1()
-            .border_color(pal.border)
-            .bg(pal.control)
-            .hover(|s| s.bg(pal.control_hover))
-            .focus_visible(|s| s.bg(pal.control_hover))
-            .text_caption()
-            .text_color(pal.text_muted)
-            .child(tr!("camera.reset_to_defaults"))
+        Button::new("camera-controls-reset")
+            .outline()
+            .small()
+            .label(tr!("camera.reset_to_defaults"))
             .on_click(cx.listener(|panel, _: &ClickEvent, window, cx| {
                 panel.reset(window, cx);
             })),

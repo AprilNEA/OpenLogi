@@ -787,9 +787,7 @@ fn shared_read_retry_is_localized_and_restarts_the_failed_read(cx: &mut TestAppC
     let (_, visual) = cx.add_window_view(|_, cx| DisableKeysPanel::new(cx));
     visual.update(|window, cx| window.draw(cx).clear(cx));
     let retry = visual
-        .debug_bounds(
-            "disable-keys-read-retry:Не удалось прочитать настройки клавиш. Нажмите для повтора.",
-        )
+        .debug_bounds("disable-keys-read-retry:Не удалось прочитать настройки клавиш.")
         .unwrap();
     visual.simulate_click(retry.center(), Modifiers::default());
     visual.run_until_parked();
@@ -805,7 +803,11 @@ fn shared_read_retry_is_localized_and_restarts_the_failed_read(cx: &mut TestAppC
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert!(visual.debug_bounds("disable-key-1").is_some());
-    assert!(visual.debug_bounds("disable-keys-read-retry:Не удалось прочитать настройки клавиш. Нажмите для повтора.").is_none());
+    assert!(
+        visual
+            .debug_bounds("disable-keys-read-retry:Не удалось прочитать настройки клавиш.")
+            .is_none()
+    );
     assert!(receiver.try_recv().is_err());
 }
 

@@ -209,10 +209,14 @@ impl ComponentGallery {
                 v_flex()
                     .gap_2()
                     .child(status_line("Reading…", pal))
-                    .child(retry_line("gallery-retry", "Retry", |_| {}))
+                    .child(retry_line("gallery-retry", "Couldn't read DPI.", |_| {}))
                     .child(
-                        retry_line("gallery-retry-disabled", "Retry (offline)", |_| {})
-                            .disabled(true),
+                        retry_line(
+                            "gallery-retry-disabled",
+                            "Couldn't read DPI (offline).",
+                            |_| {},
+                        )
+                        .disabled(true),
                     ),
                 pal,
             ))
