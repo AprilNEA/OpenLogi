@@ -249,13 +249,7 @@ fn applications_toggle(
                 pal.control_hover
             })
         })
-        .focus_visible(move |button| {
-            button.bg(if expanded {
-                pal.accent_tint_hover
-            } else {
-                pal.control_hover
-            })
-        })
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(
             // The chevron sits centred in a row-icon-wide slot so the label
             // starts where the application names below do.

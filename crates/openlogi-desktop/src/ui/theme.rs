@@ -11,7 +11,9 @@
 
 #[cfg(test)]
 use gpui::rgb;
-use gpui::{App, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems};
+use gpui::{
+    App, BoxShadow, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems,
+};
 use gpui_component::{ActiveTheme as _, Colorize as _, Theme, ThemeMode, ThemeRegistry};
 use openlogi_core::config::{Appearance, UiScale};
 
@@ -184,6 +186,8 @@ pub struct Palette {
     pub warning: Hsla,
     /// Positive state marks — granted, charging, on.
     pub success: Hsla,
+    /// The keyboard focus colour; see [`SelectableStyle::focus_ring`].
+    pub ring: Hsla,
     /// Corner radius for the bespoke card / panel surfaces. Derived from the
     /// active gpui-component theme radius (`cx.theme().radius`) so the
     /// hand-painted cards follow the Appearance → radius slider — which the old
@@ -310,6 +314,7 @@ pub fn palette(cx: &App) -> Palette {
         danger: shade(t.danger, MIN_TEXT_CONTRAST),
         warning: shade(t.warning, MIN_GRAPHIC_CONTRAST),
         success: shade(t.success, MIN_GRAPHIC_CONTRAST),
+        ring: t.ring,
         card_radius: t.radius * 1.5,
         control_radius: t.radius,
     }
@@ -466,6 +471,26 @@ pub trait SelectableStyle: Styled + Sized {
         } else {
             self
         }
+    }
+
+    /// The keyboard focus ring for a bespoke control. Apply it inside the
+    /// control's `focus_visible` refinement, so it appears only after keyboard
+    /// navigation and never on a mouse click.
+    ///
+    /// It matches the ring gpui-component draws around its own controls — a
+    /// solid line in the theme's `ring` colour inside a translucent halo — so
+    /// Tab moves through one treatment instead of a different hover-like tint
+    /// on every control. The ring is two spread shadows outside the element's
+    /// edge: it takes no layout space, and it follows the element's corner
+    /// radius. A clipping ancestor cuts it off, so leave it a few pixels of
+    /// room. The widths are physical pixels on purpose: like the framework's
+    /// ring, they must not grow with the interface scale.
+    #[must_use]
+    fn focus_ring(self, pal: Palette) -> Self {
+        self.shadow(vec![
+            BoxShadow::new(px(0.), px(0.), pal.ring.opacity(0.5)).spread_radius(px(3.)),
+            BoxShadow::new(px(0.), px(0.), pal.ring).spread_radius(px(1.)),
+        ])
     }
 }
 

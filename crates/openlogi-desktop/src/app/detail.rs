@@ -39,7 +39,8 @@ use crate::state::{AppState, DeviceRecord, StateEvents};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle, toggle_row};
 use crate::ui::theme::{
-    self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
+    self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, SelectableStyle as _,
+    Typography as _,
 };
 
 mod backlight;
@@ -220,13 +221,7 @@ fn detail_navigation(
                         pal.control_hover
                     })
                 })
-                .focus_visible(move |row| {
-                    row.bg(if selected {
-                        pal.accent_tint_hover
-                    } else {
-                        pal.control_hover
-                    })
-                })
+                .focus_visible(move |style| style.focus_ring(pal))
                 .child(
                     Icon::empty()
                         .path(detail_tab_icon(tab))

@@ -25,7 +25,10 @@ use super::choice_card::ChoiceCard;
 use super::commit_slider::{CommitSlider, SliderRange};
 use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle, toggle_row};
 use super::status::{retry_line, status_line};
-use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
+use super::theme::{
+    self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, SelectableStyle as _,
+    Typography as _,
+};
 
 const TITLE: &str = "OpenLogi Component Gallery";
 
@@ -565,7 +568,7 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
         })
         .bg(pal.control)
         .hover(move |style| style.bg(pal.control_hover))
-        .focus_visible(move |style| style.border_color(pal.accent))
+        .focus_visible(move |style| style.focus_ring(pal))
         .gap_1()
         // A preview strip above the label: the stacked shape the settings
         // pickers rely on.

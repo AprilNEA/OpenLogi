@@ -2,7 +2,7 @@
 
 use crate::state::AppState;
 use crate::ui::components::ProfileTab;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 use gpui::{
     ClickEvent, Context, ElementId, InteractiveElement, MouseButton, MouseDownEvent, ParentElement,
     Role, SharedString, StatefulInteractiveElement as _, Styled, Toggled, div,
@@ -182,7 +182,7 @@ pub(super) fn control_row(
                 .text_color(if on { pal.text_primary } else { pal.text_muted })
                 .bg(if on { pal.accent_tint } else { pal.control })
                 .hover(move |s| s.bg(chip_hover_fill(on, pal)))
-                .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
+                .focus_visible(move |style| style.focus_ring(pal))
                 .child(tr!("common.auto"))
                 .on_click(cx.listener(move |panel, _: &ClickEvent, _window, cx| {
                     panel.toggle_auto(auto_ix, cx);
@@ -237,7 +237,7 @@ fn frequency_row(
                 })
                 .bg(if active { pal.accent_tint } else { pal.control })
                 .hover(move |s| s.bg(chip_hover_fill(active, pal)))
-                .focus_visible(move |s| s.bg(chip_hover_fill(active, pal)))
+                .focus_visible(move |style| style.focus_ring(pal))
                 .child(label)
                 .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                     let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
@@ -304,7 +304,7 @@ fn binary_control_row(
                 .text_color(if on { pal.text_primary } else { pal.text_muted })
                 .bg(if on { pal.accent_tint } else { pal.control })
                 .hover(move |s| s.bg(chip_hover_fill(on, pal)))
-                .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
+                .focus_visible(move |style| style.focus_ring(pal))
                 .child(if on {
                     tr!("common.on")
                 } else {

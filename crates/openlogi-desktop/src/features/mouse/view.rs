@@ -29,7 +29,7 @@ use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
-use crate::ui::theme;
+use crate::ui::theme::{self, SelectableStyle as _};
 
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
@@ -793,7 +793,8 @@ impl RenderOnce for HotspotTrigger {
                         theme::PHOTO_MARK_FILL
                     }),
             )
-            .focus_visible(|style| style.rounded_full().border_2().border_color(pal.accent))
+            .rounded_full()
+            .focus_visible(move |style| style.focus_ring(pal))
             .on_click(move |_event, _window, cx| {
                 click_view.update(cx, |this, cx| {
                     this.select(btn);

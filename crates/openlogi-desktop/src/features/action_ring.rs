@@ -23,7 +23,7 @@ use self::editor::{PowerUserInputs, action_library};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::state::{AppState, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
 /// [`AppState`]; this entity owns selection and editor input state.
@@ -380,13 +380,7 @@ fn slot_button(
                 pal.control_hover
             })
         })
-        .focus_visible(move |button| {
-            button.border_color(pal.accent).bg(if selected {
-                pal.accent_tint_hover
-            } else {
-                pal.control_hover
-            })
-        })
+        .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_, _, cx| {
             selected_view.update(cx, |panel, cx| {
                 panel.selected_slot = slot;

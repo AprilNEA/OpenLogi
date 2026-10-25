@@ -423,6 +423,7 @@ fn mouse_pairing_click_icon_resolves_text_color() {
         danger: black,
         warning: black,
         success: black,
+        ring: black,
         card_radius: gpui::px(8.),
         control_radius: gpui::px(4.),
     };

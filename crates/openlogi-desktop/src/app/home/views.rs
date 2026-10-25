@@ -24,7 +24,7 @@ use super::{
 use crate::state::{AppState, DeviceRecord};
 use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading, value_label};
 use crate::ui::carousel::Carousel;
-use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
+use crate::ui::theme::{self, ContentWidth, Palette, SelectableStyle as _, Typography as _};
 
 pub(super) fn device_view_switcher(
     current: DeviceViewMode,
@@ -236,7 +236,7 @@ fn device_card_element(
     .aria_selected(active)
     .cursor_pointer()
     .hover(move |card| card.border_color(pal.accent).shadow_sm())
-    .focus_visible(move |card| card.border_color(pal.accent).shadow_sm())
+    .focus_visible(move |style| style.focus_ring(pal))
     .on_click(move |_, _, cx| {
         view.update(cx, |this, cx| {
             this.open_device(record_key.clone(), cx);
@@ -341,7 +341,7 @@ fn device_list_row(
         .aria_selected(active)
         .cursor_pointer()
         .hover(move |row| row.border_color(pal.accent).shadow_sm())
-        .focus_visible(move |row| row.border_color(pal.accent).shadow_sm())
+        .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
                 this.open_device(record_key.clone(), cx);

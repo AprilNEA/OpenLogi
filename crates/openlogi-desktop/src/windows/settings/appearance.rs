@@ -14,7 +14,7 @@ use super::{
 use crate::platform::app_icon::AppIconExt as _;
 use crate::ui::choice_card::ChoiceCard;
 use crate::ui::components::control_input;
-use crate::ui::theme::Typography as _;
+use crate::ui::theme::{SelectableStyle as _, Typography as _};
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
 /// interface language. Every theme here re-skins the whole app — the bespoke
@@ -214,7 +214,7 @@ fn mode_card(
         .gap(px(6.))
         .items_center()
         .cursor_pointer()
-        .focus_visible(move |style| style.text_color(pal.text_primary))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(thumb)
         .child(
             h_flex()
@@ -249,7 +249,7 @@ fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl 
         .gap(px(6.))
         .items_center()
         .cursor_pointer()
-        .focus_visible(move |style| style.text_color(pal.text_primary))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(
             div()
                 .size(px(80.))
@@ -566,7 +566,7 @@ fn theme_card(
                 style.border_color(pal.text_muted)
             }
         })
-        .focus_visible(move |style| style.border_color(swatch.primary).shadow_sm())
+        .focus_visible(move |style| style.focus_ring(pal))
         .active(gpui::Styled::shadow_2xs)
         .child(
             v_flex()
@@ -669,7 +669,6 @@ fn filter_chip(
                 this.border_color(pal.border)
                     .text_color(pal.text_muted)
                     .hover(|h| h.border_color(pal.text_muted))
-                    .focus_visible(|h| h.border_color(pal.text_muted))
             }
         })
         .child(label)

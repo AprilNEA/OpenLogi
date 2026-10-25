@@ -391,13 +391,7 @@ impl RenderOnce for MenuRow {
                     pal.control_hover
                 })
             })
-            .focus_visible(move |style| {
-                style.bg(if selected {
-                    pal.accent_tint_hover
-                } else {
-                    pal.control_hover
-                })
-            })
+            .focus_visible(move |style| style.focus_ring(pal))
             .children(self.children)
             .when_some(self.on_click, |row, handler| {
                 row.on_click(move |event, window, cx| handler(event, window, cx))
@@ -523,15 +517,7 @@ impl RenderOnce for ProfileTab {
                     pal.control_hover
                 })
             })
-            .focus_visible(move |style| {
-                style
-                    .bg(if self.selected {
-                        pal.accent_tint_hover
-                    } else {
-                        pal.control_hover
-                    })
-                    .border_color(pal.accent)
-            })
+            .focus_visible(move |style| style.focus_ring(pal))
             .when_some(self.icon, |tab, icon| tab.child(icon.size_3()))
             .child(label.clone())
             .children(self.children)
@@ -548,7 +534,7 @@ impl RenderOnce for ProfileTab {
                         .rounded_full()
                         .text_color(pal.text_muted)
                         .hover(|style| style.text_color(pal.text_primary))
-                        .focus_visible(|style| style.text_color(pal.text_primary))
+                        .focus_visible(move |style| style.focus_ring(pal))
                         .child(Icon::new(IconName::Close).size_3())
                         .on_click(move |event, window, cx| {
                             cx.stop_propagation();

@@ -25,7 +25,7 @@ use crate::features::binding_editor::{
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
@@ -709,7 +709,7 @@ fn selection_card(
         .p_3()
         .cursor_pointer()
         .hover(move |card| card.bg(pal.control_hover))
-        .focus_visible(move |card| card.bg(pal.control_hover).border_color(pal.accent))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(
             div()
                 .text_caption()

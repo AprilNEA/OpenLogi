@@ -17,7 +17,7 @@ use openlogi_core::config::Lighting;
 use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::Toggle;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 const SWATCH: f32 = 28.;
 
@@ -160,7 +160,7 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
         // ast-grep-ignore: gui-theme-color-owner
         .bg(rgb(color.packed()))
         .cursor_pointer()
-        .focus_visible(|style| style.border_color(pal.accent))
+        .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_event, _window, cx| {
             AppState::apply(cx, |state| {
                 let mut next = state.lighting();

@@ -182,13 +182,7 @@ fn profile_tab(
                 pal.control_hover
             })
         })
-        .focus_visible(move |tab| {
-            tab.bg(if selected {
-                pal.accent_tint_hover
-            } else {
-                pal.control_hover
-            })
-        })
+        .focus_visible(move |style| style.focus_ring(pal))
         .children(leading)
         .child(label)
 }
