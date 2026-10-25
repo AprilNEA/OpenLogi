@@ -7,12 +7,13 @@
 use std::io::{self, Write};
 
 use anyhow::{Context, Result, anyhow, bail};
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Args, Subcommand};
 use openlogi_core::device::Capabilities;
 use openlogi_core::hid::backlight::max_backlight_level;
 use openlogi_core::hid::{
-    BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
-    BacklightStatus, DeviceRoute,
+    BacklightChange, BacklightControls, BacklightDuration, BacklightEffect, BacklightEffects,
+    BacklightMode, BacklightState, BacklightStatus, DeviceRoute,
 };
 use openlogi_ipc::client::ConnectError;
 use openlogi_ipc::{AgentClient, AgentSnapshot, InventoryHealth};
@@ -72,6 +73,24 @@ pub enum BacklightAction {
         #[arg(value_name = "SECONDS", value_parser = duration_seconds)]
         duration: BacklightDuration,
     },
+    /// Run this predefined effect. `status` lists the ones the keyboard
+    /// offers.
+    Effect {
+        #[arg(value_name = "EFFECT", value_parser = effect_parser())]
+        effect: BacklightEffect,
+    },
+}
+
+/// Parses an effect by [`BacklightEffect::name`], listing every name in help.
+fn effect_parser() -> impl TypedValueParser<Value = BacklightEffect> {
+    PossibleValuesParser::new(BacklightEffect::ALL.map(BacklightEffect::name)).try_map(
+        |name: String| {
+            BacklightEffect::ALL
+                .into_iter()
+                .find(|effect| effect.name() == name)
+                .ok_or("unknown effect")
+        },
+    )
 }
 
 /// Reject a duration that is not one the keyboard can store, so a typo never
@@ -104,6 +123,7 @@ impl BacklightAction {
             Self::Level { level } => Some(BacklightChange::Level(level)),
             Self::BatterySaving { set } => Some(BacklightChange::PowerSave(set.is_on())),
             Self::Duration { duration } => Some(BacklightChange::Duration(duration)),
+            Self::Effect { effect } => Some(BacklightChange::Effect(effect)),
         }
     }
 }
@@ -134,7 +154,7 @@ async fn execute(
         .context("read backlight state")?;
     print_state(out, "current", before)?;
     let Some(change) = args.action.unwrap_or(BacklightAction::Status).change() else {
-        writeln!(out, "  offers: {}", offers(before.controls))?;
+        writeln!(out, "  offers: {}", offers(before.controls, before.effects))?;
         return Ok(());
     };
 
@@ -251,21 +271,25 @@ fn select_device(snapshot: &AgentSnapshot, query: Option<&str>) -> Result<(Devic
 fn keeps_the_mode(change: BacklightChange) -> bool {
     matches!(
         change,
-        BacklightChange::Enabled(_) | BacklightChange::PowerSave(_) | BacklightChange::Duration(_)
+        BacklightChange::Enabled(_)
+            | BacklightChange::PowerSave(_)
+            | BacklightChange::Duration(_)
+            | BacklightChange::Effect(_)
     )
 }
 
 fn print_state(out: &mut impl Write, label: &str, state: BacklightState) -> io::Result<()> {
     writeln!(
         out,
-        "  {label}: enabled={} mode={} status={} level={}/{} battery-saving={} duration={}",
+        "  {label}: enabled={} mode={} status={} level={}/{} battery-saving={} duration={} effect={}",
         state.enabled,
         mode_label(state.mode),
         status_label(state.status),
         state.current_level,
         max_backlight_level(state.nb_levels),
         state.power_save,
-        duration_label(state)
+        duration_label(state),
+        state.effect,
     )
 }
 
@@ -277,16 +301,23 @@ fn duration_label(state: BacklightState) -> String {
     }
 }
 
-/// The subcommands beyond `on` / `off` this keyboard accepts.
-fn offers(controls: BacklightControls) -> String {
-    let offered: Vec<&str> = [
+/// The subcommands beyond `on` / `off` this keyboard accepts, with the
+/// effect names it lists.
+fn offers(controls: BacklightControls, effects: BacklightEffects) -> String {
+    let effects = (!effects.is_empty()).then(|| {
+        let names: Vec<&str> = effects.iter().map(BacklightEffect::name).collect();
+        format!("effect ({})", names.join(", "))
+    });
+    let offered: Vec<String> = [
         (BacklightControls::AUTOMATIC, "auto"),
         (BacklightControls::LEVEL, "level"),
         (BacklightControls::POWER_SAVE, "battery-saving"),
         (BacklightControls::DURATION, "duration"),
     ]
     .into_iter()
-    .filter_map(|(offer, name)| controls.contains(offer).then_some(name))
+    .filter(|&(offer, _)| controls.contains(offer))
+    .map(|(_, name)| name.to_string())
+    .chain(effects)
     .collect();
     if offered.is_empty() {
         "on/off only".to_string()
@@ -368,20 +399,36 @@ mod tests {
             .change(),
             Some(BacklightChange::Duration(duration(15)))
         );
+        assert_eq!(
+            BacklightAction::Effect {
+                effect: BacklightEffect::Waves
+            }
+            .change(),
+            Some(BacklightChange::Effect(BacklightEffect::Waves))
+        );
     }
 
     #[test]
     fn status_lists_only_what_the_keyboard_offers() {
-        assert_eq!(offers(BacklightControls::default()), "on/off only");
-        assert_eq!(offers(BacklightControls::LEVEL), "on/off, level");
+        let none = BacklightEffects::default();
+        assert_eq!(offers(BacklightControls::default(), none), "on/off only");
+        assert_eq!(offers(BacklightControls::LEVEL, none), "on/off, level");
         assert_eq!(
             offers(
                 BacklightControls::AUTOMATIC
                     | BacklightControls::LEVEL
                     | BacklightControls::POWER_SAVE
-                    | BacklightControls::DURATION
+                    | BacklightControls::DURATION,
+                none
             ),
             "on/off, auto, level, battery-saving, duration"
+        );
+        let effects = [BacklightEffect::Static, BacklightEffect::Waves]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            offers(BacklightControls::default(), effects),
+            "on/off, effect (static, waves)"
         );
     }
 
@@ -390,6 +437,9 @@ mod tests {
         assert!(keeps_the_mode(BacklightChange::Enabled(true)));
         assert!(keeps_the_mode(BacklightChange::PowerSave(false)));
         assert!(keeps_the_mode(BacklightChange::Duration(duration(10))));
+        assert!(keeps_the_mode(BacklightChange::Effect(
+            BacklightEffect::Breathing
+        )));
         assert!(!keeps_the_mode(BacklightChange::Automatic(false)));
         assert!(!keeps_the_mode(BacklightChange::Level(2)));
     }

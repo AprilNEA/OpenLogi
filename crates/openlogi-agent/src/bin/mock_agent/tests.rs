@@ -225,6 +225,8 @@ async fn profile_backed_wheel_and_backlight_reads_return_exact_values() {
             | openlogi_hid::BacklightControls::LEVEL
             | openlogi_hid::BacklightControls::POWER_SAVE
             | openlogi_hid::BacklightControls::DURATION,
+        effects: openlogi_hid::BacklightEffects::default(),
+        effect: openlogi_hid::BacklightEffect::Static,
     };
     let agent = MockAgent::new(test_state_with_backlight(ProfileSetting::Supported(
         expected,
@@ -250,6 +252,8 @@ async fn backlight_changes_are_kept_and_unoffered_ones_refused() {
         duration: None,
         controls: openlogi_hid::BacklightControls::AUTOMATIC
             | openlogi_hid::BacklightControls::POWER_SAVE,
+        effects: openlogi_hid::BacklightEffects::default(),
+        effect: openlogi_hid::BacklightEffect::Static,
     };
     let agent = MockAgent::new(test_state_with_backlight(ProfileSetting::Supported(manual)));
     let automatic = agent

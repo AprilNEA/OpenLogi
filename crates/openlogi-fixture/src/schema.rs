@@ -1095,8 +1095,8 @@ mod optional_hex_report {
 mod tests {
     use openlogi_core::device::DeviceKind;
     use openlogi_core::hid::{
-        BacklightControls, BacklightMode, BacklightState, BacklightStatus, DisableKeysMask,
-        DisableKeysState,
+        BacklightControls, BacklightEffect, BacklightEffects, BacklightMode, BacklightState,
+        BacklightStatus, DisableKeysMask, DisableKeysState,
     };
 
     use crate::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile, ProfileSetting, ProfileSupport};
@@ -1160,6 +1160,8 @@ mod tests {
                 | BacklightControls::LEVEL
                 | BacklightControls::POWER_SAVE
                 | BacklightControls::DURATION,
+            effects: BacklightEffects::default(),
+            effect: BacklightEffect::Static,
         }
     }
 

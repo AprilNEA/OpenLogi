@@ -151,7 +151,10 @@ pub use succession::Identity;
 ///      `BacklightControls` became the bit set of the changes the keyboard
 ///      offers, and `BacklightState::duration` and
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
-///      timer, five-second steps up to two hours.
+///      timer, five-second steps up to two hours. `BacklightEffect`,
+///      `BacklightChange::Effect` and `BacklightState::{effects, effect}`
+///      appended — the `0x1982` predefined effect a keyboard runs, which ones
+///      it lists, and picking one through `Agent::set_backlight`.
 pub const PROTOCOL_VERSION: u32 = 41;
 
 /// Environment variable through which the agent hands a supervised helper the

@@ -17,8 +17,9 @@ use crate::write::smartshift::{
 };
 use crate::write::{HidppFeatureErrorKind, HidppOperation};
 use crate::{
-    BacklightControls, BacklightMode, BacklightState, BacklightStatus, FnLockState,
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    BacklightControls, BacklightEffect, BacklightEffects, BacklightMode, BacklightState,
+    BacklightStatus, FnLockState, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+    SmartShiftThreshold, TunableTorque,
 };
 use hidpp::feature::device_information::DeviceEntityType;
 use openlogi_core::hid::DisableKeysMask;
@@ -393,6 +394,8 @@ async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), 
             power_save: false,
             duration: None,
             controls: BacklightControls::default(),
+            effects: BacklightEffects::default(),
+            effect: BacklightEffect::Static,
         }
     );
 
