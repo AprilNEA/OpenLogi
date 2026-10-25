@@ -1152,6 +1152,17 @@ fn pointer_speed_and_precision_mode() {
     assert_wire(&Action::TogglePrecisionMode, "36");
 }
 
+/// The brightness actions and their ring icons are appended at the end of
+/// their enums, so each earlier index is unchanged.
+#[test]
+fn brightness_actions_and_icons() {
+    use openlogi_core::binding::Action;
+    assert_wire(&Action::BrightnessUp, "37");
+    assert_wire(&Action::BrightnessDown, "38");
+    assert_wire(&ActionRingIcon::BrightnessUp, "36");
+    assert_wire(&ActionRingIcon::BrightnessDown, "37");
+}
+
 /// The press force of a force-sensing button (the MX Master 4's Haptic Sense
 /// Panel): raw device values as varints, all of them past one byte.
 #[test]
