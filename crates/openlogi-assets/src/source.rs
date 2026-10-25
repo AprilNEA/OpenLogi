@@ -353,7 +353,8 @@ fn probe_uniform(base: &str) -> Result<ProbeSuccess, AssetError> {
 /// to 12 hours. The data API answers within seconds of a publish, so a
 /// background thread asks it while the range loads. The probe waits for that
 /// answer at most [`JSDELIVR_RESOLVE_WAIT`] and uses it only when it names a
-/// newer release; otherwise the range release stands.
+/// newer release whose routes, index, and shard routing all load; otherwise
+/// the range release stands.
 ///
 /// The chosen `npm-routes.json` names the exact release, and `index.json` and
 /// every shard file come from that release, so one run never mixes releases.
@@ -364,17 +365,24 @@ fn probe_jsdelivr() -> Result<ProbeSuccess, AssetError> {
             debug!("jsDelivr data API answered after the probe stopped waiting");
         }
     });
-    let mut release = fetch_npm_release(&jsdelivr_catalog_base(ASSET_LINE))?;
+    let range = fetch_npm_release(&jsdelivr_catalog_base(ASSET_LINE))?;
     if let Ok(Some(version)) = newest.recv_timeout(JSDELIVR_RESOLVE_WAIT)
-        && release.is_older_than(&version)
+        && range.is_older_than(&version)
     {
-        match fetch_npm_release(&jsdelivr_catalog_base(&version)) {
-            Ok(newer) => release = newer,
+        match fetch_npm_release(&jsdelivr_catalog_base(&version))
+            .and_then(|newer| probe_npm_release(&newer))
+        {
+            Ok(probe) => return Ok(probe),
             Err(error) => {
                 warn!(%version, error = %error, "newest jsDelivr asset release unavailable; using the cached range");
             }
         }
     }
+    probe_npm_release(&range)
+}
+
+/// Load `index.json` of exactly `release` and route every depot to its shard.
+fn probe_npm_release(release: &NpmRelease) -> Result<ProbeSuccess, AssetError> {
     debug!(version = %release.version, "jsDelivr asset release resolved");
     let (index_bytes, index) = AssetClient::new(&release.catalog_base()).fetch_index_raw()?;
     let client = release.client(&index)?;
