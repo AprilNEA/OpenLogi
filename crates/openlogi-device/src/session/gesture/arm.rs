@@ -5,7 +5,9 @@
 use std::num::NonZeroU8;
 use std::sync::Arc;
 
-use hidpp::feature::{CreatableFeature as _, hires_wheel::HiResWheelFeature};
+use hidpp::feature::{
+    CreatableFeature as _, gestures2::Gestures2Feature, hires_wheel::HiResWheelFeature,
+};
 use hidpp::protocol::v20::Hidpp20Error;
 use hidpp::{channel::HidppChannel, device::Device};
 use openlogi_core::binding::ButtonId;
@@ -59,6 +61,9 @@ pub(super) struct ArmedControls {
     /// `0x2150` accessor and the information read before diverting it,
     /// present when the thumb wheel is diverted.
     pub(super) thumb: Option<ArmedThumbwheel>,
+    /// The Gestures2 thumb wheel (gesture 46), diverted on devices without
+    /// `0x2150`, such as the MX Master (`wpid` `0x4041`).
+    pub(super) gesture_thumb: Option<ArmedGestureThumbwheel>,
     /// `0x2121` main wheel, present when its movement reports are diverted.
     pub(super) main_wheel: Option<ArmedMainWheel>,
 }
@@ -82,6 +87,15 @@ impl ArmedThumbwheel {
             WheelDirection::Inverted
         }
     }
+}
+
+/// The Gestures2 thumb wheel (gesture 46) a capture session diverted, and the
+/// diversion bit to restore.
+pub(super) struct ArmedGestureThumbwheel {
+    feature: Gestures2Feature,
+    /// The `0x6501` index reports arrive under.
+    pub(super) feature_index: u8,
+    restore: ThumbwheelRestore,
 }
 
 impl ArmedControls {
@@ -116,15 +130,20 @@ impl ArmedControls {
             reprog,
             reporting,
             thumb,
+            gesture_thumb,
             main_wheel,
             ..
         } = self;
         let reprog =
             reprog.and_then(|controls| ReprogRestore::new(controls.feature_index(), reporting));
+        let thumb = thumb
+            .as_ref()
+            .map(|thumb| thumb.restore)
+            .or_else(|| gesture_thumb.as_ref().map(|gesture| gesture.restore));
         PendingCaptureRestore::new(
             retired,
             reprog,
-            thumb.as_ref().map(|thumb| thumb.restore),
+            thumb,
             main_wheel
                 .as_ref()
                 .map(|wheel| HiResWheelRestore::new(wheel.feature_index)),
@@ -151,6 +170,11 @@ impl ArmedControls {
             && let Err(error) = thumb.wheel.divert(thumb.direction()).await
         {
             warn!(?error, "thumb-wheel re-divert after wake failed");
+        }
+        if let Some(gesture) = self.gesture_thumb.as_ref()
+            && let Err(error) = gesture.feature.set_thumbwheel_diverted(true).await
+        {
+            warn!(?error, "gesture thumb-wheel re-divert after wake failed");
         }
         if let Some(wheel) = self.main_wheel.as_ref()
             && let Err(error) = wheel.divert().await
@@ -278,6 +302,8 @@ pub(super) async fn arm_controls_into(
         && let Some(info) = device.root().get_feature(thumbwheel::FEATURE_ID).await?
     {
         arm_thumbwheel(Thumbwheel::new(Arc::clone(chan), slot, info.index), armed).await?;
+    } else if spec.capture_thumbwheel {
+        arm_gesture_thumbwheel(device, chan, slot, armed).await?;
     }
 
     if let Some(requested) = spec.divert_main_wheel
@@ -285,6 +311,42 @@ pub(super) async fn arm_controls_into(
     {
         arm_main_wheel(chan, slot, info.index, requested, armed).await?;
     }
+    Ok(())
+}
+
+/// Divert the Gestures2 thumb wheel (gesture 46) for capture on a device
+/// without `0x2150`. A wheel whose diversion bit cannot be read stays native
+/// and unowned, as in [`arm_thumbwheel`]; teardown selects native reporting.
+async fn arm_gesture_thumbwheel(
+    device: &Device,
+    chan: &Arc<HidppChannel>,
+    slot: u8,
+    armed: &mut ArmedControls,
+) -> Result<(), CaptureError> {
+    let Some(info) = device.root().get_feature(Gestures2Feature::ID).await? else {
+        return Ok(());
+    };
+    let feature = Gestures2Feature::new(Arc::clone(chan), slot, info.index);
+    match feature.thumbwheel_diverted().await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Ok(()),
+        Err(error @ Hidpp20Error::Channel(_)) => return Err(error.into()),
+        Err(error) => {
+            warn!(
+                ?error,
+                "gesture thumb wheel descriptor read failed — left native"
+            );
+            return Ok(());
+        }
+    }
+    // Store ownership before the write: a transport error cannot prove
+    // whether firmware applied diversion, so rollback must cover it too.
+    let gesture = armed.gesture_thumb.insert(ArmedGestureThumbwheel {
+        feature,
+        feature_index: info.index,
+        restore: ThumbwheelRestore::gesture46(),
+    });
+    gesture.feature.set_thumbwheel_diverted(true).await?;
     Ok(())
 }
 
