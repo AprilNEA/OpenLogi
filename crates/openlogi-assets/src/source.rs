@@ -33,8 +33,9 @@ const ASSET_LINE: &str = "0.1";
 /// jsDelivr prefix shared by every npm asset package.
 const JSDELIVR_PACKAGE_ROOT: &str = "https://cdn.jsdelivr.net/npm";
 
-/// jsDelivr data API root. It resolves a range within seconds of an npm
-/// publish; the CDN caches a range for up to 12 hours.
+/// jsDelivr data API root. Its range answer is at most about an hour old
+/// (`max-age=300`, `stale-while-revalidate=3600`); the CDN caches a range for
+/// up to 12 hours (`s-maxage=43200`).
 const JSDELIVR_DATA_ROOT: &str = "https://data.jsdelivr.com/v1/packages/npm";
 
 /// How long the jsDelivr probe waits for the data API after the CDN range
@@ -350,7 +351,7 @@ fn probe_uniform(base: &str) -> Result<ProbeSuccess, AssetError> {
 /// Probe the newest jsDelivr release of [`ASSET_LINE`].
 ///
 /// The CDN resolves the `catalog@<line>` range but caches the answer for up
-/// to 12 hours. The data API answers within seconds of a publish, so a
+/// to 12 hours. The data API answer is at most about an hour old, so a
 /// background thread asks it while the range loads. The probe waits for that
 /// answer at most [`JSDELIVR_RESOLVE_WAIT`] and uses it only when it names a
 /// newer release whose routes, index, and shard routing all load; otherwise
