@@ -306,27 +306,37 @@ struct KeySlot {
 /// is on its native function.
 fn bound_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
     match target {
-        KeyTarget::Control(button) => state
-            .button_bindings()
-            .get(button)
-            .filter(|action| **action != Action::None)
-            .cloned(),
+        KeyTarget::Control(button) => state.button_bindings().get(button).cloned(),
         KeyTarget::FunctionKey(trigger) => state.keyboard_bindings().get(trigger).cloned(),
     }
 }
 
 /// Persist `action` for `target`: a control binds per device (and per open
 /// app profile) like any mouse button; a function key binds globally.
-/// `None` returns a control to its native function; for a function key it
-/// clears the trigger.
+/// `None` removes the assignment in this scope (inheriting the device default
+/// in an app profile); for a function key it clears the global trigger.
 pub(super) fn commit_key_action(
     state: &mut AppState,
     target: &KeyTarget,
     action: Option<Action>,
 ) -> StateEvents {
     match target {
-        KeyTarget::Control(button) => state.commit_binding(*button, action.unwrap_or(Action::None)),
+        KeyTarget::Control(button) => match action {
+            Some(action) => state.commit_binding(*button, action),
+            None => state.clear_binding(*button),
+        },
         KeyTarget::FunctionKey(trigger) => state.commit_keyboard_binding(trigger.clone(), action),
+    }
+}
+
+/// In an app profile, default means no override, even when the inherited
+/// action is assigned. In the device/global scope it means no assignment.
+fn key_uses_default(state: &AppState, target: &KeyTarget) -> bool {
+    match target {
+        KeyTarget::Control(button) if state.editing_app().is_some() => !state
+            .editing_app_overrides()
+            .is_some_and(|overrides| overrides.contains_key(button)),
+        _ => bound_action(state, target).is_none(),
     }
 }
 
@@ -798,6 +808,7 @@ impl FunctionRowView {
 
         let state = AppState::try_read(cx);
         let current = state.and_then(|state| bound_action(state, &target));
+        let uses_default = state.is_none_or(|state| key_uses_default(state, &target));
         // A control binds inside the open app profile, like a mouse button.
         let app = match target {
             KeyTarget::Control(_) => {
@@ -823,13 +834,14 @@ impl FunctionRowView {
         let mut rows = Vec::new();
         // Unbound is not a catalog action. A control rests on its firmware
         // function (#1172); a function key rests on the key itself. The row
-        // clears the override so either key returns to that native behavior.
+        // clears the assignment, inheriting the device default in an app profile.
         let view_for_native = view.clone();
         let target_for_native = target.clone();
         rows.push(
             v_flex().child(
                 MenuRow::new("panel-native")
-                    .selected(current.is_none())
+                    .debug_selector(|| "key-panel-native".into())
+                    .selected(uses_default)
                     .role(Role::MenuItem)
                     .child(
                         h_flex()
@@ -842,9 +854,13 @@ impl FunctionRowView {
                                     .flex_none()
                                     .text_color(pal.text_muted),
                             )
-                            .child(div().child(tr!("keyboard.native_function"))),
+                            .child(div().child(if app.is_some() {
+                                tr!("profiles.use_the_default_profile")
+                            } else {
+                                tr!("keyboard.native_function")
+                            })),
                     )
-                    .when(current.is_none(), |row| {
+                    .when(uses_default, |row| {
                         row.child(
                             gpui_component::Icon::new(gpui_component::IconName::Check)
                                 .size_3()

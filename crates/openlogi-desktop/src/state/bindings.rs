@@ -259,6 +259,33 @@ impl AppState {
         events
     }
 
+    /// Remove the whole assignment in the open scope. The default scope
+    /// returns to the device's native/default behavior; an app scope inherits
+    /// the device default again. Unlike `Action::None`, this does not suppress
+    /// a keyboard control.
+    pub fn clear_binding(&mut self, button: ButtonId) -> StateEvents {
+        if self.editing_app().is_some() {
+            return self.clear_app_binding(button);
+        }
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        self.bindings.button_bindings.remove(&button);
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return events;
+        };
+        self.config.edit(|config| {
+            if let Some(device) = config.devices.get_mut(&key) {
+                device.bindings.remove(&button);
+            }
+        });
+        self.refresh_binding_projections();
+        self.persist_and_reload("binding");
+        events
+    }
+
     /// Drop `button`'s override in the open per-app profile, so it inherits the
     /// device's global binding again. A no-op in the global profile, which has
     /// nothing to inherit from.
