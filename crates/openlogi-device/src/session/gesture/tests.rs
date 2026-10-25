@@ -17,6 +17,7 @@ use crate::{ChannelRegistry, DeviceRoute};
 
 mod accumulator;
 mod foreign_change;
+mod gesture46;
 mod main_wheel;
 mod restore;
 mod session;
