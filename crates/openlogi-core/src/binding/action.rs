@@ -223,8 +223,8 @@ pub enum Action {
     /// media-key mechanism as the volume actions (macOS: the NX system-defined
     /// brightness key; Linux: `KEY_BRIGHTNESSUP`; Windows has no key event for
     /// display brightness, so its injector logs and skips). Appended last
-    /// because the variant name is the persisted `config.toml` schema (see
-    /// the stability contract above).
+    /// because the serde variant index is the IPC wire format; the variant
+    /// name is the `config.toml` schema (see the stability contract above).
     BrightnessUp,
     /// Decrease display brightness. Counterpart to [`Action::BrightnessUp`].
     BrightnessDown,
