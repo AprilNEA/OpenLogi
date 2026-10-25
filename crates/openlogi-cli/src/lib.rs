@@ -97,6 +97,23 @@ mod tests {
     }
 
     #[test]
+    fn backlight_effect_takes_every_effect_by_name() {
+        for effect in openlogi_core::hid::BacklightEffect::ALL {
+            let cli = Cli::try_parse_from(["openlogi", "backlight", "effect", effect.name()])
+                .expect("backlight effect parses");
+            match cli.cmd.expect("subcommand present") {
+                Command::Backlight(args) => assert!(
+                    matches!(args.action, Some(BacklightAction::Effect { effect: e }) if e == effect),
+                    "{effect}"
+                ),
+                other => panic!("expected Backlight, got {other:?}"),
+            }
+        }
+        Cli::try_parse_from(["openlogi", "backlight", "effect", "rainbow"])
+            .expect_err("an unknown effect must be rejected");
+    }
+
+    #[test]
     fn backlight_rejects_an_unknown_action() {
         let result = Cli::try_parse_from(["openlogi", "backlight", "dim"]);
         result.expect_err("an unknown backlight action must be rejected");

@@ -46,13 +46,14 @@ use openlogi_core::device::{
     LightValueUnit, LockKey, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
-    BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
-    DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
-    HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
-    OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SidetoneLevel, SmartShiftAutoDisengage,
-    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    BacklightChange, BacklightControls, BacklightDuration, BacklightEffect, BacklightMode,
+    BacklightState, BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi,
+    DpiCapabilities, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo,
+    HidppFeatureErrorKind, HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand,
+    OnboardMode, OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector,
+    ReportRate, ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SidetoneLevel,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -1185,11 +1186,17 @@ fn semantic_read_payloads() {
         controls: BacklightControls::AUTOMATIC
             | BacklightControls::LEVEL
             | BacklightControls::DURATION,
+        effects: [BacklightEffect::Static, BacklightEffect::Breathing]
+            .into_iter()
+            .collect(),
+        effect: BacklightEffect::Breathing,
     });
     // v36 appends `power_save` and `controls`; the timer's `duration` and
     // `duration` ride v41 as the controls bit set (30 seconds) — the
     // validated timer now serializes as an `Option` tag plus its seconds.
-    assert_wire(&backlight, "000101020408010b011e");
+    // The effect set (one bit per effect) and the running effect follow.
+    assert_wire(&backlight, "000101020408010b011e0502");
+    assert_wire(&BacklightEffect::Waves, "06");
 
     let fn_lock: Result<FnLockState, WriteError> = Ok(FnLockState {
         fn_lock: true,
@@ -1389,6 +1396,7 @@ fn backlight_changes_and_errors() {
     assert_wire(&BacklightChange::Automatic(false), "0100");
     assert_wire(&BacklightChange::Level(3), "0203");
     assert_wire(&BacklightChange::PowerSave(true), "0301");
+    assert_wire(&BacklightChange::Effect(BacklightEffect::Breathing), "0502");
     // Variant 4, then the seconds as a varint. 15 fits one byte; the
     // validated timer serializes transparently as its seconds.
     assert_wire(

@@ -135,8 +135,9 @@ fn unique_replacement(audit: &HidCassetteAudit, kind: SanitizedIdentityKind) -> 
 #[cfg(test)]
 mod tests {
     use openlogi_core::hid::{
-        BacklightControls, BacklightMode, BacklightState, BacklightStatus, SmartShiftAutoDisengage,
-        SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
+        BacklightControls, BacklightEffect, BacklightEffects, BacklightMode, BacklightState,
+        BacklightStatus, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+        SmartShiftThreshold,
     };
     use openlogi_device::reprog_controls::CidFlags;
     use openlogi_device::write::{FeatureEntry, ReprogControlEntry};
@@ -611,6 +612,7 @@ mod tests {
 
         // The recorded 0x0505 options support only power save and the wow
         // effect, and feature version 2 predates levels and durations.
+        // The effect list is its own field: this firmware names all seven.
         assert_eq!(
             observed,
             SemanticObservation::BacklightState(Ok(BacklightState {
@@ -622,6 +624,10 @@ mod tests {
                 power_save: true,
                 controls: BacklightControls::POWER_SAVE,
                 duration: None,
+                effect: BacklightEffect::Static,
+                effects: BacklightEffect::ALL
+                    .into_iter()
+                    .collect::<BacklightEffects>(),
             }))
         );
         backend
