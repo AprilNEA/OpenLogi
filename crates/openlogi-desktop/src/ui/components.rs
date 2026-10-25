@@ -7,7 +7,7 @@
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement, Interactivity, IntoElement,
     ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -22,7 +22,7 @@ use gpui_component::{
     v_flex,
 };
 
-use super::theme::{self, ACCENT_BLUE, SelectableStyle as _, Typography as _};
+use super::theme::{self, SelectableStyle as _, Typography as _};
 
 /// A gpui-component button at the house control height.
 ///
@@ -191,8 +191,7 @@ impl RenderOnce for Toggle {
             .checked(self.selected)
             .disabled(self.disabled)
             .with_size(self.size)
-            .label(label)
-            .color(rgb(ACCENT_BLUE));
+            .label(label);
         if let Some(handler) = self.on_change {
             toggle = toggle.on_click(move |selected, window, cx| handler(selected, window, cx));
         }
@@ -384,17 +383,17 @@ impl RenderOnce for MenuRow {
             .rounded(pal.control_radius)
             .text_body()
             .text_color(pal.text_primary)
-            .selected_fill(selected)
+            .selected_fill(selected, pal)
             .hover(move |style| {
                 style.bg(if selected {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
             })
             .focus_visible(move |style| {
                 style.bg(if selected {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
@@ -487,7 +486,6 @@ impl StatefulInteractiveElement for ProfileTab {}
 impl RenderOnce for ProfileTab {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let accent = rgb(ACCENT_BLUE);
         let has_delete = self.delete.is_some();
         let label = self.label;
         self.base
@@ -503,7 +501,7 @@ impl RenderOnce for ProfileTab {
             .rounded_full()
             .border_1()
             .border_color(if self.selected {
-                accent.into()
+                pal.accent
             } else {
                 pal.border
             })
@@ -514,13 +512,13 @@ impl RenderOnce for ProfileTab {
                 pal.text_muted
             })
             .bg(if self.selected {
-                theme::accent_tint()
+                pal.accent_tint
             } else {
                 pal.control
             })
             .hover(move |style| {
                 style.bg(if self.selected {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
@@ -528,11 +526,11 @@ impl RenderOnce for ProfileTab {
             .focus_visible(move |style| {
                 style
                     .bg(if self.selected {
-                        theme::accent_tint_hover()
+                        pal.accent_tint_hover
                     } else {
                         pal.control_hover
                     })
-                    .border_color(accent)
+                    .border_color(pal.accent)
             })
             .when_some(self.icon, |tab, icon| tab.child(icon.size_3()))
             .child(label.clone())
@@ -608,10 +606,10 @@ impl RenderOnce for PresetChip {
             .rounded(pal.control_radius)
             .selected_border(selected, pal)
             .bg(pal.control)
-            .selected_fill(selected)
+            .selected_fill(selected, pal)
             .hover(move |style| {
                 style.bg(if selected {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })

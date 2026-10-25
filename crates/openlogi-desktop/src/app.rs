@@ -1,7 +1,7 @@
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, rgb,
+    prelude::FluentBuilder as _,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -461,7 +461,7 @@ impl AppView {
             .child(
                 Icon::new(IconName::TriangleAlert)
                     .size_8()
-                    .text_color(rgb(theme::STATUS_CONNECTING)),
+                    .text_color(pal.warning),
             )
             .child(
                 div()

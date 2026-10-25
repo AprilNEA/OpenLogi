@@ -1,0 +1,33 @@
+# Owner: openlogi-desktop's ui::theme — every colour the settings app paints.
+# `palette(cx)` resolves the semantic roles (accent, status, surfaces) from the
+# active gpui-component theme at a legible contrast, and the few fixed
+# illustration colours (a device photo's hotspot marks, a warm light, the
+# Appearance thumbnails) are named constants beside it.
+id: gui-theme-color-owner
+language: rust
+severity: error
+message: Read colours from ui::theme (the Palette from theme::palette(cx), or a named constant there) instead of constructing one here; it owns theme-following and contrast.
+note: |
+  Thirty call sites painted a fixed brand blue and four fixed status hues, so
+  a theme picked in Settings never reached selection or status, and the yellow
+  warning icon and red error text fell below WCAG contrast on the light theme.
+  A colour that is the data itself (a keyboard's RGB swatch, its lighting glow)
+  is not a theme colour; mark that one line with `// ast-grep-ignore` and say
+  why. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/ui/theme.rs
+  - crates/openlogi-desktop/src/ui/gallery.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: rgb($$$)
+    - pattern: hsla($$$)
+    - pattern: gpui::rgb($$$)
+    - pattern: gpui::hsla($$$)
+    - pattern: Rgba { $$$ }
+    - pattern: gpui::Rgba { $$$ }
+    - pattern: Hsla { $$$ }
+    - pattern: gpui::Hsla { $$$ }

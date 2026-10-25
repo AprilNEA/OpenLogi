@@ -152,13 +152,15 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
         .rounded(pal.control_radius)
         .border_2()
         .border_color(if selected {
-            theme::accent()
+            pal.accent
         } else {
             pal.border
         })
+        // A swatch's fill is the colour it picks, not a theme colour.
+        // ast-grep-ignore: gui-theme-color-owner
         .bg(rgb(color.packed()))
         .cursor_pointer()
-        .focus_visible(|style| style.border_color(theme::accent()))
+        .focus_visible(|style| style.border_color(pal.accent))
         .on_click(move |_event, _window, cx| {
             AppState::apply(cx, |state| {
                 let mut next = state.lighting();

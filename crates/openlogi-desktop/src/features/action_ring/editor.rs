@@ -2,7 +2,7 @@
 
 use gpui::{
     Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
@@ -19,7 +19,7 @@ use crate::features::keyboard::editors::PowerUserKind;
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{Palette, Typography as _};
 
 /// The three single-field Power User inputs the ring's slot editor exposes.
 /// [`PowerUserKind::Workflow`] needs a multi-step list editor this panel
@@ -346,11 +346,7 @@ fn action_sections(
                             .child(label),
                     )
                     .when(selected, |row| {
-                        row.child(
-                            Icon::new(IconName::Check)
-                                .size_3()
-                                .text_color(rgb(theme::ACCENT_BLUE)),
-                        )
+                        row.child(Icon::new(IconName::Check).size_3().text_color(pal.accent))
                     })
                     .on_click(move |_, _, cx| {
                         commit_action(slot, action_to_commit.clone(), cx);

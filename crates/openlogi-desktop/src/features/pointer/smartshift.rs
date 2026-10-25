@@ -15,7 +15,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, div, px, rgb,
+    Subscription, Window, div, px,
 };
 use gpui_component::{
     Disableable as _, Selectable as _, button::Button, h_flex, slider::Slider, v_flex,
@@ -35,7 +35,7 @@ use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::Toggle;
 use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
 /// `0x01`–`0xFE` (0.25 turn/s steps); the slider exposes the usable band
@@ -193,7 +193,7 @@ impl SmartShiftPanel {
             );
 
         let value_color = if sensitivity_enabled {
-            rgb(ACCENT_BLUE).into()
+            pal.accent
         } else {
             pal.text_muted
         };
@@ -251,11 +251,7 @@ impl SmartShiftPanel {
         let committed_torque = status.tunable_torque?;
         self.torque.sync(committed_torque, window, cx);
         let display = self.torque.shown(committed_torque);
-        let torque_value_color = if ratchet {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.text_muted
-        };
+        let torque_value_color = if ratchet { pal.accent } else { pal.text_muted };
         Some(
             v_flex()
                 .gap_2()
@@ -308,7 +304,7 @@ impl SmartShiftPanel {
                     .child(
                         div()
                             .text_body()
-                            .text_color(rgb(ACCENT_BLUE))
+                            .text_color(pal.accent)
                             .child(format!("{display}")),
                     ),
             )

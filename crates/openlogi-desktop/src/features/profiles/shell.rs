@@ -174,17 +174,17 @@ fn profile_tab(
         .cursor_pointer()
         .text_body()
         .text_color(pal.text_primary)
-        .selected_fill(selected)
+        .selected_fill(selected, pal)
         .hover(move |tab| {
             tab.bg(if selected {
-                theme::accent_tint_hover()
+                pal.accent_tint_hover
             } else {
                 pal.control_hover
             })
         })
         .focus_visible(move |tab| {
             tab.bg(if selected {
-                theme::accent_tint_hover()
+                pal.accent_tint_hover
             } else {
                 pal.control_hover
             })

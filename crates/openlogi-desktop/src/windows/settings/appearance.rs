@@ -9,7 +9,7 @@ use super::{
     IconName, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc, SelectState,
     Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString,
     StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter, ThemeMode,
-    ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
+    ThemeRegistry, UiScale, div, h_flex, px, theme, v_flex,
 };
 use crate::platform::app_icon::AppIconExt as _;
 use crate::ui::choice_card::ChoiceCard;
@@ -285,25 +285,20 @@ fn icon_label(icon: AppIcon) -> SharedString {
 }
 
 /// A miniature window-on-desktop at a fixed 100×60, used inside a mode card.
-/// Painted with fixed scheme colours (representing light vs dark) so the
-/// thumbnails read the same under any active theme.
+/// Painted with [`theme::ModePreview`]'s fixed colours so the thumbnails show
+/// light versus dark the same way under any active theme.
 fn mini_window(dark: bool) -> impl IntoElement {
-    let (wallpaper, window, bar, line) = if dark {
-        (
-            rgb(0x26_262b),
-            rgb(0x1b_1b1e),
-            rgb(0x3a_3a42),
-            rgb(0x3b_82f6),
-        )
+    let theme::ModePreview {
+        wallpaper,
+        window,
+        bar,
+        line,
+    } = if dark {
+        theme::ModePreview::DARK
     } else {
-        (
-            rgb(0xdf_e4ec),
-            rgb(0xff_ffff),
-            rgb(0xcc_d2db),
-            rgb(0x3b_82f6),
-        )
+        theme::ModePreview::LIGHT
     };
-    let dot = |c: u32| div().size(px(3.)).rounded_full().bg(rgb(c));
+    let dot = |c: Hsla| div().size(px(3.)).rounded_full().bg(c);
     div()
         .w(px(100.))
         .h(px(60.))
@@ -324,9 +319,9 @@ fn mini_window(dark: bool) -> impl IntoElement {
                         .gap(px(2.))
                         .px(px(4.))
                         .bg(bar)
-                        .child(dot(0xff_5f57))
-                        .child(dot(0xfe_bc2e))
-                        .child(dot(0x28_c840)),
+                        .child(dot(theme::ModePreview::TRAFFIC_LIGHTS[0]))
+                        .child(dot(theme::ModePreview::TRAFFIC_LIGHTS[1]))
+                        .child(dot(theme::ModePreview::TRAFFIC_LIGHTS[2])),
                 )
                 .child(
                     v_flex()

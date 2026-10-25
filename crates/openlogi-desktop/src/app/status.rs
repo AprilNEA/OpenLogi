@@ -2,7 +2,7 @@
 //! pre-connection / unreachable / outdated-build frames rendered in place of
 //! the real UI, and an attention bar shown only when action is required.
 
-use gpui::{App, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
+use gpui::{App, Div, IntoElement, ParentElement, SharedString, Styled, div, px};
 use gpui_component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -48,7 +48,7 @@ pub(super) fn notice_body(headline: SharedString, caption: SharedString, cx: &Ap
         .child(
             Icon::new(IconName::TriangleAlert)
                 .size_8()
-                .text_color(rgb(theme::STATUS_CONNECTING)),
+                .text_color(pal.warning),
         )
         .child(div().text_title().child(headline))
         .child(
@@ -198,12 +198,7 @@ fn secure_input_status(app: Option<SharedString>, pal: Palette) -> impl IntoElem
         .items_center()
         .text_caption()
         .text_color(pal.text_primary)
-        .child(
-            div()
-                .size_1p5()
-                .rounded_full()
-                .bg(rgb(theme::STATUS_CONNECTING)),
-        )
+        .child(div().size_1p5().rounded_full().bg(pal.warning))
         .child(
             div()
                 .debug_selector(|| "secure-input-notice".into())
@@ -231,12 +226,7 @@ fn accessibility_status(pal: Palette) -> impl IntoElement {
         .cursor_pointer()
         .hover(|style| style.text_color(pal.text_muted))
         .focus_visible(|style| style.text_color(pal.text_muted))
-        .child(
-            div()
-                .size_1p5()
-                .rounded_full()
-                .bg(rgb(theme::STATUS_CONNECTING)),
-        )
+        .child(div().size_1p5().rounded_full().bg(pal.warning))
         .child(div().child(tr!("permissions.accessibility_not_granted_click_to_grant")))
         .on_click(|_, _, cx| super::request_accessibility(cx))
 }

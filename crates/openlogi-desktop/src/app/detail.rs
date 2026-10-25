@@ -212,17 +212,17 @@ fn detail_navigation(
                 } else {
                     pal.text_muted
                 })
-                .when(selected, |row| row.bg(crate::ui::theme::accent_tint()))
+                .when(selected, |row| row.bg(pal.accent_tint))
                 .hover(move |row| {
                     row.bg(if selected {
-                        crate::ui::theme::accent_tint_hover()
+                        pal.accent_tint_hover
                     } else {
                         pal.control_hover
                     })
                 })
                 .focus_visible(move |row| {
                     row.bg(if selected {
-                        crate::ui::theme::accent_tint_hover()
+                        pal.accent_tint_hover
                     } else {
                         pal.control_hover
                     })

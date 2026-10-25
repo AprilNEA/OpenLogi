@@ -407,15 +407,22 @@ fn mouse_pairing_click_icons_are_embedded() {
 #[test]
 fn mouse_pairing_click_icon_resolves_text_color() {
     let text_primary = gpui::hsla(0.5, 0.5, 0.5, 1.0);
+    let black = gpui::hsla(0., 0., 0., 1.);
     let pal = Palette {
-        page: gpui::hsla(0., 0., 0., 1.),
-        panel: gpui::hsla(0., 0., 0., 1.),
-        control: gpui::hsla(0., 0., 0., 1.),
-        control_hover: gpui::hsla(0., 0., 0., 1.),
-        muted: gpui::hsla(0., 0., 0., 1.),
-        border: gpui::hsla(0., 0., 0., 1.),
+        page: black,
+        panel: black,
+        control: black,
+        control_hover: black,
+        muted: black,
+        border: black,
         text_primary,
-        text_muted: gpui::hsla(0., 0., 0., 1.),
+        text_muted: black,
+        accent: black,
+        accent_tint: black,
+        accent_tint_hover: black,
+        danger: black,
+        warning: black,
+        success: black,
         card_radius: gpui::px(8.),
         control_radius: gpui::px(4.),
     };

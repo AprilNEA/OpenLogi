@@ -4,8 +4,8 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
     InteractiveElement, IntoElement, ParentElement, Render, RenderOnce,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
-    prelude::FluentBuilder as _, px, rgb,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, img,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -29,7 +29,7 @@ use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
-use crate::ui::theme::{self, ACCENT_BLUE};
+use crate::ui::theme;
 
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
@@ -577,7 +577,7 @@ fn leader_canvas(
 ) -> impl IntoElement {
     canvas(
         move |_bounds, _, _| (hotspots, labels, highlight),
-        move |bounds, payload, window, _app| {
+        move |bounds, payload, window, cx| {
             let (hotspots, labels, highlight) = payload;
             paint_leader_lines(
                 bounds,
@@ -589,6 +589,7 @@ fn leader_canvas(
                 &hotspots,
                 &labels,
                 highlight,
+                theme::palette(cx),
                 window,
             );
         },
@@ -695,7 +696,7 @@ impl RenderOnce for Silhouette {
                     .w(px(28.))
                     .h(px(110.))
                     .rounded_md()
-                    .bg(hsla(0., 0., 0.25, 1.0)),
+                    .bg(pal.text_muted),
             )
             .child(
                 div()
@@ -714,7 +715,7 @@ impl RenderOnce for Silhouette {
                     .w(px(34.))
                     .h(px(150.))
                     .rounded_md()
-                    .bg(hsla(0., 0., 0.25, 1.0)),
+                    .bg(pal.text_muted),
             )
     }
 }
@@ -754,7 +755,8 @@ struct HotspotTrigger {
 }
 
 impl RenderOnce for HotspotTrigger {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pal = theme::palette(cx);
         let highlighted = self.hovered || self.selected;
         let selected = self.selected;
         let view = self.view;
@@ -781,22 +783,17 @@ impl RenderOnce for HotspotTrigger {
                     .rounded_full()
                     .border_1()
                     .border_color(if highlighted {
-                        gpui::Hsla::from(rgb(ACCENT_BLUE))
+                        pal.accent
                     } else {
-                        hsla(0., 0., 0.95, 0.85)
+                        theme::PHOTO_MARK_RIM
                     })
                     .bg(if highlighted {
-                        gpui::Hsla::from(rgb(ACCENT_BLUE))
+                        pal.accent
                     } else {
-                        hsla(0., 0., 0.18, 0.85)
+                        theme::PHOTO_MARK_FILL
                     }),
             )
-            .focus_visible(|style| {
-                style
-                    .rounded_full()
-                    .border_2()
-                    .border_color(rgb(ACCENT_BLUE))
-            })
+            .focus_visible(|style| style.rounded_full().border_2().border_color(pal.accent))
             .on_click(move |_event, _window, cx| {
                 click_view.update(cx, |this, cx| {
                     this.select(btn);

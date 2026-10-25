@@ -13,7 +13,7 @@ use std::sync::Arc;
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Context, Div, ElementId, Hsla, InteractiveElement,
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window,
-    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
+    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -106,6 +106,8 @@ pub(crate) fn keyboard_glow(
         .filter(|l| l.enabled)?;
     let geom = record.asset.as_ref()?.glow.clone()?;
     let (r, g, b) = lighting.color.components();
+    // The keyboard's configured RGB is the data being shown, not a theme colour.
+    // ast-grep-ignore: gui-theme-color-owner
     let color = gpui::Rgba {
         r: f32::from(r) / 255.,
         g: f32::from(g) / 255.,
@@ -177,7 +179,7 @@ fn device_card(
         .p_4()
         .rounded(pal.card_radius)
         .border_1()
-        .border_color(device_ring(enabled))
+        .border_color(device_ring(enabled, pal))
         .bg(pal.panel)
         .shadow_xs()
         .child(
@@ -282,10 +284,8 @@ fn transport_glance(
         )
     };
     let color: Hsla = match path {
-        "action-icons/bluetooth.svg" => rgb(theme::ACCENT_BLUE).into(),
-        "action-icons/bolt.svg" | "action-icons/unifying.svg" => {
-            rgb(theme::STATUS_CONNECTED).into()
-        }
+        "action-icons/bluetooth.svg" => pal.accent,
+        "action-icons/bolt.svg" | "action-icons/unifying.svg" => pal.success,
         _ => pal.text_muted,
     };
     let hint: SharedString = format!(
@@ -324,11 +324,11 @@ fn battery_glance(
         .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
 }
 
-fn device_ring(enabled: bool) -> Hsla {
+fn device_ring(enabled: bool, pal: Palette) -> Hsla {
     if enabled {
         gpui::transparent_black()
     } else {
-        rgb(theme::STATUS_DISABLED).into()
+        pal.danger
     }
 }
 

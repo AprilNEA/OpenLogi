@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, InteractiveElement, IntoElement, ParentElement, Role, StatefulInteractiveElement as _,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    Styled, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
 use openlogi_core::binding::{Action, Category, GestureDirection};
@@ -12,7 +12,7 @@ use openlogi_core::binding::{Action, Category, GestureDirection};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::section::section_label;
-use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{Palette, Typography as _};
 
 /// Height cap shared by compact inspector and editor lists.
 pub(crate) const EDITOR_LIST_MAX_H: f32 = 360.;
@@ -184,11 +184,7 @@ pub(crate) fn action_rows_matching(
                                 .child(div().child(label)),
                         )
                         .when(selected, |row| {
-                            row.child(
-                                Icon::new(IconName::Check)
-                                    .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
-                            )
+                            row.child(Icon::new(IconName::Check).size_3().text_color(pal.accent))
                         })
                         .on_click(move |_event, window, cx| (on_pick)(action.clone(), window, cx))
                 })),

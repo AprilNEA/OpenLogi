@@ -6,7 +6,7 @@ mod editor;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -349,13 +349,9 @@ fn slot_button(
         .justify_center()
         .rounded_full()
         .border_2()
-        .border_color(if selected {
-            rgb(theme::ACCENT_BLUE).into()
-        } else {
-            pal.border
-        })
+        .border_color(if selected { pal.accent } else { pal.border })
         .bg(if selected {
-            theme::accent_tint()
+            pal.accent_tint
         } else {
             pal.control
         })
@@ -379,19 +375,17 @@ fn slot_button(
         })
         .hover(move |button| {
             button.bg(if selected {
-                theme::accent_tint_hover()
+                pal.accent_tint_hover
             } else {
                 pal.control_hover
             })
         })
         .focus_visible(move |button| {
-            button
-                .border_color(rgb(theme::ACCENT_BLUE))
-                .bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
+            button.border_color(pal.accent).bg(if selected {
+                pal.accent_tint_hover
+            } else {
+                pal.control_hover
+            })
         })
         .on_click(move |_, _, cx| {
             selected_view.update(cx, |panel, cx| {

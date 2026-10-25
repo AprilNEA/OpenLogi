@@ -6,11 +6,10 @@ use super::super::leader_lines::{Label, Side};
 use super::super::thumbwheel::ThumbwheelPreset;
 use crate::features::binding_editor::{GESTURE_BUTTON_ICON, action_icon_path};
 use crate::ui::action::localized_action_label;
-use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
+use crate::ui::theme::{self, Typography as _};
 use gpui::{
     App, ElementId, Entity, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
-    svg,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{Icon, IconName, h_flex};
@@ -113,7 +112,7 @@ impl RenderOnce for LabelTrigger {
         let click_view = view.clone();
         let pal = theme::palette(cx);
         let binding_color = if highlighted {
-            rgb(ACCENT_BLUE).into()
+            pal.accent
         } else {
             pal.text_primary
         };
@@ -138,30 +137,30 @@ impl RenderOnce for LabelTrigger {
             .rounded(pal.control_radius)
             .border_1()
             .border_color(if highlighted {
-                rgb(ACCENT_BLUE).into()
+                pal.accent
             } else {
                 pal.border
             })
             .bg(if highlighted {
-                theme::accent_tint()
+                pal.accent_tint
             } else {
                 pal.control
             })
             .cursor_pointer()
             .hover(move |s| {
                 s.bg(if highlighted {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
             })
             .focus_visible(move |s| {
                 s.bg(if highlighted {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
-                .border_color(rgb(ACCENT_BLUE))
+                .border_color(pal.accent)
             })
             // Button name — the caption (xs / muted), the same size as the
             // inspector title and category headers it shares the binding flow with.

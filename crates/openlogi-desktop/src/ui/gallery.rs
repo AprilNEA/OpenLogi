@@ -478,11 +478,7 @@ impl ComponentGallery {
                         .p_3()
                         .rounded(pal.card_radius)
                         .border_1()
-                        .border_color(if selected {
-                            theme::accent()
-                        } else {
-                            pal.border
-                        })
+                        .border_color(if selected { pal.accent } else { pal.border })
                         .bg(pal.control)
                         .items_center()
                         .justify_center()
@@ -559,13 +555,13 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
         .rounded(pal.control_radius)
         .border_1()
         .border_color(if selected {
-            theme::accent()
+            pal.accent
         } else {
             pal.border
         })
         .bg(pal.control)
         .hover(move |style| style.bg(pal.control_hover))
-        .focus_visible(move |style| style.border_color(theme::accent()))
+        .focus_visible(move |style| style.border_color(pal.accent))
         .gap_1()
         // A preview strip above the label: the stacked shape the settings
         // pickers rely on.

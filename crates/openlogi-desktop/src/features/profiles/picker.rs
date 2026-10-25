@@ -20,7 +20,7 @@ use super::shell::application_mark;
 use super::{AddAppChoices, CatalogPresentation, ProfileChoice, ProfileScopeActions};
 use crate::features::binding_editor::{compact_panel, divider, title};
 use crate::ui::components::{MenuRow, control_button, control_input};
-use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{Palette, SelectableStyle as _, Typography as _};
 
 const APP_ROW_H: f32 = 44.;
 /// Icon tile edge inside picker rows: the height of the two-line text block,
@@ -241,17 +241,17 @@ fn applications_toggle(
         } else {
             pal.text_muted
         })
-        .selected_fill(expanded)
+        .selected_fill(expanded, pal)
         .hover(move |button| {
             button.bg(if expanded {
-                theme::accent_tint_hover()
+                pal.accent_tint_hover
             } else {
                 pal.control_hover
             })
         })
         .focus_visible(move |button| {
             button.bg(if expanded {
-                theme::accent_tint_hover()
+                pal.accent_tint_hover
             } else {
                 pal.control_hover
             })

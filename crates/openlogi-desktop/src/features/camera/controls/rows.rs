@@ -2,11 +2,11 @@
 
 use crate::state::AppState;
 use crate::ui::components::ProfileTab;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 use gpui::{
     ClickEvent, Context, ElementId, InteractiveElement, MouseButton, MouseDownEvent, ParentElement,
     Role, SharedString, StatefulInteractiveElement as _, Styled, Toggled, div,
-    prelude::FluentBuilder as _, px, rgb,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{IconName, Selectable as _, h_flex, slider::Slider};
@@ -149,7 +149,7 @@ pub(super) fn control_row(
                 .text_color(if dimmed {
                     pal.text_muted
                 } else {
-                    rgb(ACCENT_BLUE).into()
+                    pal.accent
                 })
                 .accessibility_label(tr!("camera.set_value_label", label => slider.label.clone()))
                 .child(format!("{value}"))
@@ -165,7 +165,6 @@ pub(super) fn control_row(
         && let Some(toggle) = slider.control.auto_toggle()
         && let Some(auto_ix) = panel.autos.iter().position(|a| a.toggle == toggle)
     {
-        let accent = rgb(ACCENT_BLUE);
         auto_cell = auto_cell.child(
             BaseButton::new((ElementId::from("camera-control-auto"), toggle.name()))
                 .role(Role::CheckBox)
@@ -176,14 +175,10 @@ pub(super) fn control_row(
                 .py_0p5()
                 .rounded_full()
                 .border_1()
-                .border_color(if on { accent.into() } else { pal.border })
+                .border_color(if on { pal.accent } else { pal.border })
                 .text_caption()
                 .text_color(if on { pal.text_primary } else { pal.text_muted })
-                .bg(if on {
-                    theme::accent_tint()
-                } else {
-                    pal.control
-                })
+                .bg(if on { pal.accent_tint } else { pal.control })
                 .hover(move |s| s.bg(chip_hover_fill(on, pal)))
                 .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
                 .child(tr!("common.auto"))
@@ -215,7 +210,6 @@ fn frequency_row(
     .filter(|(value, _, _)| slider.range.supports(*value))
     {
         let active = value == current;
-        let accent = rgb(ACCENT_BLUE);
         let accessibility_label = label.clone();
         choices = choices.child(
             BaseButton::new(("camera-frequency", id))
@@ -232,18 +226,14 @@ fn frequency_row(
                 .py_0p5()
                 .rounded_full()
                 .border_1()
-                .border_color(if active { accent.into() } else { pal.border })
+                .border_color(if active { pal.accent } else { pal.border })
                 .text_caption()
                 .text_color(if active {
                     pal.text_primary
                 } else {
                     pal.text_muted
                 })
-                .bg(if active {
-                    theme::accent_tint()
-                } else {
-                    pal.control
-                })
+                .bg(if active { pal.accent_tint } else { pal.control })
                 .hover(move |s| s.bg(chip_hover_fill(active, pal)))
                 .focus_visible(move |s| s.bg(chip_hover_fill(active, pal)))
                 .child(label)
@@ -282,7 +272,6 @@ fn binary_control_row(
 ) -> gpui::Stateful<gpui::Div> {
     let slider = &panel.sliders[ix];
     let on = slider.value(cx) != 0;
-    let accent = rgb(ACCENT_BLUE);
     h_flex()
         .id(("camera-control-row", ix))
         .w_full()
@@ -308,14 +297,10 @@ fn binary_control_row(
                 .py_0p5()
                 .rounded_full()
                 .border_1()
-                .border_color(if on { accent.into() } else { pal.border })
+                .border_color(if on { pal.accent } else { pal.border })
                 .text_caption()
                 .text_color(if on { pal.text_primary } else { pal.text_muted })
-                .bg(if on {
-                    theme::accent_tint()
-                } else {
-                    pal.control
-                })
+                .bg(if on { pal.accent_tint } else { pal.control })
                 .hover(move |s| s.bg(chip_hover_fill(on, pal)))
                 .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
                 .child(if on {
@@ -364,7 +349,7 @@ pub(super) fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
 
 fn chip_hover_fill(selected: bool, pal: Palette) -> gpui::Hsla {
     if selected {
-        theme::accent_tint_hover()
+        pal.accent_tint_hover
     } else {
         pal.control_hover
     }
