@@ -61,7 +61,7 @@ pub(super) fn home_header(cx: &mut Context<AppView>) -> impl IntoElement {
         tr!("device.device_count_plural", count => device_count)
     };
     h_flex()
-        .h(px(HEADER_H))
+        .h(HEADER_H)
         .w_full()
         .px_5()
         .gap_3()

@@ -3,7 +3,7 @@
 
 use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -69,7 +69,7 @@ pub(super) fn detail_header(
         .and_then(|r| r.battery.as_ref())
         .map(BatteryIndicator::inline);
     h_flex()
-        .h(px(HEADER_H))
+        .h(HEADER_H)
         .flex_shrink_0()
         .w_full()
         .px_5()
@@ -81,7 +81,7 @@ pub(super) fn detail_header(
         .child(
             div()
                 .min_w_0()
-                .max_w(px(220.))
+                .max_w(rems(13.75))
                 .truncate()
                 .text_heading()
                 .child(name),
@@ -183,7 +183,7 @@ fn detail_navigation(
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
     v_flex()
-        .w(px(DETAIL_RAIL_W))
+        .w(DETAIL_RAIL_W)
         .h_full()
         .flex_shrink_0()
         .gap_1()
@@ -976,7 +976,7 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
 
     DescriptionList::new()
         .columns(1)
-        .label_width(px(100.))
+        .label_width(rems(6.25))
         .bordered(false)
         .children(items)
 }

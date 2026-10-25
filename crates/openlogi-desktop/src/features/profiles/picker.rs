@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gpui::{
     Anchor, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, UniformListScrollHandle, WeakEntity, div,
-    prelude::FluentBuilder as _, px, uniform_list,
+    prelude::FluentBuilder as _, px, rems, uniform_list,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -114,7 +114,7 @@ fn add_app_content(
     let application_rows = Arc::new(application_rows);
 
     compact_panel(pal)
-        .w(px(320.))
+        .w(rems(20.))
         .child(title(tr!("profiles.add_app_profile"), pal))
         .child(divider(pal))
         .child(

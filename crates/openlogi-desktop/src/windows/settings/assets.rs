@@ -7,7 +7,7 @@ use crate::ui::components::control_select;
 use super::{
     App, AppState, AssetCommand, AssetControl, AssetSourcePreference, Button, Entity, IconName,
     IndexPath, IntoElement, ParentElement, SelectItem, SelectState, SettingField, SettingGroup,
-    SettingItem, SettingPage, SettingsView, SharedString, Styled, div, px,
+    SettingItem, SettingPage, SettingsView, SharedString, Styled, div, rems,
 };
 
 #[derive(Clone)]
@@ -150,10 +150,10 @@ pub(super) fn assets_page(
 fn asset_source_select_field(
     asset_source_select: Entity<SelectState<Vec<AssetSourceOption>>>,
 ) -> impl IntoElement {
-    div().flex_shrink_0().w(px(220.)).h_6().child(
+    div().flex_shrink_0().w(rems(13.75)).h_6().child(
         control_select(&asset_source_select)
-            .w(px(220.))
-            .menu_width(px(220.)),
+            .w(rems(13.75))
+            .menu_width(rems(13.75)),
     )
 }
 

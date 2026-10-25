@@ -36,13 +36,13 @@ use super::theme::{self, SelectableStyle as _, Typography as _};
 pub(crate) fn control_button(id: impl Into<ElementId>) -> gpui_component::button::Button {
     gpui_component::button::Button::new(id)
         .small()
-        .h(px(theme::CONTROL_H))
+        .h(theme::CONTROL_H)
 }
 
 /// A single-line input at the house control height; see [`control_button`].
 /// Pins via `min_h` because the inherent `Input::h` is multi-line-only.
 pub(crate) fn control_input(state: &Entity<InputState>) -> Input {
-    Input::new(state).small().min_h(px(theme::CONTROL_H))
+    Input::new(state).small().min_h(theme::CONTROL_H)
 }
 
 /// Cancel and Save buttons for a form dialog opened with `open_dialog`.
@@ -93,7 +93,7 @@ pub(crate) fn localize_placeholder(
 pub(crate) fn control_select<D: SearchableListDelegate + 'static>(
     state: &Entity<SelectState<D>>,
 ) -> Select<D> {
-    Select::new(state).small().min_h(px(theme::CONTROL_H))
+    Select::new(state).small().min_h(theme::CONTROL_H)
 }
 
 /// A controlled on/off switch with a compact state label.

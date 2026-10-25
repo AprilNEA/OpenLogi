@@ -2,7 +2,7 @@
 
 use gpui::{
     Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, svg,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
@@ -46,9 +46,9 @@ pub(super) fn action_library(
 
     v_flex()
         .flex_1()
-        .min_w(px(280.0))
-        .max_w(px(320.0))
-        .h(px(420.0))
+        .min_w(rems(17.5))
+        .max_w(rems(20.))
+        .h(rems(26.25))
         .overflow_hidden()
         .rounded(pal.card_radius)
         .border_1()

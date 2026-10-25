@@ -50,7 +50,8 @@ fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
-    // Wide enough for labels on both sides (`model_layout` hides them under 960).
+    // Wide enough for labels on both sides (`model_layout` hides them below a
+    // 960 px window at the standard scale).
     cx.simulate_resize(size(px(1200.), px(800.)));
     cx.update(|window, cx| window.draw(cx).clear(cx));
 

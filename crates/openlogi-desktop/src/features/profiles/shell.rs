@@ -168,7 +168,7 @@ fn profile_tab(
         .flex_none()
         .items_center()
         .gap_1p5()
-        .h(px(theme::CONTROL_H))
+        .h(theme::CONTROL_H)
         .px_2p5()
         .rounded(pal.control_radius)
         .text_body()

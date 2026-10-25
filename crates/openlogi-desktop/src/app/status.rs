@@ -2,7 +2,7 @@
 //! pre-connection / unreachable / outdated-build frames rendered in place of
 //! the real UI, and an attention bar shown only when action is required.
 
-use gpui::{App, Div, IntoElement, ParentElement, SharedString, Styled, div, px};
+use gpui::{App, Div, IntoElement, ParentElement, SharedString, Styled, div};
 use gpui_component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -171,7 +171,7 @@ impl Attention {
 pub(super) fn attention_footer(attention: Attention, cx: &App) -> impl IntoElement {
     let pal = theme::palette(cx);
     h_flex()
-        .h(px(FOOTER_H))
+        .h(FOOTER_H)
         .flex_shrink_0()
         .w_full()
         .px_5()

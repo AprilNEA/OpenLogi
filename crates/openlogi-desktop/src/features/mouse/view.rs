@@ -53,9 +53,12 @@ const MODEL_MIN_H: f32 = 360.;
 /// Max width the model (side gutter + image) may occupy, matching the
 /// `buttons_tab` content cap so a wide keyboard image never overflows the panel.
 const MODEL_CONTENT_MAX_W: f32 = 760.;
-/// Horizontal chrome the model can't draw into (the buttons-tab padding).
-const MODEL_HORIZONTAL_RESERVE: f32 =
-    crate::ui::theme::DETAIL_RAIL_W + super::inspector::INSPECTOR_W + 48.;
+/// Horizontal chrome the model can't draw into besides the navigation rail:
+/// the inspector and the buttons-tab padding.
+const MODEL_HORIZONTAL_RESERVE: f32 = super::inspector::INSPECTOR_W + 48.;
+/// The narrowest content area, beside the navigation rail, that still fits the
+/// side labels (a 960 px window at the standard scale).
+const MODEL_LABELS_MIN_W: f32 = 792.;
 /// Floor for the model's available width on a narrow window.
 const MODEL_MIN_CONTENT_W: f32 = 200.;
 
@@ -356,7 +359,7 @@ impl Render for MouseModelView {
             .collect();
 
         let viewport_h = f32::from(window.viewport_size().height);
-        let viewport_w = f32::from(window.viewport_size().width);
+        let viewport_w = content_width(window);
         let ModelLayout {
             canvas_w,
             mouse_left,
@@ -483,9 +486,17 @@ struct ModelLayout {
     labels: Vec<Label>,
 }
 
+/// The window width beside the navigation rail. The rail is in rems, so it
+/// widens with the interface scale; take its pixel width at this window's rem.
+fn content_width(window: &Window) -> f32 {
+    let rail_w = theme::DETAIL_RAIL_W.to_pixels(window.rem_size());
+    f32::from(window.viewport_size().width - rail_w)
+}
+
 /// Scale the model to fit the content area in both axes. A tall mouse is bound
 /// by the viewport height; a wide keyboard is bound by the available width and
-/// drops the label gutter so it remains centred.
+/// drops the label gutter so it remains centred. `viewport_w` excludes the
+/// navigation rail.
 fn model_layout(
     asset: Option<&ResolvedAsset>,
     viewport_w: f32,
@@ -493,7 +504,7 @@ fn model_layout(
     thumbwheel: bool,
 ) -> ModelLayout {
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
-    let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
+    let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= MODEL_LABELS_MIN_W;
     let content_w =
         (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
     let label_distribution = if has_labels && content_w >= TWO_SIDED_LABEL_MIN_W {

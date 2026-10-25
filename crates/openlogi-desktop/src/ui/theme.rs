@@ -21,16 +21,23 @@ use crate::state::AppState;
 
 use super::spacing::DynamicSpacing;
 
-/// Sizes that several components need to agree on.
-pub const HEADER_H: f32 = 64.;
-pub const FOOTER_H: f32 = 40.;
-pub const DETAIL_RAIL_W: f32 = 168.;
-/// Height of standalone form controls: buttons, text inputs, tabs.
+/// Sizes that several components need to agree on. They are rems, so the
+/// window chrome grows and shrinks with the interface scale along with the text
+/// and spacing it holds. The pixel size in each comment is the size at the
+/// standard 16 px rem.
+///
+/// Home and device-detail header height (64 px).
+pub const HEADER_H: Rems = rems(4.);
+/// Attention footer height (40 px).
+pub const FOOTER_H: Rems = rems(2.5);
+/// Device-detail navigation rail width (168 px).
+pub const DETAIL_RAIL_W: Rems = rems(10.5);
+/// Height of standalone form controls: buttons, text inputs, tabs (30 px).
 /// gpui-component's `.small()` maps to a 24 px `h_6`, which reads undersized
-/// against this 30 px control rhythm — small controls pin the height
+/// against this control rhythm — small controls pin the height
 /// explicitly (single-line `Input`s via `min_h`; their inherent `h` is
 /// multi-line-only and would be ignored).
-pub const CONTROL_H: f32 = 30.;
+pub const CONTROL_H: Rems = rems(1.875);
 
 const BASE_REM_SIZE: f32 = 16.;
 
