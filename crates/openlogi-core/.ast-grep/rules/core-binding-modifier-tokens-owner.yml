@@ -3,7 +3,7 @@
 id: core-binding-modifier-tokens-owner
 language: rust
 severity: error
-message: Shortcut modifier names belong to openlogi_core::binding::Modifiers; parse a chord with KeyCombo's FromStr instead of matching the names here.
+message: Shortcut modifier names belong to openlogi_core::binding::Modifiers; parse a chord or a modifier set with KeyCombo's or BareModifiers' FromStr instead of matching the names here.
 note: |
   KeyCombo once kept its own token table and bit constants, so any other
   parser of the same names would have had to track them by hand.
