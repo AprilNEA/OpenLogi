@@ -489,7 +489,7 @@ dash packaging/linux/tests/install-smoke.sh
 
 The desktop app's Linux update path follows the same contract. The engine's
 `latest.json` carries no Linux asset, so on Linux the app checks GitHub
-Releases itself (`platform::updater::linux_release_check`): `stable` reads
+Releases itself (`platform::updater::linux::release_check`): `stable` reads
 `/releases/latest`, and `beta` takes the highest version among the recent
 releases, prereleases included. When [installation-source
 detection](#installation-source-detection) reports a dpkg, rpm or pacman

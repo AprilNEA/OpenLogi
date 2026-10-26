@@ -1,5 +1,5 @@
 //! Verified download + package-manager install for a Linux package update
-//! found by [`super::linux_release_check`].
+//! found by [`super::release_check`].
 //!
 //! Mirrors `packaging/linux/install.sh`'s `install_release` /
 //! `install_release_package`: download the package plus its `.minisig` and
@@ -14,7 +14,7 @@ use std::path::Path;
 use gpui_updater::Version;
 use sha2::{Digest as _, Sha256};
 
-use super::linux_release_check::ReleaseAsset;
+use super::release_check::ReleaseAsset;
 use crate::platform::installation::LinuxPackage;
 
 /// Where polkit installs `pkexec`. A fixed path, never a `PATH` lookup: the
@@ -108,7 +108,7 @@ pub fn ensure_newer(version: &Version, current: &Version) -> Result<(), String> 
 }
 
 /// Verify `package_bytes` against the `.minisig` text with the update public
-/// key this build embeds ([`super::minisign_public_key`]), as `install.sh`'s
+/// key this build embeds ([`crate::platform::updater::minisign_public_key`]), as `install.sh`'s
 /// `minisign -V` does, and require the signed trusted comment to name
 /// `package_name`. The release pipeline signs with minisign's default trusted
 /// comment (`timestamp:…\tfile:<name>\thashed`), so this binds the signature
@@ -120,7 +120,7 @@ pub fn verify_minisign(
     package_name: &str,
 ) -> Result<(), String> {
     verify_minisign_with_key(
-        super::minisign_public_key(),
+        crate::platform::updater::minisign_public_key(),
         package_bytes,
         signature,
         package_name,

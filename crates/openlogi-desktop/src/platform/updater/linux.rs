@@ -1,8 +1,8 @@
 //! GPUI glue for the Linux package update path.
 //!
-//! Runs the [`linux_release_check`] GitHub lookup alongside the engine's own
+//! Runs the [`release_check`] GitHub lookup alongside the engine's own
 //! (deliberately asset-less, see `super`) manifest check, and drives the
-//! [`linux_package_install`] verified download + install from an explicit
+//! [`package_install`] verified download + install from an explicit
 //! "Install Update" click. Both only ever act when the running build targets
 //! Linux — a runtime check, not a `cfg`, so the exact same code compiles and
 //! is exercised by tests on every host; it simply never fires off Linux.
@@ -16,9 +16,11 @@ use std::time::Duration;
 use gpui::{App, Global};
 use gpui_updater::Version;
 
-use super::linux_package_install;
-use super::linux_release_check::{self, LinuxUpdateCheck, ReleaseAsset};
+use self::release_check::{LinuxUpdateCheck, ReleaseAsset};
 use crate::platform::installation::{Installation, InstallationSource};
+
+pub mod package_install;
+pub mod release_check;
 
 /// Observable state of the Linux GitHub-release check/install — parallel to,
 /// and independent from, the engine's [`gpui_updater::UpdateStatus`].
@@ -65,9 +67,7 @@ pub fn check_in_background(cx: &mut App) {
         let current = super::running_version();
         let result = cx
             .background_executor()
-            .spawn(
-                async move { linux_release_check::check_latest_release(&HTTP, channel, &current) },
-            )
+            .spawn(async move { release_check::check_latest_release(&HTTP, channel, &current) })
             .await;
         cx.update(|cx| {
             cx.set_global(match result {
@@ -199,16 +199,16 @@ fn download_bytes(url: &str, limit: u64, timeout: Duration) -> Result<Vec<u8>, S
 /// the verified file to the package manager through `pkexec`. Blocking —
 /// callers run it off the UI thread. Not unit-tested: it is real network I/O
 /// plus a real privileged package-manager invocation, which must never run
-/// outside a genuine, user-initiated install (see [`linux_package_install`]
+/// outside a genuine, user-initiated install (see [`package_install`]
 /// for the unit-tested pure logic this calls into).
 fn download_verify_and_install(
     assets: &[ReleaseAsset],
     version: &Version,
     source: crate::platform::installation::LinuxPackage,
 ) -> Result<(), String> {
-    linux_package_install::ensure_newer(version, &super::running_version())?;
-    linux_package_install::require_install_tools(source)?;
-    let matched = linux_package_install::match_assets(assets, version, source)?;
+    package_install::ensure_newer(version, &super::running_version())?;
+    package_install::require_install_tools(source)?;
+    let matched = package_install::match_assets(assets, version, source)?;
 
     let package_bytes = download_bytes(
         &matched.package.browser_download_url,
@@ -228,16 +228,16 @@ fn download_verify_and_install(
     )?)
     .map_err(|error| format!("SHA256SUMS is not valid UTF-8: {error}"))?;
 
-    let expected_hex = linux_package_install::find_checksum(&checksums_text, &matched.package.name)
+    let expected_hex = package_install::find_checksum(&checksums_text, &matched.package.name)
         .ok_or_else(|| format!("SHA256SUMS has no entry for {}", matched.package.name))?;
-    if !linux_package_install::verify_checksum(&package_bytes, expected_hex) {
+    if !package_install::verify_checksum(&package_bytes, expected_hex) {
         return Err(format!(
             "checksum verification failed for {}",
             matched.package.name
         ));
     }
 
-    linux_package_install::verify_minisign(&package_bytes, &signature_text, &matched.package.name)?;
+    package_install::verify_minisign(&package_bytes, &signature_text, &matched.package.name)?;
 
     // A private, randomly-named, owner-only directory — not the shared,
     // world-writable `std::env::temp_dir()` with a predictable filename
@@ -250,7 +250,7 @@ fn download_verify_and_install(
     std::fs::write(&package_path, &package_bytes)
         .map_err(|error| format!("failed to write {}: {error}", package_path.display()))?;
 
-    let command = linux_package_install::pkexec_install_command(source, &package_path);
+    let command = package_install::pkexec_install_command(source, &package_path);
     let [program, rest @ ..] = command.as_slice() else {
         return Err("empty install command".to_string());
     };
