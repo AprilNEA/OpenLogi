@@ -9,7 +9,11 @@ fn rotation(magnitude: i32) -> WheelRotation {
 }
 
 fn scale() -> ScrollScale {
-    ScrollScale::new(WheelResolution::UNKNOWN, ThumbwheelSensitivity::DEFAULT)
+    ScrollScale::new(
+        WheelResolution::UNKNOWN,
+        ThumbwheelSensitivity::DEFAULT,
+        ThumbwheelSensitivity::DEFAULT,
+    )
 }
 
 #[test]

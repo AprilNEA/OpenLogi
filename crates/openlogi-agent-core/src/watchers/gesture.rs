@@ -85,6 +85,20 @@ impl GestureOutputs {
         }
     }
 
+    /// Post one zoom step from `key`'s wheel.
+    ///
+    /// Zoom leaves through the outputs rather than calling `openlogi_inject`
+    /// from the dispatcher, so every synthetic output this watcher produces
+    /// has one owner — the same reason scroll goes through [`Self::post_scroll`]
+    /// — and the gesture harness can observe zoom at that boundary.
+    #[expect(
+        clippy::unused_self,
+        reason = "zoom needs no runtime handle yet, but it is an output of this type: moving it off `&self` would put one synthetic output outside the owner every other one leaves through"
+    )]
+    fn post_zoom(&self, key: &str, magnification: f64) {
+        openlogi_inject::post_zoom(magnification, openlogi_inject::ZoomSource::Device(key));
+    }
+
     /// Post a diverted main wheel's scroll, eased by the scroll runtime.
     fn post_main_wheel_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {
         if let Err(direct) = self.scroll.try_hidpp_wheel_scroll(session, delta) {
@@ -224,6 +238,7 @@ fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
         gesture_bindings,
         side_gesture_bindings,
         thumbwheel_sensitivity,
+        zoom_sensitivity,
         invert_wheel,
         pointer_target: _,
     } = a;
@@ -232,6 +247,7 @@ fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
         && *gesture_bindings == b.gesture_bindings
         && *side_gesture_bindings == b.side_gesture_bindings
         && *thumbwheel_sensitivity == b.thumbwheel_sensitivity
+        && *zoom_sensitivity == b.zoom_sensitivity
         && *invert_wheel == b.invert_wheel
 }
 

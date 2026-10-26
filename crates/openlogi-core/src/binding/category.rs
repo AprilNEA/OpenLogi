@@ -18,6 +18,8 @@ pub enum Category {
     Dpi,
     /// Scroll direction shortcuts.
     Scroll,
+    /// Zoom in / zoom out.
+    Zoom,
     /// Window/app navigation: Mission Control, Launchpad, etc.
     Navigation,
     /// Lock screen, show desktop, system-level actions.
@@ -35,6 +37,7 @@ impl Category {
             Category::Mouse => "Mouse",
             Category::Dpi => "DPI",
             Category::Scroll => "Scroll",
+            Category::Zoom => "Zoom",
             Category::Navigation => "Navigation",
             Category::System => "System",
         }
@@ -50,6 +53,7 @@ impl Category {
             Category::Mouse => "device.mouse",
             Category::Dpi => "pointer.dpi",
             Category::Scroll => "pointer.scroll",
+            Category::Zoom => "pointer.zoom",
             Category::Navigation => "actions.navigation",
             Category::System => "actions.system",
         }

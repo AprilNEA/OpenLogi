@@ -73,6 +73,9 @@ pub struct DispatchPlan {
     /// which [`plan_for_device`] cannot see: the orchestrator fills it in,
     /// as it does [`Self::pointer_target`].
     pub invert_wheel: bool,
+    /// This device's effective zoom sensitivity (device override or the
+    /// app-wide default), scaling a wheel bound to zoom.
+    pub zoom_sensitivity: ThumbwheelSensitivity,
     /// Pointer identity used to select these mouse bindings; absent for the
     /// explicitly focused policy and keyboard input.
     pub pointer_target: Option<openlogi_hook::PointerTarget>,
@@ -305,6 +308,7 @@ pub fn plan_for_device(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    let zoom_sensitivity = config.zoom_sensitivity(config_key);
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -333,6 +337,7 @@ pub fn plan_for_device(
             side_gesture_bindings,
             thumbwheel_sensitivity,
             invert_wheel: false,
+            zoom_sensitivity,
             pointer_target: None,
         },
     }

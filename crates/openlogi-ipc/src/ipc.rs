@@ -151,7 +151,9 @@ pub use succession::Identity;
 ///      `BacklightControls` became the bit set of the changes the keyboard
 ///      offers, and `BacklightState::duration` and
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
-///      timer, five-second steps up to two hours.
+///      timer, five-second steps up to two hours. `Action::{ZoomIn, ZoomOut}`
+///      and `ActionRingIcon::{ZoomIn, ZoomOut}` appended, for a wheel or
+///      button bound to continuous zoom.
 pub const PROTOCOL_VERSION: u32 = 41;
 
 /// Environment variable through which the agent hands a supervised helper the

@@ -219,6 +219,19 @@ pub enum Action {
     /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
     /// lit while the mode is on. Does nothing on other devices.
     TogglePrecisionMode,
+    /// Zoom in one step in the frontmost application.
+    ///
+    /// Not a `Cmd+=` / `Ctrl+=` chord: that is document-only and steps in
+    /// coarse, app-defined increments. Backends instead synthesise whatever
+    /// each platform actually reads as continuous zoom — a magnification
+    /// gesture on macOS (AppKit and WebKit zoom on magnify, and macOS has no
+    /// ⌘+scroll page zoom at all), Ctrl+wheel notches on Windows and Linux.
+    /// That is what lets a wheel feel like a zoom control rather than a
+    /// repeated keypress.
+    ZoomIn,
+    /// Zoom out one step in the frontmost application. Counterpart to
+    /// [`Action::ZoomIn`]; see it for why this is a gesture, not a chord.
+    ZoomOut,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -333,6 +346,9 @@ macro_rules! for_each_unit_action {
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" "actions.scroll_left" Scroll ScrollLeft,
             HorizontalScrollRight "Scroll Right" "actions.scroll_right" Scroll ScrollRight,
+            // Zoom
+            ZoomIn "Zoom In" "actions.zoom_in" Zoom ZoomIn,
+            ZoomOut "Zoom Out" "actions.zoom_out" Zoom ZoomOut,
         }
     };
 }

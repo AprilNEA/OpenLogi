@@ -10,6 +10,10 @@
 use std::collections::HashMap;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::sync::{LazyLock, Mutex, PoisonError};
+// Only the transient hold carries the guard across a body of output.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::sync::MutexGuard;
+use std::time::Duration;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
@@ -38,6 +42,45 @@ use linux as platform;
 use macos as platform;
 #[cfg(target_os = "windows")]
 use windows as platform;
+
+/// Which input a zoom step came from, so two sources never share the
+/// fractional progress one of them made.
+///
+/// A button press is a gesture of its own, distinct from any wheel, and each
+/// device's wheel is distinct from every other. Naming the button case as a
+/// variant rather than a reserved string keeps the sentinel out of the domain
+/// type: there is no device key a caller could pass that collides with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZoomSource<'a> {
+    /// Zoom bound to a button, one notch per press.
+    Button,
+    /// A device's wheel, named by its config key.
+    Device(&'a str),
+}
+
+/// Magnification one zoom notch is worth, as a fraction of the current zoom.
+///
+/// The owner of this decision: macOS sends it as the magnification of one
+/// gesture step, and the quantized backends accumulate until a whole notch of
+/// it is due. It is *not* the per-tick fraction the wheel dispatcher asks for
+/// (`ZoomBinding::PER_TICK`, 0.15 at 1× sensitivity) — one tick is worth
+/// several notches.
+pub(crate) const ZOOM_PER_NOTCH: f64 = 0.05;
+
+/// Idle gap that ends one zoom gesture. Long enough to survive the pause
+/// between two wheel increments at a slow turn, short enough that the gesture
+/// does not outlive the user's intent.
+///
+/// One owner for all three platforms: macOS closes its open pinch session on
+/// it, and the quantizers drop a stale remainder on it, so a paused turn means
+/// the same thing everywhere.
+pub(crate) const ZOOM_IDLE: Duration = Duration::from_millis(200);
+
+// Quantizing zoom into Ctrl+wheel notches is Windows/Linux business, but the
+// logic is pure and its boundaries are exactly where the bugs live, so it is
+// compiled for tests on every host too.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+mod zoom_notch;
 
 /// Which isolated edge of a held keyboard chord to synthesize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,9 +173,21 @@ impl HeldOutput {
         });
         let released = released.map_or_else(Vec::new, |(combo, keys)| held_keys(combo, keys));
         let pressed = pressed.map_or_else(Vec::new, |(combo, keys)| held_keys(combo, keys));
+        self.transition_keys(&released, &pressed, tapped)
+    }
+
+    /// Reference-count physical keys given directly, for callers that own a
+    /// bare modifier hold rather than a whole [`KeyCombo`]. `tapped` carries
+    /// the ordinary key a modifiers-only hold taps once, if there is one.
+    fn transition_keys(
+        &mut self,
+        released: &[HeldKey],
+        pressed: &[HeldKey],
+        tapped: Option<HeldKey>,
+    ) -> HoldTransition {
         let before = self.owners.clone();
 
-        for key in &released {
+        for key in released {
             match self.owners.get_mut(key) {
                 Some(owners) if *owners > 1 => *owners -= 1,
                 Some(_) => {
@@ -141,17 +196,19 @@ impl HeldOutput {
                 None => {}
             }
         }
-        for key in &pressed {
+        for key in pressed {
             *self.owners.entry(*key).or_default() += 1;
         }
 
         HoldTransition {
             up: released
-                .into_iter()
+                .iter()
+                .copied()
                 .filter(|key| before.contains_key(key) && !self.owners.contains_key(key))
                 .collect(),
             down: pressed
-                .into_iter()
+                .iter()
+                .copied()
                 .filter(|key| !before.contains_key(key) && self.owners.contains_key(key))
                 .collect(),
             // A modifiers-only hold never owns its ordinary key, so an owner
@@ -488,6 +545,109 @@ fn with_held_modifiers<R>(post: impl FnOnce(HeldModifiers) -> R) -> R {
     post(output.modifiers())
 }
 
+/// Run `post` under the lock that orders held-chord edges, telling it which
+/// modifier outputs some hold already keeps down.
+///
+/// A one-shot chord must leave those edges alone. Its balanced up edge would
+/// otherwise release a modifier it does not own — zoom's Ctrl, or a held
+/// shortcut's — and on Linux and Windows wheel zoom runs on a different
+/// watcher thread than button shortcuts, so the two interleave: Ctrl goes
+/// down for zoom, `Ctrl+C` fires and releases it, and the notches that follow
+/// scroll instead of zooming. Taking the same lock also keeps a one-shot's
+/// frames from splitting a held transition in half.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn with_owned_modifiers<R>(post: impl FnOnce(&[HeldKey]) -> R) -> R {
+    let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    let owned: Vec<HeldKey> = output.owners.keys().copied().collect();
+    post(&owned)
+}
+
+/// The chord modifiers a one-shot emits itself: those no other hold owns.
+///
+/// `map` turns a [`HeldKey`] into the platform's own key type, so this stays
+/// one implementation for `evdev` keycodes and Windows virtual keys alike.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn unowned_modifiers<K: Copy + PartialEq>(
+    mods: &[K],
+    owned: &[HeldKey],
+    map: impl Fn(HeldKey) -> Option<K>,
+) -> Vec<K> {
+    let held: Vec<K> = owned.iter().copied().filter_map(map).collect();
+    mods.iter()
+        .copied()
+        .filter(|modifier| !held.contains(modifier))
+        .collect()
+}
+
+/// A modifier hold that lasts exactly as long as one run of output.
+///
+/// Zoom needs Ctrl down across a run of wheel notches on Linux and Windows.
+/// Pressing it, dropping the lock and posting the notches afterwards is not
+/// enough: wheel zoom runs on a different watcher thread than button
+/// shortcuts, so a one-shot can land between two notches and be typed *with*
+/// Ctrl down — `Ctrl+C` instead of `C`. [`with_owned_modifiers`] stops that
+/// one-shot from releasing Ctrl, but not from picking it up.
+///
+/// So the whole run goes under one [`HELD_OUTPUT`] guard: down edge, output,
+/// up edge. One-shots and held transitions take the same lock, so they wait
+/// until the run ends rather than interleaving with it.
+///
+/// The owners map still counts the hold, so a [`HeldChord`] that already owns
+/// Ctrl keeps it: the up edge fires only when the last owner lets go.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+struct TransientHold<'a> {
+    output: MutexGuard<'static, HeldOutput>,
+    keys: &'a [HeldKey],
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+impl Drop for TransientHold<'_> {
+    fn drop(&mut self) {
+        let transition = self.output.transition_keys(self.keys, &[], None);
+        emit_hold_transition(&transition);
+    }
+}
+
+/// Hold `keys` down for the duration of `post`, under one ownership guard.
+///
+/// `post` must not touch [`HELD_OUTPUT`] — this call owns the lock for its
+/// whole body, and that mutex is not reentrant. Emitting platform frames,
+/// which is all zoom does here, is fine.
+///
+/// [`Drop`] posts the up edge, so a panic inside `post` cannot strand the
+/// modifiers down.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn with_transient_modifiers<R>(keys: &[HeldKey], post: impl FnOnce() -> R) -> R {
+    let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    let transition = output.transition_keys(&[], keys, None);
+    emit_hold_transition(&transition);
+    // Own the release before running `post`, so unwinding still balances the
+    // transition that just completed.
+    let _hold = TransientHold { output, keys };
+    post()
+}
+
+/// Emit the edges of `transition`, which the caller has already ordered under
+/// [`HELD_OUTPUT`].
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn emit_hold_transition(transition: &HoldTransition) {
+    cfg_select! {
+        target_os = "linux" => {
+            linux::hold_keys(&transition.up, KeyPhase::Up);
+            linux::hold_keys(&transition.down, KeyPhase::Down);
+        }
+        target_os = "windows" => {
+            windows::hold_keys(&transition.up, KeyPhase::Up);
+            windows::hold_keys(&transition.down, KeyPhase::Down);
+        }
+        _ => {
+            tracing::warn!(
+                "held modifier output unsupported on this platform"
+            );
+        }
+    }
+}
+
 /// Let the frontmost app's menus answer shortcuts the keyboard layout
 /// remaps, such as Back and Forward on Spanish or German layouts. Call once
 /// on the main thread before its run loop starts.
@@ -596,6 +756,39 @@ pub fn post_scroll(delta: ScrollDelta) {
         }
         _ => {
             let _ = delta;
+        }
+    }
+}
+
+/// Apply one continuous magnification step at the current focus.
+///
+/// `magnification` is a signed fraction of the current zoom, the unit a
+/// trackpad pinch reports. Successive calls belong to one gesture: the backend
+/// opens the gesture on the first step and closes it once the input stops, so
+/// applications see the same begin/change/end session a real pinch produces.
+///
+/// A per-step self-contained gesture is deliberately *not* what this does.
+/// Apps that read the raw wheel event in their own code accept one, but a
+/// browser's own page zoom discards a gesture that begins and ends inside a
+/// single step — which is exactly how zoom ends up working on a canvas app
+/// while an ordinary page only scrolls.
+pub fn post_zoom(magnification: f64, source: ZoomSource<'_>) {
+    if !magnification.is_finite() || magnification == 0.0 {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_zoom(magnification, source);
+        }
+        target_os = "linux" => {
+            linux::post_zoom(magnification, source);
+        }
+        target_os = "windows" => {
+            windows::post_zoom(magnification, source);
+        }
+        _ => {
+            let _ = magnification;
+            let _ = source;
         }
     }
 }
@@ -738,6 +931,8 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use openlogi_core::binding::{HeldKeys, KeyCombo};
 
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    use super::{HELD_OUTPUT, with_transient_modifiers};
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::{HeldKey, HeldOutput, HoldTransition};
     use super::{QuantizedScroll, ScrollQuantizer};
@@ -810,6 +1005,146 @@ mod tests {
                 down: vec![],
                 tap: None,
             }
+        );
+    }
+
+    /// Zoom (Linux and Windows) holds Ctrl as a bare modifier while a user
+    /// chord may already own it. Neither owner may emit an edge the other does
+    /// not expect: zoom must not re-press a Ctrl that is already down, and
+    /// letting go of the zoom hold must not release the chord's Ctrl.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn zoom_hold_shares_control_with_an_active_chord() {
+        let control_a = combo("Ctrl+A");
+        let zoom = [HeldKey::Control];
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition(None, Some((&control_a, HeldKeys::WholeChord))),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Control, HeldKey::Key(control_a.key())],
+                tap: None,
+            }
+        );
+        assert_eq!(
+            output.transition_keys(&[], &zoom, None),
+            HoldTransition::default(),
+            "the chord already holds Ctrl, so zoom must not re-press it"
+        );
+        assert_eq!(
+            output.transition_keys(&zoom, &[], None),
+            HoldTransition::default(),
+            "zoom letting go must not release the chord's Ctrl"
+        );
+        assert_eq!(
+            output.transition(Some((&control_a, HeldKeys::WholeChord)), None),
+            HoldTransition {
+                up: vec![HeldKey::Control, HeldKey::Key(control_a.key())],
+                down: vec![],
+                tap: None,
+            }
+        );
+    }
+
+    /// With no chord holding it, zoom's own hold still owns both edges.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn zoom_hold_presses_control_when_nothing_else_owns_it() {
+        let zoom = [HeldKey::Control];
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition_keys(&[], &zoom, None),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Control],
+                tap: None,
+            }
+        );
+        assert_eq!(
+            output.transition_keys(&zoom, &[], None),
+            HoldTransition {
+                up: vec![HeldKey::Control],
+                down: vec![],
+                tap: None,
+            }
+        );
+    }
+
+    /// The transient hold keeps the ownership lock for its whole body.
+    ///
+    /// This is the property that stops a one-shot from being typed with
+    /// zoom's Ctrl down: one-shots take the same lock, so while the notches
+    /// go out they cannot run at all. Holding no keys keeps the platform
+    /// backends out of it — the edges are empty, so nothing is emitted.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn a_transient_hold_keeps_the_lock_across_its_body() {
+        assert!(
+            HELD_OUTPUT.try_lock().is_ok(),
+            "nothing should own the lock before the hold"
+        );
+
+        let locked_inside = with_transient_modifiers(&[], || HELD_OUTPUT.try_lock().is_err());
+
+        assert!(
+            locked_inside,
+            "a one-shot taking the lock must wait for the hold to finish"
+        );
+        assert!(
+            HELD_OUTPUT.try_lock().is_ok(),
+            "the hold must release the lock when its body returns"
+        );
+    }
+
+    /// Stand-in for a platform key type, mapping the four modifier outputs to
+    /// distinct values the way `held_keycode` and `held_key` do.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn fake_key(key: HeldKey) -> Option<u16> {
+        match key {
+            HeldKey::Control => Some(1),
+            HeldKey::Shift => Some(2),
+            HeldKey::Alt => Some(3),
+            HeldKey::Super => Some(4),
+            HeldKey::Key(_) => None,
+        }
+    }
+
+    /// A one-shot chord must not emit edges for a modifier zoom or a held
+    /// shortcut already owns: its balanced up edge would release it.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn a_one_shot_leaves_modifiers_other_holds_own_alone() {
+        let ctrl_shift = [1, 2];
+
+        assert_eq!(
+            super::unowned_modifiers(&ctrl_shift, &[], fake_key),
+            vec![1, 2],
+            "with nothing held, the one-shot owns both edges itself"
+        );
+        assert_eq!(
+            super::unowned_modifiers(&ctrl_shift, &[HeldKey::Control], fake_key),
+            vec![2],
+            "zoom holds Ctrl, so only Shift is the one-shot's to press"
+        );
+        assert_eq!(
+            super::unowned_modifiers(&[1], &[HeldKey::Control], fake_key),
+            Vec::<u16>::new(),
+            "the whole chord is already down: emit no modifier edge at all"
+        );
+    }
+
+    /// Ordinary keys a held chord keeps down are not modifiers, so they must
+    /// not filter a one-shot's modifier list.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn an_owned_ordinary_key_does_not_mask_a_modifier() {
+        let held = [HeldKey::Key(combo("Ctrl+A").key())];
+        assert_eq!(
+            super::unowned_modifiers(&[1], &held, fake_key),
+            vec![1],
+            "only the chord's own Ctrl is held, not the modifier output"
         );
     }
 
