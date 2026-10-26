@@ -64,16 +64,15 @@ pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 
 use devices::reapply_targets;
 use devices::{
-    FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
+    FollowerCookieState, FollowerCookieWrite, ForcedReapply, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch,
     carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
     changed_onboard_switches, config_keeps_os_layout, configured_dpi, configured_force_sensing,
-    configured_onboard_profiles, configured_report_rate, configured_wheel_mode,
-    hidpp20_slot_targets, host_dpi, host_switch_links, is_hidpp_device, keeps_os_layout,
-    main_wheel_divert, newly_kept_os_layouts, onboard_switch, os_layout_appeared, pick_current,
-    plan_disabled_keys_recovery, plan_reapply, published_inventories, reconnect_dpi,
-    reconnect_follower_cookies, same_device_lifecycle, saved_speed, settings_moved, stable_id,
-    wheel_inverted,
+    configured_onboard_profiles, configured_report_rate, configured_wheel_mode, host_dpi,
+    host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts,
+    onboard_switch, os_layout_appeared, pick_current, plan_disabled_keys_recovery, plan_reapply,
+    published_inventories, reconnect_dpi, reconnect_follower_cookies, same_device_lifecycle,
+    saved_speed, settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -571,24 +570,6 @@ impl SharedHandles {
     }
 }
 
-/// Which devices the next inventory refresh re-applies volatile settings to
-/// although its snapshot shows no transition for them. Ordered: a wider
-/// request subsumes a narrower one.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-enum ForcedReapply {
-    /// Only the transitions the snapshot itself shows.
-    #[default]
-    None,
-    /// Also the online devices behind HID++ 2.0 receivers: one of them
-    /// reported a reconnect, which such a receiver never shows as an
-    /// offline→online transition.
-    Hidpp20Slots,
-    /// Every online device: the system woke, and devices may have
-    /// power-cycled while their set/route/online state looks identical across
-    /// the sleep gap.
-    All,
-}
-
 /// Owns the config + device selection and keeps [`SharedHandles`] in sync.
 pub struct Orchestrator {
     config: Config,
@@ -603,21 +584,15 @@ pub struct Orchestrator {
     /// the distinction (as [`InventoryHealth`]) so the GUI can tell them
     /// apart.
     inventory: InventoryState,
-    /// Set after a system wake: devices may have power-cycled while their
-    /// set/route/online state looks identical across the gap, so the next
-    /// refresh re-applies volatile settings to every online device. The
-    /// value is the confirming re-apply budget the forced targets are
-    /// queued with.
-    forced_reapply_budget: Option<u8>,
     /// System resume must rearm every online capture; an identity-free device
     /// wake only reapplies settings, since each armed listener owns its wake.
     forced_capture_rearm: bool,
     /// Rearm epochs belong to exact routes. Discovery or wake on one link
     /// must not retire a still-running capture on another link.
     capture_route_generations: HashMap<DeviceRoute, u64>,
-    /// Devices the next refresh re-applies volatile settings to although the
-    /// snapshot shows no transition for them — see [`ForcedReapply`].
-    forced_reapply: ForcedReapply,
+    /// The re-apply the next refresh owes devices whose snapshot shows no
+    /// transition, with its scope and confirm budget — see [`ForcedReapply`].
+    forced_reapply: Option<ForcedReapply>,
     /// Whether the last enumeration pass failed to open HID++ nodes; published
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
@@ -767,10 +742,9 @@ impl Orchestrator {
                 target: openlogi_hook::PointerTarget::Unavailable,
             },
             inventory: InventoryState::Pending,
-            forced_reapply_budget: None,
             forced_capture_rearm: false,
             capture_route_generations: HashMap::new(),
-            forced_reapply: ForcedReapply::None,
+            forced_reapply: None,
             hid_open_failures: false,
             reapply_followup: BTreeMap::new(),
             disabled_keys_recovery: BTreeMap::new(),
@@ -1235,8 +1209,7 @@ impl Orchestrator {
         // a device's own `0x1d4b` reconnect broadcast, or a channel the
         // enumerator replaced after retiring it, where none of those
         // transitions are observable.
-        let forced = self.forced_reapply_budget.take();
-        let forced_reapply = std::mem::take(&mut self.forced_reapply);
+        let forced = self.forced_reapply.take();
         let next_current = pick_current(&devices, self.config.selected_device());
         self.rearm_capture_routes(&devices);
         // Manual cancellation can happen long after the boot/reconnect ladder
@@ -1260,25 +1233,9 @@ impl Orchestrator {
             plan_disabled_keys_recovery(&devices, &disabled_keys_recovery, confirm_reapply);
         self.disabled_keys_recovery = next_disabled_keys_recovery;
         let followup = std::mem::take(&mut self.reapply_followup);
-        let (mut targets, next_followup) =
+        let (targets, next_followup) =
             plan_reapply(&self.devices, &devices, &followup, forced, confirm_reapply);
         self.reapply_followup = next_followup;
-        if forced_reapply == ForcedReapply::Hidpp20Slots {
-            // The reconnect's single write races the link still stabilizing,
-            // and a later unchanged snapshot never retargets it, so it queues
-            // the link-race confirm like any other reconnect.
-            for idx in hidpp20_slot_targets(&devices) {
-                if !targets.contains(&idx) {
-                    targets.push(idx);
-                }
-                self.reapply_followup
-                    .entry(stable_id(&devices[idx]))
-                    .and_modify(|remaining| {
-                        *remaining = (*remaining).max(RECONNECT_REAPPLY_CONFIRM_RETRIES);
-                    })
-                    .or_insert(RECONNECT_REAPPLY_CONFIRM_RETRIES);
-            }
-        }
         // A keyboard switched to another platform on the device (a platform
         // key combination) is put back, as Logi Options+ does on its
         // platform-change report. So is one whose `0x4531` support shows up
@@ -1412,7 +1369,7 @@ impl Orchestrator {
         let all = std::mem::take(&mut self.forced_capture_rearm);
         self.capture_route_generations
             .retain(|route, _| devices.iter().any(|dev| dev.route.as_ref() == Some(route)));
-        let targets = reapply_targets(&self.devices, devices, all);
+        let targets = reapply_targets(&self.devices, devices, |_| all);
         if targets.is_empty() {
             return;
         }
@@ -1460,23 +1417,33 @@ impl Orchestrator {
         self.force_reapply(RECONNECT_REAPPLY_CONFIRM_RETRIES);
     }
 
-    /// Coalesce forced re-apply requests, keeping the largest confirm budget:
-    /// a device reconnect arriving between a system wake and its snapshot must
-    /// not shrink the wake's boot-race ladder.
+    /// Request a re-apply of every online device on the next refresh,
+    /// coalesced with any request already pending (see
+    /// [`ForcedReapply::merge`]).
     fn force_reapply(&mut self, confirm_retries: u8) {
-        self.forced_reapply_budget =
-            Some(self.forced_reapply_budget.unwrap_or(0).max(confirm_retries));
-        self.forced_reapply = self.forced_reapply.max(ForcedReapply::All);
+        self.request_forced_reapply(ForcedReapply::All {
+            confirm: confirm_retries,
+        });
+    }
+
+    fn request_forced_reapply(&mut self, request: ForcedReapply) {
+        self.forced_reapply = Some(
+            self.forced_reapply
+                .map_or(request, |pending| pending.merge(request)),
+        );
     }
 
     /// Re-apply volatile settings to the online devices behind HID++ 2.0
     /// receivers on the next inventory refresh. Called when one of them
     /// reported a reconnect: such a receiver sends no connection notification,
-    /// so the device's power cycle shows no offline→online transition. Capture
-    /// is not re-armed — the device's own capture session already re-arms on
-    /// that report.
+    /// so the device's power cycle shows no offline→online transition. Its
+    /// single write races the link still stabilizing, so it queues the
+    /// link-race confirm like any other reconnect. Capture is not re-armed —
+    /// the device's own capture session already re-arms on that report.
     pub fn reapply_hidpp20_slots_on_next_refresh(&mut self) {
-        self.forced_reapply = self.forced_reapply.max(ForcedReapply::Hidpp20Slots);
+        self.request_forced_reapply(ForcedReapply::Hidpp20Slots {
+            confirm: RECONNECT_REAPPLY_CONFIRM_RETRIES,
+        });
     }
 
     /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,

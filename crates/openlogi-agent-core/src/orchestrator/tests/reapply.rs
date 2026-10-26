@@ -27,7 +27,13 @@ fn direct_identity_enrichment_carries_the_spent_followup_budget() {
         let (targets, retained) = plan_reapply(previous, next, &followup, None, true);
         assert_eq!(targets, [0]);
         assert_eq!(retained, BTreeMap::from([(next_id, 1)]));
-        let (targets, retained) = plan_reapply(previous, next, &followup, Some(1), true);
+        let (targets, retained) = plan_reapply(
+            previous,
+            next,
+            &followup,
+            Some(ForcedReapply::All { confirm: 1 }),
+            true,
+        );
         assert_eq!(targets, [0]);
         assert_eq!(retained.get(&stable_id(&next[0])), Some(&1));
     }
@@ -264,21 +270,24 @@ fn receiver_identity_enrichment_preserves_requests_and_scoped_recovery() {
 #[test]
 fn reapply_targets_new_arrivals_and_transitions() {
     // First sighting of an online device → re-apply.
-    assert_eq!(reapply_targets(&[], &[dev("a", 1, true)], false), vec![0]);
+    assert_eq!(
+        reapply_targets(&[], &[dev("a", 1, true)], |_| false),
+        vec![0]
+    );
     // Steady state → nothing.
-    assert!(reapply_targets(&[dev("a", 1, true)], &[dev("a", 1, true)], false).is_empty());
+    assert!(reapply_targets(&[dev("a", 1, true)], &[dev("a", 1, true)], |_| false).is_empty());
     // Replug under a new route (same key, new slot) → re-apply.
     assert_eq!(
-        reapply_targets(&[dev("a", 1, true)], &[dev("a", 2, true)], false),
+        reapply_targets(&[dev("a", 1, true)], &[dev("a", 2, true)], |_| false),
         vec![0]
     );
     // Waking from device sleep (offline → online) → re-apply.
     assert_eq!(
-        reapply_targets(&[dev("a", 1, false)], &[dev("a", 1, true)], false),
+        reapply_targets(&[dev("a", 1, false)], &[dev("a", 1, true)], |_| false),
         vec![0]
     );
     // Going to sleep (online → offline) → nothing.
-    assert!(reapply_targets(&[dev("a", 1, true)], &[dev("a", 1, false)], false).is_empty());
+    assert!(reapply_targets(&[dev("a", 1, true)], &[dev("a", 1, false)], |_| false).is_empty());
 }
 
 #[test]
@@ -288,19 +297,19 @@ fn reapply_targets_disambiguates_same_model_duplicates() {
     // with both already online must target NEITHER.
     let prev = [dev("dup", 1, true), dev("dup", 2, true)];
     let next = [dev("dup", 1, true), dev("dup", 2, true)];
-    assert!(reapply_targets(&prev, &next, false).is_empty());
+    assert!(reapply_targets(&prev, &next, |_| false).is_empty());
 }
 
 #[test]
 fn reapply_targets_skip_offline_and_routeless_devices() {
     // A paired-but-asleep new arrival waits for its online transition —
     // writing now would only time out against a sleeping device.
-    assert!(reapply_targets(&[], &[dev("a", 1, false)], false).is_empty());
+    assert!(reapply_targets(&[], &[dev("a", 1, false)], |_| false).is_empty());
     let routeless = AgentDevice {
         route: None,
         ..dev("b", 2, true)
     };
-    assert!(reapply_targets(&[], &[routeless], false).is_empty());
+    assert!(reapply_targets(&[], &[routeless], |_| false).is_empty());
 }
 
 #[test]
@@ -309,7 +318,7 @@ fn reapply_all_targets_every_online_device() {
     let next = [dev("a", 1, true), dev("b", 2, false)];
     // The post-wake snapshot looks identical to the pre-sleep one; the
     // flag still re-applies to the online device (and only that one).
-    assert_eq!(reapply_targets(&prev, &next, true), vec![0]);
+    assert_eq!(reapply_targets(&prev, &next, |_| true), vec![0]);
 }
 
 #[test]
@@ -317,22 +326,27 @@ fn receiver_reconnect_requests_capture_rearm() {
     let prev = [dev("selected", 1, false), dev("other", 2, true)];
     let next = [dev("selected", 1, true), dev("other", 2, true)];
 
-    assert_eq!(reapply_targets(&prev, &next, false), [0]);
-    assert!(reapply_targets(&[dev("other", 2, true)], &[dev("other", 2, true)], false).is_empty());
+    assert_eq!(reapply_targets(&prev, &next, |_| false), [0]);
+    assert!(
+        reapply_targets(&[dev("other", 2, true)], &[dev("other", 2, true)], |_| {
+            false
+        })
+        .is_empty()
+    );
 }
 
 #[test]
 fn system_wake_requests_capture_rearm_for_online_devices() {
     let devices = [dev("selected", 1, true), dev("other", 2, true)];
 
-    assert_eq!(reapply_targets(&devices, &devices, true), [0, 1]);
+    assert_eq!(reapply_targets(&devices, &devices, |_| true), [0, 1]);
 }
 
 #[test]
 fn steady_inventory_does_not_cycle_capture() {
     let devices = [dev("selected", 1, true)];
 
-    assert!(reapply_targets(&devices, &devices, false).is_empty());
+    assert!(reapply_targets(&devices, &devices, |_| false).is_empty());
 }
 
 #[test]
@@ -441,7 +455,9 @@ fn plan_reapply_wake_targets_get_a_confirm_retry_run() {
         &prev,
         &prev,
         &BTreeMap::new(),
-        Some(VOLATILE_REAPPLY_CONFIRM_RETRIES),
+        Some(ForcedReapply::All {
+            confirm: VOLATILE_REAPPLY_CONFIRM_RETRIES,
+        }),
         false,
     );
     assert_eq!(targets, vec![0]);
@@ -476,7 +492,9 @@ fn plan_reapply_device_wake_forces_the_link_race_budget() {
         &prev,
         &prev,
         &BTreeMap::new(),
-        Some(RECONNECT_REAPPLY_CONFIRM_RETRIES),
+        Some(ForcedReapply::All {
+            confirm: RECONNECT_REAPPLY_CONFIRM_RETRIES,
+        }),
         false,
     );
     assert_eq!(targets, vec![0]);
@@ -756,7 +774,43 @@ fn a_hidpp20_slot_reconnect_targets_only_online_devices_behind_such_receivers() 
         behind_hidpp20(2, false),
     ];
 
-    assert_eq!(hidpp20_slot_targets(&devices), vec![1]);
+    assert_eq!(
+        reapply_targets(&devices, &devices, |dev| {
+            ForcedReapply::Hidpp20Slots {
+                confirm: RECONNECT_REAPPLY_CONFIRM_RETRIES,
+            }
+            .covers(dev)
+        }),
+        vec![1]
+    );
+}
+
+#[test]
+fn a_hidpp20_slot_reapply_plans_only_the_devices_behind_such_receivers() {
+    let x3 = AgentDevice {
+        route: Some(DeviceRoute::Hidpp20Receiver {
+            receiver_uid: "695A8298".to_string(),
+            slot: 1,
+        }),
+        ..dev("x3", 1, true)
+    };
+    let steady = [dev("bolt-mouse", 2, true), x3];
+
+    let (targets, followup) = plan_reapply(
+        &steady,
+        &steady,
+        &BTreeMap::new(),
+        Some(ForcedReapply::Hidpp20Slots {
+            confirm: RECONNECT_REAPPLY_CONFIRM_RETRIES,
+        }),
+        false,
+    );
+
+    assert_eq!(targets, vec![1]);
+    assert_eq!(
+        followup,
+        BTreeMap::from([(stable_id(&steady[1]), RECONNECT_REAPPLY_CONFIRM_RETRIES)])
+    );
 }
 
 #[test]
@@ -796,9 +850,19 @@ fn a_hidpp20_slot_reconnect_queues_a_confirming_reapply() {
 fn a_hidpp20_slot_reconnect_never_narrows_a_pending_wake_reapply() {
     let mut orchestrator = orchestrator(Config::default());
     orchestrator.reapply_hidpp20_slots_on_next_refresh();
-    assert_eq!(orchestrator.forced_reapply, ForcedReapply::Hidpp20Slots);
+    assert_eq!(
+        orchestrator.forced_reapply,
+        Some(ForcedReapply::Hidpp20Slots {
+            confirm: RECONNECT_REAPPLY_CONFIRM_RETRIES,
+        })
+    );
 
     orchestrator.reapply_volatile_on_next_refresh();
     orchestrator.reapply_hidpp20_slots_on_next_refresh();
-    assert_eq!(orchestrator.forced_reapply, ForcedReapply::All);
+    assert_eq!(
+        orchestrator.forced_reapply,
+        Some(ForcedReapply::All {
+            confirm: VOLATILE_REAPPLY_CONFIRM_RETRIES,
+        })
+    );
 }

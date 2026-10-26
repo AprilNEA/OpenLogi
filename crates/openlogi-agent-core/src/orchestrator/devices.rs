@@ -754,19 +754,20 @@ pub(super) fn carry_lifecycle_budgets(
 /// a device whose stable identity is newly present (a first sighting, or a
 /// replug that re-enumerated under a new identity — e.g. a Bolt device that
 /// moved slots), or an offline→online transition (a reconnect after device
-/// sleep); plus — after a system wake — every online device. Devices are
+/// sleep); plus every online device `forced` covers (see
+/// [`ForcedReapply::covers`]). Devices are
 /// matched across ticks by [`same_device_lifecycle`]. Offline devices are never targeted
 /// (the write would just time out); they re-apply on their own transition.
 pub(super) fn reapply_targets(
     prev: &[AgentDevice],
     next: &[AgentDevice],
-    reapply_all: bool,
+    forced: impl Fn(&AgentDevice) -> bool,
 ) -> Vec<usize> {
     next.iter()
         .enumerate()
         .filter(|(_, dev)| dev.online && dev.route.is_some())
         .filter(|(_, dev)| {
-            if reapply_all {
+            if forced(dev) {
                 return true;
             }
             match prev.iter().find(|p| same_device_lifecycle(p, dev)) {
@@ -794,19 +795,6 @@ pub(super) fn settings_moved(prev: &[AgentDevice], next: &[AgentDevice]) -> Vec<
             prev.iter().find(|p| stable_id(p) == id).is_some_and(|p| {
                 p.online && p.route == dev.route && p.settings_revision != dev.settings_revision
             })
-        })
-        .map(|(idx, _)| idx)
-        .collect()
-}
-
-/// Indices into `next` of the online devices behind a HID++ 2.0 receiver —
-/// the devices a reconnect report from such a receiver's slot may concern.
-/// The report carries no identity, and these receivers hold few devices.
-pub(super) fn hidpp20_slot_targets(next: &[AgentDevice]) -> Vec<usize> {
-    next.iter()
-        .enumerate()
-        .filter(|(_, dev)| {
-            dev.online && matches!(dev.route, Some(DeviceRoute::Hidpp20Receiver { .. }))
         })
         .map(|(idx, _)| idx)
         .collect()
@@ -856,6 +844,53 @@ pub(super) fn newly_kept_os_layouts<'a>(
         .filter(|dev| keeps_os_layout(config, dev) && !keeps_os_layout(previous, dev))
 }
 
+/// A re-apply the next inventory refresh owes devices whose snapshot shows
+/// no transition, with the confirm budget its targets are queued with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ForcedReapply {
+    /// The online devices behind HID++ 2.0 receivers: one of them reported a
+    /// reconnect, which such a receiver never shows as an offline→online
+    /// transition.
+    Hidpp20Slots { confirm: u8 },
+    /// Every online device: the system woke, or a device reconnected
+    /// unobserved, and devices may have power-cycled while their
+    /// set/route/online state looks identical across the gap.
+    All { confirm: u8 },
+}
+
+impl ForcedReapply {
+    /// The confirm budget the targets are queued with.
+    pub(super) fn confirm(self) -> u8 {
+        match self {
+            Self::Hidpp20Slots { confirm } | Self::All { confirm } => confirm,
+        }
+    }
+
+    /// Whether `dev` is in this re-apply's scope.
+    pub(super) fn covers(self, dev: &AgentDevice) -> bool {
+        match self {
+            Self::All { .. } => true,
+            Self::Hidpp20Slots { .. } => {
+                matches!(dev.route, Some(DeviceRoute::Hidpp20Receiver { .. }))
+            }
+        }
+    }
+
+    /// Coalesce two requests made before one refresh: the wider scope wins
+    /// and the larger confirm budget is kept, so a device reconnect between
+    /// a system wake and its snapshot never shrinks the wake's boot-race
+    /// ladder or its scope.
+    pub(super) fn merge(self, other: Self) -> Self {
+        let confirm = self.confirm().max(other.confirm());
+        match (self, other) {
+            (Self::All { .. }, _) | (_, Self::All { .. }) => Self::All { confirm },
+            (Self::Hidpp20Slots { .. }, Self::Hidpp20Slots { .. }) => {
+                Self::Hidpp20Slots { confirm }
+            }
+        }
+    }
+}
+
 /// How many explicit confirmation passes a first-sighted or wake-targeted
 /// device keeps re-applying its volatile settings after the initial write. A
 /// cold restart leaves a Bolt/Unifying mouse slow to enumerate — and a system
@@ -884,11 +919,13 @@ pub(super) fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
     followup: &BTreeMap<DeviceStableId, u8>,
-    forced: Option<u8>,
+    forced: Option<ForcedReapply>,
     confirm_followup: bool,
 ) -> (Vec<usize>, BTreeMap<DeviceStableId, u8>) {
     let followup = carry_lifecycle_budgets(prev, next, followup);
-    let mut targets = reapply_targets(prev, next, forced.is_some());
+    let mut targets = reapply_targets(prev, next, |dev| {
+        forced.is_some_and(|forced| forced.covers(dev))
+    });
     let mut next_followup: BTreeMap<DeviceStableId, u8> = targets
         .iter()
         .filter_map(|&idx| {
@@ -896,8 +933,8 @@ pub(super) fn plan_reapply(
             let new_identity = !prev.iter().any(|p| same_device_lifecycle(p, &next[idx]));
             let budget = if new_identity {
                 VOLATILE_REAPPLY_CONFIRM_RETRIES
-            } else if let Some(forced) = forced {
-                forced
+            } else if let Some(forced) = forced.filter(|forced| forced.covers(&next[idx])) {
+                forced.confirm()
             } else {
                 RECONNECT_REAPPLY_CONFIRM_RETRIES
             };
