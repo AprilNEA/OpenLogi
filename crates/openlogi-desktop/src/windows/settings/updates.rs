@@ -105,12 +105,34 @@ fn linux_pill(status: &LinuxUpdateStatus) -> Option<Tag> {
     }
 }
 
-fn linux_message(status: &LinuxUpdateStatus) -> Option<gpui::SharedString> {
+/// Whether "Install Update" may run for `installation`: only for a package
+/// the detected package manager owns. `Detecting` is not installable yet; an
+/// open window redraws once detection settles.
+fn linux_installable(installation: Installation) -> bool {
+    matches!(
+        installation,
+        Installation::Detected(InstallationSource::LinuxPackage(_))
+    )
+}
+
+fn linux_message(
+    status: &LinuxUpdateStatus,
+    installation: Installation,
+) -> Option<gpui::SharedString> {
     match status {
         LinuxUpdateStatus::Checking => Some(tr!("updates.checking_for_updates")),
-        LinuxUpdateStatus::Available { version, .. } => {
-            Some(tr!("updates.update_version_available", version => version))
-        }
+        LinuxUpdateStatus::Available { version, .. } => Some(match installation {
+            // Not an install the app can update: point at the package manager
+            // (or however it was installed) instead of offering a button.
+            Installation::Detected(source)
+                if !matches!(source, InstallationSource::LinuxPackage(_)) =>
+            {
+                tr!("updates.update_version_available_package_manager", version => version)
+            }
+            Installation::Detecting | Installation::Detected(_) => {
+                tr!("updates.update_version_available", version => version)
+            }
+        }),
         LinuxUpdateStatus::Installing => Some(tr!("updates.installing")),
         LinuxUpdateStatus::Staged { version } => {
             Some(tr!("updates.update_version_ready", version => version))
@@ -180,14 +202,18 @@ fn engine_action(updater: &Entity<Updater>, status: &UpdateStatus) -> Button {
 }
 
 /// The one contextual action button for the Linux-release-check states.
-fn linux_action(status: &LinuxUpdateStatus) -> Button {
+/// "Install Update" only for an installation [`linux_installable`] accepts;
+/// otherwise the check button stays.
+fn linux_action(status: &LinuxUpdateStatus, installation: Installation) -> Button {
     match status {
-        LinuxUpdateStatus::Available { .. } => Button::new("update-install")
-            .outline()
-            .label(tr!("updates.download_install"))
-            .on_click(move |_, _, cx| {
-                crate::platform::updater::linux::install(cx);
-            }),
+        LinuxUpdateStatus::Available { .. } if linux_installable(installation) => {
+            Button::new("update-install")
+                .outline()
+                .label(tr!("updates.download_install"))
+                .on_click(move |_, _, cx| {
+                    crate::platform::updater::linux::install(cx);
+                })
+        }
         LinuxUpdateStatus::Staged { .. } => Button::new("update-restart")
             .outline()
             .label(tr!("updates.restart_to_update"))
@@ -221,14 +247,15 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
             .try_global::<LinuxUpdateStatus>()
             .cloned()
             .unwrap_or_default();
+        let installation = *cx.global::<Installation>();
         (
             linux_pill(&linux_status),
-            linux_message(&linux_status),
+            linux_message(&linux_status, installation),
             matches!(
                 linux_status,
                 LinuxUpdateStatus::Checking | LinuxUpdateStatus::Installing
             ),
-            linux_action(&linux_status),
+            linux_action(&linux_status, installation),
         )
     } else {
         (
@@ -403,6 +430,20 @@ mod tests {
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
     use crate::state::Sources;
     use crate::windows::settings::{SettingsPage, SettingsView};
+
+    #[test]
+    fn only_a_detected_linux_package_is_installable_in_app() {
+        assert!(linux_installable(Installation::Detected(
+            InstallationSource::LinuxPackage(LinuxPackage::Rpm)
+        )));
+        for installation in [
+            Installation::Detecting,
+            Installation::Detected(InstallationSource::Nix),
+            Installation::Detected(InstallationSource::Unknown),
+        ] {
+            assert!(!linux_installable(installation), "{installation:?}");
+        }
+    }
 
     #[test]
     fn only_linux_shows_the_linux_release_check() {
