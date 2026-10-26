@@ -444,6 +444,22 @@ and dismiss it. The same shape covers ``Cmd+` ``, `Alt+Tab`, and an IDE's
 another button is already holding the same key through `HoldShortcut`, the tap
 is skipped and only the modifiers go down, so that button keeps its key held.
 
+`HoldModifier` holds one or more bare modifiers with no ordinary key, under
+those same lifetime and release rules. The shortcut actions all require a key
+and reject a bare modifier string, so this is the shape that binds a button to
+Ctrl, Shift, Alt, Cmd, or Super alone. The held modifier composes with input
+from other devices: hold it on the mouse, type on the keyboard, and the
+keystroke arrives modified. Combine modifiers with `+`, as in `HoldModifier =
+"Ctrl+Shift"`, using the chord modifier names above.
+
+On macOS the held modifier composes through the virtual HID keyboard that
+release builds type synthesized keys on: a modifier it holds is part of the
+hardware modifier state, exactly like one held on a real keyboard. Builds
+without that keyboard, such as local and development builds, post keys as
+`CGEvent`s instead. There the modifier is still held, so menus switch to their
+alternate items, but keys typed on another keyboard do not pick it up, as with
+every other synthesized key.
+
 A `{ short = ..., long = ... }` binding waits for the button's outcome instead
 of firing on press. Releasing before 500 ms fires `short`; keeping the button
 down for 500 ms fires `long` exactly once, and the later release does not also
