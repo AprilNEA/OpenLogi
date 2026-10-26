@@ -56,7 +56,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v17 records whether a legacy `0x1000` battery reports mileage.
 /// v18 adds the `Capabilities::force_sensing` flag (`0x19c0` press force
 /// software can change).
-const SCHEMA_VERSION: u32 = 18;
+/// v19 adds the `Capabilities::onboard_profiles` flag (`0x8100` onboard
+/// profiles the host can switch off).
+const SCHEMA_VERSION: u32 = 19;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
