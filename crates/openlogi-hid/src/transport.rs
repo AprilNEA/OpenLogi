@@ -24,6 +24,8 @@ use hidpp::channel::{ChannelObserver, HidppChannel, RawHidChannel, RequestSwId, 
 use hidpp::nibble::U4;
 #[cfg(not(target_os = "windows"))]
 use tokio::sync::Mutex;
+#[cfg(target_os = "macos")]
+use tracing::info;
 use tracing::{debug, warn};
 
 use crate::LOGITECH_VENDOR_ID;
@@ -45,9 +47,43 @@ fn backend_error(error: async_hid::HidError) -> BackendError {
         async_hid::HidError::Disconnected | async_hid::HidError::NotConnected => {
             BackendError::Disconnected
         }
+        #[cfg(target_os = "macos")]
+        other if transfer_refused(&other) => {
+            BackendError::Backend(format!("{other}: {TRANSFER_REFUSED_HINT}"))
+        }
         other => BackendError::Backend(other.to_string()),
     }
 }
+
+/// Whether the kernel refused a report transfer on a handle that opened fine.
+/// `async-hid` surfaces macOS `kIOReturnNotPermitted` (`0xE00002E2`) as an
+/// [`std::io::ErrorKind::PermissionDenied`] source; nothing else on macOS
+/// produces one.
+#[cfg(target_os = "macos")]
+fn transfer_refused(error: &async_hid::HidError) -> bool {
+    matches!(
+        error,
+        async_hid::HidError::Other(source)
+            if source
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+    )
+}
+
+/// Why macOS refuses a transfer on an open handle (#1799). `IOHIDLibUserClient`
+/// holds a client invalid — and answers every report transfer with
+/// `kIOReturnNotPermitted` — while it lacks the console privilege its device
+/// demands: for a device whose primary usage is a keyboard (a BLE-direct
+/// mouse can be one — its report map may lead with a keyboard collection),
+/// that another process holds Secure Event Input; for any device, that this login session is off the
+/// console. The kernel revalidates the client when either ends, so the device
+/// recovers on its own. Unlike a failed open, Input Monitoring plays no part.
+#[cfg(target_os = "macos")]
+const TRANSFER_REFUSED_HINT: &str = "macOS is refusing HID++ writes to this device — \
+     another app holds Secure Input (a focused password field, Terminal's \
+     Secure Keyboard Entry, a password manager), or this login session is not \
+     on the console. Device controls resume once that ends; re-granting \
+     permissions does not help";
 
 /// Classify a failed device open. On macOS `IOHIDDeviceOpen` denies silently —
 /// the error is indistinguishable from exclusive access — so fold the Input
@@ -647,6 +683,10 @@ pub(crate) struct AsyncHidChannel {
     writer: Mutex<DeviceWriter>,
     info: DeviceInfo,
     connected: AtomicBool,
+    /// Whether the last write was refused by the kernel (#1799) — logged once
+    /// per refusal spell rather than on every retry.
+    #[cfg(target_os = "macos")]
+    writes_refused: AtomicBool,
     device_io: DeviceIoGate,
     /// Whether the device exposes only the long HID++ report (a BLE-direct
     /// peripheral on macOS). Reported via `supports_short_long_hidpp` so the
@@ -668,6 +708,8 @@ impl AsyncHidChannel {
             writer: Mutex::new(writer),
             info,
             connected: AtomicBool::new(true),
+            #[cfg(target_os = "macos")]
+            writes_refused: AtomicBool::new(false),
             device_io,
             long_only,
         }
@@ -696,10 +738,20 @@ impl RawHidChannel for AsyncHidChannel {
         let mut w = self.writer.lock().await;
         self.device_io.ensure_allowed()?;
         match w.write_output_report(src).await {
-            Ok(()) => Ok(src.len()),
+            Ok(()) => {
+                #[cfg(target_os = "macos")]
+                if self.writes_refused.swap(false, Ordering::AcqRel) {
+                    info!(name = %self.info.name, "macOS accepts HID++ writes again");
+                }
+                Ok(src.len())
+            }
             Err(e) => {
                 if matches!(e, async_hid::HidError::Disconnected) {
                     self.mark_disconnected();
+                }
+                #[cfg(target_os = "macos")]
+                if transfer_refused(&e) && !self.writes_refused.swap(true, Ordering::AcqRel) {
+                    warn!(name = %self.info.name, error = %e, "{TRANSFER_REFUSED_HINT}");
                 }
                 Err(e.into())
             }
