@@ -4,8 +4,9 @@ use std::collections::HashSet;
 
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, EasySwitchHosts,
-    FnLockState, PointerSpeed, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DisableKeysState, DpiInfo,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, PointerSpeed, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -201,6 +202,13 @@ pub struct ProfileDeviceSettings {
     /// profiles recorded before it existed keep loading.
     #[serde(default = "ProfileSetting::unsupported")]
     pub pointer_speed: ProfileSetting<PointerSpeed>,
+    /// Force-sensing button (`0x19c0`) press-force read state. Defaults to
+    /// unsupported so profiles recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub force_sensing: ProfileSetting<ForceSensingInfo>,
+    /// Fixed lock/system-key disabling read state.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub disable_keys: ProfileSetting<DisableKeysState>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -484,6 +492,8 @@ fn validate_setting_values(settings: &ProfileDeviceSettings) -> Result<(), Fixtu
     if let Some(hosts) = settings.easy_switch.value() {
         validate_easy_switch(&settings.route, hosts)?;
     }
+    // Disable Keys reads retain both raw masks, including unadvertised bits.
+    // Only a write is capability-bounded; fixture capture preserves the read.
     if settings.backlight.supports_feature() && settings.lighting.is_supported() {
         return Err(FixtureError::invalid(
             "device profile",
@@ -646,6 +656,8 @@ fn validate_setting_support(
             || settings.report_rate.supports_feature()
             || settings.easy_switch.supports_feature()
             || settings.pointer_speed.supports_feature()
+            || settings.force_sensing.supports_feature()
+            || settings.disable_keys.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -719,6 +731,18 @@ fn validate_setting_support(
                 "pointer speed",
                 settings.pointer_speed.supports_feature(),
                 capabilities.pointer_scaling,
+            )?;
+            validate_capability_support(
+                settings,
+                "press force",
+                settings.force_sensing.supports_feature(),
+                capabilities.force_sensing,
+            )?;
+            validate_capability_support(
+                settings,
+                "Disable Keys",
+                settings.disable_keys.supports_feature(),
+                capabilities.disable_keys,
             )?;
         }
     }
@@ -1064,5 +1088,184 @@ mod optional_hex_report {
         Option::<String>::deserialize(deserializer)?
             .map(|encoded| parse_hex(&encoded).map_err(de::Error::custom))
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::device::DeviceKind;
+    use openlogi_core::hid::{
+        BacklightControls, BacklightMode, BacklightState, BacklightStatus, DisableKeysMask,
+        DisableKeysState,
+    };
+
+    use crate::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile, ProfileSetting, ProfileSupport};
+
+    #[test]
+    fn disable_keys_profile_preserves_unadvertised_raw_state() {
+        let mut profile: DeviceProfile =
+            serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile");
+        let setting = profile
+            .settings
+            .iter_mut()
+            .find(|setting| setting.disable_keys.supports_feature())
+            .expect("canonical keyboard supports Disable Keys");
+        setting.disable_keys = ProfileSetting::Supported(DisableKeysState {
+            supported: DisableKeysMask::from_bits_retain(0xa1),
+            disabled: DisableKeysMask::from_bits_retain(0xe0),
+        });
+
+        profile.validate().expect("raw reads preserve both masks");
+        let restored: DeviceProfile =
+            serde_json::from_str(&serde_json::to_string(&profile).expect("serialize profile"))
+                .expect("deserialize profile");
+        restored.validate().expect("restored raw state validates");
+        assert_eq!(restored, profile);
+    }
+
+    #[test]
+    fn disable_keys_profile_still_requires_the_feature_capability() {
+        let mut profile: DeviceProfile =
+            serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile");
+        let capabilities = profile
+            .inventories
+            .iter_mut()
+            .flat_map(|inventory| &mut inventory.paired)
+            .filter_map(|device| device.capabilities.as_mut())
+            .find(|capabilities| capabilities.disable_keys)
+            .expect("canonical keyboard supports Disable Keys");
+        capabilities.disable_keys = false;
+
+        let error = profile
+            .validate()
+            .expect_err("family mismatch remains invalid");
+        assert!(
+            error
+                .to_string()
+                .contains("Disable Keys support does not match")
+        );
+    }
+
+    /// A supported backlight on the canonical keyboard, with every offer on.
+    fn supported_backlight() -> BacklightState {
+        BacklightState {
+            enabled: true,
+            mode: BacklightMode::Automatic,
+            status: BacklightStatus::AlsAutomatic,
+            current_level: 3,
+            nb_levels: 8,
+            power_save: false,
+            duration: None,
+            controls: BacklightControls::AUTOMATIC
+                | BacklightControls::LEVEL
+                | BacklightControls::POWER_SAVE
+                | BacklightControls::DURATION,
+        }
+    }
+
+    /// Find which paired device the feature-bearing settings entry belongs to
+    /// (the canonical keyboard), indexed next to its settings entry.
+    fn keyboard_settings_index(profile: &DeviceProfile) -> (usize, usize) {
+        let settings_index = profile
+            .settings
+            .iter()
+            .position(|setting| setting.disable_keys.supports_feature())
+            .expect("canonical keyboard route");
+        let paired_index = profile
+            .inventories
+            .iter()
+            .position(|inventory| {
+                inventory
+                    .paired
+                    .iter()
+                    .any(|device| device.kind == DeviceKind::Keyboard)
+            })
+            .expect("canonical paired keyboard");
+        (settings_index, paired_index)
+    }
+
+    /// The canonical keyboard is an RGB device, and a profile may not expose
+    /// RGB lighting next to a backlight; backlight is the fixture under test,
+    /// so the lighting support moves aside.
+    fn dedicate_keyboard_to_backlight(profile: &mut DeviceProfile) -> (usize, usize) {
+        let (settings_index, paired_index) = keyboard_settings_index(profile);
+        profile.inventories[paired_index]
+            .paired
+            .iter_mut()
+            .find(|device| device.kind == DeviceKind::Keyboard)
+            .and_then(|device| device.capabilities.as_mut())
+            .expect("canonical keyboard has capabilities")
+            .lighting = false;
+        profile.settings[settings_index].lighting = ProfileSupport::Unsupported;
+        (settings_index, paired_index)
+    }
+
+    #[test]
+    fn backlight_profile_records_the_released_object_shape() {
+        let mut profile: DeviceProfile =
+            serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile");
+        let (settings_index, paired_index) = dedicate_keyboard_to_backlight(&mut profile);
+        profile.inventories[paired_index]
+            .paired
+            .iter_mut()
+            .find(|device| device.kind == DeviceKind::Keyboard)
+            .and_then(|device| device.capabilities.as_mut())
+            .expect("canonical keyboard has capabilities")
+            .backlight = true;
+        profile.settings[settings_index].backlight =
+            ProfileSetting::Supported(supported_backlight());
+        profile.validate().expect("backlight setting validates");
+
+        let encoded = serde_json::to_string(&profile).expect("profile serializes");
+        assert!(
+            encoded.contains(
+                r#""controls":{"automatic":true,"level":true,"power_save":true,"duration":true}"#,
+            ),
+            "the controls must re-record as the released three-field object plus `duration`, got: {encoded}"
+        );
+    }
+
+    #[test]
+    fn a_profile_recorded_before_the_timer_shipped_still_loads() {
+        let mut profile: DeviceProfile =
+            serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile");
+        let (settings_index, paired_index) = dedicate_keyboard_to_backlight(&mut profile);
+        profile.inventories[paired_index]
+            .paired
+            .iter_mut()
+            .find(|device| device.kind == DeviceKind::Keyboard)
+            .and_then(|device| device.capabilities.as_mut())
+            .expect("canonical keyboard has capabilities")
+            .backlight = true;
+        profile.settings[settings_index].backlight =
+            ProfileSetting::Supported(supported_backlight());
+        profile.validate().expect("backlight setting validates");
+
+        // A record from a released build carries no `duration` key: the
+        // timer has not shipped yet.
+        let encoded = serde_json::to_string(&profile).expect("profile serializes");
+        let mut record: serde_json::Value = serde_json::from_str(&encoded).expect("profile JSON");
+        record
+            .pointer_mut(&format!(
+                "/settings/{settings_index}/backlight/value/controls"
+            ))
+            .and_then(|controls| controls.as_object_mut())
+            .expect("recorded controls object")
+            .remove("duration");
+        let restored: DeviceProfile =
+            serde_json::from_value(record).expect("the profile without the timer key loads");
+        restored.validate().expect("restored profile validates");
+        assert_eq!(
+            restored.settings[settings_index]
+                .backlight
+                .value()
+                .map(|state| state.controls),
+            Some(
+                BacklightControls::AUTOMATIC
+                    | BacklightControls::LEVEL
+                    | BacklightControls::POWER_SAVE
+            ),
+            "the missing key reads as its default, like the old field did"
+        );
     }
 }

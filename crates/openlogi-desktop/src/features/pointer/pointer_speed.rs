@@ -135,7 +135,6 @@ pub(super) fn pointer_speed_section(
         (PointerSpeedLoad::Failed(_), _) => retry_line(
             "pointer-speed-retry",
             tr!("pointer.couldnt_read_pointer_speed_click_to_retry"),
-            pal,
             move |cx| AppState::apply(cx, |state| state.retry_pointer_speed_read(&key)),
         )
         .into_any_element(),

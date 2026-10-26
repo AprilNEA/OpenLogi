@@ -22,6 +22,57 @@ Running `openlogi` with no subcommand defaults to `list`. Set
 
 `openlogi diag pointer-speed` temporarily changes the selected device's pointer scaling. The command attempts to restore and verify the original scaling even when the test write fails. `--device NAME` selects a device; `--target RAW` sets the temporary 8.8 fixed-point value (`256` is 1×). By default, the command halves the current value, or doubles it when the raw value is `1`. Firmware may accept extreme values without clipping. A restoration error means the original speed could not be confirmed.
 
+## Keyboard backlight
+
+`openlogi backlight` reads and changes the white HID++ Backlight2 (`0x1982`)
+backlight, for example on MX Keys. It requires a running, protocol-compatible
+OpenLogi agent. Start OpenLogi normally and use the same `OPENLOGI_PROFILE` for
+the app and CLI. The command uses the agent's inventory and existing channel;
+it never opens HID directly, starts the agent, or falls back to diagnostics.
+It does not arm a dormant agent's input stack.
+
+```sh
+openlogi backlight                         # status, no write
+openlogi backlight --device "MX Keys" status
+openlogi backlight --device "MX Keys" off
+openlogi backlight --device "MX Keys" on
+openlogi backlight --device "MX Keys" auto on
+openlogi backlight --device "MX Keys" level 3
+openlogi backlight --device "MX Keys" battery-saving on
+```
+
+`--device NAME` is a case-insensitive name substring, not the automation API's
+opaque route ID. It must match exactly one online HID++ device. Without it,
+automatic selection requires exactly one online device with measured backlight
+support. Unknown capabilities require an explicit name and an agent read;
+known unsupported devices are refused. An incomplete inventory, missing route,
+or ambiguous selection fails before any backlight operation. Identical direct
+devices sharing a route cannot be disambiguated by name.
+
+**Compatibility change:** earlier versions could open hardware without an agent
+and choose the first matching device. This command now fails instead. This does
+not change `list` fallback, hardware diagnostics, or the JSON API's selection.
+
+Bare invocation and `status` only read. Changes are saved in the keyboard's
+non-volatile memory, not `config.toml`, and survive reconnects, host switches,
+and power cycles. The agent confirms writes; the CLI prints that returned state
+as `read-back` and only then reports success. `status` lists which additional
+controls the firmware offers. The agent rejects unsupported modes or levels.
+This command does not add timer or effect settings.
+
+With the matching agent and GUI build, an already-open Backlight panel refreshes
+after a CLI write; reopening the device or restarting the app is unnecessary.
+The agent announces a device-settings revision and the GUI reads the keyboard
+again. A failed write can also trigger a refresh because the keyboard may have
+changed before confirmation failed; the refresh is not a success report.
+
+Failures exit nonzero. If the agent times out or disconnects during a write,
+the outcome is **unconfirmed**: the keyboard may already have applied it.
+The command does not automatically retry. Reconnect to the matching agent and
+read `status` before deciding whether another write is needed. Firmware's
+temporary-manual mode cannot be restored by software; the command warns when
+an otherwise mode-preserving change would return it to automatic mode.
+
 ## Automation API
 
 `openlogi api` is the JSON interface for launchers such as Raycast and local
@@ -194,8 +245,12 @@ OpenLogi CLI and agent builds; it never triggers direct-hardware fallback.
 
 ## Asset synchronization
 
-Asset synchronization probes `assets.openlogi.org`, the versioned Cloudflare
-Pages release alias, and the pinned jsDelivr npm release concurrently. The first
-mirror with a valid catalog supplies every file for that synchronization run.
+Asset synchronization probes `assets.openlogi.org`, the Cloudflare Pages alias
+of the `0.1` asset release line, and the newest `0.1.x` npm release on jsDelivr
+concurrently. The first mirror with a valid catalog supplies every file for that
+synchronization run. On jsDelivr, OpenLogi also asks `data.jsdelivr.com` for the
+newest release and waits at most one second for the answer. With the answer,
+jsDelivr trails a new asset release by up to about an hour; without it, by up
+to 12 hours.
 Set `OPENLOGI_ASSETS` or pass `openlogi assets sync --base <URL>` to use one
 uniform asset origin instead of automatic mirror selection.

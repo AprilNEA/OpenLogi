@@ -25,20 +25,21 @@ pub fn status_line(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {
         .child(text.into())
 }
 
-/// A clickable accent line that re-arms a failed read on click. `on_retry` runs
-/// the panel's query retry — the only recovery
-/// path when the gallery holds a single device, where re-selecting is a no-op.
+/// A retry action with the shared Button's semantic colors and keyboard behavior.
+/// Leave the foreground to Button so its disabled style is not overridden.
+/// Callers supply localized copy, a stable ID, and their recovery action.
 pub fn retry_line(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
-    pal: Palette,
     on_retry: impl Fn(&mut App) + 'static,
 ) -> Button {
     Button::new(id)
         .text()
         .h(px(ROW_H))
         .text_body()
-        .text_color(pal.text_primary)
         .label(text)
         .on_click(move |_event, _window, cx| on_retry(cx))
 }
+
+#[cfg(test)]
+mod tests;

@@ -137,7 +137,7 @@ OpenLogi にできて Options+ にできないこと：
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="MX Keys S のキーとバックライトのカード"></td>
-        <td width="50%"><b>キーボード</b><ul><li>Fn Lock と、ホスト OS のレイアウトを維持するマルチプラットフォームキーボード</li><li>バックライトの明るさ、明るさの自動調整、省電力</li><li>バックライトの明るさを変更時に画面に表示</li><li>対応キーボードでの静的 RGB</li></ul></td>
+        <td width="50%"><b>キーボード</b><ul><li>Fn Lock と、ホスト OS のレイアウトを維持するマルチプラットフォームキーボード</li><li>バックライトの明るさ、明るさの自動調整、省電力、キーの点灯時間</li><li>バックライトの明るさを変更時に画面に表示</li><li>対応キーボードでの静的 RGB</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="明るさと色温度を設定する Litra Glow のライトパネル"></td>

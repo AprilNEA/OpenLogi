@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 
 use schedule::{
     DeadlinePurpose, HID_EVENT_SETTLE, HOTPLUG_SETTLE, ReconcileTrigger, SYSTEM_RESUME_SETTLE,
-    ScanClock, Schedule, WakeDetector,
+    ScanClock, ScanOutcome, Schedule, WakeDetector,
 };
 
 use crate::hardware::HardwareContext;
@@ -56,6 +56,10 @@ pub enum InventoryEvent {
         /// macOS the observable signature of a missing or stale Input
         /// Monitoring grant (the open denial itself is silent).
         hid_open_failures: bool,
+        /// This pass satisfies a requested volatile-settings confirmation,
+        /// including low-frequency recovery after enumeration failures. The
+        /// orchestrator may consume one bounded settings retry.
+        confirms_volatile_settings: bool,
     },
     /// Enumeration has never succeeded and won't be treated as "still
     /// starting" any longer; without this the GUI would show its scanning
@@ -76,13 +80,15 @@ pub enum InventoryEvent {
     /// A keyboard's `LockKeyState` feature (`0x4220`) reported a lock key
     /// turning on or off.
     LockKeyChanged(LockKeyChange),
-    /// A device's `WirelessDeviceStatus` feature (`0x1d4b`) broadcast a
-    /// reconnection — the firmware explicitly asking the host to reconfigure
-    /// it after a nap. A nap can be too short for any reconciliation to have
-    /// observed the device offline, so the agent must not rely on an
-    /// offline→online transition in the snapshot that follows: it re-applies
-    /// volatile settings on the next snapshot, like [`Self::SystemWake`] but
-    /// with the shorter link-race confirm budget.
+    /// A device reconnected without any reconciliation observing it offline:
+    /// its `WirelessDeviceStatus` feature (`0x1d4b`) broadcast a reconnection
+    /// — the firmware explicitly asking the host to reconfigure it after a
+    /// nap — or the enumerator replaced a channel it had retired for failing
+    /// probes, while the ledger kept replaying the device as online. Either
+    /// way the agent must not rely on an offline→online transition in the
+    /// snapshot that follows: it re-applies volatile settings on the next
+    /// snapshot, like [`Self::SystemWake`] but with the shorter link-race
+    /// confirm budget.
     DeviceWake,
 }
 
@@ -180,6 +186,7 @@ impl WatchState {
         inventories: Vec<DeviceInventory>,
         standalone: Result<Vec<StandaloneDevice>, openlogi_hid::InventoryError>,
         hid_open_failures: bool,
+        confirms_volatile_settings: bool,
     ) -> InventoryEvent {
         self.succeeded = true;
         let standalone = match standalone {
@@ -196,6 +203,7 @@ impl WatchState {
             inventories,
             standalone,
             hid_open_failures,
+            confirms_volatile_settings,
         }
     }
 
@@ -218,7 +226,7 @@ impl WatchState {
     ) -> Option<InventoryEvent> {
         match result {
             Ok((inventories, standalone)) => {
-                Some(self.classify_parts(inventories, Ok(standalone), false))
+                Some(self.classify_parts(inventories, Ok(standalone), false, false))
             }
             Err(e) => {
                 warn!(error = ?e, "enumerate failed during reconciliation — keeping last snapshot");
@@ -244,6 +252,19 @@ pub struct InventoryRefresh {
 }
 
 impl InventoryRefresh {
+    /// Observe a normal one-slot confirmation request without a worker thread.
+    #[cfg(test)]
+    pub(crate) fn test_settings_confirmation() -> (Self, impl Future<Output = ()> + Send) {
+        let (sender, mut requests) = mpsc::channel(1);
+        let (rescan, _rescans) = mpsc::channel(1);
+        (Self { sender, rescan }, async move {
+            assert!(matches!(
+                requests.recv().await,
+                Some(RefreshRequest::SettingsConfirmation)
+            ));
+        })
+    }
+
     /// Request the next delayed confirmation pass for volatile settings.
     /// Repeated requests coalesce into the bounded one-slot channel.
     pub fn request_settings_confirmation(&self) {
@@ -520,20 +541,40 @@ impl InventoryWorker {
         // Repair retries use completion, or a pass longer than
         // `FAST_RETRY_DELAY` would already be due when it returns (#1774).
         let started = Instant::now();
-        let (event, needs_repair) = match self.enumerator.enumerate().await {
+        let result = self.enumerator.enumerate().await;
+        self.complete_enumeration(trigger, result, started).await
+    }
+
+    /// Deliver the authoritative result before acknowledging its scheduled
+    /// purpose. An enumeration error retains the last snapshot, not success.
+    async fn complete_enumeration(
+        &mut self,
+        trigger: ReconcileTrigger,
+        result: Result<Vec<DeviceInventory>, openlogi_hid::InventoryError>,
+        started: Instant,
+    ) -> bool {
+        let (event, outcome, replaced) = match result {
             Ok(inventories) => {
                 let standalone = self.hardware.enumerate_standalone().await;
                 let standalone_failed = standalone.is_err();
                 let open_failures = self.enumerator.open_failures_last_tick();
-                let event = self
-                    .state
-                    .classify_parts(inventories, standalone, open_failures);
+                let event = self.state.classify_parts(
+                    inventories,
+                    standalone,
+                    open_failures,
+                    self.schedule.confirms_settings(trigger),
+                );
                 let needs_repair = self.enumerator.retry_needed_last_tick()
                     || standalone_failed
                     || self.state.raw_nodes.has_pending_misses();
-                (Some(event), needs_repair)
+                let replaced = self.enumerator.replaced_channels_last_tick();
+                (
+                    Some(event),
+                    ScanOutcome::Snapshot { needs_repair },
+                    replaced,
+                )
             }
-            Err(error) => (self.state.classify(Err(error)), true),
+            Err(error) => (self.state.classify(Err(error)), ScanOutcome::Failed, false),
         };
         if !self.device_io.allows_io() {
             debug!(
@@ -541,6 +582,15 @@ impl InventoryWorker {
                 "device I/O suspended during inventory reconciliation — result discarded"
             );
             return true;
+        }
+        // Request the reconnect re-apply before the snapshot that publishes
+        // the replacement channel, so that snapshot carries it out.
+        if replaced {
+            info!("reopened a channel retired for failing probes — re-applying volatile settings");
+            if self.events.send(InventoryEvent::DeviceWake).is_err() {
+                debug!("inventory watcher receiver dropped — exiting");
+                return false;
+            }
         }
         if let Some(event) = event
             && self.events.send(event).is_err()
@@ -550,7 +600,7 @@ impl InventoryWorker {
         }
         self.schedule.scan_finished(
             trigger,
-            needs_repair,
+            outcome,
             ScanClock {
                 started,
                 finished: Instant::now(),
@@ -693,7 +743,7 @@ mod tests {
         let _ = state.classify(Ok((vec![], vec![raw_light("serial:glow-1")])));
 
         assert_matches!(
-            state.classify_parts(vec![], Err(enumerate_failed()), false),
+            state.classify_parts(vec![], Err(enumerate_failed()), false, false),
             InventoryEvent::Snapshot { inventories, standalone, .. }
                 if inventories.is_empty()
                     && standalone.len() == 1

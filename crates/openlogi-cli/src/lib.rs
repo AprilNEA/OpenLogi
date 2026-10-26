@@ -103,6 +103,81 @@ mod tests {
     }
 
     #[test]
+    fn backlight_duration_accepts_an_options_plus_step_and_rejects_the_rest() {
+        let cli = Cli::try_parse_from(["openlogi", "backlight", "duration", "15"])
+            .expect("a 15 second duration parses");
+        match cli.cmd.expect("subcommand present") {
+            Command::Backlight(args) => {
+                assert!(matches!(
+                    args.action,
+                    Some(BacklightAction::Duration {
+                        duration: seconds
+                    }) if seconds.seconds() == 15
+                ));
+            }
+            other => panic!("expected Backlight, got {other:?}"),
+        }
+
+        let result = Cli::try_parse_from(["openlogi", "backlight", "duration", "7"]);
+        result.expect_err("7 seconds is not a 5-second step");
+        let two_hours = Cli::try_parse_from(["openlogi", "backlight", "duration", "7200"])
+            .expect("two hours is the protocol maximum");
+        match two_hours.cmd.expect("subcommand present") {
+            Command::Backlight(args) => {
+                assert!(matches!(
+                    args.action,
+                    Some(BacklightAction::Duration {
+                        duration: seconds
+                    }) if seconds.seconds() == 7_200
+                ));
+            }
+            other => panic!("expected Backlight, got {other:?}"),
+        }
+        let result = Cli::try_parse_from(["openlogi", "backlight", "duration", "7205"]);
+        result.expect_err("7205 seconds is past the protocol maximum");
+    }
+
+    #[test]
+    fn backlight_existing_actions_and_global_name_filter_remain_compatible() {
+        for (action, expected) in [
+            (vec!["status"], "Status"),
+            (vec!["on"], "On"),
+            (vec!["off"], "Off"),
+            (vec!["auto", "on"], "Auto { set: On }"),
+            (vec!["auto", "off"], "Auto { set: Off }"),
+            (vec!["level", "3"], "Level { level: 3 }"),
+            (vec!["battery-saving", "on"], "BatterySaving { set: On }"),
+            (vec!["battery-saving", "off"], "BatterySaving { set: Off }"),
+        ] {
+            let mut args = vec!["openlogi", "backlight"];
+            args.extend(action);
+            args.extend(["--device", "Test keyboard"]);
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Some(Command::Backlight(args)) = cli.cmd else {
+                panic!("expected backlight command");
+            };
+            assert_eq!(args.device.as_deref(), Some("Test keyboard"));
+            assert_eq!(format!("{:?}", args.action.unwrap()), expected);
+        }
+    }
+
+    #[test]
+    fn backlight_help_explains_agent_requirement_and_selection_changes() {
+        let help = Cli::try_parse_from(["openlogi", "backlight", "--help"]).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let text = help.to_string();
+        for expected in [
+            openlogi_core::env::PROFILE,
+            "No direct hardware fallback",
+            "Ambiguous matches",
+            "measured backlight support",
+            "unknown support requires an explicit name",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+    }
+
+    #[test]
     fn smartshift_leave_flipped_conflicts_with_sensitivity() {
         let result = Cli::try_parse_from([
             "openlogi",

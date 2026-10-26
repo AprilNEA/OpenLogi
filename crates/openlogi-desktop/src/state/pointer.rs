@@ -21,6 +21,14 @@ pub(super) struct PointerState {
     /// The mice whose last pointer-speed write the mouse refused or the agent
     /// could not deliver.
     pub(super) refused_pointer_speeds: HashSet<DeviceKey>,
+    /// The devices whose last press-force write the device refused or the
+    /// agent could not deliver.
+    pub(super) refused_force_sensing: HashSet<DeviceKey>,
+    /// The newest press-force write sent to each device whose answer has not
+    /// arrived yet. Only that write's answer may change the shown force or
+    /// save it.
+    pub(super) pending_force_sensing_writes: HashMap<DeviceKey, u64>,
+    pub(super) next_force_sensing_write: u64,
 }
 
 impl Default for PointerState {
@@ -32,6 +40,9 @@ impl Default for PointerState {
             pending_dpi_writes: HashMap::new(),
             next_dpi_write: 0,
             refused_pointer_speeds: HashSet::new(),
+            refused_force_sensing: HashSet::new(),
+            pending_force_sensing_writes: HashMap::new(),
+            next_force_sensing_write: 0,
         }
     }
 }
@@ -42,6 +53,7 @@ impl AppState {
         client: SwrClient,
         runtime: std::sync::Arc<dyn Runtime>,
     ) {
-        self.pointer.reads.connect(client, runtime);
+        self.pointer.reads.connect(client.clone(), runtime.clone());
+        self.disable_keys_reads.connect(client, runtime);
     }
 }

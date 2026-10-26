@@ -10,14 +10,25 @@ use std::sync::Arc;
 
 use hidpp::channel::{HidppChannel, RawHidChannel};
 
-use crate::backend::{BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter};
+#[cfg(any(test, feature = "test-support"))]
+use crate::backend::NodeId;
+#[cfg(test)]
+use crate::backend::{BackendError, HidBackend, HotplugStream, NodeInfo, RawWriter};
+#[cfg(feature = "test-support")]
+use crate::replay::ReplayChannelHandle;
+#[cfg(test)]
+pub(crate) use crate::replay::ReplayChannelHandle as ScriptedRawHidHandle;
 pub(crate) use crate::replay::ReplayRawHidChannel as ScriptedRawHidChannel;
+#[cfg(feature = "test-support")]
+use crate::{ChannelRegistry, DeviceRoute, SharedChannel};
 
 /// Answers a HID++ request as a particular scripted device would.
+#[cfg(test)]
 pub(crate) type Responder = fn(&[u8]) -> Option<Vec<u8>>;
 
 /// A HID++ 2.0 error response to `request`: feature index `0xff`, then the
 /// addressed feature index, the function/software id, and the error code.
+#[cfg(test)]
 pub(crate) fn feature_error(request: &[u8], error: u8) -> Vec<u8> {
     let mut response = vec![0u8; 7];
     response[0] = 0x10;
@@ -30,6 +41,10 @@ pub(crate) fn feature_error(request: &[u8], error: u8) -> Vec<u8> {
 }
 
 /// A live channel over `raw`.
+#[expect(
+    clippy::expect_used,
+    reason = "the test-only scripted transport declares HID++ support and cannot recover usefully"
+)]
 pub(crate) async fn scripted_channel(raw: impl RawHidChannel) -> Arc<HidppChannel> {
     Arc::new(
         HidppChannel::from_raw_channel(raw)
@@ -38,11 +53,40 @@ pub(crate) async fn scripted_channel(raw: impl RawHidChannel) -> Arc<HidppChanne
     )
 }
 
+/// Build a route-bound scripted channel for a higher-layer test.
+#[cfg(feature = "test-support")]
+pub async fn scripted_shared_channel(
+    route: DeviceRoute,
+    responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
+) -> (SharedChannel, ReplayChannelHandle) {
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(responder);
+    let channel = scripted_channel(raw).await;
+    (SharedChannel::new(channel, route), handle)
+}
+
+/// Publish a route-bound scripted channel as the registry's current owner.
+#[cfg(feature = "test-support")]
+pub async fn publish_scripted_channel(
+    registry: &ChannelRegistry,
+    node_id: &str,
+    route: DeviceRoute,
+    responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
+) -> (SharedChannel, ReplayChannelHandle) {
+    let (shared, handle) = scripted_shared_channel(route.clone(), responder).await;
+    registry.replace_node(
+        NodeId::from(node_id.to_owned()),
+        [route],
+        Arc::clone(shared.channel()),
+    );
+    (shared, handle)
+}
+
 /// Outcome produced when the scripted backend opens a listed node.
 ///
 /// The cases are distinct contracts the enumerator must not conflate: only
 /// [`Self::Fails`] is a backend failure the ledger replays a last-good snapshot
 /// through.
+#[cfg(test)]
 pub(crate) enum ScriptedOpen {
     /// The backend cannot open the node at all — unplugged mid-tick, or denied.
     Fails,
@@ -58,10 +102,12 @@ pub(crate) enum ScriptedOpen {
 /// no HID stack under them — including the partial-failure paths (a node that
 /// will not open, one that is not HID++ at all) that hardware cannot be asked
 /// to reproduce on demand.
+#[cfg(test)]
 pub(crate) struct ScriptedBackend {
     nodes: Vec<(NodeInfo, ScriptedOpen)>,
 }
 
+#[cfg(test)]
 impl ScriptedBackend {
     /// A backend presenting `nodes`, in the order given.
     pub(crate) fn new(nodes: Vec<(NodeInfo, ScriptedOpen)>) -> Arc<Self> {
@@ -75,6 +121,7 @@ impl ScriptedBackend {
     }
 }
 
+#[cfg(test)]
 #[hidpp::async_trait]
 impl HidBackend for ScriptedBackend {
     async fn enumerate(&self) -> Result<Vec<NodeInfo>, BackendError> {
@@ -109,6 +156,7 @@ impl HidBackend for ScriptedBackend {
 
 /// A scripted node's descriptor, identified by `id` and otherwise a plausible
 /// Logitech HID++ collection.
+#[cfg(test)]
 pub(crate) fn scripted_node_info(id: &str) -> NodeInfo {
     NodeInfo {
         id: NodeId::from(id.to_owned()),

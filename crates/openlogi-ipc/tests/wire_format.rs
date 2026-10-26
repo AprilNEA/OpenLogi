@@ -41,20 +41,22 @@ use openlogi_core::device::{
     LightValueUnit, LockKey, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
-    DeviceRoute, Dpi, DpiCapabilities, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
-    HidppFeatureErrorKind, HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand,
-    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget,
-    ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
-    SmartShiftThreshold, TunableTorque, WriteError,
+    BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
+    BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
+    DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
+    HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, PasskeyMethod,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget, ScrollWheelMode,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind, ConfigReloadError,
-    ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange, LockKeyObservation,
-    MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation, ObservedLight,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig, SecureInput, VirtualKeyboardStatus,
+    AgentResponse, AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind,
+    ConfigReloadError, ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange,
+    LockKeyObservation, MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation,
+    ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, SecureInput,
+    VirtualKeyboardStatus,
 };
 use succession::{Compat, Run};
 
@@ -110,7 +112,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 39);
+    assert_eq!(PROTOCOL_VERSION, 41);
 }
 
 #[test]
@@ -335,6 +337,39 @@ fn reload_saved_config() {
         },
         "24e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\
          010d73657269616c3a414243313233000101",
+    );
+    assert_wire(&SavedConfigVerdict::Accepted, "00");
+    assert_wire(&SavedConfigVerdict::FileChangedAfterSave, "01");
+    assert_wire(
+        &Ok::<SavedConfigVerdict, ConfigReloadError>(SavedConfigVerdict::Accepted),
+        "0000",
+    );
+    assert_wire(
+        &Ok::<SavedConfigVerdict, ConfigReloadError>(SavedConfigVerdict::FileChangedAfterSave),
+        "0001",
+    );
+    assert_wire(
+        &AgentRequest::ReloadSavedConfigWithVerdict {
+            saved: SavedConfig {
+                revision: ConfigRevision::of(""),
+                chosen: vec![ChosenLight {
+                    device: "serial:ABC123".into(),
+                    power: false,
+                    brightness: true,
+                    temperature: true,
+                }],
+            },
+        },
+        "2ee3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\
+         010d73657269616c3a414243313233000101",
+    );
+    assert_wire(
+        &AgentResponse::ReloadSavedConfigWithVerdict(Ok(SavedConfigVerdict::Accepted)),
+        "2e0000",
+    );
+    assert_wire(
+        &AgentResponse::ReloadSavedConfigWithVerdict(Ok(SavedConfigVerdict::FileChangedAfterSave)),
+        "2e0001",
     );
 }
 
@@ -672,13 +707,15 @@ fn device_inventory() {
                 easy_switch: true,
                 virtual_thumbwheel: true,
                 pointer_scaling: true,
+                force_sensing: true,
+                disable_keys: false,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010007",
     );
 }
 
@@ -719,6 +756,39 @@ fn pairing_updates() {
 
 #[test]
 fn device_settings_payloads() {
+    let disable_keys = DisableKeysState {
+        supported: DisableKeysMask::from_bits_retain(0xa1),
+        disabled: DisableKeysMask::from_bits_retain(0xe0),
+    };
+    assert_wire(&DisableKeysMask::from_bits_retain(0xa1), "a1");
+    assert_wire(&disable_keys, "a1e0");
+    assert_wire(&Ok::<DisableKeysState, WriteError>(disable_keys), "00a1e0");
+    assert_wire(&HidppOperation::ReadDisableKeys, "1a");
+    assert_wire(&HidppOperation::WriteDisableKeys, "1b");
+    assert_wire(
+        &WriteError::UnsupportedMask {
+            operation: HidppOperation::WriteDisableKeys,
+            feature_hex: 0x4521,
+            requested: 0x20,
+            supported: 0x1f,
+        },
+        "1c1bfb2145201f",
+    );
+    assert_wire(
+        &WriteError::WriteNotApplied {
+            operation: HidppOperation::WriteDisableKeys,
+            feature_hex: 0x4521,
+            expected: 0xa1,
+            actual: 0x01,
+        },
+        "1d1bfb2145a101",
+    );
+    assert_wire(
+        &WriteError::WriteSuperseded {
+            operation: HidppOperation::WriteDisableKeys,
+        },
+        "1e1b",
+    );
     let dpi: Result<DpiInfo, WriteError> = Ok(DpiInfo {
         current: Dpi::new(1600),
         capabilities: DpiCapabilities::new(vec![800, 1600, 3200]).expect("non-empty list"),
@@ -818,14 +888,15 @@ fn semantic_read_payloads() {
         current_level: 4,
         nb_levels: 8,
         power_save: true,
-        controls: BacklightControls {
-            automatic: true,
-            level: true,
-            power_save: false,
-        },
+        duration: BacklightDuration::try_from(30).ok(),
+        controls: BacklightControls::AUTOMATIC
+            | BacklightControls::LEVEL
+            | BacklightControls::DURATION,
     });
-    // v36 appends `power_save` and `controls` after the level count.
-    assert_wire(&backlight, "00010102040801010100");
+    // v36 appends `power_save` and `controls`; the timer's `duration` and
+    // `duration` ride v41 as the controls bit set (30 seconds) — the
+    // validated timer now serializes as an `Option` tag plus its seconds.
+    assert_wire(&backlight, "000101020408010b011e");
 
     let fn_lock: Result<FnLockState, WriteError> = Ok(FnLockState {
         fn_lock: true,
@@ -1017,6 +1088,12 @@ fn backlight_changes_and_errors() {
     assert_wire(&BacklightChange::Automatic(false), "0100");
     assert_wire(&BacklightChange::Level(3), "0203");
     assert_wire(&BacklightChange::PowerSave(true), "0301");
+    // Variant 4, then the seconds as a varint. 15 fits one byte; the
+    // validated timer serializes transparently as its seconds.
+    assert_wire(
+        &BacklightChange::Duration(BacklightDuration::try_from(15).expect("15 is a listed step")),
+        "040f",
+    );
     assert_wire(
         &WriteError::BacklightChangeUnsupported {
             change: BacklightChange::Level(8),
@@ -1073,4 +1150,67 @@ fn pointer_speed_and_precision_mode() {
     );
     // Appended at the end of `Action`, so every earlier index is unchanged.
     assert_wire(&Action::TogglePrecisionMode, "36");
+}
+
+/// The press force of a force-sensing button (the MX Master 4's Haptic Sense
+/// Panel): raw device values as varints, all of them past one byte.
+#[test]
+fn force_sensing_dtos_and_errors() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "F00DCAFE".into(),
+        slot: 1,
+    };
+    assert_wire(
+        &AgentRequest::ReadForceSensing {
+            route: route.clone(),
+        },
+        "2a0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetForceSensing { route, force: 4500 },
+        "2b0008463030444341464501fb9411",
+    );
+    let info = ForceSensingInfo {
+        changeable: true,
+        default: 5089,
+        min: 4071,
+        max: 6768,
+        current: 4500,
+    };
+    assert_wire(&info, "01fbe113fbe70ffb701afb9411");
+    assert_wire(
+        &Ok::<ForceSensingInfo, WriteError>(info),
+        "0001fbe113fbe70ffb701afb9411",
+    );
+    assert_wire(&HidppOperation::ReadForceSensing, "18");
+    assert_wire(&HidppOperation::WriteForceSensing, "19");
+    assert_wire(&WriteError::ForceSensingUnchangeable, "1a");
+    assert_wire(
+        &WriteError::ForceSensingNotApplied {
+            requested: 4500,
+            actual: 5089,
+        },
+        "1bfb9411fbe113",
+    );
+}
+
+#[test]
+fn disable_keys_requests_are_appended() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "F00DCAFE".into(),
+        slot: 1,
+    };
+    assert_wire(
+        &AgentRequest::ReadDisableKeys {
+            route: route.clone(),
+        },
+        "2c0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetDisableKeys {
+            route,
+            desired: DisableKeysMask::CAPS_LOCK,
+        },
+        "2d000846303044434146450101",
+    );
 }

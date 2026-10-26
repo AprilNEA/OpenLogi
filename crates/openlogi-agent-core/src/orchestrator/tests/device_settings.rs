@@ -47,6 +47,30 @@ fn held_wheel_inversion_follows_the_main_wheel_on_its_link() {
 }
 
 #[test]
+fn disable_keys_reapply_distinguishes_unmanaged_empty_and_nonempty_config() {
+    let mut config = Config::default();
+    assert_eq!(configured_disabled_keys(&config, "keyboard"), None);
+
+    config.set_disabled_keys("keyboard", BTreeSet::new());
+    assert_eq!(
+        configured_disabled_keys(&config, "keyboard"),
+        Some(openlogi_hid::DisableKeysMask::EMPTY)
+    );
+
+    config.set_disabled_keys(
+        "keyboard",
+        BTreeSet::from([DisableKey::CapsLock, DisableKey::WindowsCommand]),
+    );
+    assert_eq!(
+        configured_disabled_keys(&config, "keyboard"),
+        Some(
+            openlogi_hid::DisableKeysMask::CAPS_LOCK
+                | openlogi_hid::DisableKeysMask::WINDOWS_COMMAND
+        )
+    );
+}
+
+#[test]
 fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
     let mut config = Config::default();
     config.set_scroll_resolution("a", Some(ScrollResolution::Low));
@@ -201,6 +225,60 @@ fn configured_report_rate_needs_the_feature_and_a_saved_rate() {
     assert_eq!(configured_report_rate(&config, &device), None);
     device.capabilities = None;
     assert_eq!(configured_report_rate(&config, &device), None);
+}
+
+#[test]
+fn configured_force_sensing_needs_the_capability_and_a_saved_force() {
+    let mut config = Config::default();
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        force_sensing: true,
+        ..Capabilities::default()
+    });
+    // Nothing saved: the device keeps its own force.
+    assert_eq!(configured_force_sensing(&config, &device), None);
+    config.set_force_sensing("a", 4500);
+    assert_eq!(configured_force_sensing(&config, &device), Some(4500));
+    // A device whose force software may not change is never written.
+    device.capabilities = Some(Capabilities::default());
+    assert_eq!(configured_force_sensing(&config, &device), None);
+    device.capabilities = None;
+    assert_eq!(configured_force_sensing(&config, &device), None);
+}
+
+#[test]
+fn a_reload_writes_a_changed_force_only_to_an_online_enabled_device() {
+    let sensing = |key: &str, slot: u8, online: bool| {
+        let mut device = dev(key, slot, online);
+        device.capabilities = Some(Capabilities {
+            force_sensing: true,
+            ..Capabilities::default()
+        });
+        device
+    };
+    let devices = [
+        sensing("unchanged", 1, true),
+        sensing("changed", 2, true),
+        sensing("disabled", 3, true),
+        sensing("offline", 4, false),
+        sensing("removed", 5, true),
+    ];
+    let mut previous = Config::default();
+    previous.set_force_sensing("unchanged", 5000);
+    previous.set_force_sensing("changed", 5000);
+    previous.set_force_sensing("removed", 5000);
+    let mut config = Config::default();
+    config.set_force_sensing("unchanged", 5000);
+    config.set_force_sensing("changed", 6000);
+    config.set_force_sensing("disabled", 6000);
+    config.set_device_enabled("disabled", false);
+    config.set_force_sensing("offline", 6000);
+
+    assert_eq!(
+        changed_force_sensing(&previous, &config, &devices),
+        vec![(bolt(2), 6000)],
+        "a disabled device is left native, and a removed force writes nothing"
+    );
 }
 
 fn bolt(slot: u8) -> DeviceRoute {

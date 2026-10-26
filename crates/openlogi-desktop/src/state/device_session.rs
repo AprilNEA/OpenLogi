@@ -3,6 +3,7 @@
 use openlogi_core::device::ModelTransport;
 use openlogi_core::hid::ReceiverProtocol;
 
+use super::disable_keys::DisableKeysDeviceState;
 use super::light::LightDeviceState;
 use super::smartshift::SmartShiftDeviceState;
 
@@ -34,4 +35,5 @@ pub(super) struct DeviceSession {
     pub(super) inventory_misses: u8,
     pub(super) smartshift: SmartShiftDeviceState,
     pub(super) light: LightDeviceState,
+    pub(super) disable_keys: DisableKeysDeviceState,
 }

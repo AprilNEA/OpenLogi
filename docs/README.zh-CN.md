@@ -137,7 +137,7 @@ OpenLogi 能做、而 Options+ 做不到的事：
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="MX Keys S 的按键和背光卡片"></td>
-        <td width="50%"><b>键盘</b><ul><li>Fn Lock；多平台键盘保持当前系统的布局</li><li>背光档位、自动亮度和省电模式</li><li>调整背光时在屏幕上显示档位</li><li>受支持键盘的静态 RGB 灯光</li></ul></td>
+        <td width="50%"><b>键盘</b><ul><li>Fn Lock；多平台键盘保持当前系统的布局</li><li>背光档位、自动亮度、省电模式和按键亮灯时长</li><li>调整背光时在屏幕上显示档位</li><li>受支持键盘的静态 RGB 灯光</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Litra Glow 灯光面板：亮度和色温"></td>

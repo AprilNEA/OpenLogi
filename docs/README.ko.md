@@ -137,7 +137,7 @@ OpenLogi는 되고 Options+는 안 되는 것들:
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="MX Keys S의 키 카드와 백라이트 카드"></td>
-        <td width="50%"><b>키보드</b><ul><li>Fn Lock, 그리고 호스트 OS 레이아웃을 유지하는 멀티 플랫폼 키보드</li><li>백라이트 밝기, 자동 밝기, 배터리 절약</li><li>백라이트 밝기를 바꿀 때 화면에 표시</li><li>지원 키보드의 정적 RGB</li></ul></td>
+        <td width="50%"><b>키보드</b><ul><li>Fn Lock, 그리고 호스트 OS 레이아웃을 유지하는 멀티 플랫폼 키보드</li><li>백라이트 밝기, 자동 밝기, 배터리 절약, 키 조명 유지 시간</li><li>백라이트 밝기를 바꿀 때 화면에 표시</li><li>지원 키보드의 정적 RGB</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="밝기와 색온도를 설정하는 Litra Glow 조명 패널"></td>

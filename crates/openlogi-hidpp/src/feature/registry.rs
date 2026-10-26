@@ -34,6 +34,7 @@ use crate::{
         fn_inversion::{
             FnInversionFeature, FnInversionMultiHostFeature, FnInversionWithDefaultStateFeature,
         },
+        force_sensing_button::ForceSensingButtonFeature,
         gestures2::Gestures2Feature,
         haptic_feedback::HapticFeedbackFeature,
         hires_wheel::HiResWheelFeature,
@@ -192,9 +193,7 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x1983 "Backlight3",
     0x1990 "Illumination" => IlluminationFeature,
     0x19b0 "HapticFeedback" => HapticFeedbackFeature,
-    // Reverse-engineered name observed in MX Master 4 metadata; no public HID++
-    // definition is available, so it remains intentionally unimplemented.
-    0x19c0 "ForceSensingButton",
+    0x19c0 "ForceSensingButton" => ForceSensingButtonFeature,
     0x1a00 "PresenterControl",
     0x1a01 "Sensor3D",
     0x1b00 "ReprogControls",

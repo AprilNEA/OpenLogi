@@ -490,7 +490,8 @@ impl From<WriteError> for ApiError {
             WriteError::FeatureUnsupported { .. }
             | WriteError::LightUnsupported { .. }
             | WriteError::HapticWaveformUnsupported { .. }
-            | WriteError::HostRenameUnsupported => "unsupported_feature",
+            | WriteError::HostRenameUnsupported
+            | WriteError::ForceSensingUnchangeable => "unsupported_feature",
             WriteError::DeviceNotFound => "device_not_found",
             WriteError::DeviceUnreachable { .. } => "device_offline",
             WriteError::AgentUnavailable => "agent_unavailable",
@@ -504,7 +505,8 @@ impl From<WriteError> for ApiError {
             | WriteError::HostNameRejected { .. } => "invalid_value",
             WriteError::DpiNotApplied { .. }
             | WriteError::ReportRateNotApplied { .. }
-            | WriteError::HostNameNotApplied { .. } => "readback_mismatch",
+            | WriteError::HostNameNotApplied { .. }
+            | WriteError::ForceSensingNotApplied { .. } => "readback_mismatch",
             _ => "device_error",
         };
         Self::new(code, error.to_string())

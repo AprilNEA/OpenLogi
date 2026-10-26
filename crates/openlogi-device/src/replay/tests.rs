@@ -266,6 +266,7 @@ fn profile_validator_rejects_route_and_setting_inconsistencies() {
         current_level: 4,
         nb_levels: 4,
         power_save: false,
+        duration: None,
         controls: BacklightControls::default(),
     });
     let error = invalid_backlight
@@ -897,6 +898,8 @@ fn dpi_settings(route: DeviceRoute, current: u16, supported: Vec<u16>) -> Profil
         easy_switch: ProfileSetting::Unsupported,
         report_rate: ProfileSetting::Unsupported,
         pointer_speed: ProfileSetting::Unsupported,
+        force_sensing: ProfileSetting::Unsupported,
+        disable_keys: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: ProfileSupport::Unsupported,
     }

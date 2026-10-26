@@ -137,7 +137,7 @@ Les profils par application basculent avec l'application au premier plan. Un ali
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="Cartes Touches et Rétroéclairage d'un MX Keys S"></td>
-        <td width="50%"><b>Clavier</b><ul><li>Fn Lock, et claviers multiplateformes qui restent sur la disposition du système hôte</li><li>Niveau de rétroéclairage, luminosité automatique et économie de batterie</li><li>Le niveau de rétroéclairage affiché à l'écran quand il change</li><li>RGB statique sur les claviers compatibles</li></ul></td>
+        <td width="50%"><b>Clavier</b><ul><li>Fn Lock, et claviers multiplateformes qui restent sur la disposition du système hôte</li><li>Niveau de rétroéclairage, luminosité automatique, économie de batterie et durée d'éclairage des touches</li><li>Le niveau de rétroéclairage affiché à l'écran quand il change</li><li>RGB statique sur les claviers compatibles</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Panneau d'éclairage Litra Glow avec luminosité et température de couleur"></td>

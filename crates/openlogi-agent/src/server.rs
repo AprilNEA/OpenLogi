@@ -5,6 +5,7 @@
 //! The agent owns all device I/O, so the GUI never opens a device — it routes
 //! "apply now" / "read" commands here, and polls snapshots.
 
+mod backlight;
 mod haptic_restore;
 
 use std::sync::{Arc, PoisonError};
@@ -18,20 +19,20 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_core::config::{ConfigFile, Lighting};
+use openlogi_core::config::{ConfigFile, ConfigRevision, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation, LightCommand,
-    PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
-    WriteError,
+    ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
+    LightCommand, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, Generation, Identity, LockKeyObservation,
     MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate, RingObservation, SavedConfig,
+    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 
@@ -105,20 +106,24 @@ impl AgentServer {
     /// [`Agent::reload_saved_config`] when the GUI's save is given. The
     /// revision is that of the text the config is parsed from, so an edit
     /// that lands after the read cannot pass for the save.
-    async fn reload(self, saved: Option<SavedConfig>) -> Result<(), ConfigReloadError> {
+    async fn reload(
+        &self,
+        saved: Option<&SavedConfig>,
+    ) -> Result<ConfigRevision, ConfigReloadError> {
         match ConfigFile::load_or_default() {
             Ok((config, file)) => {
+                let revision = file.revision();
                 let launch_at_login = config.app_settings.launch_at_login;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
                 let language = config.app_settings.language.clone();
                 match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
-                    Some(saved) => self.orchestrator.lock().await.reload_saved_config(
-                        config,
-                        file.revision(),
-                        &saved,
-                    ),
+                    Some(saved) => self
+                        .orchestrator
+                        .lock()
+                        .await
+                        .reload_saved_config(config, revision, saved),
                 }
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
@@ -135,7 +140,7 @@ impl AgentServer {
                 openlogi_core::locale::activate(language.as_deref());
                 #[cfg(target_os = "macos")]
                 crate::tray::relocalize();
-                Ok(())
+                Ok(revision)
             }
             Err(error) => {
                 warn!(error = %error, "reload_config: parse failed; keeping current config");
@@ -144,6 +149,15 @@ impl AgentServer {
                 })
             }
         }
+    }
+}
+
+/// Decide whether the agent reloaded the exact revision the GUI saved.
+fn saved_config_verdict(saved: &SavedConfig, revision: ConfigRevision) -> SavedConfigVerdict {
+    if saved.revision == revision {
+        SavedConfigVerdict::Accepted
+    } else {
+        SavedConfigVerdict::FileChangedAfterSave
     }
 }
 
@@ -178,7 +192,7 @@ impl Agent for AgentServer {
     }
 
     async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
-        self.reload(None).await
+        self.reload(None).await.map(|_| ())
     }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
@@ -265,6 +279,14 @@ impl Agent for AgentServer {
             .await
     }
 
+    async fn read_disable_keys(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_hid::DisableKeysState, WriteError> {
+        self.shared.read_disable_keys(&route).await
+    }
+
     async fn set_fn_lock(
         self,
         _: Context,
@@ -272,6 +294,15 @@ impl Agent for AgentServer {
         fn_lock: bool,
     ) -> Result<FnLockState, WriteError> {
         self.shared.set_fn_lock(&route, fn_lock).await
+    }
+
+    async fn set_disable_keys(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        desired: openlogi_hid::DisableKeysMask,
+    ) -> Result<openlogi_hid::DisableKeysState, WriteError> {
+        self.shared.set_disable_keys(&route, desired).await
     }
 
     async fn request_accessibility_prompt(self, _: Context) {
@@ -337,13 +368,33 @@ impl Agent for AgentServer {
     ) -> Result<PointerSpeed, WriteError> {
         self.shared.set_pointer_speed(&route, speed).await
     }
+    async fn read_force_sensing(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ForceSensingInfo, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadForceSensing, |c| async move {
+                openlogi_hid::get_force_sensing_on(&c).await
+            })
+            .await
+    }
+    async fn set_force_sensing(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        force: u16,
+    ) -> Result<ForceSensingInfo, WriteError> {
+        self.shared.set_force_sensing(&route, force).await
+    }
     async fn set_backlight(
         self,
         _: Context,
         route: DeviceRoute,
         change: BacklightChange,
     ) -> Result<BacklightState, WriteError> {
-        self.shared.set_backlight(&route, change).await
+        backlight::write(self.orchestrator, &self.shared, route, change).await
     }
 
     async fn read_easy_switch_hosts(
@@ -375,7 +426,16 @@ impl Agent for AgentServer {
         _: Context,
         saved: SavedConfig,
     ) -> Result<(), ConfigReloadError> {
-        self.reload(Some(saved)).await
+        self.reload(Some(&saved)).await.map(|_| ())
+    }
+
+    async fn reload_saved_config_with_verdict(
+        self,
+        _: Context,
+        saved: SavedConfig,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError> {
+        let revision = self.reload(Some(&saved)).await?;
+        Ok(saved_config_verdict(&saved, revision))
     }
 
     async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {
@@ -1031,7 +1091,111 @@ mod tests {
         ARM_BUDGET, Budget, HapticBreaker, PLAY_BUDGET, PlayOutcome, RESTORE_BUDGET, WriteError,
         haptic_restore, is_worth_retrying,
     };
+    use super::{DeviceRoute, ObservableState, Orchestrator, saved_config_verdict};
+    use openlogi_core::config::{Config, ConfigFile};
+    use openlogi_device::test_support::publish_scripted_channel;
+    use openlogi_ipc::{SavedConfig, SavedConfigVerdict};
+    use std::sync::{Arc, PoisonError};
     use std::time::{Duration, Instant};
+
+    fn disable_keys_response(request: &[u8]) -> Option<Vec<u8>> {
+        if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+            return None;
+        }
+        let mut payload = [0u8; 16];
+        match (request[2], request[3] >> 4) {
+            (0x00, 0x01) => payload[0] = 4,
+            (0x00, 0x00) => {
+                if u16::from_be_bytes([request[4], request[5]]) == 0x4521 {
+                    payload[0] = 0x05;
+                }
+            }
+            (0x05, 0x00) => payload[0] = 0xa1,
+            (0x05, 0x01) => payload[0] = 0x80,
+            _ => return None,
+        }
+
+        let mut response = vec![0u8; 7];
+        response[0] = 0x10;
+        response[1..4].copy_from_slice(&request[1..4]);
+        response[4..].copy_from_slice(&payload[..3]);
+        Some(response)
+    }
+
+    #[test]
+    fn a_file_edit_after_save_is_reported_by_its_verdict() {
+        let directory = tempfile::tempdir().expect("temporary config directory");
+        let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+        Config::default()
+            .save_to_path(&path)
+            .expect("seed config file");
+        let (_, file) = ConfigFile::load_from_path(&path).expect("saved revision");
+        let saved = SavedConfig {
+            revision: file.revision(),
+            chosen: Vec::new(),
+        };
+        assert_eq!(
+            saved_config_verdict(&saved, file.revision()),
+            SavedConfigVerdict::Accepted
+        );
+
+        let mut external = Config::load_from_path(&path).expect("external config");
+        external.app_settings.smooth_scroll = true;
+        external.save_to_path(&path).expect("external edit");
+        let (_, edited) = ConfigFile::load_from_path(&path).expect("edited revision");
+
+        assert_eq!(
+            saved_config_verdict(&saved, edited.revision()),
+            SavedConfigVerdict::FileChangedAfterSave,
+            "the server must not acknowledge the earlier saved revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn disable_keys_real_server_route_uses_only_keyboard_channel() {
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        };
+        let observable = Arc::new(ObservableState::new("test".to_string()));
+        let shared = Orchestrator::new(Config::default(), observable).shared();
+        let generic_route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb023,
+        };
+        let (generic, generic_reports) = publish_scripted_channel(
+            &shared.channel_registry,
+            "generic",
+            generic_route,
+            disable_keys_response,
+        )
+        .await;
+        let (keyboard, keyboard_reports) = publish_scripted_channel(
+            &shared.channel_registry,
+            "keyboard",
+            route.clone(),
+            disable_keys_response,
+        )
+        .await;
+        *shared
+            .capture_channel
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(generic);
+        *shared
+            .keyboard_channel
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(keyboard);
+
+        let state = shared
+            .read_disable_keys(&route)
+            .await
+            .expect("real-server Disable Keys read");
+
+        assert_eq!(state.supported.bits(), 0xa1);
+        assert_eq!(state.disabled.bits(), 0x80);
+        assert!(generic_reports.written_reports().is_empty());
+        assert!(!keyboard_reports.written_reports().is_empty());
+    }
 
     /// Attempts share one allowance, so the second gets what the first left —
     /// not another full one, which is how three retries came to outlast the

@@ -137,7 +137,7 @@ Profile pro Anwendung wechseln mit der App im Fokus. Ein `[apps]`-Alias lässt e
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="Karten für Tasten und Hintergrundbeleuchtung einer MX Keys S"></td>
-        <td width="50%"><b>Tastatur</b><ul><li>Fn Lock sowie Multi-Plattform-Tastaturen, die beim Layout des Host-Betriebssystems bleiben</li><li>Stufe der Hintergrundbeleuchtung, automatische Helligkeit und Energiesparen</li><li>Bildschirmanzeige der Beleuchtungsstufe, sobald sie sich ändert</li><li>Statisches RGB auf unterstützten Tastaturen</li></ul></td>
+        <td width="50%"><b>Tastatur</b><ul><li>Fn Lock sowie Multi-Plattform-Tastaturen, die beim Layout des Host-Betriebssystems bleiben</li><li>Stufe der Hintergrundbeleuchtung, automatische Helligkeit, Energiesparen und wie lange die Tasten leuchten</li><li>Bildschirmanzeige der Beleuchtungsstufe, sobald sie sich ändert</li><li>Statisches RGB auf unterstützten Tastaturen</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Litra-Glow-Beleuchtungspanel mit Helligkeit und Farbtemperatur"></td>

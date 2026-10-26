@@ -2,7 +2,8 @@
 //! way the GUI carousel is, then diffed across ticks into the volatile-settings
 //! re-apply plan, the host-switch links, and the follower cookie writes.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 
 use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
@@ -108,6 +109,37 @@ pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Opti
         .is_some_and(|caps| caps.report_rate)
         .then(|| config.report_rate(&dev.config_key))
         .flatten()
+}
+
+/// The saved press force to push to `dev`: only when the user saved one and
+/// the probe found a force-sensing button whose force software may change,
+/// so nothing is written to a device the user never set a force for.
+pub(super) fn configured_force_sensing(config: &Config, dev: &AgentDevice) -> Option<u16> {
+    dev.capabilities
+        .is_some_and(|caps| caps.force_sensing)
+        .then(|| config.force_sensing(&dev.config_key))
+        .flatten()
+}
+
+/// The press-force writes a config reload owes: each online, enabled device
+/// whose saved force differs from `previous`'s, with the force to write. A
+/// removed force writes nothing — the device keeps the force it has — and a
+/// disabled device is left alone, as pointer speed leaves it.
+pub(super) fn changed_force_sensing(
+    previous: &Config,
+    config: &Config,
+    devices: &[AgentDevice],
+) -> Vec<(DeviceRoute, u16)> {
+    devices
+        .iter()
+        .filter(|dev| dev.online && config.device_enabled(&dev.config_key))
+        .filter_map(|dev| {
+            let force = configured_force_sensing(config, dev)?;
+            (Some(force) != configured_force_sensing(previous, dev))
+                .then(|| Some((dev.route.clone()?, force)))
+                .flatten()
+        })
+        .collect()
 }
 
 /// How precision mode sets `dev`'s speed, with the value saved for it, or
@@ -247,6 +279,46 @@ pub(super) fn build_devices(
             .then_with(|| a.model_key.cmp(&b.model_key))
     });
     devices
+}
+
+/// Count one more settings change the agent made on `route` itself.
+pub(super) fn bump_settings_epoch(epochs: &mut Vec<(DeviceRoute, u64)>, route: &DeviceRoute) {
+    match epochs.iter_mut().find(|(known, _)| known == route) {
+        Some((_, epoch)) => *epoch = epoch.wrapping_add(1),
+        None => epochs.push((route.clone(), 1)),
+    }
+}
+
+/// The inventory clients see: each paired device's reported settings revision
+/// plus the agent's own changes on its route. Agent decisions keep the raw
+/// snapshot, whose revision only a device report moves.
+pub(super) fn published_inventories<'a>(
+    inventories: &'a [DeviceInventory],
+    epochs: &[(DeviceRoute, u64)],
+) -> Cow<'a, [DeviceInventory]> {
+    if epochs.is_empty() {
+        return Cow::Borrowed(inventories);
+    }
+    Cow::Owned(
+        inventories
+            .iter()
+            .map(|inventory| {
+                let mut published = inventory.clone();
+                for paired in &mut published.paired {
+                    let epoch = DeviceRoute::for_slot(inventory, paired.slot).and_then(|route| {
+                        epochs
+                            .iter()
+                            .find(|(known, _)| *known == route)
+                            .map(|(_, epoch)| *epoch)
+                    });
+                    if let Some(epoch) = epoch {
+                        paired.settings_revision = paired.settings_revision.wrapping_add(epoch);
+                    }
+                }
+                published
+            })
+            .collect(),
+    )
 }
 
 pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec<HostSwitchLink> {
@@ -574,12 +646,55 @@ pub(super) fn stable_id(dev: &AgentDevice) -> DeviceStableId {
     )
 }
 
+/// Whether two snapshots still describe the same device lifecycle. Receiver
+/// slots can be reused by another physical device without changing their
+/// stable ID. Missing identity fields are not replacement evidence: a later
+/// probe can enrich them while requests and confirmation budgets remain live.
+pub(super) fn same_device_lifecycle(previous: &AgentDevice, next: &AgentDevice) -> bool {
+    if previous.route != next.route
+        || (previous.unit_id != [0; 4]
+            && next.unit_id != [0; 4]
+            && previous.unit_id != next.unit_id)
+    {
+        return false;
+    }
+    if let (DeviceIdentity::Serial(before), DeviceIdentity::Serial(after)) = (
+        DeviceIdentity::from_parts(previous.serial.as_deref(), previous.unit_id),
+        DeviceIdentity::from_parts(next.serial.as_deref(), next.unit_id),
+    ) && before != after
+    {
+        return false;
+    }
+    stable_id(previous) == stable_id(next)
+        || (previous.unit_id != [0; 4]
+            && previous.unit_id == next.unit_id
+            && (previous.route.is_some() || previous.slot == next.slot))
+}
+
+/// Carry remaining attempts across identity enrichment, but never across a
+/// replacement or removal. Both confirmation schedulers use this transition.
+pub(super) fn carry_lifecycle_budgets(
+    previous: &[AgentDevice],
+    next: &[AgentDevice],
+    budgets: &BTreeMap<DeviceStableId, u8>,
+) -> BTreeMap<DeviceStableId, u8> {
+    next.iter()
+        .filter_map(|device| {
+            let old = previous
+                .iter()
+                .find(|old| same_device_lifecycle(old, device))?;
+            let remaining = *budgets.get(&stable_id(old))?;
+            Some((stable_id(device), remaining))
+        })
+        .collect()
+}
+
 /// Indices into `next` of devices whose volatile settings need re-applying:
 /// a device whose stable identity is newly present (a first sighting, or a
 /// replug that re-enumerated under a new identity — e.g. a Bolt device that
 /// moved slots), or an offline→online transition (a reconnect after device
 /// sleep); plus — after a system wake — every online device. Devices are
-/// matched across ticks by [`stable_id`]. Offline devices are never targeted
+/// matched across ticks by [`same_device_lifecycle`]. Offline devices are never targeted
 /// (the write would just time out); they re-apply on their own transition.
 pub(super) fn reapply_targets(
     prev: &[AgentDevice],
@@ -593,8 +708,7 @@ pub(super) fn reapply_targets(
             if reapply_all {
                 return true;
             }
-            let id = stable_id(dev);
-            match prev.iter().find(|p| stable_id(p) == id) {
+            match prev.iter().find(|p| same_device_lifecycle(p, dev)) {
                 // A new identity (first sighting, or a replug under a new
                 // route/slot) needs a fresh apply; a known one only when it has
                 // just come back online.
@@ -685,7 +799,7 @@ pub(super) fn any_device_needs_capture_rearm(
 /// wake can enumerate a receiver whose mouse link is still re-establishing —
 /// so the first write (and a single confirm) can both time out against a
 /// still-booting device. Four confirmations are requested at two-second
-/// intervals; any intervening authoritative reconciliation satisfies one.
+/// intervals; only a delayed confirmation consumes an attempt.
 pub(super) const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
 /// The shorter confirmation budget for a link re-establishment (a device nap
@@ -697,24 +811,26 @@ pub(super) const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 pub(super) const RECONNECT_REAPPLY_CONFIRM_RETRIES: u8 = 1;
 
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
-/// plus a bounded run of confirming re-applies, and the follow-up keys (with
-/// remaining retry counts) to confirm next refresh. `forced` re-applies to
-/// every online device carrying the caller's confirm budget (system wake
+/// plus a bounded run of confirming re-applies, and the follow-up identities
+/// (with remaining retry counts) to confirm next refresh. `forced` re-applies
+/// to every online device carrying the caller's confirm budget (system wake
 /// keeps the boot ladder, a device reconnect the single link-race confirm);
 /// first sightings always queue the full boot ladder, and plain
 /// offline→online reconnects queue the link-race confirm.
 pub(super) fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
-    followup: &HashMap<String, u8>,
+    followup: &BTreeMap<DeviceStableId, u8>,
     forced: Option<u8>,
-) -> (Vec<usize>, HashMap<String, u8>) {
+    confirm_followup: bool,
+) -> (Vec<usize>, BTreeMap<DeviceStableId, u8>) {
+    let followup = carry_lifecycle_budgets(prev, next, followup);
     let mut targets = reapply_targets(prev, next, forced.is_some());
-    let mut next_followup: HashMap<String, u8> = targets
+    let mut next_followup: BTreeMap<DeviceStableId, u8> = targets
         .iter()
         .filter_map(|&idx| {
             let id = stable_id(&next[idx]);
-            let new_identity = !prev.iter().any(|p| stable_id(p) == id);
+            let new_identity = !prev.iter().any(|p| same_device_lifecycle(p, &next[idx]));
             let budget = if new_identity {
                 VOLATILE_REAPPLY_CONFIRM_RETRIES
             } else if let Some(forced) = forced {
@@ -725,26 +841,65 @@ pub(super) fn plan_reapply(
             // A new trigger can land mid-run (a reconnect while the boot
             // confirmations are still draining) — keep the larger of the
             // fresh budget and what this pass would have drained to.
-            let carried = followup
-                .get(&next[idx].config_key)
-                .map_or(0, |remaining| remaining.saturating_sub(1));
+            let carried = if new_identity {
+                0
+            } else {
+                followup.get(&id).map_or(0, |remaining| {
+                    remaining.saturating_sub(u8::from(confirm_followup))
+                })
+            };
             let budget = budget.max(carried);
-            (budget > 0).then(|| (next[idx].config_key.clone(), budget))
+            (budget > 0).then_some((id, budget))
         })
         .collect();
     for (idx, dev) in next.iter().enumerate() {
         if dev.online
             && dev.route.is_some()
             && !targets.contains(&idx)
-            && let Some(&remaining) = followup.get(&dev.config_key)
+            && let id = stable_id(dev)
+            && let Some(&remaining) = followup.get(&id)
         {
-            targets.push(idx);
-            if remaining > 1 {
-                next_followup.insert(dev.config_key.clone(), remaining - 1);
+            if confirm_followup {
+                targets.push(idx);
+                if remaining > 1 {
+                    next_followup.insert(id, remaining - 1);
+                }
+            } else {
+                next_followup.insert(id, remaining);
             }
         }
     }
     (targets, next_followup)
+}
+
+/// Plan confirming writes for a failed or cancelled Disable Keys request. The
+/// request's own bounded run is separate from [`plan_reapply`], because a manual
+/// key-disable request must not replay unrelated volatile settings.
+pub(super) fn plan_disabled_keys_recovery(
+    devices: &[AgentDevice],
+    recovery: &BTreeMap<DeviceStableId, u8>,
+    confirm_recovery: bool,
+) -> (Vec<usize>, BTreeMap<DeviceStableId, u8>) {
+    let mut targets = Vec::new();
+    let mut next_recovery = BTreeMap::new();
+    for (idx, dev) in devices.iter().enumerate() {
+        let id = stable_id(dev);
+        let Some(&remaining) = recovery.get(&id) else {
+            continue;
+        };
+        if !dev.online || dev.route.is_none() {
+            continue;
+        }
+        if confirm_recovery {
+            targets.push(idx);
+            if remaining > 1 {
+                next_recovery.insert(id, remaining - 1);
+            }
+        } else {
+            next_recovery.insert(id, remaining);
+        }
+    }
+    (targets, next_recovery)
 }
 
 /// Index of the selected HID++ input device. Prefer the saved selection while
