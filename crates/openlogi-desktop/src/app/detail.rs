@@ -685,6 +685,9 @@ fn device_tab(
     let keyboard = AppState::try_read(cx)
         .and_then(AppState::current_record)
         .is_some_and(|record| record.kind == DeviceKind::Keyboard);
+    let host_switch_keyboard = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .is_some_and(DeviceRecord::is_host_switch_keyboard);
     let show_disable_keys = AppState::try_read(cx)
         .and_then(AppState::current_record)
         .and_then(|record| record.capabilities)
@@ -704,6 +707,13 @@ fn device_tab(
                 easy_switch::EasySwitchFacts::current(cx),
                 pal,
             ))
+            .when(host_switch_keyboard, |column| {
+                column.child(PanelCard::new(
+                    tr!("device.switch_together"),
+                    Icon::empty().path("action-icons/refresh-cw.svg"),
+                    crate::features::keyboard::host_switch::target_table(cx),
+                ))
+            })
             .child(configuration_card(pal, cx))
             .children(show_disable_keys.then(|| disable_keys_panel.clone())),
     )
