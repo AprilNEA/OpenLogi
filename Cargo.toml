@@ -29,23 +29,23 @@ members = [
 default-members = ["crates/openlogi"]
 
 [workspace.package]
-version = "0.8.14"
+version = "0.8.18"
 edition = "2024"
 # Tracks current stable rather than trailing it. OpenLogi ships as an app —
 # prebuilt installers, and no crate here has an external reverse dependency —
 # so a floor below stable buys nobody compatibility and only costs us APIs.
 # Raise this freely the day a release lands something worth using; the `msrv`
 # CI matrix keeps the number honest for `cargo install`.
-rust-version = "1.98"
+rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/AprilNEA/OpenLogi"
 authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.14" }
-openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.14" }
-openlogi-fixture = { path = "crates/openlogi-fixture", version = "0.8.14" }
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.18" }
+openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.18" }
+openlogi-fixture = { path = "crates/openlogi-fixture", version = "0.8.18" }
 async-hid = { package = "openlogi-async-hid", version = "=0.5.3-openlogi.1" }
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
@@ -134,8 +134,10 @@ doc_markdown = "allow"
 assert_is_empty = "allow"
 # Machine-checks the suppression policy in .claude/rules/rust.md: every
 # suppression states a reason, and reaches for `expect` unless it cannot work.
-# Blind spot worth knowing: `allow_attributes` only sees outer `#[allow]`, so a
-# module-wide `#![allow(…)]` — the shape that rots worst — still needs review.
+# `allow_attributes` only sees outer `#[allow]`. The module-wide `#![allow(…)]`
+# it cannot see — the shape that rots worst — is rejected by the ast-grep guard
+# `workspace-no-inner-allow` in the root .ast-grep/rules/. An `allow` that
+# stops suppressing anything stays quiet; `stale-allows.yml` sweeps for those.
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 # Shared lint set, kept in sync with

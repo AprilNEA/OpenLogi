@@ -17,14 +17,12 @@ use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
     Subscription, Window, div, px, rgb,
 };
-use gpui_component::{
-    Disableable as _, Selectable as _, button::Button, h_flex, slider::Slider, v_flex,
-};
+use gpui_component::{Disableable as _, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::config::{
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ThumbwheelSensitivity,
 };
 use openlogi_core::hid::{
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };
 
 use crate::state::{
@@ -32,7 +30,7 @@ use crate::state::{
     StateEvents,
 };
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::components::Toggle;
+use crate::ui::components::{Pill, Toggle};
 use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -56,6 +54,9 @@ pub struct SmartShiftPanel {
     /// builder-only); only *rendered* in ratchet, non-permanent mode. The
     /// value it was last seated on is what toggling "permanent" off restores.
     threshold: CommitSlider<SmartShiftThreshold>,
+    /// The tunable torque (scrolling force) slider. Rendered only when the
+    /// device supports tunable torque.
+    torque: CommitSlider<TunableTorque>,
     /// The per-device thumb-wheel sensitivity slider (device override; devices
     /// without one follow the app-wide default from Settings → General).
     wheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
@@ -78,6 +79,23 @@ impl SmartShiftPanel {
                         SmartShiftStatus {
                             mode: SmartShiftMode::Ratchet,
                             auto_disengage: SmartShiftAutoDisengage::Threshold(threshold),
+                            ..status
+                        },
+                    );
+                }
+            },
+        );
+        let torque = CommitSlider::new(
+            SliderRange::new(TunableTorque::MIN, TunableTorque::MAX),
+            TunableTorque::DEFAULT,
+            cx,
+            |_, torque, cx| {
+                let status = AppState::try_read(cx).and_then(AppState::current_smartshift_ready);
+                if let Some(status) = status {
+                    AppState::update_smartshift(
+                        cx,
+                        SmartShiftStatus {
+                            tunable_torque: Some(torque),
                             ..status
                         },
                     );
@@ -107,6 +125,7 @@ impl SmartShiftPanel {
         });
         Self {
             threshold,
+            torque,
             wheel_sensitivity,
             _state_obs: state_obs,
         }
@@ -201,8 +220,8 @@ impl SmartShiftPanel {
                     .child(tr!("pointer.smartshift_sensitivity_description")),
             );
 
+        let torque_row = self.torque_row(status, ratchet, window, cx);
         let wheel_row = self.wheel_sensitivity_row(window, cx);
-
         let permanent_row = permanent_row(permanent, ratchet, restore_threshold, status, pal);
 
         v_flex()
@@ -210,12 +229,59 @@ impl SmartShiftPanel {
             .w_full()
             .child(mode_row)
             .child(sensitivity_row)
+            .children(torque_row)
             .child(permanent_row)
             .child(wheel_row)
     }
 }
 
 impl SmartShiftPanel {
+    /// The tunable-torque (scrolling force) row: label, live percentage, slider.
+    /// Rendered only when the device supports tunable torque hardware.
+    fn torque_row(
+        &mut self,
+        status: SmartShiftStatus,
+        ratchet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        let pal = theme::palette(cx);
+        let committed_torque = status.tunable_torque?;
+        self.torque.sync(committed_torque, window, cx);
+        let display = self.torque.shown(committed_torque);
+        let torque_value_color = if ratchet {
+            rgb(ACCENT_BLUE).into()
+        } else {
+            pal.text_muted
+        };
+        Some(
+            v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .items_baseline()
+                        .child(section_label(tr!("pointer.scrolling_force"), pal))
+                        .child(
+                            div()
+                                .text_body()
+                                .text_color(torque_value_color)
+                                .child(format!("{display}%")),
+                        ),
+                )
+                .when(ratchet, |row| {
+                    row.child(Slider::new(self.torque.slider()).horizontal())
+                })
+                .when(!ratchet, |row| row.child(disabled_track(pal)))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("pointer.scrolling_force_description")),
+                ),
+        )
+    }
+
     /// The per-device thumb-wheel sensitivity row: label, live value, slider.
     /// Reads the selected device's effective value and re-seats the thumb on a
     /// device switch / external config change, never mid-drag.
@@ -277,7 +343,6 @@ impl Render for SmartShiftPanel {
             SmartShiftLoad::Failed(_) => retry_line(
                 "smartshift-retry",
                 tr!("pointer.couldnt_read_smartshift_click_to_retry"),
-                pal,
                 retry_smartshift_closure(key.clone()),
             )
             .into_any_element(),
@@ -319,7 +384,6 @@ fn smartshift_write_feedback(
             retry_line(
                 "smartshift-confirm-retry",
                 tr!("pointer.couldnt_read_smartshift_click_to_retry"),
-                pal,
                 retry_smartshift_closure(key),
             )
             .into_any_element(),
@@ -378,9 +442,7 @@ fn mode_pill(label: SharedString, selected: bool, status: SmartShiftStatus) -> i
         SmartShiftMode::Free => "smartshift-mode-free",
         SmartShiftMode::Ratchet => "smartshift-mode-ratchet",
     };
-    Button::new(id)
-        .compact()
-        .label(label)
+    Pill::new(id, label)
         .selected(selected)
         .on_click(move |_event, _window, cx| {
             AppState::update_smartshift(cx, status);
@@ -435,5 +497,14 @@ mod tests {
             clamp_threshold(SmartShiftThreshold::from_rounded(200.0)),
             THRESHOLD_MAX
         );
+    }
+
+    #[test]
+    fn tunable_torque_slider_conversion_and_bounds() {
+        use openlogi_core::hid::TunableTorque;
+
+        assert_eq!(TunableTorque::from_rounded(0.0), TunableTorque::MIN);
+        assert_eq!(TunableTorque::from_rounded(50.4), TunableTorque::DEFAULT);
+        assert_eq!(TunableTorque::from_rounded(150.0), TunableTorque::MAX);
     }
 }

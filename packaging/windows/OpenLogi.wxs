@@ -51,7 +51,11 @@
            Scope="perUser"
            Compressed="yes">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of OpenLogi is already installed." />
+    <!-- Windows Installer compares only the first three ProductVersion fields.
+         A beta's build version adds a fourth to the stable release it follows
+         (0.8.16.12 after 0.8.16), so without AllowSameVersionUpgrades the two
+         would install side by side instead of one replacing the other. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of OpenLogi is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <!--

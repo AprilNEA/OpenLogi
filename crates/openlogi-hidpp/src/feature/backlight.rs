@@ -20,6 +20,11 @@ use crate::{
 const EFFECT_UNCHANGED: u8 = 0xff;
 
 /// Bit offset of the 2-bit backlight mode inside the options field.
+///
+/// The width is unresolved. Logi Options+ 2.8 (static analysis) reads and
+/// writes a three-bit mode at bits 3..=5; Solaar reads two bits, as this crate
+/// does. Bit 5 therefore stays in [`BacklightOptions`] on a read and goes back
+/// as read on a write, so neither reading loses it.
 const MODE_SHIFT: u16 = 3;
 /// Mask of the backlight-mode bits inside the options field.
 const MODE_MASK: u16 = 0b11 << MODE_SHIFT;
@@ -30,6 +35,8 @@ bitflags::bitflags! {
     /// The low bits are the currently enabled options; the high bits report
     /// which options and modes the device supports. The 2-bit backlight mode
     /// occupies bits 3..=4 and is exposed separately as [`BacklightMode`].
+    /// Bits 5..=7 have no flag: a read retains them, and
+    /// [`BacklightFeature::set_backlight_config`] sends them back unchanged.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(serde::Serialize))]
     pub struct BacklightOptions: u16 {
@@ -174,9 +181,14 @@ pub struct BacklightConfig {
 pub struct SetBacklightConfig {
     /// Whether to enable the backlight system.
     pub enabled: bool,
-    /// Options to enable. Only [`BacklightOptions::WOW`],
-    /// [`BacklightOptions::CROWN`] and [`BacklightOptions::PWR_SAVE`] are
-    /// writable; the device discards unsupported options.
+    /// Options to enable: [`BacklightOptions::WOW`],
+    /// [`BacklightOptions::CROWN`] and [`BacklightOptions::PWR_SAVE`]; the
+    /// device discards unsupported options.
+    ///
+    /// The whole low byte is sent except bits 3..=4, which carry `mode`. Pass
+    /// the options from [`BacklightConfig::options`] so that bits 5..=7, which
+    /// this crate does not model, go back as the device reported them. The
+    /// high (capability) byte is read-only and is not sent.
     pub options: BacklightOptions,
     /// Mode to select. [`BacklightMode::TemporaryManual`] cannot be set by
     /// software.
@@ -231,6 +243,14 @@ pub enum BacklightEvent {
     InfoChanged(BacklightInfoUpdate),
 }
 
+impl BacklightEvent {
+    /// Decodes one unsolicited backlight event payload.
+    #[must_use]
+    pub fn decode(function_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        <Self as DecodeEvent>::decode(function_id, payload)
+    }
+}
+
 /// Payload of [`BacklightEvent::InfoChanged`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -269,6 +289,58 @@ impl DecodeEvent for BacklightEvent {
     }
 }
 
+impl BacklightConfig {
+    /// Decodes a long `getBacklightConfig` reply.
+    fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
+        let raw_options = u16::from_le_bytes([payload[1], payload[2]]);
+        Ok(Self {
+            enabled: payload[0] & 1 != 0,
+            options: BacklightOptions::from_bits_retain(raw_options & !MODE_MASK),
+            mode: BacklightMode::try_from(((raw_options & MODE_MASK) >> MODE_SHIFT) as u8)
+                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            effect_list: BacklightEffectList::from_bits_retain(u16::from_le_bytes([
+                payload[3], payload[4],
+            ])),
+            current_level: payload[5],
+            duration_hands_out: u16::from_le_bytes([payload[6], payload[7]]),
+            duration_hands_in: u16::from_le_bytes([payload[8], payload[9]]),
+            duration_powered: u16::from_le_bytes([payload[10], payload[11]]),
+            duration_not_powered: u16::from_le_bytes([payload[12], payload[13]]),
+        })
+    }
+}
+
+impl SetBacklightConfig {
+    /// Encodes the long `setBacklightConfig` request.
+    fn to_payload(self) -> [u8; 16] {
+        // Request byte 1 is the low byte of the options field with the mode
+        // in bits 3..=4. Every other bit of that byte comes from `options`,
+        // so the bits this crate does not model go back as read.
+        let [options_low, _capabilities] = (self.options.bits() & !MODE_MASK).to_le_bytes();
+        let options_byte = options_low | (u8::from(self.mode) << MODE_SHIFT);
+        let [out_lo, out_hi] = self.duration_hands_out.to_le_bytes();
+        let [in_lo, in_hi] = self.duration_hands_in.to_le_bytes();
+        let [pwr_lo, pwr_hi] = self.duration_powered.to_le_bytes();
+        let [not_pwr_lo, not_pwr_hi] = self.duration_not_powered.to_le_bytes();
+        let mut args = [0; 16];
+        args[..12].copy_from_slice(&[
+            u8::from(self.enabled),
+            options_byte,
+            self.effect.map_or(EFFECT_UNCHANGED, u8::from),
+            self.current_level,
+            out_lo,
+            out_hi,
+            in_lo,
+            in_hi,
+            pwr_lo,
+            pwr_hi,
+            not_pwr_lo,
+            not_pwr_hi,
+        ]);
+        args
+    }
+}
+
 impl BacklightFeature {
     /// Whether an unsolicited report with `function_id` is the keyboard's
     /// `backlightInfoEvent`, sent when its backlight changes on the device —
@@ -293,58 +365,18 @@ impl BacklightFeature {
         let v20::Message::Long(_, payload) = self.endpoint.call(0, [0; 3]).await? else {
             return Err(Hidpp20Error::UnsupportedResponse);
         };
-        let raw_options = u16::from_le_bytes([payload[1], payload[2]]);
-        Ok(BacklightConfig {
-            enabled: payload[0] & 1 != 0,
-            options: BacklightOptions::from_bits_retain(raw_options & !MODE_MASK),
-            mode: BacklightMode::try_from(((raw_options & MODE_MASK) >> MODE_SHIFT) as u8)
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            effect_list: BacklightEffectList::from_bits_retain(u16::from_le_bytes([
-                payload[3], payload[4],
-            ])),
-            current_level: payload[5],
-            duration_hands_out: u16::from_le_bytes([payload[6], payload[7]]),
-            duration_hands_in: u16::from_le_bytes([payload[8], payload[9]]),
-            duration_powered: u16::from_le_bytes([payload[10], payload[11]]),
-            duration_not_powered: u16::from_le_bytes([payload[12], payload[13]]),
-        })
+        BacklightConfig::from_payload(&payload)
     }
 
     /// Writes the backlight configuration persistently (to non-volatile memory).
+    ///
+    /// Option bits that [`BacklightOptions`] does not name are sent as given;
+    /// see [`SetBacklightConfig::options`].
     pub async fn set_backlight_config(
         &self,
         config: SetBacklightConfig,
     ) -> Result<(), Hidpp20Error> {
-        // The request options byte packs the writable option flags (low 3 bits)
-        // and the 2-bit mode (bits 3..=4).
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "masked to WOW|CROWN|PWR_SAVE (bits 0-2), so the value always fits in a u8"
-        )]
-        let options_byte = (config.options.bits()
-            & (BacklightOptions::WOW | BacklightOptions::CROWN | BacklightOptions::PWR_SAVE).bits())
-            as u8
-            | (u8::from(config.mode) << MODE_SHIFT);
-        let [out_lo, out_hi] = config.duration_hands_out.to_le_bytes();
-        let [in_lo, in_hi] = config.duration_hands_in.to_le_bytes();
-        let [pwr_lo, pwr_hi] = config.duration_powered.to_le_bytes();
-        let [not_pwr_lo, not_pwr_hi] = config.duration_not_powered.to_le_bytes();
-        let mut args = [0; 16];
-        args[..12].copy_from_slice(&[
-            u8::from(config.enabled),
-            options_byte,
-            config.effect.map_or(EFFECT_UNCHANGED, u8::from),
-            config.current_level,
-            out_lo,
-            out_hi,
-            in_lo,
-            in_hi,
-            pwr_lo,
-            pwr_hi,
-            not_pwr_lo,
-            not_pwr_hi,
-        ]);
-        self.endpoint.call_long(1, args).await?;
+        self.endpoint.call_long(1, config.to_payload()).await?;
         Ok(())
     }
 
@@ -392,9 +424,75 @@ impl BacklightInfoUpdate {
 #[cfg(test)]
 mod tests {
     use super::{
-        BacklightEffect, BacklightFeature, BacklightInfoUpdate, BacklightMode, BacklightOptions,
-        BacklightStatus,
+        BacklightConfig, BacklightEffect, BacklightFeature, BacklightInfoUpdate, BacklightMode,
+        BacklightOptions, BacklightStatus, SetBacklightConfig,
     };
+
+    /// `getBacklightConfig` options-byte value of `WOW`.
+    const WOW: u8 = 1 << 0;
+    /// `getBacklightConfig` options-byte value of `PWR_SAVE`.
+    const PWR_SAVE: u8 = 1 << 2;
+    /// Automatic mode in bits 3..=4.
+    const AUTOMATIC: u8 = 1 << 3;
+    /// Permanent-manual mode in bits 3..=4.
+    const PERMANENT: u8 = 3 << 3;
+    /// Bits 5..=7 of the options byte, which have no flag.
+    const UNMODELLED: u8 = 0b1110_0000;
+
+    /// A long `getBacklightConfig` reply with options byte `options_low`:
+    /// enabled, the sensor, a held level and battery saving supported, level
+    /// 4, and durations 0x0001 / 0x0002 / 0x0003 / 0x0405.
+    fn config_reply(options_low: u8) -> [u8; 16] {
+        let mut payload = [0; 16];
+        payload[0] = 1;
+        payload[1] = options_low;
+        payload[2] = (BacklightOptions::AUTO_MODE_SUPPORTED
+            | BacklightOptions::PERM_MANUAL_SUPPORTED
+            | BacklightOptions::PWR_SAVE_SUPPORTED)
+            .bits()
+            .to_le_bytes()[1];
+        payload[5] = 4;
+        payload[6..14].copy_from_slice(&[0x01, 0, 0x02, 0, 0x03, 0, 0x05, 0x04]);
+        payload
+    }
+
+    /// The `setBacklightConfig` request for [`config_reply`]'s durations with
+    /// these leading bytes; the effect is "do not change".
+    fn request(enabled: u8, options_byte: u8, level: u8) -> [u8; 16] {
+        [
+            enabled,
+            options_byte,
+            0xff,
+            level,
+            0x01,
+            0,
+            0x02,
+            0,
+            0x03,
+            0,
+            0x05,
+            0x04,
+            0,
+            0,
+            0,
+            0,
+        ]
+    }
+
+    /// The request that writes `config` back as read.
+    fn written_back(config: &BacklightConfig) -> SetBacklightConfig {
+        SetBacklightConfig {
+            enabled: config.enabled,
+            options: config.options,
+            mode: config.mode,
+            effect: None,
+            current_level: config.current_level,
+            duration_hands_out: config.duration_hands_out,
+            duration_hands_in: config.duration_hands_in,
+            duration_powered: config.duration_powered,
+            duration_not_powered: config.duration_not_powered,
+        }
+    }
 
     #[test]
     fn only_function_zero_is_the_info_broadcast() {
@@ -409,19 +507,77 @@ mod tests {
 
     #[test]
     fn decodes_options_and_mode_split() {
-        // WOW enabled + permanent-manual mode (0b11 << 3) + auto-mode supported.
-        let raw = BacklightOptions::WOW.bits()
-            | (u16::from(u8::from(BacklightMode::PermanentManual)) << 3)
-            | BacklightOptions::AUTO_MODE_SUPPORTED.bits();
-        let mode = BacklightMode::try_from(((raw & (0b11 << 3)) >> 3) as u8).unwrap();
-        let options = BacklightOptions::from_bits_retain(raw & !(0b11 << 3));
+        // WOW enabled, permanent-manual mode and bit 5.
+        let config =
+            BacklightConfig::from_payload(&config_reply(WOW | PERMANENT | (1 << 5))).unwrap();
 
-        assert_eq!(mode, BacklightMode::PermanentManual);
-        assert!(options.contains(BacklightOptions::WOW));
-        assert!(options.contains(BacklightOptions::AUTO_MODE_SUPPORTED));
-        // The mode bits must not leak into the options flags.
-        assert!(!options.contains(BacklightOptions::PWR_SAVE));
-        assert!(!options.contains(BacklightOptions::CROWN));
+        assert_eq!(config.mode, BacklightMode::PermanentManual);
+        assert!(
+            config
+                .options
+                .contains(BacklightOptions::AUTO_MODE_SUPPORTED)
+        );
+        // The mode bits do not leak into the options; bit 5 is not read as
+        // mode and stays in the options as an unnamed bit.
+        assert_eq!(config.options.bits().to_le_bytes()[0], WOW | (1 << 5));
+    }
+
+    #[test]
+    fn a_write_built_from_a_read_keeps_the_unmodelled_option_bits() {
+        // Logi Options+ 2.8 reads bit 5 as a third mode bit; Solaar does not.
+        // Bits 6 and 7 have no known meaning. All three go back as read.
+        let read = UNMODELLED | AUTOMATIC | WOW;
+        let config = BacklightConfig::from_payload(&config_reply(read)).unwrap();
+        assert_eq!(config.mode, BacklightMode::Automatic);
+        let unchanged = written_back(&config);
+
+        for (changed, set, expected) in [
+            ("nothing", unchanged, request(1, read, 4)),
+            (
+                "enabled",
+                SetBacklightConfig {
+                    enabled: false,
+                    ..unchanged
+                },
+                request(0, read, 4),
+            ),
+            (
+                "battery saving",
+                SetBacklightConfig {
+                    options: config.options | BacklightOptions::PWR_SAVE,
+                    ..unchanged
+                },
+                request(1, read | PWR_SAVE, 4),
+            ),
+            (
+                "level",
+                SetBacklightConfig {
+                    current_level: 2,
+                    ..unchanged
+                },
+                request(1, read, 2),
+            ),
+            // A mode change rewrites bits 3..=4 only.
+            (
+                "mode",
+                SetBacklightConfig {
+                    mode: BacklightMode::PermanentManual,
+                    ..unchanged
+                },
+                request(1, UNMODELLED | PERMANENT | WOW, 4),
+            ),
+            // Bits 3..=4 come from `mode`, never from `options`.
+            (
+                "stray mode bits",
+                SetBacklightConfig {
+                    options: config.options | BacklightOptions::from_bits_retain(0b11 << 3),
+                    ..unchanged
+                },
+                request(1, read, 4),
+            ),
+        ] {
+            assert_eq!(set.to_payload(), expected, "{changed}");
+        }
     }
 
     #[test]

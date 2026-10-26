@@ -180,3 +180,183 @@ async fn successful_channel_open_resets_eviction_but_not_inventory_grace() {
     assert!(!first_incomplete_probe.evict_channel);
     assert!(first_incomplete_probe.inventory.is_none());
 }
+
+/// A backend whose `open_hidpp` sleeps for a fixed delay before failing,
+/// standing in for a slow BLE-direct connection handshake.
+struct SlowOpenBackend {
+    delay: Duration,
+}
+
+#[hidpp::async_trait]
+impl crate::backend::HidBackend for SlowOpenBackend {
+    async fn enumerate(&self) -> Result<Vec<NodeInfo>, crate::backend::BackendError> {
+        Ok(Vec::new())
+    }
+
+    async fn enumerate_hidpp(&self) -> Result<Vec<NodeInfo>, crate::backend::BackendError> {
+        Ok(Vec::new())
+    }
+
+    async fn open_hidpp(
+        &self,
+        _node: &NodeInfo,
+    ) -> Result<Option<Arc<hidpp::channel::HidppChannel>>, crate::backend::BackendError> {
+        tokio::time::sleep(self.delay).await;
+        Err(crate::backend::BackendError::Disconnected)
+    }
+
+    async fn open_raw_writer(
+        &self,
+        _node: &NodeInfo,
+    ) -> Result<Box<dyn crate::backend::RawWriter>, crate::backend::BackendError> {
+        Err(crate::backend::BackendError::Backend(
+            "slow-open test backend has no raw writer".into(),
+        ))
+    }
+
+    fn watch(&self) -> Result<crate::backend::HotplugStream, crate::backend::BackendError> {
+        Ok(Box::new(futures_lite::stream::empty()))
+    }
+}
+
+/// BLE-direct devices measured 10-15s each to open, fully serialized, because
+/// `prepare_nodes` opened one node at a time. Three nodes that each take
+/// `DELAY` to open must finish in about one `DELAY`, not three.
+///
+/// Uses paused virtual time instead of a wall-clock ceiling: `SlowOpenBackend`
+/// sleeps via `tokio::time::sleep`, so with time paused a serialized open
+/// would need the runtime to auto-advance past three delays before this task
+/// can resume, while a concurrent one only needs one — proving the property
+/// directly rather than measuring scheduler latency, which a loaded CI
+/// runner can blow through even when every open genuinely ran concurrently.
+#[tokio::test(start_paused = true)]
+async fn opening_multiple_nodes_does_not_serialize_a_slow_connection_handshake() {
+    const DELAY: Duration = Duration::from_millis(150);
+
+    let backend = Arc::new(SlowOpenBackend { delay: DELAY });
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    let candidates = vec![
+        scripted_node_info("slow-a"),
+        scripted_node_info("slow-b"),
+        scripted_node_info("slow-c"),
+    ];
+
+    let start = tokio::time::Instant::now();
+    let prepared = tokio::time::timeout(DELAY * 2, enumerator.prepare_nodes(&*backend, candidates))
+        .await
+        .expect("three concurrent opens must resolve within two delays of virtual time");
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        prepared.open_failures.len(),
+        3,
+        "every node's open must still be attempted and reported"
+    );
+    assert!(
+        elapsed < DELAY * 2,
+        "opening three {DELAY:?}-latency nodes advanced virtual time by {elapsed:?} — they were serialized"
+    );
+}
+
+/// A backend can report the same node twice in one enumeration pass (a
+/// duplicate hotplug event, a receiver re-listing a slot). The cache stays
+/// empty for every occurrence of a not-yet-cached node until the concurrent
+/// opens finish, so without deduplicating `to_open` the duplicate would be
+/// opened a second time and end up live through two channels — the exact
+/// split-delivery state `ChannelCache` exists to prevent.
+#[tokio::test]
+async fn a_duplicate_candidate_opens_only_one_channel() {
+    let info = scripted_node_info("duplicated");
+    let backend = ScriptedBackend::new(vec![(info.clone(), ScriptedOpen::UnresponsiveHidpp)]);
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+
+    let prepared = enumerator
+        .prepare_nodes(backend.as_ref(), vec![info.clone(), info])
+        .await;
+
+    assert_eq!(
+        prepared.active.len(),
+        1,
+        "a duplicate candidate must only ever open one live channel"
+    );
+}
+
+/// A backend whose single node opens into a channel that still reports itself
+/// connected but rejects every write: a handle that looks alive yet can no
+/// longer reach the device.
+struct RejectingWritesBackend {
+    node: NodeInfo,
+}
+
+#[hidpp::async_trait]
+impl crate::backend::HidBackend for RejectingWritesBackend {
+    async fn enumerate(&self) -> Result<Vec<NodeInfo>, crate::backend::BackendError> {
+        Ok(vec![self.node.clone()])
+    }
+
+    async fn enumerate_hidpp(&self) -> Result<Vec<NodeInfo>, crate::backend::BackendError> {
+        self.enumerate().await
+    }
+
+    async fn open_hidpp(
+        &self,
+        _node: &NodeInfo,
+    ) -> Result<Option<Arc<hidpp::channel::HidppChannel>>, crate::backend::BackendError> {
+        let (raw, _) = ScriptedRawHidChannel::with_failing_writes(|_| None, |_| true);
+        Ok(Some(scripted_channel(raw).await))
+    }
+
+    async fn open_raw_writer(
+        &self,
+        _node: &NodeInfo,
+    ) -> Result<Box<dyn crate::backend::RawWriter>, crate::backend::BackendError> {
+        Err(crate::backend::BackendError::Backend(
+            "rejecting-writes test backend has no raw writer".into(),
+        ))
+    }
+
+    fn watch(&self) -> Result<crate::backend::HotplugStream, crate::backend::BackendError> {
+        Ok(Box::new(futures_lite::stream::empty()))
+    }
+}
+
+/// A stale direct-device probe whose refresh fails is a failed probe, not a
+/// cache hit. Serving the cached answer in its place reports an unreachable
+/// channel healthy, so the ledger never retires it and the device stays dead
+/// until the agent restarts. A silent device takes the same branch once its
+/// request times out; rejected writes reach it without waiting.
+#[tokio::test]
+async fn a_failed_direct_reprobe_retires_the_channel() {
+    let info = scripted_node_info("unreachable-direct");
+    let node = info.id.clone();
+    let backend = Arc::new(RejectingWritesBackend { node: info });
+    let mut enumerator = Enumerator::with_backend(backend);
+    let mut last_good = cache_entry();
+    last_good.probe.capabilities = Some(Capabilities {
+        pointer: true,
+        ..Capabilities::default()
+    });
+    last_good.probed_at = Instant::now()
+        .checked_sub(REFRESH_INTERVAL + Duration::from_nanos(1))
+        .expect("the refresh interval fits the monotonic clock");
+    enumerator
+        .cache
+        .insert(CacheKey::Direct(node.clone()), last_good);
+
+    enumerator
+        .enumerate()
+        .await
+        .expect("a failed reprobe still settles");
+    assert!(
+        !enumerator.channels.is_retiring(&node),
+        "one failed reprobe is not yet evidence of a dead channel"
+    );
+    enumerator
+        .enumerate()
+        .await
+        .expect("a failed reprobe still settles");
+    assert!(
+        enumerator.channels.is_retiring(&node),
+        "a second failed reprobe must retire the channel so it reopens"
+    );
+}

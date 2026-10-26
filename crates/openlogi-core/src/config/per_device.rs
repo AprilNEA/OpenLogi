@@ -6,16 +6,16 @@
 //! beside this file: gesture mode in [`gestures`](super::gestures),
 //! per-application profiles in [`per_app`](super::per_app).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    CameraControls, Config, DeviceIdentity, DisableKey, LightSettings, Lighting, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
 };
-use crate::hid::{Dpi, ReportRate};
+use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
 impl Config {
     /// The bindings stored for `device_key` as they were committed, or an
@@ -274,6 +274,30 @@ impl Config {
         self.devices.entry(device_key.to_string()).or_default().dpi = Some(dpi);
     }
 
+    /// Known keys managed for `device_key`, or `None` when OpenLogi should not
+    /// change the keyboard's current `DisableKeys` state.
+    #[must_use]
+    pub fn disabled_keys(&self, device_key: &str) -> Option<&BTreeSet<DisableKey>> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.disabled_keys.as_ref())
+    }
+
+    /// Persist the complete desired known-key set for `device_key`.
+    pub fn set_disabled_keys(&mut self, device_key: &str, disabled_keys: BTreeSet<DisableKey>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .disabled_keys = Some(disabled_keys);
+    }
+
+    /// Return `device_key` to unmanaged Disable Keys state.
+    pub fn clear_disabled_keys(&mut self, device_key: &str) {
+        if let Some(device) = self.devices.get_mut(device_key) {
+            device.disabled_keys = None;
+        }
+    }
+
     /// The SmartShift wheel config for `device_key`, or `None` if never set.
     #[must_use]
     pub fn smartshift(&self, device_key: &str) -> Option<SmartShift> {
@@ -327,6 +351,40 @@ impl Config {
             .or_default()
             .report_rate = Some(rate);
     }
+
+    /// The persisted pointer speed for `device_key`, or `None` when the user
+    /// never chose one (the mouse keeps its own speed).
+    #[must_use]
+    pub fn pointer_speed(&self, device_key: &str) -> Option<PointerSpeed> {
+        self.devices.get(device_key).and_then(|d| d.pointer_speed)
+    }
+
+    /// Record the pointer speed for `device_key`; the agent re-applies it
+    /// when the mouse reconnects.
+    pub fn set_pointer_speed(&mut self, device_key: &str, speed: PointerSpeed) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .pointer_speed = Some(speed);
+    }
+
+    /// The persisted press force for `device_key`'s force-sensing button, or
+    /// `None` when the user never chose one (the device keeps its own force).
+    #[must_use]
+    pub fn force_sensing(&self, device_key: &str) -> Option<u16> {
+        self.devices.get(device_key).and_then(|d| d.force_sensing)
+    }
+
+    /// Record the press force for `device_key`'s force-sensing button; the
+    /// agent re-applies it, clamped into the device's range, when the device
+    /// reconnects.
+    pub fn set_force_sensing(&mut self, device_key: &str, force: u16) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .force_sensing = Some(force);
+    }
+
     /// Record the SmartShift wheel config for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).
     pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {

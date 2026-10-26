@@ -22,6 +22,7 @@ mod key_trigger;
 mod migrate;
 mod per_app;
 mod per_device;
+mod revision;
 mod settings;
 mod wheel_hold;
 
@@ -31,7 +32,7 @@ mod wheel_hold;
 #[cfg(feature = "fs")]
 mod tests;
 
-pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
+pub use device::{DeviceConfig, DeviceIdentity, DisableKey, LinkConfig, LinkOverrides};
 #[cfg(all(test, feature = "fs", unix))]
 use file::resolve_symlinks;
 #[cfg(feature = "fs")]
@@ -41,6 +42,7 @@ use file::{backup_existing_config, config_backup_path};
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
+pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, DeviceViewMode,
@@ -49,12 +51,23 @@ pub use settings::{
     WheelMode,
 };
 
+use crate::app::AppAliases;
 use crate::binding::Action;
 #[cfg(all(test, feature = "fs"))]
 use crate::binding::{Binding, ButtonId, GestureDirection};
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v10 adds per-device [`DeviceConfig::disabled_keys`]. Older files omit the
+/// setting and leave the firmware unmanaged. The bump makes a v9 build reject
+/// a file that stores the field at the version check instead of failing after
+/// parsing an unknown field.
+///
+/// v9 adds the `[apps]` alias table and `app:<alias>` per-app profile keys
+/// (see [`Config::apps`]). Nothing older needs migrating; the bump makes a v8
+/// build refuse a file that may hold either at the version check, instead of
+/// failing on the unknown table or keeping `app:` profiles that never match.
 ///
 /// v8 adds `{ click = ..., wheel = "HorizontalScroll" }` wheel-hold button
 /// bindings and the per-device `smooth_wheel` switch. Nothing older needs
@@ -104,7 +117,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,8 +144,7 @@ pub struct Config {
     // that exists conditionally is a struct whose shape depends on a feature.
     #[cfg_attr(
         not(feature = "fs"),
-        expect(clippy::allow_attributes, reason = "see above"),
-        allow(dead_code, reason = "only the `fs` half suppresses a save")
+        expect(dead_code, reason = "only the `fs` half suppresses a save")
     )]
     ephemeral: bool,
     /// Per-device state, normally keyed by the stable physical-device
@@ -146,6 +158,12 @@ pub struct Config {
     /// `[keyboard]` section loading unchanged.
     #[serde(default)]
     pub keyboard: KeyboardConfig,
+    /// Application aliases: one name for an application across the
+    /// identifiers each platform reports, so a per-app profile keyed
+    /// `app:<alias>` applies on every platform the alias lists. Loading
+    /// rejects an `app:` profile key that names no alias here.
+    #[serde(default, skip_serializing_if = "AppAliases::is_empty")]
+    pub apps: AppAliases,
 }
 
 impl Default for Config {
@@ -157,6 +175,7 @@ impl Default for Config {
             devices: BTreeMap::new(),
             ephemeral: false,
             keyboard: KeyboardConfig::default(),
+            apps: AppAliases::default(),
         }
     }
 }

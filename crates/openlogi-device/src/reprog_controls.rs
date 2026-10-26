@@ -20,9 +20,10 @@
 
 use std::sync::Arc;
 
+use futures_lite::{Stream, StreamExt as _};
 use hidpp::{
     channel::HidppChannel,
-    feature::{CreatableFeature, reprog_controls as hidpp_reprog},
+    feature::{CreatableFeature, EmittingFeature as _, reprog_controls as hidpp_reprog},
     protocol::v20::Hidpp20Error,
 };
 
@@ -45,6 +46,15 @@ pub const FEATURE_ID: u16 = 0x1b04;
 /// MX Master 4 also has a separate Haptic Sense Panel in the thumb area; that
 /// panel is [`HAPTIC_PANEL_CID`], not this CID.
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
+
+/// Control ID of the multiplatform mice's thumb gesture button
+/// (`Multiplatform gesture button`) — the M720 Triathlon's thumb button,
+/// which reports this CID instead of [`GESTURE_BUTTON_CID`].
+///
+/// Confirmed on real hardware (M720, Bluetooth): divertable with raw-XY, task
+/// `0x00ad`. Undiverted, the firmware runs its own host action, so every
+/// binding on the button was ignored until this CID was a gesture source.
+pub const MULTIPLATFORM_GESTURE_BUTTON_CID: u16 = control_ids::MULTIPLATFORM_GESTURE_BUTTON.0;
 
 /// Control ID of the MX Master 4 Haptic Sense Panel — the touch-sensitive
 /// thumb rest that replaces the dedicated gesture button on that model.
@@ -221,5 +231,23 @@ impl ReprogControlsV4 {
         )
         .await?;
         Ok(())
+    }
+
+    /// The reporting changes that other clients make on this feature, from
+    /// the feature's event stream: one [`CidReportingChangeEcho`] for every
+    /// `setCidReporting` that another client sent to the device. Another
+    /// client is another application (Logi Options+, for example) or another
+    /// OpenLogi channel to the same HID node. This channel's own writes never
+    /// appear, and only the changes made after this call arrive.
+    pub fn reporting_changes(
+        &self,
+    ) -> impl Stream<Item = CidReportingChangeEcho> + Send + Sync + use<> {
+        self.inner.listen().filter_map(|event| match event {
+            ReprogControlsEvent::ReportingChangedElsewhere(echo) => Some(echo),
+            ReprogControlsEvent::DivertedButtons(_)
+            | ReprogControlsEvent::DivertedRawMouseXy { .. }
+            | ReprogControlsEvent::AnalyticsKeyEvents(_)
+            | ReprogControlsEvent::DivertedRawWheel { .. } => None,
+        })
     }
 }

@@ -66,10 +66,15 @@ impl LightCmd {
     }
 }
 
+/// Standalone devices that are lights; other standalone families share the scan.
 async fn standalone() -> Result<Vec<StandaloneDevice>> {
-    openlogi_hid::enumerate_standalone()
+    let devices = openlogi_hid::enumerate_standalone()
         .await
-        .context("failed to enumerate standalone HID devices")
+        .context("failed to enumerate standalone HID devices")?;
+    Ok(devices
+        .into_iter()
+        .filter(|device| device.light_capabilities.is_some())
+        .collect())
 }
 
 async fn list() -> Result<()> {

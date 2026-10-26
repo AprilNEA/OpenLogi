@@ -45,8 +45,15 @@ pub(super) fn general_page(
                 SettingField::render(move |_, _, cx| thumbwheel_sensitivity_field(&thumbwheel, cx)),
             )
             .description(tr!("pointer.thumbwheel_sensitivity_description")),
-        )
-        .item(launch_at_login_item());
+        );
+    // Only macOS animates a desktop switch, so only macOS shows the switch.
+    // `cfg!` keeps the item and its setter compiled, and used, everywhere.
+    let group = if cfg!(target_os = "macos") {
+        group.item(animate_desktop_switch_item())
+    } else {
+        group
+    };
+    let group = group.item(launch_at_login_item());
 
     // Switched off under System Settings › Login Items: nothing can start
     // the service until the user flips it back on there — surface it instead
@@ -81,6 +88,10 @@ pub(super) fn general_page(
             tr!("app.notification_area_visibility_description")
         }),
     );
+
+    let group = group
+        .item(low_battery_notifications_item())
+        .item(lock_key_notifications_item());
 
     SettingPage::new(tr!("app.general"))
         .icon(IconName::Settings)
@@ -136,6 +147,54 @@ fn smooth_scrolling_item() -> SettingItem {
         ),
     )
     .description(tr!("pointer.smooth_scrolling_description"))
+}
+
+/// The switch for the Previous/Next Desktop slide.
+fn animate_desktop_switch_item() -> SettingItem {
+    SettingItem::new(
+        tr!("app.animate_desktop_switch"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().animate_desktop_switch),
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_animate_desktop_switch(enabled));
+            },
+        ),
+    )
+    .description(tr!("app.animate_desktop_switch_description"))
+}
+
+/// The switch for the overlay's low-battery notices.
+fn low_battery_notifications_item() -> SettingItem {
+    SettingItem::new(
+        tr!("app.low_battery_notifications"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().low_battery_notifications),
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_low_battery_notifications(enabled));
+            },
+        ),
+    )
+    .description(tr!("app.low_battery_notifications_description"))
+}
+
+/// The switch for the overlay's lock-key indicator.
+fn lock_key_notifications_item() -> SettingItem {
+    SettingItem::new(
+        tr!("app.lock_key_notifications"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().lock_key_notifications),
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_lock_key_notifications(enabled));
+            },
+        ),
+    )
+    // macOS gives Num Lock and Scroll Lock no meaning, so the indicator shows
+    // only Caps Lock there (`LockKey::is_indicated_here`).
+    .description(if cfg!(target_os = "macos") {
+        tr!("app.lock_key_notifications_description_macos")
+    } else {
+        tr!("app.lock_key_notifications_description")
+    })
 }
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {

@@ -24,6 +24,8 @@ fn raw_light_dev(key: &str) -> AgentDevice {
         }),
         online: true,
         settings_revision: 0,
+        codename: None,
+        battery: None,
     }
 }
 
@@ -268,7 +270,7 @@ fn runtime_selection_tracks_online_transition_without_device_set_change() {
 
 #[test]
 fn a_setting_changed_on_the_device_is_not_replayed_over() {
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     // Fn+Esc on the keyboard, or a DPI button, moves the settings revision.
     // The user changed the setting on the device on purpose, so the agent
     // must not write the persisted value back over it.
@@ -277,7 +279,62 @@ fn a_setting_changed_on_the_device_is_not_replayed_over() {
     inventory.paired[0].settings_revision += 1;
     let after = build_devices(&Config::default(), &[inventory], &[]);
 
-    let (targets, followup) = plan_reapply(&before, &after, &HashMap::new(), None);
+    let (targets, followup) = plan_reapply(&before, &after, &BTreeMap::new(), None, false);
     assert!(targets.is_empty());
     assert!(followup.is_empty());
+}
+
+/// The config that links `keyboard` to `mouse` for host switches.
+fn host_switch_link(keyboard: &str, mouse: &str) -> Config {
+    let mut config = Config::default();
+    config
+        .devices
+        .entry(keyboard.into())
+        .or_default()
+        .host_switch_targets = std::iter::once(mouse.into()).collect();
+    config
+}
+
+/// A mouse that wakes gets its cookie plan on the refresh that sees it
+/// online. Here the plan drops a clear held for a pair that is linked again.
+/// A plan that read the previous inventory would still see the mouse offline
+/// and keep the clear.
+#[test]
+fn a_waking_mouse_gets_its_cookie_plan_on_the_refresh_that_sees_it() {
+    let (keyboard, mouse) = ("unit:01000000", "unit:02000000");
+    let byte = openlogi_hid::LeadCookie::for_unit_id([1, 0, 0, 0]).expect("a non-zero byte");
+    let mut orchestrator = orchestrator(host_switch_link(keyboard, mouse));
+    orchestrator.follower_cookies().requeue(mouse, [byte]);
+    let inventory = |mouse_online| {
+        [
+            direct_inventory_state(0xb023, None, [1, 0, 0, 0], true),
+            direct_inventory_state(0xb034, None, [2, 0, 0, 0], mouse_online),
+        ]
+    };
+    orchestrator.refresh_inventory(&inventory(false), &[], false);
+    assert_eq!(orchestrator.follower_cookies().held_for(mouse), [byte]);
+    orchestrator.refresh_inventory(&inventory(true), &[], false);
+    assert!(orchestrator.follower_cookies().held_for(mouse).is_empty());
+}
+
+/// A link removed while its keyboard's receiver is unplugged is cleared with
+/// the byte that the agent saw while the keyboard was there. The test mouse
+/// has no channel, so the planned clear is held again for its next reconnect.
+#[test]
+fn a_link_removed_after_the_keyboard_left_is_still_cleared() {
+    let (keyboard, mouse) = ("unit:01000000", "unit:02000000");
+    let byte = openlogi_hid::LeadCookie::for_unit_id([1, 0, 0, 0]).expect("a non-zero byte");
+    let mut orchestrator = orchestrator(host_switch_link(keyboard, mouse));
+    let mouse_inventory = direct_inventory_state(0xb034, None, [2, 0, 0, 0], true);
+    orchestrator.refresh_inventory(
+        &[
+            direct_inventory_state(0xb023, None, [1, 0, 0, 0], true),
+            mouse_inventory.clone(),
+        ],
+        &[],
+        false,
+    );
+    orchestrator.refresh_inventory(std::slice::from_ref(&mouse_inventory), &[], false);
+    orchestrator.reload_config(Config::default());
+    assert_eq!(orchestrator.follower_cookies().held_for(mouse), [byte]);
 }

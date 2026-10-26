@@ -1,5 +1,5 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 8
+schema_version = 10
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
@@ -21,6 +21,9 @@ ui_scale = "normal"
 device_view_mode = "grid"
 # macOS only: "openlogi" (the signed icon) or "prism".
 app_icon = "openlogi"
+# macOS only: Previous / Next Desktop slide like a three-finger swipe (default
+# true); false switches at once.
+animate_desktop_switch = true
 
 [devices."receiver:aabbccdd:slot:1"]
 custom_name = "Office mouse"
@@ -60,6 +63,12 @@ Back = "Undo"
 
 [devices."receiver:aabbccdd:slot:1".per_app_bindings."exe:sharex.exe"]
 MiddleClick = { CustomShortcut = "F1" }
+# `app:<alias>` names an application in `[apps]` below, so this profile applies
+# to Chrome on every platform the alias lists. A key in the platform's own
+# namespace, like the two above, wins over an alias for the same application.
+[devices."receiver:aabbccdd:slot:1".per_app_bindings."app:chrome"]
+Back = "PrevTab"
+Forward = "NextTab"
 
 [devices."receiver:aabbccdd:slot:1".action_ring]
 enabled = true
@@ -127,3 +136,11 @@ dpi = 800
 [keyboard.bindings]
 f1 = "MissionControl"
 "shift+command+f5" = "ShowDesktop"
+# Application aliases: one name for an application across platforms. Each
+# platform field takes the identifiers OpenLogi reports there, one string or an
+# array of them. Windows identifiers are lower-case paths or `exe:<filename>`.
+[apps.chrome]
+name = "Google Chrome"
+macos = "com.google.Chrome"
+linux = ["google-chrome", "Google-chrome"]
+windows = "exe:chrome.exe"

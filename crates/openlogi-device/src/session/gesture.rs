@@ -40,12 +40,13 @@ use crate::SharedChannel;
 use crate::channel::route::DeviceRoute;
 
 pub use super::capture::CaptureHost;
-use super::capture::{ArmedCapture, Liveness, run_capture};
+use super::capture::{ArmedCapture, Liveness, ReportingChangeStream, run_capture};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
 pub use main_wheel::MainWheelDivert;
 
+use super::capture_restore::ArmedReporting;
 pub use super::capture_restore::{
     CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome,
     CaptureSessionStop, PendingCaptureRestore,
@@ -148,14 +149,15 @@ pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 9] = {
 };
 
 /// HID++ gesture sources: the `0x1b04` control ID and the [`ButtonId`] it
-/// delivers — the dedicated gesture button, its multiplatform variant, and
-/// the haptic panel. Each source in
+/// delivers — the dedicated gesture button on most MX mice (and its
+/// multiplatform CID on the M720 Triathlon), and the Haptic
+/// Sense Panel on MX Master 4 (two distinct physical controls). Each source in
 /// gesture mode is diverted with raw-XY; one with a non-default single binding
 /// instead is plain-diverted like a standard button.
 pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 3] = [
     (reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton),
     (
-        hidpp::feature::reprog_controls::control_ids::MULTIPLATFORM_GESTURE_BUTTON.0,
+        reprog_controls::MULTIPLATFORM_GESTURE_BUTTON_CID,
         ButtonId::GestureButton,
     ),
     (reprog_controls::HAPTIC_PANEL_CID, ButtonId::HapticPanel),
@@ -340,6 +342,9 @@ impl ArmedCapture for GestureCapture {
                 && let Some(event) = hires_wheel::decode_event(msg, device_index, idx)
             {
                 if let HiResWheelEvent::RatchetSwitch(state) = event {
+                    // Not input. The inventory's listener on this channel
+                    // counts it as a setting change, so clients re-read
+                    // SmartShift.
                     debug!(index = device_index, ?state, "wheel ratchet switched");
                 } else if let Some(input) = main_wheel::movement_input(event, per_notch) {
                     let _ = sink.send(input);
@@ -360,6 +365,14 @@ impl ArmedCapture for GestureCapture {
 
     async fn rearm(&self) {
         self.armed.rearm().await;
+    }
+
+    fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
+        self.armed.armed_reporting()
+    }
+
+    fn take_reporting_changes(&mut self) -> Option<ReportingChangeStream> {
+        self.armed.take_reporting_changes()
     }
 
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
@@ -388,6 +401,9 @@ impl ArmedCapture for GestureCapture {
 /// included. Logi Options+ reads the same sequence as a `Stop`
 /// (`devio_feature_2150::convert`, "Inconsistent transition from ACTIVE to
 /// INACTIVE. Consider this a STOP.").
+///
+/// A status byte the spec does not define never delivers a tap: only
+/// `Inactive` says the wheel is settled. Its rotation still scrolls.
 fn thumbwheel_input(
     event: thumbwheel::ThumbwheelEvent,
     previous: RotationStatus,
@@ -399,7 +415,7 @@ fn thumbwheel_input(
             resolution,
         });
     }
-    if event.rotation_status.is_rolling() || previous.leaves_roll_open() {
+    if !event.rotation_status.is_at_rest() || previous.leaves_roll_open() {
         return None;
     }
     event

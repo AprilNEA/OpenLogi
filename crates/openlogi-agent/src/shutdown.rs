@@ -10,6 +10,7 @@ use tracing::info;
 use tracing::warn;
 
 use crate::startup::InputServices;
+use crate::virtual_keyboard::VirtualKeyboard;
 
 /// A non-signal request for the process lifecycle owner.
 pub(crate) enum ShutdownRequest {
@@ -152,15 +153,21 @@ impl ShutdownSignals {
 /// Release the input hook, then end the process. The run loop is not the
 /// process — macOS keeps the AppKit tray loop on the main thread — so the
 /// exit has to be explicit, and it must run the hook's destructor.
+///
+/// On macOS the virtual keyboard goes last: the input workers may still
+/// release a held chord through it until they stop, and its destructor
+/// reports every remaining key released before it removes the device.
 pub(crate) fn release_hook_and_exit(
     hook: Option<Hook>,
     inputs: &mut InputServices,
+    virtual_keyboard: VirtualKeyboard,
     reason: &str,
     _tray_guard: Option<oneshot::Sender<()>>,
 ) -> ! {
     info!(reason, "releasing the input hook and exiting");
     drop(hook);
     inputs.shutdown();
+    virtual_keyboard.release();
     #[expect(
         clippy::exit,
         reason = "a signalled shutdown must end the process, and the loop that observed it runs off the main thread"

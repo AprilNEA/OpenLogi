@@ -216,7 +216,25 @@ not describe a device.
 
 The built-in scripted inventory remains the no-argument default. Manual demo
 mode can retain moving battery/app/camera behavior. Test mode freezes those
-inputs and changes them only through a scenario.
+inputs and changes them only through a scenario or the console's `advance`
+command.
+
+While it runs, the mock reads one console command per stdin line (`help` lists
+them). The console changes only semantic state that the IPC contract already
+exposes:
+
+- a paired device's battery reading;
+- a device's online flag;
+- a fault that makes every read and write to an online device fail;
+- a lock-key or backlight indicator change;
+- frozen test time;
+- every open client connection, closed as an agent restart closes them.
+
+Battery readings and indicators go through the same agent-core state machines
+that the orchestrator uses. Tests build `Command` values and call
+`MockAgent::apply` directly; the command words are for people only. The console
+does not replace the scenario controls below: it models no channel, report, or
+barrier.
 
 ### `openlogi-agent-core` (later)
 
@@ -730,6 +748,7 @@ The semantic mock verifies:
 - nearest supported DPI selection;
 - unsupported-feature errors;
 - writes to unknown or offline routes;
+- console battery, link, fault, indicator, time, and disconnect transitions;
 - generation changes only when observable state changes;
 - pairing cancel/restart isolation;
 - frozen-time event progression.

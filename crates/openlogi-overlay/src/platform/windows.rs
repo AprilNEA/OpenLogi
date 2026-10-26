@@ -3,9 +3,10 @@
 //! monitor selection nor HWND positioning can use logical containment.
 
 use gpui::{
-    Bounds, DevicePixels, DisplayId, Pixels, Point, WindowBounds, WindowOptions, point, size,
+    Bounds, DevicePixels, DisplayId, Pixels, Point, Size, WindowBounds, WindowOptions, point, size,
 };
 
+use crate::notice::{BOTTOM_MARGIN, notice_window_options};
 use crate::ring::{Placement, WINDOW_SIZE, ring_window_options};
 
 #[cfg(target_os = "windows")]
@@ -22,9 +23,10 @@ pub(crate) struct RingPlacement {
 }
 
 impl RingPlacement {
-    /// Window options for this invocation, paired with how the view places its panel.
-    pub(crate) fn openings(&self) -> Vec<(WindowOptions, Placement)> {
-        vec![(self.window_options(), Placement::Window)]
+    /// The one set of windows to try: the window at the cursor, paired with
+    /// how its view places the panel.
+    pub(crate) fn openings(&self) -> Vec<Vec<(WindowOptions, Placement)>> {
+        vec![vec![(self.window_options(), Placement::Window)]]
     }
 
     pub(crate) fn window_options(&self) -> WindowOptions {
@@ -40,26 +42,14 @@ impl RingPlacement {
     }
 
     /// The 1px bootstrap at the monitor's centre, in its logical pixels.
-    ///
-    /// GPUI validates requested bounds by scaling their centre with the
-    /// requested monitor's own factor. Bounds that land elsewhere are replaced
-    /// by its default (large, and here visible) window, so they must be
-    /// expressed for this monitor rather than as a global logical point.
     fn bootstrap_bounds(&self) -> Bounds<Pixels> {
-        Bounds::new(
-            self.display.center(),
-            size(DevicePixels(1), DevicePixels(1)),
-        )
-        .to_pixels(self.scale_factor())
+        bootstrap_bounds(self.display, self.dpi)
     }
 
     /// GPUI's per-monitor scale factor, `dpi / 96`.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "effective DPIs are a few hundred, exactly representable in f32"
-    )]
+    #[cfg(test)]
     fn scale_factor(&self) -> f32 {
-        self.dpi as f32 / 96.0
+        scale_factor(self.dpi)
     }
 
     #[expect(
@@ -80,9 +70,83 @@ impl RingPlacement {
     }
 }
 
+/// One native monitor snapshot for the notice window, kept through
+/// bootstrap-window creation.
+pub(crate) struct NoticePlacement {
+    display_id: DisplayId,
+    display: Bounds<DevicePixels>,
+    /// The monitor without the taskbar (`rcWork`), where the notice sits.
+    work: Bounds<DevicePixels>,
+    /// The selected monitor's effective DPI, as for the ring.
+    dpi: u32,
+    /// The notice window's size in logical pixels.
+    size: Size<Pixels>,
+}
+
+impl NoticePlacement {
+    /// The notice window, opened as the same 1px bootstrap as the ring.
+    pub(crate) fn openings(&self) -> Vec<WindowOptions> {
+        vec![WindowOptions {
+            display_id: Some(self.display_id),
+            window_bounds: Some(WindowBounds::Windowed(bootstrap_bounds(
+                self.display,
+                self.dpi,
+            ))),
+            show: true,
+            ..notice_window_options()
+        }]
+    }
+
+    /// The notice at the bottom centre of the work area, above the taskbar.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "notice dimensions scaled by a native display DPI fit in screen-sized i32 pixels"
+    )]
+    fn bounds(&self, dpi: u32) -> Bounds<DevicePixels> {
+        let scaled = |logical: f32| {
+            DevicePixels((f64::from(logical) * f64::from(dpi) / 96.0).round() as i32)
+        };
+        let width = scaled(self.size.width.as_f32());
+        let height = scaled(self.size.height.as_f32());
+        let work = self.work;
+        let desired = point(
+            work.left() + DevicePixels((work.size.width.0 - width.0) / 2),
+            work.bottom() - height - scaled(BOTTOM_MARGIN),
+        );
+        // A work area smaller than the notice anchors it to the top-left, as
+        // an undersized display does for the ring.
+        let max = point(
+            (work.right() - width).max(work.left()),
+            (work.bottom() - height).max(work.top()),
+        );
+        Bounds::new(desired.clamp(&work.origin, &max), size(width, height))
+    }
+}
+
+/// The 1px bootstrap at the monitor's centre, in its logical pixels.
+///
+/// GPUI validates requested bounds by scaling their centre with the requested
+/// monitor's own factor. Bounds that land elsewhere are replaced by its
+/// default (large, and here visible) window, so they must be expressed for
+/// this monitor rather than as a global logical point.
+fn bootstrap_bounds(display: Bounds<DevicePixels>, dpi: u32) -> Bounds<Pixels> {
+    Bounds::new(display.center(), size(DevicePixels(1), DevicePixels(1)))
+        .to_pixels(scale_factor(dpi))
+}
+
+/// GPUI's per-monitor scale factor, `dpi / 96`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "effective DPIs are a few hundred, exactly representable in f32"
+)]
+fn scale_factor(dpi: u32) -> f32 {
+    dpi as f32 / 96.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notice::stack_size;
 
     fn placement(cursor: (i32, i32), rect: (i32, i32, i32, i32)) -> RingPlacement {
         RingPlacement {
@@ -99,11 +163,9 @@ mod tests {
     /// The single positioned window this placement opens.
     #[track_caller]
     fn opened(placement: &RingPlacement) -> WindowOptions {
-        let (options, panel) = placement
-            .openings()
-            .into_iter()
-            .next()
-            .expect("a Windows ring opens one window");
+        let mut windows = placement.openings().into_iter().flatten();
+        let (options, panel) = windows.next().expect("a Windows ring opens a window");
+        assert!(windows.next().is_none(), "a Windows ring opens one window");
         assert_eq!(panel, Placement::Window);
         options
     }
@@ -211,5 +273,73 @@ mod tests {
         let bounds = placement((-100, -50), (-200, -100, 0, 0)).bounds(192);
         assert_eq!(bounds.origin, point(DevicePixels(-200), DevicePixels(-100)));
         assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
+    }
+
+    fn rect_bounds(rect: (i32, i32, i32, i32)) -> Bounds<DevicePixels> {
+        Bounds::new(
+            point(DevicePixels(rect.0), DevicePixels(rect.1)),
+            size(DevicePixels(rect.2 - rect.0), DevicePixels(rect.3 - rect.1)),
+        )
+    }
+
+    fn notice(
+        display: (i32, i32, i32, i32),
+        work: (i32, i32, i32, i32),
+        dpi: u32,
+    ) -> NoticePlacement {
+        NoticePlacement {
+            display_id: DisplayId::from(7),
+            display: rect_bounds(display),
+            work: rect_bounds(work),
+            dpi,
+            // One card: 344×88 logical pixels.
+            size: stack_size(1),
+        }
+    }
+
+    #[test]
+    fn a_notice_sits_centred_above_the_taskbar() {
+        // 1920×1080 at 100%, with a 48px taskbar along the bottom.
+        let bounds = notice((0, 0, 1920, 1080), (0, 0, 1920, 1032), 96).bounds(96);
+        assert_eq!(bounds.size, size(DevicePixels(344), DevicePixels(88)));
+        // Centred: (1920 - 344) / 2 = 788. Above the taskbar by the margin:
+        // 1032 - 88 - 48 = 896.
+        assert_eq!(bounds.origin, point(DevicePixels(788), DevicePixels(896)));
+    }
+
+    #[test]
+    fn a_notice_scales_with_its_monitor_and_follows_its_work_area() {
+        // A 200% monitor right of the primary, taskbar on its left edge.
+        let bounds = notice((1920, 0, 4480, 1440), (2016, 0, 4480, 1440), 192).bounds(192);
+        assert_eq!(bounds.size, size(DevicePixels(688), DevicePixels(176)));
+        // (2464 - 688) / 2 = 888 into the work area; 1440 - 176 - 96 = 1168.
+        assert_eq!(bounds.origin, point(DevicePixels(2904), DevicePixels(1168)));
+    }
+
+    #[test]
+    fn a_notice_opens_as_a_bootstrap_on_its_monitor() {
+        let placement = notice((-2560, 105, 0, 1545), (-2560, 105, 0, 1497), 120);
+        let options = placement
+            .openings()
+            .into_iter()
+            .next()
+            .expect("a Windows notice opens one window");
+        assert_eq!(options.display_id, Some(DisplayId::from(7)));
+        assert!(
+            options.show,
+            "GPUI only applies DWM transparency to a window created visible"
+        );
+        let Some(WindowBounds::Windowed(bounds)) = options.window_bounds else {
+            panic!("the notice must request windowed bootstrap bounds");
+        };
+        let device = bounds.to_device_pixels(scale_factor(120));
+        assert!(placement.display.contains(&device.center()));
+        assert_eq!(device.size, size(DevicePixels(1), DevicePixels(1)));
+    }
+
+    #[test]
+    fn a_work_area_smaller_than_the_notice_anchors_it_top_left() {
+        let bounds = notice((0, 0, 200, 60), (0, 0, 200, 60), 96).bounds(96);
+        assert_eq!(bounds.origin, point(DevicePixels(0), DevicePixels(0)));
     }
 }

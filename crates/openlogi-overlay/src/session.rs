@@ -157,6 +157,19 @@ pub(crate) fn close_ring_windows(cx: &mut gpui::App, session_id: u64) -> bool {
     closed
 }
 
+/// Close every ring window, whichever session it shows.
+///
+/// For when the agent names the ring that should be showing, or none: any
+/// other ring is stale. Only ring windows close, so a notice that is showing
+/// stays up while rings come and go.
+pub(crate) fn close_all_ring_windows(cx: &mut gpui::App) {
+    for handle in cx.windows() {
+        if let Some(ring) = handle.downcast::<RingView>() {
+            let _ = ring.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+}
+
 /// Cancel the open ring only if it is still the session the click named.
 pub(crate) fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
     let target = cx.windows().into_iter().find_map(|handle| {

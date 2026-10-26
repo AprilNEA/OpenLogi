@@ -3,7 +3,7 @@
 use super::{DeviceEntityFirmwareInfo, DeviceEntityType};
 
 /// A getFwInfo reply for an entity of type `kind`: `MPM17.00_B0008`, active,
-/// transport PID `0xc08d`.
+/// with `0xc08d` in bytes 9 and 10.
 fn fw_info(kind: u8) -> [u8; 16] {
     let mut payload = [0; 16];
     payload[0] = kind;
@@ -44,8 +44,81 @@ fn an_unnamed_entity_type_still_decodes() {
             (17, 0, 8)
         );
         assert!(info.active);
-        assert_eq!(info.transport_pid, 0xc08d);
+        assert_eq!(info.transport_specific_info, [0xc0, 0x8d, 0, 0, 0, 0, 0]);
     }
+}
+
+/// A getFwInfo reply whose bytes 9 to 15 are `region`, for an entity of type
+/// `kind` that is active or dormant.
+fn fw_info_with_region(kind: u8, active: bool, region: [u8; 7]) -> DeviceEntityFirmwareInfo {
+    let mut payload = fw_info(kind);
+    payload[8] = u8::from(active);
+    payload[9..].copy_from_slice(&region);
+    DeviceEntityFirmwareInfo::from_payload(&payload).unwrap()
+}
+
+#[test]
+fn the_transport_specific_region_is_kept_byte_for_byte() {
+    // No two bytes of this pattern are zero or alike, so a dropped, shifted,
+    // or reordered byte fails the comparison.
+    let region = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde];
+    for kind in [0, 1, 2, 5, 9, 10, 15, 0x80] {
+        for active in [true, false] {
+            let info = fw_info_with_region(kind, active, region);
+            assert_eq!(
+                info.transport_specific_info, region,
+                "entity type {kind}, active {active}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_active_main_application_reports_its_link_pid() {
+    // The running image of a wired G502 LIGHTSPEED, as captured in #690, with
+    // source-control bytes added after the PID.
+    let region = [0xc0, 0x8d, 0x01, 0x02, 0x03, 0x04, 0x05];
+    let info = fw_info_with_region(0, true, region);
+    assert_eq!(info.entity_type, DeviceEntityType::MainApplication);
+    assert_eq!(info.transport_pid(), Some(0xc08d));
+    assert_eq!(info.transport_specific_info, region);
+}
+
+#[test]
+fn a_dormant_bootloader_reports_no_pid() {
+    // The G502 LIGHTSPEED bootloader from #690, byte for byte. It is not the
+    // running entity, and `0xaaef` is not the PID of the link the request
+    // used, so it must not read as one.
+    let mut payload = [0; 16];
+    payload[..11].copy_from_slice(&[
+        0x01, b'B', b'O', b'T', 0x92, 0x00, 0x00, 0x08, 0x00, 0xaa, 0xef,
+    ]);
+    let info = DeviceEntityFirmwareInfo::from_payload(&payload).unwrap();
+    assert_eq!(info.entity_type, DeviceEntityType::Bootloader);
+    assert!(!info.active);
+    assert_eq!(info.transport_pid(), None);
+    assert_eq!(info.transport_specific_info, [0xaa, 0xef, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn only_the_active_main_application_has_a_pid() {
+    let region = [0xc0, 0x8d, 0, 0, 0, 0, 0];
+    for kind in [1, 2, 3, 5, 9, 10, 15, 0x80] {
+        for active in [true, false] {
+            let info = fw_info_with_region(kind, active, region);
+            assert_eq!(
+                info.transport_pid(),
+                None,
+                "entity type {kind}, active {active}"
+            );
+            assert_eq!(info.transport_specific_info, region);
+        }
+    }
+    assert_eq!(fw_info_with_region(0, false, region).transport_pid(), None);
+    assert_eq!(
+        fw_info_with_region(0, true, region).transport_pid(),
+        Some(0xc08d)
+    );
 }
 
 /// Decodes `fw_info(0)` with the version and build bytes replaced.

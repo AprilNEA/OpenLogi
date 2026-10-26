@@ -204,6 +204,43 @@ fn resetting_profiles_restores_inheritance_without_closing_the_editors() {
 }
 
 #[test]
+fn a_reset_ring_profile_shows_the_default_its_next_edit_starts_from() {
+    // A platform profile and an alias profile can name one application. The
+    // agent falls back to the alias layout once the platform layout is gone,
+    // but the editor still addresses the platform key, whose next edit copies
+    // the default: showing the alias layout would hide what that edit keeps.
+    let mut state = state_with_a_known_mouse();
+    let editor = "editor-id";
+    let aliases = serde_json::from_value(serde_json::json!({
+        "editor": { "macos": editor, "linux": editor, "windows": editor }
+    }))
+    .expect("alias table");
+    state.config.edit(|config| config.apps = aliases);
+    let default_ring = state.current_action_ring_layout();
+    for (key, action) in [("app:editor", Action::Paste), (editor, Action::Undo)] {
+        let _ = state.set_editing_action_ring_app(Some(key.into()));
+        let _ = state
+            .commit_action_ring_slot(ActionRingSlot::Top, Some(RingAction::new(action).unwrap()));
+    }
+
+    let _ = state.reset_action_ring_profile(&DeviceKey::from(KNOWN_MOUSE_KEY), editor);
+    assert_eq!(state.editing_action_ring_app(), Some(editor));
+    assert_eq!(state.current_action_ring_layout(), default_ring);
+
+    let _ = state.commit_action_ring_slot(
+        ActionRingSlot::Top,
+        Some(RingAction::new(Action::Redo).unwrap()),
+    );
+    let mut expected = default_ring;
+    expected.set_action(
+        ActionRingSlot::Top,
+        Some(RingAction::new(Action::Redo).unwrap()),
+    );
+    assert_eq!(state.current_action_ring_layout(), expected);
+    assert_eq!(state.current_action_ring().per_app[editor], expected);
+}
+
+#[test]
 fn removing_all_app_profiles_only_closes_editors_showing_that_app() {
     for (buttons_app, ring_app) in [("Safari", "Chrome"), ("Chrome", "Safari")] {
         let mut state = state_with_a_known_mouse();

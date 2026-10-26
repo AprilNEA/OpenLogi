@@ -14,12 +14,15 @@ use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
-use openlogi_core::config::Lighting;
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::config::{ConfigRevision, Lighting};
+use openlogi_core::device::{
+    BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
+};
 use openlogi_core::hid::{
-    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PairingError, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PairingError, PasskeyMethod,
+    PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -103,8 +106,53 @@ pub use succession::Identity;
 ///      HostNameNotApplied}` appended — the `0x1815` Easy-Switch host names
 ///      and OS, and renaming a slot's computer.
 /// v37: `Capabilities::virtual_thumbwheel` appended — Back/Forward can hold
-///      the main wheel as a virtual thumb wheel.
-pub const PROTOCOL_VERSION: u32 = 37;
+///      the main wheel as a virtual thumb wheel; `AgentSnapshot::lights`
+///      appended — what each standalone light reached over HID++ `0x1990`
+///      reads back, and the settings changed on the light itself;
+///      `Agent::reload_saved_config` appended — the reload after a save of
+///      the settings app, with the revision of the file it wrote. It keeps a
+///      change made on a light unless the save holds its value, removes the
+///      control's value, or the user chose that control. A file at another
+///      revision loads as a plain reload. `Agent::observe_backlight`
+///      appended — the level a keyboard's backlight keys set, for the
+///      overlay's transient indicator. `Agent::observe_notices`,
+///      [`NoticeObservation`], [`Notice`] and [`NoticeKind`] appended —
+///      the notices the overlay shows, first among them a device's low
+///      battery. `Agent::observe_lock_keys`, [`LockKeyObservation`] and
+///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
+///      off over HID++ `0x4220`, for the overlay's transient indicator.
+/// v38: `AgentStatus::secure_input` and [`SecureInput`] appended — whether
+///      macOS Secure Event Input is hiding key presses from the hook, and
+///      the app macOS attributes it to. `Capabilities::pointer_scaling`
+///      appended — a mouse without adjustable DPI whose speed HID++ `0x2205`
+///      scales; `Agent::{read_pointer_speed, set_pointer_speed}` appended —
+///      that speed read and set from the settings app;
+///      `Action::TogglePrecisionMode` appended — precision mode bound to a
+///      button; `HidppOperation::WriteLed` appended — the `0x1300` DPI LED
+///      that precision mode lights. `ReceiverSelector::ReceiverUid`
+///      appended — a pairing target matched by receiver product ID and
+///      unique ID, never falling back to another receiver.
+/// v39: `AgentStatus::virtual_keyboard` and [`VirtualKeyboardStatus`]
+///      appended — whether the agent types synthesized keys on its macOS
+///      virtual HID keyboard.
+/// v40: `Capabilities::force_sensing` appended — a force-sensing button,
+///      the MX Master 4's Haptic Sense Panel, whose press force HID++
+///      `0x19c0` lets software change; `Agent::{read_force_sensing,
+///      set_force_sensing}` appended — that force read and set from the
+///      settings app, with [`ForceSensingInfo`];
+///      `HidppOperation::{ReadForceSensing, WriteForceSensing}` and
+///      `WriteError::{ForceSensingUnchangeable, ForceSensingNotApplied}`
+///      appended.
+/// v41: Disable Keys capability and read/write methods appended after the
+///      v40 press-force methods, together with raw-preserving masks and
+///      guarded-write/superseded errors; `Agent::reload_saved_config_with_verdict`
+///      and [`SavedConfigVerdict`] appended, so a GUI distinguishes its accepted
+///      saved revision from an external edit that replaced it before reload.
+///      `BacklightControls` became the bit set of the changes the keyboard
+///      offers, and `BacklightState::duration` and
+///      `BacklightChange::Duration` appended — the `0x1982` backlight
+///      timer, five-second steps up to two hours.
+pub const PROTOCOL_VERSION: u32 = 41;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -140,6 +188,43 @@ pub enum InventoryHealth {
     Unavailable,
 }
 
+/// macOS Secure Event Input, as the agent last read it. While it is on,
+/// macOS delivers no key presses to any event tap, so key bindings made
+/// through the OS hook do not fire; mouse buttons, scrolling, gestures and
+/// HID++-diverted controls keep working. Always [`Self::Off`] on Linux and
+/// Windows.
+///
+/// The agent reports `On` only once it has stayed on for two consecutive
+/// reads (about 2 s), so focusing a password field for a moment does not
+/// flash a notice. Variants are append-only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SecureInput {
+    #[default]
+    Off,
+    /// On, attributed to this app — or `None` when macOS names no running
+    /// app. The attribution is the window server's: a background process
+    /// that turns it on is attributed to the frontmost app.
+    On(Option<ForegroundApp>),
+}
+
+/// Whether the agent types synthesized keys on its virtual HID keyboard,
+/// "OpenLogi Virtual Keyboard". macOS handles keys from that device as keys
+/// from a USB keyboard; keys the agent posts as `CGEvent`s instead are
+/// ignored by some apps and system shortcuts. Variants are append-only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VirtualKeyboardStatus {
+    /// Linux and Windows, which inject keys through their own interfaces.
+    #[default]
+    Unsupported,
+    /// macOS without the device: the agent may not create one (a build
+    /// without the `com.apple.developer.hid.virtual.device` entitlement), is
+    /// not armed yet, or removed it after it rejected a report. Keys are
+    /// posted as `CGEvent`s.
+    Unavailable,
+    /// macOS, and synthesized keys type on the device.
+    Active,
+}
+
 /// Agent health the GUI surfaces: the Accessibility gate, whether the hook is
 /// live, the autostart toggle state, and enumeration progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +246,10 @@ pub struct AgentStatus {
     /// node. Paired with [`Self::input_monitoring_granted`] it distinguishes
     /// a missing grant from an exclusive open or a stale permission session.
     pub hid_open_failures: bool,
+    /// See [`SecureInput`].
+    pub secure_input: SecureInput,
+    /// See [`VirtualKeyboardStatus`].
+    pub virtual_keyboard: VirtualKeyboardStatus,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never
@@ -181,6 +270,62 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// The online standalone lights the agent reads over HID++ `0x1990`. A
+    /// light reached only through its raw report reads nothing back and is
+    /// not listed.
+    pub lights: Vec<ObservedLight>,
+}
+
+/// A standalone light as it reported itself to the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedLight {
+    /// The route the light is reached on, as in [`AgentSnapshot::standalone`].
+    pub route: DeviceRoute,
+    /// What the light last read back: when its watch began, after each of
+    /// its notifications, and after each write OpenLogi made.
+    pub state: LightState,
+    /// Settings changed on the light itself that the saved settings do not
+    /// hold yet. The agent already uses them; the GUI saves them.
+    pub changed_on_light: ChangedOnLight,
+}
+
+/// The controls of a standalone light that the user set in the GUI without
+/// a write to the light, as [`Agent::reload_saved_config`] tells the agent.
+/// A change made on the light to one of them gives way to the saved value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChosenLight {
+    /// The config key of the light, as `[lights.<key>]` in `config.toml`.
+    /// It names the light whether it is online or not.
+    pub device: String,
+    /// The user set the power.
+    pub power: bool,
+    /// The user set the brightness.
+    pub brightness: bool,
+    /// The user set the colour temperature.
+    pub temperature: bool,
+}
+
+/// A save of the GUI, which [`Agent::reload_saved_config`] reloads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedConfig {
+    /// The revision of `config.toml` that the GUI wrote. A file at another
+    /// revision was edited after the save, so the agent loads it as
+    /// [`Agent::reload_config`] does.
+    pub revision: ConfigRevision,
+    /// The controls of lights the user set in the save without a write.
+    pub chosen: Vec<ChosenLight>,
+}
+
+/// How the agent treated a GUI save when it re-read `config.toml`.
+///
+/// Variants are append-only because this type crosses the IPC boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SavedConfigVerdict {
+    /// The agent read the exact revision the GUI saved.
+    Accepted,
+    /// Another writer changed the file after the GUI saved it. The agent
+    /// applied that external revision without restoring the GUI's older save.
+    FileChangedAfterSave,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -448,6 +593,91 @@ pub struct RingObservation {
     pub invocation: Option<ActionRingInvocation>,
 }
 
+/// A transient keyboard backlight level indicator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacklightObservation {
+    /// Generation of this observation on the backlight channel.
+    pub generation: Generation,
+    /// Current level, where zero is off.
+    pub current_level: u8,
+    /// Number of levels reported by the keyboard, including level zero.
+    pub levels: u8,
+    /// Whether the firmware reports a visible backlight state.
+    pub visible: bool,
+}
+
+/// The transient lock-key indicator: the lock key a keyboard just turned on
+/// or off, or none once the indicator's time is up.
+///
+/// Its own cell, as [`BacklightObservation`] is. The agent owns how long the
+/// indicator shows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockKeyObservation {
+    /// See [`Generation`]. Pass it back to the next [`Agent::observe_lock_keys`].
+    pub generation: Generation,
+    /// The change to show, or `None` for none — which is also how the
+    /// indicator ends.
+    pub shown: Option<LockKeyChange>,
+    /// Configured UI locale, or `None` to follow the overlay host's system
+    /// locale.
+    pub language: Option<String>,
+}
+
+/// A lock key that a keyboard reported turning on or off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockKeyChange {
+    /// The key that changed.
+    pub key: LockKey,
+    /// Whether the key is now on.
+    pub engaged: bool,
+}
+
+/// What a notice tells the user.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoticeKind {
+    /// A device's battery came to need attention
+    /// ([`BatteryInfo::needs_attention`]).
+    LowBattery {
+        /// What to call the device: the name the user gave it, else the name
+        /// it reports. `None` when it has neither, and the overlay names it
+        /// by its kind.
+        name: Option<String>,
+        /// The device's kind, for that fallback name.
+        kind: DeviceKind,
+        /// The reading that made the battery low.
+        battery: BatteryInfo,
+    },
+}
+
+/// One notice the overlay is showing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notice {
+    /// Unique among the notices of one agent run, so a notice that is still
+    /// showing keeps its place while others come and go.
+    pub id: u64,
+    /// What the notice says.
+    pub kind: NoticeKind,
+}
+
+/// The notices the overlay should be showing, stamped with their generation.
+///
+/// Its own cell, as [`RingObservation`] is. The agent owns how long a notice
+/// shows: it posts the notice and removes it when its time is up, so an
+/// overlay that starts or reconnects shows only what is still current.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeObservation {
+    /// See [`Generation`]. Pass it back to the next [`Agent::observe_notices`].
+    pub generation: Generation,
+    /// The notices to show, oldest first. Empty when there are none, which
+    /// is also how the last one ends.
+    pub notices: Vec<Notice>,
+    /// Configured UI locale, or `None` to follow the overlay host's system
+    /// locale.
+    pub language: Option<String>,
+}
+
 /// Why an Actions Ring interaction command was rejected.
 ///
 /// Variants are append-only because this enum crosses bincode IPC.
@@ -494,7 +724,9 @@ pub trait Agent {
     /// window is open).
     async fn inventory() -> Vec<DeviceInventory>;
     /// Re-read `config.toml` and rebuild the live binding/DPI maps. Called by
-    /// the GUI after it saves a config change.
+    /// the GUI at startup and by the CLI after it edits the file: a saved
+    /// light value that differs from the one the agent had replaces a change
+    /// made on the light, as a hand edit does.
     async fn reload_config() -> Result<(), ConfigReloadError>;
     /// Apply a DPI value to `route` now (slider preview / commit).
     async fn set_dpi(route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError>;
@@ -658,4 +890,67 @@ pub trait Agent {
         slot: u8,
         name: String,
     ) -> Result<EasySwitchHosts, WriteError>;
+    /// Re-read `config.toml` after the GUI saved it, as
+    /// [`Agent::reload_config`] does, except for changes made on lights. The
+    /// GUI writes a light it changes, and that write already takes the change
+    /// on the light. So this reload keeps such a change unless the save holds
+    /// its value, the save removes the control's value, or `saved.chosen`
+    /// names the control: the user set it while the light could not be
+    /// written. This holds only for the file the GUI wrote: a file at another
+    /// revision than `saved.revision` was edited since, and loads as
+    /// [`Agent::reload_config`] loads it.
+    async fn reload_saved_config(saved: SavedConfig) -> Result<(), ConfigReloadError>;
+    /// Block until the transient keyboard-backlight indicator changes.
+    async fn observe_backlight(since: Generation) -> BacklightObservation;
+
+    /// Long-poll the notices the overlay should be showing. Answers as soon
+    /// as they differ from generation `since`, or with the unchanged notices
+    /// after [`OBSERVE_HOLD`]. Pass `0` to read the current notices at once.
+    async fn observe_notices(since: Generation) -> NoticeObservation;
+
+    /// Long-poll the lock-key indicator. Answers as soon as it differs from
+    /// generation `since`, or with the unchanged indicator after
+    /// [`OBSERVE_HOLD`]. Pass `0` to read the current indicator at once.
+    async fn observe_lock_keys(since: Generation) -> LockKeyObservation;
+
+    /// Read the pointer speed of the mouse on `route` (HID++ `0x2205`). A
+    /// reading outside [`PointerSpeed`]'s range comes back clamped into it.
+    async fn read_pointer_speed(route: DeviceRoute) -> Result<PointerSpeed, WriteError>;
+    /// Write the pointer speed of the mouse on `route` now and answer with
+    /// what it reads back. The write ends precision mode on that mouse, so
+    /// the pointer moves at the speed the settings app shows.
+    async fn set_pointer_speed(
+        route: DeviceRoute,
+        speed: PointerSpeed,
+    ) -> Result<PointerSpeed, WriteError>;
+
+    /// Read the press force of the force-sensing button on `route` (HID++
+    /// `0x19c0`), with the range the device accepts and whether software may
+    /// change it.
+    async fn read_force_sensing(route: DeviceRoute) -> Result<ForceSensingInfo, WriteError>;
+    /// Write the press force of the force-sensing button on `route` now and
+    /// answer with what it reads back. A force outside the device's range is
+    /// clamped into it. A button that does not let software change its force
+    /// is refused with [`WriteError::ForceSensingUnchangeable`] before
+    /// anything is written; a force the device acknowledges but does not keep
+    /// with [`WriteError::ForceSensingNotApplied`].
+    async fn set_force_sensing(
+        route: DeviceRoute,
+        force: u16,
+    ) -> Result<ForceSensingInfo, WriteError>;
+    /// Read raw Disable Keys capabilities and current state for `route`.
+    async fn read_disable_keys(route: DeviceRoute) -> Result<DisableKeysState, WriteError>;
+    /// Replace the desired known disabled-key set for `route`.
+    async fn set_disable_keys(
+        route: DeviceRoute,
+        desired: DisableKeysMask,
+    ) -> Result<DisableKeysState, WriteError>;
+    /// Re-read a GUI save and report whether its exact revision was still on
+    /// disk. Unlike [`Self::reload_saved_config`], callers use this to
+    /// reconcile presentation after another writer replaced the saved file.
+    ///
+    /// This method is appended to preserve the existing service-method order.
+    async fn reload_saved_config_with_verdict(
+        saved: SavedConfig,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError>;
 }

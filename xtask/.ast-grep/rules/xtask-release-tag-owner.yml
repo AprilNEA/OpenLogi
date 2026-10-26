@@ -1,0 +1,19 @@
+# Owner: xtask's `support::release_tag` — the release tag syntax (`vX.Y.Z`,
+# `vX.Y.Z-beta.N`), which channel a tag belongs to, and its build version.
+id: xtask-release-tag-owner
+language: rust
+severity: error
+message: Release tags are parsed by xtask's support::release_tag (ReleaseTag::parse, ReleaseTag::stable_version); use it instead of stripping the `v` here.
+note: |
+  `release appcast`, `release latest-json`, `release changelog` and
+  `release sparkle-deltas` each parsed tags their own way, and a beta tag
+  would have meant four more rules. See "Single source of truth" in AGENTS.md.
+files:
+  - xtask/**/*.rs
+ignores:
+  - xtask/src/support/release_tag.rs
+  - xtask/src/support/release_tag/**
+rule:
+  any:
+    - pattern: $TAG.strip_prefix('v')
+    - pattern: $TAG.strip_prefix("v")

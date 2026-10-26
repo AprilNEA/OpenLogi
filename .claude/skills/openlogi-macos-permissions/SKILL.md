@@ -166,6 +166,12 @@ every grant on that machine is being ignored.
 5. **Prompt from the process that needs the permission**, not from whichever
    process happens to be running. A TCC grant is scoped to the identity that
    asked.
+6. **The agent's restricted entitlement ships only with its profile.**
+   `com.apple.developer.hid.virtual.device` (the virtual HID keyboard) is
+   valid only with the embedded Developer ID profile, and AMFI kills an agent
+   that claims it without one before it writes a log line.
+   `xtask/src/commands/macos/bundle/provisioning.rs` owns both; never add the
+   entitlement to an entitlements file by hand.
 
 ## 7. Check current evidence
 

@@ -100,9 +100,8 @@ pub fn hidpp_gesture_maps_for(
 
 /// Per-direction maps for every OS-hook button with a stored gesture binding on
 /// `config_key`, with `app_bundle`'s per-app overlay applied, for the OS hook to
-/// resolve a hold+swipe. New gesture mode is offered only for Back/Forward, but
-/// v0.8.0 also persisted Middle Click gesture maps; accepting all OS-hook
-/// buttons here preserves those maps until the user turns that mode off.
+/// resolve a hold+swipe. Middle Click, Back, and Forward can each enter
+/// gesture mode through the GUI.
 /// Gesture mode is per-button (see [`Config::is_gesture_mode`]), so any number
 /// of entries may be live at once — concurrency between them is the hook's
 /// first-hold-wins policy, not a config concern.
@@ -256,27 +255,34 @@ mod tests {
     }
 
     #[test]
-    fn oshook_gestures_preserves_a_stored_middle_click_gesture() {
+    fn oshook_gestures_includes_new_middle_click_gesture() {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
-        let middle = BTreeMap::from([
-            (GestureDirection::Click, Action::MiddleClick),
-            (GestureDirection::Up, Action::Copy),
-        ]);
-        cfg.set_binding(
+        cfg.set_gesture_mode("2b042", ButtonId::MiddleClick, true);
+        cfg.set_gesture_direction(
             "2b042",
             ButtonId::MiddleClick,
-            Binding::Gesture(middle.clone()),
+            GestureDirection::Up,
+            Action::Copy,
         );
 
         let oshook = oshook_gestures_for(&cfg, Some("2b042"), None);
         assert!(oshook.contains_key(&ButtonId::Back), "got: {oshook:?}");
         assert!(oshook.contains_key(&ButtonId::Forward), "got: {oshook:?}");
         assert_eq!(
-            oshook.get(&ButtonId::MiddleClick),
-            Some(&middle),
-            "an existing Middle Click gesture from v0.8.0 must keep dispatching"
+            oshook
+                .get(&ButtonId::MiddleClick)
+                .and_then(|map| map.get(&GestureDirection::Click)),
+            Some(&Action::MiddleClick),
+            "a tap must retain native middle-click behavior"
+        );
+        assert_eq!(
+            oshook
+                .get(&ButtonId::MiddleClick)
+                .and_then(|map| map.get(&GestureDirection::Up)),
+            Some(&Action::Copy),
+            "a new Middle Click swipe must reach the OS hook"
         );
     }
 

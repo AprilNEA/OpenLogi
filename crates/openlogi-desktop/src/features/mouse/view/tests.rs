@@ -223,6 +223,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 wheel_hold: &BTreeSet::new(),
                 editing_app: None,
                 overridden: None,
+                press_force: None,
             },
             ActionPickerContext {
                 open: true,

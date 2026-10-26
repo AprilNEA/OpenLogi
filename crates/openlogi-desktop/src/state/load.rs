@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use openlogi_core::hid::{
-    BacklightState, DpiInfo, EasySwitchHosts, FnLockState, ReportRateInfo, SmartShiftStatus,
+    BacklightState, DisableKeysState, DpiInfo, EasySwitchHosts, FnLockState, ForceSensingInfo,
+    PointerSpeed, ReportRateInfo, SmartShiftStatus,
 };
 
 /// State projected from an swr-backed device query: unqueried, in flight,
@@ -45,6 +46,14 @@ pub type FnLockLoad = Load<Arc<FnLockState>>;
 /// its current connection, which change when it moves between a receiver and
 /// a cable.
 pub type ReportRateLoad = Load<Arc<ReportRateInfo>>;
+/// Per-mouse pointer-speed (`0x2205`) load state. See [`Load`]. The read is
+/// the speed the mouse moves at now: the persisted `pointer_speed`, or the
+/// slowest speed while precision mode is on.
+pub type PointerSpeedLoad = Load<Arc<PointerSpeed>>;
+/// Per-device press-force (`0x19c0`) load state. See [`Load`]. The read is
+/// the force the button clicks at now, the range the device accepts, and
+/// whether software may change it.
+pub type ForceSensingLoad = Load<Arc<ForceSensingInfo>>;
 /// Per-keyboard backlight (`0x1982`) load state. See [`Load`]. The keyboard
 /// stores its backlight itself and changes it on its own — the backlight keys,
 /// the light sensor, a low battery — so the read is the only record.
@@ -54,3 +63,6 @@ pub type BacklightLoad = Load<Arc<BacklightState>>;
 /// stores each slot's host name and OS itself — the computer on the slot
 /// writes them — so the read is the only record.
 pub type EasySwitchLoad = Load<Arc<EasySwitchHosts>>;
+
+/// Per-device Disable Keys capability/current-state load.
+pub type DisableKeysLoad = Load<Arc<DisableKeysState>>;

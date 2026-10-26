@@ -16,7 +16,7 @@ use super::gesture::main_wheel;
 use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
 use crate::reprog_controls::{self, ReprogControlsV4};
-use crate::thumbwheel::{self, Thumbwheel, ThumbwheelStatus, WheelDirection};
+use crate::thumbwheel::{self, Thumbwheel, ThumbwheelStatus};
 use crate::{ChannelRegistry, DeviceRoute, IoSuspended, SharedChannel};
 
 /// Why a capture manager is stopping an active session.
@@ -140,6 +140,41 @@ impl ArmedReporting {
             ReprogRestorePolicy::Keyboard => undivert_keyboard_key(self.original),
         }
     }
+
+    /// The `setCidReporting` change that diverts this control again the way
+    /// it was armed, given its `current` reporting, or `None` when `current`
+    /// still has every setting that arming wrote.
+    ///
+    /// The change leaves the remap alone (`remap: None`, which the device
+    /// reads as "keep the current remap"). Capture does not own the remap,
+    /// and another client may set it again between the read of `current` and
+    /// this write; writing the remap read in `current` would undo that. The
+    /// original state stays the one that teardown restores.
+    pub(crate) fn redivert_change(
+        self,
+        current: reprog_controls::CidReporting,
+    ) -> Option<reprog_controls::CidReportingChange> {
+        let change = reprog_controls::CidReportingChange {
+            remap: None,
+            ..self.divert_change()
+        };
+        (!holds(change, current)).then_some(change)
+    }
+}
+
+/// Whether `current` already has every flag that `change` writes. The remap
+/// is not compared: [`ArmedReporting::redivert_change`] does not write it.
+fn holds(
+    change: reprog_controls::CidReportingChange,
+    current: reprog_controls::CidReporting,
+) -> bool {
+    let holds = |wanted: Option<bool>, now: bool| wanted.is_none_or(|wanted| wanted == now);
+    holds(change.diverted, current.diverted)
+        && holds(change.persistently_diverted, current.persistently_diverted)
+        && holds(change.raw_xy, current.raw_xy)
+        && holds(change.force_raw_xy, current.force_raw_xy)
+        && holds(change.analytics_key_events, current.analytics_key_events)
+        && holds(change.raw_wheel, current.raw_wheel)
 }
 
 /// A non-empty set of `0x1b04` controls owned through one feature index.
@@ -157,22 +192,22 @@ impl ReprogRestore {
     }
 }
 
-/// The thumb wheel a capture session diverted, and the native rotation sign
-/// to hand back with native reporting.
+/// The thumb wheel a capture session diverted, and the reporting state to
+/// hand back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ThumbwheelRestore {
     feature_index: u8,
-    native_direction: WheelDirection,
+    status: ThumbwheelStatus,
 }
 
 impl ThumbwheelRestore {
-    /// Teardown always selects native reporting, with the sign
-    /// [`thumbwheel::native_direction_to_restore`] derives from the status read
-    /// before arming.
+    /// Teardown writes the reporting mode and rotation sign
+    /// [`thumbwheel::status_to_restore`] derives from the status read before
+    /// arming.
     pub(crate) fn new(feature_index: u8, original: Option<ThumbwheelStatus>) -> Self {
         Self {
             feature_index,
-            native_direction: thumbwheel::native_direction_to_restore(original),
+            status: thumbwheel::status_to_restore(original),
         }
     }
 }
@@ -250,10 +285,7 @@ impl RestorePlan for CaptureRestorePlan {
         }
         if let Some(thumb) = self.thumb {
             let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
-            restored &= restore_result(
-                thumbwheel.undivert(thumb.native_direction).await,
-                "thumb wheel",
-            );
+            restored &= restore_result(thumbwheel.restore(thumb.status).await, "thumb wheel");
         }
         restored
     }

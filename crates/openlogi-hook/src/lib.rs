@@ -668,6 +668,41 @@ pub fn frontmost_safari_pid() -> Option<i32> {
     }
 }
 
+/// Whether macOS Secure Event Input is on in this login session.
+///
+/// While it is, macOS delivers no key presses to any event tap — this crate's
+/// included — so [`HookEvent::Key`] stops arriving and key bindings do not
+/// fire. Mouse events keep arriving. Always `false` off macOS, where no such
+/// mode exists.
+#[must_use]
+pub fn secure_input_enabled() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::secure_input_enabled()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// The app macOS attributes Secure Event Input to.
+///
+/// The attribution is the window server's: a background process that turns
+/// it on is attributed to the frontmost app. `None` when it is off, when the
+/// pid does not resolve to a running app, and always off macOS.
+#[must_use]
+pub fn secure_input_app() -> Option<ForegroundApp> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::secure_input_app()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Failure to install or operate a native foreground-application observer.
 #[derive(Debug, Error)]
 #[non_exhaustive]

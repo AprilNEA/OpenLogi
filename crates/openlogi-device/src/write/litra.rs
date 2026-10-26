@@ -10,8 +10,12 @@
 //! that does not answer there gets the fixed-index raw report the driver has
 //! always sent, which carries no read-back; that answer is remembered for the
 //! node, so later commands go straight to the raw report.
+//!
+//! A light that answers HID++ stays open ([`link`]): commands reuse the
+//! channel, and [`watch`] reports changes made on the light itself.
 
 mod illumination;
+mod link;
 
 #[cfg(test)]
 mod hidpp_tests;
@@ -27,8 +31,11 @@ use tracing::{debug, info};
 use crate::backend::{HidBackend, NodeId, NodeInfo};
 use crate::channel::route::{DeviceRoute, find_raw_route_node};
 
-use self::illumination::{Illumination, RESOLVE_TIMEOUT};
+use self::illumination::RESOLVE_TIMEOUT;
+use self::link::{LinkKey, LiveLink};
 use super::WriteError;
+
+pub use self::link::{LightChange, LightControls, LightWatch};
 
 // LightCommand is pure IPC wire data with no HID++ I/O, so it lives in
 // `openlogi_core::hid::light`; the Litra writes name it through here.
@@ -195,11 +202,15 @@ static RAW_ONLY: LazyLock<std::sync::Mutex<HashSet<(String, NodeId)>>> =
 enum Link {
     /// HID++ `0x1990`, with read-back; `state` was just read.
     Illumination {
-        light: Illumination,
+        link: Arc<LiveLink>,
         state: LightState,
     },
-    /// Only the fixed-index raw report, on this node.
-    Raw(NodeInfo),
+    /// Only the fixed-index raw report, on this node. `refused` holds the
+    /// error when the backend refused the HID++ open this time only.
+    Raw {
+        node: NodeInfo,
+        refused: Option<crate::backend::BackendError>,
+    },
 }
 
 /// Find the light `route` addresses and work out how to reach it.
@@ -208,38 +219,71 @@ enum Link {
 /// the light — the backend refused it this time — so that failure falls back
 /// for this command only. A light that opened but did not answer the root
 /// ping, list `0x1990` or have its state read is remembered in [`RAW_ONLY`].
+///
+/// A link kept from an earlier command is read again before it is used; one
+/// that no longer answers is retired and the light is opened afresh.
 async fn connect(backend: &dyn HidBackend, route: &DeviceRoute) -> Result<Link, WriteError> {
     let Some(node) = find_raw_route_node(backend, route).await? else {
         return Err(WriteError::DeviceNotFound);
     };
-    let key = (route.to_string(), node.id.clone());
+    let key: LinkKey = (route.to_string(), node.id.clone());
     if RAW_ONLY
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .contains(&key)
     {
-        return Ok(Link::Raw(node));
+        return Ok(Link::Raw {
+            node,
+            refused: None,
+        });
+    }
+    if let Some(link) = link::kept(&key) {
+        match tokio::time::timeout(RESOLVE_TIMEOUT, link.light.read_state()).await {
+            Ok(Ok(state)) => return Ok(Link::Illumination { link, state }),
+            Ok(Err(error)) => {
+                debug!(route = %route, %error, "the open Litra link failed — opening the light again");
+            }
+            Err(_elapsed) => {
+                debug!(route = %route, "the open Litra link did not answer — opening the light again");
+            }
+        }
+        link::retire(&key);
     }
     let channel = match backend.open_hidpp(&node).await {
         Ok(Some(channel)) => channel,
         Ok(None) => {
             remember_raw_only(key, route, &"no HID++ collection");
-            return Ok(Link::Raw(node));
+            return Ok(Link::Raw {
+                node,
+                refused: None,
+            });
         }
         Err(error) => {
             debug!(route = %route, %error, "could not open the Litra as HID++ — sending its raw report");
-            return Ok(Link::Raw(node));
+            return Ok(Link::Raw {
+                node,
+                refused: Some(error),
+            });
         }
     };
     match tokio::time::timeout(RESOLVE_TIMEOUT, illumination::resolve(channel)).await {
-        Ok(Ok((light, state))) => Ok(Link::Illumination { light, state }),
+        Ok(Ok((light, state))) => Ok(Link::Illumination {
+            link: link::keep(key, light, state),
+            state,
+        }),
         Ok(Err(unresolved)) => {
             remember_raw_only(key, route, &unresolved);
-            Ok(Link::Raw(node))
+            Ok(Link::Raw {
+                node,
+                refused: None,
+            })
         }
         Err(_elapsed) => {
             remember_raw_only(key, route, &"no answer");
-            Ok(Link::Raw(node))
+            Ok(Link::Raw {
+                node,
+                refused: None,
+            })
         }
     }
 }
@@ -276,14 +320,15 @@ pub async fn apply(
     check_route(route, model)?;
     let _guard = device_lock(route).await;
     let node = match connect(backend, route).await? {
-        Link::Illumination { light, state } => {
+        Link::Illumination { link, state } => {
             // The command reached the light over HID++ from here on, so a
             // failure is returned rather than sent again as a raw report.
-            let state = light.apply(state, command).await?;
+            let state = link.light.apply(state, command).await?;
+            link.note_written(command, &state);
             debug!(route = %route, ?state, "applied Litra command over HID++ 0x1990");
             return Ok(Some(state));
         }
-        Link::Raw(node) => node,
+        Link::Raw { node, .. } => node,
     };
     let report = encode_command(model, command)?;
     let mut writer = backend.open_raw_writer(&node).await?;
@@ -307,7 +352,29 @@ pub async fn read_state(
     let _guard = device_lock(route).await;
     match connect(backend, route).await? {
         Link::Illumination { state, .. } => Ok(Some(state)),
-        Link::Raw(_) => Ok(None),
+        Link::Raw { .. } => Ok(None),
+    }
+}
+
+/// Watch the light on `route` for changes made on the light itself.
+///
+/// Returns `None` for a light reached only through the raw report, which
+/// announces nothing. A HID++ open the backend refused this time is an
+/// error, so the caller can try again later.
+pub async fn watch(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    model: LitraModel,
+) -> Result<Option<LightWatch>, WriteError> {
+    check_route(route, model)?;
+    let _guard = device_lock(route).await;
+    match connect(backend, route).await? {
+        Link::Illumination { link, state } => Ok(Some(LightWatch::new(route.clone(), link, state))),
+        Link::Raw {
+            refused: Some(error),
+            ..
+        } => Err(error.into()),
+        Link::Raw { refused: None, .. } => Ok(None),
     }
 }
 

@@ -2,7 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
+use openlogi_core::device::{Capabilities, DeviceKind, RawDeviceAddress, StandaloneDevice};
+use openlogi_device_registry::g600::{G600_DRIVER_ID, G600_NAME, matches_g600};
 use openlogi_device_registry::headset::{GAMING_HEADSET_DRIVER_ID, find_gaming_headset};
 use openlogi_device_registry::litra::find_litra;
 
@@ -84,6 +85,35 @@ fn standalone_device(device: &crate::backend::NodeInfo) -> Option<StandaloneDevi
         });
     }
 
+    if matches_g600(
+        device.vendor_id,
+        device.product_id,
+        device.usage_page,
+        device.usage_id,
+    ) {
+        return Some(StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: device.vendor_id,
+                product_id: device.product_id,
+                usage_page: device.usage_page,
+                usage_id: device.usage_id,
+                identity: device.identity(),
+            },
+            display_name: G600_NAME.to_owned(),
+            manufacturer: device.manufacturer.clone(),
+            serial_number: device.serial_number.clone(),
+            unit_id: [0; 4],
+            kind: DeviceKind::Mouse,
+            online: true,
+            // Measured, not unknown: `None` would make clients presume a
+            // mouse's HID++ button and pointer controls this device lacks.
+            capabilities: Some(Capabilities::default()),
+            light_capabilities: None,
+            driver_id: G600_DRIVER_ID.to_owned(),
+            registry_model_id: None,
+        });
+    }
+
     None
 }
 
@@ -128,15 +158,47 @@ fn validate_no_ambiguous_nodes(devices: &[StandaloneDevice]) -> Result<(), Inven
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
+    use openlogi_core::device::{Capabilities, DeviceKind, RawDeviceAddress, StandaloneDevice};
 
+    use crate::backend::{NodeId, NodeInfo};
     use crate::write::matches_litra;
 
-    use super::{InventoryError, validate_no_ambiguous_nodes};
+    use super::{InventoryError, standalone_device, validate_no_ambiguous_nodes};
 
     #[test]
     fn glow_fixture_matches_standalone_driver() {
         assert!(matches_litra(0x046d, 0xc900, 0xff43, 0x0202));
+    }
+
+    fn g600_node(usage_page: u16, usage_id: u16) -> NodeInfo {
+        NodeInfo {
+            id: NodeId::from("g600-node".to_string()),
+            vendor_id: 0x046d,
+            product_id: 0xc24a,
+            usage_page,
+            usage_id,
+            name: "Logitech Gaming Mouse G600".into(),
+            manufacturer: Some("Logitech".into()),
+            serial_number: None,
+        }
+    }
+
+    #[test]
+    fn g600_vendor_collection_is_an_identity_only_mouse() {
+        let device = standalone_device(&g600_node(0xff80, 0x0080)).expect("G600 is recognized");
+
+        assert_eq!(device.kind, DeviceKind::Mouse);
+        assert_eq!(device.display_name, "G600 Gaming Mouse");
+        assert_eq!(device.driver_id, "logitech-g600");
+        assert_eq!(device.address.identity, "id:g600-node");
+        assert_eq!(device.capabilities, Some(Capabilities::default()));
+        assert!(device.light_capabilities.is_none());
+    }
+
+    #[test]
+    fn g600_mouse_and_keyboard_collections_are_ignored() {
+        assert!(standalone_device(&g600_node(0x0001, 0x0002)).is_none());
+        assert!(standalone_device(&g600_node(0x0001, 0x0006)).is_none());
     }
 
     fn raw(identity: &str) -> StandaloneDevice {

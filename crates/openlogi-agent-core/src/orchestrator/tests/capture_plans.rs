@@ -99,6 +99,20 @@ fn config_reload_publishes_scroll_preferences_without_restarting_the_hook() {
     );
 }
 
+#[test]
+fn desktop_switches_follow_the_animation_setting() {
+    let mut settings = Config::default().app_settings;
+    assert_eq!(
+        desktop_switch(&settings),
+        openlogi_inject::DesktopSwitch::Animated
+    );
+    settings.animate_desktop_switch = false;
+    assert_eq!(
+        desktop_switch(&settings),
+        openlogi_inject::DesktopSwitch::Instant
+    );
+}
+
 /// The published capture plan's Back binding for the first device, if any.
 fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
     let published = orch.shared.capture_plans.borrow();
@@ -203,6 +217,22 @@ fn app_switch_republishes_capture_plans() {
     );
     orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
+}
+
+#[test]
+fn app_switch_cancels_held_buttons_only_when_a_per_app_override_is_involved() {
+    let mut config = Config::default();
+    config.set_per_app_binding("a", "editor", ButtonId::Back, Some(Action::Undo));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    // No profile on either side: a desktop-switch gesture changing the front
+    // app must not end its own hold (#1634).
+    assert!(!orch.set_current_app(Some(ForegroundApp::unnamed("finder".into()))));
+    assert!(!orch.set_current_app(Some(ForegroundApp::unnamed("safari".into()))));
+    // Entering or leaving an app with a profile changes the bindings.
+    assert!(orch.set_current_app(Some(ForegroundApp::unnamed("editor".into()))));
+    assert!(orch.set_current_app(Some(ForegroundApp::unnamed("safari".into()))));
 }
 
 #[test]
@@ -409,10 +439,9 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
     assert_eq!(maps.thumbwheel_positive_is_forward.get("a"), Some(&true));
 }
 
-#[test]
-fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
+fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(button: ButtonId) {
     let mut config = Config::default();
-    config.set_gesture_mode("a", ButtonId::Forward, true);
+    config.set_gesture_mode("a", button, true);
     let mut orch = orchestrator(config);
     orch.devices = vec![dev("a", 1, true)];
     orch.rebuild();
@@ -425,7 +454,7 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
             .spec
             .divert_gesture_buttons
             .iter()
-            .any(|&(_, button)| button == ButtonId::Forward)
+            .any(|&(_, b)| b == button)
     };
     assert!(
         !side_gesture_is_requested(&orch),
@@ -446,18 +475,18 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
         .hook_maps
         .read()
         .expect("hook maps should not be poisoned");
-    if cfg!(target_os = "macos") {
-        assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
-        assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
+    if cfg!(target_os = "macos") && button != ButtonId::MiddleClick {
+        assert!(!hook_maps.bindings.contains_key(&button));
+        assert!(!hook_maps.gestures.contains_key(&button));
         assert!(side_gesture_is_requested(&orch));
-    } else if cfg!(target_os = "windows") {
-        assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
+    } else if cfg!(any(target_os = "macos", target_os = "windows")) {
+        assert!(hook_maps.gestures.contains_key(&button));
         assert!(
             side_gesture_is_requested(&orch),
-            "Windows must request HID++ raw XY while retaining the passive hook fallback"
+            "{button} must request HID++ raw XY while retaining the passive hook fallback"
         );
     } else {
-        assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
+        assert!(hook_maps.gestures.contains_key(&button));
         assert!(!side_gesture_is_requested(&orch));
     }
     drop(hook_maps);
@@ -473,6 +502,18 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
     assert!(
         !side_gesture_is_requested(&orch),
         "revoking the movement hook must restore native HID++ controls"
+    );
+}
+
+#[test]
+fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
+    assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(ButtonId::Forward);
+}
+
+#[test]
+fn middle_click_gesture_capture_follows_platform_ownership_and_hook_availability() {
+    assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(
+        ButtonId::MiddleClick,
     );
 }
 

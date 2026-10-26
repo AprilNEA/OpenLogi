@@ -40,12 +40,34 @@ impl RootFeature {
     /// If the device only supports the root feature version 1, the
     /// [`FeatureInformation::version`] field will be `0` for all features.
     pub async fn get_feature(&self, id: u16) -> Result<Option<FeatureInformation>, Hidpp20Error> {
+        self.get_feature_with(id, crate::protocol::WriteCompletion::Bounded)
+            .await
+    }
+
+    /// Feature lookup that drains the native request before its response
+    /// deadline. The caller must keep this owned transaction alive.
+    pub async fn get_feature_write_through(
+        &self,
+        id: u16,
+    ) -> Result<Option<FeatureInformation>, Hidpp20Error> {
+        self.get_feature_with(id, crate::protocol::WriteCompletion::Drain)
+            .await
+    }
+
+    async fn get_feature_with(
+        &self,
+        id: u16,
+        completion: crate::protocol::WriteCompletion,
+    ) -> Result<Option<FeatureInformation>, Hidpp20Error> {
         let [id_hi, id_lo] = id.to_be_bytes();
-        let payload = self
-            .endpoint
-            .call(0, [id_hi, id_lo, 0x00])
-            .await?
-            .extend_payload();
+        let args = [id_hi, id_lo, 0];
+        let response = match completion {
+            crate::protocol::WriteCompletion::Bounded => self.endpoint.call(0, args).await,
+            crate::protocol::WriteCompletion::Drain => {
+                self.endpoint.call_write_through(0, args).await
+            }
+        }?;
+        let payload = response.extend_payload();
         if payload[0] == 0 {
             return Ok(None);
         }

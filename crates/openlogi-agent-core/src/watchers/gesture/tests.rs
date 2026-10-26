@@ -171,9 +171,13 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             device_io,
             transport_turns: crate::hardware::TransportTurns::default(),
         };
-        let mut actions =
-            crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring)
-                .unwrap();
+        let mut actions = crate::runtime::ActionRuntime::new(
+            Arc::default(),
+            Arc::default(),
+            device_access.clone(),
+            ring,
+        )
+        .unwrap();
         let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
             false,
             VerticalScrollSensitivity::default(),
@@ -779,4 +783,76 @@ async fn pending_restore_follows_a_disabled_devices_latest_route() {
         Some(latest),
         "restore must follow the mouse onto the receiver inventory names now"
     );
+}
+
+#[tokio::test]
+async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ));
+
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [(GestureDirection::Left, Action::PreviousDesktop)].into(),
+    );
+    let mut session = live_session_from_plan(7, held.clone());
+    let id = session.id().clone();
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+    );
+    assert!(dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
+
+    // The swipe switched desktops, leaving the pointer over another window
+    // (#1634): the republished plan differs only in its pointer target.
+    let mut moved = held;
+    moved.dispatch.pointer_target = Some(openlogi_hook::PointerTarget::Desktop);
+    reconcile_session(
+        &mut session,
+        Some((&moved.target, &moved.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(
+        dispatcher.holds_gesture_press(&id, ButtonId::GestureButton),
+        "a pointer-only refresh must not end the hold that caused it"
+    );
+
+    // A real binding change still ends every admitted press.
+    let mut rebound = moved;
+    rebound.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [(GestureDirection::Left, Action::Copy)].into(),
+    );
+    reconcile_session(
+        &mut session,
+        Some((&rebound.target, &rebound.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(!dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
+
+    scroll.shutdown();
+    actions.shutdown();
 }

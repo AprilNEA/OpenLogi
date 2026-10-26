@@ -12,30 +12,46 @@
 //! publishes as [`PairedDevice::settings_revision`]. A client re-reads the
 //! device's settings when it sees the revision move.
 //!
+//! A keyboard's backlight broadcast additionally carries its new level, which
+//! goes through a separate latest-value channel to the transient on-screen
+//! indicator ([`EventReceiver::backlights`]).
+//!
+//! A keyboard's lock-key broadcast (`0x4220`) is not inventory at all. It is
+//! compared with the device's last lock state, and each key that changed goes
+//! to the on-screen indicator ([`EventReceiver::take_lock_keys`]).
+//!
 //! [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use hidpp::channel::{HidppChannel, HidppMessage, MessageListenerGuard};
+use hidpp::feature::CreatableFeature;
 use hidpp::feature::adc_measurement::AdcMeasurementFeature;
-use hidpp::feature::backlight::BacklightFeature;
+use hidpp::feature::backlight::{
+    BacklightEvent, BacklightFeature, BacklightInfoUpdate, BacklightStatus,
+};
 use hidpp::feature::battery_status::BatteryStatusFeature;
 use hidpp::feature::battery_voltage::BatteryVoltageFeature;
+use hidpp::feature::disable_keys::DisableKeysFeature;
 use hidpp::feature::extended_dpi::ExtendedDpiFeature;
 use hidpp::feature::extended_report_rate::ExtendedReportRateFeature;
 use hidpp::feature::fn_inversion::{
     FnInversionMultiHostFeature, FnInversionWithDefaultStateFeature,
 };
+use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
+use hidpp::feature::lock_key_state::{LockKeyStateFeature, LockKeys};
 use hidpp::feature::multi_platform::PlatformChange;
 use hidpp::feature::unified_battery::BatteryEvent;
 use hidpp::feature::wireless_device_status::WirelessDeviceStatusEvent;
 use hidpp::protocol::{v10, v20};
 use hidpp::receiver::{bolt, unifying};
+use openlogi_core::device::LockKey;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use tokio::sync::Notify;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tracing::debug;
 
 use crate::ReceiverProtocol;
 
@@ -62,12 +78,17 @@ pub enum HidppEventSource {
     /// Fn lock changing on the device, as Fn+Esc does.
     FnInversion,
     /// A mouse's `ExtendedAdjustableDpi` (`0x2202`) feature reported its
-    /// sensor DPI changing on the device, as a DPI button does.
+    /// sensor DPI changing on the device, as a DPI button does, or a sensor
+    /// calibration finishing.
     ExtendedDpi,
     /// A keyboard's `MultiPlatform` (`0x4531`) feature reported its key
     /// layout platform changing on the device, as a platform key combination
     /// does.
     MultiPlatform,
+    /// A keyboard's `DisableKeys` (`0x4521`) feature reported its disabled-key
+    /// set changing without a request from this host, as software on another
+    /// host does.
+    DisableKeys,
     /// A mouse's `ExtendedAdjustableReportRate` (`0x8061`) feature reported
     /// its report rate changing on the device.
     ExtendedReportRate,
@@ -75,6 +96,10 @@ pub enum HidppEventSource {
     /// changing on the device — the backlight keys, the ambient-light
     /// sensor, or the battery.
     Backlight,
+    /// A mouse's `HiResWheel` (`0x2121`) feature reported its wheel switching
+    /// between ratchet and free-spin on the device. The wheel mode a client
+    /// shows is the SmartShift one, which the client re-reads.
+    HiResWheelRatchet,
 }
 
 impl HidppEventSource {
@@ -86,20 +111,99 @@ impl HidppEventSource {
             Self::FnInversion
                 | Self::ExtendedDpi
                 | Self::MultiPlatform
+                | Self::DisableKeys
                 | Self::ExtendedReportRate
                 | Self::Backlight
+                | Self::HiResWheelRatchet
         )
     }
 }
 
-/// The sending half of the bounded HID++ reconciliation-request channel.
+/// Complete latest-value reading from a keyboard's `backlightInfoEvent`, for
+/// the transient on-screen indicator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BacklightUpdate {
+    /// HID++ device index that emitted the event.
+    pub device_index: u8,
+    /// Current backlight level.
+    pub current_level: u8,
+    /// Number of selectable backlight levels, including zero.
+    pub levels: u8,
+    /// Whether the backlight is lit, so the indicator should show.
+    pub visible: bool,
+}
+
+impl BacklightUpdate {
+    fn from_info(device_index: u8, info: BacklightInfoUpdate) -> Self {
+        Self {
+            device_index,
+            current_level: info.current_level,
+            levels: info.nb_levels,
+            visible: !matches!(
+                info.status,
+                BacklightStatus::DisabledBySoftware
+                    | BacklightStatus::DisabledByCriticalBattery
+                    | BacklightStatus::AlsSaturated
+            ),
+        }
+    }
+}
+
+/// One lock key changing on a keyboard, for the transient on-screen
+/// indicator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LockKeyUpdate {
+    /// HID++ device index that emitted the broadcast.
+    pub device_index: u8,
+    /// The lock key that changed.
+    pub key: LockKey,
+    /// Whether the key is now engaged.
+    pub engaged: bool,
+}
+
+/// The lock keys a `0x4220` state names, in the order Logi Options+ reports
+/// them.
+const LOCK_KEYS: [(LockKeys, LockKey); 3] = [
+    (LockKeys::NUM_LOCK, LockKey::NumLock),
+    (LockKeys::CAPS_LOCK, LockKey::CapsLock),
+    (LockKeys::SCROLL_LOCK, LockKey::ScrollLock),
+];
+
+impl LockKeyUpdate {
+    /// One update per named lock key whose state differs between `old` and
+    /// `new`, as Logi Options+ reports them.
+    fn changes(device_index: u8, old: LockKeys, new: LockKeys) -> impl Iterator<Item = Self> {
+        let changed = old.symmetric_difference(new);
+        LOCK_KEYS
+            .into_iter()
+            .filter(move |(bit, _)| changed.contains(*bit))
+            .map(move |(bit, key)| Self {
+                device_index,
+                key,
+                engaged: new.contains(bit),
+            })
+    }
+}
+
+/// How many lock-key updates wait for the indicator before new ones are
+/// dropped. A person toggles lock keys far slower than the indicator reads
+/// them, so only a stalled indicator fills it.
+const LOCK_KEY_QUEUE: usize = 8;
+
+/// The sending half of the HID++ notification channels.
 ///
-/// Clones are installed only on inventory-owned channels. Capacity is one:
-/// every source asks for the same full reconciliation, so a burst has no
-/// additional meaning and must not grow memory while a slow probe is running.
+/// Clones are installed only on inventory-owned channels. Reconciliation
+/// requests share a capacity-one queue: every source asks for the same full
+/// reconciliation, so a burst has no additional meaning and must not grow
+/// memory while a slow probe is running. Backlight readings keep only their
+/// latest value in a separate channel, so a slow probe never drops one. Lock
+/// keys use a short queue instead, so two keys changing in one broadcast are
+/// both reported.
 #[derive(Clone)]
 pub struct EventNotifier {
     sender: mpsc::Sender<HidppEventSource>,
+    backlight: watch::Sender<Option<BacklightUpdate>>,
+    lock_keys: mpsc::Sender<LockKeyUpdate>,
     #[cfg(test)]
     observation: Option<Arc<EventObservation>>,
 }
@@ -113,22 +217,75 @@ impl EventNotifier {
             observation.changed.notify_waiters();
         }
     }
+
+    fn notify_backlight(&self, update: BacklightUpdate) {
+        self.backlight.send_replace(Some(update));
+    }
+
+    fn notify_lock_key(&self, update: LockKeyUpdate) {
+        if self.lock_keys.try_send(update).is_err() {
+            debug!(?update, "lock-key update dropped: indicator not reading");
+        }
+    }
 }
 
-/// The receiving half of the coalesced HID++ reconciliation-request channel.
-pub type EventReceiver = mpsc::Receiver<HidppEventSource>;
+/// The receiving half of the reconciliation-request queue, the latest
+/// backlight reading and the lock-key updates.
+pub struct EventReceiver {
+    lifecycle: mpsc::Receiver<HidppEventSource>,
+    backlight: watch::Receiver<Option<BacklightUpdate>>,
+    lock_keys: Option<mpsc::Receiver<LockKeyUpdate>>,
+}
 
-/// Build the bounded channel used by an inventory watcher and its enumerator.
+impl EventReceiver {
+    /// Receive the next reconciliation request.
+    pub async fn recv(&mut self) -> Option<HidppEventSource> {
+        self.lifecycle.recv().await
+    }
+
+    /// Receive a queued reconciliation request without waiting.
+    ///
+    /// # Errors
+    ///
+    /// [`mpsc::error::TryRecvError::Empty`] when nothing is queued, and
+    /// [`mpsc::error::TryRecvError::Disconnected`] once every notifier is gone.
+    pub fn try_recv(&mut self) -> Result<HidppEventSource, mpsc::error::TryRecvError> {
+        self.lifecycle.try_recv()
+    }
+
+    /// Subscribe to the latest backlight reading, independently of inventory.
+    #[must_use]
+    pub fn backlights(&self) -> watch::Receiver<Option<BacklightUpdate>> {
+        self.backlight.clone()
+    }
+
+    /// Take the lock-key updates, independently of inventory. `None` once
+    /// taken: the updates have a single reader.
+    pub fn take_lock_keys(&mut self) -> Option<mpsc::Receiver<LockKeyUpdate>> {
+        self.lock_keys.take()
+    }
+}
+
+/// Build the reconciliation, backlight and lock-key channels used by an
+/// inventory watcher and its enumerator.
 #[must_use]
 pub fn event_channel() -> (EventNotifier, EventReceiver) {
     let (sender, receiver) = mpsc::channel(1);
+    let (backlight, backlight_receiver) = watch::channel(None);
+    let (lock_keys, lock_key_receiver) = mpsc::channel(LOCK_KEY_QUEUE);
     (
         EventNotifier {
             sender,
+            backlight,
+            lock_keys,
             #[cfg(test)]
             observation: None,
         },
-        receiver,
+        EventReceiver {
+            lifecycle: receiver,
+            backlight: backlight_receiver,
+            lock_keys: Some(lock_key_receiver),
+        },
     )
 }
 
@@ -161,6 +318,8 @@ impl EventObserver {
 #[cfg(test)]
 pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventObserver) {
     let (sender, receiver) = mpsc::channel(1);
+    let (backlight, backlight_receiver) = watch::channel(None);
+    let (lock_keys, lock_key_receiver) = mpsc::channel(LOCK_KEY_QUEUE);
     let observation = Arc::new(EventObservation {
         count: AtomicUsize::new(0),
         changed: Notify::new(),
@@ -168,9 +327,15 @@ pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventOb
     (
         EventNotifier {
             sender,
+            backlight,
+            lock_keys,
             observation: Some(Arc::clone(&observation)),
         },
-        receiver,
+        EventReceiver {
+            lifecycle: receiver,
+            backlight: backlight_receiver,
+            lock_keys: Some(lock_key_receiver),
+        },
         EventObserver { observation },
     )
 }
@@ -183,7 +348,9 @@ pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventOb
 /// measurement — broadcasts its changes, so each has an index here. So do the
 /// settings a user can change on the device itself: Fn lock (`0x40a2`,
 /// `0x40a3`), extended DPI (`0x2202`), the keyboard platform (`0x4531`), the
-/// extended report rate (`0x8061`) and the keyboard backlight (`0x1982`).
+/// keyboard's disabled keys (`0x4521`), the extended report rate (`0x8061`),
+/// the keyboard backlight (`0x1982`) and the wheel's ratchet (`0x2121`). So
+/// do the keyboard's lock keys (`0x4220`), for the on-screen indicator only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct EventFeatureIndices {
     pub(super) wireless_status: Option<u8>,
@@ -195,8 +362,11 @@ pub(super) struct EventFeatureIndices {
     pub(super) fn_inversion_multi_host: Option<u8>,
     pub(super) extended_dpi: Option<u8>,
     pub(super) multi_platform: Option<u8>,
+    pub(super) disable_keys: Option<u8>,
     pub(super) extended_report_rate: Option<u8>,
     pub(super) backlight: Option<u8>,
+    pub(super) lock_key_state: Option<u8>,
+    pub(super) hires_wheel: Option<u8>,
 }
 
 impl EventFeatureIndices {
@@ -216,8 +386,11 @@ impl EventFeatureIndices {
                 0x40a3 => indices.fn_inversion_multi_host = Some(index),
                 0x2202 => indices.extended_dpi = Some(index),
                 0x4531 => indices.multi_platform = Some(index),
+                0x4521 => indices.disable_keys = Some(index),
                 0x8061 => indices.extended_report_rate = Some(index),
                 0x1982 => indices.backlight = Some(index),
+                0x4220 => indices.lock_key_state = Some(index),
+                0x2121 => indices.hires_wheel = Some(index),
                 _ => {}
             }
         }
@@ -270,8 +443,11 @@ impl EventFeatureIndices {
         {
             return Some(HidppEventSource::FnInversion);
         }
+        // A calibration result can leave the sensor different from its last
+        // read just as a DPI button can.
         if self.extended_dpi == Some(header.feature_index)
-            && ExtendedDpiFeature::is_parameters_broadcast(function_id)
+            && (ExtendedDpiFeature::is_parameters_broadcast(function_id)
+                || ExtendedDpiFeature::is_calibration_broadcast(function_id))
         {
             return Some(HidppEventSource::ExtendedDpi);
         }
@@ -282,6 +458,14 @@ impl EventFeatureIndices {
         {
             return Some(HidppEventSource::MultiPlatform);
         }
+        // Only the report's function is trusted. Options+ reads byte 0 as the
+        // new mask, but that layout is unconfirmed, so the report only says
+        // a re-read is due.
+        if self.disable_keys == Some(header.feature_index)
+            && DisableKeysFeature::is_state_broadcast(function_id)
+        {
+            return Some(HidppEventSource::DisableKeys);
+        }
         if self.extended_report_rate == Some(header.feature_index)
             && ExtendedReportRateFeature::is_rate_broadcast(function_id)
         {
@@ -291,6 +475,15 @@ impl EventFeatureIndices {
             && BacklightFeature::is_info_broadcast(function_id)
         {
             return Some(HidppEventSource::Backlight);
+        }
+        // Only the ratchet switch: a movement report is input, not a setting.
+        if self.hires_wheel == Some(header.feature_index)
+            && matches!(
+                hires_wheel::decode_event(message, header.device_index, header.feature_index),
+                Some(HiResWheelEvent::RatchetSwitch(_))
+            )
+        {
+            return Some(HidppEventSource::HiResWheelRatchet);
         }
         None
     }
@@ -304,6 +497,37 @@ struct DeviceEvents {
     /// channel. Owned here, never reset by [`EventSubscriptionHandle::register_device`]:
     /// a re-probe does not undo a change the user made on the device.
     settings_revision: u64,
+    /// The device's last lock-key state, to tell which key a `0x4220`
+    /// broadcast changed. `None` while unknown: then a broadcast only records
+    /// its state, because no key can be named as changed.
+    lock_keys: Option<LockKeys>,
+    /// Whether the lock state was read since the device came online. One
+    /// attempt per connection: a failed read is not retried on every
+    /// reconciliation, and the next broadcast records the state instead.
+    lock_keys_read: bool,
+    /// How often the device came back since it was registered, so a
+    /// lock-state read started before a comeback does not record its answer
+    /// after it.
+    lock_keys_connection: u64,
+}
+
+impl DeviceEvents {
+    /// Forget the lock state: the device was away, and its keys may have
+    /// changed meanwhile, so the next scan reads them again.
+    fn forget_lock_keys(&mut self) {
+        self.lock_keys = None;
+        self.lock_keys_read = false;
+        self.lock_keys_connection = self.lock_keys_connection.wrapping_add(1);
+    }
+}
+
+/// A lock-state read in flight: which device it asks, and on which of its
+/// connections it started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LockKeyRead {
+    device_index: u8,
+    feature_index: u8,
+    connection: u64,
 }
 
 struct SubscriptionState {
@@ -331,12 +555,20 @@ impl SubscriptionState {
             None => false,
         };
         if receiver_connection {
-            return (self.receiver_snapshot_depth.load(Ordering::Acquire) == 0)
-                .then_some(HidppEventSource::ReceiverConnection);
+            if self.receiver_snapshot_depth.load(Ordering::Acquire) != 0 {
+                return None;
+            }
+            // The slot connected or dropped between scans, which may never
+            // see it offline.
+            self.forget_lock_keys(v10::Message::from(raw).header().device_index);
+            return Some(HidppEventSource::ReceiverConnection);
         }
 
         let message = v20::Message::from(raw);
         let device_index = message.header().device_index;
+        if self.track_lock_keys(&message) {
+            return None;
+        }
         let source = self
             .devices
             .read()
@@ -344,6 +576,10 @@ impl SubscriptionState {
             .iter()
             .find(|device| device.device_index == device_index)
             .and_then(|device| device.features.recognizes(&message))?;
+        if source == HidppEventSource::WirelessDeviceStatus {
+            // A reconnection, which the scans may never see as offline.
+            self.forget_lock_keys(device_index);
+        }
         if source.changes_settings() {
             // Bumped before the reconciliation request is sent, so the
             // snapshot that request produces already carries it.
@@ -357,7 +593,69 @@ impl SubscriptionState {
                 device.settings_revision = device.settings_revision.wrapping_add(1);
             }
         }
+        // The same broadcast also carries the level for the on-screen
+        // indicator, published whether or not a reconciliation is queued.
+        if source == HidppEventSource::Backlight
+            && let Some(BacklightEvent::InfoChanged(info)) = BacklightEvent::decode(
+                message.header().function_id.to_lo(),
+                &message.extend_payload(),
+            )
+        {
+            self.notifier
+                .notify_backlight(BacklightUpdate::from_info(device_index, info));
+        }
         Some(source)
+    }
+
+    /// Track a `0x4220` broadcast from a registered device and publish one
+    /// update per lock key it changed. Lock keys are not inventory, so this
+    /// never asks for a reconciliation. Returns whether `message` was such a
+    /// broadcast.
+    fn track_lock_keys(&self, message: &v20::Message) -> bool {
+        let header = message.header();
+        if header.software_id.to_lo() != 0 {
+            return false;
+        }
+        let is_lock_broadcast = |device: &DeviceEvents| {
+            device.device_index == header.device_index
+                && device.features.lock_key_state == Some(header.feature_index)
+        };
+        if !self
+            .devices
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(is_lock_broadcast)
+        {
+            return false;
+        }
+        let new = LockKeyStateFeature::decode_broadcast(&message.extend_payload());
+        let old = self
+            .devices
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter_mut()
+            .find(|device| is_lock_broadcast(device))
+            .and_then(|device| device.lock_keys.replace(new));
+        if let Some(old) = old {
+            for update in LockKeyUpdate::changes(header.device_index, old, new) {
+                self.notifier.notify_lock_key(update);
+            }
+        }
+        true
+    }
+
+    /// [`DeviceEvents::forget_lock_keys`] for `device_index`, if registered.
+    fn forget_lock_keys(&self, device_index: u8) {
+        if let Some(device) = self
+            .devices
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter_mut()
+            .find(|device| device.device_index == device_index)
+        {
+            device.forget_lock_keys();
+        }
     }
 }
 
@@ -388,7 +686,76 @@ impl EventSubscriptionHandle {
                 device_index,
                 features,
                 settings_revision: 0,
+                lock_keys: None,
+                lock_keys_read: false,
+                lock_keys_connection: 0,
             });
+        }
+    }
+
+    /// The read to start for an `online` `device_index` whose lock state has
+    /// not been read since it came online: the cue to read it once.
+    /// An offline device has its state forgotten instead: its keys may change
+    /// before it comes back, so the next connection reads them again.
+    fn lock_keys_to_read(&self, device_index: u8, online: bool) -> Option<LockKeyRead> {
+        let mut devices = self
+            .state
+            .devices
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let device = devices
+            .iter_mut()
+            .find(|device| device.device_index == device_index)?;
+        if !online {
+            device.forget_lock_keys();
+            return None;
+        }
+        let feature_index = device.features.lock_key_state?;
+        if device.lock_keys_read {
+            return None;
+        }
+        device.lock_keys_read = true;
+        Some(LockKeyRead {
+            device_index,
+            feature_index,
+            connection: device.lock_keys_connection,
+        })
+    }
+
+    /// Record the lock state `read` answered, unless a broadcast recorded a
+    /// state while the read was in flight, or the device came back meanwhile:
+    /// then the answer is from the connection before.
+    fn record_lock_keys(&self, read: LockKeyRead, keys: LockKeys) {
+        if let Some(device) = self
+            .state
+            .devices
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter_mut()
+            .find(|device| device.device_index == read.device_index)
+            && device.lock_keys_connection == read.connection
+        {
+            device.lock_keys.get_or_insert(keys);
+        }
+    }
+
+    /// Read the lock state of an `online` `device_index` once per connection,
+    /// so its first lock-key broadcast already names the key that changed, or
+    /// forget the state of an offline one.
+    pub(super) async fn sync_lock_keys(
+        &self,
+        channel: &Arc<HidppChannel>,
+        device_index: u8,
+        online: bool,
+    ) {
+        let Some(read) = self.lock_keys_to_read(device_index, online) else {
+            return;
+        };
+        let feature =
+            LockKeyStateFeature::new(Arc::clone(channel), device_index, read.feature_index);
+        match feature.get_lock_state().await {
+            Ok(keys) => self.record_lock_keys(read, keys),
+            Err(error) => debug!(device_index, ?error, "lock-key state read failed"),
         }
     }
 
@@ -498,8 +865,11 @@ mod tests {
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
                 multi_platform: None,
+                disable_keys: None,
                 extended_report_rate: None,
                 backlight: None,
+                lock_key_state: None,
+                hires_wheel: None,
             }
         );
     }
@@ -530,6 +900,9 @@ mod tests {
         state.devices.write().unwrap().push(DeviceEvents {
             device_index: 2,
             settings_revision: 0,
+            lock_keys: None,
+            lock_keys_read: false,
+            lock_keys_connection: 0,
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: None,
@@ -540,8 +913,11 @@ mod tests {
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
                 multi_platform: None,
+                disable_keys: None,
                 extended_report_rate: None,
                 backlight: None,
+                lock_key_state: None,
+                hires_wheel: None,
             },
         });
         state.receiver_snapshot_depth.store(1, Ordering::Release);
@@ -568,6 +944,9 @@ mod tests {
         state.devices.write().unwrap().push(DeviceEvents {
             device_index: 3,
             settings_revision: 0,
+            lock_keys: None,
+            lock_keys_read: false,
+            lock_keys_connection: 0,
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: Some(7),
@@ -578,8 +957,11 @@ mod tests {
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
                 multi_platform: None,
+                disable_keys: None,
                 extended_report_rate: None,
                 backlight: None,
+                lock_key_state: None,
+                hires_wheel: None,
             },
         });
 
@@ -635,6 +1017,9 @@ mod tests {
         state.devices.write().unwrap().push(DeviceEvents {
             device_index: 0xff,
             settings_revision: 0,
+            lock_keys: None,
+            lock_keys_read: false,
+            lock_keys_connection: 0,
             features: EventFeatureIndices {
                 wireless_status: None,
                 unified_battery: None,
@@ -645,8 +1030,11 @@ mod tests {
                 fn_inversion_multi_host: None,
                 extended_dpi: None,
                 multi_platform: None,
+                disable_keys: None,
                 extended_report_rate: None,
                 backlight: None,
+                lock_key_state: None,
+                hires_wheel: None,
             },
         });
         let event = |function_id: u8, software_id: u8, bytes: [u8; 3]| {
@@ -706,6 +1094,9 @@ mod tests {
         state.devices.write().unwrap().push(DeviceEvents {
             device_index: 1,
             settings_revision: 0,
+            lock_keys: None,
+            lock_keys_read: false,
+            lock_keys_connection: 0,
             features: EventFeatureIndices {
                 battery_status: Some(4),
                 battery_voltage: Some(6),
@@ -832,13 +1223,19 @@ mod tests {
         .into();
         assert_eq!(state.decode(short, false), None);
         assert_eq!(handle.settings_revision(1), 2);
-        // 0x2202: the parameters broadcast, not a calibration result.
-        assert_eq!(
-            state.decode(long(1, 6, 0, 0), false),
-            Some(HidppEventSource::ExtendedDpi)
-        );
-        assert_eq!(state.decode(long(1, 6, 1, 0), false), None);
-        assert_eq!(handle.settings_revision(1), 3);
+        // 0x2202: the parameters broadcast and the calibration result, no
+        // other function.
+        for (function_id, revision) in [(0, 3), (1, 4)] {
+            assert_eq!(
+                state.decode(long(1, 6, function_id, 0), false),
+                Some(HidppEventSource::ExtendedDpi)
+            );
+            assert_eq!(handle.settings_revision(1), revision);
+        }
+        assert_eq!(state.decode(long(1, 6, 2, 0), false), None);
+        // A reply to our own calibration request is not a result.
+        assert_eq!(state.decode(long(1, 6, 1, 0xd), false), None);
+        assert_eq!(handle.settings_revision(1), 4);
 
         // Our own traffic is not a device-side change: a matched reply, or a
         // message carrying a software id.
@@ -849,16 +1246,66 @@ mod tests {
             state.decode(long(1, 7, 0, 0), false),
             Some(HidppEventSource::BatteryStatus)
         );
-        assert_eq!(handle.settings_revision(1), 3);
+        assert_eq!(handle.settings_revision(1), 4);
 
         // A re-probe re-registers the device; the change it already made
         // stands.
         handle.register_device(1, features);
-        assert_eq!(handle.settings_revision(1), 3);
+        assert_eq!(handle.settings_revision(1), 4);
         // The revision is per device index, and an unknown index has none.
         assert_eq!(handle.settings_revision(2), 0);
         assert_eq!(state.decode(long(3, 5, 0, 0), false), None);
         assert_eq!(handle.settings_revision(3), 0);
+    }
+
+    /// The mode-shift button switching the wheel between ratchet and
+    /// free-spin sends a `0x2121` ratchet-switch broadcast. It bumps the
+    /// revision, so a client re-reads SmartShift. A movement report on the
+    /// same index is input, not a setting.
+    #[test]
+    fn a_wheel_ratchet_switch_bumps_the_revision() {
+        let mouse = EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x2121]);
+        assert_eq!(mouse.hires_wheel, Some(3));
+        let state = state(Some(ReceiverProtocol::Bolt));
+        let handle = EventSubscriptionHandle {
+            state: Arc::clone(&state),
+        };
+        handle.register_device(1, mouse);
+        let header = |function_id: u8, software_id: u8| v20::MessageHeader {
+            device_index: 1,
+            feature_index: 3,
+            function_id: U4::from_lo(function_id),
+            software_id: U4::from_lo(software_id),
+        };
+        let mut payload = [0; 16];
+        payload[0] = 1;
+        let ratchet = v20::Message::Long(header(1, 0), payload).into();
+        let freespin = v20::Message::Short(header(1, 0), [0, 0, 0]).into();
+
+        assert_eq!(
+            state.decode(freespin, false),
+            Some(HidppEventSource::HiResWheelRatchet)
+        );
+        assert_eq!(
+            state.decode(ratchet, false),
+            Some(HidppEventSource::HiResWheelRatchet)
+        );
+        assert_eq!(handle.settings_revision(1), 2);
+
+        // Low resolution, 1 period, deltaV = -1.
+        let mut movement = [0; 16];
+        movement[..3].copy_from_slice(&[1, 0xff, 0xff]);
+        assert_eq!(
+            state.decode(v20::Message::Long(header(0, 0), movement).into(), false),
+            None
+        );
+        // Our own traffic: a matched reply, or a message with a software id.
+        assert_eq!(state.decode(ratchet, true), None);
+        assert_eq!(
+            state.decode(v20::Message::Long(header(1, 0xd), payload).into(), false),
+            None
+        );
+        assert_eq!(handle.settings_revision(1), 2);
     }
 
     #[test]
@@ -899,6 +1346,90 @@ mod tests {
     }
 
     #[test]
+    fn disabled_key_reports_are_change_hints_that_bump_the_revision() {
+        let keyboard = EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x4531, 0x4521]);
+        assert_eq!(keyboard.disable_keys, Some(4));
+        assert_eq!(keyboard.multi_platform, Some(3));
+
+        let state = state(Some(ReceiverProtocol::Bolt));
+        let handle = EventSubscriptionHandle {
+            state: Arc::clone(&state),
+        };
+        handle.register_device(1, keyboard);
+        let report = |function_id: u8, software_id: u8, payload: [u8; 3]| {
+            v20::Message::Short(
+                v20::MessageHeader {
+                    device_index: 1,
+                    feature_index: 4,
+                    function_id: U4::from_lo(function_id),
+                    software_id: U4::from_lo(software_id),
+                },
+                payload,
+            )
+            .into()
+        };
+
+        // Options+ takes an unsolicited function-2 report as a change. Its
+        // bytes are unconfirmed, so none of them decides anything: an empty
+        // mask, a known one and unknown bits are all the same hint.
+        for (payload, revision) in [
+            ([0x00, 0x00, 0x00], 1),
+            ([0x11, 0x00, 0x00], 2),
+            ([0xe0, 0xff, 0xff], 3),
+        ] {
+            assert_eq!(
+                state.decode(report(2, 0, payload), false),
+                Some(HidppEventSource::DisableKeys),
+                "{payload:02x?}"
+            );
+            assert_eq!(handle.settings_revision(1), revision);
+        }
+        // A long report is the same hint.
+        let long = v20::Message::Long(
+            v20::MessageHeader {
+                device_index: 1,
+                feature_index: 4,
+                function_id: U4::from_lo(2),
+                software_id: U4::from_lo(0),
+            },
+            [0x01; 16],
+        )
+        .into();
+        assert_eq!(
+            state.decode(long, false),
+            Some(HidppEventSource::DisableKeys)
+        );
+        assert_eq!(handle.settings_revision(1), 4);
+
+        // Only function 2 is the change: not the capability and mask reads
+        // (functions 0 and 1), and not a function the feature does not have.
+        for function_id in [0, 1, 3] {
+            assert_eq!(
+                state.decode(report(function_id, 0, [0x01, 0, 0]), false),
+                None,
+                "function {function_id}"
+            );
+        }
+        // Our own write's reply is not a change made elsewhere: it is matched
+        // to its request, and it carries our software id.
+        assert_eq!(state.decode(report(2, 0, [0x01, 0, 0]), true), None);
+        assert_eq!(state.decode(report(2, 0xd, [0x01, 0, 0]), false), None);
+        // A feature index the table does not hold is not this feature.
+        let unknown_index = v20::Message::Short(
+            v20::MessageHeader {
+                device_index: 1,
+                feature_index: 5,
+                function_id: U4::from_lo(2),
+                software_id: U4::from_lo(0),
+            },
+            [0x01, 0, 0],
+        )
+        .into();
+        assert_eq!(state.decode(unknown_index, false), None);
+        assert_eq!(handle.settings_revision(1), 4);
+    }
+
+    #[test]
     fn backlight_info_broadcasts_bump_the_revision() {
         // An MX Keys S-shaped table: Fn lock, backlight, multi-platform.
         let keyboard =
@@ -934,6 +1465,357 @@ mod tests {
         assert_eq!(state.decode(report(0, 0), true), None);
         assert_eq!(state.decode(report(0, 0xd), false), None);
         assert_eq!(handle.settings_revision(1), 1);
+    }
+
+    #[test]
+    fn backlight_info_broadcasts_publish_the_latest_level() {
+        let keyboard =
+            EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x40a3, 0x1982, 0x4531]);
+        let (notifier, receiver) = event_channel();
+        let state = Arc::new(SubscriptionState {
+            protocol: Some(ReceiverProtocol::Bolt),
+            devices: RwLock::new(Vec::new()),
+            receiver_snapshot_depth: AtomicUsize::new(0),
+            notifier,
+        });
+        EventSubscriptionHandle {
+            state: Arc::clone(&state),
+        }
+        .register_device(1, keyboard);
+        let backlights = receiver.backlights();
+        // nb_levels, current_level, status, effect.
+        let report = |current_level: u8, status: u8| {
+            v20::Message::Long(
+                v20::MessageHeader {
+                    device_index: 1,
+                    feature_index: 4,
+                    function_id: U4::from_lo(0),
+                    software_id: U4::from_lo(0),
+                },
+                [
+                    8,
+                    current_level,
+                    status,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            )
+            .into()
+        };
+
+        // A reply to our own `getBacklightInfo` is not a reading to show.
+        assert_eq!(state.decode(report(4, 5), true), None);
+        assert_eq!(*backlights.borrow(), None);
+
+        assert_eq!(
+            state.decode(report(4, 5), false),
+            Some(HidppEventSource::Backlight)
+        );
+        assert_eq!(
+            *backlights.borrow(),
+            Some(BacklightUpdate {
+                device_index: 1,
+                current_level: 4,
+                levels: 8,
+                visible: true,
+            })
+        );
+
+        // Turned off in software: the indicator hides.
+        let _ = state.decode(report(0, 0), false);
+        assert_eq!(
+            backlights.borrow().map(|update| update.visible),
+            Some(false)
+        );
+    }
+
+    /// A keyboard on Bolt device index 1 whose `0x4220` sits at index 3,
+    /// with its lock-key updates.
+    fn lock_keyboard() -> (
+        Arc<SubscriptionState>,
+        EventSubscriptionHandle,
+        mpsc::Receiver<LockKeyUpdate>,
+    ) {
+        let keyboard = EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x4220]);
+        assert_eq!(keyboard.lock_key_state, Some(3));
+        let (notifier, mut receiver) = event_channel();
+        let state = Arc::new(SubscriptionState {
+            protocol: Some(ReceiverProtocol::Bolt),
+            devices: RwLock::new(Vec::new()),
+            receiver_snapshot_depth: AtomicUsize::new(0),
+            notifier,
+        });
+        let handle = EventSubscriptionHandle {
+            state: Arc::clone(&state),
+        };
+        handle.register_device(1, keyboard);
+        let updates = receiver.take_lock_keys().unwrap();
+        assert!(receiver.take_lock_keys().is_none());
+        (state, handle, updates)
+    }
+
+    fn lock_report(software_id: u8, keys: u8) -> HidppMessage {
+        let mut payload = [0; 16];
+        payload[0] = keys;
+        v20::Message::Long(
+            v20::MessageHeader {
+                device_index: 1,
+                feature_index: 3,
+                function_id: U4::from_lo(0),
+                software_id: U4::from_lo(software_id),
+            },
+            payload,
+        )
+        .into()
+    }
+
+    fn drain(updates: &mut mpsc::Receiver<LockKeyUpdate>) -> Vec<(LockKey, bool)> {
+        std::iter::from_fn(|| updates.try_recv().ok())
+            .map(|update| {
+                assert_eq!(update.device_index, 1);
+                (update.key, update.engaged)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lock_key_broadcasts_name_each_key_that_changed() {
+        let (state, handle, mut updates) = lock_keyboard();
+
+        // No state yet: the first broadcast only records one.
+        assert_eq!(state.decode(lock_report(0, 0x02), false), None);
+        assert_eq!(drain(&mut updates), []);
+
+        assert_eq!(state.decode(lock_report(0, 0x00), false), None);
+        assert_eq!(drain(&mut updates), [(LockKey::CapsLock, false)]);
+
+        // Two keys in one broadcast, in the order Options+ reports them.
+        assert_eq!(state.decode(lock_report(0, 0x05), false), None);
+        assert_eq!(
+            drain(&mut updates),
+            [(LockKey::NumLock, true), (LockKey::ScrollLock, true)]
+        );
+
+        // The same state again names nothing.
+        assert_eq!(state.decode(lock_report(0, 0x05), false), None);
+        assert_eq!(drain(&mut updates), []);
+
+        // Neither a reply to our own read nor a report carrying a software
+        // id is a broadcast, so neither moves the recorded state.
+        assert_eq!(state.decode(lock_report(0, 0x00), true), None);
+        assert_eq!(state.decode(lock_report(0xd, 0x00), false), None);
+        assert_eq!(state.decode(lock_report(0, 0x05), false), None);
+        assert_eq!(drain(&mut updates), []);
+
+        // Lock keys are not a setting of the device.
+        assert_eq!(handle.settings_revision(1), 0);
+    }
+
+    #[test]
+    fn a_lock_broadcast_needs_the_registered_lock_index() {
+        let (state, _handle, mut updates) = lock_keyboard();
+        let elsewhere = |device_index: u8, feature_index: u8, keys: u8| {
+            let mut payload = [0; 16];
+            payload[0] = keys;
+            v20::Message::Long(
+                v20::MessageHeader {
+                    device_index,
+                    feature_index,
+                    function_id: U4::from_lo(0),
+                    software_id: U4::from_lo(0),
+                },
+                payload,
+            )
+            .into()
+        };
+        let _ = state.decode(lock_report(0, 0x00), false);
+
+        // Another feature on the keyboard, or the same index on another
+        // device, is not its lock state.
+        let _ = state.decode(elsewhere(1, 1, 0x02), false);
+        let _ = state.decode(elsewhere(2, 3, 0x02), false);
+        assert_eq!(drain(&mut updates), []);
+
+        assert_eq!(state.decode(lock_report(0, 0x02), false), None);
+        assert_eq!(drain(&mut updates), [(LockKey::CapsLock, true)]);
+    }
+
+    #[test]
+    fn the_lock_state_is_read_once_per_connection() {
+        let (state, handle, mut updates) = lock_keyboard();
+
+        let read = handle.lock_keys_to_read(1, true).expect("a first read");
+        assert_eq!(read.feature_index, 3);
+        assert_eq!(handle.lock_keys_to_read(1, true), None);
+        // A device without `0x4220`, or one never registered, has none.
+        handle.register_device(3, EventFeatureIndices::default());
+        assert_eq!(handle.lock_keys_to_read(3, true), None);
+        assert_eq!(handle.lock_keys_to_read(4, true), None);
+
+        // The state read names the key the first broadcast changes.
+        handle.record_lock_keys(read, LockKeys::CAPS_LOCK);
+        assert_eq!(state.decode(lock_report(0, 0x00), false), None);
+        assert_eq!(drain(&mut updates), [(LockKey::CapsLock, false)]);
+
+        // Offline: the state is forgotten and read again next connection.
+        assert_eq!(
+            handle.lock_keys_to_read(1, false),
+            None,
+            "nothing is read offline"
+        );
+        assert_eq!(state.decode(lock_report(0, 0x02), false), None);
+        assert_eq!(drain(&mut updates), []);
+        let read = handle.lock_keys_to_read(1, true).expect("read again");
+
+        // That broadcast already recorded Caps Lock on, so a read answering
+        // later with the older state does not replace it.
+        handle.record_lock_keys(read, LockKeys::empty());
+        assert_eq!(state.decode(lock_report(0, 0x00), false), None);
+        assert_eq!(drain(&mut updates), [(LockKey::CapsLock, false)]);
+    }
+
+    #[test]
+    fn a_re_registered_device_keeps_its_lock_state() {
+        let (state, handle, mut updates) = lock_keyboard();
+        let read = handle.lock_keys_to_read(1, true).expect("a first read");
+        handle.record_lock_keys(read, LockKeys::CAPS_LOCK);
+
+        // A re-probe of the connected device registers it again.
+        handle.register_device(
+            1,
+            EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x4220]),
+        );
+        assert_eq!(handle.lock_keys_to_read(1, true), None);
+        assert_eq!(state.decode(lock_report(0, 0x00), false), None);
+        assert_eq!(drain(&mut updates), [(LockKey::CapsLock, false)]);
+    }
+
+    /// A `0x1d4b` reconnection broadcast from `device_index`, whose
+    /// `WirelessDeviceStatus` is at `feature_index`.
+    fn reconnection(device_index: u8, feature_index: u8) -> HidppMessage {
+        v20::Message::Long(
+            v20::MessageHeader {
+                device_index,
+                feature_index,
+                function_id: U4::from_lo(0),
+                software_id: U4::from_lo(0),
+            },
+            [0; 16],
+        )
+        .into()
+    }
+
+    /// A keyboard can drop and come back between two scans, which then never
+    /// see it offline. Its receiver's connection notice, or its own `0x1d4b`
+    /// reconnection broadcast, still has the next scan read its keys again.
+    #[test]
+    fn a_reconnection_between_scans_has_the_lock_state_read_again() {
+        let (state, handle, mut updates) = lock_keyboard();
+        handle.register_device(
+            1,
+            EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x4220, 0x1d4b]),
+        );
+        let read = handle.lock_keys_to_read(1, true).expect("a first read");
+        handle.record_lock_keys(read, LockKeys::CAPS_LOCK);
+        let connection: HidppMessage = v10::Message::Short(
+            v10::MessageHeader {
+                device_index: 1,
+                sub_id: 0x41,
+            },
+            [0, 0x02, 0x34, 0x12],
+        )
+        .into();
+
+        // The receiver reporting its slots on request is no reconnection.
+        state.receiver_snapshot_depth.store(1, Ordering::Release);
+        assert_eq!(state.decode(connection, false), None);
+        assert_eq!(handle.lock_keys_to_read(1, true), None);
+        state.receiver_snapshot_depth.store(0, Ordering::Release);
+
+        assert_eq!(
+            state.decode(connection, false),
+            Some(HidppEventSource::ReceiverConnection)
+        );
+        // The old state is gone: a broadcast names no key, it only records.
+        assert_eq!(state.decode(lock_report(0, 0x00), false), None);
+        assert_eq!(drain(&mut updates), []);
+        assert!(handle.lock_keys_to_read(1, true).is_some(), "read again");
+
+        assert_eq!(
+            state.decode(reconnection(1, 4), false),
+            Some(HidppEventSource::WirelessDeviceStatus)
+        );
+        assert_eq!(state.decode(lock_report(0, 0x02), false), None);
+        assert_eq!(drain(&mut updates), []);
+        assert!(handle.lock_keys_to_read(1, true).is_some(), "read again");
+    }
+
+    /// A read can answer after its device came back. That answer is from the
+    /// connection before, so the new connection's own read decides.
+    #[test]
+    fn a_read_started_before_a_reconnection_is_not_recorded() {
+        let (state, handle, mut updates) = lock_keyboard();
+        handle.register_device(
+            1,
+            EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x4220, 0x1d4b]),
+        );
+        let old_read = handle.lock_keys_to_read(1, true).expect("a first read");
+        assert_eq!(
+            state.decode(reconnection(1, 4), false),
+            Some(HidppEventSource::WirelessDeviceStatus)
+        );
+        let new_read = handle.lock_keys_to_read(1, true).expect("read again");
+
+        handle.record_lock_keys(old_read, LockKeys::CAPS_LOCK);
+        handle.record_lock_keys(new_read, LockKeys::empty());
+        assert_eq!(state.decode(lock_report(0, 0x02), false), None);
+        assert_eq!(drain(&mut updates), [(LockKey::CapsLock, true)]);
+    }
+
+    #[test]
+    fn a_full_lock_queue_drops_new_updates() {
+        let (state, _handle, mut updates) = lock_keyboard();
+        let _ = state.decode(lock_report(0, 0x00), false);
+        for _ in 0..LOCK_KEY_QUEUE {
+            let _ = state.decode(lock_report(0, 0x02), false);
+            let _ = state.decode(lock_report(0, 0x00), false);
+        }
+        assert_eq!(drain(&mut updates).len(), LOCK_KEY_QUEUE);
+    }
+
+    #[tokio::test]
+    async fn latest_backlight_survives_a_full_reconciliation_queue() {
+        let (notifier, mut receiver) = event_channel();
+        let mut backlights = receiver.backlights();
+        let update = |current_level| BacklightUpdate {
+            device_index: 2,
+            current_level,
+            levels: 8,
+            visible: true,
+        };
+        notifier.notify(HidppEventSource::ReceiverConnection);
+        notifier.notify(HidppEventSource::Backlight);
+        notifier.notify_backlight(update(3));
+        notifier.notify_backlight(update(7));
+
+        backlights.changed().await.expect("sender is live");
+        assert_eq!(*backlights.borrow_and_update(), Some(update(7)));
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(HidppEventSource::ReceiverConnection)
+        );
+        assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     }
 
     #[test]

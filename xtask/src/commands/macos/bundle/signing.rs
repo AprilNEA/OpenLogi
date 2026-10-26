@@ -7,10 +7,11 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use xshell::{Shell, cmd};
 
 use super::identity::{Channel, Component};
+use super::provisioning::AgentProfile;
 use super::sparkle;
 use crate::support::fs::{ensure_file, repo_root};
 
@@ -25,17 +26,17 @@ pub(super) fn local_sign_app_if_available(channel: Channel) -> Result<()> {
     }
 
     if let Some(identity) = env_nonempty(SIGN_IDENTITY_ENV) {
-        sign_app_with_timestamp(&identity, TimestampMode::Secure, channel)?;
+        sign_app_with_timestamp(&identity, TimestampMode::Secure, channel, None)?;
         return Ok(());
     }
 
     if let Some(identity) = env_nonempty("OPENLOGI_LOCAL_CODESIGN_IDENTITY") {
-        sign_app_with_timestamp(&identity, TimestampMode::None, channel)?;
+        sign_app_with_timestamp(&identity, TimestampMode::None, channel, None)?;
         return Ok(());
     }
 
     if let Some(identity) = first_apple_development_identity()? {
-        sign_app_with_timestamp(&identity, TimestampMode::None, channel)?;
+        sign_app_with_timestamp(&identity, TimestampMode::None, channel, None)?;
         return Ok(());
     }
 
@@ -48,10 +49,15 @@ pub(super) fn local_sign_app_if_available(channel: Channel) -> Result<()> {
     Ok(())
 }
 
+/// Sign the bundle inside out. Given `agent_profile`, the agent helper embeds
+/// it and claims the HID virtual-device entitlement it grants; without one,
+/// the helper claims no entitlements, because a claim without its profile
+/// gets the agent killed at launch.
 pub(super) fn sign_app_with_timestamp(
     identity: &str,
     timestamp: TimestampMode,
     channel: Channel,
+    agent_profile: Option<&AgentProfile>,
 ) -> Result<()> {
     let sh = Shell::new()?;
     let root = repo_root()?;
@@ -68,8 +74,19 @@ pub(super) fn sign_app_with_timestamp(
     // deprecated and can't give the helper an independent signature — but a
     // stable, separately-signed helper identity is exactly what lets the agent's
     // Accessibility (TCC) grant persist across updates. So sign each explicitly.
-    if helper.exists() {
-        codesign_runtime(identity, &helper, timestamp, None)?;
+    match (agent_profile, helper.exists()) {
+        (Some(profile), true) => {
+            let scratch = tempfile::tempdir()?;
+            let entitlements = profile.install(&helper, scratch.path())?;
+            codesign_runtime(identity, &helper, timestamp, Some(&entitlements))?;
+            profile.verify_signed(&helper, scratch.path())?;
+        }
+        (Some(_), false) => bail!(
+            "the agent helper is missing at {}, so its provisioning profile has nowhere to go",
+            helper.display()
+        ),
+        (None, true) => codesign_runtime(identity, &helper, timestamp, None)?,
+        (None, false) => {}
     }
     if overlay.exists() {
         codesign_runtime(identity, &overlay, timestamp, None)?;

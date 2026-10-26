@@ -103,6 +103,81 @@ mod tests {
     }
 
     #[test]
+    fn backlight_duration_accepts_an_options_plus_step_and_rejects_the_rest() {
+        let cli = Cli::try_parse_from(["openlogi", "backlight", "duration", "15"])
+            .expect("a 15 second duration parses");
+        match cli.cmd.expect("subcommand present") {
+            Command::Backlight(args) => {
+                assert!(matches!(
+                    args.action,
+                    Some(BacklightAction::Duration {
+                        duration: seconds
+                    }) if seconds.seconds() == 15
+                ));
+            }
+            other => panic!("expected Backlight, got {other:?}"),
+        }
+
+        let result = Cli::try_parse_from(["openlogi", "backlight", "duration", "7"]);
+        result.expect_err("7 seconds is not a 5-second step");
+        let two_hours = Cli::try_parse_from(["openlogi", "backlight", "duration", "7200"])
+            .expect("two hours is the protocol maximum");
+        match two_hours.cmd.expect("subcommand present") {
+            Command::Backlight(args) => {
+                assert!(matches!(
+                    args.action,
+                    Some(BacklightAction::Duration {
+                        duration: seconds
+                    }) if seconds.seconds() == 7_200
+                ));
+            }
+            other => panic!("expected Backlight, got {other:?}"),
+        }
+        let result = Cli::try_parse_from(["openlogi", "backlight", "duration", "7205"]);
+        result.expect_err("7205 seconds is past the protocol maximum");
+    }
+
+    #[test]
+    fn backlight_existing_actions_and_global_name_filter_remain_compatible() {
+        for (action, expected) in [
+            (vec!["status"], "Status"),
+            (vec!["on"], "On"),
+            (vec!["off"], "Off"),
+            (vec!["auto", "on"], "Auto { set: On }"),
+            (vec!["auto", "off"], "Auto { set: Off }"),
+            (vec!["level", "3"], "Level { level: 3 }"),
+            (vec!["battery-saving", "on"], "BatterySaving { set: On }"),
+            (vec!["battery-saving", "off"], "BatterySaving { set: Off }"),
+        ] {
+            let mut args = vec!["openlogi", "backlight"];
+            args.extend(action);
+            args.extend(["--device", "Test keyboard"]);
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Some(Command::Backlight(args)) = cli.cmd else {
+                panic!("expected backlight command");
+            };
+            assert_eq!(args.device.as_deref(), Some("Test keyboard"));
+            assert_eq!(format!("{:?}", args.action.unwrap()), expected);
+        }
+    }
+
+    #[test]
+    fn backlight_help_explains_agent_requirement_and_selection_changes() {
+        let help = Cli::try_parse_from(["openlogi", "backlight", "--help"]).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let text = help.to_string();
+        for expected in [
+            openlogi_core::env::PROFILE,
+            "No direct hardware fallback",
+            "Ambiguous matches",
+            "measured backlight support",
+            "unknown support requires an explicit name",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+    }
+
+    #[test]
     fn smartshift_leave_flipped_conflicts_with_sensitivity() {
         let result = Cli::try_parse_from([
             "openlogi",
@@ -121,6 +196,48 @@ mod tests {
         // silently becoming "no change" downstream.
         let result = Cli::try_parse_from(["openlogi", "diag", "smartshift", "--sensitivity", "0"]);
         result.expect_err("a zero --sensitivity must fail to parse");
+    }
+
+    #[test]
+    fn smartshift_torque_conflicts_with_leave_flipped_and_sensitivity() {
+        let res1 = Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "smartshift",
+            "--leave-flipped",
+            "--torque",
+            "50",
+        ]);
+        res1.expect_err("--leave-flipped and --torque must conflict");
+
+        let res2 = Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "smartshift",
+            "--sensitivity",
+            "10",
+            "--torque",
+            "50",
+        ]);
+        res2.expect_err("--sensitivity and --torque must conflict");
+    }
+
+    #[test]
+    fn smartshift_rejects_zero_torque() {
+        let result = Cli::try_parse_from(["openlogi", "diag", "smartshift", "--torque", "0"]);
+        result.expect_err("a zero --torque must fail to parse");
+    }
+
+    #[test]
+    fn smartshift_parses_valid_torque() {
+        let cli =
+            Cli::try_parse_from(["openlogi", "diag", "smartshift", "--torque", "75"]).unwrap();
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::Smartshift(args)) => {
+                assert_eq!(args.torque.map(std::num::NonZeroU8::get), Some(75));
+            }
+            other => panic!("expected Diag(Smartshift), got {other:?}"),
+        }
     }
 
     #[test]

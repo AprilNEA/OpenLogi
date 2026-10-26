@@ -122,6 +122,39 @@ fn contact_without_rotation_or_a_tap_carries_no_input() {
     );
 }
 
+/// A status byte the spec does not define does not say the wheel is settled,
+/// so a zero-rotation report carrying one is not a tap, tap bit or not.
+#[test]
+fn an_unrecognised_status_never_delivers_a_tap() {
+    for previous in [RotationStatus::Inactive, RotationStatus::Stop] {
+        assert_eq!(
+            thumbwheel_input(
+                thumb_event(0, RotationStatus::Other(4), true),
+                previous,
+                TRACED_RES
+            ),
+            None,
+            "after {previous:?}"
+        );
+    }
+}
+
+/// Only the tap is ruled out: the report's own rotation is still a roll.
+#[test]
+fn an_unrecognised_status_still_scrolls() {
+    assert_eq!(
+        thumbwheel_input(
+            thumb_event(5, RotationStatus::Other(0xff), true),
+            RotationStatus::Inactive,
+            TRACED_RES
+        ),
+        Some(CapturedInput::Scroll {
+            increments: 5,
+            resolution: TRACED_RES
+        })
+    );
+}
+
 /// A gesture capture with the thumb wheel of
 /// [`thumbwheel_device`](super::session::thumbwheel_device) armed: device
 /// `0xff`, `0x2150` at index 3, resolutions as [`TRACED_RES`].
@@ -204,5 +237,23 @@ async fn a_reconnect_forgets_a_roll_left_open() {
     assert_eq!(
         received(&mut inputs),
         vec![scroll(3), CapturedInput::ButtonPulse(ButtonId::Thumbwheel)]
+    );
+}
+
+/// Through the session's handler: zero-rotation reports with status bytes the
+/// spec does not define fire nothing despite their tap bit, and they leave no
+/// roll open, so the next tap on the settled wheel still fires.
+#[tokio::test]
+async fn an_unknown_status_byte_with_a_tap_is_not_a_click() {
+    let capture = armed_thumbwheel_capture().await;
+    let (sink, mut inputs) = mpsc::unbounded_channel();
+    let handler = capture.report_handler(0xff, sink);
+    handler(&wheel_report(0, 0x04, true));
+    handler(&wheel_report(0, 0xff, true));
+    assert_eq!(received(&mut inputs), Vec::new());
+    handler(&wheel_report(0, 0, true));
+    assert_eq!(
+        received(&mut inputs),
+        vec![CapturedInput::ButtonPulse(ButtonId::Thumbwheel)]
     );
 }

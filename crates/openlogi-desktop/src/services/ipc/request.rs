@@ -16,18 +16,24 @@
 
 use std::future::Future;
 
-use openlogi_core::config::Lighting;
+use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
-    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PointerSpeed, ReceiverSelector,
+    ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
-use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
+use openlogi_ipc::{
+    AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
+    SavedConfigVerdict,
+};
 use tarpc::client::RpcError;
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use super::{GuiUpdate, UnpairFailure};
+use super::{
+    ConfigReloadContext, DisableKeysRequestContext, GuiUpdate, UnpairFailure, UnpairIntent,
+};
 use crate::state::DeviceKey;
 
 /// The GPUI-bound update stream a request may deliver through.
@@ -98,10 +104,15 @@ fn log_rejection(what: &str, outcome: Result<Result<(), WriteError>, Unavailable
     }
 }
 
-/// Apply a DPI value to a device now.
+/// Write a DPI value to a device now, answered as [`GuiUpdate::DpiWritten`]
+/// with the device's verdict.
 pub struct SetDpi {
     pub route: DeviceRoute,
     pub dpi: Dpi,
+    pub key: DeviceKey,
+    /// The number the state gave this write, returned with the answer so it
+    /// is matched to the write it answers.
+    pub write: u64,
 }
 
 impl Request for SetDpi {
@@ -113,8 +124,13 @@ impl Request for SetDpi {
             .await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
-        log_rejection("DPI", outcome);
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::DpiWritten {
+            key: self.key,
+            write: self.write,
+            dpi: self.dpi,
+            result: or_unavailable(outcome),
+        });
     }
 }
 
@@ -188,6 +204,61 @@ impl Request for SetReportRate {
         let _ = updates.send(GuiUpdate::ReportRateWritten {
             key: self.key,
             route: self.route,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Write a mouse's pointer speed now, answered as
+/// [`GuiUpdate::PointerSpeedWritten`] with what the mouse reads back.
+pub struct SetPointerSpeed {
+    pub route: DeviceRoute,
+    pub speed: PointerSpeed,
+    pub key: DeviceKey,
+}
+
+impl Request for SetPointerSpeed {
+    type Answer = Result<PointerSpeed, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_pointer_speed(context::current(), self.route.clone(), self.speed)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::PointerSpeedWritten {
+            key: self.key,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Write the press force of a force-sensing button now, answered as
+/// [`GuiUpdate::ForceSensingWritten`] with what the device reads back.
+pub struct SetForceSensing {
+    pub route: DeviceRoute,
+    pub force: u16,
+    pub key: DeviceKey,
+    /// The number the state gave this write, returned with the answer so it
+    /// is matched to the write it answers.
+    pub write: u64,
+}
+
+impl Request for SetForceSensing {
+    type Answer = Result<ForceSensingInfo, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_force_sensing(context::current(), self.route.clone(), self.force)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::ForceSensingWritten {
+            key: self.key,
+            write: self.write,
+            force: self.force,
             result: or_unavailable(outcome),
         });
     }
@@ -376,6 +447,50 @@ pub struct ReadSmartShift {
     pub reply: oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
 }
 
+/// Read a device's Disable Keys state; the answer goes back over `reply`.
+pub struct ReadDisableKeys {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<DisableKeysState, WriteError>>,
+}
+
+impl Request for ReadDisableKeys {
+    type Answer = Result<DisableKeysState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_disable_keys(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Guardedly replace a device's Disable Keys mask and report the confirmed
+/// device state to the transaction that requested it.
+pub struct SetDisableKeys {
+    pub context: DisableKeysRequestContext,
+    pub desired: DisableKeysMask,
+}
+
+impl Request for SetDisableKeys {
+    type Answer = Result<DisableKeysState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_disable_keys(context::current(), self.context.route.clone(), self.desired)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::DisableKeysWriteResult {
+            context: self.context,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
 impl Request for ReadSmartShift {
     type Answer = Result<SmartShiftStatus, WriteError>;
 
@@ -402,6 +517,47 @@ impl Request for ReadReportRate {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_report_rate(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a mouse's pointer speed; the answer goes back over `reply`.
+pub struct ReadPointerSpeed {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<PointerSpeed, WriteError>>,
+}
+
+impl Request for ReadPointerSpeed {
+    type Answer = Result<PointerSpeed, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_pointer_speed(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read the press force of a force-sensing button, with the range the device
+/// accepts; the answer goes back over `reply`.
+pub struct ReadForceSensing {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<ForceSensingInfo, WriteError>>,
+}
+
+impl Request for ReadForceSensing {
+    type Answer = Result<ForceSensingInfo, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_force_sensing(context::current(), self.route.clone())
             .await
     }
 
@@ -471,14 +627,133 @@ impl Request for ReadFnLock {
     }
 }
 
-/// Have the agent re-read `config.toml`.
+/// Have the agent re-read the `config.toml` the GUI just saved
+/// ([`openlogi_ipc::Agent::reload_saved_config`]).
 ///
 /// The loop holds this one until a connection exists and never answers it
 /// locally (module doc), so `deliver` only ever reports the agent's own
 /// verdict: a reload that did not happen is not one the agent refused.
-pub struct ReloadConfig;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReloadConfig {
+    /// The controls of lights the user set in the save without a write to
+    /// the light. A change made on the light to one of them gives way.
+    pub chosen: Vec<ChosenLight>,
+    /// The revision of `config.toml` that the save wrote. The agent takes a
+    /// file at another revision as edited after the save.
+    pub revision: ConfigRevision,
+    pub(crate) contexts: Vec<SavedReloadContext>,
+}
+
+/// An acknowledgement recipient and the saved revision it needs confirmed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SavedReloadContext {
+    /// Application-wide saves retain the aggregate reload result.
+    General,
+    /// A hardware transaction must confirm its own save, not a later batch member.
+    DisableKeys {
+        context: DisableKeysRequestContext,
+        revision: ConfigRevision,
+    },
+    /// External adoption must confirm its own revision, not a later batch member.
+    Reconciled {
+        request_id: u64,
+        revision: ConfigRevision,
+    },
+}
+
+impl SavedReloadContext {
+    /// Identity used to replace a retry of the same transaction while batching.
+    pub(crate) fn context(&self) -> ConfigReloadContext {
+        match self {
+            Self::General => ConfigReloadContext::General,
+            Self::DisableKeys { context, .. } => ConfigReloadContext::DisableKeys(context.clone()),
+            Self::Reconciled { request_id, .. } => ConfigReloadContext::Reconciled(*request_id),
+        }
+    }
+
+    fn verdict(
+        &self,
+        submitted: ConfigRevision,
+        outcome: Result<SavedConfigVerdict, ConfigReloadError>,
+    ) -> Result<SavedConfigVerdict, ConfigReloadError> {
+        match (self, outcome) {
+            (
+                Self::DisableKeys { revision, .. } | Self::Reconciled { revision, .. },
+                Ok(SavedConfigVerdict::Accepted),
+            ) if *revision != submitted => Ok(SavedConfigVerdict::FileChangedAfterSave),
+            (_, outcome) => outcome,
+        }
+    }
+}
+
+impl Default for ReloadConfig {
+    fn default() -> Self {
+        Self {
+            chosen: Vec::new(),
+            revision: ConfigRevision::default(),
+            contexts: vec![SavedReloadContext::General],
+        }
+    }
+}
+
+impl ReloadConfig {
+    /// Confirm an adopted file without changing general-save error presentation.
+    pub(crate) fn reconciled(request_id: u64, revision: ConfigRevision) -> Self {
+        Self {
+            contexts: vec![SavedReloadContext::Reconciled {
+                request_id,
+                revision,
+            }],
+            revision,
+            ..Default::default()
+        }
+    }
+
+    /// Also confirm a later general save while external-file reconciliation is pending.
+    pub(crate) fn track_reconciliation(&mut self, request_id: u64) {
+        self.contexts.push(SavedReloadContext::Reconciled {
+            request_id,
+            revision: self.revision,
+        });
+    }
+
+    pub(crate) fn disable_keys(
+        context: DisableKeysRequestContext,
+        revision: ConfigRevision,
+    ) -> Self {
+        Self {
+            contexts: vec![SavedReloadContext::DisableKeys { context, revision }],
+            revision,
+            ..Default::default()
+        }
+    }
+}
 
 impl Request for ReloadConfig {
+    type Answer = Result<SavedConfigVerdict, ConfigReloadError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        let saved = SavedConfig {
+            revision: self.revision,
+            chosen: self.chosen.clone(),
+        };
+        client
+            .reload_saved_config_with_verdict(context::current(), saved)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_saved_reload(self.contexts, self.revision, outcome, updates);
+    }
+}
+
+/// Have the agent re-read a `config.toml` it did not see the GUI save, as at
+/// startup, so edits made while the GUI was closed apply
+/// ([`openlogi_ipc::Agent::reload_config`]). Held and answered like
+/// [`ReloadConfig`].
+pub struct LoadConfig;
+
+impl Request for LoadConfig {
     type Answer = Result<(), ConfigReloadError>;
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
@@ -486,8 +761,26 @@ impl Request for ReloadConfig {
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
-        if let Ok(verdict) = outcome {
-            let _ = updates.send(GuiUpdate::ConfigReloadResult(verdict));
+        if let Ok(result) = outcome {
+            let _ = updates.send(GuiUpdate::ConfigLoadResult { result });
+        }
+    }
+}
+
+/// Report the agent's verdict on a held reload. A reload that did not happen
+/// is not one the agent refused, so it reports nothing.
+fn report_saved_reload(
+    contexts: impl IntoIterator<Item = SavedReloadContext>,
+    submitted: ConfigRevision,
+    outcome: Result<Result<SavedConfigVerdict, ConfigReloadError>, Unavailable>,
+    updates: &UpdateSender,
+) {
+    if let Ok(verdict) = outcome {
+        for context in contexts {
+            let _ = updates.send(GuiUpdate::ConfigReloadResult {
+                context: context.context(),
+                result: context.verdict(submitted, verdict.clone()),
+            });
         }
     }
 }
@@ -563,9 +856,7 @@ impl Request for PairDevice {
     }
 }
 
-/// End the pairing session. Nothing to report when the agent is unreachable:
-/// there is no session left for the window to wait on, and the observed state
-/// says so.
+/// End the pairing session, acknowledging only after the agent releases it.
 pub struct CancelPairing;
 
 impl Request for CancelPairing {
@@ -576,22 +867,22 @@ impl Request for CancelPairing {
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
-        if let Ok(Err(refused)) = outcome {
-            let _ = updates.send(GuiUpdate::PairingUndeliverable(PairingFailure::from(
-                refused,
-            )));
+        match outcome {
+            Ok(Ok(())) => {
+                let _ = updates.send(GuiUpdate::PairingCancelled);
+            }
+            other => report_pairing_refusal(updates, other),
         }
     }
 }
 
-/// Remove a forgotten device's pairing from its receiver, answered as
-/// [`GuiUpdate::DeviceUnpaired`] so the card goes only once the receiver has
-/// let the device go.
+/// Remove one pairing from its receiver, answered as
+/// [`GuiUpdate::DeviceUnpaired`] so local state changes only once the
+/// receiver has let the pairing go.
 pub struct UnpairDevice {
     pub route: DeviceRoute,
-    pub record_key: String,
-    /// Where the device's settings live, dropped once the receiver lets go.
-    pub config_key: Option<String>,
+    /// What the pairing's removal is for.
+    pub intent: UnpairIntent,
 }
 
 impl Request for UnpairDevice {
@@ -610,9 +901,8 @@ impl Request for UnpairDevice {
             Err(Unavailable) => Err(UnpairFailure::AgentUnreachable),
         };
         let _ = updates.send(GuiUpdate::DeviceUnpaired {
-            record_key: self.record_key,
             route: self.route,
-            config_key: self.config_key,
+            intent: self.intent,
             result,
         });
     }
@@ -683,14 +973,21 @@ commands! {
     SetSmartShift,
     SetFnLock,
     SetReportRate,
+    SetPointerSpeed,
+    SetForceSensing,
     SetBacklight,
     RenameEasySwitchHost,
     ReadDpi,
     ReadSmartShift,
     ReadFnLock,
     ReadReportRate,
+    ReadPointerSpeed,
+    ReadForceSensing,
     ReadBacklight,
     ReadEasySwitchHosts,
+    LoadConfig,
+    ReadDisableKeys,
+    SetDisableKeys,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,
@@ -734,19 +1031,35 @@ mod tests {
     }
 
     #[test]
-    fn a_cancel_that_found_no_agent_reports_nothing() {
+    fn a_cancel_that_found_no_agent_releases_the_local_wait_with_an_error() {
         let (updates, mut received) = mpsc::unbounded_channel();
 
         CancelPairing.deliver(Err(Unavailable), &updates);
 
-        assert!(received.try_recv().is_err());
+        assert!(matches!(
+            received.try_recv(),
+            Ok(GuiUpdate::PairingUndeliverable(
+                PairingFailure::AgentRestarted
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_completed_cancel_acknowledges_even_without_a_snapshot_change() {
+        let (updates, mut received) = mpsc::unbounded_channel();
+        CancelPairing.deliver(Ok(Ok(())), &updates);
+        assert!(matches!(
+            received.try_recv(),
+            Ok(GuiUpdate::PairingCancelled)
+        ));
     }
 
     #[test]
     fn a_reload_that_never_reached_the_agent_is_not_a_verdict() {
         let (updates, mut received) = mpsc::unbounded_channel();
 
-        ReloadConfig.deliver(Err(Unavailable), &updates);
+        ReloadConfig::default().deliver(Err(Unavailable), &updates);
+        LoadConfig.deliver(Err(Unavailable), &updates);
 
         assert!(received.try_recv().is_err());
     }

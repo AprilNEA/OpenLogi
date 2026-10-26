@@ -44,6 +44,7 @@ fn test_dispatcher() -> (
     let dispatcher = ActionDispatcher {
         executor: super::super::ActionExecutor {
             dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
+            pointer_speeds: Arc::default(),
             access: crate::hardware::DeviceAccess {
                 channel: Arc::new(RwLock::new(None)),
                 registry: openlogi_hid::ChannelRegistry::default(),
@@ -76,7 +77,7 @@ fn accumulate_tags_a_committed_swipe_with_the_held_press() {
     assert_eq!(
         hold.accumulate(50, 0),
         None,
-        "commits at most once per hold"
+        "continuing the same swipe does not repeat"
     );
     assert_eq!(hold.end(ButtonId::Back), Some((press, false)));
 }

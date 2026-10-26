@@ -75,7 +75,6 @@ pub(super) fn easy_switch_card(facts: Option<EasySwitchFacts>, pal: Palette) -> 
         EasySwitchLoad::Failed(_) => retry_line(
             "easy-switch-retry",
             tr!("device.couldnt_read_easy_switch_click_to_retry"),
-            pal,
             move |cx| AppState::apply(cx, |state| state.retry_easy_switch_read(&key)),
         )
         .into_any_element(),
