@@ -140,21 +140,27 @@ fn engine_updater(channel: UpdateChannel, cx: &mut Context<Updater>) -> Updater 
         .os(std::env::consts::OS)
         .arch(release_arch())
         .format(release_format());
-    #[expect(
-        clippy::expect_used,
-        reason = "CARGO_PKG_VERSION is cargo-provided and always valid semver"
-    )]
-    let version = Version::parse(env!("CARGO_PKG_VERSION")).expect("valid embedded version");
-    let mut config = EngineConfig::new(version).verification(Verification::Strict);
+    let mut config = EngineConfig::new(running_version()).verification(Verification::Strict);
     if let Some(key) = minisign_public_key() {
         config = config.minisign_public_key(key);
     }
     Updater::new(source, config, cx)
 }
 
+/// The version of this running build, which every update decision compares
+/// a release against.
+#[expect(
+    clippy::expect_used,
+    reason = "CARGO_PKG_VERSION is cargo-provided and always valid semver"
+)]
+pub(crate) fn running_version() -> Version {
+    Version::parse(env!("CARGO_PKG_VERSION")).expect("valid embedded version")
+}
+
 /// The embedded minisign public key, trimmed, or `None` when the build did not
-/// bake one in.
-fn minisign_public_key() -> Option<&'static str> {
+/// bake one in. The one trust anchor for every update this app installs: the
+/// engine's artifacts and the Linux packages alike.
+pub(crate) fn minisign_public_key() -> Option<&'static str> {
     MINISIGN_PUBLIC_KEY
         .map(str::trim)
         .filter(|key| !key.is_empty())

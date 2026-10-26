@@ -10,6 +10,9 @@
 //! engine's own opt-in, explicit-click shape (see module docs on
 //! [`super::install`]).
 
+use std::sync::LazyLock;
+use std::time::Duration;
+
 use gpui::{App, Global};
 use gpui_updater::Version;
 
@@ -38,28 +41,33 @@ pub enum LinuxUpdateStatus {
 
 impl Global for LinuxUpdateStatus {}
 
-/// Run the GitHub-release check in the background. A no-op off Linux, and
-/// while a check or install is already in flight.
+/// Run the GitHub-release check for the channel this launch follows in the
+/// background. A no-op off Linux, while a check or install is in flight, and
+/// once an install is staged: a later check would compare against the old
+/// running version and offer the installed package again.
 pub fn check_in_background(cx: &mut App) {
     if !cfg!(target_os = "linux") {
         return;
     }
     if matches!(
         cx.try_global::<LinuxUpdateStatus>(),
-        Some(LinuxUpdateStatus::Checking | LinuxUpdateStatus::Installing)
+        Some(
+            LinuxUpdateStatus::Checking
+                | LinuxUpdateStatus::Installing
+                | LinuxUpdateStatus::Staged { .. }
+        )
     ) {
         return;
     }
     cx.set_global(LinuxUpdateStatus::Checking);
+    let channel = super::channel_in_use(cx);
     cx.spawn(async move |cx| {
-        #[expect(
-            clippy::expect_used,
-            reason = "CARGO_PKG_VERSION is cargo-provided and always valid semver"
-        )]
-        let current = Version::parse(env!("CARGO_PKG_VERSION")).expect("valid embedded version");
+        let current = super::running_version();
         let result = cx
             .background_executor()
-            .spawn(async move { linux_release_check::check_latest_release(&current) })
+            .spawn(
+                async move { linux_release_check::check_latest_release(&HTTP, channel, &current) },
+            )
             .await;
         cx.update(|cx| {
             cx.set_global(match result {
@@ -152,8 +160,31 @@ const METADATA_LIMIT: u64 = 1024 * 1024;
 /// ureq's 10 MB default.
 const PACKAGE_LIMIT: u64 = 512 * 1024 * 1024;
 
-fn download_bytes(url: &str, limit: u64) -> Result<Vec<u8>, String> {
-    ureq::get(url)
+/// Whole-request deadline for the release lookup and the small downloads.
+const METADATA_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Whole-request deadline for the package download, sized for a ~40 MB
+/// package on a slow link.
+const PACKAGE_TIMEOUT: Duration = Duration::from_mins(15);
+
+/// The one HTTP agent for the release lookup and every download. ureq sets no
+/// timeouts by default, and a stalled request would leave the status in
+/// `Checking` or `Installing` — which blocks every later check — until the
+/// app is relaunched.
+static HTTP: LazyLock<ureq::Agent> = LazyLock::new(|| {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_global(Some(METADATA_TIMEOUT))
+        .build()
+        .into()
+});
+
+fn download_bytes(url: &str, limit: u64, timeout: Duration) -> Result<Vec<u8>, String> {
+    HTTP.get(url)
+        .config()
+        .timeout_global(Some(timeout))
+        .build()
         .call()
         .map_err(|error| format!("download of {url} failed: {error}"))?
         .body_mut()
@@ -175,27 +206,25 @@ fn download_verify_and_install(
     version: &Version,
     source: crate::platform::installation::LinuxPackage,
 ) -> Result<(), String> {
-    #[expect(
-        clippy::expect_used,
-        reason = "CARGO_PKG_VERSION is cargo-provided and always valid semver"
-    )]
-    let current = Version::parse(env!("CARGO_PKG_VERSION")).expect("valid embedded version");
-    linux_package_install::ensure_newer(version, &current)?;
-    linux_package_install::require_install_tools(
-        source,
-        &std::env::var_os("PATH").unwrap_or_default(),
-    )?;
+    linux_package_install::ensure_newer(version, &super::running_version())?;
+    linux_package_install::require_install_tools(source)?;
     let matched = linux_package_install::match_assets(assets, version, source)?;
 
-    let package_bytes = download_bytes(&matched.package.browser_download_url, PACKAGE_LIMIT)?;
+    let package_bytes = download_bytes(
+        &matched.package.browser_download_url,
+        PACKAGE_LIMIT,
+        PACKAGE_TIMEOUT,
+    )?;
     let signature_text = String::from_utf8(download_bytes(
         &matched.signature.browser_download_url,
         METADATA_LIMIT,
+        METADATA_TIMEOUT,
     )?)
     .map_err(|error| format!("{} is not valid UTF-8: {error}", matched.signature.name))?;
     let checksums_text = String::from_utf8(download_bytes(
         &matched.checksums.browser_download_url,
         METADATA_LIMIT,
+        METADATA_TIMEOUT,
     )?)
     .map_err(|error| format!("SHA256SUMS is not valid UTF-8: {error}"))?;
 
