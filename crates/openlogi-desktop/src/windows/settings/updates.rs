@@ -7,7 +7,7 @@ use super::{
     Updater, div, h_flex, img, px, v_flex,
 };
 use crate::platform::installation::{HomebrewCask, Installation, InstallationSource, LinuxPackage};
-use crate::platform::updater::linux::LinuxUpdateStatus;
+use crate::platform::updater::linux::{self, LinuxUpdateStatus};
 use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::PressableStyle as _;
 use crate::ui::theme::SelectableStyle as _;
@@ -105,16 +105,6 @@ fn linux_pill(status: &LinuxUpdateStatus) -> Option<Tag> {
     }
 }
 
-/// Whether "Install Update" may run for `installation`: only for a package
-/// the detected package manager owns. `Detecting` is not installable yet; an
-/// open window redraws once detection settles.
-fn linux_installable(installation: Installation) -> bool {
-    matches!(
-        installation,
-        Installation::Detected(InstallationSource::LinuxPackage(_))
-    )
-}
-
 fn linux_message(
     status: &LinuxUpdateStatus,
     installation: Installation,
@@ -124,9 +114,9 @@ fn linux_message(
         LinuxUpdateStatus::Available { version, .. } => Some(match installation {
             // Not an install the app can update: point at the package manager
             // (or however it was installed) instead of offering a button.
-            Installation::Detected(source)
-                if !matches!(source, InstallationSource::LinuxPackage(_)) =>
-            {
+            // `Detecting` keeps the plain message; an open window redraws once
+            // detection settles.
+            Installation::Detected(_) if linux::installable_package(installation).is_none() => {
                 tr!("updates.update_version_available_package_manager", version => version)
             }
             Installation::Detecting | Installation::Detected(_) => {
@@ -202,11 +192,13 @@ fn engine_action(updater: &Entity<Updater>, status: &UpdateStatus) -> Button {
 }
 
 /// The one contextual action button for the Linux-release-check states.
-/// "Install Update" only for an installation [`linux_installable`] accepts;
-/// otherwise the check button stays.
+/// "Install Update" only for an installation [`linux::installable_package`]
+/// accepts; otherwise the check button stays.
 fn linux_action(status: &LinuxUpdateStatus, installation: Installation) -> Button {
     match status {
-        LinuxUpdateStatus::Available { .. } if linux_installable(installation) => {
+        LinuxUpdateStatus::Available { .. }
+            if linux::installable_package(installation).is_some() =>
+        {
             Button::new("update-install")
                 .outline()
                 .label(tr!("updates.download_install"))
@@ -430,20 +422,6 @@ mod tests {
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
     use crate::state::Sources;
     use crate::windows::settings::{SettingsPage, SettingsView};
-
-    #[test]
-    fn only_a_detected_linux_package_is_installable_in_app() {
-        assert!(linux_installable(Installation::Detected(
-            InstallationSource::LinuxPackage(LinuxPackage::Rpm)
-        )));
-        for installation in [
-            Installation::Detecting,
-            Installation::Detected(InstallationSource::Nix),
-            Installation::Detected(InstallationSource::Unknown),
-        ] {
-            assert!(!linux_installable(installation), "{installation:?}");
-        }
-    }
 
     #[test]
     fn only_linux_shows_the_linux_release_check() {
