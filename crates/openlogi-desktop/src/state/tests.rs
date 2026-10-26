@@ -53,6 +53,7 @@ pub(crate) mod device_list;
 mod device_names;
 mod dpi;
 mod easy_switch;
+mod event_haptics;
 mod fn_lock;
 pub(crate) mod force_sensing;
 mod light_adoption;

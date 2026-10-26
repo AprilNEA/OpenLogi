@@ -81,6 +81,7 @@ mod devices;
 mod disable_keys;
 mod dpi;
 mod easy_switch;
+mod event_haptics;
 mod events;
 mod fn_lock;
 mod force_sensing;
