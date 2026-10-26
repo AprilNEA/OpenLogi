@@ -2,6 +2,13 @@
 //! with.
 //!
 //! [`Modifiers`] is the set a [`super::KeyCombo`] carries beside its key.
+//! [`BareModifiers`] is a non-empty set held with no key at all, the payload
+//! of `Action::HoldModifier`.
+
+use std::str::FromStr;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use thiserror::Error;
 
 bitflags::bitflags! {
     /// A set of keyboard modifiers, possibly empty.
@@ -63,6 +70,112 @@ impl Modifiers {
     }
 }
 
+/// One or more modifiers held with no ordinary key: the payload of
+/// `Action::HoldModifier`.
+///
+/// Never empty, so a binding cannot hold nothing. Human-readable formats store
+/// the canonical label (`"Ctrl+Shift"`); binary IPC stores the validated
+/// [`Modifiers`] byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BareModifiers(Modifiers);
+
+/// Why a bare-modifier binding could not be parsed.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum BareModifiersParseError {
+    /// The string was blank.
+    #[error("modifier binding must not be empty")]
+    Empty,
+    /// The token is not a supported modifier name.
+    #[error("unsupported modifier token: {0}")]
+    UnknownToken(String),
+    /// Serialized bits contain an unknown flag.
+    #[error("unsupported modifier bits: {0:#04x}")]
+    InvalidBits(u8),
+    /// The serialized set is empty.
+    #[error("modifier binding must contain at least one modifier")]
+    NoModifiers,
+}
+
+impl BareModifiers {
+    /// The held modifiers, never empty.
+    #[must_use]
+    pub const fn modifiers(self) -> Modifiers {
+        self.0
+    }
+
+    /// Canonical user-facing label.
+    #[must_use]
+    pub fn rendered_label(self) -> String {
+        self.0.rendered_label().unwrap_or_default()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct BareModifiersWire(u8);
+
+impl TryFrom<BareModifiersWire> for BareModifiers {
+    type Error = BareModifiersParseError;
+
+    fn try_from(value: BareModifiersWire) -> Result<Self, Self::Error> {
+        let modifiers =
+            Modifiers::from_bits(value.0).ok_or(BareModifiersParseError::InvalidBits(value.0))?;
+        if modifiers.is_empty() {
+            return Err(BareModifiersParseError::NoModifiers);
+        }
+        Ok(Self(modifiers))
+    }
+}
+
+impl Serialize for BareModifiers {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.rendered_label())
+        } else {
+            BareModifiersWire(self.0.bits()).serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BareModifiers {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            String::deserialize(deserializer)?
+                .parse()
+                .map_err(de::Error::custom)
+        } else {
+            Self::try_from(BareModifiersWire::deserialize(deserializer)?).map_err(de::Error::custom)
+        }
+    }
+}
+
+impl FromStr for BareModifiers {
+    type Err = BareModifiersParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(BareModifiersParseError::Empty);
+        }
+
+        let mut modifiers = Modifiers::empty();
+        for raw in input.split('+') {
+            let token = raw.trim();
+            let Some(modifier) = Modifiers::from_token(token) else {
+                return Err(BareModifiersParseError::UnknownToken(token.to_string()));
+            };
+            modifiers |= modifier;
+        }
+
+        Ok(Self(modifiers))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +193,62 @@ mod tests {
         let set = Modifiers::SHIFT | Modifiers::CONTROL | Modifiers::SUPER;
         assert_eq!(set.rendered_label().as_deref(), Some("Super+Ctrl+Shift"));
         assert_eq!(Modifiers::empty().rendered_label(), None);
+    }
+
+    #[test]
+    fn bare_modifiers_parse_one_or_more_in_canonical_order() {
+        let ctrl = "Ctrl".parse::<BareModifiers>().expect("Ctrl is valid");
+        assert_eq!(ctrl.modifiers(), Modifiers::CONTROL);
+        assert_eq!(ctrl.rendered_label(), "Ctrl");
+
+        let combined = "Shift+Ctrl+Alt"
+            .parse::<BareModifiers>()
+            .expect("multi-modifier is valid");
+        assert_eq!(combined.rendered_label(), "Ctrl+Alt+Shift");
+
+        let logo = "Win+Ctrl".parse::<BareModifiers>().expect("Super is valid");
+        assert_eq!(logo.modifiers(), Modifiers::SUPER | Modifiers::CONTROL);
+        assert_eq!(logo.rendered_label(), "Super+Ctrl");
+    }
+
+    #[test]
+    fn bare_modifiers_reject_empty_ordinary_keys_and_unknown_tokens() {
+        assert_eq!(
+            "".parse::<BareModifiers>(),
+            Err(BareModifiersParseError::Empty)
+        );
+        assert!(matches!(
+            "Ctrl+A".parse::<BareModifiers>(),
+            Err(BareModifiersParseError::UnknownToken(t)) if t == "A"
+        ));
+        assert!(matches!(
+            "Ctrl+Hyper".parse::<BareModifiers>(),
+            Err(BareModifiersParseError::UnknownToken(t)) if t == "Hyper"
+        ));
+    }
+
+    #[test]
+    fn bare_modifiers_wire_rejects_unknown_bits_and_zero() {
+        assert_eq!(
+            BareModifiers::try_from(BareModifiersWire(128)),
+            Err(BareModifiersParseError::InvalidBits(128))
+        );
+        assert_eq!(
+            BareModifiers::try_from(BareModifiersWire(0)),
+            Err(BareModifiersParseError::NoModifiers)
+        );
+    }
+
+    #[test]
+    fn bare_modifiers_toml_uses_the_canonical_text_label() {
+        #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+        struct Wrapper {
+            hold: BareModifiers,
+        }
+        let hold = "Ctrl+Shift".parse::<BareModifiers>().expect("valid");
+        let wrapper = Wrapper { hold };
+        let encoded = toml::to_string(&wrapper).expect("serialization");
+        assert_eq!(encoded, "hold = \"Ctrl+Shift\"\n");
+        assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
     }
 }

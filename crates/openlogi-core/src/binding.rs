@@ -47,7 +47,7 @@ pub use gaming::{
 };
 pub use gesture::GestureDirection;
 pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
-pub use modifiers::Modifiers;
+pub use modifiers::{BareModifiers, BareModifiersParseError, Modifiers};
 pub use swipe::{
     GESTURE_HOLD_FOR_SWIPE, GESTURE_REARM_PAUSE, GESTURE_REPEAT_DISTANCE, GESTURE_SWIPE_DEADZONE,
     GESTURE_SWIPE_THRESHOLD, SwipeAccumulator, detect_swipe,
