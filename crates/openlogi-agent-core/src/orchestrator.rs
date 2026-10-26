@@ -27,7 +27,9 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState, ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
+    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
+    ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo, WriteError,
+    commands_for_light_settings, is_reserved_keyboard_control,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -62,10 +64,17 @@ pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 
 use devices::reapply_targets;
 use devices::{
-    FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch, carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing, config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current, plan_disabled_keys_recovery, plan_reapply, published_inventories, reconnect_follower_cookies, same_device_lifecycle, saved_speed, settings_moved, stable_id, wheel_inverted, hidpp20_slot_targets, host_dpi, onboard_switch, reconnect_dpi,
+    FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
+    VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch,
+    carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
+    changed_onboard_switches, config_keeps_os_layout, configured_dpi, configured_force_sensing,
+    configured_onboard_profiles, configured_report_rate, configured_wheel_mode,
+    hidpp20_slot_targets, host_dpi, host_switch_links, is_hidpp_device, keeps_os_layout,
+    main_wheel_divert, newly_kept_os_layouts, onboard_switch, os_layout_appeared, pick_current,
+    plan_disabled_keys_recovery, plan_reapply, published_inventories, reconnect_dpi,
+    reconnect_follower_cookies, same_device_lifecycle, saved_speed, settings_moved, stable_id,
+    wheel_inverted,
 };
-#[cfg(test)]
-use devices::{configured_report_rate, reapply_targets};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
@@ -1485,7 +1494,7 @@ impl Orchestrator {
         // A mouse with an onboard-profiles choice gets its DPI from the
         // ordered onboard write below, after the mode; an active onboard
         // profile rejects it anyway.
-        let onboard_owns_dpi = self.config.onboard_profiles(key).is_some();
+        let onboard_owns_dpi = configured_onboard_profiles(&self.config, dev).is_some();
         let saved = saved_speed(&self.config, dev)
             .filter(|saved| !(onboard_owns_dpi && matches!(saved, SavedSpeed::Dpi(_))));
         let speed_write =
@@ -2108,22 +2117,11 @@ impl Orchestrator {
     /// both are ordered per device, so the newest request is the one that
     /// stays. The reconnect path is [`Self::reapply_volatile_settings`].
     fn apply_changed_onboard_profiles(&self, previous: &Config) {
-        for dev in self.devices.iter().filter(|dev| dev.online) {
-            let Some(route) = dev.route.clone() else {
-                continue;
-            };
-            if self.config.onboard_profiles(&dev.config_key)
-                == previous.onboard_profiles(&dev.config_key)
-            {
-                continue;
-            }
-            if let Some((onboard_profiles, host_dpi)) = onboard_switch(&self.config, dev) {
-                self.shared.write_onboard_profiles_in_background(
-                    &route,
-                    onboard_profiles,
-                    host_dpi,
-                );
-            }
+        for (route, onboard_profiles, host_dpi) in
+            changed_onboard_switches(previous, &self.config, &self.devices)
+        {
+            self.shared
+                .write_onboard_profiles_in_background(&route, onboard_profiles, host_dpi);
         }
     }
 

@@ -9,7 +9,7 @@ use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_hid::session::gesture::MainWheelDivert;
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, LeadCookie, ReportRate};,
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, LeadCookie, ReportRate};
 
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
@@ -181,20 +181,52 @@ pub(super) fn assignments_changed(previous: &Config, config: &Config, key: &str)
         || before.action_ring != after.action_ring
 }
 
+/// The onboard-profiles choice saved for `dev`: only when the user saved one
+/// and the probe found `0x8100` on the device, so nothing is written to a
+/// device without onboard profiles.
+pub(super) fn configured_onboard_profiles(config: &Config, dev: &AgentDevice) -> Option<bool> {
+    dev.capabilities
+        .is_some_and(|caps| caps.onboard_profiles)
+        .then(|| config.onboard_profiles(&dev.config_key))
+        .flatten()
+}
+
 /// The DPI a reconnect re-applies to `dev` with its volatile settings. A
 /// device with an onboard-profiles choice gets none here: [`onboard_switch`]
 /// writes it in order after the mode, and an active onboard profile rejects
 /// it anyway.
 pub(super) fn reconnect_dpi(config: &Config, dev: &AgentDevice) -> Option<Dpi> {
-    configured_dpi(config, dev).filter(|_| config.onboard_profiles(&dev.config_key).is_none())
+    configured_dpi(config, dev).filter(|_| configured_onboard_profiles(config, dev).is_none())
 }
 
-/// The onboard-mode write `dev`'s configuration asks for, or `None` when the
-/// user never chose: the mode, and — handing control to the host — the
-/// user's own DPI to write after it.
+/// The onboard-mode write `dev`'s configuration asks for, or `None` when
+/// there is none to write (see [`configured_onboard_profiles`]): the mode,
+/// and — handing control to the host — the user's own DPI to write after it.
 pub(super) fn onboard_switch(config: &Config, dev: &AgentDevice) -> Option<(bool, Option<Dpi>)> {
-    let onboard_profiles = config.onboard_profiles(&dev.config_key)?;
+    let onboard_profiles = configured_onboard_profiles(config, dev)?;
     Some((onboard_profiles, host_dpi(config, dev, onboard_profiles)))
+}
+
+/// The onboard-mode writes a config reload owes: each online, enabled device
+/// whose saved choice differs from `previous`'s, with the write to make. A
+/// removed choice writes nothing — the device keeps the mode it has — and a
+/// disabled device is left alone, as the press force leaves it.
+pub(super) fn changed_onboard_switches(
+    previous: &Config,
+    config: &Config,
+    devices: &[AgentDevice],
+) -> Vec<(DeviceRoute, bool, Option<Dpi>)> {
+    devices
+        .iter()
+        .filter(|dev| dev.online && config.device_enabled(&dev.config_key))
+        .filter(|dev| {
+            configured_onboard_profiles(config, dev) != configured_onboard_profiles(previous, dev)
+        })
+        .filter_map(|dev| {
+            let (onboard_profiles, host_dpi) = onboard_switch(config, dev)?;
+            Some((dev.route.clone()?, onboard_profiles, host_dpi))
+        })
+        .collect()
 }
 
 /// The DPI a switch of `dev` to `onboard_profiles` must write after the mode:
