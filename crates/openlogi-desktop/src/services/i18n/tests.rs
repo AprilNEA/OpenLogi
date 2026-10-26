@@ -71,11 +71,17 @@ fn chord_action_labels_resolve() {
     let hold = label(Action::HoldShortcut(chord("Cmd+Tab")));
     let switcher = label(Action::TapKeyHoldingModifiers(chord("Cmd+Tab")));
     let bare_key = label(Action::TapKeyHoldingModifiers(chord("F5")));
+    let modifier = label(Action::HoldModifier(
+        "Ctrl+Shift"
+            .parse()
+            .expect("test modifier set must be valid"),
+    ));
     rust_i18n::set_locale("en");
 
     assert_eq!(hold, "按住 Cmd+Tab");
     assert_eq!(switcher, "按住 Cmd，点按 Tab");
     assert_eq!(bare_key, "点按 F5");
+    assert_eq!(modifier, "按住 Ctrl+Shift");
 }
 
 /// Czech must resolve in the actual desktop backend, including the pairing

@@ -452,6 +452,16 @@ fn key_combo_modifier_bits() {
     assert_wire(&combo("Insert"), "0049");
 }
 
+/// A bare-modifier hold crosses the wire as its variant index and one byte of
+/// modifier bits. Appended at the end of `Action`, so every earlier index is
+/// unchanged.
+#[test]
+fn hold_modifier_bits() {
+    use openlogi_core::binding::Action;
+    let ctrl_shift = "Ctrl+Shift".parse().expect("valid modifier set");
+    assert_wire(&Action::HoldModifier(ctrl_shift), "3706");
+}
+
 /// The agent identity is frozen: a helper from any build has to be able to
 /// decode it, so both halves stay plain `u64`s and this golden never changes.
 #[test]
