@@ -760,6 +760,39 @@ fn a_hidpp20_slot_reconnect_targets_only_online_devices_behind_such_receivers() 
 }
 
 #[test]
+fn a_hidpp20_slot_reconnect_queues_a_confirming_reapply() {
+    let mut inventory = direct_inventory(None, [1, 2, 3, 4]);
+    inventory.receiver.product_id = 0xc54f;
+    inventory.receiver.unique_id = Some("695A8298".into());
+    inventory.paired[0].slot = 1;
+    let mut orchestrator = orchestrator(Config::default());
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    let id = stable_id(&orchestrator.devices[0]);
+    assert!(matches!(
+        orchestrator.devices[0].route,
+        Some(DeviceRoute::Hidpp20Receiver { .. })
+    ));
+    // Drain the first sighting's boot ladder.
+    for _ in 0..VOLATILE_REAPPLY_CONFIRM_RETRIES {
+        orchestrator.refresh_inventory_for_settings_confirmation(
+            std::slice::from_ref(&inventory),
+            &[],
+            false,
+        );
+    }
+    assert!(!orchestrator.reapply_followup.contains_key(&id));
+
+    orchestrator.reapply_hidpp20_slots_on_next_refresh();
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+
+    assert_eq!(
+        orchestrator.reapply_followup.get(&id),
+        Some(&RECONNECT_REAPPLY_CONFIRM_RETRIES),
+        "the reconnect write gets a confirming retry"
+    );
+}
+
+#[test]
 fn a_hidpp20_slot_reconnect_never_narrows_a_pending_wake_reapply() {
     let mut orchestrator = orchestrator(Config::default());
     orchestrator.reapply_hidpp20_slots_on_next_refresh();

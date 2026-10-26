@@ -1264,10 +1264,19 @@ impl Orchestrator {
             plan_reapply(&self.devices, &devices, &followup, forced, confirm_reapply);
         self.reapply_followup = next_followup;
         if forced_reapply == ForcedReapply::Hidpp20Slots {
+            // The reconnect's single write races the link still stabilizing,
+            // and a later unchanged snapshot never retargets it, so it queues
+            // the link-race confirm like any other reconnect.
             for idx in hidpp20_slot_targets(&devices) {
                 if !targets.contains(&idx) {
                     targets.push(idx);
                 }
+                self.reapply_followup
+                    .entry(stable_id(&devices[idx]))
+                    .and_modify(|remaining| {
+                        *remaining = (*remaining).max(RECONNECT_REAPPLY_CONFIRM_RETRIES);
+                    })
+                    .or_insert(RECONNECT_REAPPLY_CONFIRM_RETRIES);
             }
         }
         // A keyboard switched to another platform on the device (a platform
