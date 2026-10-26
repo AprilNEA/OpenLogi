@@ -161,6 +161,10 @@ impl DpiPanel {
             return;
         }
 
+        // A uniform slider step can land between two stops; the value snaps
+        // to the nearest stop before the device's own list resolves it, so a
+        // drag never picks a value the slider does not offer.
+        let (preview_stops, commit_stops) = (capabilities.clone(), capabilities.clone());
         let slider = CommitSlider::previewing(
             SliderRange::new(shape.min, shape.max).step(shape.step.into()),
             capabilities.nearest(dpi),
@@ -168,13 +172,15 @@ impl DpiPanel {
             // Dragging drives the in-process state so the numeric label tracks
             // the thumb. The HID write happens once on release to keep us from
             // spamming the device with intermediate values.
-            |_, dpi, cx| {
+            move |_, dpi, cx| {
+                let dpi = preview_stops.nearest(dpi);
                 let dpi =
                     AppState::try_read(cx).map_or(dpi, |state| state.normalize_active_dpi(dpi));
                 debug!(%dpi, "slider change → AppState.dpi");
                 AppState::apply(cx, |state| state.set_dpi_preview(dpi));
             },
-            |_, dpi, cx| {
+            move |_, dpi, cx| {
+                let dpi = commit_stops.nearest(dpi);
                 let dpi =
                     AppState::try_read(cx).map_or(dpi, |state| state.normalize_active_dpi(dpi));
                 // `commit_dpi` resolves the target at fire-time, so
@@ -321,7 +327,10 @@ impl DpiPanel {
         let pal = theme::palette(cx);
 
         if let (DpiLoad::Ready(info), Some(key)) = (&snapshot.status, &snapshot.device_key) {
-            self.ensure_slider(key, &info.capabilities, snapshot.dpi, window, cx);
+            // The slider spans the stops a hand can drag across; the field
+            // beside it takes any value the device supports.
+            let stops = info.capabilities.slider_stops();
+            self.ensure_slider(key, &stops, snapshot.dpi, window, cx);
             // A device with a single supported DPI has nothing to type either —
             // `slider_element` shows a fixed-value line instead of a control.
             if info.capabilities.min() == info.capabilities.max() {
