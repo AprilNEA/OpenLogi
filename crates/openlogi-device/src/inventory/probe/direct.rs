@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use hidpp::channel::HidppChannel;
-use openlogi_core::device::{DeviceInventory, PairedDevice, ReceiverInfo};
+use openlogi_core::device::{DeviceInventory, DeviceModelInfo, PairedDevice, ReceiverInfo};
 use tracing::debug;
 
 use super::{NodeProbe, PassContext, ProbeVerdict};
@@ -13,7 +13,9 @@ use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
 use crate::inventory::cache::{CacheKey, CacheOutcome, ProbeTarget, probe_or_reuse, seen};
 use crate::inventory::features::Refresh;
-use crate::inventory::mappings::{direct_identity_kind, resolve_device_kind};
+use crate::inventory::mappings::{
+    direct_identity_kind, normalize_serial_number, resolve_device_kind,
+};
 
 /// Prefer the device's own HID++ marketing name over the host HID collection
 /// label. Windows Bluetooth frequently exposes only a generic `"Mouse"`, while
@@ -26,6 +28,35 @@ pub(in crate::inventory) fn preferred_direct_codename(
         .filter(|name| !name.trim().is_empty())
         .unwrap_or(os_name)
         .to_string()
+}
+
+/// A direct device (such as the K380) may lack a HID++ 0x0003 serial number,
+/// leaving `model_info.serial_number` as `None` and yielding an ephemeral
+/// unit id across reconnects. Backfill with the host transport's stable serial
+/// (e.g. Bluetooth MAC address or USB descriptor serial).
+pub(in crate::inventory) fn backfill_direct_serial(
+    model_info: &mut Option<DeviceModelInfo>,
+    outcome: &mut CacheOutcome,
+    os_serial: Option<&str>,
+) {
+    let Some(direct_serial) = os_serial.and_then(normalize_serial_number) else {
+        return;
+    };
+    if let Some(model) = model_info.as_mut()
+        && model.serial_number.is_none()
+    {
+        model.serial_number = Some(direct_serial.clone());
+    }
+    match outcome {
+        CacheOutcome::Fresh(_, cached) | CacheOutcome::Update(_, cached) => {
+            if let Some(model) = &mut cached.probe.model_info
+                && model.serial_number.is_none()
+            {
+                model.serial_number = Some(direct_serial);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Probe a HID++ channel that doesn't host a Bolt receiver — for
@@ -61,7 +92,7 @@ pub(super) async fn probe_direct(
     // A direct device's HID node is present (it is the candidate), so probe it
     // as online: reuse the cached probe while fresh, otherwise probe. Whether
     // the device behind it is linked is the probe's answer, not this call's.
-    let (probe, outcome) = probe_or_reuse(
+    let (mut probe, mut outcome) = probe_or_reuse(
         &channel,
         ProbeTarget {
             index: DIRECT_DEVICE_INDEX,
@@ -133,6 +164,11 @@ pub(super) async fn probe_direct(
     // calls every pointing device simply `"Mouse"`.
     let codename = preferred_direct_codename(probe.marketing_name.as_deref(), &info.name);
     debug!(os_name = %info.name, name = %codename, "BT-direct / wired device recognised");
+    backfill_direct_serial(
+        &mut probe.model_info,
+        &mut outcome,
+        info.serial_number.as_deref(),
+    );
     let inventory = DeviceInventory {
         receiver: ReceiverInfo {
             name: info.name.clone(),
@@ -178,5 +214,138 @@ fn failed_probe(info: &NodeInfo) -> NodeProbe {
         inventory: None,
         verdict: ProbeVerdict::Failed,
         outcomes: vec![seen(Some(CacheKey::Direct(info.id.clone())))],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use openlogi_core::device::{DeviceModelInfo, DeviceTransports};
+
+    use super::*;
+    use crate::backend::NodeId;
+    use crate::inventory::cache::Cached;
+    use crate::inventory::events::EventFeatureIndices;
+    use crate::inventory::features::ProbedFeatures;
+
+    fn sample_model(serial: Option<&str>) -> DeviceModelInfo {
+        DeviceModelInfo {
+            entity_count: 2,
+            serial_number: serial.map(str::to_string),
+            unit_id: [0xfc, 0, 0, 0],
+            transports: DeviceTransports::default(),
+            model_ids: [0xb342, 0, 0],
+            extended_model_id: 0,
+        }
+    }
+
+    fn sample_cached(model: Option<DeviceModelInfo>) -> Cached {
+        Cached {
+            probe: ProbedFeatures {
+                model_info: model,
+                ..ProbedFeatures::default()
+            },
+            battery: None,
+            events: EventFeatureIndices::default(),
+            probed_at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn direct_device_without_hidpp_serial_inherits_os_serial() {
+        let mut model = Some(sample_model(None));
+        let key = CacheKey::Direct(NodeId::from("test-node".to_string()));
+        let mut outcome = CacheOutcome::Fresh(key, sample_cached(model.clone()));
+
+        backfill_direct_serial(&mut model, &mut outcome, Some("f4:73:35:43:c8:12"));
+
+        assert_eq!(
+            model.as_ref().and_then(|m| m.serial_number.as_deref()),
+            Some("f4:73:35:43:c8:12")
+        );
+        match outcome {
+            CacheOutcome::Fresh(_, cached) => {
+                assert_eq!(
+                    cached
+                        .probe
+                        .model_info
+                        .as_ref()
+                        .and_then(|m| m.serial_number.as_deref()),
+                    Some("f4:73:35:43:c8:12")
+                );
+            }
+            _ => panic!("expected Fresh outcome"),
+        }
+    }
+
+    #[test]
+    fn direct_device_in_update_outcome_inherits_os_serial() {
+        let mut model = Some(sample_model(None));
+        let key = CacheKey::Direct(NodeId::from("test-node".to_string()));
+        let mut outcome = CacheOutcome::Update(key, sample_cached(model.clone()));
+
+        backfill_direct_serial(&mut model, &mut outcome, Some("f4:73:35:43:c8:12"));
+
+        assert_eq!(
+            model.as_ref().and_then(|m| m.serial_number.as_deref()),
+            Some("f4:73:35:43:c8:12")
+        );
+        match outcome {
+            CacheOutcome::Update(_, cached) => {
+                assert_eq!(
+                    cached
+                        .probe
+                        .model_info
+                        .as_ref()
+                        .and_then(|m| m.serial_number.as_deref()),
+                    Some("f4:73:35:43:c8:12")
+                );
+            }
+            _ => panic!("expected Update outcome"),
+        }
+    }
+
+    #[test]
+    fn direct_device_with_existing_hidpp_serial_is_not_overwritten() {
+        let mut model = Some(sample_model(Some("1945LZ04A8")));
+        let key = CacheKey::Direct(NodeId::from("test-node".to_string()));
+        let mut outcome = CacheOutcome::Fresh(key, sample_cached(model.clone()));
+
+        backfill_direct_serial(&mut model, &mut outcome, Some("f4:73:35:43:c8:12"));
+
+        assert_eq!(
+            model.as_ref().and_then(|m| m.serial_number.as_deref()),
+            Some("1945LZ04A8")
+        );
+        match outcome {
+            CacheOutcome::Fresh(_, cached) => {
+                assert_eq!(
+                    cached
+                        .probe
+                        .model_info
+                        .as_ref()
+                        .and_then(|m| m.serial_number.as_deref()),
+                    Some("1945LZ04A8")
+                );
+            }
+            _ => panic!("expected Fresh outcome"),
+        }
+    }
+
+    #[test]
+    fn direct_device_with_empty_or_whitespace_os_serial_remains_none() {
+        let mut model = Some(sample_model(None));
+        let key = CacheKey::Direct(NodeId::from("test-node".to_string()));
+        let mut outcome = CacheOutcome::Fresh(key, sample_cached(model.clone()));
+
+        backfill_direct_serial(&mut model, &mut outcome, Some("  \0\0 "));
+
+        assert!(
+            model
+                .as_ref()
+                .and_then(|m| m.serial_number.as_deref())
+                .is_none()
+        );
     }
 }
