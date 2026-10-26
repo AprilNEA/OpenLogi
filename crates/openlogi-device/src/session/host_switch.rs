@@ -346,10 +346,13 @@ async fn depart(
     // A restore write now would wait for a keyboard that is leaving. The
     // owner retries it once inventory publishes the keyboard again.
     let restore = pending.map(|pending| {
-        if registry.is_current(shared) {
-            pending.allow_current_channel()
-        } else {
+        if matches!(
+            HostSwitchStop::for_current_publication(registry, shared),
+            HostSwitchStop::ChannelChanged
+        ) {
             pending
+        } else {
+            pending.allow_current_channel()
         }
     });
     HostSwitchSessionOutcome::Departed { restore }

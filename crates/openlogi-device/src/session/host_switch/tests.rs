@@ -1147,6 +1147,49 @@ fn a_failed_host_read_follows_only_an_announcement_to_another_host() {
     );
 }
 
+#[tokio::test]
+async fn an_offline_receiver_departure_restores_when_its_slot_returns_on_the_same_channel() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "receiver".to_owned(),
+        slot: KEYBOARD_SLOT,
+    };
+    let registry = ChannelRegistry::default();
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    let channel = raw_scripted_channel(raw).await;
+    let shared = SharedChannel::new(Arc::clone(&channel), route.clone());
+    let node = NodeId::from("receiver-node".to_owned());
+    registry.replace_node(node.clone(), [route.clone()], Arc::clone(&channel));
+    let pending = PendingHostSwitchRestore::new(&shared, 0x22, vec![armed_control()])
+        .expect("armed host control requires restoration");
+    registry.replace_node(node.clone(), [], Arc::clone(&channel));
+    let (_signal, gate) = device_io_channel();
+    let pool = ChannelPool::with_backend(ScriptedBackend::new(Vec::new()));
+    let outcome = super::depart(
+        super::Departure::new(&shared, None, 1),
+        Some(pending),
+        super::Followers {
+            targets: &[],
+            registry: &registry,
+            channel_pool: &pool,
+            device_io: &gate,
+        },
+    )
+    .await;
+    let (follow_up, pending) = outcome.into_parts();
+    assert_eq!(follow_up, super::HostSwitchFollowUp::AwaitDeparture);
+    let pending = match pending.unwrap().retry(&registry).await {
+        HostSwitchRestoreOutcome::RestorePending(pending) => pending,
+        HostSwitchRestoreOutcome::Restored => panic!("an offline slot cannot restore"),
+    };
+    assert!(handle.written_reports().is_empty());
+    registry.replace_node(node, [route], channel);
+    assert!(matches!(
+        pending.retry(&registry).await,
+        HostSwitchRestoreOutcome::Restored
+    ));
+    assert_eq!(handle.written_reports().len(), 1);
+}
+
 #[test]
 fn a_rename_queued_before_a_departure_drops_the_old_slot_names() {
     // The keyboard is leaving, so the session cannot read the names again.
