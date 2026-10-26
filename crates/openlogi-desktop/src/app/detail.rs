@@ -17,6 +17,7 @@ use gpui_component::{
 };
 use openlogi_core::config::ScrollResolution;
 use openlogi_core::device::DeviceKind;
+use openlogi_core::hid::OnboardMode;
 
 use super::widgets::{back_button, connection_summary, kind_label, sidebar_action, status_badge};
 use super::{AppView, DetailTab};
@@ -717,43 +718,45 @@ fn device_tab(
 /// Onboard-memory card: switch between the profile stored on the device and
 /// host control. Shown only for a device with onboard profiles (`0x8100`);
 /// the state shown is the device's own reading, else the persisted choice —
-/// see `AppState::current_onboard_profiles_shown`.
+/// see `AppState::current_onboard_mode`.
 fn onboard_memory_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let onboard_profiles =
-        AppState::try_read(cx).is_none_or(AppState::current_onboard_profiles_shown);
-    let row = h_flex()
-        .justify_between()
-        .items_center()
-        .gap_4()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(pal.text_primary)
-                        .child(tr!("device.onboard_profiles")),
-                )
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("device.onboard_profiles_description")),
+    // The switch is the one place the mode is a yes/no: on is onboard.
+    let onboard = AppState::try_read(cx)
+        .is_none_or(|state| state.current_onboard_mode() == OnboardMode::Onboard);
+    let row =
+        h_flex()
+            .justify_between()
+            .items_center()
+            .gap_4()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_body()
+                            .text_color(pal.text_primary)
+                            .child(tr!("device.onboard_profiles")),
+                    )
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(pal.text_muted)
+                            .child(tr!("device.onboard_profiles_description")),
+                    ),
+            )
+            .child(div().flex_shrink_0().child(
+                Switch::new("onboard-profiles").checked(onboard).on_click(
+                    |checked, _window, cx| {
+                        let mode = if *checked {
+                            OnboardMode::Onboard
+                        } else {
+                            OnboardMode::Host
+                        };
+                        AppState::apply(cx, |state| state.commit_onboard_mode(mode));
+                    },
                 ),
-        )
-        .child(
-            div().flex_shrink_0().child(
-                Switch::new("onboard-profiles")
-                    .checked(onboard_profiles)
-                    .on_click(|onboard_profiles, _window, cx| {
-                        let onboard_profiles = *onboard_profiles;
-                        AppState::apply(cx, |state| {
-                            state.commit_onboard_profiles(onboard_profiles)
-                        });
-                    }),
-            ),
-        );
+            ));
     PanelCard::new(
         tr!("device.onboard_memory"),
         Icon::empty().path("action-icons/layers.svg"),

@@ -1773,26 +1773,33 @@ fn wired_mouse_route() -> DeviceRoute {
 }
 
 #[tokio::test]
-async fn onboard_profiles_switch_to_host_control_and_back() -> Result<(), WriteError> {
+async fn onboard_mode_switches_to_host_control_and_back() -> Result<(), WriteError> {
     let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(onboard_profiles_mouse(true));
     let shared = SharedChannel::new(scripted_channel(raw).await, wired_mouse_route());
 
-    assert!(
-        get_onboard_profiles_on(&shared).await?,
+    assert_eq!(
+        get_onboard_mode_on(&shared).await?,
+        OnboardMode::Onboard,
         "factory onboard mode"
     );
 
-    assert!(!set_onboard_profiles_on(&shared, false).await?);
+    assert_eq!(
+        set_onboard_mode_on(&shared, OnboardMode::Host).await?,
+        OnboardMode::Host
+    );
     let set = handle
         .written_reports()
         .into_iter()
         .find(|report| report[2] == 0x0b && report[3] >> 4 == 0x01)
         .expect("a setOnboardMode write");
     assert_eq!(set[4], 2, "host mode is mode 2");
-    assert!(!get_onboard_profiles_on(&shared).await?);
+    assert_eq!(get_onboard_mode_on(&shared).await?, OnboardMode::Host);
 
-    assert!(set_onboard_profiles_on(&shared, true).await?);
-    assert!(get_onboard_profiles_on(&shared).await?);
+    assert_eq!(
+        set_onboard_mode_on(&shared, OnboardMode::Onboard).await?,
+        OnboardMode::Onboard
+    );
+    assert_eq!(get_onboard_mode_on(&shared).await?, OnboardMode::Onboard);
     Ok(())
 }
 
@@ -1802,7 +1809,7 @@ async fn an_onboard_mode_write_the_device_ignored_is_reported() {
         ScriptedRawHidChannel::with_dynamic_responder(onboard_profiles_mouse(false));
     let shared = SharedChannel::new(scripted_channel(raw).await, wired_mouse_route());
 
-    let error = set_onboard_profiles_on(&shared, false)
+    let error = set_onboard_mode_on(&shared, OnboardMode::Host)
         .await
         .expect_err("the mode read back after the write is still onboard");
     assert_eq!(
@@ -1820,7 +1827,7 @@ async fn a_device_without_onboard_profiles_reports_the_feature_missing() {
     let shared = SharedChannel::new(scripted_channel(raw).await, wired_mouse_route());
 
     assert_eq!(
-        get_onboard_profiles_on(&shared).await,
+        get_onboard_mode_on(&shared).await,
         Err(WriteError::FeatureUnsupported {
             feature_hex: 0x8100
         })

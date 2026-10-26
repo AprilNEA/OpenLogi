@@ -44,10 +44,10 @@ use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
     BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
     DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
-    HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, PasskeyMethod,
-    ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget, ScrollWheelMode,
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
-    WriteError,
+    HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
+    PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget,
+    ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+    SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -453,12 +453,13 @@ fn lock_keys() {
     );
 }
 
-/// Onboard-profiles RPCs are appended after the saved-config verdict reload,
-/// so their variant indices (0x2f/0x30) sit past every method above.
+/// Onboard-mode RPCs are appended after the saved-config verdict reload, so
+/// their variant indices (0x2f/0x30) sit past every method above; the mode is
+/// its variant index (Onboard=0, Host=1).
 #[test]
-fn onboard_profiles_requests() {
+fn onboard_mode_requests() {
     assert_wire(
-        &AgentRequest::ReadOnboardProfiles {
+        &AgentRequest::ReadOnboardMode {
             route: DeviceRoute::Bolt {
                 receiver_uid: "F00DCAFE".into(),
                 slot: 1,
@@ -467,14 +468,14 @@ fn onboard_profiles_requests() {
         "2f0008463030444341464501",
     );
     assert_wire(
-        &AgentRequest::SetOnboardProfiles {
+        &AgentRequest::SetOnboardMode {
             route: DeviceRoute::Bolt {
                 receiver_uid: "F00DCAFE".into(),
                 slot: 1,
             },
-            onboard_profiles: false,
+            mode: OnboardMode::Host,
         },
-        "30000846303044434146450100",
+        "30000846303044434146450101",
     );
 }
 

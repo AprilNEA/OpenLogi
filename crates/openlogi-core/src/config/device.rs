@@ -13,7 +13,7 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::{DisableKeysMask, Dpi, PointerSpeed, ReportRate};
+use crate::hid::{DisableKeysMask, Dpi, OnboardMode, PointerSpeed, ReportRate};
 
 /// A known key controlled by HID++ `0x4521 DisableKeys`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -365,13 +365,14 @@ pub struct DeviceConfig {
     /// firmware unmanaged; an explicit empty set re-enables every known key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_keys: Option<BTreeSet<DisableKey>>,
-    /// Whether the device's onboard profiles (HID++ `0x8100`) stay active:
-    /// `false` hands DPI, report rate and buttons to the host. The PRO X3
-    /// SUPERSTRIKE falls back to onboard mode on every power cycle, so the
-    /// agent re-applies this when the device reconnects, before its DPI.
-    /// `None` means "never set — leave the device alone".
+    /// Who controls the settings the device's onboard profiles (HID++
+    /// `0x8100`) store: [`OnboardMode::Host`] hands DPI, report rate and
+    /// buttons to the host. The PRO X3 SUPERSTRIKE falls back to onboard mode
+    /// on every power cycle, so the agent re-applies this when the device
+    /// reconnects, before its DPI. `None` means "never set — leave the
+    /// device alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboard_profiles: Option<bool>,
+    pub onboard_mode: Option<OnboardMode>,
 }
 
 impl DeviceConfig {
@@ -478,7 +479,7 @@ impl Default for DeviceConfig {
             pointer_speed: None,
             force_sensing: None,
             disabled_keys: None,
-            onboard_profiles: None,
+            onboard_mode: None,
         }
     }
 }
@@ -611,7 +612,7 @@ struct RawDeviceConfig {
     force_sensing: Option<u16>,
     disabled_keys: Option<BTreeSet<DisableKey>>,
     #[serde(default)]
-    onboard_profiles: Option<bool>,
+    onboard_mode: Option<OnboardMode>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -678,7 +679,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             pointer_speed: raw.pointer_speed,
             force_sensing: raw.force_sensing,
             disabled_keys: raw.disabled_keys,
-            onboard_profiles: raw.onboard_profiles,
+            onboard_mode: raw.onboard_mode,
         }
     }
 }

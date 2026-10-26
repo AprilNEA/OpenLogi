@@ -28,9 +28,9 @@ use openlogi_core::config::Lighting;
 use openlogi_hid::DisableKeysMask;
 use openlogi_hid::{
     CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, FollowerLink,
-    FollowerRelease, HidppOperation, HostOs, HostSwitchError, LeadCookie, OsLayoutOutcome,
-    PointerSpeed, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel,
-    WriteError,
+    FollowerRelease, HidppOperation, HostOs, HostSwitchError, LeadCookie, OnboardMode,
+    OsLayoutOutcome, PointerSpeed, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus,
+    WeakSharedChannel, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
@@ -1150,24 +1150,76 @@ pub(crate) struct HostDpi {
     pub(crate) speeds: Arc<PointerSpeeds>,
 }
 
-/// Switch `shared`'s device between its onboard profiles (`true`) and host
-/// control (`false`) and, when handing control to the host, write `host_dpi`
-/// — the user's own DPI, which the onboard profile had overridden and which
-/// the device rejects until the switch lands. Returns the mode the device
-/// reports. A DPI write that fails after a landed switch is logged rather
-/// than returned: the switch is what was asked, and it took.
+/// An onboard-mode write: the mode, and — handing control to the host — the
+/// user's own DPI to restore right after it, which the onboard profile had
+/// overridden and the device rejects until the switch lands. A switch to
+/// onboard mode carries no DPI: the active profile owns the sensor.
+///
+/// `D` is the plain [`Dpi`] where the write is planned, and the crate's `HostDpi`
+/// numbered with the mouse's pointer-speed writes where it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnboardSwitch<D = Dpi> {
+    /// Hand control to the device's onboard profiles.
+    Onboard,
+    /// Take control for the host and restore `restore`, when one is saved.
+    Host {
+        /// The DPI written after the mode.
+        restore: Option<D>,
+    },
+}
+
+impl OnboardSwitch {
+    /// The write that switches a device to `mode`, restoring `saved_dpi`
+    /// when handing control to the host — also on a retry, when the saved
+    /// mode has not changed and no config reload would write the DPI.
+    pub(crate) fn to(mode: OnboardMode, saved_dpi: impl FnOnce() -> Option<Dpi>) -> Self {
+        match mode {
+            OnboardMode::Onboard => Self::Onboard,
+            OnboardMode::Host => Self::Host {
+                restore: saved_dpi(),
+            },
+        }
+    }
+}
+
+impl<D> OnboardSwitch<D> {
+    /// The mode this write sets.
+    #[must_use]
+    pub fn mode(&self) -> OnboardMode {
+        match self {
+            Self::Onboard => OnboardMode::Onboard,
+            Self::Host { .. } => OnboardMode::Host,
+        }
+    }
+
+    /// The same switch with its restore turned into `E`.
+    pub(crate) fn map_restore<E>(self, f: impl FnOnce(D) -> E) -> OnboardSwitch<E> {
+        match self {
+            Self::Onboard => OnboardSwitch::Onboard,
+            Self::Host { restore } => OnboardSwitch::Host {
+                restore: restore.map(f),
+            },
+        }
+    }
+}
+
+/// Run `switch` on `shared`'s device and return the mode the device reports.
+/// A DPI restore that fails after a landed switch is logged rather than
+/// returned: the switch is what was asked, and it took.
 ///
 /// The restore runs inside the switch's transport turn, so it does not wait
 /// for its own pointer-speed turn: it writes only while it is still the
 /// newest pointer-speed write, and yields to a DPI the user asked for after
 /// the switch instead of overwriting it with the value captured before.
-pub(crate) async fn switch_onboard_profiles_on(
+pub(crate) async fn switch_onboard_mode_on(
     shared: &SharedChannel,
-    onboard_profiles: bool,
-    host_dpi: Option<HostDpi>,
-) -> Result<bool, WriteError> {
-    let reported = openlogi_hid::set_onboard_profiles_on(shared, onboard_profiles).await?;
-    if !reported && let Some(HostDpi { dpi, write, speeds }) = host_dpi {
+    switch: OnboardSwitch<HostDpi>,
+) -> Result<OnboardMode, WriteError> {
+    let reported = openlogi_hid::set_onboard_mode_on(shared, switch.mode()).await?;
+    if let OnboardSwitch::Host {
+        restore: Some(HostDpi { dpi, write, speeds }),
+    } = switch
+    {
         if !write.ticket.is_current() {
             debug!(%dpi, "DPI restore superseded by a newer DPI write");
             return Ok(reported);
@@ -1189,16 +1241,16 @@ pub(crate) async fn switch_onboard_profiles_on(
     Ok(reported)
 }
 
-/// Spawn an OS thread that runs [`switch_onboard_profiles_on`] on `op`'s
-/// device, unless a newer onboard-mode write for the device was requested
-/// after `ticket`. Returns immediately; the outcome is logged.
-pub(crate) fn write_onboard_profiles_in_background(
+/// Spawn an OS thread that runs [`switch_onboard_mode_on`] on `op`'s device,
+/// unless a newer onboard-mode write for the device was requested after
+/// `ticket`. Returns immediately; the outcome is logged.
+pub(crate) fn write_onboard_mode_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
-    onboard_profiles: bool,
-    host_dpi: Option<HostDpi>,
+    switch: OnboardSwitch<HostDpi>,
 ) {
     let index = op.route.device_index();
+    let mode = switch.mode();
     let turn = op.access.transport_turns.turn_for(&op.route);
     op.spawn_timed_write(
         "onboard-mode write",
@@ -1208,9 +1260,7 @@ pub(crate) fn write_onboard_profiles_in_background(
                 &turn,
                 || async {
                     let shared = op.resolve()?;
-                    switch_onboard_profiles_on(&shared, onboard_profiles, host_dpi)
-                        .await
-                        .map(Some)
+                    switch_onboard_mode_on(&shared, switch).await.map(Some)
                 },
                 || async { Ok(None) },
             )
@@ -1219,12 +1269,9 @@ pub(crate) fn write_onboard_profiles_in_background(
         move |result| {
             log_outcome(index, "onboard-mode write", result, |reported| {
                 if reported.is_some() {
-                    debug!(index, onboard_profiles, "onboard mode written");
+                    debug!(index, ?mode, "onboard mode written");
                 } else {
-                    debug!(
-                        index,
-                        onboard_profiles, "onboard-mode write superseded by a newer one"
-                    );
+                    debug!(index, ?mode, "onboard-mode write superseded by a newer one");
                 }
             });
         },

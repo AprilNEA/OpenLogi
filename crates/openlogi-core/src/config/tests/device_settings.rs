@@ -1,6 +1,7 @@
 //! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, the smooth wheel, keeping the OS layout, the report rate, and the stored bindings.
 
 use super::*;
+use crate::hid::OnboardMode;
 use std::collections::BTreeSet;
 
 #[test]
@@ -27,18 +28,20 @@ fn disabled_keys_roundtrip_and_clear_per_device() {
 }
 
 #[test]
-fn onboard_profiles_roundtrip_per_device_and_stay_unset_by_default() {
+fn onboard_mode_roundtrips_per_device_and_stays_unset_by_default() {
     let mut cfg = Config::default();
-    cfg.set_onboard_profiles("serial:x3", false);
+    cfg.set_onboard_mode("serial:x3", OnboardMode::Host);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains(r#"onboard_mode = "host""#), "{body}");
     let restored = write_and_read(&cfg);
-    assert_eq!(restored.onboard_profiles("serial:x3"), Some(false));
+    assert_eq!(restored.onboard_mode("serial:x3"), Some(OnboardMode::Host));
     assert_eq!(
-        restored.onboard_profiles("absent"),
+        restored.onboard_mode("absent"),
         None,
         "a device nobody switched keeps its own mode"
     );
     let body = toml::to_string_pretty(&Config::default()).expect("serialize");
-    assert!(!body.contains("onboard_profiles"));
+    assert!(!body.contains("onboard_mode"));
 }
 
 #[test]

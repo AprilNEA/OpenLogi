@@ -20,9 +20,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PairingError, PasskeyMethod,
-    PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
-    WriteError,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardMode, PairingError,
+    PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -156,7 +156,8 @@ pub use succession::Identity;
 ///      receiver that speaks HID++ 2.0, such as the PRO X3's `c54f`;
 ///      `Capabilities::onboard_profiles`,
 ///      `HidppOperation::{ReadOnboardMode, WriteOnboardMode}` and
-///      `Agent::{read_onboard_profiles, set_onboard_profiles}` appended.
+///      `Agent::{read_onboard_mode, set_onboard_mode}` with [`OnboardMode`]
+///      appended.
 pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -958,13 +959,12 @@ pub trait Agent {
     async fn reload_saved_config_with_verdict(
         saved: SavedConfig,
     ) -> Result<SavedConfigVerdict, ConfigReloadError>;
-    /// Read whether the onboard profiles (`0x8100`) of the device on `route`
-    /// are active: `true` in onboard mode, `false` under host control.
-    async fn read_onboard_profiles(route: DeviceRoute) -> Result<bool, WriteError>;
-    /// Switch the device on `route` between its onboard profiles (`true`) and
-    /// host control (`false`), answering with the mode it reports afterwards.
-    async fn set_onboard_profiles(
+    /// Read the onboard mode (`0x8100`) of the device on `route`.
+    async fn read_onboard_mode(route: DeviceRoute) -> Result<OnboardMode, WriteError>;
+    /// Switch the device on `route` to `mode`, answering with the mode it
+    /// reports afterwards.
+    async fn set_onboard_mode(
         route: DeviceRoute,
-        onboard_profiles: bool,
-    ) -> Result<bool, WriteError>;
+        mode: OnboardMode,
+    ) -> Result<OnboardMode, WriteError>;
 }

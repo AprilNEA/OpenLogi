@@ -19,8 +19,8 @@ use std::future::Future;
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardMode, PointerSpeed,
+    ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
@@ -332,28 +332,24 @@ impl Request for RenameEasySwitchHost {
 }
 
 /// Switch a device between its onboard profiles and host control, answered
-/// as [`GuiUpdate::OnboardProfilesWritten`] with the mode it reports after.
-pub struct SetOnboardProfiles {
+/// as [`GuiUpdate::OnboardModeWritten`] with the mode it reports after.
+pub struct SetOnboardMode {
     pub route: DeviceRoute,
-    pub onboard_profiles: bool,
+    pub mode: OnboardMode,
     pub key: DeviceKey,
 }
 
-impl Request for SetOnboardProfiles {
-    type Answer = Result<bool, WriteError>;
+impl Request for SetOnboardMode {
+    type Answer = Result<OnboardMode, WriteError>;
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
-            .set_onboard_profiles(
-                context::current(),
-                self.route.clone(),
-                self.onboard_profiles,
-            )
+            .set_onboard_mode(context::current(), self.route.clone(), self.mode)
             .await
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
-        let _ = updates.send(GuiUpdate::OnboardProfilesWritten {
+        let _ = updates.send(GuiUpdate::OnboardModeWritten {
             key: self.key,
             result: or_unavailable(outcome),
         });
@@ -658,17 +654,17 @@ impl Request for ReadFnLock {
 
 /// Read whether a device's onboard profiles are active; the answer goes back
 /// over `reply`.
-pub struct ReadOnboardProfiles {
+pub struct ReadOnboardMode {
     pub route: DeviceRoute,
-    pub reply: oneshot::Sender<Result<bool, WriteError>>,
+    pub reply: oneshot::Sender<Result<OnboardMode, WriteError>>,
 }
 
-impl Request for ReadOnboardProfiles {
-    type Answer = Result<bool, WriteError>;
+impl Request for ReadOnboardMode {
+    type Answer = Result<OnboardMode, WriteError>;
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
-            .read_onboard_profiles(context::current(), self.route.clone())
+            .read_onboard_mode(context::current(), self.route.clone())
             .await
     }
 
@@ -1026,7 +1022,7 @@ commands! {
     SetPointerSpeed,
     SetForceSensing,
     SetBacklight,
-    SetOnboardProfiles,
+    SetOnboardMode,
     RenameEasySwitchHost,
     ReadDpi,
     ReadSmartShift,
@@ -1036,7 +1032,7 @@ commands! {
     ReadForceSensing,
     ReadBacklight,
     ReadEasySwitchHosts,
-    ReadOnboardProfiles,
+    ReadOnboardMode,
     LoadConfig,
     ReadDisableKeys,
     SetDisableKeys,

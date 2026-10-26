@@ -83,13 +83,15 @@ pub use litra::{
     read_state as read_litra_state, watch as watch_litra,
 };
 pub use onboard_mode::{
-    get_onboard_profiles, get_onboard_profiles_on, set_onboard_profiles, set_onboard_profiles_on,
+    get_onboard_mode, get_onboard_mode_on, set_onboard_mode, set_onboard_mode_on,
 };
 pub use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
 };
-pub use openlogi_core::hid::{ForceSensingInfo, PointerSpeed, ReportRate, ReportRateInfo};
+pub use openlogi_core::hid::{
+    ForceSensingInfo, OnboardMode, PointerSpeed, ReportRate, ReportRateInfo,
+};
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
 pub use pointer_scaling::{
     PointerScaling, get_pointer_scaling, get_pointer_speed_on, set_pointer_scaling,

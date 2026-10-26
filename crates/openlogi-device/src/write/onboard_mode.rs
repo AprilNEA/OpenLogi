@@ -1,10 +1,8 @@
 //! HID++ `0x8100` onboard-mode reads and writes: whether the device's stored
-//! onboard profile or the host controls DPI, report rate and buttons.
-//!
-//! OpenLogi exposes this as `onboard_profiles`: `true` is
-//! [`OnboardMode::Onboard`], `false` is [`OnboardMode::Host`]. A device in
-//! onboard mode rejects host DPI writes (the PRO X3 SUPERSTRIKE answers
-//! `LogitechInternal`), so switching to host mode is what lets them land.
+//! onboard profile or the host controls DPI, report rate and buttons. A
+//! device in onboard mode rejects host DPI writes (the PRO X3 SUPERSTRIKE
+//! answers `LogitechInternal`), so switching to host mode is what lets them
+//! land.
 
 use std::sync::Arc;
 
@@ -13,9 +11,10 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature as _,
-        onboard_profiles::{OnboardMode, OnboardProfilesFeature},
+        onboard_profiles::{OnboardMode as HidppOnboardMode, OnboardProfilesFeature},
     },
 };
+use openlogi_core::hid::OnboardMode;
 use tracing::debug;
 
 use crate::SharedChannel;
@@ -24,12 +23,27 @@ use crate::channel::route::DeviceRoute;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
-/// The onboard mode an `onboard_profiles` setting selects.
-fn mode_for(onboard_profiles: bool) -> OnboardMode {
-    if onboard_profiles {
-        OnboardMode::Onboard
-    } else {
-        OnboardMode::Host
+/// Map OpenLogi's [`OnboardMode`] onto the fork's `0x8100` mode. A `From`
+/// impl cannot live anywhere: neither crate depends on the other, and this
+/// one owns neither type.
+fn mode_to_hidpp(mode: OnboardMode) -> HidppOnboardMode {
+    match mode {
+        OnboardMode::Onboard => HidppOnboardMode::Onboard,
+        OnboardMode::Host => HidppOnboardMode::Host,
+    }
+}
+
+/// The inverse of [`mode_to_hidpp`]. The fork's mode is `#[non_exhaustive]`:
+/// a mode it learns later is a read this layer cannot represent, never a
+/// default.
+fn mode_from_hidpp(mode: HidppOnboardMode) -> Result<OnboardMode, WriteError> {
+    match mode {
+        HidppOnboardMode::Onboard => Ok(OnboardMode::Onboard),
+        HidppOnboardMode::Host => Ok(OnboardMode::Host),
+        _ => Err(WriteError::UnsupportedResponse {
+            operation: HidppOperation::ReadOnboardMode,
+            feature_hex: OnboardProfilesFeature::ID,
+        }),
     }
 }
 
@@ -43,7 +57,7 @@ async fn open(
     open_feature::<OnboardProfilesFeature>(&mut device).await
 }
 
-async fn read(feature: &OnboardProfilesFeature) -> Result<bool, WriteError> {
+async fn read(feature: &OnboardProfilesFeature) -> Result<OnboardMode, WriteError> {
     let mode = feature.get_onboard_mode().await.map_err(|e| {
         classify_hidpp_error(
             e,
@@ -51,14 +65,14 @@ async fn read(feature: &OnboardProfilesFeature) -> Result<bool, WriteError> {
             OnboardProfilesFeature::ID,
         )
     })?;
-    Ok(mode == OnboardMode::Onboard)
+    mode_from_hidpp(mode)
 }
 
-/// Read whether `route`'s onboard profiles are active.
-pub async fn get_onboard_profiles(
+/// Read `route`'s onboard mode.
+pub async fn get_onboard_mode(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
-) -> Result<bool, WriteError> {
+) -> Result<OnboardMode, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
         read(&*open(&channel, index).await?).await
@@ -66,43 +80,42 @@ pub async fn get_onboard_profiles(
     .await
 }
 
-/// Read whether the onboard profiles are active on an already-open
-/// [`SharedChannel`].
-pub async fn get_onboard_profiles_on(shared: &SharedChannel) -> Result<bool, WriteError> {
+/// Read the onboard mode on an already-open [`SharedChannel`].
+pub async fn get_onboard_mode_on(shared: &SharedChannel) -> Result<OnboardMode, WriteError> {
     read(&*open(shared.channel(), shared.device_index()).await?).await
 }
 
-/// Switch `route` between its onboard profiles (`true`) and host control
-/// (`false`). Returns the mode the device reports after the write; a device
-/// that did not take it surfaces as [`WriteError::UnsupportedResponse`].
-pub async fn set_onboard_profiles(
+/// Switch `route` to `mode`. Returns the mode the device reports after the
+/// write; a device that did not take it surfaces as
+/// [`WriteError::UnsupportedResponse`].
+pub async fn set_onboard_mode(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
-    onboard_profiles: bool,
-) -> Result<bool, WriteError> {
+    mode: OnboardMode,
+) -> Result<OnboardMode, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        set_on_channel(&channel, index, onboard_profiles).await
+        set_on_channel(&channel, index, mode).await
     })
     .await
 }
 
-/// [`set_onboard_profiles`] on an already-open [`SharedChannel`].
-pub async fn set_onboard_profiles_on(
+/// [`set_onboard_mode`] on an already-open [`SharedChannel`].
+pub async fn set_onboard_mode_on(
     shared: &SharedChannel,
-    onboard_profiles: bool,
-) -> Result<bool, WriteError> {
-    set_on_channel(shared.channel(), shared.device_index(), onboard_profiles).await
+    mode: OnboardMode,
+) -> Result<OnboardMode, WriteError> {
+    set_on_channel(shared.channel(), shared.device_index(), mode).await
 }
 
 async fn set_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
-    onboard_profiles: bool,
-) -> Result<bool, WriteError> {
+    mode: OnboardMode,
+) -> Result<OnboardMode, WriteError> {
     let feature = open(channel, index).await?;
     feature
-        .set_onboard_mode(mode_for(onboard_profiles))
+        .set_onboard_mode(mode_to_hidpp(mode))
         .await
         .map_err(|e| {
             classify_hidpp_error(
@@ -114,13 +127,13 @@ async fn set_on_channel(
     // The write itself echoes nothing; read the mode back so a device that
     // ignored it is reported instead of logged as a success.
     let echoed = read(&feature).await?;
-    if echoed != onboard_profiles {
+    if echoed != mode {
         return Err(WriteError::UnsupportedResponse {
             operation: HidppOperation::WriteOnboardMode,
             feature_hex: OnboardProfilesFeature::ID,
         });
     }
-    debug!(index, onboard_profiles, "onboard mode written");
+    debug!(index, ?mode, "onboard mode written");
     Ok(echoed)
 }
 
@@ -129,8 +142,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn onboard_profiles_on_is_onboard_mode() {
-        assert_eq!(mode_for(true), OnboardMode::Onboard);
-        assert_eq!(mode_for(false), OnboardMode::Host);
+    fn onboard_mode_round_trips() {
+        // mode_from_hidpp is the inverse of mode_to_hidpp.
+        for mode in [OnboardMode::Onboard, OnboardMode::Host] {
+            assert_eq!(mode_from_hidpp(mode_to_hidpp(mode)), Ok(mode));
+        }
+        assert_eq!(
+            mode_to_hidpp(OnboardMode::Host),
+            HidppOnboardMode::Host,
+            "host mode is the fork's host mode, not a neighbour"
+        );
     }
 }

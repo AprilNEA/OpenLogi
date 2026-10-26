@@ -10,8 +10,8 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
     DisableKeysMask, DisableKeysState, Dpi, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
-    ForceSensingInfo, HostConnection, LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    ForceSensingInfo, HostConnection, LightCommand, OnboardMode, PasskeyMethod, PointerSpeed,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -226,20 +226,20 @@ impl Agent for TestAgent {
         unreachable!("profile capture must never write the backlight")
     }
 
-    async fn read_onboard_profiles(
+    async fn read_onboard_mode(
         self,
         _: TarpcContext,
         _route: DeviceRoute,
-    ) -> Result<bool, WriteError> {
+    ) -> Result<OnboardMode, WriteError> {
         unreachable!("profile capture does not record the onboard mode")
     }
 
-    async fn set_onboard_profiles(
+    async fn set_onboard_mode(
         self,
         _: TarpcContext,
         _route: DeviceRoute,
-        _onboard_profiles: bool,
-    ) -> Result<bool, WriteError> {
+        _mode: OnboardMode,
+    ) -> Result<OnboardMode, WriteError> {
         unreachable!("profile capture must never switch the onboard mode")
     }
 

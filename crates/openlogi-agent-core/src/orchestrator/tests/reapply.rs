@@ -1,6 +1,8 @@
 //! Which devices re-apply their volatile settings, and how many confirming passes they get.
 
 use super::*;
+use crate::hardware::OnboardSwitch;
+use openlogi_hid::OnboardMode;
 use std::collections::BTreeMap;
 
 #[test]
@@ -659,22 +661,24 @@ fn onboard_mouse(key: &str, slot: u8, online: bool) -> AgentDevice {
     device
 }
 
-fn onboard_mouse_config(onboard_profiles: Option<bool>) -> Config {
+fn onboard_mouse_config(mode: Option<OnboardMode>) -> Config {
     let mut config = Config::default();
     config.set_dpi("a", Dpi::new(3200));
-    if let Some(onboard_profiles) = onboard_profiles {
-        config.set_onboard_profiles("a", onboard_profiles);
+    if let Some(mode) = mode {
+        config.set_onboard_mode("a", mode);
     }
     config
 }
 
 #[test]
 fn a_host_control_choice_switches_before_restoring_the_users_dpi() {
-    let config = onboard_mouse_config(Some(false));
+    let config = onboard_mouse_config(Some(OnboardMode::Host));
 
     assert_eq!(
         onboard_switch(&config, &onboard_mouse("a", 1, true)),
-        Some((false, Some(Dpi::new(3200))))
+        Some(OnboardSwitch::Host {
+            restore: Some(Dpi::new(3200))
+        })
     );
     // The DPI rides the ordered onboard write, not the unordered reapply.
     assert_eq!(reconnect_dpi(&config, &onboard_mouse("a", 1, true)), None);
@@ -682,11 +686,11 @@ fn a_host_control_choice_switches_before_restoring_the_users_dpi() {
 
 #[test]
 fn an_active_onboard_profile_gets_no_host_dpi() {
-    let config = onboard_mouse_config(Some(true));
+    let config = onboard_mouse_config(Some(OnboardMode::Onboard));
 
     assert_eq!(
         onboard_switch(&config, &onboard_mouse("a", 1, true)),
-        Some((true, None))
+        Some(OnboardSwitch::Onboard)
     );
     assert_eq!(reconnect_dpi(&config, &onboard_mouse("a", 1, true)), None);
 }
@@ -704,7 +708,7 @@ fn without_an_onboard_choice_the_mode_is_left_and_the_dpi_reapplied() {
 
 #[test]
 fn a_device_without_onboard_profiles_gets_no_switch_and_keeps_its_dpi() {
-    let config = onboard_mouse_config(Some(false));
+    let config = onboard_mouse_config(Some(OnboardMode::Host));
     let mut device = onboard_mouse("a", 1, true);
     device.capabilities = Some(Capabilities::default());
 
@@ -725,38 +729,55 @@ fn a_reload_switches_onboard_mode_only_on_an_online_enabled_device() {
         onboard_mouse("removed", 5, true),
     ];
     let mut previous = Config::default();
-    previous.set_onboard_profiles("unchanged", false);
-    previous.set_onboard_profiles("changed", true);
-    previous.set_onboard_profiles("removed", false);
+    previous.set_onboard_mode("unchanged", OnboardMode::Host);
+    previous.set_onboard_mode("changed", OnboardMode::Onboard);
+    previous.set_onboard_mode("removed", OnboardMode::Host);
     let mut config = Config::default();
-    config.set_onboard_profiles("unchanged", false);
-    config.set_onboard_profiles("changed", false);
+    config.set_onboard_mode("unchanged", OnboardMode::Host);
+    config.set_onboard_mode("changed", OnboardMode::Host);
     config.set_dpi("changed", Dpi::new(1600));
-    config.set_onboard_profiles("disabled", false);
+    config.set_onboard_mode("disabled", OnboardMode::Host);
     config.set_device_enabled("disabled", false);
-    config.set_onboard_profiles("offline", false);
+    config.set_onboard_mode("offline", OnboardMode::Host);
 
     assert_eq!(
         changed_onboard_switches(&previous, &config, &devices),
         vec![(
             devices[1].route.clone().expect("routed"),
-            false,
-            Some(Dpi::new(1600))
+            OnboardSwitch::Host {
+                restore: Some(Dpi::new(1600))
+            }
         )]
     );
 }
 
 #[test]
 fn every_switch_to_host_control_restores_the_users_dpi() {
-    // Also a retry after a refused switch, when the saved choice is already
+    // Also a retry after a refused switch, when the saved mode is already
     // host control and no config reload would write the DPI.
-    let config = onboard_mouse_config(Some(false));
+    let mut orchestrator = orchestrator(onboard_mouse_config(Some(OnboardMode::Host)));
+    orchestrator.devices = vec![dev("a", 1, true)];
+    let route = orchestrator.devices[0].route.clone().expect("routed");
 
     assert_eq!(
-        host_dpi(&config, &dev("a", 1, true), false),
-        Some(Dpi::new(3200))
+        orchestrator.onboard_switch(&route, OnboardMode::Host),
+        OnboardSwitch::Host {
+            restore: Some(Dpi::new(3200))
+        }
     );
-    assert_eq!(host_dpi(&config, &dev("a", 1, true), true), None);
+    assert_eq!(
+        orchestrator.onboard_switch(&route, OnboardMode::Onboard),
+        OnboardSwitch::Onboard
+    );
+    let unknown = DeviceRoute::Bolt {
+        receiver_uid: "FFFF".to_string(),
+        slot: 6,
+    };
+    assert_eq!(
+        orchestrator.onboard_switch(&unknown, OnboardMode::Host),
+        OnboardSwitch::Host { restore: None },
+        "a device the agent does not know has no saved DPI to restore"
+    );
 }
 
 #[test]

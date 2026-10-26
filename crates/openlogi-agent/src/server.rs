@@ -24,8 +24,8 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
-    LightCommand, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus, WriteError,
+    LightCommand, OnboardMode, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -305,36 +305,27 @@ impl Agent for AgentServer {
         self.shared.set_disable_keys(&route, desired).await
     }
 
-    async fn read_onboard_profiles(
+    async fn read_onboard_mode(
         self,
         _: Context,
         route: DeviceRoute,
-    ) -> Result<bool, WriteError> {
+    ) -> Result<OnboardMode, WriteError> {
         self.shared
             .device(&route)
             .run(HidppOperation::ReadOnboardMode, |c| async move {
-                openlogi_hid::get_onboard_profiles_on(&c).await
+                openlogi_hid::get_onboard_mode_on(&c).await
             })
             .await
     }
 
-    async fn set_onboard_profiles(
+    async fn set_onboard_mode(
         self,
         _: Context,
         route: DeviceRoute,
-        onboard_profiles: bool,
-    ) -> Result<bool, WriteError> {
-        // Handing control to the host restores the user's own DPI in the same
-        // ordered write — also on a retry, when the saved choice has not
-        // changed and no config reload would write it.
-        let host_dpi = self
-            .orchestrator
-            .lock()
-            .await
-            .onboard_switch_dpi(&route, onboard_profiles);
-        self.shared
-            .set_onboard_profiles(&route, onboard_profiles, host_dpi)
-            .await
+        mode: OnboardMode,
+    ) -> Result<OnboardMode, WriteError> {
+        let switch = self.orchestrator.lock().await.onboard_switch(&route, mode);
+        self.shared.set_onboard_mode(&route, switch).await
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

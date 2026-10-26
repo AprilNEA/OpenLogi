@@ -15,7 +15,7 @@ use super::{
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
 };
-use crate::hid::{Dpi, PointerSpeed, ReportRate};
+use crate::hid::{Dpi, OnboardMode, PointerSpeed, ReportRate};
 
 impl Config {
     /// The bindings stored for `device_key` as they were committed, or an
@@ -385,22 +385,20 @@ impl Config {
             .force_sensing = Some(force);
     }
 
-    /// The persisted onboard-profiles choice for `device_key`, or `None` when
-    /// the user never set one (the device keeps its own mode).
+    /// The persisted onboard mode for `device_key`, or `None` when the user
+    /// never chose one (the device keeps its own mode).
     #[must_use]
-    pub fn onboard_profiles(&self, device_key: &str) -> Option<bool> {
-        self.devices
-            .get(device_key)
-            .and_then(|d| d.onboard_profiles)
+    pub fn onboard_mode(&self, device_key: &str) -> Option<OnboardMode> {
+        self.devices.get(device_key).and_then(|d| d.onboard_mode)
     }
 
-    /// Record whether `device_key`'s onboard profiles stay active; the agent
-    /// writes it on reload and re-applies it when the device reconnects.
-    pub fn set_onboard_profiles(&mut self, device_key: &str, onboard_profiles: bool) {
+    /// Record `device_key`'s onboard mode; the agent writes it on reload and
+    /// re-applies it when the device reconnects.
+    pub fn set_onboard_mode(&mut self, device_key: &str, mode: OnboardMode) {
         self.devices
             .entry(device_key.to_string())
             .or_default()
-            .onboard_profiles = Some(onboard_profiles);
+            .onboard_mode = Some(mode);
     }
 
     /// Record the SmartShift wheel config for `device_key`, so the agent can

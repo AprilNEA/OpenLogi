@@ -59,7 +59,7 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
     PairedDevice, StandaloneDevice, prettify_codename,
 };
-use openlogi_core::hid::{DisableKeysMask, DisableKeysState, HidppOperation};
+use openlogi_core::hid::{DisableKeysMask, DisableKeysState, HidppOperation, OnboardMode};
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
@@ -1159,23 +1159,23 @@ impl Agent for MockAgent {
         Ok(*stored)
     }
 
-    async fn read_onboard_profiles(
+    async fn read_onboard_mode(
         self,
         _: Context,
         _route: DeviceRoute,
-    ) -> Result<bool, WriteError> {
+    ) -> Result<OnboardMode, WriteError> {
         // The mock's scripted devices carry no onboard profiles.
         Err(WriteError::FeatureUnsupported {
             feature_hex: 0x8100,
         })
     }
 
-    async fn set_onboard_profiles(
+    async fn set_onboard_mode(
         self,
         _: Context,
         _route: DeviceRoute,
-        _onboard_profiles: bool,
-    ) -> Result<bool, WriteError> {
+        _mode: OnboardMode,
+    ) -> Result<OnboardMode, WriteError> {
         Err(WriteError::FeatureUnsupported {
             feature_hex: 0x8100,
         })

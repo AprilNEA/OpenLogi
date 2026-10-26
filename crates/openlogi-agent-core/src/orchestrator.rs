@@ -28,8 +28,8 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDevice
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo, WriteError,
-    commands_for_light_settings, is_reserved_keyboard_control,
+    ForceSensingInfo, HidppOperation, HostOs, OnboardMode, PointerSpeed, ReportRate,
+    ReportRateInfo, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -42,8 +42,8 @@ use crate::capture_plan::{
     CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
 use crate::hardware::{
-    DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
-    show_precision_led, write_pointer_speed_in_background,
+    DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, OnboardSwitch, VolatileMouseSettings,
+    WriteOrder, show_precision_led, write_pointer_speed_in_background,
 };
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
@@ -68,9 +68,9 @@ use devices::{
     VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch,
     carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
     changed_onboard_switches, config_keeps_os_layout, configured_dpi, configured_force_sensing,
-    configured_onboard_profiles, configured_report_rate, configured_wheel_mode, host_dpi,
-    host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts,
-    onboard_switch, os_layout_appeared, pick_current, plan_disabled_keys_recovery, plan_reapply,
+    configured_onboard_mode, configured_report_rate, configured_wheel_mode, host_switch_links,
+    is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, onboard_switch,
+    os_layout_appeared, pick_current, plan_disabled_keys_recovery, plan_reapply,
     published_inventories, reconnect_dpi, reconnect_follower_cookies, same_device_lifecycle,
     saved_speed, settings_moved, stable_id, wheel_inverted,
 };
@@ -187,7 +187,7 @@ pub struct SharedHandles {
     disabled_keys_order: WriteOrder<Option<DisableKeysMask>>,
     /// Orders the GUI's onboard-mode switches and the reconnect reapply's
     /// per mouse.
-    onboard_profiles_order: WriteOrder,
+    onboard_mode_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -474,46 +474,35 @@ impl SharedHandles {
         )
     }
 
-    /// Switch the device at `route` between its onboard profiles and host
-    /// control — writing `host_dpi` after a switch to the host — and return
-    /// the mode it reports. Ordered per device like [`Self::set_fn_lock`]:
-    /// when a newer onboard-mode write is requested before this one gets its
-    /// turn, this one reads the device instead. Waiting for the turn does not
-    /// count against the write's deadline.
-    pub async fn set_onboard_profiles(
+    /// Run `switch` on the device at `route` and return the mode it reports.
+    /// Ordered per device like [`Self::set_fn_lock`]: when a newer
+    /// onboard-mode write is requested before this one gets its turn, this
+    /// one reads the device instead. Waiting for the turn does not count
+    /// against the write's deadline.
+    pub async fn set_onboard_mode(
         &self,
         route: &DeviceRoute,
-        onboard_profiles: bool,
-        host_dpi: Option<Dpi>,
-    ) -> Result<bool, WriteError> {
-        let ticket = self.onboard_profiles_order.request(route);
-        let host_dpi = host_dpi.map(|dpi| self.host_dpi_write(route, dpi));
+        switch: OnboardSwitch,
+    ) -> Result<OnboardMode, WriteError> {
+        let ticket = self.onboard_mode_order.request(route);
+        let switch = switch.map_restore(|dpi| self.host_dpi_write(route, dpi));
         self.device(route)
             .run_in_turn(
                 HidppOperation::WriteOnboardMode,
                 &ticket,
-                |c| async move {
-                    crate::hardware::switch_onboard_profiles_on(&c, onboard_profiles, host_dpi)
-                        .await
-                },
-                |c| async move { openlogi_hid::get_onboard_profiles_on(&c).await },
+                |c| async move { crate::hardware::switch_onboard_mode_on(&c, switch).await },
+                |c| async move { openlogi_hid::get_onboard_mode_on(&c).await },
             )
             .await
     }
 
-    /// [`Self::set_onboard_profiles`] without waiting, for the config-reload
-    /// and reconnect paths; the outcome is logged.
-    fn write_onboard_profiles_in_background(
-        &self,
-        route: &DeviceRoute,
-        onboard_profiles: bool,
-        host_dpi: Option<Dpi>,
-    ) {
-        crate::hardware::write_onboard_profiles_in_background(
+    /// [`Self::set_onboard_mode`] without waiting, for the config-reload and
+    /// reconnect paths; the outcome is logged.
+    fn write_onboard_mode_in_background(&self, route: &DeviceRoute, switch: OnboardSwitch) {
+        crate::hardware::write_onboard_mode_in_background(
             self.device(route),
-            self.onboard_profiles_order.request(route),
-            onboard_profiles,
-            host_dpi.map(|dpi| self.host_dpi_write(route, dpi)),
+            self.onboard_mode_order.request(route),
+            switch.map_restore(|dpi| self.host_dpi_write(route, dpi)),
         );
     }
 
@@ -729,7 +718,7 @@ impl Orchestrator {
             host_name_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
             disabled_keys_order: WriteOrder::default(),
-            onboard_profiles_order: WriteOrder::default(),
+            onboard_mode_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
@@ -1470,7 +1459,7 @@ impl Orchestrator {
         // A mouse with an onboard-profiles choice gets its DPI from the
         // ordered onboard write below, after the mode; an active onboard
         // profile rejects it anyway.
-        let onboard_owns_dpi = configured_onboard_profiles(&self.config, dev).is_some();
+        let onboard_owns_dpi = configured_onboard_mode(&self.config, dev).is_some();
         let saved = saved_speed(&self.config, dev)
             .filter(|saved| !(onboard_owns_dpi && matches!(saved, SavedSpeed::Dpi(_))));
         let speed_write =
@@ -1512,9 +1501,8 @@ impl Orchestrator {
         }
         self.keep_os_layout(dev);
         let _ = self.shared.reapply_disabled_keys(&route);
-        if let Some((onboard_profiles, host_dpi)) = onboard_switch(&self.config, dev) {
-            self.shared
-                .write_onboard_profiles_in_background(&route, onboard_profiles, host_dpi);
+        if let Some(switch) = onboard_switch(&self.config, dev) {
+            self.shared.write_onboard_mode_in_background(&route, switch);
         }
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
@@ -1963,7 +1951,7 @@ impl Orchestrator {
         }
 
         self.apply_changed_pointer_speeds(&previous);
-        self.apply_changed_onboard_profiles(&previous);
+        self.apply_changed_onboard_modes(&previous);
         self.apply_enabled_os_layouts(&previous);
         let writes = changed_follower_cookies(
             &previous,
@@ -2087,29 +2075,28 @@ impl Orchestrator {
             .collect()
     }
 
-    /// Push a changed onboard-profiles setting to the online device it belongs
-    /// to. Only values that differ from `previous` are written. The GUI toggle
-    /// also writes directly through [`SharedHandles::set_onboard_profiles`];
-    /// both are ordered per device, so the newest request is the one that
-    /// stays. The reconnect path is [`Self::reapply_volatile_settings`].
-    fn apply_changed_onboard_profiles(&self, previous: &Config) {
-        for (route, onboard_profiles, host_dpi) in
-            changed_onboard_switches(previous, &self.config, &self.devices)
-        {
-            self.shared
-                .write_onboard_profiles_in_background(&route, onboard_profiles, host_dpi);
+    /// Push a changed onboard mode to the online device it belongs to. Only
+    /// values that differ from `previous` are written. The GUI toggle also
+    /// writes directly through [`SharedHandles::set_onboard_mode`]; both are
+    /// ordered per device, so the newest request is the one that stays. The
+    /// reconnect path is [`Self::reapply_volatile_settings`].
+    fn apply_changed_onboard_modes(&self, previous: &Config) {
+        for (route, switch) in changed_onboard_switches(previous, &self.config, &self.devices) {
+            self.shared.write_onboard_mode_in_background(&route, switch);
         }
     }
 
-    /// The DPI a switch of the device at `route` to `onboard_profiles` must
-    /// write after the mode — see [`SharedHandles::set_onboard_profiles`].
+    /// The write that switches the device at `route` to `mode` — see
+    /// [`SharedHandles::set_onboard_mode`].
     #[must_use]
-    pub fn onboard_switch_dpi(&self, route: &DeviceRoute, onboard_profiles: bool) -> Option<Dpi> {
+    pub fn onboard_switch(&self, route: &DeviceRoute, mode: OnboardMode) -> OnboardSwitch {
         let dev = self
             .devices
             .iter()
-            .find(|dev| dev.route.as_ref() == Some(route))?;
-        host_dpi(&self.config, dev, onboard_profiles)
+            .find(|dev| dev.route.as_ref() == Some(route));
+        OnboardSwitch::to(mode, || {
+            dev.and_then(|dev| configured_dpi(&self.config, dev))
+        })
     }
 
     /// The online lights a config reload has to write: those whose effective

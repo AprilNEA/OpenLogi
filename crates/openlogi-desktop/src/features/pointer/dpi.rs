@@ -19,7 +19,7 @@ use gpui_component::{
     slider::{Slider, SliderState},
     v_flex,
 };
-use openlogi_core::hid::{Dpi, DpiCapabilities};
+use openlogi_core::hid::{Dpi, DpiCapabilities, OnboardMode};
 use tracing::debug;
 
 use super::pointer_speed::{PointerSpeedFacts, PointerSpeedSlider, pointer_speed_section};
@@ -313,7 +313,7 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
                 presets: s.dpi_presets(),
                 reachable: record.route.is_some(),
                 onboard_profile: s.current_onboard_profiles_supported()
-                    && s.current_onboard_profiles_shown(),
+                    && s.current_onboard_mode() == OnboardMode::Onboard,
             })
         })
         .unwrap_or_else(|| DpiPanelSnapshot {

@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
     BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, WriteError,
+    ForceSensingInfo, LightCommand, OnboardMode, PointerSpeed, ReportRateInfo, WriteError,
 };
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
@@ -68,10 +68,10 @@ use request::LinkLost;
 pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDisableKeys, ReadDpi,
-    ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadOnboardProfiles, ReadPointerSpeed,
+    ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadOnboardMode, ReadPointerSpeed,
     ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
     SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight,
-    SetLightManualPower, SetLighting, SetOnboardProfiles, SetPointerSpeed, SetReportRate,
+    SetLightManualPower, SetLighting, SetOnboardMode, SetPointerSpeed, SetReportRate,
     SetSmartShift, StartPairing, UnpairDevice,
 };
 
@@ -221,13 +221,12 @@ pub enum GuiUpdate {
         result: Result<EasySwitchHosts, WriteError>,
     },
     /// What a device reports after an onboard-mode switch the GUI asked for:
-    /// whether its onboard profiles are now active, or the typed refusal.
-    /// Answers [`SetOnboardProfiles`].
-    OnboardProfilesWritten {
+    /// its mode now, or the typed refusal. Answers [`SetOnboardMode`].
+    OnboardModeWritten {
         /// The device that was written.
         key: DeviceKey,
-        /// `true` in onboard mode, or why the write did not land.
-        result: Result<bool, WriteError>,
+        /// The mode the device reports, or why the write did not land.
+        result: Result<OnboardMode, WriteError>,
     },
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather

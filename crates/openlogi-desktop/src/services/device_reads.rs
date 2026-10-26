@@ -9,7 +9,7 @@ use std::time::Duration;
 use gpui::{Context, Subscription};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, PointerSpeed, ReportRateInfo, SmartShiftStatus, WriteError,
+    ForceSensingInfo, OnboardMode, PointerSpeed, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use swr_core::{
     MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 use super::ipc::{
     Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadForceSensing,
-    ReadOnboardProfiles, ReadPointerSpeed, ReadReportRate, ReadSmartShift,
+    ReadOnboardMode, ReadPointerSpeed, ReadReportRate, ReadSmartShift,
 };
 use crate::state::{
     AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
@@ -85,7 +85,7 @@ pub(crate) struct DeviceReads {
     /// out on; cleared with that read.
     host_renames: BTreeMap<DeviceKey, HostRenames>,
     next_host_rename: u64,
-    onboard_profiles: BTreeMap<DeviceKey, DeviceRead<bool>>,
+    onboard_profiles: BTreeMap<DeviceKey, DeviceRead<OnboardMode>>,
     /// Devices with an onboard-mode write in flight. Their reading is the
     /// asked-for mode until the device answers; a re-read must not race it.
     onboard_profiles_writes: BTreeSet<DeviceKey>,
@@ -1203,7 +1203,7 @@ impl DeviceReads {
                 let commands = commands.clone();
                 let route = fetch_route.clone();
                 read_ipc(
-                    move |reply| ReadOnboardProfiles { route, reply }.into(),
+                    move |reply| ReadOnboardMode { route, reply }.into(),
                     commands,
                 )
             },
@@ -1243,9 +1243,9 @@ impl DeviceReads {
     /// An onboard-mode write to `key` is on its way: show the asked-for mode
     /// until [`Self::finish_onboard_profiles_write`] brings the device's
     /// answer, and hold off re-reads that could land the pre-write mode.
-    pub(crate) fn begin_onboard_profiles_write(&mut self, key: &DeviceKey, onboard_profiles: bool) {
+    pub(crate) fn begin_onboard_profiles_write(&mut self, key: &DeviceKey, mode: OnboardMode) {
         self.onboard_profiles_writes.insert(key.clone());
-        self.set_onboard_profiles_ready(key, onboard_profiles);
+        self.set_onboard_profiles_ready(key, mode);
     }
 
     /// The device's answer to an onboard-mode write: the mode it reports, or
@@ -1254,11 +1254,11 @@ impl DeviceReads {
     pub(crate) fn finish_onboard_profiles_write(
         &mut self,
         key: &DeviceKey,
-        result: Result<bool, &WriteError>,
+        result: Result<OnboardMode, &WriteError>,
     ) {
         self.onboard_profiles_writes.remove(key);
         match result {
-            Ok(onboard_profiles) => self.set_onboard_profiles_ready(key, onboard_profiles),
+            Ok(mode) => self.set_onboard_profiles_ready(key, mode),
             Err(_) => self.refresh_onboard_profiles(key),
         }
     }
@@ -1270,10 +1270,10 @@ impl DeviceReads {
         self.onboard_profiles_writes.contains(key)
     }
 
-    fn set_onboard_profiles_ready(&mut self, key: &DeviceKey, onboard_profiles: bool) {
-        let value = Arc::new(onboard_profiles);
+    fn set_onboard_profiles_ready(&mut self, key: &DeviceKey, mode: OnboardMode) {
+        let value = Arc::new(mode);
         if let Some(client) = &self.client {
-            client.set::<_, Cached<bool>, WriteError>(
+            client.set::<_, Cached<OnboardMode>, WriteError>(
                 query_key(ONBOARD_PROFILES, key),
                 Some(value.clone()),
             );
@@ -1467,7 +1467,7 @@ impl DeviceReads {
         self.onboard_profiles_writes.remove(key);
         if let Some(read) = self.onboard_profiles.remove(key) {
             drop(read);
-            self.clear::<bool>(ONBOARD_PROFILES, key);
+            self.clear::<OnboardMode>(ONBOARD_PROFILES, key);
         }
     }
 

@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, LightState, StandaloneDevice};
-use openlogi_core::hid::{FnLockState, LightCommand, PairingError, WriteError};
+use openlogi_core::hid::{FnLockState, LightCommand, OnboardMode, PairingError, WriteError};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
@@ -154,18 +154,17 @@ pub async fn set_fn_lock(route: &DeviceRoute, on: bool) -> Result<FnLockState, W
     device::set_fn_lock(&*native_backend(), route, on).await
 }
 
-/// Read whether the onboard profiles of the device `route` reaches are active.
-pub async fn get_onboard_profiles(route: &DeviceRoute) -> Result<bool, WriteError> {
-    device::get_onboard_profiles(&*native_backend(), route).await
+/// Read the onboard mode of the device `route` reaches.
+pub async fn get_onboard_mode(route: &DeviceRoute) -> Result<OnboardMode, WriteError> {
+    device::get_onboard_mode(&*native_backend(), route).await
 }
 
-/// Switch the device `route` reaches between its onboard profiles and host
-/// control, and read the mode back.
-pub async fn set_onboard_profiles(
+/// Switch the device `route` reaches to `mode`, and read the mode back.
+pub async fn set_onboard_mode(
     route: &DeviceRoute,
-    onboard_profiles: bool,
-) -> Result<bool, WriteError> {
-    device::set_onboard_profiles(&*native_backend(), route, onboard_profiles).await
+    mode: OnboardMode,
+) -> Result<OnboardMode, WriteError> {
+    device::set_onboard_mode(&*native_backend(), route, mode).await
 }
 
 /// Read the backlight state of the keyboard `route` reaches.

@@ -1,12 +1,12 @@
-//! Onboard profiles: the toggle persists the choice, writes the device through the agent, and hands DPI back to the host's setting.
+//! Onboard mode: the toggle persists the choice, writes the device through the agent, and hands DPI back to the host's setting.
 
 use super::*;
 use std::sync::Arc;
 
-use crate::services::ipc::{Command, SetOnboardProfiles};
+use crate::services::ipc::{Command, SetOnboardMode};
 use crate::state::load::OnboardProfilesLoad;
-use crate::state::onboard_profiles::onboard_profiles_shown;
-use openlogi_core::hid::Dpi;
+use crate::state::onboard_profiles::shown_mode;
+use openlogi_core::hid::{Dpi, OnboardMode};
 
 /// A PRO X3 SUPERSTRIKE on its HID++ 2.0 receiver, with or without `0x8100`.
 fn mouse_inventory(onboard_profiles: bool) -> DeviceInventory {
@@ -66,12 +66,12 @@ fn config_key(state: &AppState) -> String {
 }
 
 #[test]
-fn unset_onboard_profiles_show_the_factory_onboard_mode() {
+fn an_unset_onboard_mode_shows_the_factory_onboard_mode() {
     let (state, _receiver) = mouse_state(true);
 
     assert!(state.current_onboard_profiles_supported());
-    assert_eq!(state.current_onboard_profiles_setting(), None);
-    assert!(state.current_onboard_profiles_shown());
+    assert_eq!(state.current_onboard_mode_setting(), None);
+    assert_eq!(state.current_onboard_mode(), OnboardMode::Onboard);
 }
 
 #[test]
@@ -83,17 +83,20 @@ fn onboard_toggle_persists_the_choice_and_writes_the_device_directly() {
     let route = record.route.clone().expect("a receiver route");
     let config_key = config_key(&state);
 
-    let events = state.commit_onboard_profiles(false);
+    let events = state.commit_onboard_mode(OnboardMode::Host);
 
     assert_eq!(events, [StateEvent::OnboardProfilesChanged(key.clone())]);
-    assert_eq!(state.config.onboard_profiles(&config_key), Some(false));
-    assert!(!state.current_onboard_profiles_shown());
+    assert_eq!(
+        state.config.onboard_mode(&config_key),
+        Some(OnboardMode::Host)
+    );
+    assert_eq!(state.current_onboard_mode(), OnboardMode::Host);
     let commands = drain(&mut receiver);
     let [
         Command::ReloadConfig(_),
-        Command::SetOnboardProfiles(SetOnboardProfiles {
+        Command::SetOnboardMode(SetOnboardMode {
             route: written_route,
-            onboard_profiles,
+            mode,
             key: written_key,
         }),
     ] = commands.as_slice()
@@ -101,7 +104,7 @@ fn onboard_toggle_persists_the_choice_and_writes_the_device_directly() {
         panic!("expected a config reload followed by one onboard-mode write");
     };
     assert_eq!(*written_route, route);
-    assert!(!*onboard_profiles);
+    assert_eq!(*mode, OnboardMode::Host);
     assert_eq!(*written_key, key);
 }
 
@@ -111,9 +114,9 @@ fn onboard_toggle_is_inert_on_a_device_without_onboard_profiles() {
     drain(&mut receiver);
     let config_key = config_key(&state);
 
-    let _ = state.commit_onboard_profiles(false);
+    let _ = state.commit_onboard_mode(OnboardMode::Host);
 
-    assert_eq!(state.config.onboard_profiles(&config_key), None);
+    assert_eq!(state.config.onboard_mode(&config_key), None);
     assert!(drain(&mut receiver).is_empty());
 }
 
@@ -121,18 +124,27 @@ fn onboard_toggle_is_inert_on_a_device_without_onboard_profiles() {
 fn the_devices_reading_outranks_the_persisted_choice() {
     // A refused switch: the user chose host control, the device kept its
     // onboard profile. DPI controls must follow what the device reports.
-    let onboard = OnboardProfilesLoad::Ready(Arc::new(true));
-    assert!(onboard_profiles_shown(&onboard, Some(false)));
-    assert!(!onboard_profiles_shown(
-        &OnboardProfilesLoad::Ready(Arc::new(false)),
-        Some(true)
-    ));
+    let onboard = OnboardProfilesLoad::Ready(Arc::new(OnboardMode::Onboard));
+    assert_eq!(
+        shown_mode(&onboard, Some(OnboardMode::Host)),
+        OnboardMode::Onboard
+    );
+    assert_eq!(
+        shown_mode(
+            &OnboardProfilesLoad::Ready(Arc::new(OnboardMode::Host)),
+            Some(OnboardMode::Onboard)
+        ),
+        OnboardMode::Host
+    );
     // Until a reading lands, the choice stands in, then the factory mode.
-    assert!(!onboard_profiles_shown(
-        &OnboardProfilesLoad::Loading,
-        Some(false)
-    ));
-    assert!(onboard_profiles_shown(&OnboardProfilesLoad::Unknown, None));
+    assert_eq!(
+        shown_mode(&OnboardProfilesLoad::Loading, Some(OnboardMode::Host)),
+        OnboardMode::Host
+    );
+    assert_eq!(
+        shown_mode(&OnboardProfilesLoad::Unknown, None),
+        OnboardMode::Onboard
+    );
 }
 
 #[test]
@@ -140,10 +152,10 @@ fn a_switch_holds_off_re_reads_until_the_device_answers() {
     let (mut state, _receiver) = mouse_state(true);
     let key = state.current_record().expect("mouse").device_key();
 
-    let _ = state.commit_onboard_profiles(false);
+    let _ = state.commit_onboard_mode(OnboardMode::Host);
     assert!(state.pointer.reads.onboard_profiles_write_pending(&key));
 
-    let _ = state.apply_onboard_profiles_written(&key, Err(WriteError::AgentUnavailable));
+    let _ = state.apply_onboard_mode_written(&key, Err(WriteError::AgentUnavailable));
     assert!(
         !state.pointer.reads.onboard_profiles_write_pending(&key),
         "a refused switch re-reads the device instead of trusting the request"
@@ -160,7 +172,7 @@ fn handing_control_to_the_host_shows_the_users_own_dpi_again() {
         .edit(|config| config.set_dpi(&config_key, Dpi::new(3200)));
     state.pointer.dpi = Dpi::new(800);
 
-    let events = state.apply_onboard_profiles_written(&key, Ok(false));
+    let events = state.apply_onboard_mode_written(&key, Ok(OnboardMode::Host));
 
     assert_eq!(events, [StateEvent::OnboardProfilesChanged(key)]);
     assert_eq!(state.dpi(), Dpi::new(3200));
@@ -172,7 +184,7 @@ fn a_refused_onboard_write_still_repaints_the_device_tab() {
     let key = state.current_record().expect("mouse").device_key();
 
     assert_eq!(
-        state.apply_onboard_profiles_written(&key, Err(WriteError::AgentUnavailable)),
+        state.apply_onboard_mode_written(&key, Err(WriteError::AgentUnavailable)),
         [StateEvent::OnboardProfilesChanged(key)]
     );
 }
