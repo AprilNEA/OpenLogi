@@ -457,16 +457,18 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
 
 fn dpi_range_label(status: &DpiLoad, reachable: bool) -> AnyElement {
     match status {
-        DpiLoad::Ready(info) => h_flex()
-            .gap_1()
-            .child(format!(
-                "{}–{}",
-                info.capabilities.min(),
-                info.capabilities.max()
-            ))
-            .child(Icon::empty().path("action-icons/dot.svg").size_3())
-            .child(tr!("pointer.dpi_step", step => info.capabilities.step_hint()))
-            .into_any_element(),
+        // The range the slider spans, not the whole list: beside a slider that
+        // ends at 8000, a gaming sensor's "100–48000 · step 1" reads as if the
+        // slider still covered it.
+        DpiLoad::Ready(info) => {
+            let stops = info.capabilities.slider_stops();
+            h_flex()
+                .gap_1()
+                .child(format!("{}–{}", stops.min(), stops.max()))
+                .child(Icon::empty().path("action-icons/dot.svg").size_3())
+                .child(tr!("pointer.dpi_step", step => stops.step_hint()))
+                .into_any_element()
+        }
         DpiLoad::Unknown | DpiLoad::Loading if !reachable => {
             tr!("pointer.dpi_range_device_offline").into_any_element()
         }
