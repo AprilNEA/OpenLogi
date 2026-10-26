@@ -4,7 +4,9 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::Context as _;
 use gpui::AppContext as _;
 use gpui::{AnyWindowHandle, Entity, HeadlessAppContext, Render, Window, px, size};
-use gpui_component::{Root, Theme, ThemeMode};
+#[cfg(test)]
+use gpui_kit::component::Theme;
+use gpui_kit::component::{Root, ThemeMode};
 use openlogi_core::{
     binding::{Action, ButtonId, GestureDirection},
     config::Config,
@@ -28,13 +30,23 @@ pub(crate) fn output() -> Option<PathBuf> {
 
 pub(crate) fn context(mode: ThemeMode) -> HeadlessAppContext {
     let mut cx = HeadlessAppContext::with_platform(
-        gpui_platform::current_platform(true).text_system(),
+        gpui_kit::platform::current_platform(true).text_system(),
         Arc::new(crate::app_assets::AppAssets),
-        gpui_platform::current_headless_renderer,
+        gpui_kit::platform::current_headless_renderer,
     );
-    cx.update(gpui_component::init);
-    cx.update(|cx| Theme::change(mode, None, cx));
+    cx.update(|cx| initialize(mode, cx));
     cx
+}
+
+fn initialize(mode: ThemeMode, cx: &mut gpui::App) {
+    gpui_kit::init(cx);
+    crate::ui::theme::register_builtin_themes(cx);
+    crate::ui::theme::apply_theme_tokens(
+        mode,
+        None,
+        &openlogi_core::config::AppSettings::default(),
+        cx,
+    );
 }
 
 pub(crate) fn install_fixture(
@@ -84,6 +96,7 @@ pub(crate) fn install_on_app(
             codename: Some("MX Master 4".into()),
             wpid: None,
             kind: DeviceKind::Mouse,
+            hidpp10: false,
             online: true,
             battery: None,
             settings_revision: 0,
@@ -183,4 +196,23 @@ pub(crate) fn run() -> anyhow::Result<()> {
     std::fs::create_dir_all(directory)?;
     crate::features::mouse::view::render_native_qa()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn contexts_use_bundled_openlogi_themes(cx: &mut gpui::TestAppContext) {
+        for (mode, name) in [
+            (ThemeMode::Light, crate::ui::theme::OPENLOGI_LIGHT),
+            (ThemeMode::Dark, crate::ui::theme::OPENLOGI_DARK),
+        ] {
+            cx.update(|cx| {
+                initialize(mode, cx);
+                let theme = Theme::global(cx);
+                assert_eq!(theme.theme_name(), name);
+            });
+        }
+    }
 }

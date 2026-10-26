@@ -1102,8 +1102,8 @@ mod tests;
 pub(crate) fn render_native_qa() -> anyhow::Result<()> {
     use anyhow::Context as _;
     for (theme, name) in [
-        (gpui_component::ThemeMode::Light, "light"),
-        (gpui_component::ThemeMode::Dark, "dark"),
+        (gpui_kit::component::ThemeMode::Light, "light"),
+        (gpui_kit::component::ThemeMode::Dark, "dark"),
     ] {
         let mut cx = crate::qa::context(theme);
         let _receiver = crate::qa::install_fixture(&mut cx)?;
@@ -1116,7 +1116,7 @@ pub(crate) fn render_native_qa() -> anyhow::Result<()> {
             );
             view.update(cx, |view, cx| {
                 view.select(MouseControlId::Button(ButtonId::HapticPanel));
-                view.set_gesture_selected_dir(Some(GestureDirection::Up));
+                view.select_gesture_direction(GestureDirection::Up);
                 cx.notify();
             });
             let state = AppState::try_read(cx).context("QA state unavailable")?;
