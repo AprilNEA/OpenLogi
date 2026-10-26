@@ -17,7 +17,7 @@ use gpui::{App, Global};
 use gpui_updater::Version;
 
 use self::release_check::{LinuxUpdateCheck, ReleaseAsset};
-use crate::platform::installation::{Installation, InstallationSource};
+use crate::platform::installation::{Installation, InstallationSource, LinuxPackage};
 
 pub mod package_install;
 pub mod release_check;
@@ -83,10 +83,32 @@ pub fn check_in_background(cx: &mut App) {
     .detach();
 }
 
+/// The package family an in-app update installs through, or `None` when
+/// this install cannot update in-app. Only a package the detected package
+/// manager owns qualifies (not Nix, `Unknown`, or a still-`Detecting` probe),
+/// and only in a build that embeds the update signing key: without it every
+/// download fails verification. The one gate for the Settings button and
+/// [`install`].
+pub fn installable_package(installation: Installation) -> Option<LinuxPackage> {
+    installable_package_with(installation, super::minisign_public_key())
+}
+
+/// [`installable_package`] with the embedded key passed in, so tests cover a
+/// build with and without one.
+fn installable_package_with(
+    installation: Installation,
+    update_key: Option<&str>,
+) -> Option<LinuxPackage> {
+    let Installation::Detected(InstallationSource::LinuxPackage(package)) = installation else {
+        return None;
+    };
+    update_key.is_some().then_some(package)
+}
+
 /// Download, verify and install the update [`check_in_background`] found,
 /// then report [`LinuxUpdateStatus::Staged`] for the restart prompt. A no-op
-/// off Linux, without a matched package installation, or without an
-/// [`LinuxUpdateStatus::Available`] result to act on.
+/// off Linux, or without an [`LinuxUpdateStatus::Available`] result to act
+/// on; an error when [`installable_package`] rejects this install.
 pub fn install(cx: &mut App) {
     if !cfg!(target_os = "linux") {
         return;
@@ -96,11 +118,11 @@ pub fn install(cx: &mut App) {
     else {
         return;
     };
-    let Installation::Detected(InstallationSource::LinuxPackage(source)) =
-        *cx.global::<Installation>()
-    else {
+    let Some(source) = installable_package(*cx.global::<Installation>()) else {
         cx.set_global(LinuxUpdateStatus::Errored(
-            "installation source is not a recognized Linux package".to_string(),
+            "this install cannot update in-app: it is not a recognized Linux package, \
+             or this build embeds no update signing key"
+                .to_string(),
         ));
         return;
     };
@@ -204,7 +226,7 @@ fn download_bytes(url: &str, limit: u64, timeout: Duration) -> Result<Vec<u8>, S
 fn download_verify_and_install(
     assets: &[ReleaseAsset],
     version: &Version,
-    source: crate::platform::installation::LinuxPackage,
+    source: LinuxPackage,
 ) -> Result<(), String> {
     package_install::ensure_newer(version, &super::running_version())?;
     package_install::require_install_tools(source)?;
@@ -262,4 +284,30 @@ fn download_verify_and_install(
         return Err("package-manager install failed".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_detected_linux_package_in_a_keyed_build_installs_in_app() {
+        let rpm = Installation::Detected(InstallationSource::LinuxPackage(LinuxPackage::Rpm));
+        assert_eq!(
+            installable_package_with(rpm, Some("key")),
+            Some(LinuxPackage::Rpm)
+        );
+        assert_eq!(installable_package_with(rpm, None), None);
+        for installation in [
+            Installation::Detecting,
+            Installation::Detected(InstallationSource::Nix),
+            Installation::Detected(InstallationSource::Unknown),
+        ] {
+            assert_eq!(
+                installable_package_with(installation, Some("key")),
+                None,
+                "{installation:?}"
+            );
+        }
+    }
 }
