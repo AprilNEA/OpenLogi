@@ -17,6 +17,7 @@ pub mod battery;
 pub mod controls;
 pub mod dpi;
 pub mod features;
+pub mod haptic;
 pub mod host_switch;
 pub mod lighting;
 pub mod mouse_buttons;
@@ -40,6 +41,8 @@ pub enum DiagCmd {
     Smartshift(smartshift::SmartshiftArgs),
     /// Set an online RGB device to a solid colour (e.g. `ff0000` for red).
     Lighting(lighting::LightingArgs),
+    /// List the haptic waveforms a device advertises and play them (HID++ 0x19b0).
+    Haptic(haptic::HapticArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
     /// Read 0x2205 pointer scaling → write a test value → read back → restore.
@@ -68,6 +71,7 @@ impl DiagCmd {
             Self::Dpi(args) => dpi::run(args).await,
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
+            Self::Haptic(args) => haptic::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
             Self::PointerSpeed(args) => pointer_speed::run(args).await,
             Self::Onboard(args) => onboard::run(args).await,
