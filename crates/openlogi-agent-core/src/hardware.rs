@@ -1962,6 +1962,7 @@ mod tests {
         let reconnecting = tokio::spawn(async move {
             reconnect
                 .write_or(
+                    std::future::ready(()),
                     || async move {
                         let _ = started.send(());
                         let _ = released.await;

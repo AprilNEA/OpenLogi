@@ -453,8 +453,8 @@ fn lock_keys() {
     );
 }
 
-/// Onboard-profiles RPCs are appended after the lock-key observer, so their
-/// variant indices (0x28/0x29) sit past every method above.
+/// Onboard-profiles RPCs are appended after the saved-config verdict reload,
+/// so their variant indices (0x2f/0x30) sit past every method above.
 #[test]
 fn onboard_profiles_requests() {
     assert_wire(
@@ -464,7 +464,7 @@ fn onboard_profiles_requests() {
                 slot: 1,
             },
         },
-        "280008463030444341464501",
+        "2f0008463030444341464501",
     );
     assert_wire(
         &AgentRequest::SetOnboardProfiles {
@@ -474,7 +474,7 @@ fn onboard_profiles_requests() {
             },
             onboard_profiles: false,
         },
-        "29000846303044434146450100",
+        "30000846303044434146450100",
     );
 }
 
@@ -751,7 +751,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010007",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010101000107",
     );
 }
 

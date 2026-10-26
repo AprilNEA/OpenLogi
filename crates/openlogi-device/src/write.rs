@@ -82,10 +82,10 @@ pub use litra::{
     encode_command as encode_litra_command, find_litra, litra_model_for_route, matches_litra,
     read_state as read_litra_state, watch as watch_litra,
 };
-pub use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
 pub use onboard_mode::{
     get_onboard_profiles, get_onboard_profiles_on, set_onboard_profiles, set_onboard_profiles_on,
 };
+pub use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
 };
