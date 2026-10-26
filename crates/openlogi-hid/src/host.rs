@@ -26,8 +26,9 @@ use openlogi_device::backlight::{BacklightChange, BacklightState};
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticReport, HapticWaveform,
+    LightingMethod, LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution,
+    ScrollWheelMode,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -209,6 +210,21 @@ pub async fn set_keyboard_color_with(
 /// Play a haptic waveform on the device `route` reaches.
 pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Result<(), WriteError> {
     device::play_haptic(&*native_backend(), route, waveform).await
+}
+
+/// Play `waveforms` over one open of the haptic feature on the device
+/// `route` reaches, returning how long each play took.
+pub async fn time_haptic_plays(
+    route: &DeviceRoute,
+    waveforms: Vec<HapticWaveform>,
+    interval: std::time::Duration,
+) -> Result<Vec<(HapticWaveform, std::time::Duration)>, WriteError> {
+    device::time_haptic_plays(&*native_backend(), route, waveforms, interval).await
+}
+
+/// Read what the device `route` reaches reports about its haptic engine.
+pub async fn read_haptic_report(route: &DeviceRoute) -> Result<HapticReport, WriteError> {
+    device::read_haptic_report(&*native_backend(), route).await
 }
 
 /// Apply a light command to the Litra `route` reaches, returning the state

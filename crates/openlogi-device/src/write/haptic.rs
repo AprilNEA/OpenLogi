@@ -446,6 +446,66 @@ pub async fn play_haptic(
     .await
 }
 
+/// Play `waveforms` in order over one open of the feature, pausing
+/// `interval` after each, and return how long each play took. The open
+/// itself is not timed, so the figures are the steady-state cost of one
+/// play, as the agent's cached [`play_haptic_on`] pays it. Diagnostic only.
+pub async fn time_haptic_plays(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    waveforms: Vec<HapticWaveform>,
+    interval: Duration,
+) -> Result<Vec<(HapticWaveform, Duration)>, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let haptics = open_haptics(&channel, index).await?;
+        let mut timings = Vec::with_capacity(waveforms.len());
+        for waveform in waveforms {
+            haptics.check(waveform)?;
+            let started = std::time::Instant::now();
+            haptics.feature.play(waveform).await.map_err(|error| {
+                classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+            })?;
+            timings.push((waveform, started.elapsed()));
+            tokio::time::sleep(interval).await;
+        }
+        Ok(timings)
+    })
+    .await
+}
+
+/// What a device reports about its haptic engine: the diagnostic read
+/// behind `openlogi diag haptic`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HapticReport {
+    /// Waveforms the device advertises.
+    pub waveforms: SupportedWaveforms,
+    /// The function-3 status, or `None` when the device did not answer it.
+    pub status: Option<HapticStatus>,
+    /// Enable flags, intensity, and discrete levels.
+    pub configuration: HapticConfiguration,
+}
+
+/// Read what the device reaching `route` reports about its haptic engine.
+pub async fn read_haptic_report(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<HapticReport, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let haptics = open_haptics(&channel, index).await?;
+        let configuration = haptics.feature.get_configuration().await.map_err(|error| {
+            classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })?;
+        Ok(HapticReport {
+            waveforms: haptics.waveforms,
+            status: haptics.status,
+            configuration,
+        })
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches;

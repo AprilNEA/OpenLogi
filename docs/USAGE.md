@@ -14,6 +14,8 @@ openlogi diag dpi             # read → write → read-back → restore DPI (sm
 openlogi diag pointer-speed             # test 0x2205 pointer scaling and attempt to restore it
 openlogi diag smartshift                # toggle SmartShift and restore (smoke test)
 openlogi diag smartshift --torque 60    # set scrolling force / feedback intensity (1-100%)
+openlogi diag haptic                    # list the haptic waveforms an MX Master 4 advertises (read-only)
+openlogi diag haptic --all              # ...and play each one, timing every call
 openlogi diag lighting ff0000           # solid colour for a wired RGB keyboard (any RRGGBB hex)
 ```
 
