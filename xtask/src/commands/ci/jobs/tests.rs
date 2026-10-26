@@ -39,6 +39,27 @@ fn workflow_commands(workflow: &str) -> String {
         .join(" ")
 }
 
+/// The lines of the `ci.yml` job keyed `key`, from its key to the next job's,
+/// so a test can check what that one job runs rather than the whole workflow.
+fn workflow_job<'a>(workflow: &'a str, key: &str) -> Vec<&'a str> {
+    let header = format!("  {key}:");
+    let mut lines = workflow
+        .lines()
+        .skip_while(|line| line.trim_end() != header)
+        .peekable();
+    let Some(first) = lines.next() else {
+        panic!("ci.yml has no `{key}` job");
+    };
+    // A job ends where the next key at the same two-space indent starts.
+    let is_job_key = |line: &&str| {
+        line.strip_prefix("  ")
+            .is_some_and(|rest| !rest.starts_with(' ') && !rest.trim().is_empty())
+    };
+    std::iter::once(first)
+        .chain(lines.take_while(|line| !is_job_key(line)))
+        .collect()
+}
+
 #[test]
 fn wrapped_commands_join_under_either_line_ending() {
     let joined = "cargo doc --workspace --exclude openlogi-ui";
@@ -105,7 +126,12 @@ fn native_clippy_windows_runs_what_ci_runs() {
     let Some(workflow) = workflow() else {
         return;
     };
-    let commands = workflow_commands(&workflow);
+    // Only this job's commands: the `docs` job runs the same `cargo doc`, so
+    // searching the whole workflow would pass with the Windows step removed.
+    let commands = workflow_commands(&workflow_job(&workflow, "clippy-windows").join(
+        "
+",
+    ));
     let sh = Shell::new().expect("a shell");
 
     let plan = Job::ClippyWindows.plan(&sh, Host::Windows).expect("a plan");
