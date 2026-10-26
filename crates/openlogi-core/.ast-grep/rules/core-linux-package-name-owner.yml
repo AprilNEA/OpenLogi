@@ -1,0 +1,36 @@
+# Owner: openlogi_core::linux_package — the Linux package arch tag (`amd64`,
+# `arm64`) for a Rust arch, and the published package file name
+# `openlogi-v<version>-linux-<arch>.<extension>`. xtask builds the packages
+# with that tag and the desktop app matches release assets by that name.
+# Tests may pin the literal names as an oracle; production code asks
+# linux_package.
+id: core-linux-package-name-owner
+language: rust
+severity: error
+message: The Linux package arch tag and file name are openlogi_core::linux_package's (arch_tag, release_file_name); ask it instead of spelling `amd64` or a `-linux-` package name here.
+note: |
+  `xtask linux package` mapped x86_64 to amd64 and the desktop updater mapped
+  it again to find the release asset. See "Single source of truth" in
+  AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/src/linux_package.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - any:
+        - kind: string_literal
+        - kind: raw_string_literal
+    - any:
+        - regex: '^r?#*"amd64"#*$'
+        - regex: '-linux-\{'
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'
