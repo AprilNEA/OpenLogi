@@ -49,8 +49,6 @@ use openlogi_core::update_feed::UpdateChannel;
 use crate::state::AppState;
 
 pub mod linux;
-pub mod linux_package_install;
-pub mod linux_release_check;
 
 /// The update host, embedded at build time by the release workflow. A build
 /// without one reads the official host. So does a build with an empty one,

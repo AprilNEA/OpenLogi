@@ -1,10 +1,11 @@
 //! GitHub Releases version check for Linux package installs.
 //!
-//! The engine-based manifest check in [`super`] never has a Linux asset to
-//! find (`.deb`/`.rpm`/`.pkg.tar.zst` installs update through the OS package
-//! manager, not the in-app engine — see `xtask/src/commands/release/latest_json.rs`).
+//! The engine-based manifest check in [`crate::platform::updater`] never has a
+//! Linux asset to find (`.deb`/`.rpm`/`.pkg.tar.zst` installs update through
+//! the OS package manager, not the in-app engine — see
+//! `xtask/src/commands/release/latest_json.rs`).
 //! This checks the project's GitHub Releases directly instead, purely to learn
-//! whether a newer version exists; installing it is [`super::linux_package_install`].
+//! whether a newer version exists; installing it is [`super::package_install`].
 
 use gpui_updater::Version;
 use openlogi_core::update_feed::UpdateChannel;
