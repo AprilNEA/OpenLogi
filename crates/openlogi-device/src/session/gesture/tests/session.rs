@@ -1,6 +1,7 @@
 //! The capture session lifecycle: arming, restore through a replacement channel, rollback, and teardown order.
 
 use super::*;
+use crate::channel::registry::PublicationState;
 use crate::channel::scripted::feature_error;
 
 #[tokio::test]
@@ -653,8 +654,9 @@ async fn an_offline_receiver_slot_restores_on_return_to_the_same_usb_channel() {
         "no restoration writes on an inactive slot"
     );
     registry.replace_node(node.clone(), [], channel.clone());
-    assert!(
-        registry.contains_transport(&shared),
+    assert_eq!(
+        registry.publication(&shared),
+        PublicationState::SlotOffline,
         "an all-offline receiver still owns its USB channel"
     );
     let pending = match pending.retry(&registry).await {

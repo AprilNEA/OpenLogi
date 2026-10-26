@@ -15,6 +15,7 @@ use thiserror::Error;
 use super::gesture::main_wheel;
 use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
+use crate::channel::registry::PublicationState;
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel, ThumbwheelStatus};
 use crate::{ChannelRegistry, DeviceRoute, IoSuspended, SharedChannel};
@@ -365,17 +366,10 @@ pub(crate) fn stop_for_current_publication(
     registry: &ChannelRegistry,
     retired: &SharedChannel,
 ) -> CaptureStop {
-    if registry.is_current(retired) {
-        CaptureStop::Shutdown
-    } else if matches!(
-        retired.route(),
-        DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. }
-    ) && registry.lookup(retired.route()).is_none()
-        && registry.contains_transport(retired)
-    {
-        CaptureStop::ReceiverSlotGone
-    } else {
-        CaptureStop::ChannelChanged
+    match registry.publication(retired) {
+        PublicationState::Current => CaptureStop::Shutdown,
+        PublicationState::SlotOffline => CaptureStop::ReceiverSlotGone,
+        PublicationState::Retired => CaptureStop::ChannelChanged,
     }
 }
 

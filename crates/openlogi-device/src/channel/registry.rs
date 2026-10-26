@@ -283,11 +283,40 @@ impl ChannelRegistry {
         })
     }
 
-    /// Whether inventory still publishes the underlying transport, even when
-    /// every paired device on that receiver is offline and has no live route.
-    pub(crate) fn contains_transport(&self, shared: &SharedChannel) -> bool {
-        self.inner.contains_channel(shared.channel())
+    /// How inventory publishes the connection `shared` was taken from now.
+    ///
+    /// This is the one place that tells an offline receiver slot from a
+    /// retired transport. Sessions map the verdict to their own stop reason
+    /// instead of recombining route lookups and transport checks.
+    #[must_use]
+    pub(crate) fn publication(&self, shared: &SharedChannel) -> PublicationState {
+        if self.is_current(shared) {
+            PublicationState::Current
+        } else if matches!(
+            shared.route(),
+            DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. }
+        ) && self.inner.lookup(shared.route()).is_none()
+            && self.inner.contains_channel(shared.channel())
+        {
+            PublicationState::SlotOffline
+        } else {
+            PublicationState::Retired
+        }
     }
+}
+
+/// How inventory publishes a channel a session took earlier; the verdict of
+/// [`ChannelRegistry::publication`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationState {
+    /// The channel still wins its exact route on the same connection.
+    Current,
+    /// Inventory withdrew the receiver slot's route but still publishes the
+    /// USB transport, so the slot may return on the same connection.
+    SlotOffline,
+    /// Inventory removed or replaced the connection, or another publication
+    /// now wins the route. Do not write through it again.
+    Retired,
 }
 
 #[cfg(test)]

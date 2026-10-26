@@ -65,6 +65,7 @@ pub use restore::{
 use crate::{
     ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, IoSuspended, SharedChannel,
     backend::BackendError,
+    channel::registry::PublicationState,
     reprog_controls::{self, ReprogControlsV4},
 };
 
@@ -592,25 +593,19 @@ impl HostSwitchStop {
     /// A stop that did not itself retire the channel. Re-checking inventory
     /// keeps a simultaneously ready replacement from being written underneath.
     fn for_current_publication(registry: &ChannelRegistry, shared: &SharedChannel) -> Self {
-        if registry.is_current(shared) {
-            Self::Shutdown
-        } else {
-            Self::for_lost_publication(registry, shared)
+        match registry.publication(shared) {
+            PublicationState::Current => Self::Shutdown,
+            PublicationState::SlotOffline => Self::ReceiverSlotGone,
+            PublicationState::Retired => Self::ChannelChanged,
         }
     }
 
     /// Losing a receiver slot does not retire its still-published transport.
     /// A lost owner on an otherwise current route remains conservative.
     fn for_lost_publication(registry: &ChannelRegistry, shared: &SharedChannel) -> Self {
-        if matches!(
-            shared.route(),
-            DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. }
-        ) && registry.lookup(shared.route()).is_none()
-            && registry.contains_transport(shared)
-        {
-            Self::ReceiverSlotGone
-        } else {
-            Self::ChannelChanged
+        match registry.publication(shared) {
+            PublicationState::SlotOffline => Self::ReceiverSlotGone,
+            PublicationState::Current | PublicationState::Retired => Self::ChannelChanged,
         }
     }
 }
