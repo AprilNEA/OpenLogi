@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 
+use core_graphics::display::CGDisplay;
 use core_graphics::event::{CGEvent, CGEventField, CGEventFlags, CGEventType, EventField};
 use tracing::debug;
 
@@ -166,6 +167,17 @@ fn from_virtual_keyboard(event: &CGEvent) -> bool {
     })
 }
 
+/// Note the display a pointer move lands on, while the agent asks
+/// ([`crate::track_pointer_display`]).
+fn note_pointer_display(event: &CGEvent) {
+    if crate::tracks_pointer_display()
+        && let Ok((displays, _)) = CGDisplay::displays_with_point(event.location(), 1)
+        && let Some(&display) = displays.first()
+    {
+        crate::record_pointer_display(display);
+    }
+}
+
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
 /// for event types we don't translate (e.g. move events, unknown buttons).
 pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
@@ -266,6 +278,7 @@ pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEven
         | CGEventType::RightMouseDragged
         | CGEventType::OtherMouseDragged => {
             refresh_attribution(event);
+            note_pointer_display(event);
             let dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X);
             let dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y);
             #[expect(
