@@ -23,7 +23,7 @@ use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
 use super::commit_slider::{CommitSlider, SliderRange};
-use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle, toggle_row};
+use super::components::{MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, toggle_row};
 use super::status::{retry_line, status_line};
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
 
@@ -97,6 +97,7 @@ struct ComponentGallery {
     menu_selected: usize,
     profile_selected: usize,
     preset_selected: bool,
+    pill_selected: usize,
     carousel_selected: usize,
     slider: CommitSlider<u8>,
     slider_committed: u8,
@@ -119,6 +120,7 @@ impl ComponentGallery {
             menu_selected: 0,
             profile_selected: 1,
             preset_selected: true,
+            pill_selected: 1,
             carousel_selected: 1,
             slider,
             slider_committed,
@@ -201,6 +203,7 @@ impl ComponentGallery {
             .child(self.menu_panel(pal, cx))
             .child(self.profile_panel(pal, cx))
             .child(self.preset_panel(pal, cx))
+            .child(self.pill_panel(pal, cx))
             .child(self.slider_panel(pal))
             .child(Self::battery_panel(pal))
             .child(gallery_panel(
@@ -385,6 +388,40 @@ impl ComponentGallery {
                         .px_1()
                         .text_color(pal.text_muted)
                         .child(Icon::new(IconName::Close).size_3()),
+                ),
+            pal,
+        )
+    }
+
+    fn pill_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        const STEPS: [&str; 3] = ["5 s", "10 s", "30 s"];
+        gallery_panel(
+            "Pill",
+            IconName::Sun,
+            v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .children(STEPS.into_iter().enumerate().map(|(index, label)| {
+                            Pill::new(("gallery-pill", index), label)
+                                .selected(self.pill_selected == index)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.pill_selected = index;
+                                    cx.notify();
+                                }))
+                        })),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .children(STEPS.into_iter().enumerate().map(|(index, label)| {
+                            Pill::new(("gallery-pill-disabled", index), label)
+                                .selected(self.pill_selected == index)
+                                .disabled(true)
+                        })),
                 ),
             pal,
         )

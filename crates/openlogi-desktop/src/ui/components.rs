@@ -620,5 +620,77 @@ impl RenderOnce for PresetChip {
     }
 }
 
+/// One choice in a row of compact pills: a backlight level, a timer step, a
+/// report rate, a wheel mode.
+///
+/// A stock gpui-component `Button` paints its selected state with the theme's
+/// pressed fill, which on the light theme is about 1.07:1 from the resting
+/// fill, so the chosen value could not be told apart (#2046). A pill takes the
+/// house selected look from [`SelectableStyle`] instead: the accent border and
+/// faint accent fill that [`PresetChip`] and [`ProfileTab`] use. A disabled
+/// pill keeps the stock disabled look, because there is nothing to choose.
+#[derive(IntoElement)]
+pub(crate) struct Pill {
+    button: gpui_component::button::Button,
+    selected: bool,
+    disabled: bool,
+}
+
+impl Pill {
+    pub(crate) fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Self {
+            button: gpui_component::button::Button::new(id)
+                .compact()
+                .label(label),
+            selected: false,
+            disabled: false,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.button = self.button.on_click(handler);
+        self
+    }
+
+    /// The stock button, with the house selected look on an enabled selection.
+    fn into_button(self, pal: theme::Palette) -> gpui_component::button::Button {
+        let marked = self.selected && !self.disabled;
+        self.button
+            .selected(self.selected)
+            .disabled(self.disabled)
+            .when(marked, |pill| {
+                pill.selected_border(true, pal).selected_fill(true)
+            })
+    }
+}
+
+impl Selectable for Pill {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl Disableable for Pill {
+    fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+}
+
+impl RenderOnce for Pill {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.into_button(theme::palette(cx))
+    }
+}
+
 #[cfg(test)]
 mod tests;

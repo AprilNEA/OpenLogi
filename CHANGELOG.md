@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.18] - 2026-10-25
+
+### Added
+
+- *(assets)* ask the jsDelivr data API for the newest asset release ([#2040](https://github.com/AprilNEA/OpenLogi/pull/2040))
+- *(desktop)* add a keyboard backlight duration timer ([#1879](https://github.com/AprilNEA/OpenLogi/pull/1879))
+- *(core,agent,gui)* add guarded disable-keys controls ([#993](https://github.com/AprilNEA/OpenLogi/pull/993))
+- *(core,agent,gui)* add a press force setting for the MX Master 4 Haptic Sense Panel ([#2021](https://github.com/AprilNEA/OpenLogi/pull/2021))
+- *(hidpp)* add capability-bound force sensing buttons ([#2016](https://github.com/AprilNEA/OpenLogi/pull/2016))
+- *(release)* cut betas from a workflow and tell the tap about them ([#2005](https://github.com/AprilNEA/OpenLogi/pull/2005))
+- *(release)* build a beta at its own version ([#2004](https://github.com/AprilNEA/OpenLogi/pull/2004))
+- *(xtask,ci)* compose update channel files from per-release records ([#2000](https://github.com/AprilNEA/OpenLogi/pull/2000))
+- *(agent)* drive the mock agent from a stdin control console ([#2003](https://github.com/AprilNEA/OpenLogi/pull/2003))
+
+### Fixed
+
+- *(assets)* follow the 0.1 asset release line instead of pinning 0.1.0 ([#2039](https://github.com/AprilNEA/OpenLogi/pull/2039))
+- *(i18n)* translate the receiver chooser, old-pairing cleanup, and update channel in Czech ([#2034](https://github.com/AprilNEA/OpenLogi/pull/2034))
+- *(cli)* route backlight operations through the agent ([#2031](https://github.com/AprilNEA/OpenLogi/pull/2031))
+- *(windows)* post the layout's scan code with keys a layout can move ([#2028](https://github.com/AprilNEA/OpenLogi/pull/2028))
+- *(overlay)* draw the Windows Actions Ring without a window frame ([#1913](https://github.com/AprilNEA/OpenLogi/pull/1913))
+- *(agent)* re-apply volatile settings after replacing a dead channel ([#1997](https://github.com/AprilNEA/OpenLogi/pull/1997))
+- *(i18n)* translate the disable-keys strings in 22 locales ([#2024](https://github.com/AprilNEA/OpenLogi/pull/2024))
+- *(deps)* update Tokio for AsyncFd soundness advisory ([#2019](https://github.com/AprilNEA/OpenLogi/pull/2019))
+- *(device)* bound Bolt receiver identity reads ([#2009](https://github.com/AprilNEA/OpenLogi/pull/2009))
+- *(release)* name Sparkle deltas so Sparkle applies them ([#2002](https://github.com/AprilNEA/OpenLogi/pull/2002))
+
 ## [0.8.17] - 2026-10-22
 
 ### Added
