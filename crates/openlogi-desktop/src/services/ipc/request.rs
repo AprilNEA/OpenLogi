@@ -16,7 +16,7 @@
 
 use std::future::Future;
 
-use openlogi_core::config::{ConfigRevision, Lighting};
+use openlogi_core::config::{ConfigRevision, EventHapticFeedback, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
     EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PointerSpeed,
@@ -206,6 +206,29 @@ impl Request for SetReportRate {
             route: self.route,
             result: or_unavailable(outcome),
         });
+    }
+}
+
+/// Play a haptic preview on the mouse on `route`, fire-and-forget: a lost
+/// preview is felt as missing, and the next choice plays its own.
+pub struct PlayHaptic {
+    pub route: DeviceRoute,
+    pub feedback: EventHapticFeedback,
+}
+
+impl Request for PlayHaptic {
+    type Answer = Result<(), WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .play_haptic(context::current(), Some(self.route.clone()), self.feedback)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _updates: &UpdateSender) {
+        if let Ok(Err(error)) = outcome {
+            debug!(%error, feedback = self.feedback.name(), "haptic preview refused");
+        }
     }
 }
 
@@ -1151,6 +1174,7 @@ commands! {
     SetPointerSpeed,
     SetSidetone,
     SetForceSensing,
+    PlayHaptic,
     SetBacklight,
     RenameEasySwitchHost,
     ReadDpi,

@@ -248,11 +248,7 @@ fn size_segment(current: ActionRingSize, cx: &App) -> ButtonGroup {
 }
 
 fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {
-    AppState::try_read(cx).is_some_and(|state| {
-        state
-            .current_record()
-            .is_some_and(|record| record.capabilities_or_presumed().haptic_feedback)
-    })
+    AppState::try_read(cx).is_some_and(AppState::current_haptic_feedback_supported)
 }
 
 const PREVIEW_SIZE: f32 = 320.0;
