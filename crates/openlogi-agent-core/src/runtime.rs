@@ -12,6 +12,7 @@ pub mod scroll;
 
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,7 @@ use self::button::{
 pub(crate) use self::button::{HidppSessionId, PressToken};
 pub(crate) use self::pointer::{FocusBinding, PointerPress, PointerSelection};
 use crate::dpi::DpiBeforeShift;
+use crate::event_haptics::{EventCue, EventHaptics};
 use crate::hardware::{
     DeviceAccess, restore_dpi_in_background, step_dpi_in_background,
     toggle_smartshift_in_background, write_pointer_speed_in_background,
@@ -162,12 +164,18 @@ impl HeldShortcuts {
     }
 }
 
+/// How close to an end of its range the output volume counts as there:
+/// macOS steps it in sixteenths, so this is well inside one step.
+const VOLUME_EPSILON: f32 = 0.01;
+
 #[derive(Clone)]
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
     pointer_speeds: Arc<PointerSpeeds>,
     access: DeviceAccess,
     requests: tokio::sync::mpsc::UnboundedSender<ActionRequest>,
+    /// Confirms DPI, SmartShift, and volume changes on the haptic mouse.
+    haptics: EventHaptics,
 }
 
 /// The request the agent handles itself for `action` pressed on
@@ -220,20 +228,47 @@ impl ActionExecutor {
 
     /// [`Self::write_speed`], first reading the sensor DPI into `before`.
     fn write_speed_reading(&self, write: SpeedWrite, before: Option<DpiBeforeShift>) {
-        self.write_speed_then(write, before, || {});
+        self.write_speed_then(write, before, || {}, || {});
     }
 
-    /// Write the DPI a preset action picked. If the mouse rejects it, the
-    /// cache forgets that DPI, so a DPI shift reads the mouse instead.
-    fn write_preset(&self, route: &DeviceRoute, dpi: Dpi) {
+    /// Write the DPI a preset action picked, and call `applied` once it
+    /// lands. If the mouse rejects it, the cache forgets that DPI, so a DPI
+    /// shift reads the mouse instead.
+    fn write_preset(&self, route: &DeviceRoute, dpi: Dpi, applied: impl FnOnce() + Send + 'static) {
         let rejected = self.preset_rejected(route.clone());
         self.write_speed_then(
             self.pointer_speeds.preset_write(route, dpi),
             None,
+            applied,
             move || {
                 rejected(dpi);
             },
         );
+    }
+
+    /// What confirms a preset write for the mouse `device_key` names, or
+    /// the selected one, once it lands: one tap per preset position, so the
+    /// count tells which preset it landed on. A rejected or superseded write
+    /// is not confirmed.
+    fn preset_confirmation(&self, device_key: Option<&str>) -> impl FnOnce() + Send + 'static {
+        let cycles = Arc::clone(&self.dpi_cycle);
+        let haptics = self.haptics.clone();
+        let key = device_key.map(str::to_owned);
+        move || {
+            let index = cycles.read().ok().and_then(|cycles| {
+                let state_key = key.as_deref().or(cycles.selected.as_deref())?;
+                Some(cycles.by_key.get(state_key)?.index)
+            });
+            let count =
+                index.and_then(|index| NonZeroU8::new(u8::try_from(index + 1).unwrap_or(u8::MAX)));
+            if let Some(count) = count {
+                let cue = EventCue::ModeChange { count };
+                match key.as_deref() {
+                    Some(key) => haptics.observe_on(key, cue),
+                    None => haptics.observe_host(cue),
+                }
+            }
+        }
     }
 
     /// What a preset write the mouse at `route` rejected does with its DPI:
@@ -247,12 +282,13 @@ impl ActionExecutor {
         }
     }
 
-    /// [`Self::write_speed_reading`], running `on_failed` when the mouse
-    /// rejects the write or it times out.
+    /// [`Self::write_speed_reading`], running `on_applied` once the write
+    /// lands, and `on_failed` when the mouse rejects it or it times out.
     fn write_speed_then(
         &self,
         write: SpeedWrite,
         before: Option<DpiBeforeShift>,
+        on_applied: impl FnOnce() + Send + 'static,
         on_failed: impl FnOnce() + Send + 'static,
     ) {
         let speeds = Arc::clone(&self.pointer_speeds);
@@ -273,6 +309,7 @@ impl ActionExecutor {
                 if let Some(restore) = restore {
                     speeds.restored(&restore);
                 }
+                on_applied();
             },
             on_failed,
         );
@@ -343,6 +380,7 @@ impl ActionExecutor {
         } = self.pointer_speeds.preset_place(&route);
         let cycles = Arc::clone(&self.dpi_cycle);
         let speeds = Arc::clone(&self.pointer_speeds);
+        let confirm = self.preset_confirmation(device_key);
         step_dpi_in_background(
             self.access.op(&route),
             ticket,
@@ -355,6 +393,7 @@ impl ActionExecutor {
                 if let Some(restore) = restore {
                     speeds.restored(&restore);
                 }
+                confirm();
             },
             self.preset_rejected(route.clone()),
         );
@@ -409,17 +448,7 @@ impl ActionExecutor {
                 }
             },
             Action::ToggleSmartShift => {
-                let target = self
-                    .dpi_cycle
-                    .read()
-                    .ok()
-                    .and_then(|cycles| cycles.target_for(device_key));
-                if let Some(target) = target {
-                    info!("SmartShift toggle → flipping wheel mode");
-                    toggle_smartshift_in_background(self.access.op(&target));
-                } else {
-                    debug!("no target device — SmartShift toggle skipped");
-                }
+                self.toggle_smartshift(device_key);
                 return;
             }
             Action::TogglePrecisionMode => {
@@ -450,17 +479,66 @@ impl ActionExecutor {
                 }
                 None
             }
+            Action::VolumeUp | Action::VolumeDown => {
+                // Read before the step: at the end of the range, the press
+                // is the one that hits the stop.
+                self.cue_volume(action);
+                openlogi_inject::execute(action);
+                None
+            }
             other => {
                 openlogi_inject::execute(other);
                 None
             }
         };
-        self.write_dpi_action(action, next);
+        self.write_dpi_action(action, device_key, next);
+    }
+
+    /// Cue a volume step, or the end of the range when the volume is already
+    /// there and `action` pushes past it.
+    fn cue_volume(&self, action: &Action) {
+        let at_limit = openlogi_inject::output_volume().is_some_and(|volume| match action {
+            Action::VolumeUp => volume >= 1.0 - VOLUME_EPSILON,
+            _ => volume <= VOLUME_EPSILON,
+        });
+        self.haptics.observe_host(if at_limit {
+            EventCue::LevelLimit
+        } else {
+            EventCue::LevelStep
+        });
+    }
+
+    /// Flip the wheel between ratchet and free spin on the device
+    /// `device_key` names, or the selected one, and confirm it once written.
+    fn toggle_smartshift(&self, device_key: Option<&str>) {
+        let target = self
+            .dpi_cycle
+            .read()
+            .ok()
+            .and_then(|cycles| cycles.target_for(device_key));
+        if let Some(target) = target {
+            info!("SmartShift toggle → flipping wheel mode");
+            let haptics = self.haptics.clone();
+            let key = device_key.map(str::to_owned);
+            toggle_smartshift_in_background(self.access.op(&target), move || {
+                match key.as_deref() {
+                    Some(key) => haptics.observe_on(key, EventCue::WheelMode),
+                    None => haptics.observe_host(EventCue::WheelMode),
+                }
+            });
+        } else {
+            debug!("no target device — SmartShift toggle skipped");
+        }
     }
 
     /// Write the DPI a preset action picked, `next`; `None` when it had no
     /// preset to pick.
-    fn write_dpi_action(&self, action: &Action, next: Option<(Dpi, Option<DeviceRoute>)>) {
+    fn write_dpi_action(
+        &self,
+        action: &Action,
+        device_key: Option<&str>,
+        next: Option<(Dpi, Option<DeviceRoute>)>,
+    ) {
         if let Some((dpi, target)) = next {
             // No target: a dev environment without a real device.
             if let Some(target) = target {
@@ -468,7 +546,7 @@ impl ActionExecutor {
                 // Numbered with the pointer-speed writes: on a DPI mouse it
                 // ends precision mode, and an older precision write must not
                 // land after it.
-                self.write_preset(&target, dpi);
+                self.write_preset(&target, dpi, self.preset_confirmation(device_key));
             } else {
                 debug!(%dpi, "no target device — DPI write skipped");
             }
@@ -724,12 +802,14 @@ impl ActionRuntime {
         pointer_speeds: Arc<PointerSpeeds>,
         access: DeviceAccess,
         requests: tokio::sync::mpsc::UnboundedSender<ActionRequest>,
+        haptics: EventHaptics,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
             pointer_speeds,
             access,
             requests,
+            haptics,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;
@@ -1008,6 +1088,7 @@ mod tests {
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
             requests,
+            haptics: crate::event_haptics::EventHaptics::default(),
         }
     }
 
@@ -1146,6 +1227,7 @@ mod tests {
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
             requests,
+            haptics: crate::event_haptics::EventHaptics::default(),
         };
 
         executor.dispatch_to(
@@ -1185,6 +1267,7 @@ mod tests {
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
             requests,
+            crate::event_haptics::EventHaptics::default(),
         )
         .expect("the button worker must start");
         let buttons = runtime.dispatcher().buttons;
@@ -1230,6 +1313,7 @@ mod tests {
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
             requests,
+            haptics: crate::event_haptics::EventHaptics::default(),
         };
         let unavailable = || {
             ActionDispatchTarget::for_pointer(

@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
-use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
+use openlogi_core::config::{
+    ConfigRevision, EventHapticFeedback, FlowPeerName, FlowPublicKey, Lighting,
+};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
 };
@@ -181,7 +183,10 @@ pub use succession::Identity;
 ///      chooses on release, so the overlay reports the pointer leaving every
 ///      slot as well as entering one. `ActionRingInvocation::size` appended,
 ///      the size the overlay draws the ring at.
-pub const PROTOCOL_VERSION: u32 = 45;
+/// v46: `Agent::play_haptic` appended — a waveform played on the haptic
+///      mouse now, for the settings app's preview and for scripts; it
+///      carries [`EventHapticFeedback`].
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -1222,4 +1227,14 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+
+    /// Play `feedback` once on the haptic mouse on `route`, or, without a
+    /// route, on the mouse event haptics play on, else the first online one
+    /// with a haptic engine. Fails with [`WriteError::DeviceNotFound`] when
+    /// there is none; `Off` plays nothing. Answers once the play is queued,
+    /// not played: a preview is feedback, and a later one replaces it.
+    async fn play_haptic(
+        route: Option<DeviceRoute>,
+        feedback: EventHapticFeedback,
+    ) -> Result<(), WriteError>;
 }

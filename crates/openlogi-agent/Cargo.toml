@@ -51,7 +51,7 @@ embed-resource = "3.0.9"
 dispatch2 = { workspace = true }
 libc = "0.2"
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication", "NSWorkspace"] }
+objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication", "NSWorkspace", "NSPasteboard"] }
 objc2-core-foundation = { workspace = true, features = ["CFBase", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-graphics = { workspace = true, features = ["CGSession"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray", "NSNotification"] }

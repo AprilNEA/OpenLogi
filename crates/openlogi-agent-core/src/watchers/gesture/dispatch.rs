@@ -3,10 +3,12 @@
 mod wheel;
 
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroU16};
 use std::time::Instant;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, HeldWheel, default_binding};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, GestureDirection, HeldWheel, default_binding,
+};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::CapturedInput;
@@ -16,6 +18,7 @@ use tracing::debug;
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
+use crate::event_haptics::EventCue;
 use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::{HidppSessionId, PointerPress, PressToken};
 
@@ -217,11 +220,17 @@ impl InputDispatcher {
                     .and_then(|map| map.get(&direction))
                 {
                     debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                    if !self
+                    if self
                         .outputs
                         .actions
                         .try_dispatch_while_pressed(press, action)
                     {
+                        // A tap is the button's own press, cued at its down
+                        // edge; only a swipe is a recognized gesture.
+                        if direction != GestureDirection::Click {
+                            self.outputs.haptics.observe_on(key, EventCue::Gesture);
+                        }
+                    } else {
                         debug!(key, %button, ?direction, "gesture press no longer active — ignored");
                     }
                 } else {
@@ -229,6 +238,9 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonDown(button) => {
+                // A diverted button never reaches the OS hook, so its press
+                // haptic is cued here.
+                self.outputs.haptics.observe_button(key, button);
                 if self.start_gshift(session, plan, button) {
                     return;
                 }
@@ -263,7 +275,10 @@ impl InputDispatcher {
                 self.outputs.actions.try_hidpp_button_up(session, button);
                 self.held_presses.end(session, button);
             }
-            CapturedInput::ButtonPulse(button) => self.dispatch_button_pulse(session, plan, button),
+            CapturedInput::ButtonPulse(button) => {
+                self.outputs.haptics.observe_button(key, button);
+                self.dispatch_button_pulse(session, plan, button);
+            }
             CapturedInput::Scroll {
                 increments,
                 resolution,
@@ -273,16 +288,26 @@ impl InputDispatcher {
                 delta,
                 per_notch,
             } => self.dispatch_held_wheel(session, plan, button, delta, per_notch),
-            CapturedInput::MainWheel { delta, per_notch } => self.outputs.post_main_wheel_scroll(
-                session,
-                main_wheel_scroll(
-                    delta,
-                    per_notch,
-                    plan.invert_wheel,
-                    openlogi_inject::natural_scrolling(),
-                ),
-                plan.momentum.resolve(),
-            ),
+            CapturedInput::MainWheel { delta, per_notch } => {
+                // The diverted wheel never reaches the OS hook, so its detent
+                // haptics are cued here.
+                self.outputs
+                    .haptics
+                    .observe_main_wheel(key, delta, per_notch);
+                self.outputs.post_main_wheel_scroll(
+                    session,
+                    main_wheel_scroll(
+                        delta,
+                        per_notch,
+                        plan.invert_wheel,
+                        openlogi_inject::natural_scrolling(),
+                    ),
+                    plan.momentum.resolve(),
+                );
+            }
+            CapturedInput::WheelRatchet => {
+                self.outputs.haptics.observe_on(key, EventCue::WheelMode);
+            }
             CapturedInput::Interrupted => self.cancel_session(session),
             CapturedInput::HostModeEntered => self.outputs.actions.host_mode_entered(key),
             CapturedInput::ButtonDiverted(_) => {
@@ -370,6 +395,13 @@ impl InputDispatcher {
             WheelOutput::Idle => {}
             WheelOutput::Scroll(delta) => {
                 debug!(key, ?button, action = %action.label(), ?delta, "thumb wheel → scroll");
+                // Only when it scrolls: an action it fires (a volume step)
+                // cues that action's own haptic instead.
+                self.outputs.haptics.observe_thumbwheel(
+                    key,
+                    increments,
+                    increments_per_step(resolution),
+                );
                 self.outputs.post_scroll(session, delta);
             }
             WheelOutput::FireAction(repeats) => {
@@ -384,6 +416,17 @@ impl InputDispatcher {
             }
         }
     }
+}
+
+/// How many diverted increments make one thumb-wheel haptic step: as many as
+/// one native scroll unit spans (6 on an MX Master 4, 120 to 20 a turn), or
+/// every increment when the wheel did not report its resolutions.
+fn increments_per_step(resolution: WheelResolution) -> NonZeroU16 {
+    resolution
+        .diverted_res
+        .checked_div(resolution.native_res)
+        .and_then(NonZeroU16::new)
+        .unwrap_or(NonZeroU16::MIN)
 }
 
 /// The horizontal scroll one held-wheel report stands for: away from the
