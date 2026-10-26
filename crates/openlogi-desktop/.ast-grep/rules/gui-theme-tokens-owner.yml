@@ -1,0 +1,18 @@
+# Owner: ui::theme::apply_theme_tokens selects named themes and normalizes text
+# contrast for both production and offscreen QA. A raw mode switch silently
+# leaves the QA capture on the component framework's default palette.
+id: gui-theme-tokens-owner
+language: rust
+severity: error
+message: Use ui::theme::apply_theme_tokens, the owner of named theme selection and text contrast; a raw mode switch bypasses that policy.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/ui/theme.rs
+  - crates/openlogi-desktop/src/ui/gallery.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: Theme::change($$$ARGS)
+    - pattern: $PATH::Theme::change($$$ARGS)

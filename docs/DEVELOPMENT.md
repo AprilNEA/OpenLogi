@@ -224,7 +224,7 @@ crates/
 
 ### Offscreen native UI captures (macOS)
 
-The opt-in `native-ui-qa` feature renders the normal mouse editor through GPUI's offscreen Metal renderer with an ephemeral device fixture, in-memory configuration and no host asset inputs. It does not connect to an agent or enumerate hardware. Captures cover the global gesture editor in light and dark themes; they do not verify hardware behavior or per-app gestures.
+The opt-in `native-ui-qa` feature renders the normal mouse editor through GPUI's offscreen Metal renderer with an ephemeral device fixture, in-memory configuration and no host asset inputs. It does not connect to an agent or enumerate hardware. Captures cover the global gesture editor with the bundled OpenLogi light and dark themes and production text-contrast normalization; they do not verify hardware behavior or per-app gestures.
 
 Build and invoke the binary directly so the development bundle runner does not launch app helpers:
 
