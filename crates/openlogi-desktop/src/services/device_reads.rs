@@ -19,10 +19,13 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::{
-    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadPointerSpeed, ReadReportRate, ReadSmartShift, ReadOnboardProfiles,
+    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadForceSensing,
+    ReadOnboardProfiles, ReadPointerSpeed, ReadReportRate, ReadSmartShift,
 };
 use crate::state::{
-    AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad, HostRenameRefusal, Load, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad, StateEvent, OnboardProfilesLoad,
+    AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
+    HostRenameRefusal, Load, OnboardProfilesLoad, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
+    StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -1206,17 +1209,18 @@ impl DeviceReads {
             },
             READ_RETRY_POLICY,
         )
-        .retry_if(|error| !onboard_profiles_error_is_permanent(error));
+        .retry_if(|error| !unsupported_error_is_permanent(error));
         let handle = client.subscribe(
             query_key(ONBOARD_PROFILES, &key),
             fetcher,
             QueryOptions::immutable(),
         );
+        read_through(&client, ONBOARD_PROFILES, &key, &handle);
         let query = Query::new(&client, handle, cx);
-        let load = project_load(query.read(cx), onboard_profiles_error_is_permanent);
+        let load = project_load(query.read(cx), unsupported_error_is_permanent);
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
-            let load = project_load(query_state.read(cx), onboard_profiles_error_is_permanent);
+            let load = project_load(query_state.read(cx), unsupported_error_is_permanent);
             if state
                 .device_reads_mut()
                 .update_onboard_profiles(&observed_key, flight, load)
@@ -1761,10 +1765,6 @@ fn unsupported_error_is_permanent(error: &WriteError) -> bool {
 }
 
 fn easy_switch_error_is_permanent(error: &WriteError) -> bool {
-    matches!(error, WriteError::FeatureUnsupported { .. })
-}
-
-fn onboard_profiles_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
