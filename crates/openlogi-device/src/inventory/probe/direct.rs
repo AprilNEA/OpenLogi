@@ -12,6 +12,7 @@ use super::{NodeProbe, PassContext, ProbeVerdict};
 use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
 use crate::inventory::cache::{CacheKey, CacheOutcome, probe_or_reuse, seen};
+use crate::inventory::features::Refresh;
 use crate::inventory::mappings::resolve_device_kind;
 
 /// Prefer the device's own HID++ marketing name over the host HID collection
@@ -42,6 +43,19 @@ pub(super) async fn probe_direct(
     info: &NodeInfo,
     pass: PassContext<'_>,
 ) -> NodeProbe {
+    // A transport that reported a permanent disconnect will never answer, and
+    // a still-fresh cached probe would not ask: serving it would report the
+    // dead channel healthy, so the ledger would never retire it. Windows can
+    // drop and re-create a Bluetooth HID node at the same path faster than one
+    // reconciliation, so node-vanish retirement does not cover this either.
+    if !channel.is_connected() {
+        debug!(
+            vid = format_args!("{:04x}", info.vendor_id),
+            pid = format_args!("{:04x}", info.product_id),
+            "channel disconnected — failed probe, keeping last-known identity"
+        );
+        return failed_probe(info);
+    }
     let id = CacheKey::Direct(info.id.clone());
     let cached = pass.cache.get(&id);
     // A direct device's HID node is present (it is the candidate), so probe it
@@ -68,11 +82,12 @@ pub(super) async fn probe_direct(
     // write attempt. We reuse the capabilities the probe already derived from
     // the feature table — no extra round-trip.
     // A completed feature-table walk is what makes this probe's verdict
-    // trustworthy: without it (the device never answered) a rejection below
-    // would be indistinguishable from a transient glitch, so the node is
-    // settled as a failed probe and its last inventory replayed.
+    // trustworthy: without it (the device never answered, or its refresh just
+    // failed and the cache stood in) a rejection below would be
+    // indistinguishable from a transient glitch, so the node is settled as a
+    // failed probe and its last inventory replayed.
     let capabilities = probe.capabilities;
-    let walk_succeeded = capabilities.is_some();
+    let walk_succeeded = capabilities.is_some() && probe.refresh == Refresh::Answered;
     let caps = capabilities.unwrap_or_default();
     // An unlinked answer came from a battery feature too: a headset dongle
     // whose headset is off.
@@ -89,11 +104,7 @@ pub(super) async fn probe_direct(
             pid = format_args!("{:04x}", info.product_id),
             "feature walk did not complete — transient probe failure, keeping last-known identity"
         );
-        return NodeProbe {
-            inventory: None,
-            verdict: ProbeVerdict::Failed,
-            outcomes: vec![seen(Some(CacheKey::Direct(info.id.clone())))],
-        };
+        return failed_probe(info);
     }
     if !is_peripheral {
         debug!(
@@ -145,5 +156,16 @@ pub(super) async fn probe_direct(
         inventory: Some(inventory),
         verdict: ProbeVerdict::Healthy { complete: true },
         outcomes: vec![outcome],
+    }
+}
+
+/// A probe that could not check the node. The ledger replays its last-good
+/// inventory and counts the failure toward retiring the channel; the cache
+/// entry is kept so the device's identity survives the outage.
+fn failed_probe(info: &NodeInfo) -> NodeProbe {
+    NodeProbe {
+        inventory: None,
+        verdict: ProbeVerdict::Failed,
+        outcomes: vec![seen(Some(CacheKey::Direct(info.id.clone())))],
     }
 }

@@ -4,12 +4,13 @@
 //! An override replaces a whole button with a single action. Editing addresses
 //! a profile by its exact key; matching goes through [`overlay_for`], which
 //! also falls back from a Windows executable path to that executable's
-//! `exe:<filename>` key.
+//! `exe:<filename>` key, and then to the `app:<alias>` key of the
+//! [`Config::apps`] alias that lists the application.
 
 use std::collections::BTreeMap;
 
 use super::Config;
-use crate::app::overlay_for;
+use crate::app::{overlay_for, profile_key_for};
 use crate::binding::{Action, Binding, ButtonId};
 
 impl Config {
@@ -31,7 +32,7 @@ impl Config {
         };
         let mut out = device.bindings.clone();
         if let Some(bid) = bundle_id
-            && let Some(overlay) = overlay_for(&device.per_app_bindings, bid)
+            && let Some(overlay) = overlay_for(&device.per_app_bindings, &self.apps, bid)
         {
             for (k, v) in overlay {
                 out.insert(*k, Binding::Single(v.clone()));
@@ -76,8 +77,9 @@ impl Config {
     /// Exact key, deliberately: this answers "what did the user author under
     /// this key", which is what an editor needs to show and to clear. The
     /// question [`Self::has_app_override`] answers — "will the app in front hit
-    /// a profile" — is the matcher's, and goes through the same `exe:` fallback
-    /// the matcher does. The two look interchangeable and are not.
+    /// a profile" — is the matcher's, and goes through the same `exe:` and
+    /// alias fallbacks the matcher does. The two look interchangeable and are
+    /// not.
     #[must_use]
     pub fn per_app_overrides(
         &self,
@@ -114,7 +116,36 @@ impl Config {
     #[must_use]
     pub fn has_app_override(&self, device_key: &str, app: &str) -> bool {
         self.devices.get(device_key).is_some_and(|d| {
-            overlay_for(&d.per_app_bindings, app).is_some_and(|overlay| !overlay.is_empty())
+            overlay_for(&d.per_app_bindings, &self.apps, app)
+                .is_some_and(|overlay| !overlay.is_empty())
+        })
+    }
+
+    /// The key of the profile `device_key` runs the foreground application
+    /// `app` under, matched as [`Self::effective_bindings`] matches it — the
+    /// exact key, an `exe:<filename>` key, or an `app:<alias>` key — or `None`
+    /// when the global bindings apply.
+    #[must_use]
+    pub fn app_profile_for(&self, device_key: &str, app: &str) -> Option<&str> {
+        profile_key_for(
+            &self.devices.get(device_key)?.per_app_bindings,
+            &self.apps,
+            app,
+        )
+    }
+
+    /// The first per-app profile, by device and then key, whose `app:` key
+    /// names an alias [`Self::apps`] does not define, as `(device, key)`.
+    /// Such a profile could never apply, so loading rejects it.
+    #[cfg(feature = "fs")]
+    pub(super) fn undefined_app_alias(&self) -> Option<(&str, &str)> {
+        self.devices.iter().find_map(|(device_key, device)| {
+            device
+                .per_app_bindings
+                .keys()
+                .chain(device.action_ring.per_app.keys())
+                .find(|key| self.apps.is_undefined_reference(key))
+                .map(|key| (device_key.as_str(), key.as_str()))
         })
     }
 }

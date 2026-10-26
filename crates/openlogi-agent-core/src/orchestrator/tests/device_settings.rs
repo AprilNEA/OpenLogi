@@ -47,6 +47,30 @@ fn held_wheel_inversion_follows_the_main_wheel_on_its_link() {
 }
 
 #[test]
+fn disable_keys_reapply_distinguishes_unmanaged_empty_and_nonempty_config() {
+    let mut config = Config::default();
+    assert_eq!(configured_disabled_keys(&config, "keyboard"), None);
+
+    config.set_disabled_keys("keyboard", BTreeSet::new());
+    assert_eq!(
+        configured_disabled_keys(&config, "keyboard"),
+        Some(openlogi_hid::DisableKeysMask::EMPTY)
+    );
+
+    config.set_disabled_keys(
+        "keyboard",
+        BTreeSet::from([DisableKey::CapsLock, DisableKey::WindowsCommand]),
+    );
+    assert_eq!(
+        configured_disabled_keys(&config, "keyboard"),
+        Some(
+            openlogi_hid::DisableKeysMask::CAPS_LOCK
+                | openlogi_hid::DisableKeysMask::WINDOWS_COMMAND
+        )
+    );
+}
+
+#[test]
 fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
     let mut config = Config::default();
     config.set_scroll_resolution("a", Some(ScrollResolution::Low));
@@ -201,6 +225,356 @@ fn configured_report_rate_needs_the_feature_and_a_saved_rate() {
     assert_eq!(configured_report_rate(&config, &device), None);
     device.capabilities = None;
     assert_eq!(configured_report_rate(&config, &device), None);
+}
+
+#[test]
+fn configured_force_sensing_needs_the_capability_and_a_saved_force() {
+    let mut config = Config::default();
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        force_sensing: true,
+        ..Capabilities::default()
+    });
+    // Nothing saved: the device keeps its own force.
+    assert_eq!(configured_force_sensing(&config, &device), None);
+    config.set_force_sensing("a", 4500);
+    assert_eq!(configured_force_sensing(&config, &device), Some(4500));
+    // A device whose force software may not change is never written.
+    device.capabilities = Some(Capabilities::default());
+    assert_eq!(configured_force_sensing(&config, &device), None);
+    device.capabilities = None;
+    assert_eq!(configured_force_sensing(&config, &device), None);
+}
+
+#[test]
+fn a_reload_writes_a_changed_force_only_to_an_online_enabled_device() {
+    let sensing = |key: &str, slot: u8, online: bool| {
+        let mut device = dev(key, slot, online);
+        device.capabilities = Some(Capabilities {
+            force_sensing: true,
+            ..Capabilities::default()
+        });
+        device
+    };
+    let devices = [
+        sensing("unchanged", 1, true),
+        sensing("changed", 2, true),
+        sensing("disabled", 3, true),
+        sensing("offline", 4, false),
+        sensing("removed", 5, true),
+    ];
+    let mut previous = Config::default();
+    previous.set_force_sensing("unchanged", 5000);
+    previous.set_force_sensing("changed", 5000);
+    previous.set_force_sensing("removed", 5000);
+    let mut config = Config::default();
+    config.set_force_sensing("unchanged", 5000);
+    config.set_force_sensing("changed", 6000);
+    config.set_force_sensing("disabled", 6000);
+    config.set_device_enabled("disabled", false);
+    config.set_force_sensing("offline", 6000);
+
+    assert_eq!(
+        changed_force_sensing(&previous, &config, &devices),
+        vec![(bolt(2), 6000)],
+        "a disabled device is left native, and a removed force writes nothing"
+    );
+}
+
+fn bolt(slot: u8) -> DeviceRoute {
+    DeviceRoute::Bolt {
+        receiver_uid: "AA00".into(),
+        slot,
+    }
+}
+
+/// A keyboard in `slot` whose `0x0003` unit ID is `unit`.
+fn keyboard_with_unit(key: &str, slot: u8, unit: u8, online: bool) -> AgentDevice {
+    let mut keyboard = dev(key, slot, online);
+    keyboard.kind = openlogi_core::device::DeviceKind::Keyboard;
+    keyboard.unit_id = [0, 0, 0, unit];
+    keyboard
+}
+
+fn lead(unit: u8) -> openlogi_hid::LeadCookie {
+    openlogi_hid::LeadCookie::for_unit_id([0, 0, 0, unit])
+        .expect("the test unit IDs hash to a non-zero byte")
+}
+
+fn linking(links: &[(&str, &[&str])]) -> Config {
+    let mut config = Config::default();
+    for (keyboard, targets) in links {
+        config
+            .devices
+            .entry((*keyboard).into())
+            .or_default()
+            .host_switch_targets = targets.iter().map(|target| (*target).into()).collect();
+    }
+    config
+}
+
+/// The cookie write for the device `key` in Bolt `slot`.
+fn cookie_write(
+    key: &str,
+    slot: u8,
+    release: &[openlogi_hid::LeadCookie],
+    link: &[openlogi_hid::LeadCookie],
+) -> FollowerCookieWrite {
+    FollowerCookieWrite {
+        key: key.to_owned(),
+        follower: bolt(slot),
+        release: release.to_vec(),
+        link: link.to_vec(),
+    }
+}
+
+#[test]
+fn a_config_change_links_new_pairs_and_unlinks_removed_ones() {
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, false),
+        dev("mouse", 2, true),
+        dev("trackball", 3, true),
+        dev("asleep", 4, false),
+    ];
+    let writes = changed_follower_cookies(
+        &linking(&[("keyboard", &["mouse", "asleep"])]),
+        &linking(&[("keyboard", &["trackball", "asleep"])]),
+        &devices,
+        &mut FollowerCookieState::default(),
+    );
+    assert_eq!(
+        writes,
+        vec![
+            cookie_write("mouse", 2, &[lead(1)], &[]),
+            cookie_write("trackball", 3, &[], &[lead(1)]),
+        ],
+        "an offline keyboard still names its byte; an unchanged pair is not written"
+    );
+}
+
+#[test]
+fn a_keyboard_that_left_keeps_its_last_known_byte() {
+    // Its receiver is unplugged, or it is asleep and reports no unit ID.
+    let mut state = FollowerCookieState::default();
+    state.remember_leads(&[keyboard_with_unit("keyboard", 1, 1, true)]);
+    let linked = linking(&[("keyboard", &["mouse"])]);
+    for devices in [
+        vec![dev("mouse", 2, true)],
+        vec![dev("keyboard", 1, false), dev("mouse", 2, true)],
+    ] {
+        assert_eq!(
+            changed_follower_cookies(&linked, &Config::default(), &devices, &mut state),
+            vec![cookie_write("mouse", 2, &[lead(1)], &[])],
+            "the removed link is cleared"
+        );
+        assert_eq!(
+            changed_follower_cookies(&Config::default(), &linked, &devices, &mut state),
+            vec![cookie_write("mouse", 2, &[], &[lead(1)])],
+            "a new link is written"
+        );
+    }
+}
+
+#[test]
+fn a_link_moved_to_another_keyboard_clears_the_old_byte_first() {
+    // Two writes for one mouse could run in either order. The new link would
+    // then be refused while the old byte is there.
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        keyboard_with_unit("other", 4, 2, true),
+        dev("mouse", 2, true),
+    ];
+    let writes = changed_follower_cookies(
+        &linking(&[("keyboard", &["mouse"])]),
+        &linking(&[("other", &["mouse"])]),
+        &devices,
+        &mut FollowerCookieState::default(),
+    );
+    assert_eq!(
+        writes,
+        vec![cookie_write("mouse", 2, &[lead(1)], &[lead(2)])]
+    );
+}
+
+#[test]
+fn a_link_removed_while_the_device_is_offline_is_cleared_when_it_returns() {
+    let linked = linking(&[("keyboard", &["mouse"])]);
+    let unlinked = Config::default();
+    let mut state = FollowerCookieState::default();
+    let offline = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, false),
+    ];
+    assert!(changed_follower_cookies(&linked, &unlinked, &offline, &mut state).is_empty());
+
+    let online = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, true),
+    ];
+    assert_eq!(
+        reconnect_follower_cookies(&unlinked, &online, &online[1], &mut state),
+        vec![cookie_write("mouse", 2, &[lead(1)], &[])]
+    );
+    assert!(
+        reconnect_follower_cookies(&unlinked, &online, &online[1], &mut state).is_empty(),
+        "a clear runs once"
+    );
+}
+
+#[test]
+fn a_pending_clear_is_dropped_when_the_link_comes_back() {
+    let linked = linking(&[("keyboard", &["mouse"])]);
+    let unlinked = Config::default();
+    let mut state = FollowerCookieState::default();
+    let offline = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, false),
+    ];
+    changed_follower_cookies(&linked, &unlinked, &offline, &mut state);
+    changed_follower_cookies(&unlinked, &linked, &offline, &mut state);
+
+    let online = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, true),
+    ];
+    assert_eq!(
+        reconnect_follower_cookies(&linked, &online, &online[1], &mut state),
+        vec![cookie_write("mouse", 2, &[], &[lead(1)])]
+    );
+}
+
+#[test]
+fn a_clear_that_did_not_finish_runs_on_the_next_reconnect() {
+    // The write failed, timed out, or found the mouse gone.
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, true),
+    ];
+    let mut state = FollowerCookieState::default();
+    state.requeue("mouse", [lead(1)]);
+    assert_eq!(
+        reconnect_follower_cookies(&Config::default(), &devices, &devices[1], &mut state),
+        vec![cookie_write("mouse", 2, &[lead(1)], &[])]
+    );
+}
+
+#[test]
+fn a_clear_that_did_not_finish_leaves_a_link_made_again() {
+    // The user linked the pair again before the failed clear came back.
+    let config = linking(&[("keyboard", &["mouse"])]);
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, true),
+    ];
+    let mut state = FollowerCookieState::default();
+    state.requeue("mouse", [lead(1)]);
+    assert_eq!(
+        reconnect_follower_cookies(&config, &devices, &devices[1], &mut state),
+        vec![cookie_write("mouse", 2, &[], &[lead(1)])]
+    );
+}
+
+#[test]
+fn a_re_enabled_device_gets_the_link_changes_made_while_it_was_disabled() {
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        keyboard_with_unit("old", 4, 2, true),
+        dev("mouse", 2, true),
+    ];
+    let disabled = |links: &[(&str, &[&str])]| {
+        let mut config = linking(links);
+        config.set_device_enabled("mouse", false);
+        config
+    };
+    let both = disabled(&[("keyboard", &["mouse"]), ("old", &["mouse"])]);
+    let one = disabled(&[("keyboard", &["mouse"])]);
+    let mut state = FollowerCookieState::default();
+    assert!(
+        changed_follower_cookies(&both, &one, &devices, &mut state).is_empty(),
+        "a disabled device gets no writes"
+    );
+    assert_eq!(
+        changed_follower_cookies(
+            &one,
+            &linking(&[("keyboard", &["mouse"])]),
+            &devices,
+            &mut state
+        ),
+        vec![cookie_write("mouse", 2, &[lead(2)], &[lead(1)])],
+        "the held clear runs, and the unchanged link is written"
+    );
+}
+
+#[test]
+fn a_byte_that_another_linked_keyboard_shares_is_not_cleared() {
+    // Unit IDs 28 and 30 hash to the same byte, 0x4d.
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 28, true),
+        keyboard_with_unit("other", 4, 30, true),
+        dev("mouse", 2, true),
+    ];
+    assert_eq!(lead(28), lead(30));
+    let writes = changed_follower_cookies(
+        &linking(&[("keyboard", &["mouse"]), ("other", &["mouse"])]),
+        &linking(&[("other", &["mouse"])]),
+        &devices,
+        &mut FollowerCookieState::default(),
+    );
+    assert!(
+        writes.is_empty(),
+        "the mouse still follows the other keyboard"
+    );
+}
+
+#[test]
+fn cookie_writes_skip_an_unknown_keyboard_and_a_disabled_device() {
+    let mut config = linking(&[("keyboard", &["mouse", "disabled"])]);
+    config.set_device_enabled("disabled", false);
+    let devices = [
+        dev("keyboard", 1, true),
+        dev("mouse", 2, true),
+        dev("disabled", 3, true),
+    ];
+    let mut state = FollowerCookieState::default();
+    assert!(
+        changed_follower_cookies(&Config::default(), &config, &devices, &mut state).is_empty(),
+        "a keyboard without a unit ID has no byte"
+    );
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        dev("mouse", 2, true),
+        dev("disabled", 3, true),
+    ];
+    let followers: Vec<_> =
+        changed_follower_cookies(&Config::default(), &config, &devices, &mut state)
+            .into_iter()
+            .map(|write| write.follower)
+            .collect();
+    assert_eq!(followers, vec![bolt(2)], "a disabled device is left native");
+}
+
+#[test]
+fn a_reconnect_links_each_pair_that_the_device_is_part_of() {
+    let config = linking(&[("keyboard", &["mouse", "trackball"]), ("other", &["mouse"])]);
+    let devices = [
+        keyboard_with_unit("keyboard", 1, 1, true),
+        keyboard_with_unit("other", 4, 2, true),
+        dev("mouse", 2, true),
+        dev("trackball", 3, true),
+    ];
+    let mut state = FollowerCookieState::default();
+    assert_eq!(
+        reconnect_follower_cookies(&config, &devices, &devices[2], &mut state),
+        vec![cookie_write("mouse", 2, &[], &[lead(1), lead(2)])],
+        "the first keyboard to write keeps the mouse; the second is refused on the device"
+    );
+    assert_eq!(
+        reconnect_follower_cookies(&config, &devices, &devices[0], &mut state),
+        vec![
+            cookie_write("mouse", 2, &[], &[lead(1)]),
+            cookie_write("trackball", 3, &[], &[lead(1)]),
+        ]
+    );
 }
 
 #[test]

@@ -206,6 +206,19 @@ pub enum Action {
     /// this to a balanced tap of the whole chord, exactly as they do for
     /// [`Action::HoldShortcut`].
     TapKeyHoldingModifiers(KeyCombo),
+    /// Turn precision mode on or off, as the precision button of an MX Ergo
+    /// does in Logi Options+: on, the mouse moves at its slowest speed; off,
+    /// it returns to its saved speed. On a mouse whose speed HID++ `0x2205`
+    /// scales
+    /// ([`Capabilities::pointer_scaling`](crate::device::Capabilities::pointer_scaling))
+    /// the slowest speed is the slowest
+    /// [`PointerSpeed`](crate::hid::PointerSpeed), and with none saved the
+    /// mouse returns to 1×. On a mouse with adjustable DPI
+    /// ([`Capabilities::pointer`](crate::device::Capabilities::pointer)) it
+    /// is the lowest DPI the sensor lists, and with none saved the mouse
+    /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
+    /// lit while the mode is on. Does nothing on other devices.
+    TogglePrecisionMode,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -314,6 +327,7 @@ macro_rules! for_each_unit_action {
             // DPI
             CycleDpiPresets "Cycle DPI Presets" "pointer.cycle_dpi_presets" Dpi Gauge,
             ToggleSmartShift "Toggle SmartShift" "pointer.toggle_smartshift" Dpi Refresh,
+            TogglePrecisionMode "Precision Mode" "pointer.precision_mode" Dpi Gauge,
             // Scroll
             ScrollUp "Scroll Up" "actions.scroll_up" Scroll ArrowUp,
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,

@@ -38,6 +38,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the Accessibility-trust check/prompt, the off-tap `NSWorkspace` frontmost-app read, and the `CGGetEventTapList` enumeration |
 | `openlogi-hook/src/macos/foreground.rs` | the `NSWorkspace` activation observer, the `NSRunningApplication` conversion behind every frontmost-app read, and the Safari PID snapshot |
+| `openlogi-hook/src/macos/secure_input.rs` | the Secure Event Input read: `IsSecureEventInputEnabled` (hand-declared, see below) and the `kCGSSessionSecureInputPID` entry of `CGSessionCopyCurrentDictionary`, named through `foreground.rs`'s `NSRunningApplication` conversion |
 | `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent key and click synthesis, media-key `NSEvent`s |
 | `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields |
@@ -47,6 +48,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-inject/src/inject/macos/{app_services,dock,symbolic_hotkey}.rs` | the `dlopen`'d private SPIs: `CoreDockSendNotification` and the CGS symbolic-hotkey trio |
 | `openlogi-inject/src/inject/macos/keyboard_layout.rs` | the active keyboard layout's `uchr` data (Text Input Source Services, read on the main thread) and `UCKeyTranslate` over it |
 | `openlogi-inject/src/inject/macos/main_thread.rs` | the bounded hand-off of main-thread work from the action worker to the main queue (`dispatch2`) |
+| `openlogi-inject/src/inject/macos/virtual_keyboard/device.rs` | the `IOHIDUserDevice` virtual keyboard that key synthesis types through: its creation (which needs the `com.apple.developer.hid.virtual.device` entitlement) and its timestamped input reports. The report state in `virtual_keyboard.rs` above it is safe code |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
@@ -212,6 +214,9 @@ its single user. The current set, all deliberate:
 
 - `openlogi-hook`: `CGEventCopyIOHIDEvent` / `IOHIDEventGetSenderID` —
   undocumented, no bindings anywhere.
+- `openlogi-hook/src/macos/secure_input.rs`: `IsSecureEventInputEnabled` —
+  Carbon HIToolbox, which `objc2-carbon` skips. It takes no arguments and has
+  no precondition, so the block declares it `safe fn`.
 - `openlogi-agent/src/activity_macos.rs`: the `IOPMConnection` SPI
   (`IOPMConnectionCreate` / `SetNotification` / `SetDispatchQueue` /
   `AcknowledgeEvent` / `Release` / `GetSystemCapabilities`) — exported by IOKit
@@ -260,11 +265,12 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   `AXIsProcessTrusted[WithOptions]` with the two extern statics they need
   (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and the `kern.sleeptime` /
   `kern.waketime` `sysctlbyname` reads the lifecycle watchdog gates its gap
-  discount on. Its module-wide `#![expect(unsafe_code)]` covers the two files
+  discount on. Its module-wide `#![expect(unsafe_code)]` covers the three files
   below as well.
 - `hook/macos/foreground.rs` — the `NSWorkspace` activation-observer
   registration and typed notification payload, and `NSString::to_str(pool)`
   (the borrow is tied to the pool).
+- `hook/macos/secure_input.rs` — the `CGSession` dictionary cast.
 - `hook/macos/sender.rs` — the sender-id `extern` calls and the IOKit registry
   walk, including the Create-rule `CFString` / `CFNumber` wraps.
 - `inject/macos/ax.rs` — AX attribute-copy out-pointers and the unchecked
@@ -282,6 +288,11 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   thread reads the layout), so a worker hands the read to the main queue and
   waits a bounded time; only `UCKeyTranslate`, a pure function of the copied
   data, runs on the worker.
+- `inject/macos/virtual_keyboard/device.rs` — `IOHIDUserDevice::with_properties`,
+  `handle_report_with_time_stamp` over the eight-byte report, `mach2`'s
+  `mach_absolute_time` for its timestamp, and the `Send` impl that lets the
+  process-wide slot hold the device. The device is never scheduled on a dispatch
+  queue, so it needs no `Activate` / `Cancel` pair: releasing it removes it.
 - `permissions/macos.rs` — the CoreBluetooth force-link and the `CBManager`
   class-method send. `IOHIDCheckAccess` needs none: `objc2-io-kit` exposes it as
   a safe fn, in `openlogi-permissions` and `openlogi-hid` alike.
@@ -316,7 +327,9 @@ temporaries. The call sites that keep an explicit
   watcher and notification callback may run on threads with no run loop, and
   `to_str` borrows its UTF-8 view from the pool (both the bundle id and the
   localized name). Registration and removal use the same boundary so AppKit's
-  internal autoreleased temporaries are drained as well.
+  internal autoreleased temporaries are drained as well. The Secure Event
+  Input app read names its app through the same conversion, on the
+  secure-input watcher thread, under its own pool.
 - `openlogi-inject`'s `post_media_key` — the hook/gesture dispatch threads, where
   both the `NSEvent` creation and the `CGEvent` getter autorelease temporaries.
 - `openlogi-inject`'s `ax_browser_navigate` — the action worker, where `to_str`

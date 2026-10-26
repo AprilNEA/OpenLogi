@@ -19,8 +19,10 @@ use std::time::Duration;
 use hidpp::{
     channel::HidppChannel,
     device::{Device, DeviceError},
+    feature::EmittingFeature,
     feature::illumination::{
-        ControlCapabilities, ControlInfo, IlluminationFeature, IlluminationState,
+        BrightnessEffectiveMax, ControlInfo, IlluminationEvent, IlluminationFeature,
+        IlluminationState,
     },
     protocol::v20::Hidpp20Error,
 };
@@ -117,9 +119,16 @@ fn info_range(info: ControlInfo, unit: LightValueUnit) -> Option<LightValueRange
 }
 
 impl Illumination {
+    /// The light's notifications, from now on.
+    pub(super) fn listen(
+        &self,
+    ) -> impl futures_lite::Stream<Item = IlluminationEvent> + Send + 'static {
+        self.feature.listen()
+    }
+
     /// Read the light's ranges and current state, in the order Logi Options+
     /// reads them on start.
-    async fn read_state(&self) -> Result<LightState, WriteError> {
+    pub(super) async fn read_state(&self) -> Result<LightState, WriteError> {
         let brightness_info = self
             .feature
             .get_brightness_info()
@@ -168,23 +177,21 @@ impl Illumination {
 
     /// The brightness limit in effect, if one lowers the top of the range.
     ///
-    /// `getBrightnessEffectiveMax` is a version-1 function, and only a light
-    /// whose brightness info flags a dynamic maximum has one — Logi Options+
-    /// reads it under the same flag. `0` means no limit is in effect.
+    /// [`IlluminationFeature::get_brightness_effective_max`] decides whether
+    /// the light has an effective maximum at all; one at or above the top of
+    /// the range lowers nothing.
     async fn brightness_limit(&self, info: ControlInfo) -> Result<Option<u16>, WriteError> {
-        if self.version < 1
-            || !info
-                .capabilities
-                .contains(ControlCapabilities::HAS_DYNAMIC_MAXIMUM)
-        {
-            return Ok(None);
-        }
-        let limit = self
+        let effective_max = self
             .feature
-            .get_brightness_effective_max()
+            .get_brightness_effective_max(self.version, info)
             .await
             .map_err(hidpp_failed)?;
-        Ok((limit != 0 && limit < info.max).then_some(limit))
+        Ok(match effective_max {
+            BrightnessEffectiveMax::Limit(limit) if limit.get() < info.max => Some(limit.get()),
+            BrightnessEffectiveMax::Unsupported
+            | BrightnessEffectiveMax::NoLimit
+            | BrightnessEffectiveMax::Limit(_) => None,
+        })
     }
 
     async fn is_on(&self) -> Result<bool, WriteError> {

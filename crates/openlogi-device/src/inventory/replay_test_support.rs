@@ -123,7 +123,8 @@ pub(super) const HEADSET_PRODUCT_ID: u16 = 0x0ab5;
 /// A node whose feature table is `FeatureSet` plus one battery feature
 /// (`feature_id`) at index 2 and nothing else. `answers` scripts each
 /// successive function-`0` read of that feature: the first rides the full
-/// probe, each later one a cache-hit battery re-read.
+/// probe, each later one a cache-hit battery re-read. A legacy `0x1000` also
+/// answers the probe's [`legacy_capability`] read.
 pub(super) fn battery_only_fixture(
     feature_id: u16,
     product_id: u16,
@@ -154,6 +155,9 @@ pub(super) fn battery_only_fixture(
             short(0xff, 0x01, 0x10, [feature_high, feature_low, 0]),
         ),
     ];
+    if feature_id == 0x1000 {
+        exchanges.push(legacy_capability());
+    }
     exchanges.extend(
         answers
             .iter()
@@ -177,7 +181,8 @@ pub(super) fn battery_only_fixture(
 /// battery at index 2, and one settings feature (`feature_id`, such as
 /// `0x40a3` or `0x2202`) at index 3 that the inventory probe lists but never
 /// reads. The battery answers 50 % to each of `battery_reads` reads: the
-/// first rides the full probe, each later one a cache-hit re-read.
+/// first rides the full probe, each later one a cache-hit re-read. The probe
+/// also reads the battery's [`legacy_capability`].
 pub(super) fn setting_fixture(
     feature_id: u16,
     product_id: u16,
@@ -211,6 +216,7 @@ pub(super) fn setting_fixture(
             short(0xff, 0x01, 0x10, [3, 0, 0]),
             short(0xff, 0x01, 0x10, [feature_high, feature_low, 0]),
         ),
+        legacy_capability(),
     ];
     exchanges.extend((0..battery_reads).map(|_| {
         h20(
@@ -230,6 +236,32 @@ pub(super) fn setting_fixture(
         channel: replay_channel(HEADSET_CHANNEL),
         cassette: cassette("scenario-settings-probes", HEADSET_CHANNEL, exchanges),
     }
+}
+
+/// A [`setting_fixture`] keyboard whose setting feature is the `0x4220`
+/// lock-key state at index 3. It answers one `getLockState` read with `keys`.
+pub(super) fn lock_key_fixture(
+    product_id: u16,
+    name: &str,
+    battery_reads: usize,
+    keys: u8,
+) -> HeadsetFixture {
+    let mut fixture = setting_fixture(0x4220, product_id, name, battery_reads);
+    fixture.cassette.exchanges.push(h20(
+        short(0xff, 0x03, 0x00, [0, 0, 0]),
+        short(0xff, 0x03, 0x00, [keys, 0, 0]),
+    ));
+    fixture
+}
+
+/// The legacy `0x1000` `getBatteryCapability` answer for a battery at index 2,
+/// read once per full probe: four levels, rechargeable, no mileage, like the
+/// `50`/`20` steps these fixtures report.
+fn legacy_capability() -> CassetteExchange {
+    h20(
+        short(0xff, 0x02, 0x10, [0, 0, 0]),
+        short(0xff, 0x02, 0x10, [4, 1 << 2, 0]),
+    )
 }
 
 /// A linked `getAdcMeasurement` answer.

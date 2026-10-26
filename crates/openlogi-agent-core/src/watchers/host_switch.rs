@@ -3,8 +3,9 @@
 use std::time::Duration;
 
 use openlogi_hid::{
-    ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, HostSwitchRestoreOutcome,
-    HostSwitchStopReason, PendingHostSwitchRestore, run_host_switch_session, switch_linked_hosts,
+    ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, HostSwitchFollowUp,
+    HostSwitchRestoreOutcome, HostSwitchStopReason, PendingHostSwitchRestore,
+    run_host_switch_session, switch_linked_hosts,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -18,6 +19,10 @@ const DEPARTURE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One resolved link. Config keys are converted to live routes by the
 /// orchestrator so the transport watcher never needs to understand inventory.
+///
+/// The keyboard's session moves the targets itself when the keyboard
+/// switches by itself. A diverted host key instead becomes a transition that
+/// moves the targets and then the keyboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostSwitchLink {
     /// Keyboard whose host switch keys initiate the transition.
@@ -117,6 +122,14 @@ enum HostSwitchSlot {
         link: HostSwitchLink,
         retry_at: Instant,
     },
+    /// The keyboard is switching hosts by itself and its session already
+    /// moved the targets. No successor arms until inventory stops publishing
+    /// the link or `until` passes: a successor would arm on a keyboard that
+    /// is leaving.
+    Departing {
+        link: HostSwitchLink,
+        until: Instant,
+    },
 }
 
 impl HostSwitchSlot {
@@ -124,7 +137,7 @@ impl HostSwitchSlot {
         match self {
             Self::Running(session) => &session.link.keyboard,
             Self::Recovering(recovery) => &recovery.link.keyboard,
-            Self::Restarting { link, .. } => &link.keyboard,
+            Self::Restarting { link, .. } | Self::Departing { link, .. } => &link.keyboard,
         }
     }
 }
@@ -146,7 +159,7 @@ struct SessionCompletion {
 }
 
 struct SessionResult {
-    requested_host: Option<u8>,
+    follow_up: HostSwitchFollowUp,
     pending_restore: Option<PendingHostSwitchRestore>,
     failed: bool,
 }
@@ -250,6 +263,7 @@ impl HostSwitchManagerState {
                     ..
                 })
                 | HostSwitchSlot::Restarting { retry_at, .. } => Some(*retry_at),
+                HostSwitchSlot::Departing { until, .. } => Some(*until),
                 HostSwitchSlot::Running(_) | HostSwitchSlot::Recovering(_) => None,
             })
             .min()
@@ -277,6 +291,9 @@ impl HostSwitchManagerState {
         self.slots.retain(|slot| match slot {
             HostSwitchSlot::Restarting { link, retry_at } => {
                 !terminal && published.contains(link) && (*retry_at > now || requests.any())
+            }
+            HostSwitchSlot::Departing { link, until } => {
+                !terminal && published.contains(link) && *until > now
             }
             HostSwitchSlot::Running(_) | HostSwitchSlot::Recovering(_) => true,
         });
@@ -366,21 +383,38 @@ impl HostSwitchManagerState {
             debug!(route = %session.link.keyboard, "host switch session ended");
         }
         let request_is_current = !terminal && published.contains(&session.link);
+        let requested_host = match result.follow_up {
+            HostSwitchFollowUp::Switch(host) => request_is_current.then_some(host),
+            HostSwitchFollowUp::Rearm | HostSwitchFollowUp::AwaitDeparture => None,
+        };
+        let departing = result.follow_up == HostSwitchFollowUp::AwaitDeparture;
         if let Some(token) = result.pending_restore {
+            // A keyboard that is leaving cannot answer a restore write. The
+            // first retry waits for it to go, unless inventory changes first.
+            let first_retry = if departing {
+                DEPARTURE_TIMEOUT
+            } else {
+                RETRY_DELAY
+            };
             self.slots.push(HostSwitchSlot::Recovering(Recovery {
                 link: session.link,
                 epoch: session.epoch,
-                requested_host: result.requested_host.filter(|_| request_is_current),
+                requested_host,
                 restore: RestorePhase::Ready {
                     token,
-                    retry_at: Instant::now() + RETRY_DELAY,
+                    retry_at: Instant::now() + first_retry,
                 },
             }));
-        } else if let Some(host) = result.requested_host.filter(|_| request_is_current) {
+        } else if let Some(host) = requested_host {
             self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
                 link: session.link,
                 host,
             }));
+        } else if departing && request_is_current {
+            self.slots.push(HostSwitchSlot::Departing {
+                link: session.link,
+                until: Instant::now() + DEPARTURE_TIMEOUT,
+            });
         } else if result.failed && request_is_current {
             self.slots.push(HostSwitchSlot::Restarting {
                 link: session.link,
@@ -546,6 +580,7 @@ fn spawn_session(
     let (stop, stop_rx) = oneshot::channel();
     let session_link = link.clone();
     let registry = services.registry.clone();
+    let channel_pool = services.channel_pool.clone();
     let device_io = services.device_io.clone();
     let events = services.events.clone();
     tokio::spawn(async move {
@@ -553,16 +588,18 @@ fn spawn_session(
             let _receiver_lease = receiver_lease;
             match run_host_switch_session(
                 session_link.keyboard.clone(),
+                &session_link.targets,
                 stop_rx,
                 &registry,
+                &channel_pool,
                 device_io,
             )
             .await
             {
                 Ok(outcome) => {
-                    let (requested_host, pending_restore) = outcome.into_parts();
+                    let (follow_up, pending_restore) = outcome.into_parts();
                     SessionResult {
-                        requested_host,
+                        follow_up,
                         pending_restore,
                         failed: false,
                     }
@@ -571,7 +608,7 @@ fn spawn_session(
                     let (error, pending_restore) = failure.into_parts();
                     debug!(%error, route = %session_link.keyboard, "host switch session ended");
                     SessionResult {
-                        requested_host: None,
+                        follow_up: HostSwitchFollowUp::Rearm,
                         pending_restore,
                         failed: true,
                     }
@@ -871,6 +908,111 @@ mod tests {
             Some(retry_at)
         );
         assert_eq!(state.deadline(ReceiverRequestState::default(), false), None);
+    }
+
+    fn departed(
+        state: &mut HostSwitchManagerState,
+        pending_restore: Option<PendingHostSwitchRestore>,
+    ) {
+        let (stop, _stop_rx) = oneshot::channel();
+        state.slots.push(HostSwitchSlot::Running(RunningSession {
+            link: link(2),
+            epoch: SessionEpoch(1),
+            phase: SessionPhase::Active(stop),
+        }));
+        state.handle_session_completion(
+            SessionCompletion {
+                epoch: SessionEpoch(1),
+                result: Ok(SessionResult {
+                    follow_up: HostSwitchFollowUp::AwaitDeparture,
+                    pending_restore,
+                    failed: false,
+                }),
+            },
+            &[link(2)],
+            false,
+        );
+    }
+
+    fn services() -> SessionServices {
+        let (_signal, gate) = openlogi_hid::device_io_channel();
+        let (events, _received) = mpsc::unbounded_channel();
+        SessionServices {
+            channel_pool: openlogi_hid::channel_pool(),
+            registry: ChannelRegistry::default(),
+            receiver_access: ReceiverAccess::default(),
+            device_io: gate,
+            events,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_departing_keyboard_rearms_only_after_its_link_is_unpublished() {
+        let mut state = HostSwitchManagerState::new();
+        departed(&mut state, None);
+
+        assert!(
+            state.transition.is_none(),
+            "the session already moved the targets"
+        );
+        assert!(
+            state.owns_keyboard(&route(1)),
+            "no successor may arm on a keyboard that is leaving"
+        );
+        let services = services();
+        state.reconcile_recoveries(
+            &[link(2)],
+            ReceiverRequestState::default(),
+            &services,
+            false,
+        );
+        assert!(
+            state.owns_keyboard(&route(1)),
+            "the link is still published"
+        );
+
+        state.reconcile_recoveries(&[], ReceiverRequestState::default(), &services, false);
+        assert!(
+            !state.owns_keyboard(&route(1)),
+            "a returning keyboard arms a fresh session"
+        );
+    }
+
+    #[test]
+    fn a_departing_keyboard_rearms_after_the_departure_timeout() {
+        let mut state = HostSwitchManagerState::new();
+        departed(&mut state, None);
+        let Some(HostSwitchSlot::Departing { until, .. }) = state.slots.first() else {
+            panic!("a departed session leaves a departing slot");
+        };
+        assert_eq!(
+            state.deadline(ReceiverRequestState::default(), true),
+            Some(*until),
+            "the manager wakes when the wait ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_departed_restore_waits_for_the_keyboard_to_go() {
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        };
+        let mut state = HostSwitchManagerState::new();
+        departed(&mut state, Some(PendingHostSwitchRestore::detached(route)));
+
+        let Some(HostSwitchSlot::Recovering(Recovery {
+            requested_host: None,
+            restore: RestorePhase::Ready { retry_at, .. },
+            ..
+        })) = state.slots.first()
+        else {
+            panic!("a departed session that owes firmware keeps it");
+        };
+        assert!(
+            *retry_at > Instant::now() + RETRY_DELAY,
+            "the first retry does not write to a keyboard that is leaving"
+        );
     }
 
     #[tokio::test(start_paused = true)]

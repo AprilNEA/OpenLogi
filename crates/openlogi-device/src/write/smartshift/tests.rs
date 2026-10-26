@@ -443,3 +443,124 @@ async fn a_write_holds_when_the_reply_carries_what_it_wrote() -> Result<(), Writ
     assert_eq!(writes, [[FREE, 30, 0]]);
     Ok(())
 }
+
+/// Open the scripted wheel the way the route-based writes do.
+async fn open_wheel(harness: &Harness) -> Result<SmartShift, WriteError> {
+    let mut device = Device::new(
+        Arc::clone(harness.shared.channel()),
+        harness.shared.device_index(),
+    )
+    .await
+    .expect("scripted device answers the root ping");
+    SmartShift::open(&mut device).await
+}
+
+fn torque_unsupported(result: &Result<(), WriteError>) {
+    assert!(
+        matches!(
+            result,
+            Err(WriteError::FeatureUnsupported {
+                feature_hex: 0x2111
+            })
+        ),
+        "unexpected result: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_torque_write_sends_only_the_torque_when_advertised() -> Result<(), WriteError> {
+    let harness = Harness::new(Wheel::new(
+        SmartShiftEnhancedCapabilities::TUNABLE_TORQUE,
+        50,
+    ))
+    .await;
+    let smartshift = open_wheel(&harness).await?;
+
+    smartshift.set_torque(torque(65)).await?;
+
+    // Mode and threshold go out as the "do not change" zero.
+    assert_eq!(harness.writes(), [[0, 0, 65]]);
+    assert_eq!(harness.capability_reads(), 1);
+    let wheel = harness.wheel();
+    assert_eq!(
+        (wheel.mode, wheel.auto_disengage, wheel.torque),
+        (SmartShiftMode::Ratchet, 10, 65)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_torque_write_is_refused_without_the_capability() -> Result<(), WriteError> {
+    let harness = Harness::new(Wheel::new(SmartShiftEnhancedCapabilities::empty(), 50)).await;
+    let smartshift = open_wheel(&harness).await?;
+
+    torque_unsupported(&smartshift.set_torque(torque(65)).await);
+
+    assert!(harness.writes().is_empty());
+    assert_eq!(harness.wheel().torque, 50);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_torque_write_is_refused_on_a_legacy_wheel() -> Result<(), WriteError> {
+    let harness = Harness::new(Wheel::legacy()).await;
+    let smartshift = open_wheel(&harness).await?;
+
+    torque_unsupported(&smartshift.set_torque(torque(65)).await);
+
+    assert!(harness.writes().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_torque_write_fails_when_capabilities_cannot_be_read() -> Result<(), WriteError> {
+    let harness = Harness::new(Wheel {
+        fail_capabilities: true,
+        ..Wheel::new(SmartShiftEnhancedCapabilities::TUNABLE_TORQUE, 50)
+    })
+    .await;
+    let smartshift = open_wheel(&harness).await?;
+
+    let result = smartshift.set_torque(torque(65)).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(WriteError::HidppFeature {
+                operation: HidppOperation::ReadSmartShift,
+                feature_hex: 0x2111,
+                kind: HidppFeatureErrorKind::InvalidFunctionId,
+            })
+        ),
+        "unexpected result: {result:?}"
+    );
+    assert!(harness.writes().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_torque_write_fails_when_the_reply_keeps_another_torque() -> Result<(), WriteError> {
+    let harness = Harness::new(Wheel {
+        firmware: |w| w.torque = 50,
+        ..Wheel::new(SmartShiftEnhancedCapabilities::TUNABLE_TORQUE, 50)
+    })
+    .await;
+    let smartshift = open_wheel(&harness).await?;
+
+    refused(&smartshift.set_torque(torque(65)).await, 0x2111);
+    Ok(())
+}
+
+#[test]
+fn every_tunable_torque_is_a_torque_percent() {
+    // The configured level and the wire level are separate types with the
+    // same `1..=100` range; the encoder relies on the two staying equal.
+    for value in 0..=u8::MAX {
+        let configured = TunableTorque::try_new(value).ok();
+        assert_eq!(
+            configured.map(|torque| encode_tunable_torque(torque).get()),
+            TorquePercent::new(value).map(TorquePercent::get),
+            "torque byte {value}"
+        );
+    }
+}

@@ -5,7 +5,9 @@ use hidpp::channel::HidppChannel;
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
-use super::features::{BatteryProbe, BatteryRead, ProbedFeatures, probe_features, read_battery};
+use super::features::{
+    BatteryProbe, BatteryRead, ProbedFeatures, Refresh, probe_features, read_battery,
+};
 use crate::backend::NodeId;
 
 /// How long a device's probe is reused before a fresh read.
@@ -92,7 +94,7 @@ fn hold_percentage_while_charging(
         status: fresh.status,
     };
     match (probe, prev) {
-        (BatteryProbe::Legacy(_), Some(p))
+        (BatteryProbe::Legacy { .. }, Some(p))
             if fresh.percentage.is_none() && p.percentage.is_some_and(|p| p > 0) =>
         {
             held(p)
@@ -169,7 +171,30 @@ pub(super) fn is_stale(cached: &Cached, now: Instant) -> bool {
 /// rather than overwriting it with an empty default. An unprobed offline device
 /// with no cache yields a default probe. Returns the probe plus its cache
 /// contribution (only a *successful* probe is cached).
+///
+/// Also keeps the device's lock-key state for the on-screen indicator: an
+/// online device has it read once per connection, after its feature indexes
+/// are registered; an offline one has it forgotten (see
+/// [`EventSubscriptionHandle::sync_lock_keys`]).
 pub(super) async fn probe_or_reuse(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    id: Option<CacheKey>,
+    cached: Option<&Cached>,
+    online: bool,
+    now: Instant,
+    subscriptions: Option<&EventSubscriptionHandle>,
+) -> (ProbedFeatures, CacheOutcome) {
+    let probed =
+        probe_or_reuse_registered(channel, index, id, cached, online, now, subscriptions).await;
+    if let Some(subscriptions) = subscriptions {
+        subscriptions.sync_lock_keys(channel, index, online).await;
+    }
+    probed
+}
+
+/// [`probe_or_reuse`] without the lock-key state.
+async fn probe_or_reuse_registered(
     channel: &Arc<HidppChannel>,
     index: u8,
     id: Option<CacheKey>,
@@ -225,10 +250,16 @@ pub(super) async fn probe_or_reuse(
             };
         }
         // Re-probe failed: don't cache the failure. Fall back to the last-known
-        // data so a transient glitch doesn't drop the device or its battery.
+        // data so a transient glitch doesn't drop the device or its battery,
+        // but mark it as a stand-in: read as a live answer, it would report an
+        // unreachable device healthy.
         // No battery re-read either — the device just proved unresponsive.
         return match cached {
-            Some(c) => (c.probe.clone(), seen(id)),
+            Some(c) => {
+                let mut last_known = c.probe.clone();
+                last_known.refresh = Refresh::Failed;
+                (last_known, seen(id))
+            }
             None => (fresh, seen(id)),
         };
     }
@@ -318,14 +349,20 @@ mod hold_tests {
 
     #[test]
     fn charging_without_a_percentage_holds_last_known_percentage() {
-        let legacy = BatteryProbe::Legacy(0);
-        let held = hold_percentage_while_charging(
-            battery(None, BatteryStatus::Charging),
-            Some(&battery(Some(85), BatteryStatus::Discharging)),
-            legacy,
-        );
-        assert_eq!(held.percentage, Some(85));
-        assert_eq!(held.status, BatteryStatus::Charging);
+        for mileage in [true, false] {
+            let legacy = BatteryProbe::Legacy { index: 0, mileage };
+            let held = hold_percentage_while_charging(
+                battery(None, BatteryStatus::Charging),
+                Some(&battery(Some(85), BatteryStatus::Discharging)),
+                legacy,
+            );
+            assert_eq!(held.percentage, Some(85), "mileage {mileage}");
+            assert_eq!(held.status, BatteryStatus::Charging, "mileage {mileage}");
+        }
+        let legacy = BatteryProbe::Legacy {
+            index: 0,
+            mileage: true,
+        };
 
         let discharging = hold_percentage_while_charging(
             battery(Some(0), BatteryStatus::Discharging),

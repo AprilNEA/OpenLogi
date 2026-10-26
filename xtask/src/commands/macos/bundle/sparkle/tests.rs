@@ -1,11 +1,19 @@
 use plist::{Dictionary, Value};
 
 use super::{Feed, code_inside_out, configure, framework};
+use crate::support::info_plist::BundleVersions;
 use crate::support::update_feed::MacArch;
 
 /// The public half of the seed `[7; 32]`, as Sparkle 2.10's `generate_keys`
 /// prints it (the golden key `release appcast`'s tests sign with).
 const PUBLIC_KEY: &str = "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=";
+
+fn versions(short: &str, build: &str) -> BundleVersions {
+    BundleVersions {
+        short: short.to_owned(),
+        build: build.to_owned(),
+    }
+}
 
 #[test]
 fn feed_points_each_architecture_at_its_own_appcast() {
@@ -79,7 +87,7 @@ fn configure_stamps_the_keys_beside_what_the_bundle_already_declares() {
         .unwrap();
 
     let feed = Feed::new(PUBLIC_KEY, "https://u.example", MacArch::Arm64).unwrap();
-    configure(&info_plist, &feed).unwrap();
+    configure(&info_plist, &feed, &versions("0.8.14", "0.8.14")).unwrap();
 
     let plist = Value::from_file(&info_plist).unwrap();
     let dict = plist.as_dictionary().unwrap();
@@ -110,8 +118,36 @@ fn configure_refuses_a_bundle_version_sparkle_would_rank_above_every_release() {
         Value::Dictionary(existing)
             .to_file_xml(&info_plist)
             .unwrap();
-        let error = configure(&info_plist, &feed).unwrap_err().to_string();
+        let error = configure(&info_plist, &feed, &versions("0.8.14", "0.8.14"))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("CFBundleVersion"), "{error}");
+    }
+}
+
+#[test]
+fn configure_takes_a_beta_whose_bundle_version_is_its_build_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let info_plist = dir.path().join("Info.plist");
+    let feed = Feed::new(PUBLIC_KEY, "https://u.example", MacArch::Arm64).unwrap();
+    let beta = versions("0.8.17-beta.12", "0.8.16.12");
+    // A beta bundle stamped with its release version where its build version
+    // belongs is refused; the build version itself is taken.
+    for (bundle_version, accepted) in [("0.8.17-beta.12", false), ("0.8.16.12", true)] {
+        let mut existing = Dictionary::new();
+        existing.insert(
+            "CFBundleShortVersionString".into(),
+            beta.short.clone().into(),
+        );
+        existing.insert("CFBundleVersion".into(), bundle_version.into());
+        Value::Dictionary(existing)
+            .to_file_xml(&info_plist)
+            .unwrap();
+        assert_eq!(
+            configure(&info_plist, &feed, &beta).is_ok(),
+            accepted,
+            "{bundle_version}"
+        );
     }
 }
 

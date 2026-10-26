@@ -16,8 +16,11 @@ use openlogi_core::hid::{FnLockState, LightCommand, PairingError, WriteError};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
-use openlogi_core::hid::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus};
+use openlogi_core::hid::smartshift::{
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, TunableTorque,
+};
 use openlogi_device::ChannelPool;
+use openlogi_device::LightWatch;
 use openlogi_device::backend::{HidBackend, HotplugStream};
 use openlogi_device::backlight::{BacklightChange, BacklightState};
 use openlogi_device::inventory::{Enumerator, InventoryError};
@@ -104,6 +107,14 @@ pub async fn set_smartshift_sensitivity(
     value: SmartShiftAutoDisengage,
 ) -> Result<SmartShiftStatus, WriteError> {
     device::set_smartshift_sensitivity(&*native_backend(), route, value).await
+}
+
+/// Set the SmartShift tunable torque (scrolling force) of the device `route` reaches.
+pub async fn set_smartshift_torque(
+    route: &DeviceRoute,
+    value: TunableTorque,
+) -> Result<SmartShiftStatus, WriteError> {
+    device::set_smartshift_torque(&*native_backend(), route, value).await
 }
 
 /// Read the scroll-wheel resolution and inversion of the device `route` reaches.
@@ -217,6 +228,15 @@ pub async fn read_litra_state(
     model: LitraModel,
 ) -> Result<Option<LightState>, WriteError> {
     device::read_litra_state(&*native_backend(), route, model).await
+}
+
+/// Watch the Litra `route` reaches for changes made on the light itself
+/// (`None` when only its raw report reaches it, which announces nothing).
+pub async fn watch_litra(
+    route: &DeviceRoute,
+    model: LitraModel,
+) -> Result<Option<LightWatch>, WriteError> {
+    device::watch_litra(&*native_backend(), route, model).await
 }
 
 /// Walk the HID++ feature table of the device `route` reaches.

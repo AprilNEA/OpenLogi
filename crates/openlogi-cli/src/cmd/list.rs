@@ -6,7 +6,9 @@ use std::{
 use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_camera::Camera;
-use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice};
+use openlogi_core::device::{
+    BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice, StandaloneDevice,
+};
 use openlogi_ipc::client::ConnectError;
 use openlogi_ipc::{AgentSnapshot, AgentStatus};
 
@@ -17,7 +19,8 @@ pub struct ListArgs {}
 /// from the failure status a real enumeration error produces.
 const NOTHING_FOUND: u8 = 2;
 
-/// Print every connected receiver, paired device and Logitech webcam.
+/// Print every connected receiver, paired device, standalone raw-HID device
+/// and Logitech webcam.
 ///
 /// Reads the running agent's inventory when one is reachable — the agent is
 /// the process that actually holds device permissions, so its answer is the
@@ -26,13 +29,18 @@ const NOTHING_FOUND: u8 = 2;
 /// agent responds; the provenance goes to stderr so scripts keep parsing
 /// stdout.
 ///
-/// Returns the `NOTHING_FOUND` status when neither a HID++ device nor a webcam
-/// is present, so scripts can tell "no hardware" apart from a failed
+/// Returns the `NOTHING_FOUND` status when no HID++ device, standalone device
+/// or webcam is present, so scripts can tell "no hardware" apart from a failed
 /// enumeration.
 pub async fn run(_args: ListArgs) -> Result<ExitCode> {
-    let (inventories, agent_status) = if let Some(snapshot) = agent_snapshot().await {
+    let mut standalone_error = None;
+    let (inventories, standalone, agent_status) = if let Some(snapshot) = agent_snapshot().await {
         eprintln!("(inventory read from the running agent)");
-        (snapshot.inventory, Some(snapshot.status))
+        (
+            snapshot.inventory,
+            snapshot.standalone,
+            Some(snapshot.status),
+        )
     } else {
         eprintln!(
             "(no agent reachable — reading hardware directly; macOS judges this \
@@ -41,11 +49,24 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
         let inventories = openlogi_hid::enumerate()
             .await
             .context("failed to enumerate HID++ devices")?;
-        (inventories, None)
+        // A standalone scan failure must not hide the HID++ listing above.
+        let standalone = match openlogi_hid::enumerate_standalone().await {
+            Ok(devices) => devices,
+            Err(error) => {
+                eprintln!("(standalone device scan failed: {error})");
+                standalone_error = Some(error);
+                Vec::new()
+            }
+        };
+        (inventories, standalone, None)
     };
     let cameras = openlogi_camera::enumerate_cameras();
 
-    if inventories.is_empty() && cameras.is_empty() {
+    if inventories.is_empty() && standalone.is_empty() && cameras.is_empty() {
+        // An empty list after a failed scan is a failure, not "no hardware".
+        if let Some(error) = standalone_error {
+            return Err(error).context("failed to enumerate standalone HID devices");
+        }
         println!("No Logitech HID++ devices or webcams found.");
         println!();
         print_empty_notes(agent_status.as_ref());
@@ -59,8 +80,15 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
         print_inventory(inv);
     }
 
-    if !cameras.is_empty() {
+    if !standalone.is_empty() {
         if !inventories.is_empty() {
+            println!();
+        }
+        print_standalone(&standalone);
+    }
+
+    if !cameras.is_empty() {
+        if !inventories.is_empty() || !standalone.is_empty() {
             println!();
         }
         print_cameras(&cameras);
@@ -126,6 +154,33 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
                  packages; for a source build see docs/INSTALL-linux.md)."
             );
         }
+    }
+}
+
+fn print_standalone(devices: &[StandaloneDevice]) {
+    println!("Standalone devices ({})", devices.len());
+    let last = devices.len() - 1;
+    for (i, device) in devices.iter().enumerate() {
+        let prefix = if i == last { "  └─" } else { "  ├─" };
+        println!("{prefix} {}", StandaloneDisplay(device));
+    }
+}
+
+struct StandaloneDisplay<'a>(&'a StandaloneDevice);
+
+impl fmt::Display for StandaloneDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let device = self.0;
+        let dot = if device.online { "●" } else { "○" };
+        write!(
+            f,
+            "{dot} {} ({}, vid={:04x} pid={:04x}, driver={})",
+            device.display_name,
+            LowercaseDebug(device.kind),
+            device.address.vendor_id,
+            device.address.product_id,
+            device.driver_id,
+        )
     }
 }
 
@@ -297,12 +352,43 @@ impl fmt::Write for LowercaseWriter<'_, '_> {
 
 #[cfg(test)]
 mod format_tests {
-    use openlogi_core::device::{BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports};
+    use openlogi_core::device::{
+        BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports, RawDeviceAddress,
+        StandaloneDevice,
+    };
 
     use super::{
         BatteryDisplay, CameraCapabilitiesDisplay, DeviceModelDisplay, PairedDevice,
-        PairedDeviceDisplay,
+        PairedDeviceDisplay, StandaloneDisplay,
     };
+
+    #[test]
+    fn standalone_device_shows_name_kind_ids_and_driver() {
+        let device = StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc24a,
+                usage_page: 0xff80,
+                usage_id: 0x0080,
+                identity: "id:node".into(),
+            },
+            display_name: "G600 Gaming Mouse".into(),
+            manufacturer: None,
+            serial_number: None,
+            unit_id: [0; 4],
+            kind: DeviceKind::Mouse,
+            online: true,
+            capabilities: None,
+            light_capabilities: None,
+            driver_id: "logitech-g600".into(),
+            registry_model_id: None,
+        };
+
+        assert_eq!(
+            StandaloneDisplay(&device).to_string(),
+            "● G600 Gaming Mouse (mouse, vid=046d pid=c24a, driver=logitech-g600)"
+        );
+    }
     use super::{BatteryInfo, DeviceModelInfo};
 
     fn base_device() -> PairedDevice {

@@ -11,11 +11,14 @@ use hidpp::{
         battery_voltage::BatteryVoltageFeature,
         device_information::{DeviceInformationFeature, DeviceTransport},
         device_type_and_name::DeviceTypeAndNameFeature,
+        disable_keys::DisableKeysFeature,
+        force_sensing_button::ForceSensingButtonFeature,
         gestures2::Gestures2Feature,
         multi_platform::{MultiPlatformCapabilities, MultiPlatformFeature},
         reprog_controls::{ReprogControlsFeature, control_ids},
         unified_battery::UnifiedBatteryFeature,
     },
+    protocol::v20::{ErrorType, Hidpp20Error},
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -24,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::reprog_controls::{BACK_CIDS, DPI_MODE_SHIFT_CIDS, FORWARD_CIDS};
+use crate::write::{force_button_is_changeable, panel_button};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
@@ -68,6 +72,24 @@ pub(super) struct ProbedFeatures {
     /// [`BatteryRead`]; `true` implies `battery` is `None`.
     #[serde(skip)]
     pub(super) unlinked: bool,
+    /// Whether these fields answer for the device now. Only the cache marks a
+    /// stand-in, so this is never persisted.
+    #[serde(skip)]
+    pub(super) refresh: Refresh,
+}
+
+/// Whether a probe's data is the device's answer or the cache's stand-in for
+/// a refresh that just failed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Refresh {
+    /// The data comes from a feature walk the device completed: this one, or
+    /// the one behind a cache entry that is still fresh.
+    #[default]
+    Answered,
+    /// A due refresh failed, so the cache's last-known answer stands in.
+    /// Callers keep publishing its identity, but must not take it as evidence
+    /// that the device is reachable.
+    Failed,
 }
 
 /// What one battery read learned about the device.
@@ -97,7 +119,13 @@ pub(super) enum BatteryProbe {
         index: u8,
         state_of_charge: bool,
     },
-    Legacy(u8),
+    /// `0x1000` at `index`. `mileage` is the device's capability for a gauge
+    /// reading: without it the discharge level encodes one of four coarse
+    /// levels, which take the draft's ranges instead of the display buckets.
+    Legacy {
+        index: u8,
+        mileage: bool,
+    },
     Voltage(u8),
     Adc(u8),
 }
@@ -127,13 +155,13 @@ pub(super) async fn read_battery(
                     status: map_battery_status(info.status),
                 })
         }
-        BatteryProbe::Legacy(feature_index) => {
-            let feature = BatteryStatusFeature::new(Arc::clone(channel), slot, feature_index);
+        BatteryProbe::Legacy { index, mileage } => {
+            let feature = BatteryStatusFeature::new(Arc::clone(channel), slot, index);
             feature
                 .get_battery_level_status()
                 .await
                 .ok()
-                .map(|info| legacy_battery_info(info.discharge_level, info.status))
+                .map(|info| legacy_battery_info(info.discharge_level, info.status, mileage))
         }
         BatteryProbe::Voltage(feature_index) => {
             let feature = BatteryVoltageFeature::new(Arc::clone(channel), slot, feature_index);
@@ -177,9 +205,9 @@ pub(super) async fn read_battery(
 /// source always outranks them). The table is 1-based (index 0 is the implicit root
 /// feature, which enumeration omits).
 ///
-/// The table alone cannot say whether a `0x1004` reports a percentage, so a
-/// unified source comes back assuming it does; [`probe_features`] then reads the
-/// capability.
+/// The table alone cannot say whether a `0x1004` reports a percentage, or
+/// whether a `0x1000` reports mileage, so either source comes back assuming
+/// it does; [`probe_features`] then reads the capability.
 pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Option<BatteryProbe> {
     // A feature table holds at most `u8::MAX` entries (its count is a u8), so a
     // 1-based index always fits.
@@ -199,7 +227,10 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
             });
         }
         if id == BatteryStatusFeature::ID && legacy.is_none() {
-            legacy = Some(BatteryProbe::Legacy(index));
+            legacy = Some(BatteryProbe::Legacy {
+                index,
+                mileage: true,
+            });
         }
         if id == BatteryVoltageFeature::ID && voltage.is_none() {
             voltage = Some(BatteryProbe::Voltage(index));
@@ -236,6 +267,17 @@ async fn read_marketing_identity(
         }
     };
     (kind, name)
+}
+
+fn derive_capabilities(
+    features: &[hidpp::feature::feature_set::FeatureInformation],
+    ids: &[u16],
+) -> Capabilities {
+    let mut capabilities = Capabilities::from_feature_ids(ids);
+    capabilities.disable_keys = features.iter().any(|feature| {
+        feature.id == DisableKeysFeature::ID && feature.typ.is_end_user_configurable()
+    });
+    capabilities
 }
 
 /// Read device identity and capabilities through one HID++ session for `slot`.
@@ -278,7 +320,7 @@ pub(super) async fn probe_features(
                 subscriptions.register_device(slot, event_features);
             }
             probe_haptic_controls = ids.contains(&0x19b0) || ids.contains(&0x19c0);
-            Some(Capabilities::from_feature_ids(&ids))
+            Some(derive_capabilities(&features, &ids))
         }
         Ok(None) => None,
         Err(e) => {
@@ -297,9 +339,9 @@ pub(super) async fn probe_features(
             .is_err();
     }
 
-    let (battery_probe, state_of_charge_unknown) =
-        resolve_state_of_charge(channel, slot, battery_probe).await;
-    capabilities_incomplete |= state_of_charge_unknown;
+    let (battery_probe, battery_capability_unknown) =
+        resolve_battery_capability(channel, slot, battery_probe).await;
+    capabilities_incomplete |= battery_capability_unknown;
     let mut identity_incomplete = false;
     let model_info = match device.get_feature::<DeviceInformationFeature>() {
         Some(feature) => match feature.get_device_info().await {
@@ -354,10 +396,24 @@ pub(super) async fn probe_features(
             identity_incomplete,
             capabilities_incomplete,
             unlinked: false,
+            refresh: Refresh::Answered,
         },
         battery_probe,
         event_features,
     )
+}
+
+/// Read the battery capability the feature table cannot answer (see
+/// [`battery_feature_index`]) and return the probe with that answer. The flag
+/// is `true` when the read failed.
+async fn resolve_battery_capability(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    probe: Option<BatteryProbe>,
+) -> (Option<BatteryProbe>, bool) {
+    let (probe, state_of_charge_unknown) = resolve_state_of_charge(channel, slot, probe).await;
+    let (probe, mileage_unknown) = resolve_legacy_mileage(channel, slot, probe).await;
+    (probe, state_of_charge_unknown || mileage_unknown)
 }
 
 /// Read whether a `0x1004` battery gauges its state of charge, and return the
@@ -389,6 +445,39 @@ async fn resolve_state_of_charge(
         ),
         Err(e) => {
             debug!(slot, error = ?e, "UnifiedBattery capability read failed");
+            (probe, true)
+        }
+    }
+}
+
+/// Read whether a legacy `0x1000` battery reports mileage, and return the
+/// probe with that answer. Other probes pass through unchanged.
+///
+/// Memoized with the probe for the same reason as
+/// [`resolve_state_of_charge`], with the same failure rule: a failed read
+/// keeps the assumed mileage (the display buckets) for this read, and the flag
+/// tells the caller to mark the probe incomplete.
+async fn resolve_legacy_mileage(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    probe: Option<BatteryProbe>,
+) -> (Option<BatteryProbe>, bool) {
+    let Some(BatteryProbe::Legacy { index, .. }) = probe else {
+        return (probe, false);
+    };
+    match BatteryStatusFeature::new(Arc::clone(channel), slot, index)
+        .get_battery_capability()
+        .await
+    {
+        Ok(capability) => (
+            Some(BatteryProbe::Legacy {
+                index,
+                mileage: capability.reports_mileage(),
+            }),
+            false,
+        ),
+        Err(e) => {
+            debug!(slot, error = ?e, "BatteryStatus capability read failed");
             (probe, true)
         }
     }
@@ -432,6 +521,17 @@ async fn probe_extra_capabilities(
             .capabilities
             .contains(MultiPlatformCapabilities::SET_HOST_PLATFORM);
     }
+    // An unanswered 0x19c0 read keeps the feature table's presumption and
+    // marks the set incomplete, but does not skip the control walk below.
+    let mut force_sensing_read = Ok(());
+    if caps.force_sensing
+        && let Some(feature) = device.get_feature::<ForceSensingButtonFeature>()
+    {
+        match probe_force_sensing(&feature).await {
+            Ok(changeable) => caps.force_sensing = changeable,
+            Err(()) => force_sensing_read = Err(()),
+        }
+    }
     if let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
         let count = feature.get_count().await.map_err(|_| ())?;
         let mut haptic_panel = false;
@@ -457,15 +557,50 @@ async fn probe_extra_capabilities(
         caps.dpi_gestures = dpi_gestures;
         caps.virtual_thumbwheel = virtual_thumbwheel;
     }
-    Ok(())
+    force_sensing_read
+}
+
+/// Whether the device lets software change the [`panel_button`]'s press
+/// force; the write path refuses a button that does not.
+///
+/// `Err(())` means a read went unanswered: the channel failed or the device
+/// was busy. Any other reply, including a feature error, is an answer.
+async fn probe_force_sensing(feature: &ForceSensingButtonFeature) -> Result<bool, ()> {
+    match feature.get_button_count().await {
+        Ok(0) => Ok(false),
+        Ok(_) => match panel_button(feature).await {
+            Ok(button) => Ok(force_button_is_changeable(&button)),
+            Err(e) => force_sensing_error_answer(e),
+        },
+        Err(e) => force_sensing_error_answer(e),
+    }
+}
+
+/// Classify a failed `0x19c0` read: `Ok(false)` when the device answered it,
+/// `Err(())` when it went unanswered.
+fn force_sensing_error_answer(error: Hidpp20Error) -> Result<bool, ()> {
+    match error {
+        Hidpp20Error::Feature(ErrorType::Busy) => {
+            debug!("ForceSensingButton read refused: device busy");
+            Err(())
+        }
+        // `UnsupportedResponse` covers a short reply, one naming no usable
+        // range or a default outside it, and an error code this crate does
+        // not know; either way the device answered.
+        Hidpp20Error::Feature(_) | Hidpp20Error::UnsupportedResponse => Ok(false),
+        error => {
+            debug!(error = ?error, "ForceSensingButton read went unanswered");
+            Err(())
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use hidpp::feature::{
-        CreatableFeature as _, adc_measurement::AdcMeasurementFeature,
+        CreatableFeature as _, FeatureType, adc_measurement::AdcMeasurementFeature,
         battery_status::BatteryStatusFeature, battery_voltage::BatteryVoltageFeature,
-        unified_battery::UnifiedBatteryFeature,
+        disable_keys::DisableKeysFeature, unified_battery::UnifiedBatteryFeature,
     };
 
     use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
@@ -508,6 +643,48 @@ mod tests {
         });
         let channel = scripted_channel(raw).await;
         probe_features(&channel, 0xff, None).await.0
+    }
+
+    /// Probe a `DisableKeys` descriptor with the supplied feature-table flags.
+    async fn disable_keys_probe(typ: FeatureType) -> ProbedFeatures {
+        let features = [
+            (0x0001_u16, FeatureType::empty()),
+            (DisableKeysFeature::ID, typ),
+        ];
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => response[4] = 1,
+                (1, 0) => response[4] = u8::try_from(features.len()).unwrap(),
+                (1, 1) => {
+                    let (id, typ) = features[usize::from(request[4]) - 1];
+                    response[4..6].copy_from_slice(&id.to_be_bytes());
+                    response[6] = typ.bits();
+                }
+                _ => panic!("unexpected DisableKeys descriptor request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        probe_features(&channel, 0xff, None).await.0
+    }
+
+    #[tokio::test]
+    async fn disable_keys_capability_ignores_hidden_and_engineering_descriptors() {
+        for (typ, supported) in [
+            (FeatureType::empty(), true),
+            (FeatureType::HIDDEN, false),
+            (FeatureType::ENGINEERING, false),
+        ] {
+            let capabilities = disable_keys_probe(typ)
+                .await
+                .capabilities
+                .expect("feature table responded");
+            assert_eq!(capabilities.disable_keys, supported, "{typ:?}");
+        }
     }
 
     #[tokio::test]
@@ -624,6 +801,141 @@ mod tests {
         assert!(probe.capabilities_incomplete);
     }
 
+    /// Probe a mouse whose `0x19c0` (at index 2) reports `count` buttons and
+    /// answers `getButtonInfo` with `info`, or fails that read when it is
+    /// `None`.
+    async fn force_sensing_probe(count: u8, info: Option<[u8; 8]>) -> ProbedFeatures {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            let features = [0x0001_u16, 0x19c0];
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => response[4] = 1,
+                (1, 0) => response[4] = 2,
+                (1, 1) => {
+                    let id = features[usize::from(request[4]) - 1];
+                    response[4..6].copy_from_slice(&id.to_be_bytes());
+                }
+                (2, 0) => response[4] = count,
+                (2, 1) => match info {
+                    Some(info) => response[4..12].copy_from_slice(&info),
+                    None => return Some(feature_error(request, 0x08)),
+                },
+                _ => panic!("unexpected capability request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        probe_features(&channel, 0xff, None).await.0
+    }
+
+    #[tokio::test]
+    async fn force_sensing_needs_a_button_whose_force_software_can_change() {
+        // The MX Master 4 Haptic Sense Panel: changeable, 5089 in 4071..=6768.
+        const MX_MASTER_4: [u8; 8] = [0x00, 0x01, 0x13, 0xe1, 0x1a, 0x70, 0x0f, 0xe7];
+        const FIXED: [u8; 8] = [0x00, 0x00, 0x13, 0xe1, 0x1a, 0x70, 0x0f, 0xe7];
+        const INVERTED: [u8; 8] = [0x00, 0x01, 0x13, 0xe1, 0x0f, 0xe7, 0x1a, 0x70];
+        const DEFAULT_OUTSIDE: [u8; 8] = [0x00, 0x01, 0x0f, 0x00, 0x1a, 0x70, 0x0f, 0xe7];
+        for (count, info, offered) in [
+            (1, MX_MASTER_4, true),
+            (1, FIXED, false),
+            (1, INVERTED, false),
+            (1, DEFAULT_OUTSIDE, false),
+            (0, MX_MASTER_4, false),
+        ] {
+            let probe = force_sensing_probe(count, Some(info)).await;
+            assert!(!probe.capabilities_incomplete);
+            assert_eq!(
+                probe.capabilities.unwrap().force_sensing,
+                offered,
+                "count {count}, info {info:02x?}"
+            );
+        }
+        // An unanswered read leaves the set incomplete, so it is not memoized.
+        let probe = force_sensing_probe(1, None).await;
+        assert!(probe.capabilities_incomplete);
+    }
+
+    /// How a `0x19c0` `getCount` read goes in [`force_sensing_count_probe`].
+    #[derive(Clone, Copy, Debug)]
+    enum CountRead {
+        /// The device answers with this HID++ error code.
+        FeatureError(u8),
+        /// The request never reaches the device.
+        TransportFailure,
+    }
+
+    /// Probe a mouse with `0x19c0` at index 2 and `0x1b04` at index 3 whose
+    /// `getCount` goes as `count` describes. Its one control is DPI-family
+    /// and divertable with raw XY, so a completed walk offers DPI gestures.
+    async fn force_sensing_count_probe(count: CountRead) -> ProbedFeatures {
+        fn is_get_count(request: &[u8]) -> bool {
+            request[2] == 2 && request[3] >> 4 == 0
+        }
+        let responder = move |request: &[u8]| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            let features = [0x0001_u16, 0x19c0, 0x1b04];
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                // The feature set's index, and the 0x1b04 control count.
+                (0 | 3, 0) => response[4] = 1,
+                (1, 0) => response[4] = 3,
+                (1, 1) => {
+                    let id = features[usize::from(request[4]) - 1];
+                    response[4..6].copy_from_slice(&id.to_be_bytes());
+                }
+                (2, 0) => match count {
+                    CountRead::FeatureError(code) => return Some(feature_error(request, code)),
+                    CountRead::TransportFailure => {
+                        panic!("a failed write must not reach the device")
+                    }
+                },
+                (3, 1) => {
+                    response[4..6].copy_from_slice(&0x00ed_u16.to_be_bytes());
+                    response[8] = 0x20;
+                    response[12] = 0x01;
+                }
+                _ => panic!("unexpected capability request: {request:02x?}"),
+            }
+            Some(response)
+        };
+        let (raw, _) = match count {
+            CountRead::TransportFailure => {
+                ScriptedRawHidChannel::with_failing_writes(responder, is_get_count)
+            }
+            CountRead::FeatureError(_) => ScriptedRawHidChannel::with_dynamic_responder(responder),
+        };
+        let channel = scripted_channel(raw).await;
+        probe_features(&channel, 0xff, None).await.0
+    }
+
+    #[tokio::test]
+    async fn force_sensing_count_failure_is_incomplete_only_when_unanswered() {
+        // Unknown (1), InvalidArgument (2), InvalidFunctionId (7) and
+        // Unsupported (9) are answers; Busy (8) and a lost write are not.
+        for (count, incomplete) in [
+            (CountRead::FeatureError(0x01), false),
+            (CountRead::FeatureError(0x02), false),
+            (CountRead::FeatureError(0x07), false),
+            (CountRead::FeatureError(0x09), false),
+            (CountRead::FeatureError(0x08), true),
+            (CountRead::TransportFailure, true),
+        ] {
+            let probe = force_sensing_count_probe(count).await;
+            assert_eq!(probe.capabilities_incomplete, incomplete, "{count:?}");
+            let caps = probe.capabilities.unwrap();
+            // An answer withdraws the button; an unanswered read keeps the
+            // feature table's presumption for the cache to repair.
+            assert_eq!(caps.force_sensing, incomplete, "{count:?}");
+            // The control walk runs regardless of how 0x19c0 went.
+            assert!(caps.dpi_gestures, "{count:?}");
+        }
+    }
+
     /// A `0x1004` source as the feature table alone describes it, before the
     /// probe reads its capability.
     const fn unified(index: u8) -> BatteryProbe {
@@ -719,6 +1031,117 @@ mod tests {
         assert_eq!(battery.expect("a reading").percentage, Some(67));
     }
 
+    /// A `0x1000` source as the feature table alone describes it, before the
+    /// probe reads its capability.
+    const fn legacy(index: u8) -> BatteryProbe {
+        BatteryProbe::Legacy {
+            index,
+            mileage: true,
+        }
+    }
+
+    /// `0x1000` capability flags: bit 1 mileage, bit 2 rechargeable.
+    const MILEAGE: u8 = 1 << 1;
+    const LEGACY_RECHARGEABLE: u8 = 1 << 2;
+
+    /// Probe a device whose only battery source is a `0x1000` at index 2, then
+    /// read the battery through the probe the way the cache does.
+    /// `capability` is the `getBatteryCapability` reply's level count and
+    /// flags (`None` fails the read); `status` is the `getBatteryLevelStatus`
+    /// reply.
+    async fn legacy_probe(
+        capability: Option<[u8; 2]>,
+        status: [u8; 3],
+    ) -> (ProbedFeatures, Option<BatteryProbe>, Option<BatteryInfo>) {
+        let features = [0x0001, BatteryStatusFeature::ID];
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => response[4] = 1,
+                (1, 0) => response[4] = u8::try_from(features.len()).unwrap(),
+                (1, 1) => response[4..6]
+                    .copy_from_slice(&features[usize::from(request[4]) - 1].to_be_bytes()),
+                (2, 1) => {
+                    let Some(capability) = capability else {
+                        return Some(feature_error(request, 0x08));
+                    };
+                    response[4..6].copy_from_slice(&capability);
+                }
+                (2, 0) => response[4..7].copy_from_slice(&status),
+                _ => panic!("unexpected request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        let (probe, battery_probe, _) = probe_features(&channel, 0xff, None).await;
+        let battery = match battery_probe {
+            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe).await {
+                BatteryRead::Reading(info) => Some(info),
+                _ => None,
+            },
+            None => None,
+        };
+        (probe, battery_probe, battery)
+    }
+
+    #[tokio::test]
+    async fn a_legacy_battery_without_mileage_reads_its_four_levels() {
+        // Four levels, no mileage. 85 % is the draft's "full" range but the
+        // display buckets' "good".
+        let (probe, battery_probe, battery) =
+            legacy_probe(Some([4, LEGACY_RECHARGEABLE]), [85, 50, 0]).await;
+        assert_eq!(
+            battery_probe,
+            Some(BatteryProbe::Legacy {
+                index: 2,
+                mileage: false,
+            })
+        );
+        assert!(!probe.capabilities_incomplete);
+        let battery = battery.expect("a reading");
+        assert_eq!(battery.percentage, Some(85));
+        assert_eq!(battery.level, BatteryLevel::Full);
+        assert_eq!(battery.status, BatteryStatus::Discharging);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_mileage_flag_below_ten_levels_is_ignored() {
+        let (_, battery_probe, battery) = legacy_probe(Some([4, MILEAGE]), [15, 5, 0]).await;
+        assert_eq!(
+            battery_probe,
+            Some(BatteryProbe::Legacy {
+                index: 2,
+                mileage: false,
+            })
+        );
+        assert_eq!(battery.expect("a reading").level, BatteryLevel::Low);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_battery_with_mileage_keeps_the_display_buckets() {
+        let (probe, battery_probe, battery) =
+            legacy_probe(Some([100, MILEAGE | LEGACY_RECHARGEABLE]), [85, 84, 0]).await;
+        assert_eq!(battery_probe, Some(legacy(2)));
+        assert!(!probe.capabilities_incomplete);
+        let battery = battery.expect("a reading");
+        assert_eq!(battery.percentage, Some(85));
+        assert_eq!(battery.level, BatteryLevel::Good);
+    }
+
+    #[tokio::test]
+    async fn a_failed_legacy_capability_read_keeps_the_display_buckets_and_reprobes() {
+        let (probe, battery_probe, battery) = legacy_probe(None, [85, 50, 0]).await;
+        assert_eq!(battery_probe, Some(legacy(2)));
+        assert!(
+            probe.capabilities_incomplete,
+            "an assumed capability must not be memoized"
+        );
+        assert_eq!(battery.expect("a reading").level, BatteryLevel::Good);
+    }
+
     #[test]
     fn battery_index_is_one_based_in_the_enumerated_table() {
         // `enumerate_features` omits the root feature (index 0), so the first
@@ -735,7 +1158,7 @@ mod tests {
     #[test]
     fn legacy_battery_is_found_when_unified_is_absent() {
         let table = [0x0001, BatteryStatusFeature::ID, 0x2201];
-        assert_eq!(battery_feature_index(table), Some(BatteryProbe::Legacy(2)));
+        assert_eq!(battery_feature_index(table), Some(legacy(2)));
     }
 
     #[test]
@@ -754,7 +1177,7 @@ mod tests {
     #[test]
     fn direct_percentage_sources_outrank_the_voltage_estimate() {
         let table = [BatteryVoltageFeature::ID, BatteryStatusFeature::ID];
-        assert_eq!(battery_feature_index(table), Some(BatteryProbe::Legacy(2)));
+        assert_eq!(battery_feature_index(table), Some(legacy(2)));
         let table = [BatteryVoltageFeature::ID, UnifiedBatteryFeature::ID];
         assert_eq!(battery_feature_index(table), Some(unified(2)));
     }
@@ -847,9 +1270,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        let BatteryRead::Reading(battery) =
-            read_battery(&channel, 0xff, BatteryProbe::Legacy(2)).await
-        else {
+        let BatteryRead::Reading(battery) = read_battery(&channel, 0xff, legacy(2)).await else {
             panic!("expected a reading");
         };
         battery
@@ -885,7 +1306,7 @@ mod tests {
     fn adc_battery_ranks_below_every_other_source() {
         for (other, expected) in [
             (UnifiedBatteryFeature::ID, unified(2)),
-            (BatteryStatusFeature::ID, BatteryProbe::Legacy(2)),
+            (BatteryStatusFeature::ID, legacy(2)),
             (BatteryVoltageFeature::ID, BatteryProbe::Voltage(2)),
         ] {
             let table = [AdcMeasurementFeature::ID, other];

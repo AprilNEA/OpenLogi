@@ -166,7 +166,11 @@ fn a_refresh_checks_a_keyboard_whose_layout_support_shows_up_late() {
     inventory.paired[0].capabilities = None;
     orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
     for _ in 0..VOLATILE_REAPPLY_CONFIRM_RETRIES {
-        orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+        orch.refresh_inventory_for_settings_confirmation(
+            std::slice::from_ref(&inventory),
+            &[],
+            false,
+        );
     }
     assert!(
         !orch.needs_reapply_confirmation(),

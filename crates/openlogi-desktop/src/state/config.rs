@@ -2,7 +2,7 @@
 
 use std::ops::Deref;
 
-use openlogi_core::config::{Config, ConfigFile};
+use openlogi_core::config::{Config, ConfigFile, ConfigRevision};
 use tracing::warn;
 
 /// Where [`super::AppState`] may persist configuration mutations.
@@ -70,6 +70,22 @@ impl ConfigState {
         self.issue.is_none() && matches!(&self.persistence, ConfigPersistence::UserFile(_))
     }
 
+    /// The revision of `config.toml` as this process last loaded or saved
+    /// it. Without a user file there is no such file, so the revision matches
+    /// no file the agent reads.
+    pub(super) fn revision(&self) -> ConfigRevision {
+        match &self.persistence {
+            ConfigPersistence::UserFile(file) => file.revision(),
+            ConfigPersistence::ReadOnly(_) | ConfigPersistence::MemoryOnly => {
+                ConfigRevision::default()
+            }
+        }
+    }
+
+    pub(super) fn is_writable(&self) -> bool {
+        !matches!(self.persistence, ConfigPersistence::ReadOnly(_))
+    }
+
     /// Scope an uncommitted edit to this rollback boundary. Runtime callers
     /// must follow it with the appropriate `AppState` persistence path; startup
     /// migration and tests are the only intentional in-memory-only callers.
@@ -98,6 +114,46 @@ impl ConfigState {
             self.issue = None;
         }
         true
+    }
+
+    /// Persist a recoverable feature transaction without replacing the whole
+    /// window with [`ConfigIssue`]. On failure the live config is restored to
+    /// the last persisted revision and the caller retains its recovery token.
+    pub(super) fn persist_feature(&mut self, what: &str) -> Result<(), String> {
+        let result = match &mut self.persistence {
+            ConfigPersistence::UserFile(file) => file.save(&self.current),
+            ConfigPersistence::ReadOnly(error) => {
+                let error = error.clone();
+                self.restore();
+                return Err(error);
+            }
+            ConfigPersistence::MemoryOnly => Ok(()),
+        };
+        if let Err(error) = result {
+            warn!(error = %error, what, "could not persist feature transaction");
+            self.restore();
+            return Err(error.to_string());
+        }
+        self.persisted.clone_from(&self.current);
+        Ok(())
+    }
+
+    /// Refresh the tracked source revision for feature-local conflict retry.
+    pub(super) fn refresh_feature(&mut self) -> Result<(), String> {
+        match &self.persistence {
+            ConfigPersistence::UserFile(file) => {
+                let (config, file) = file.reload().map_err(|error| error.to_string())?;
+                self.current = config.clone();
+                self.persisted = config;
+                self.persistence = ConfigPersistence::UserFile(file);
+                Ok(())
+            }
+            ConfigPersistence::ReadOnly(error) => Err(error.clone()),
+            ConfigPersistence::MemoryOnly => {
+                self.current.clone_from(&self.persisted);
+                Ok(())
+            }
+        }
     }
 
     pub(super) fn apply_reload_result(

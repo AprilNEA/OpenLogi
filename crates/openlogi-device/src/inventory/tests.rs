@@ -89,21 +89,27 @@ fn bolt_receiver_info() -> ReceiverInfo {
 /// timeout produces (#251): the device still surfaces from its pairing-register
 /// identity, so a timed-out slot counts as readable here.
 fn bolt_slot(slot: u8) -> (PairedDevice, CacheOutcome) {
+    bolt_slot_with_identity(slot, [0, 0, 0, slot], true)
+}
+
+fn bolt_slot_with_identity(
+    slot: u8,
+    unit_id: [u8; 4],
+    online: bool,
+) -> (PairedDevice, CacheOutcome) {
     (
         PairedDevice {
             slot,
             codename: Some(format!("device-{slot}")),
             wpid: None,
             kind: DeviceKind::Mouse,
-            online: true,
+            online,
             battery: None,
             model_info: None,
             capabilities: None,
             settings_revision: 0,
         },
-        CacheOutcome::Seen(CacheKey::Bolt {
-            unit_id: [0, 0, 0, slot],
-        }),
+        CacheOutcome::Seen(CacheKey::Bolt { unit_id }),
     )
 }
 

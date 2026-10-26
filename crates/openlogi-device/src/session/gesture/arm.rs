@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 use super::main_wheel::{self, ArmedMainWheel, MainWheelDivert};
 use super::{CaptureSpec, CapturedInput};
 use crate::reprog_controls::{self, ReprogControlsV4};
-use crate::session::capture::open_device;
+use crate::session::capture::{ReportingChangeStream, open_device, subscribe_reporting_changes};
 use crate::session::capture_restore::{
     ArmedReporting, CaptureError, CaptureSessionFailure, HiResWheelRestore, PendingCaptureRestore,
     PointerDivert, ReprogRestore, ThumbwheelRestore,
@@ -52,8 +52,12 @@ pub(super) struct ArmedControls {
     pub(super) hires_per_notch: Option<NonZeroU8>,
     /// Original reporting state for every diverted `0x1b04` control.
     reporting: Vec<ArmedReporting>,
-    /// `0x2150` accessor and the information read while diverting it, present
-    /// when the thumb wheel is diverted.
+    /// The reporting changes that other clients make on `reprog`, subscribed
+    /// before the first diversion write; [`Self::take_reporting_changes`]
+    /// hands it to the running session.
+    reporting_changes: Option<ReportingChangeStream>,
+    /// `0x2150` accessor and the information read before diverting it,
+    /// present when the thumb wheel is diverted.
     pub(super) thumb: Option<ArmedThumbwheel>,
     /// `0x2121` main wheel, present when its movement reports are diverted.
     pub(super) main_wheel: Option<ArmedMainWheel>,
@@ -61,21 +65,21 @@ pub(super) struct ArmedControls {
 
 pub(super) struct ArmedThumbwheel {
     pub(super) wheel: Thumbwheel,
-    info: Option<ThumbwheelInfo>,
+    /// Read before diverting: a wheel whose info cannot be read stays native.
+    info: ThumbwheelInfo,
     restore: ThumbwheelRestore,
 }
 
 impl ArmedThumbwheel {
     pub(super) fn resolution(&self) -> WheelResolution {
-        self.info
-            .map_or(WheelResolution::UNKNOWN, |info| info.resolution)
+        self.info.resolution
     }
 
     fn direction(&self) -> WheelDirection {
-        if self.info.is_some_and(|info| !info.positive_is_forward()) {
-            WheelDirection::Inverted
-        } else {
+        if self.info.positive_is_forward() {
             WheelDirection::Default
+        } else {
+            WheelDirection::Inverted
         }
     }
 }
@@ -83,14 +87,25 @@ impl ArmedThumbwheel {
 impl ArmedControls {
     /// Build the one-time polarity fact learned while arming the thumb wheel.
     pub(super) fn thumbwheel_direction(&self) -> Option<CapturedInput> {
-        let positive_is_forward = self
-            .thumb
-            .as_ref()?
-            .info
-            .map(ThumbwheelInfo::positive_is_forward)?;
+        let positive_is_forward = self.thumb.as_ref()?.info.positive_is_forward();
         Some(CapturedInput::ThumbwheelDirection {
             positive_is_forward,
         })
+    }
+
+    /// The `0x1b04` accessor and every control armed through it, or `None`
+    /// when the session armed no `0x1b04` control.
+    pub(super) fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
+        let reprog = self.reprog.as_ref()?;
+        (!self.reporting.is_empty()).then_some((reprog, self.reporting.as_slice()))
+    }
+
+    /// Take the subscription to other clients' reporting changes, or `None`
+    /// when the session armed no `0x1b04` control or the subscription was
+    /// already taken.
+    pub(super) fn take_reporting_changes(&mut self) -> Option<ReportingChangeStream> {
+        let changes = self.reporting_changes.take()?;
+        (!self.reporting.is_empty()).then_some(changes)
     }
 
     /// Convert all armed firmware state into the one capability that can
@@ -200,6 +215,7 @@ pub(super) async fn arm_controls_into(
         // Register an accessor before the first divert, so a failure on any
         // divert (including the first) can become a restore capability.
         armed.reprog = Some(rc.clone());
+        armed.reporting_changes = Some(subscribe_reporting_changes(&rc));
 
         // Divert each gesture-mode source; a source not listed stays native
         // (an idle HID++ control must not be captured-and-dropped).
@@ -261,43 +277,7 @@ pub(super) async fn arm_controls_into(
     if spec.capture_thumbwheel
         && let Some(info) = device.root().get_feature(thumbwheel::FEATURE_ID).await?
     {
-        let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
-        let wheel_info = match tw.get_info().await {
-            Ok(twinfo) => Some(twinfo),
-            Err(e) => {
-                warn!(error = ?e, "thumb wheel getInfo failed");
-                None
-            }
-        };
-        // Divert whenever capture was requested: rotation rebinds and the
-        // sensitivity multiplier need the diverted event stream even on wheels
-        // that report no single-tap capability (e.g. MX Master 4) — lacking the
-        // tap only means a bound click can never fire.
-        if wheel_info.is_some_and(|info| !info.supports_single_tap) {
-            debug!("thumb wheel reports no single tap — click not capturable");
-        }
-        // Read before the first divert: teardown hands back the native
-        // inversion found here (see `ThumbwheelRestore::new`).
-        let original = match tw.get_status().await {
-            Ok(status) => Some(status),
-            Err(e) => {
-                warn!(error = ?e, "thumb wheel getStatus failed; restore will use the default sign");
-                None
-            }
-        };
-        if original.is_some_and(|status| status.mode == ReportingMode::Diverted) {
-            debug!("thumb wheel was already diverted before arming");
-        }
-        // Store ownership before the write: a transport error cannot prove
-        // whether firmware applied diversion, so rollback must cover it too.
-        armed.thumb = Some(ArmedThumbwheel {
-            restore: ThumbwheelRestore::new(tw.feature_index(), original),
-            wheel: tw,
-            info: wheel_info,
-        });
-        if let Some(thumb) = armed.thumb.as_ref() {
-            thumb.wheel.divert(thumb.direction()).await?;
-        }
+        arm_thumbwheel(Thumbwheel::new(Arc::clone(chan), slot, info.index), armed).await?;
     }
 
     if let Some(requested) = spec.divert_main_wheel
@@ -305,6 +285,53 @@ pub(super) async fn arm_controls_into(
     {
         arm_main_wheel(chan, slot, info.index, requested, armed).await?;
     }
+    Ok(())
+}
+
+/// Divert the thumb wheel for capture.
+///
+/// Its diverted reports cannot be read without `getThumbwheelInfo`:
+/// `default_dir` gives their sign and the two resolutions their scale. A
+/// wheel that answers the info read with an error is left native and
+/// unowned, and the rest of the session arms anyway, as for a main wheel that
+/// refuses. A transport failure still fails arming, so the session retries
+/// instead of diverting the wheel blind.
+async fn arm_thumbwheel(tw: Thumbwheel, armed: &mut ArmedControls) -> Result<(), CaptureError> {
+    let info = match tw.get_info().await {
+        Ok(info) => info,
+        Err(error @ Hidpp20Error::Channel(_)) => return Err(error.into()),
+        Err(error) => {
+            warn!(?error, "thumb wheel getInfo failed — left native");
+            return Ok(());
+        }
+    };
+    // Divert whenever capture was requested: rotation rebinds and the
+    // sensitivity multiplier need the diverted event stream even on wheels
+    // that report no single-tap capability (e.g. MX Master 4) — lacking the
+    // tap only means a bound click can never fire.
+    if !info.supports_single_tap {
+        debug!("thumb wheel reports no single tap — click not capturable");
+    }
+    // Read before the first divert: teardown hands back the reporting
+    // state found here (see `ThumbwheelRestore::new`).
+    let original = match tw.get_status().await {
+        Ok(status) => Some(status),
+        Err(e) => {
+            warn!(error = ?e, "thumb wheel getStatus failed; restore will select native reporting");
+            None
+        }
+    };
+    if original.is_some_and(|status| status.mode == ReportingMode::Diverted) {
+        debug!("thumb wheel was already diverted before arming; restore will keep it diverted");
+    }
+    // Store ownership before the write: a transport error cannot prove
+    // whether firmware applied diversion, so rollback must cover it too.
+    let thumb = armed.thumb.insert(ArmedThumbwheel {
+        restore: ThumbwheelRestore::new(tw.feature_index(), original),
+        wheel: tw,
+        info,
+    });
+    thumb.wheel.divert(thumb.direction()).await?;
     Ok(())
 }
 

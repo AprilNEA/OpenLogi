@@ -187,8 +187,10 @@ use windows::normalize_collection_path;
 ///
 /// `long_only` marks a transport that exposes *only* the long report — no
 /// short-report (`0x10`) collection — so short HID++ requests must be
-/// up-converted to long (handled by the `hidpp` channel). BLE-direct devices on
-/// macOS are long-only; USB / receiver / wired-keyboard devices carry both.
+/// up-converted to long (handled by the `hidpp` channel). BLE-direct devices and
+/// the G733 headset's interface are long-only; USB / receiver / wired-keyboard
+/// devices carry both. On Windows a long-only collection is therefore never
+/// paired with a short sibling collection.
 /// Keeping the flag in this table means a new long-only transport is a
 /// single-line addition here, with no second site to update.
 ///
@@ -211,19 +213,6 @@ fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
 /// Whether the matched HID++ collection exposes only the long report, so short
 /// requests must be re-framed as long (done in the `hidpp` channel). `false` for
 /// pages not in [`HIDPP_LONG_COLLECTIONS`].
-// Windows routes short vs long by report id over the composite channel
-// (WindowsHidppChannel), so the long-only up-conversion path — and thus this
-// helper — is only reached off Windows. Still compiled + unit-tested there.
-// Not `expect`: the lint fires in the `--lib` build and not in the `--test`
-// one, so an expectation is always unfulfilled for one of them.
-#[cfg_attr(
-    target_os = "windows",
-    expect(clippy::allow_attributes, reason = "see above"),
-    allow(
-        dead_code,
-        reason = "long-only up-conversion is the non-Windows AsyncHidChannel path"
-    )
-)]
 fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
     HIDPP_LONG_COLLECTIONS
         .iter()

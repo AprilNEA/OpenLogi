@@ -1,6 +1,8 @@
 //! Backlight: a change writes the keyboard through the agent — only one its
 //! last reading accepts — and nothing is persisted on this computer.
 
+mod freshness;
+
 use super::fn_lock::drain;
 use super::*;
 use crate::services::ipc::{Command, ReadBacklight, SetBacklight};
@@ -8,11 +10,18 @@ use crate::state::BacklightLoad;
 use crate::state::backlight::change_target;
 use crate::state::events::StateEvents;
 use openlogi_core::hid::{
-    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, DeviceRoute,
+    BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
+    BacklightStatus, DeviceRoute,
 };
 
 /// A keyboard lit at level 2 of 0–4 by its light sensor, offering every
 /// control.
+/// A test duration; the type guarantees every constructed value is legal.
+fn duration(seconds: u16) -> BacklightDuration {
+    BacklightDuration::try_from(seconds).expect("a listed step is a valid duration")
+}
+
+/// The fixture keyboard's lights-on state, worked through one control.
 fn lit() -> BacklightState {
     BacklightState {
         enabled: true,
@@ -21,11 +30,11 @@ fn lit() -> BacklightState {
         current_level: 2,
         nb_levels: 5,
         power_save: true,
-        controls: BacklightControls {
-            automatic: true,
-            level: true,
-            power_save: true,
-        },
+        duration: Some(duration(30)),
+        controls: BacklightControls::AUTOMATIC
+            | BacklightControls::LEVEL
+            | BacklightControls::POWER_SAVE
+            | BacklightControls::DURATION,
     }
 }
 
@@ -183,12 +192,18 @@ fn a_change_targets_a_reading_that_accepts_it_and_is_altered_by_it() {
     );
     // A level the keyboard does not have.
     assert_eq!(change_target(&reading, BacklightChange::Level(5)), None);
+    // Already on the 30 second step: nothing to write. A shorter step is.
+    assert_eq!(
+        change_target(&reading, BacklightChange::Duration(duration(30))),
+        None
+    );
+    assert_eq!(
+        change_target(&reading, BacklightChange::Duration(duration(15))),
+        Some(lit().changed(BacklightChange::Duration(duration(15))))
+    );
     // A control this keyboard does not offer.
     let no_level = Load::Ready(Arc::new(BacklightState {
-        controls: BacklightControls {
-            level: false,
-            ..lit().controls
-        },
+        controls: lit().controls & !BacklightControls::LEVEL,
         ..lit()
     }));
     assert_eq!(change_target(&no_level, BacklightChange::Level(1)), None);
@@ -241,10 +256,7 @@ fn a_change_shows_at_once_and_writes_the_keyboard_without_touching_the_config(
 fn a_change_the_reading_does_not_accept_writes_nothing(cx: &mut gpui::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let reading = BacklightState {
-        controls: BacklightControls {
-            automatic: false,
-            ..lit().controls
-        },
+        controls: lit().controls & !BacklightControls::AUTOMATIC,
         ..lit()
     };
     let (_key, _route) = installed_and_read(cx, &mut receiver, state, reading);
