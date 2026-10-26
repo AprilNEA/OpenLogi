@@ -811,3 +811,41 @@ impl RenderOnce for HotspotTrigger {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(feature = "native-ui-qa", target_os = "macos"))]
+pub(crate) fn render_native_qa() -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    for (theme, name) in [
+        (gpui_component::ThemeMode::Light, "light"),
+        (gpui_component::ThemeMode::Dark, "dark"),
+    ] {
+        let mut cx = crate::qa::context(theme);
+        let _receiver = crate::qa::install_fixture(&mut cx)?;
+        let (window, view) = crate::qa::open(&mut cx, 1280., 820., MouseModelView::new)?;
+        crate::qa::render(&mut cx, window)?;
+        cx.update(|cx| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                view.read(cx).current_device_key.is_some(),
+                "QA device frame did not initialize"
+            );
+            view.update(cx, |view, cx| {
+                view.select(MouseControlId::Button(ButtonId::HapticPanel));
+                view.set_gesture_selected_dir(Some(GestureDirection::Up));
+                cx.notify();
+            });
+            let state = AppState::try_read(cx).context("QA state unavailable")?;
+            let directions = state
+                .gesture_bindings()
+                .get(&ButtonId::HapticPanel)
+                .context("QA gesture map missing")?;
+            anyhow::ensure!(
+                directions.get(&GestureDirection::Up)
+                    == Some(&Action::CustomShortcut("2".parse()?)),
+                "Wrong fixture direction action"
+            );
+            Ok(())
+        })?;
+        crate::qa::capture(&mut cx, window, &format!("mouse-gestures-{name}.png"))?;
+    }
+    Ok(())
+}
