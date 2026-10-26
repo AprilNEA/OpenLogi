@@ -39,8 +39,8 @@ mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
 pub use diagnostics::{
-    FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
-    dump_firmware_entities, dump_reprog_controls, read_battery_raw,
+    FeatureEntry, FirmwareEntity, FirmwareEntityInfo, RAW_BATTERY_FEATURES, ReprogControlEntry,
+    dump_features, dump_firmware_entities, dump_reprog_controls, read_battery_raw,
 };
 pub use disable_keys::{
     get_disable_keys, get_disable_keys_on, set_disable_keys, set_disable_keys_on,

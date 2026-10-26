@@ -7,6 +7,7 @@ use hidpp::{
     feature::FeatureType,
     feature::adc_measurement::AdcMeasurementFeature,
     feature::battery_status::BatteryStatusFeature,
+    feature::battery_voltage::BatteryVoltageFeature,
     feature::device_information::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
@@ -143,68 +144,108 @@ pub async fn dump_reprog_controls(
     .await
 }
 
+/// The battery features [`read_battery_raw`] reads, in the order it tries
+/// them: unified `0x1004`, legacy `0x1000`, voltage `0x1001`, then the `0x1F20`
+/// ADC. A device exposing none of them has no battery this command can read.
+pub const RAW_BATTERY_FEATURES: [u16; 4] = [
+    UnifiedBatteryFeature::ID,
+    BatteryStatusFeature::ID,
+    BatteryVoltageFeature::ID,
+    AdcMeasurementFeature::ID,
+];
+
 /// Diagnostic read of the device's raw battery report — the unified `0x1004`
-/// fields, the legacy `0x1000` `discharge_level`/`next_level`/`status`, or the
-/// `0x1F20` ADC voltage and charging state. For
+/// fields, the legacy `0x1000` `discharge_level`/`next_level`/`status`, the
+/// `0x1001` measured voltage and charging flags, or the `0x1F20` ADC voltage
+/// and charging state. For
 /// `openlogi diag battery`: surfaces exactly what the firmware reports so a
 /// claim like "MX2S shows 0% while charging" can be confirmed against the wire
 /// instead of guessed (the GUI only ever shows the mapped value).
+///
+/// Fails with [`WriteError::FeatureUnsupported`] naming `0x1004`, the preferred
+/// feature, when the device exposes none of [`RAW_BATTERY_FEATURES`].
 pub async fn read_battery_raw(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
 ) -> Result<String, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-
-        match super::open_feature_with_version::<UnifiedBatteryFeature>(&mut device).await {
-            Ok((feature, version)) => {
-                let info = feature
-                    .get_battery_info()
-                    .await
-                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-                return Ok(unified_battery_line(version, info));
-            }
-            Err(WriteError::FeatureUnsupported { .. }) => {}
-            Err(e) => return Err(e),
-        }
-
-        match open_feature::<BatteryStatusFeature>(&mut device).await {
-            Ok(feature) => {
-                let info = feature
-                    .get_battery_level_status()
-                    .await
-                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-                return Ok(format!(
-                    "0x1000 BatteryStatus: discharge_level={} next_level={} status={:?}",
-                    info.discharge_level, info.next_level, info.status
-                ));
-            }
-            Err(WriteError::FeatureUnsupported { .. }) => {}
-            Err(e) => return Err(e),
-        }
-
-        match open_feature::<AdcMeasurementFeature>(&mut device).await {
-            Ok(feature) => {
-                let measurement = feature
-                    .get_adc_measurement()
-                    .await
-                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-                return Ok(format!("0x1F20 AdcMeasurement: {measurement:?}"));
-            }
-            Err(WriteError::FeatureUnsupported { .. }) => {}
-            Err(e) => return Err(e),
-        }
-
-        // Reached only when none of the read features is present; report the
-        // preferred feature rather than implying 0x1F20 was specifically absent.
-        Err(WriteError::FeatureUnsupported {
-            feature_hex: 0x1004,
-        })
+        read_battery_raw_on_channel(&channel, index).await
     })
     .await
+}
+
+/// [`read_battery_raw`] against an already-open channel, the shape the tests
+/// drive a scripted device through.
+pub(crate) async fn read_battery_raw_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<String, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+
+    match super::open_feature_with_version::<UnifiedBatteryFeature>(&mut device).await {
+        Ok((feature, version)) => {
+            let info = feature
+                .get_battery_info()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(unified_battery_line(version, info));
+        }
+        Err(WriteError::FeatureUnsupported { .. }) => {}
+        Err(e) => return Err(e),
+    }
+
+    match open_feature::<BatteryStatusFeature>(&mut device).await {
+        Ok(feature) => {
+            let info = feature
+                .get_battery_level_status()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(format!(
+                "0x1000 BatteryStatus: discharge_level={} next_level={} status={:?}",
+                info.discharge_level, info.next_level, info.status
+            ));
+        }
+        Err(WriteError::FeatureUnsupported { .. }) => {}
+        Err(e) => return Err(e),
+    }
+
+    // The measured voltage, not the percentage the inventory interpolates from
+    // it: checking that estimate against the wire is what this command is for.
+    match open_feature::<BatteryVoltageFeature>(&mut device).await {
+        Ok(feature) => {
+            let info = feature
+                .get_battery_info()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(format!(
+                "0x1001 BatteryVoltage: voltage_mv={} critical={} status={:?}",
+                info.voltage_mv, info.critical, info.status
+            ));
+        }
+        Err(WriteError::FeatureUnsupported { .. }) => {}
+        Err(e) => return Err(e),
+    }
+
+    match open_feature::<AdcMeasurementFeature>(&mut device).await {
+        Ok(feature) => {
+            let measurement = feature
+                .get_adc_measurement()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(format!("0x1F20 AdcMeasurement: {measurement:?}"));
+        }
+        Err(WriteError::FeatureUnsupported { .. }) => {}
+        Err(e) => return Err(e),
+    }
+
+    // Reached only when none of the read features is present; report the
+    // preferred feature rather than implying 0x1F20 was specifically absent.
+    Err(WriteError::FeatureUnsupported {
+        feature_hex: UnifiedBatteryFeature::ID,
+    })
 }
 
 /// The [`read_battery_raw`] line for a `0x1004` status at feature `version`.
