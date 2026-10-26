@@ -88,7 +88,7 @@ pub(crate) fn install_on_app(
         ButtonId::HapticPanel,
         openlogi_core::binding::Binding::Single(Action::ShowActionsRing),
     );
-    config.set_per_app_gesture_mode(KEY, APP, ButtonId::HapticPanel, true);
+    config.enable_per_app_gestures(KEY, APP, ButtonId::HapticPanel);
     for (direction, shortcut) in [
         (GestureDirection::Click, "Enter"),
         (GestureDirection::Up, "2"),

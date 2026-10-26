@@ -164,7 +164,7 @@ fn exact_gestures_do_not_mix_with_executable_fallback_single_actions() {
         ButtonId::Back,
         Some(Action::Paste),
     );
-    config.set_per_app_gesture_mode("device", exact, button, true);
+    config.enable_per_app_gestures("device", exact, button);
     config.set_per_app_gesture_direction(
         "device",
         exact,
@@ -201,7 +201,7 @@ fn exact_single_actions_do_not_mix_with_executable_fallback_gestures() {
         ButtonId::Back,
         Binding::Single(Action::BrowserBack),
     );
-    config.set_per_app_gesture_mode("device", "exe:code.exe", button, true);
+    config.enable_per_app_gestures("device", "exe:code.exe", button);
     config.set_per_app_gesture_direction(
         "device",
         "exe:code.exe",
@@ -209,7 +209,7 @@ fn exact_single_actions_do_not_mix_with_executable_fallback_gestures() {
         GestureDirection::Up,
         Action::Undo,
     );
-    config.set_per_app_gesture_mode("device", "exe:code.exe", ButtonId::Back, true);
+    config.enable_per_app_gestures("device", "exe:code.exe", ButtonId::Back);
     config.set_per_app_binding("device", exact, button, Some(Action::Copy));
 
     let effective = config.effective_bindings("device", Some(exact));
@@ -285,12 +285,7 @@ fn app_direction_maps_survive_single_mode_and_reset_without_changing_global() {
         panic!("app map missing")
     };
     assert_eq!(map[&GestureDirection::Up], Action::Copy);
-    cfg.set_per_app_gesture_mode(
-        "2b042",
-        "com.example.Editor",
-        ButtonId::GestureButton,
-        false,
-    );
+    cfg.disable_per_app_gestures("2b042", "com.example.Editor", ButtonId::GestureButton);
     assert_eq!(
         cfg.effective_bindings("2b042", Some("com.example.Editor"))[&ButtonId::GestureButton],
         Binding::Single(Action::Paste)
@@ -299,7 +294,7 @@ fn app_direction_maps_survive_single_mode_and_reset_without_changing_global() {
         cfg.per_app_gesture_overrides("2b042", "com.example.Editor")
             .is_some()
     );
-    cfg.set_per_app_gesture_mode("2b042", "com.example.Editor", ButtonId::GestureButton, true);
+    cfg.enable_per_app_gestures("2b042", "com.example.Editor", ButtonId::GestureButton);
     assert_eq!(
         cfg.effective_bindings("2b042", Some("com.example.Editor")),
         custom
@@ -324,12 +319,7 @@ fn per_app_gesture_maps_roundtrip_without_changing_global_bindings() {
         ButtonId::HapticPanel,
         Binding::Single(Action::ShowActionsRing),
     );
-    config.set_per_app_gesture_mode(
-        "unit:12345678",
-        "com.example.App",
-        ButtonId::HapticPanel,
-        true,
-    );
+    config.enable_per_app_gestures("unit:12345678", "com.example.App", ButtonId::HapticPanel);
     config.set_per_app_gesture_direction(
         "unit:12345678",
         "com.example.App",

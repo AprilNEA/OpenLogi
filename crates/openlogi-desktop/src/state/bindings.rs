@@ -507,7 +507,8 @@ impl AppState {
             return events;
         }
         self.config.edit(|config| match app {
-            Some(app) => config.set_per_app_gesture_mode(&key, &app, button, enabled),
+            Some(app) if enabled => config.enable_per_app_gestures(&key, &app, button),
+            Some(app) => config.disable_per_app_gestures(&key, &app, button),
             None => config.set_gesture_mode(&key, button, enabled),
         });
         // The mode change shuffles bindings between the single + gesture maps.

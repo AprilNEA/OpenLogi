@@ -95,34 +95,30 @@ impl Config {
         }
     }
 
-    /// Enter or leave gesture mode only in `app`'s profile, preserving the global binding.
-    pub fn set_per_app_gesture_mode(
-        &mut self,
-        device_key: &str,
-        app: &str,
-        button: ButtonId,
-        enabled: bool,
-    ) {
+    /// Enter gesture mode only in `app`'s profile, preserving the global binding.
+    pub fn enable_per_app_gestures(&mut self, device_key: &str, app: &str, button: ButtonId) {
         let mut binding = self.app_gesture_binding(device_key, app, button);
-        if enabled {
-            if let Some(map) = self
-                .per_app_gesture_overrides(device_key, app)
-                .and_then(|maps| maps.get(&button))
-            {
-                binding = Binding::Gesture(map.clone());
-            }
-            binding.upgrade_to_gesture();
-            binding.fill_gesture_defaults();
-            if let Binding::Gesture(map) = binding {
-                self.store_per_app_gestures(device_key, app, button, map);
-            }
-        } else {
-            let click = binding.click_action();
-            if let Binding::Gesture(map) = binding {
-                self.store_per_app_gestures(device_key, app, button, map);
-            }
-            self.set_per_app_binding(device_key, app, button, Some(click));
+        if let Some(map) = self
+            .per_app_gesture_overrides(device_key, app)
+            .and_then(|maps| maps.get(&button))
+        {
+            binding = Binding::Gesture(map.clone());
         }
+        binding.upgrade_to_gesture();
+        binding.fill_gesture_defaults();
+        if let Binding::Gesture(map) = binding {
+            self.store_per_app_gestures(device_key, app, button, map);
+        }
+    }
+
+    /// Leave gesture mode only in `app`'s profile, retaining its directions for restoration.
+    pub fn disable_per_app_gestures(&mut self, device_key: &str, app: &str, button: ButtonId) {
+        let binding = self.app_gesture_binding(device_key, app, button);
+        let click = binding.click_action();
+        if let Binding::Gesture(map) = binding {
+            self.store_per_app_gestures(device_key, app, button, map);
+        }
+        self.set_per_app_binding(device_key, app, button, Some(click));
     }
 
     /// Edit one app-specific direction, snapshotting the inherited map before its first edit.
