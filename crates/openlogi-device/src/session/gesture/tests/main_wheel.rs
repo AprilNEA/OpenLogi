@@ -382,6 +382,35 @@ async fn movement_reports_reach_the_dispatcher_as_main_wheel_input() {
     );
 }
 
+/// Asked to report ratchet switches without a divert, a session writes
+/// nothing to the wheel and forwards only the switch: the wheel keeps
+/// scrolling natively.
+#[tokio::test]
+async fn a_session_reporting_ratchet_switches_forwards_only_those() {
+    let armed = arm(
+        0,
+        0,
+        SetReply::Apply,
+        &CaptureSpec {
+            report_wheel_ratchet: true,
+            ..CaptureSpec::default()
+        },
+    )
+    .await;
+    armed.result.unwrap();
+    assert_eq!(mode_writes(&armed.handle), Vec::<[u8; 3]>::new());
+    assert!(armed.controls.main_wheel.is_none());
+    let capture = GestureCapture::new(armed.controls);
+    let (sink, mut inputs) = mpsc::unbounded_channel();
+    let handler = capture.report_handler(0xff, sink);
+    handler(&movement(true, 16, 0));
+    handler(&wheel_event(1, &[1]));
+    assert_eq!(
+        std::iter::from_fn(|| inputs.try_recv().ok()).collect::<Vec<_>>(),
+        [CapturedInput::WheelRatchet]
+    );
+}
+
 async fn restore_outcome(armed: Armed) -> (CaptureSessionOutcome, ReplayChannelHandle) {
     let route = DeviceRoute::Direct {
         vendor_id: 0x046d,

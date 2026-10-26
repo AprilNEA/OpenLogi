@@ -100,6 +100,27 @@ openlogi api report-rate --device "$DEVICE_ID"
 openlogi api report-rate --device "$DEVICE_ID" --set 1000 --save
 openlogi api easy-switch --device "$DEVICE_ID"
 openlogi api easy-switch --device "$DEVICE_ID" --channel 2 --name "Work laptop"
+openlogi api haptic                                # one subtle tap on the haptic mouse
+openlogi api haptic --waveform damp_collision --repeat 2
+```
+
+`api haptic` plays a short waveform on a mouse with a haptic engine (MX Master
+4) and answers once the play is queued. Without `--device` it uses the mouse
+event haptics play on, else the first online one with an engine. `--save` does
+not apply. A script can use it to say "done" in the hand, for example as a
+Claude Code hook in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "openlogi api haptic --repeat 2 >/dev/null" }] }
+    ],
+    "Notification": [
+      { "hooks": [{ "type": "command", "command": "openlogi api haptic --waveform damp_collision >/dev/null" }] }
+    ]
+  }
+}
 ```
 
 ### Output and compatibility

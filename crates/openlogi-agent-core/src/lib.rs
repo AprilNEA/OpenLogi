@@ -14,6 +14,7 @@ pub mod action_ring;
 pub mod backlight_overlay;
 pub mod capture_plan;
 mod dpi;
+pub mod event_haptics;
 pub mod event_monitor;
 pub mod hardware;
 pub mod lock_keys;

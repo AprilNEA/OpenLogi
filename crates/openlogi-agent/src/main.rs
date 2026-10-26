@@ -20,6 +20,8 @@ mod activity_macos;
 mod autostart;
 mod binary_watch;
 #[cfg(target_os = "macos")]
+mod clipboard_macos;
+#[cfg(target_os = "macos")]
 mod input_monitoring;
 mod lifecycle;
 mod logging;

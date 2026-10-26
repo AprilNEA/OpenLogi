@@ -133,6 +133,9 @@ pub struct SharedHandles {
     /// Live smooth-scroll and vertical sensitivity settings read without
     /// taking the orchestrator/config lock.
     pub scroll_preferences: Arc<ScrollPreferences>,
+    /// The device click and wheel haptics play on, and the cues waiting for
+    /// the haptic player.
+    pub event_haptics: crate::event_haptics::EventHaptics,
     pub dpi_cycle: Arc<RwLock<DpiCycles>>,
     /// Capture plans for online enabled devices, plus the latest route of
     /// every online physical device. A disabled device stays out of the plans
@@ -653,6 +656,7 @@ impl Orchestrator {
                 config.app_settings.smooth_scroll,
                 config.app_settings.vertical_scroll_sensitivity,
             )),
+            event_haptics: crate::event_haptics::EventHaptics::default(),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans,
             capture_channel: Arc::new(RwLock::new(None)),
@@ -925,8 +929,58 @@ impl Orchestrator {
             host_switch_links(&self.config, &self.devices),
         );
         publish_optional_arc_if_changed(&self.keyboard_spec_tx, self.keyboard_spec_for());
+        self.shared
+            .event_haptics
+            .publish(self.event_haptics_target());
         publish_arc_if_changed(&self.watched_lights_tx, self.watched_lights());
         self.publish_lights();
+    }
+
+    /// The mouse a haptic preview plays on: the event haptics target, else
+    /// the selected device when it has a haptic engine, else the first online
+    /// device that has one.
+    #[must_use]
+    pub fn haptic_route(&self) -> Option<DeviceRoute> {
+        if let Some(target) = self.event_haptics_target() {
+            return Some(target.route);
+        }
+        let has_engine = |device: &&AgentDevice| {
+            device.online
+                && device
+                    .capabilities
+                    .is_some_and(|capabilities| capabilities.haptic_feedback)
+        };
+        self.current_key()
+            .and_then(|key| self.devices.iter().find(|device| device.config_key == key))
+            .filter(has_engine)
+            .or_else(|| self.devices.iter().find(has_engine))
+            .and_then(|device| device.route.clone())
+    }
+
+    /// The device click and wheel haptics play on: the selected device when
+    /// it qualifies, else the first one that does. A device qualifies while
+    /// it is online, enabled, has a haptic engine (`0x19b0`), and has event
+    /// haptics turned on.
+    fn event_haptics_target(&self) -> Option<crate::event_haptics::EventHapticsTarget> {
+        let qualifies = |device: &&AgentDevice| {
+            device.online
+                && device.route.is_some()
+                && self.config.device_enabled(&device.config_key)
+                && device
+                    .capabilities
+                    .is_some_and(|capabilities| capabilities.haptic_feedback)
+                && self.config.event_haptics(&device.config_key).enabled
+        };
+        let device = self
+            .current_key()
+            .and_then(|key| self.devices.iter().find(|device| device.config_key == key))
+            .filter(qualifies)
+            .or_else(|| self.devices.iter().find(qualifies))?;
+        Some(crate::event_haptics::EventHapticsTarget {
+            config_key: device.config_key.clone(),
+            route: device.route.clone()?,
+            config: self.config.event_haptics(&device.config_key),
+        })
     }
 
     fn publish_capture_plans(&self) {
@@ -1009,6 +1063,7 @@ impl Orchestrator {
         let keyboard = self.keyboard_spec_for();
         let mut plans = Vec::new();
         let mut routes = BTreeMap::new();
+        let event_haptics = self.event_haptics_target();
         for dev in &self.devices {
             let Some((physical_key, route)) = Self::capture_identity(dev) else {
                 continue;
@@ -1042,6 +1097,10 @@ impl Orchestrator {
             plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
             plan.target.spec.divert_main_wheel =
                 main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
+            // Event haptics confirm a SmartShift switch made on the device.
+            plan.target.spec.report_wheel_ratchet = event_haptics.as_ref().is_some_and(|target| {
+                target.config_key == dev.config_key && target.config.mode_changes.plays()
+            });
             if let Some(keyboard) = keyboard
                 .as_ref()
                 .filter(|keyboard| keyboard.route == plan.target.route)

@@ -37,7 +37,7 @@ pub(crate) struct Core {
     pub(crate) event_monitor: Arc<EventMonitor>,
     pub(crate) inputs: InputServices,
     pub(crate) backlight_overlay: BacklightOverlayManager,
-    pub(crate) ring_haptics: server::RingHapticPlayer,
+    pub(crate) haptics: server::HapticPlayer,
     /// Client declarations forwarded by the IPC server — the dormancy gate's
     /// demand channel. It buffers, so a declaration that lands before the
     /// gate listens is not lost.
@@ -74,7 +74,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         Arc::clone(&observable),
     ));
 
-    let (ring_haptics, demand) = spawn_ipc_server(
+    let (haptics, demand) = spawn_ipc_server(
         Arc::clone(&orchestrator),
         &shared,
         Arc::clone(&observable),
@@ -90,7 +90,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         event_monitor,
         inputs,
         backlight_overlay,
-        ring_haptics,
+        haptics,
         demand,
     })
 }
@@ -104,7 +104,7 @@ fn spawn_ipc_server(
     inputs: &InputServices,
     backlight_overlay: BacklightOverlayManager,
 ) -> (
-    server::RingHapticPlayer,
+    server::HapticPlayer,
     tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
 ) {
     let (server, demand) = AgentServer::new(
@@ -117,9 +117,9 @@ fn spawn_ipc_server(
         inputs.dispatcher.clone(),
         backlight_overlay,
     );
-    let ring_haptics = server.ring_haptics.clone();
+    let haptics = server.haptics.clone();
     tokio::spawn(server::run(server));
-    (ring_haptics, demand)
+    (haptics, demand)
 }
 
 /// The input-action runtimes — pure in-process workers that touch no device
@@ -142,6 +142,7 @@ impl InputServices {
             shared.pointer_speeds(),
             shared.device_access(),
             sender,
+            shared.event_haptics.clone(),
         ) {
             Ok(runtime) => runtime,
             Err(e) => {
@@ -208,6 +209,7 @@ pub(crate) fn spawn_hidpp_watchers(
             inputs.dispatcher.clone(),
             inputs.scroll_input.clone(),
             shared.hook_maps.clone(),
+            shared.event_haptics.clone(),
         ),
     );
     let host_switch = watchers::host_switch::spawn(

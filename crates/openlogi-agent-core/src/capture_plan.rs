@@ -323,6 +323,9 @@ pub fn plan_for_device(
                 // Needs the device's wheel capabilities and the settings of
                 // its current link, so the orchestrator fills it in.
                 divert_main_wheel: None,
+                // Needs the event haptics target, which the orchestrator
+                // resolves.
+                report_wheel_ratchet: false,
             },
             rearm_generation,
         },

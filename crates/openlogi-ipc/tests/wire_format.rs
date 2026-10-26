@@ -1138,6 +1138,22 @@ fn report_rate_dtos_and_errors() {
     );
 }
 
+/// A haptic preview names its device or leaves it to the agent, and the
+/// feedback by its declaration index.
+#[test]
+fn play_haptic() {
+    use openlogi_core::config::EventHapticFeedback;
+    assert_wire(&EventHapticFeedback::Off, "00");
+    assert_wire(&EventHapticFeedback::SharpCollision, "04");
+    assert_wire(
+        &AgentRequest::PlayHaptic {
+            route: None,
+            feedback: EventHapticFeedback::WhisperCollision,
+        },
+        "2f0001",
+    );
+}
+
 #[test]
 fn pointer_speed_and_precision_mode() {
     use openlogi_core::binding::Action;
