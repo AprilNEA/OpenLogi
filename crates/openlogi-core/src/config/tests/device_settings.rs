@@ -226,11 +226,28 @@ fn dpi_presets_roundtrip_per_device() {
         parsed.dpi_presets("4082d"),
         vec![Dpi::new(400), Dpi::new(1600)]
     );
-    assert!(parsed.dpi_presets("unknown").is_empty());
+    assert_eq!(parsed.dpi_presets("unknown"), DEFAULT_DPI_PRESETS.to_vec());
 }
 
 #[test]
-fn empty_dpi_presets_skip_serialization() {
+fn a_device_without_a_preset_list_offers_the_defaults() {
+    let mut cfg = Config::default();
+    cfg.set_dpi("2b042", Dpi::new(1600));
+
+    let parsed = write_and_read(&cfg);
+    assert_eq!(
+        parsed.dpi_presets("2b042"),
+        vec![Dpi::new(800), Dpi::new(1000)]
+    );
+    let body = toml::to_string_pretty(&parsed).expect("serialize");
+    assert!(
+        !body.contains("dpi_presets"),
+        "the defaults are not written: {body}"
+    );
+}
+
+#[test]
+fn an_emptied_dpi_preset_list_is_kept() {
     let mut cfg = Config::default();
     // Add a binding so the device block exists.
     cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Copy));
@@ -239,9 +256,10 @@ fn empty_dpi_presets_skip_serialization() {
 
     let body = toml::to_string_pretty(&cfg).expect("serialize");
     assert!(
-        !body.contains("dpi_presets"),
-        "empty dpi_presets should be omitted: {body}"
+        body.contains("dpi_presets = []"),
+        "an emptied list is kept, so the defaults do not come back: {body}"
     );
+    assert!(write_and_read(&cfg).dpi_presets("2b042").is_empty());
 }
 
 /// `KeyScreenCapture` and `control:0x010a` are one control. TOML cannot see

@@ -62,13 +62,13 @@ impl AppState {
         self.persist_and_reload("DPI presets");
         events
     }
-    /// Read the DPI preset list for the active device, or an empty `Vec`
-    /// when no device is selected. UI helper.
+    /// Read the DPI preset list for the active device — the defaults while
+    /// it has no list of its own, as the agent's DPI cycle sees them — or an
+    /// empty `Vec` when no device is selected. UI helper.
     #[must_use]
     pub fn dpi_presets(&self) -> Vec<Dpi> {
         self.current_record()
-            .and_then(DeviceRecord::persistent_config_key)
-            .map(|key| self.config.dpi_presets(key))
+            .map(|record| self.config.dpi_presets(&record.config_key))
             .unwrap_or_default()
     }
     /// The active device's known DPI: the live capability read once it
