@@ -183,8 +183,14 @@ impl DpiPanel {
     /// The slider, or the onboard-profile hint in its place while the
     /// device's own profile owns the DPI.
     fn slider_row(&self, snapshot: &DpiPanelSnapshot, pal: Palette) -> AnyElement {
+        // A caption, like the preset hint below it: a two-sentence
+        // explanation, not a one-word status, so it must wrap.
         if snapshot.onboard_profile {
-            return status_line(tr!("pointer.dpi_set_by_onboard_profile"), pal).into_any_element();
+            return div()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!("pointer.dpi_set_by_onboard_profile"))
+                .into_any_element();
         }
         slider_element(
             &snapshot.status,
