@@ -277,9 +277,12 @@ pub fn plan_for_device(
         .filter(|entry| !divert_wheel_buttons.contains(entry))
         .filter(|(_, button)| {
             bindings.get(button).is_some_and(|binding| {
-                // Both decide on release whether the click runs, which only
+                // Each decides after the press which action runs, which only
                 // the shared button runtime can do.
-                if matches!(binding, Binding::LongPress(_) | Binding::WheelHold(_)) {
+                if matches!(
+                    binding,
+                    Binding::LongPress(_) | Binding::MultiClick(_) | Binding::WheelHold(_)
+                ) {
                     return true;
                 }
                 let action = binding.click_action();
@@ -340,7 +343,7 @@ pub fn plan_for_device(
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::binding::{Binding, LongPressBinding, WheelHoldBinding};
+    use openlogi_core::binding::{Binding, LongPressBinding, MultiClickBinding, WheelHoldBinding};
     use openlogi_hid::reprog_controls::{
         GESTURE_BUTTON_CID, HAPTIC_PANEL_CID, MULTIPLATFORM_GESTURE_BUTTON_CID,
     };
@@ -493,6 +496,29 @@ mod tests {
                 .iter()
                 .any(|&(_, button)| button == ButtonId::Back),
             "the runtime needs both edges even when the short action is native"
+        );
+    }
+
+    #[test]
+    fn multi_click_is_diverted_even_when_its_click_action_matches_the_native_default() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::Back,
+            Binding::MultiClick(MultiClickBinding::new(
+                default_binding(ButtonId::Back),
+                Action::MissionControl,
+            )),
+        );
+
+        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
+        assert!(
+            plan.target
+                .spec
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "the runtime must see the first click to wait for a second"
         );
     }
 
