@@ -51,7 +51,7 @@ use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, Speed
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
-use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
+use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks, LinkedHostSwitch};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::watchers::light::{WatchedLight, WatchedLights};
@@ -164,6 +164,9 @@ pub struct SharedHandles {
     transport_turns: crate::hardware::TransportTurns,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Moves a linked keyboard and its pointing devices together, for an
+    /// Easy-Switch action fired on either.
+    pub linked_host_switch: LinkedHostSwitch,
     /// The online lights to watch for changes made on the light itself.
     pub watched_lights: WatchedLights,
     /// Orders every path's Fn-lock writes per keyboard.
@@ -662,6 +665,7 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             transport_turns: crate::hardware::TransportTurns::default(),
+            linked_host_switch: LinkedHostSwitch::new(&host_switch_links),
             host_switch_links,
             watched_lights,
             fn_lock_order: WriteOrder::default(),

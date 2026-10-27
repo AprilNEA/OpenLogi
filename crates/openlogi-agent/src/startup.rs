@@ -141,6 +141,7 @@ impl InputServices {
             shared.dpi_cycle.clone(),
             shared.pointer_speeds(),
             shared.device_access(),
+            shared.linked_host_switch.clone(),
             sender,
         ) {
             Ok(runtime) => runtime,
@@ -212,6 +213,7 @@ pub(crate) fn spawn_hidpp_watchers(
     );
     let host_switch = watchers::host_switch::spawn(
         &shared.host_switch_links,
+        &shared.linked_host_switch,
         shared.channel_pool.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),

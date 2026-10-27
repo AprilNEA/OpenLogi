@@ -205,6 +205,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             Arc::default(),
             Arc::default(),
             device_access.clone(),
+            crate::watchers::host_switch::LinkedHostSwitch::default(),
             ring,
         )
         .unwrap();
