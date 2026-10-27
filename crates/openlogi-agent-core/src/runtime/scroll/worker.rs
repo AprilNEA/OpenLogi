@@ -241,6 +241,11 @@ impl ScrollInputHandle {
     /// smoothing), because the press itself disturbs the wheel. A release
     /// does not extend it. The window length is an assumption, see
     /// `MIDDLE_PRESS_WINDOW`.
+    ///
+    /// The window is shared by every device: the hook cannot tell which unit
+    /// pressed, and a wheel session carries no product identity to compare.
+    /// A second mouse scrolled within the window of another's middle click
+    /// loses those reports.
     pub fn on_middle_button(&self, pressed: bool) {
         if pressed {
             self.middle_press
