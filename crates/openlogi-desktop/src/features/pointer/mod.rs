@@ -3,4 +3,5 @@
 pub mod dpi;
 mod pointer_speed;
 mod report_rate;
+pub mod scroll_speed;
 pub mod smartshift;
