@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 
+use crate::binding::MultiClickBinding;
+
 use super::*;
 
 #[test]
@@ -134,4 +136,33 @@ fn persisted_numeric_contracts_reject_unsafe_values() {
     ] {
         assert!(toml::from_str::<Config>(body).is_err(), "accepted: {body}");
     }
+}
+
+#[test]
+fn v10_loads_and_a_multi_click_binding_survives_a_v11_save() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 10\n[devices.mouse.bindings]\nBack = \"Copy\"\n",
+    )
+    .expect("write v10 config");
+
+    let (mut config, mut file) = ConfigFile::load_from_path(&path).expect("load v10 config");
+    assert_eq!(config.schema_version, SCHEMA_VERSION);
+
+    let binding = Binding::MultiClick(MultiClickBinding::new(Action::Copy, Action::Paste));
+    config.set_binding("mouse", ButtonId::Back, binding.clone());
+    file.save(&config).expect("save v11 config");
+
+    let saved = fs::read_to_string(&path).expect("read saved config");
+    assert!(
+        saved.starts_with(&format!("schema_version = {SCHEMA_VERSION}\n")),
+        "saved header: {saved}"
+    );
+    let reloaded = Config::load_from_path(&path).expect("reload v11 config");
+    assert_eq!(
+        reloaded.stored_bindings("mouse").get(&ButtonId::Back),
+        Some(&binding)
+    );
 }

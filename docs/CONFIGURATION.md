@@ -44,7 +44,7 @@ header before parsing its fields. A v9 file without the policy still loads.
 
 ## Shape
 
-`schema_version` is required and currently `10`. `selected_device` is an
+`schema_version` is required and currently `11`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:

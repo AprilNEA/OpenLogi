@@ -229,7 +229,14 @@ impl Config {
         let is_old_default = |binding: Option<&Binding>, old: &Action| match binding {
             None => true,
             Some(Binding::Single(action)) => action == old,
-            Some(Binding::Gesture(_) | Binding::LongPress(_) | Binding::WheelHold(_)) => false,
+            // Neither shape exists in a file old enough to reach this pass; the
+            // arm only keeps the match exhaustive.
+            Some(
+                Binding::Gesture(_)
+                | Binding::LongPress(_)
+                | Binding::MultiClick(_)
+                | Binding::WheelHold(_),
+            ) => false,
         };
 
         for device in self.devices.values_mut() {
