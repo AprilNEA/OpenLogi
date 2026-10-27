@@ -23,7 +23,8 @@ use self::button::{
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{
-    DeviceAccess, toggle_smartshift_in_background, write_pointer_speed_in_background,
+    DeviceAccess, switch_host_in_background, toggle_smartshift_in_background,
+    write_pointer_speed_in_background,
 };
 use crate::pointer_speed::{PrecisionPress, SpeedWrite};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
@@ -123,6 +124,25 @@ impl ActionExecutor {
         true
     }
 
+    /// Move the device whose button or Actions Ring fired `action` to the
+    /// Easy-Switch channel the action names, as its own channel key would.
+    fn switch_host(&self, action: &Action, device_key: Option<&str>) {
+        let Some(slot) = action.easy_switch_host() else {
+            return;
+        };
+        let target = self
+            .dpi_cycle
+            .read()
+            .ok()
+            .and_then(|cycles| cycles.target_for(device_key));
+        if let Some(target) = target {
+            info!(slot, "Easy-Switch action → switching host");
+            switch_host_in_background(self.access.op(&target), slot);
+        } else {
+            debug!("no target device — Easy-Switch action skipped");
+        }
+    }
+
     /// Write `write` in the background, and settle the restore it carries
     /// once it lands.
     fn write_speed(&self, write: SpeedWrite) {
@@ -209,6 +229,12 @@ impl ActionExecutor {
                 if !self.toggle_precision_mode(device_key, PrecisionPress::Assigned) {
                     debug!("no online mouse with pointer scaling — precision toggle skipped");
                 }
+                return;
+            }
+            Action::EasySwitchChannel1
+            | Action::EasySwitchChannel2
+            | Action::EasySwitchChannel3 => {
+                self.switch_host(action, device_key);
                 return;
             }
             // Browser navigation uses Safari's captured Accessibility target

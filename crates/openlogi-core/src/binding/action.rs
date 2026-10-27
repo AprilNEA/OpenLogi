@@ -219,6 +219,14 @@ pub enum Action {
     /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
     /// lit while the mode is on. Does nothing on other devices.
     TogglePrecisionMode,
+    /// Move the device that fired the action to its first Easy-Switch
+    /// channel, as its own channel key would (HID++ `0x1814`). See
+    /// [`Action::easy_switch_host`].
+    EasySwitchChannel1,
+    /// Move the device to its second Easy-Switch channel.
+    EasySwitchChannel2,
+    /// Move the device to its third Easy-Switch channel.
+    EasySwitchChannel3,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -317,6 +325,9 @@ macro_rules! for_each_unit_action {
             CaptureRegion "Capture Region" "actions.capture_region" System Camera,
             Sleep "Sleep" "actions.sleep" System Monitor,
             ShowActionsRing "Actions Ring" "action_ring.actions_ring" System Grid,
+            EasySwitchChannel1 "Easy-Switch Channel 1" "actions.easy_switch_channel_1" System Channel1,
+            EasySwitchChannel2 "Easy-Switch Channel 2" "actions.easy_switch_channel_2" System Channel2,
+            EasySwitchChannel3 "Easy-Switch Channel 3" "actions.easy_switch_channel_3" System Channel3,
             // Media
             PlayPause "Play / Pause" "actions.play_pause" Media Play,
             NextTrack "Next Track" "actions.next_track" Media NextTrack,
@@ -449,6 +460,18 @@ macro_rules! derive_action_core {
 for_each_unit_action!(derive_action_core);
 
 impl Action {
+    /// The zero-based Easy-Switch channel this action moves its device to,
+    /// or `None` for any other action.
+    #[must_use]
+    pub fn easy_switch_host(&self) -> Option<u8> {
+        match self {
+            Self::EasySwitchChannel1 => Some(0),
+            Self::EasySwitchChannel2 => Some(1),
+            Self::EasySwitchChannel3 => Some(2),
+            _ => None,
+        }
+    }
+
     /// The chord whose output must remain down until the originating press
     /// ends, together with which of its keys stay down. `None` for an
     /// instantaneous action.

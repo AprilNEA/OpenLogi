@@ -703,6 +703,22 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
     );
 }
 
+/// Move `op`'s device to Easy-Switch `slot` in the background via
+/// [`openlogi_hid::switch_easy_switch_host_on`]. Returns immediately; a
+/// device without `0x1814` or an empty slot is logged and left where it is.
+pub fn switch_host_in_background(op: DeviceOp, slot: u8) {
+    let index = op.route.device_index();
+    op.spawn_write(
+        "Easy-Switch host switch",
+        move |c| async move { openlogi_hid::switch_easy_switch_host_on(&c, slot).await },
+        move |result| {
+            log_outcome(index, "Easy-Switch host switch", result, |sent| {
+                debug!(index, slot, sent, "Easy-Switch host switch done");
+            });
+        },
+    );
+}
+
 /// Spawn an OS thread that writes the keyboard Fn-lock state to `op`'s device
 /// via [`openlogi_hid::set_fn_lock_on`], unless a newer Fn-lock write for the
 /// keyboard was requested after `ticket`. Returns immediately; failures (incl.

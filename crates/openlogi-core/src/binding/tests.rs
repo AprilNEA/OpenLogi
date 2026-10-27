@@ -382,6 +382,10 @@ fn all_catalog_variants_roundtrip_toml() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one line per persisted variant name, the list this test pins"
+)]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
     actions.extend([
@@ -433,6 +437,9 @@ fn persisted_action_variant_names_are_stable() {
         "CustomShortcut",
         "Cut",
         "CycleDpiPresets",
+        "EasySwitchChannel1",
+        "EasySwitchChannel2",
+        "EasySwitchChannel3",
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",

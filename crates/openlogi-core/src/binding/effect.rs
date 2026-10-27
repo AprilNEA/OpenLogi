@@ -266,13 +266,16 @@ impl Action {
             Action::VolumeDown => Effect::Media(MediaKey::VolumeDown),
             Action::MuteVolume => Effect::Media(MediaKey::Mute),
 
-            // DPI/SmartShift/precision mode/the Actions Ring/OpenApplication
-            // are all handled above (or beside) the injector — see
-            // `Effect::AgentSide`.
+            // DPI/SmartShift/precision mode/Easy-Switch/the Actions
+            // Ring/OpenApplication are all handled above (or beside) the
+            // injector — see `Effect::AgentSide`.
             Action::CycleDpiPresets
             | Action::SetDpiPreset(_)
             | Action::ToggleSmartShift
             | Action::TogglePrecisionMode
+            | Action::EasySwitchChannel1
+            | Action::EasySwitchChannel2
+            | Action::EasySwitchChannel3
             | Action::ShowActionsRing
             | Action::OpenApplication(_) => Effect::AgentSide,
 

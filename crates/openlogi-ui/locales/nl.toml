@@ -437,6 +437,9 @@ workflow_step_delay = "Delay"
 workflow_step_applescript = "AppleScript"
 workflow_step_shell = "Shell"
 open_named_target = "%{name} openen"
+easy_switch_channel_1 = "Easy-Switch kanaal 1"
+easy_switch_channel_2 = "Easy-Switch kanaal 2"
+easy_switch_channel_3 = "Easy-Switch kanaal 3"
 
 [pairing]
 choose_receiver = "Choose a receiver"

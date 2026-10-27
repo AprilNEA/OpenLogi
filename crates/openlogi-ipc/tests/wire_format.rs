@@ -112,7 +112,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 41);
+    assert_eq!(PROTOCOL_VERSION, 42);
 }
 
 #[test]
@@ -1213,4 +1213,29 @@ fn disable_keys_requests_are_appended() {
         },
         "2d000846303044434146450101",
     );
+}
+
+/// v42: the settings app moves a device to another Easy-Switch channel, and
+/// a button or ring slot does the same through three appended actions.
+#[test]
+fn easy_switch_host_switch_is_appended() {
+    use openlogi_core::binding::Action;
+
+    assert_wire(
+        &AgentRequest::SwitchEasySwitchHost {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            slot: 1,
+        },
+        "2f000846303044434146450101",
+    );
+    assert_wire(&HidppOperation::SwitchHost, "1c");
+    assert_wire(&Action::EasySwitchChannel1, "37");
+    assert_wire(&Action::EasySwitchChannel2, "38");
+    assert_wire(&Action::EasySwitchChannel3, "39");
+    assert_wire(&ActionRingIcon::Channel1, "36");
+    assert_wire(&ActionRingIcon::Channel2, "37");
+    assert_wire(&ActionRingIcon::Channel3, "38");
 }

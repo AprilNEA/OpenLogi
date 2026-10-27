@@ -1276,6 +1276,25 @@ impl Agent for MockAgent {
         info!(%route, slot, "rename_easy_switch_host");
         Ok(stored.clone())
     }
+
+    /// The mock has no other computer to move to, so the switch only moves
+    /// the reading's current channel.
+    async fn switch_easy_switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        slot: u8,
+    ) -> Result<(), WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.easy_switch, &route, 0x1815)?;
+        if !stored.slot(slot).is_some_and(|host| host.paired) {
+            return Err(WriteError::HostSlotEmpty { slot });
+        }
+        stored.current = Some(slot);
+        info!(%route, slot, "switch_easy_switch_host");
+        Ok(())
+    }
     /// The mock reports no changes on its lights, so it has none to keep.
     async fn reload_saved_config(
         self,

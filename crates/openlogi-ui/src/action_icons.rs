@@ -20,7 +20,9 @@ use gpui::{AssetSource, Result, SharedString};
 /// `Icon::empty().path(..)`. Mostly command glyphs for the binding menus
 /// (paste / cut / volume / lock / …), plus the chrome marks gpui-component's
 /// bundled `IconName` set does not cover — About-page icons, and `mouse-left` /
-/// `mouse-right`, which are lucide's `mouse` with one button filled in.
+/// `mouse-right`, which are lucide's `mouse` with one button filled in, and
+/// `square-1` … `square-3`, lucide's `square` around the digits of its
+/// `heading-1` … `heading-3`, for the Easy-Switch channel actions.
 ///
 /// `x.svg` duplicates `IconName::Close` on purpose: the overlay does not depend
 /// on gpui-component, and its ring cancel target has to match the settings-side
@@ -82,6 +84,9 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/settings.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/settings.svg"))),
     ("action-icons/skip-back.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/skip-back.svg"))),
     ("action-icons/skip-forward.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/skip-forward.svg"))),
+    ("action-icons/square-1.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/square-1.svg"))),
+    ("action-icons/square-2.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/square-2.svg"))),
+    ("action-icons/square-3.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/square-3.svg"))),
     ("action-icons/square-arrow-left.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/square-arrow-left.svg"))),
     ("action-icons/square-arrow-right.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/square-arrow-right.svg"))),
     ("action-icons/square-plus.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/square-plus.svg"))),
