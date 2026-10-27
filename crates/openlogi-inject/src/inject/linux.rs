@@ -219,6 +219,7 @@ fn dispatch_generic_linux_native(action: &Action, native: NativeAction) {
         }
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
+        NativeAction::SmartZoom => skip_unsupported_native(action),
     }
 }
 
@@ -237,6 +238,7 @@ fn dispatch_hyprland_native(action: &Action, native: NativeAction) {
             press_key(&[], KeyCode::KEY_SYSRQ);
         }
         NativeAction::Sleep => sleep_system(),
+        NativeAction::SmartZoom => skip_unsupported_native(action),
     }
 }
 

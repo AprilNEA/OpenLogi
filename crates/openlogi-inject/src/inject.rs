@@ -301,9 +301,9 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// the fallback is Super+Ctrl+L). Helpers run asynchronously with a bounded
 /// wait, then fall back to their compositor shortcut. Otherwise macOS-only
 /// window manager actions (`MissionControl`, `AppExpose`, `ShowDesktop`,
-/// `LaunchpadShow`) have no universal Linux equivalent and are silently skipped
-/// (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes to Linux key codes;
-/// macOS Cmd maps to Ctrl.
+/// `LaunchpadShow`, `SmartZoom`) have no universal Linux equivalent and are
+/// silently skipped (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes
+/// to Linux key codes; macOS Cmd maps to Ctrl.
 ///
 /// On Windows, key and mouse events are synthesised via `SendInput`. The
 /// macOS window-manager actions map to their Windows equivalents (e.g.

@@ -163,6 +163,8 @@ pub use succession::Identity;
 ///      `Action::{PreviousKeypadPage, NextKeypadPage}` appended after the
 ///      G-series actions, and `ButtonId` grid keys gain page-qualified names
 ///      (`page2:gridMiddle`) — the keypad's binding pages.
+///      `Action::SmartZoom` appended after the keypad page actions — the
+///      trackpad's two-finger double-tap zoom.
 pub const PROTOCOL_VERSION: u32 = 43;
 
 /// Environment variable through which the agent hands a supervised helper the
