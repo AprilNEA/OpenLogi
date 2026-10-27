@@ -408,10 +408,11 @@ async fn restore(armed: Armed) -> ReplayChannelHandle {
     handle
 }
 
-/// The restore flips only the target, so the resolution and inversion
-/// arming wrote stay for native scrolling.
+/// The restore flips the target and puts the resolution back to the one the
+/// wheel had before arming, so a session's high-resolution request does not
+/// outlive it. The inversion arming wrote stays for native scrolling.
 #[tokio::test]
-async fn restore_hands_the_wheel_back_with_only_the_target_changed() {
+async fn restore_hands_the_wheel_back_in_its_original_resolution() {
     let armed = arm(
         HAS_INVERT,
         0,
@@ -425,7 +426,28 @@ async fn restore_hands_the_wheel_back_with_only_the_target_changed() {
         mode_writes(&handle),
         [
             [DIVERTED | HIGH_RES | INVERTED, PRIORITY, RATE],
-            [HIGH_RES | INVERTED, PRIORITY, RATE],
+            [INVERTED, PRIORITY, RATE],
+        ]
+    );
+}
+
+/// A wheel that already reported in high resolution keeps doing so.
+#[tokio::test]
+async fn restore_keeps_a_wheel_that_started_in_high_resolution() {
+    let armed = arm(
+        HAS_INVERT,
+        HIGH_RES,
+        SetReply::Apply,
+        &spec(Some(ScrollResolution::High), None),
+    )
+    .await;
+    armed.result.as_ref().unwrap();
+    let handle = restore(armed).await;
+    assert_eq!(
+        mode_writes(&handle),
+        [
+            [DIVERTED | HIGH_RES, PRIORITY, RATE],
+            [HIGH_RES, PRIORITY, RATE],
         ]
     );
 }
