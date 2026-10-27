@@ -131,6 +131,8 @@ fn dispatch_media(key: MediaKey) {
         MediaKey::VolumeUp => press_key(&[], KeyCode::KEY_VOLUMEUP),
         MediaKey::VolumeDown => press_key(&[], KeyCode::KEY_VOLUMEDOWN),
         MediaKey::Mute => press_key(&[], KeyCode::KEY_MUTE),
+        MediaKey::BrightnessUp => press_key(&[], KeyCode::KEY_BRIGHTNESSUP),
+        MediaKey::BrightnessDown => press_key(&[], KeyCode::KEY_BRIGHTNESSDOWN),
     }
 }
 
@@ -562,6 +564,7 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     // Multimedia
     KeyCode::KEY_PLAYPAUSE, KeyCode::KEY_NEXTSONG, KeyCode::KEY_PREVIOUSSONG,
     KeyCode::KEY_VOLUMEUP,  KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_MUTE,
+    KeyCode::KEY_BRIGHTNESSUP, KeyCode::KEY_BRIGHTNESSDOWN,
     // Mouse buttons (injected as EV_KEY with BTN_* codes). The side pair
     // must be registered here or the kernel silently drops their events.
     KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE,
@@ -1174,7 +1177,7 @@ mod tests {
     use openlogi_core::binding::{KeyCombo, NativeAction, Shortcut};
 
     use super::{
-        HELPER_PREFIXES, ScrollOutput, action_scroll, capture_region_mods, combo,
+        HELPER_PREFIXES, KEY_CAPABILITIES, ScrollOutput, action_scroll, capture_region_mods, combo,
         generic_linux_lock_fallback_chord, hid_usage_to_linux, hyprland_helper,
         hyprland_lock_fallback_chord, hyprland_lock_helper, hyprland_session_from_signature,
         key_ev, key_phase_events, modifiers_to_keycodes, rel_ev, resolve_allowlisted_under,
@@ -1253,6 +1256,22 @@ mod tests {
         assert_eq!(hid_usage_to_linux(0x3a), Some(KeyCode::KEY_F1));
         assert_eq!(hid_usage_to_linux(0x6f), Some(KeyCode::KEY_F20));
         assert_eq!(hid_usage_to_linux(0xff), None);
+    }
+
+    /// A keycode `press_key` emits without a matching `KEY_CAPABILITIES`
+    /// entry is silently dropped by the kernel — `build` never registers it,
+    /// `emit` still returns `Ok`, and nothing distinguishes that from a
+    /// working press. Only Linux compiles this file, so neither the macOS
+    /// CI host nor a macOS reviewer can catch a missing entry by building.
+    #[test]
+    fn brightness_keycodes_are_registered_as_capabilities() {
+        for code in [KeyCode::KEY_BRIGHTNESSUP, KeyCode::KEY_BRIGHTNESSDOWN] {
+            assert!(
+                KEY_CAPABILITIES.contains(&code),
+                "dispatch_media presses {code:?} but KEY_CAPABILITIES omits it, \
+                 so the kernel will drop the event"
+            );
+        }
     }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
