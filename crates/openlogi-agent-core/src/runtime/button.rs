@@ -709,8 +709,7 @@ impl ButtonInputHandle {
         match self.events.try_send(command) {
             Ok(()) => true,
             Err(mpsc::TrySendError::Full(_)) => {
-                self.generation.fetch_add(1, Ordering::AcqRel);
-                warn!("button lifecycle queue full — invalidating active presses");
+                self.invalidate_after_dropped_command();
                 false
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -718,6 +717,14 @@ impl ButtonInputHandle {
                 false
             }
         }
+    }
+
+    /// A dropped command may have been a release, so every active press is
+    /// invalidated. The worker can drain the full queue and block before the
+    /// generation changes, so the change needs its wake like any other.
+    fn invalidate_after_dropped_command(&self) {
+        self.invalidate_all();
+        warn!("button lifecycle queue full — invalidating active presses");
     }
 
     fn stop_accepting(&self) {

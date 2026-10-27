@@ -958,6 +958,42 @@ fn an_idle_worker_wakes_for_shutdown_and_releases_its_held_press() {
 }
 
 #[test]
+fn an_idle_worker_wakes_for_the_invalidation_after_a_full_queue() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let hold = Binding::Single(Action::HoldShortcut(
+        "Ctrl+Space".parse().expect("valid shortcut"),
+    ));
+    let token = input
+        .try_hook_down(ButtonId::Back, Some(&hold))
+        .expect("down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+
+    // A producer saw the queue full, then the worker drained it and blocked
+    // before the generation changed. The dropped command may have been this
+    // hold's release, so only the invalidation's own wake can end it.
+    thread::sleep(Duration::from_millis(20));
+    input.invalidate_after_dropped_command();
+    let ButtonRuntimeEvent::Ended { press, reason } = received
+        .recv_timeout(WAKE_SLACK)
+        .expect("the invalidation must wake the idle worker")
+    else {
+        panic!("the invalidation must end the held press");
+    };
+    assert_eq!(press.token, token);
+    assert_eq!(reason, EndReason::Canceled(CancelReason::Invalidated));
+    assert!(owner.shutdown());
+}
+
+#[test]
 fn overdue_long_press_precedes_unrelated_queued_actions() {
     let (commands, queued) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
     let binding = long_press(Action::Copy, Action::Paste);
