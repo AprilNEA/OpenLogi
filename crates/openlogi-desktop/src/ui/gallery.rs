@@ -13,6 +13,7 @@ use gpui_component::{
     h_flex,
     scroll::ScrollableElement as _,
     slider::Slider,
+    tag::Tag,
     v_flex,
 };
 use openlogi_core::brand::APP_ID;
@@ -498,7 +499,8 @@ impl ComponentGallery {
     fn carousel(&self, pal: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.carousel_selected;
         let view = cx.entity();
-        div().w_full().child(PanelCard::new(
+        div().w_full().child(
+            PanelCard::new(
             "Carousel",
             Icon::new(IconName::GalleryVerticalEnd).text_color(pal.text_muted),
             div().w_full().h(rems(13.)).child(
@@ -540,7 +542,11 @@ impl ComponentGallery {
                         cx.notify();
                     })),
             ),
-        ))
+        )
+        // A title suffix, as the Pointer tab's momentum-scrolling card shows
+        // its platform notice.
+        .title_suffix(Tag::secondary().small().child("Tag")),
+        )
     }
 }
 

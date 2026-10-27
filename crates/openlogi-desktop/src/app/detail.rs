@@ -13,6 +13,7 @@ use gpui_component::{
     h_flex,
     scroll::ScrollableElement as _,
     switch::Switch,
+    tag::Tag,
     v_flex,
 };
 use openlogi_core::config::{OnboardMemory, ScrollResolution};
@@ -31,6 +32,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::momentum::{MomentumPanel, confirm_turning_off_with_smooth_wheel};
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
@@ -100,6 +102,7 @@ pub(super) struct DetailPanels<'a> {
     pub disable_keys_panel: &'a gpui::Entity<DisableKeysPanel>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
+    pub momentum_panel: &'a gpui::Entity<MomentumPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
@@ -131,9 +134,13 @@ pub(super) fn detail_content(
         DetailTab::Keys => {
             keys_tab(panels.keyboard_model, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::Pointer => {
-            pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
-        }
+        DetailTab::Pointer => pointer_tab(
+            panels.dpi_panel,
+            panels.smartshift_panel,
+            panels.momentum_panel,
+            cx,
+        )
+        .into_any_element(),
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
@@ -378,12 +385,14 @@ fn action_ring_tab(
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
-/// scroll-wheel preferences, each in a titled card. Use a responsive two-column
-/// grid that still fits the window's 720 px minimum width, so these short
-/// controls don't force a vertical scroll.
+/// scroll-wheel preferences, each in a titled card, then momentum scrolling
+/// across the bottom. Use a responsive two-column grid that still fits the
+/// window's 720 px minimum width, so these short controls don't force a
+/// vertical scroll.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
+    momentum_panel: &gpui::Entity<MomentumPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
@@ -416,7 +425,22 @@ fn pointer_tab(
                     .flex_1()
                     .child(scrolling_card(pal, cx)),
             )
-            .children(onboard_card(pal, cx).map(pointer_grid_card)),
+            .children(onboard_card(pal, cx).map(pointer_grid_card))
+            // Full width, so it always starts its own row at the bottom.
+            .child(
+                div().w_full().child(
+                    PanelCard::new(
+                        tr!("pointer.momentum_title"),
+                        Icon::empty().path("action-icons/mouse.svg"),
+                        momentum_panel.clone().into_any_element(),
+                    )
+                    .title_suffix(
+                        Tag::secondary()
+                            .small()
+                            .child(tr!("pointer.momentum_macos_only")),
+                    ),
+                ),
+            ),
     )
 }
 
@@ -683,7 +707,8 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
 /// The scrolling card's smooth-wheel switch. It follows the wheel-resolution
 /// control's reasons for being unavailable, since both need `0x2121` on this
 /// link. A smooth wheel that is already on stays switchable, so a setting made
-/// on another link can always be turned off from here.
+/// on another link can always be turned off from here. With Glide on free
+/// spin on, turning it off asks to turn both off.
 fn smooth_wheel_row(pal: Palette, smooth_wheel: bool, hires: HiresWheel) -> impl IntoElement {
     let available = hires == HiresWheel::Here || smooth_wheel;
     toggle_row(
@@ -695,8 +720,14 @@ fn smooth_wheel_row(pal: Palette, smooth_wheel: bool, hires: HiresWheel) -> impl
             .selected(smooth_wheel)
             .disabled(!available)
             .label((!available).then(|| tr!("common.unavailable")))
-            .on_change(|enabled, _window, cx| {
-                AppState::apply(cx, |state| state.commit_smooth_wheel(*enabled));
+            .on_change(|enabled, window, cx| {
+                let gliding = AppState::try_read(cx)
+                    .is_some_and(|state| state.app_settings().momentum_scrolling.enabled);
+                if !*enabled && gliding {
+                    confirm_turning_off_with_smooth_wheel(window, cx);
+                } else {
+                    AppState::apply(cx, |state| state.commit_smooth_wheel(*enabled));
+                }
             }),
     )
 }
@@ -1190,6 +1221,7 @@ mod tests {
     };
 
     use gpui::{AppContext as _, Modifiers, VisualTestContext};
+    use gpui_component::WindowExt;
     use openlogi_core::config::Config;
 
     use super::{
@@ -1300,7 +1332,11 @@ mod tests {
             });
             AppState::set_global(state, cx);
         });
-        let (_view, cx) = cx.add_window_view(move |_, _| SmoothWheelRowHost { hires });
+        // Rooted, so the row's confirmation dialog has somewhere to open.
+        let (_view, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| SmoothWheelRowHost { hires });
+            gpui_component::Root::new(host, window, cx)
+        });
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx
@@ -1378,6 +1414,32 @@ mod tests {
         assert!(smooth_wheel_on(cx));
         click_switch(cx);
         assert!(!smooth_wheel_on(cx));
+    }
+
+    /// With the glide on, turning the smooth wheel off asks first instead of
+    /// switching it off under the glide. What confirming does is
+    /// `commit_glide_with_smooth_wheel`'s state test.
+    #[gpui::test]
+    fn turning_off_the_smooth_wheel_under_the_glide_asks_first(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let mut config = Config::ephemeral();
+        config.set_smooth_wheel(KNOWN_MOUSE_KEY, true);
+        config.app_settings.momentum_scrolling.enabled = true;
+        let cx = smooth_wheel_row_view(cx, HiresWheel::Here, true, config);
+        let gliding = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                AppState::try_read(cx)
+                    .expect("state is installed")
+                    .app_settings()
+                    .momentum_scrolling
+                    .enabled
+            })
+        };
+
+        click_switch(cx);
+        assert!(cx.update(WindowExt::has_active_dialog), "it asks");
+        assert!(smooth_wheel_on(cx) && gliding(cx), "asked, not changed");
     }
 
     #[test]
