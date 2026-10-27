@@ -11,8 +11,8 @@ mod worker;
 
 pub use worker::{ScrollInputHandle, ScrollPreferences, ScrollRuntime};
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -21,8 +21,6 @@ use openlogi_inject::SmoothScrollPhase;
 
 use crate::runtime::HidppSessionId;
 
-/// Duration of every segment, including a segment restarted by retargeting.
-const ANIMATION_DURATION: Duration = Duration::from_millis(100);
 /// Output cadence. Position is evaluated from absolute time, so delayed wakes
 /// do not slow or lengthen the animation.
 const FRAME_PERIOD: Duration = Duration::from_millis(8);
@@ -31,15 +29,115 @@ const FRAME_PERIOD: Duration = Duration::from_millis(8);
 /// above the gap between ratchet ticks of a continuous spin and far below the
 /// pause between separate spins.
 const PHASED_IDLE: Duration = Duration::from_millis(120);
+/// Sliding window over which a source's recent tick distance becomes its
+/// wheel rate for acceleration. Sized so a notched wheel emitting one full
+/// tick every `dt < ACCEL_WINDOW` reproduces the classic per-interval gain.
+const ACCEL_WINDOW: Duration = Duration::from_millis(70);
+/// Numerator of the tick-rate acceleration curve, in milliseconds: a source
+/// whose window holds one tick per `dt` ms gains `(1 + ACCEL_RATE_MS/dt) / 2`,
+/// clamped between 1 and the configured cap.
+const ACCEL_RATE_MS: f64 = 30.0;
+/// Upper bound on remembered window entries; overflow drops the oldest, which
+/// can only understate the rate. 128 entries cover ~1.8 kHz reporting across
+/// the full window — beyond any real wheel.
+const ACCEL_WINDOW_MAX_TICKS: usize = 128;
+/// Ratio of the pulse curve's viscous tail to its damped-force head.
+const PULSE_TAIL_RATIO: f64 = 3.0;
+/// Upper bound on in-flight pulses per source; free-spin bursts merge into
+/// the newest pulse past this (see [`ActiveMotion::add_tick`]), keeping frame
+/// evaluation O(1)-ish.
+const MAX_PULSES: usize = 64;
+/// How long the OS acceleration baked into pre-accelerated input takes to
+/// decay after the wheel changes direction. Measured on macOS 15.7 with an
+/// MX Master 4: a flip 68 ms after the opposing stream arrived with its
+/// first tick 14× the cold-start magnitude, while flips ≥ 435 ms after it
+/// started cold like every from-rest burst.
+const REVERSAL_COOLDOWN: Duration = Duration::from_millis(400);
+/// Raw opposing distance (in the input's own units) a flip must accumulate
+/// before the tracked direction changes. Free-spin wheels jitter a fraction
+/// of a tick backwards at the end of a flick; below this floor the opposing
+/// ticks are attenuated but the resumed main direction stays untouched.
+const REVERSAL_COMMIT: f64 = 0.5;
+/// Per-tick line magnitude above which a corrective burst is compressed.
+/// The OS acceleration curve reaches ~8 lines per tick within half a second
+/// even from a cold start; that speed reads as intended travel when the
+/// direction is sustained but as overshoot when it follows a reversal
+/// (measured 2026-08-29: physically identical bursts were flagged as
+/// overshoot only in the reversal context).
+const REVERSAL_KNEE: f64 = 3.0;
+/// Compression slope above [`REVERSAL_KNEE`] at the moment of the flip.
+const REVERSAL_KNEE_RATIO: f64 = 4.0;
+/// How long after the first opposing tick the corrective compression takes
+/// to fade back to unity, so a reversal that turns into sustained scrolling
+/// regains full throughput.
+const REVERSAL_RECOVERY: Duration = Duration::from_millis(2000);
+
+/// Normalized two-phase pulse: a damped-force head (`u − 1 + e^(−u)`) blending
+/// C¹-continuously into an exponential viscous tail at one part head to
+/// [`PULSE_TAIL_RATIO`] parts tail, rescaled so `P(0) = 0` and `P(1) = 1`.
+/// Monotone in between; clamped outside.
+fn pulse_curve(progress: f64) -> f64 {
+    fn raw(u: f64) -> f64 {
+        if u < 1.0 {
+            u - 1.0 + (-u).exp()
+        } else {
+            let head_end = (-1.0_f64).exp();
+            head_end + (1.0 - head_end) * (1.0 - (1.0 - u).exp())
+        }
+    }
+    let scale = 1.0 + PULSE_TAIL_RATIO;
+    (raw(progress.clamp(0.0, 1.0) * scale) / raw(scale)).clamp(0.0, 1.0)
+}
+
+/// Amplitude gain for a source whose ticks summed to `window_ticks` of raw
+/// wheel distance across the trailing [`ACCEL_WINDOW`]. Rate-based rather
+/// than interval-based: a high-resolution or free-spin wheel reports many
+/// tiny deltas milliseconds apart, so the gap between events says nothing
+/// about how fast the wheel is actually turning — only the distance covered
+/// per unit time does. A notched wheel (one full tick per report, `dt`
+/// apart) fills the window with `ACCEL_WINDOW/dt` ticks and lands on the
+/// classic `(1 + ACCEL_RATE_MS/dt) / 2` within one tick's worth of rate.
+/// Deliberately deterministic so traces are exactly testable.
+fn accel_gain(window_ticks: f64, max_gain: f64) -> f64 {
+    let rate_per_ms = window_ticks / (ACCEL_WINDOW.as_secs_f64() * 1000.0);
+    f64::midpoint(1.0, ACCEL_RATE_MS * rate_per_ms).clamp(1.0, max_gain)
+}
+
+/// Motion settings resolved when the worker takes a tick off its queue and
+/// kept with that tick's pulse, so a live settings change never re-times or
+/// rescales motion already under way. A tick still queued when a setting
+/// changes takes the new value, exactly as the smoothing toggle does.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MotionTuning {
+    /// Amplitude multiplier per wheel tick, in native wheel steps (lines on
+    /// macOS, notches on Windows and Linux).
+    pub(crate) step: f64,
+    /// Animation length of one tick's pulse.
+    pub(crate) duration: Duration,
+    /// Cap on [`accel_gain`]; `1.0` disables acceleration.
+    pub(crate) max_gain: f64,
+    /// Per-axis sensitivity already applied to the tick before it was queued
+    /// (an OS hook's vertical wheel sensitivity, a thumb wheel's own
+    /// sensitivity; [`WheelDelta::UNIT`] otherwise). The rate window divides
+    /// it back out, so sensitivity scales distance only and never how fast
+    /// the wheel appears to turn.
+    pub(crate) distance_scale: WheelDelta,
+    /// Whether the source's distances already carry an OS acceleration curve
+    /// keyed on unsigned wheel speed. Such input stays hot across a quick
+    /// direction flip, so opposing ticks get a cold start re-imposed via
+    /// [`ReversalCooldown`].
+    pub(crate) preaccelerated: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct WheelDelta {
+pub(crate) struct WheelDelta {
     x: f64,
     y: f64,
 }
 
 impl WheelDelta {
     const ZERO: Self = Self { x: 0.0, y: 0.0 };
+    const UNIT: Self = Self { x: 1.0, y: 1.0 };
 
     fn is_zero(self) -> bool {
         self.x == 0.0 && self.y == 0.0
@@ -63,6 +161,14 @@ impl WheelDelta {
         Self {
             x: self.x * factor,
             y: self.y * factor,
+        }
+    }
+
+    /// Scale each axis by its own factor.
+    fn scale_axes(self, factors: Self) -> Self {
+        Self {
+            x: self.x * factors.x,
+            y: self.y * factors.y,
         }
     }
 
@@ -129,11 +235,27 @@ impl ScrollFrame {
 /// One physical producer. Linux runs one hook callback thread per grabbed
 /// mouse; macOS and Windows use one global callback thread. HID++ capture
 /// sessions use their epoch-bearing identity so a restarted session cannot
-/// inherit motion from the one it replaced.
+/// inherit motion from the one it replaced, and each of a session's wheels
+/// is a producer of its own, so one wheel's rate never accelerates another's
+/// ticks. A session is cancelled as a whole.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ScrollSource {
     OsHook(ThreadId),
-    Hidpp(HidppSessionId),
+    Hidpp(HidppSessionId, HidppWheel),
+}
+
+/// A physical wheel that scrolls through a HID++ capture session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum HidppWheel {
+    /// The main scroll wheel: diverted by its smooth-wheel switch, or turned
+    /// while a wheel-hold button is held.
+    Main,
+    /// The thumb wheel.
+    Thumb,
+}
+
+impl HidppWheel {
+    const ALL: [Self; 2] = [Self::Main, Self::Thumb];
 }
 
 impl ScrollSource {
@@ -142,23 +264,28 @@ impl ScrollSource {
     }
 }
 
-/// A finite cubic smoothstep segment between two cumulative positions.
-struct MotionSegment {
-    from: WheelDelta,
-    target: WheelDelta,
+/// One tick's finite animation: `amplitude × pulse_curve(elapsed/duration)`.
+struct Pulse {
+    amplitude: WheelDelta,
     started_at: Instant,
+    duration: Duration,
+    /// Arrival of the first tick this pulse absorbed. The frame-window merge
+    /// in [`ActiveMotion::add_tick`] is measured from here rather than from
+    /// `started_at`, which a merge moves forward — so a steady stream still
+    /// hands off to a fresh pulse one frame after each pulse began instead of
+    /// restarting the same pulse forever.
+    anchor: Instant,
 }
 
-impl MotionSegment {
+impl Pulse {
     fn position_at(&self, at: Instant) -> WheelDelta {
         let elapsed = at.saturating_duration_since(self.started_at);
-        let progress = (elapsed.as_secs_f64() / ANIMATION_DURATION.as_secs_f64()).clamp(0.0, 1.0);
-        let eased = progress * progress * (3.0 - 2.0 * progress);
-        self.from.plus(self.target.minus(self.from).scale(eased))
+        let progress = elapsed.as_secs_f64() / self.duration.as_secs_f64();
+        self.amplitude.scale(pulse_curve(progress))
     }
 
     fn ends_at(&self) -> Instant {
-        self.started_at + ANIMATION_DURATION
+        self.started_at + self.duration
     }
 
     fn is_complete_at(&self, at: Instant) -> bool {
@@ -166,61 +293,366 @@ impl MotionSegment {
     }
 }
 
-/// A source exists in the state map only while it has a non-zero remaining
-/// target.
+/// The two instants a reversal is measured from.
+#[derive(Clone, Copy)]
+struct Flip {
+    /// Last tick of the direction scrolled away from: the cooldown ramp's
+    /// reference.
+    departed_at: Instant,
+    /// The flip's first opposing tick: the corrective burst's own age, from
+    /// which the knee compression fades.
+    started_at: Instant,
+}
+
+/// A run of ticks in one direction that has not yet crossed
+/// [`REVERSAL_COMMIT`]: against the committed direction, or either way while
+/// none is committed.
+#[derive(Clone, Copy)]
+struct PendingFlip {
+    /// Sign of the run.
+    sign: i8,
+    /// The flip it would commit, or `None` when there is no warm direction
+    /// to depart from, leaving nothing to cool.
+    flip: Option<Flip>,
+    /// The run's raw distance so far.
+    distance: f64,
+    /// Arrival of the run's latest tick. A run that stops for a full
+    /// [`REVERSAL_COOLDOWN`] was jitter, and is dropped.
+    last_at: Instant,
+}
+
+/// One axis of cold-start attenuation for quick direction reversals of
+/// pre-accelerated input.
+///
+/// The OS acceleration baked into such input is keyed on unsigned wheel
+/// speed, so the first ticks after a fast flip arrive as hot as the stream
+/// they interrupt instead of ramping from rest — amplified by the step
+/// multiplier, that is felt as reversal overshoot. Scaling an opposing tick
+/// by the time elapsed since the departed direction's last tick, relative to
+/// [`REVERSAL_COOLDOWN`], reproduces the measured cold-start ramp on quick
+/// flips and leaves leisurely reversals (which arrive cold anyway) exactly
+/// unscaled.
+#[derive(Default)]
+struct ReversalCooldown {
+    /// Sign of the committed scroll direction; `0` while none is: before
+    /// any input, and again once the axis has gone cold.
+    dir: i8,
+    /// Arrival of the committed direction's most recent tick; `None` while
+    /// no direction is committed. The axis goes cold when this is a full
+    /// [`REVERSAL_COOLDOWN`] old, however busy the source's other axis has
+    /// been meanwhile: sub-commit jitter back the other way is not
+    /// scrolling, so it never refreshes this.
+    last_at: Option<Instant>,
+    /// A committed reversal still within [`REVERSAL_RECOVERY`]. It is kept
+    /// apart from `pending`, so a sub-commit tick back the old way during the
+    /// recovery cannot discard it.
+    recovering: Option<Flip>,
+    /// Ticks that have not yet committed a direction.
+    pending: Option<PendingFlip>,
+}
+
+impl ReversalCooldown {
+    /// Scale one tick of a reversal in progress: the cooldown ramp re-imposes
+    /// a cold start relative to the departed direction's last tick (the OS
+    /// acceleration stays hot across a quick flip), and the knee compression
+    /// tames the corrective burst's peak speed, fading out over
+    /// [`REVERSAL_RECOVERY`] from the burst's first opposing tick.
+    fn rescale(value: f64, flip: Flip, at: Instant) -> f64 {
+        let ramp = (at.saturating_duration_since(flip.departed_at).as_secs_f64()
+            / REVERSAL_COOLDOWN.as_secs_f64())
+        .min(1.0);
+        let recovery = (at.saturating_duration_since(flip.started_at).as_secs_f64()
+            / REVERSAL_RECOVERY.as_secs_f64())
+        .min(1.0);
+        let magnitude = value.abs() * ramp;
+        let compressed = if magnitude > REVERSAL_KNEE {
+            REVERSAL_KNEE + (magnitude - REVERSAL_KNEE) / REVERSAL_KNEE_RATIO
+        } else {
+            magnitude
+        };
+        value.signum() * (compressed + (magnitude - compressed) * recovery)
+    }
+
+    fn attenuate(&mut self, value: f64, at: Instant) -> f64 {
+        if value == 0.0 {
+            return value;
+        }
+        let cold = |last: Instant| at.saturating_duration_since(last) >= REVERSAL_COOLDOWN;
+        if self.last_at.is_some_and(cold) {
+            // Cold axis: the departed direction's acceleration has decayed
+            // and any flip is over, so the axis is uncommitted again, as
+            // before any input, and this tick starts exactly unscaled. A
+            // flip still under way keeps its distance, though not its warm
+            // references, so a slow flip still commits.
+            self.dir = 0;
+            self.last_at = None;
+            self.recovering = None;
+            if let Some(pending) = &mut self.pending {
+                pending.flip = None;
+            }
+        }
+        if self.pending.is_some_and(|pending| cold(pending.last_at)) {
+            self.pending = None;
+        }
+        let sign: i8 = if value > 0.0 { 1 } else { -1 };
+        if sign == self.dir {
+            self.last_at = Some(at);
+            // Opposing ticks that never committed were free-spin jitter, and
+            // the main direction resumed: drop them. A committed reversal
+            // still recovering keeps rescaling until its compression has
+            // fully faded.
+            self.pending = None;
+            return match self.recovering {
+                Some(flip) if at.saturating_duration_since(flip.started_at) < REVERSAL_RECOVERY => {
+                    Self::rescale(value, flip, at)
+                }
+                _ => {
+                    self.recovering = None;
+                    value
+                }
+            };
+        }
+        // Opposing tick, or any tick while no direction is committed: it
+        // takes the direction only once its run crosses the commit floor, so
+        // jitter never does. Keep the run's references, or start a fresh run
+        // from the departed direction's last arrival, if there is one.
+        if self.pending.is_some_and(|pending| pending.sign != sign) {
+            self.pending = None;
+        }
+        let departed_at = self.last_at;
+        let pending = self.pending.get_or_insert_with(|| PendingFlip {
+            sign,
+            flip: departed_at.map(|departed_at| Flip {
+                departed_at,
+                started_at: at,
+            }),
+            distance: 0.0,
+            last_at: at,
+        });
+        pending.distance += value.abs();
+        pending.last_at = at;
+        let flip = pending.flip;
+        if pending.distance >= REVERSAL_COMMIT {
+            self.dir = sign;
+            self.last_at = Some(at);
+            self.recovering = flip;
+            self.pending = None;
+        }
+        flip.map_or(value, |flip| Self::rescale(value, flip, at))
+    }
+}
+
+/// Both axes' reversal state for one source, kept apart from its pulses: a
+/// pulse can finish well inside [`REVERSAL_COOLDOWN`] (the 80 ms minimum
+/// and the 360 ms default both do), and an opposing tick arriving after the
+/// animation ended but while the OS curve is still hot must still be cooled.
+/// Each axis starts fresh once it has gone a full cooldown without a tick in
+/// its committed direction — by then any flip is cold, which is exactly
+/// unscaled — and the entry is dropped once the whole source has gone that
+/// long without any tick.
+#[derive(Default)]
+struct SourceCooldown {
+    x: ReversalCooldown,
+    y: ReversalCooldown,
+    last_tick: Option<Instant>,
+}
+
+impl SourceCooldown {
+    fn attenuate(&mut self, impulse: WheelDelta, at: Instant) -> WheelDelta {
+        self.last_tick = Some(at);
+        let cooled = WheelDelta {
+            x: self.x.attenuate(impulse.x, at),
+            y: self.y.attenuate(impulse.y, at),
+        };
+        if cooled != impulse {
+            tracing::trace!(
+                raw_x = impulse.x,
+                raw_y = impulse.y,
+                cooled_x = cooled.x,
+                cooled_y = cooled.y,
+                "reversal cooldown attenuated a tick"
+            );
+        }
+        cooled
+    }
+
+    fn is_expired(&self, at: Instant) -> bool {
+        self.last_tick
+            .is_none_or(|last| at.saturating_duration_since(last) >= REVERSAL_COOLDOWN)
+    }
+}
+
+/// A source exists in the state map only while it has in-flight pulses.
+///
+/// Overlapping pulses superpose: the source's position is the settled distance
+/// of completed pulses plus every live pulse's current contribution. Opposite
+/// ticks superpose too — free-spin wheels jitter a tick backwards at the end
+/// of a flick, and a finite pulse set already bounds how long any direction
+/// change takes to win.
 struct ActiveMotion {
-    segment: MotionSegment,
+    pulses: Vec<Pulse>,
+    /// Sum of completed pulses' full amplitudes, so pruning never moves the
+    /// position.
+    settled: WheelDelta,
     emitted: WheelDelta,
     next_frame: Instant,
+    /// Trailing [`ACCEL_WINDOW`] of accepted ticks — `(arrival, unsigned raw
+    /// wheel distance per axis)` — from which [`accel_gain`] derives each
+    /// axis's own rate, so a fast spin on one axis never accelerates slow
+    /// movement on the other.
+    recent_ticks: VecDeque<(Instant, WheelDelta)>,
 }
 
 impl ActiveMotion {
-    fn new(impulse: WheelDelta, at: Instant) -> Self {
-        Self {
-            segment: MotionSegment {
-                from: WheelDelta::ZERO,
-                target: impulse,
-                started_at: at,
-            },
+    fn new(impulse: WheelDelta, at: Instant, tuning: MotionTuning) -> Self {
+        let mut motion = Self {
+            pulses: Vec::new(),
+            settled: WheelDelta::ZERO,
             emitted: WheelDelta::ZERO,
             next_frame: at + FRAME_PERIOD,
+            recent_ticks: VecDeque::new(),
+        };
+        let gain = motion.windowed_gain(impulse, at, tuning);
+        motion.pulses.push(Pulse {
+            amplitude: impulse.scale(tuning.step).scale_axes(gain),
+            started_at: at,
+            duration: tuning.duration,
+            anchor: at,
+        });
+        motion
+    }
+
+    /// Record one tick in the rate window and return each axis's amplitude
+    /// gain. The window holds the wheel's own distance, with any queue-side
+    /// sensitivity divided back out.
+    fn windowed_gain(
+        &mut self,
+        impulse: WheelDelta,
+        at: Instant,
+        tuning: MotionTuning,
+    ) -> WheelDelta {
+        while self
+            .recent_ticks
+            .front()
+            .is_some_and(|(tick_at, _)| at.saturating_duration_since(*tick_at) > ACCEL_WINDOW)
+        {
+            self.recent_ticks.pop_front();
+        }
+        self.recent_ticks.push_back((
+            at,
+            WheelDelta {
+                x: impulse.x.abs() / tuning.distance_scale.x,
+                y: impulse.y.abs() / tuning.distance_scale.y,
+            },
+        ));
+        if self.recent_ticks.len() > ACCEL_WINDOW_MAX_TICKS {
+            self.recent_ticks.pop_front();
+        }
+        let window_ticks = self
+            .recent_ticks
+            .iter()
+            .fold(WheelDelta::ZERO, |sum, (_, ticks)| sum.plus(*ticks));
+        WheelDelta {
+            x: accel_gain(window_ticks.x, tuning.max_gain),
+            y: accel_gain(window_ticks.y, tuning.max_gain),
         }
     }
 
-    /// Evaluate the old segment at the impulse timestamp, then restart toward
-    /// the cumulative target.
-    fn retarget(&mut self, impulse: WheelDelta, at: Instant) -> MotionUpdate {
-        let position = self.segment.position_at(at);
-        let target = self.segment.target.plus(impulse);
-        let delta = self.delta_to(position);
-        if target == position {
-            return MotionUpdate::Finished(delta);
+    /// Superpose one tick's pulse and evaluate the position at its timestamp.
+    ///
+    /// Ticks landing within one frame of the newest pulse's first tick merge
+    /// into that pulse when both run the same duration — but never by
+    /// inheriting its clock. The merge settles whatever the pulse has
+    /// delivered so far and restarts its remainder together with the new tick
+    /// from `at`: position is continuous, net distance is conserved, and the
+    /// tick neither starts partially progressed nor ends at an older pulse's
+    /// deadline. A tick accepted under a freshly reloaded duration gets its
+    /// own pulse instead, so a reload never re-times motion accepted under
+    /// the previous configuration. Only the [`MAX_PULSES`] bound merges
+    /// unconditionally; that is the one place the model approximates, and it
+    /// still conserves distance and continuity.
+    fn add_tick(&mut self, impulse: WheelDelta, at: Instant, tuning: MotionTuning) -> MotionUpdate {
+        let gain = self.windowed_gain(impulse, at, tuning);
+        let amplitude = impulse.scale(tuning.step).scale_axes(gain);
+        let merge = self.pulses.len() >= MAX_PULSES
+            || self.pulses.last().is_some_and(|pulse| {
+                pulse.duration == tuning.duration
+                    && at.saturating_duration_since(pulse.anchor) < FRAME_PERIOD
+            });
+        if merge && let Some(last) = self.pulses.last_mut() {
+            let delivered = last.position_at(at);
+            self.settled = self.settled.plus(delivered);
+            let remainder = last.amplitude.minus(delivered).plus(amplitude);
+            if remainder.is_zero() {
+                self.pulses.pop();
+            } else {
+                last.amplitude = remainder;
+                last.started_at = at;
+                last.duration = tuning.duration;
+            }
+        } else {
+            self.pulses.push(Pulse {
+                amplitude,
+                started_at: at,
+                duration: tuning.duration,
+                anchor: at,
+            });
         }
-
-        self.segment = MotionSegment {
-            from: position,
-            target,
-            started_at: at,
-        };
-        self.next_frame = at + FRAME_PERIOD;
-        MotionUpdate::Active(delta)
+        let update = self.evaluate(at);
+        if !update.is_finished() {
+            // Never re-evaluate before the tick's own timestamp: an already
+            // due frame deadline would read an earlier position and emit an
+            // opposing delta.
+            self.next_frame = at + FRAME_PERIOD;
+        }
+        update
     }
 
     /// Evaluate the position at `at` and report whether the source remains
     /// active after this update.
     fn advance(&mut self, at: Instant) -> MotionUpdate {
-        let complete = self.segment.is_complete_at(at);
-        let position = self.segment.position_at(at);
-        let delta = self.delta_to(position);
-        if complete {
-            MotionUpdate::Finished(delta)
-        } else {
+        let update = self.evaluate(at);
+        if !update.is_finished() {
             while self.next_frame <= at {
                 self.next_frame += FRAME_PERIOD;
             }
-            self.next_frame = self.next_frame.min(self.segment.ends_at());
+            if let Some(ends_at) = self.ends_at() {
+                self.next_frame = self.next_frame.min(ends_at);
+            }
+        }
+        update
+    }
+
+    fn evaluate(&mut self, at: Instant) -> MotionUpdate {
+        let position = self.position_at(at);
+        let delta = self.delta_to(position);
+        self.prune(at);
+        if self.pulses.is_empty() {
+            MotionUpdate::Finished(delta)
+        } else {
             MotionUpdate::Active(delta)
         }
+    }
+
+    fn position_at(&self, at: Instant) -> WheelDelta {
+        self.pulses
+            .iter()
+            .fold(self.settled, |sum, pulse| sum.plus(pulse.position_at(at)))
+    }
+
+    fn prune(&mut self, at: Instant) {
+        self.pulses.retain(|pulse| {
+            if pulse.is_complete_at(at) {
+                self.settled = self.settled.plus(pulse.amplitude);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn ends_at(&self) -> Option<Instant> {
+        self.pulses.iter().map(Pulse::ends_at).max()
     }
 
     fn delta_to(&mut self, position: WheelDelta) -> WheelDelta {
@@ -315,6 +747,9 @@ struct ScrollEngine {
     /// idle window closes. Disjoint from `active`: smoothing on or off decides
     /// which map a source can enter, and a preference change cancels both.
     phased: HashMap<ScrollSource, Instant>,
+    /// Reversal state of pre-accelerated sources; outlives `active` entries
+    /// (see [`SourceCooldown`]).
+    cooldowns: HashMap<ScrollSource, SourceCooldown>,
     output: OutputStream,
 }
 
@@ -324,28 +759,20 @@ impl ScrollEngine {
         source: ScrollSource,
         impulse: WheelDelta,
         at: Instant,
+        tuning: MotionTuning,
         emit: &mut impl FnMut(ScrollFrame),
     ) {
-        if self
-            .active
-            .get(&source)
-            .is_some_and(|motion| motion.segment.is_complete_at(at))
-            && let Some(mut completed) = self.active.remove(&source)
-        {
-            let update = completed.advance(at);
-            self.emit_update(update, emit);
-        }
-
+        let impulse = self.cooled(&source, impulse, at, tuning);
         let update = match self.active.entry(source) {
             Entry::Occupied(mut entry) => {
-                let update = entry.get_mut().retarget(impulse, at);
+                let update = entry.get_mut().add_tick(impulse, at, tuning);
                 if update.is_finished() {
                     entry.remove();
                 }
                 Some(update)
             }
             Entry::Vacant(entry) => {
-                entry.insert(ActiveMotion::new(impulse, at));
+                entry.insert(ActiveMotion::new(impulse, at, tuning));
                 None
             }
         };
@@ -366,6 +793,43 @@ impl ScrollEngine {
         self.end_idle_phased(at, emit);
         self.output.progress(impulse, true, emit);
         self.phased.insert(source, at + PHASED_IDLE);
+    }
+
+    /// Attenuate quick direction reversals of pre-accelerated input; raw
+    /// sources pass through untouched. Expired state is dropped on the way
+    /// so the map only ever holds sources that ticked within one cooldown.
+    ///
+    /// The cooldown's thresholds are in the OS's own line units, so any
+    /// queue-side sensitivity is divided out before it sees the tick and
+    /// re-applied to the result: a jitter commits, and a burst is
+    /// compressed, at the same physical motion whatever the sensitivity.
+    fn cooled(
+        &mut self,
+        source: &ScrollSource,
+        impulse: WheelDelta,
+        at: Instant,
+        tuning: MotionTuning,
+    ) -> WheelDelta {
+        self.cooldowns
+            .retain(|_, cooldown| !cooldown.is_expired(at));
+        if !tuning.preaccelerated {
+            return impulse;
+        }
+        let scale = tuning.distance_scale;
+        let native = WheelDelta {
+            x: impulse.x / scale.x,
+            y: impulse.y / scale.y,
+        };
+        let cooled = self
+            .cooldowns
+            .entry(source.clone())
+            .or_default()
+            .attenuate(native, at);
+        if cooled == native {
+            impulse
+        } else {
+            cooled.scale_axes(scale)
+        }
     }
 
     fn advance_due(&mut self, at: Instant, emit: &mut impl FnMut(ScrollFrame)) {
@@ -410,6 +874,7 @@ impl ScrollEngine {
     }
 
     fn cancel_source(&mut self, source: &ScrollSource, emit: &mut impl FnMut(ScrollFrame)) {
+        self.cooldowns.remove(source);
         // Both removals must run, so neither may short-circuit the other.
         let was_smooth = self.active.remove(source).is_some();
         let was_phased = self.phased.remove(source).is_some();
@@ -418,7 +883,19 @@ impl ScrollEngine {
         }
     }
 
+    /// Cancel every wheel of one HID++ capture-session incarnation.
+    fn cancel_hidpp_session(
+        &mut self,
+        session: &HidppSessionId,
+        emit: &mut impl FnMut(ScrollFrame),
+    ) {
+        for wheel in HidppWheel::ALL {
+            self.cancel_source(&ScrollSource::Hidpp(session.clone(), wheel), emit);
+        }
+    }
+
     fn cancel_all(&mut self, emit: &mut impl FnMut(ScrollFrame)) {
+        self.cooldowns.clear();
         self.active.clear();
         self.phased.clear();
         self.output.cancel(emit);
