@@ -263,6 +263,24 @@ pub(crate) fn shift_bindings_for(config: &Config, config_key: &str) -> BTreeMap<
         .collect()
 }
 
+/// Whether any thumb-wheel control carries a binding the wheel capture must
+/// serve: a non-default click action, or a multi-click binding, which needs
+/// the runtime to see the first click even when its click is the default.
+fn thumbwheel_bindings_nondefault(bindings: &BTreeMap<ButtonId, Binding>) -> bool {
+    [
+        ButtonId::Thumbwheel,
+        ButtonId::ThumbwheelScrollUp,
+        ButtonId::ThumbwheelScrollDown,
+    ]
+    .iter()
+    .any(|button| {
+        bindings.get(button).is_some_and(|binding| {
+            matches!(binding, Binding::MultiClick(_))
+                || binding.click_action() != default_binding(*button)
+        })
+    })
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
@@ -353,17 +371,7 @@ pub fn plan_for_device(
             })
         })
         .collect();
-    let thumbwheel_bindings_nondefault = [
-        ButtonId::Thumbwheel,
-        ButtonId::ThumbwheelScrollUp,
-        ButtonId::ThumbwheelScrollDown,
-    ]
-    .iter()
-    .any(|button| {
-        bindings
-            .get(button)
-            .is_some_and(|binding| binding.click_action() != default_binding(*button))
-    });
+    let thumbwheel_bindings_nondefault = thumbwheel_bindings_nondefault(&bindings);
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
     DeviceCapturePlan {
         target: CaptureTarget {
@@ -680,6 +688,25 @@ mod tests {
                 .iter()
                 .any(|&(_, button)| button == ButtonId::Back),
             "the runtime must see the first click to wait for a second"
+        );
+    }
+
+    #[test]
+    fn a_thumbwheel_multi_click_captures_the_wheel_even_when_only_the_double_action_differs() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::Thumbwheel,
+            Binding::MultiClick(MultiClickBinding::new(
+                default_binding(ButtonId::Thumbwheel),
+                Action::MissionControl,
+            )),
+        );
+
+        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
+        assert!(
+            plan.target.spec.capture_thumbwheel,
+            "the double click can only run if the thumbwheel is captured"
         );
     }
 
