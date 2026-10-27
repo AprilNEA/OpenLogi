@@ -419,16 +419,42 @@ fn a_saved_report_rate_survives_route_adoption() {
     );
 }
 
+/// A profile is a plain number in the file, and the mouse has no profile 0.
+#[test]
+fn onboard_profile_is_a_nonzero_number_in_the_file() {
+    let body = |profile: u8| {
+        format!("schema_version = 7\n[devices.\"unit:1\".onboard_memory]\nprofile = {profile}\n")
+    };
+    let parsed: Config = toml::from_str(&body(3)).expect("profile 3 loads");
+    assert_eq!(
+        parsed.onboard_memory("unit:1"),
+        Some(OnboardMemory::Profile(
+            crate::hid::ProfileIndex::new(3).unwrap()
+        ))
+    );
+    assert!(
+        toml::from_str::<Config>(&body(0)).is_err(),
+        "profile 0 is refused when the file loads"
+    );
+}
+
 #[test]
 fn onboard_memory_and_report_rate_roundtrip() {
     let mut cfg = Config::default();
-    cfg.set_onboard_memory("unit:1", Some(OnboardMemory::Profile(5)));
+    cfg.set_onboard_memory(
+        "unit:1",
+        Some(OnboardMemory::Profile(
+            crate::hid::ProfileIndex::new(5).unwrap(),
+        )),
+    );
     cfg.set_report_rate("unit:1", ReportRate::new(1000));
     cfg.set_onboard_memory("unit:2", Some(OnboardMemory::Off));
     let restored = write_and_read(&cfg);
     assert_eq!(
         restored.onboard_memory("unit:1"),
-        Some(OnboardMemory::Profile(5))
+        Some(OnboardMemory::Profile(
+            crate::hid::ProfileIndex::new(5).unwrap()
+        ))
     );
     assert_eq!(restored.onboard_memory("unit:2"), Some(OnboardMemory::Off));
     assert_eq!(restored.report_rate("unit:1"), Some(ReportRate::new(1000)));
@@ -457,10 +483,17 @@ fn host_mode_is_implied_only_by_host_only_buttons_or_report_rate() {
     );
     assert_eq!(cfg.effective_onboard_memory("g502", None), None);
 
-    cfg.set_onboard_memory("g502", Some(OnboardMemory::Profile(1)));
+    cfg.set_onboard_memory(
+        "g502",
+        Some(OnboardMemory::Profile(
+            crate::hid::ProfileIndex::new(1).unwrap(),
+        )),
+    );
     assert_eq!(
         cfg.effective_onboard_memory("g502", layout),
-        Some(OnboardMemory::Profile(1))
+        Some(OnboardMemory::Profile(
+            crate::hid::ProfileIndex::new(1).unwrap()
+        ))
     );
 
     let mut rate_only = Config::default();

@@ -394,6 +394,7 @@ pub fn plan_for_device(
 #[cfg(test)]
 mod tests {
     use openlogi_core::binding::{Binding, LongPressBinding, WheelHoldBinding};
+    use openlogi_core::hid::ProfileIndex;
     use openlogi_hid::reprog_controls::{
         GESTURE_BUTTON_CID, HAPTIC_PANEL_CID, MULTIPLATFORM_GESTURE_BUTTON_CID,
     };
@@ -537,9 +538,15 @@ mod tests {
         let layout = Some(&openlogi_core::binding::G502_LIGHTSPEED);
         let mut cfg = Config::default();
         cfg.set_binding("g502", ButtonId::G9, Binding::Single(Action::Copy));
-        cfg.set_onboard_memory("g502", Some(OnboardMemory::Profile(5)));
+        cfg.set_onboard_memory(
+            "g502",
+            Some(OnboardMemory::Profile(ProfileIndex::new(5).unwrap())),
+        );
         let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
-        assert_eq!(plan.target.spec.onboard, Some(OnboardTarget::Profile(5)));
+        assert_eq!(
+            plan.target.spec.onboard,
+            Some(OnboardTarget::Profile(ProfileIndex::new(5).unwrap()))
+        );
         cfg.set_onboard_memory("g502", Some(OnboardMemory::Off));
         let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, None);
         assert_eq!(plan.target.spec.onboard, None);

@@ -7,7 +7,7 @@ use hidpp::{
     device::Device,
     feature::onboard_profiles::{self, OnboardProfilesFeature},
 };
-use openlogi_core::hid::{OnboardMode, OnboardProfile, OnboardState};
+use openlogi_core::hid::{OnboardMode, OnboardProfile, OnboardState, ProfileIndex};
 use tracing::debug;
 
 use crate::SharedChannel;
@@ -47,18 +47,22 @@ async fn get_onboard_on_channel(
         onboard_profiles::OnboardMode::Onboard => OnboardMode::Onboard,
         onboard_profiles::OnboardMode::Host => OnboardMode::Host,
     };
-    let active_profile = onboard.get_current_profile().await.map_err(err)?;
+    let active_profile = onboard
+        .get_current_profile()
+        .await
+        .map_err(err)?
+        .map(ProfileIndex::from);
     let mut profiles = Vec::new();
     for entry in onboard.read_directory(&info).await.map_err(err)? {
         let name = onboard
             .read_profile_name(&info, entry.sector)
             .await
             .unwrap_or_else(|error| {
-                debug!(profile = entry.index, ?error, "profile name read failed");
+                debug!(profile = %entry.index, ?error, "profile name read failed");
                 None
             });
         profiles.push(OnboardProfile {
-            index: entry.index,
+            index: entry.index.into(),
             name,
             enabled: entry.enabled,
         });

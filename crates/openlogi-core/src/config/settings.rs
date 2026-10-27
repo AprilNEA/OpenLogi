@@ -705,8 +705,8 @@ pub struct CameraControls(pub BTreeMap<String, i32>);
 pub enum OnboardMemory {
     /// Host mode.
     Off,
-    /// An onboard profile (1-based).
-    Profile(u8),
+    /// An onboard profile.
+    Profile(crate::hid::ProfileIndex),
 }
 
 /// Vertical wheel reporting resolution for HID++ `0x2121 HiResWheel`.

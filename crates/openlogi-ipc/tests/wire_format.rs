@@ -45,9 +45,9 @@ use openlogi_core::hid::{
     BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
     DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
     HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
-    OnboardProfile, OnboardState, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
+    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -737,9 +737,9 @@ fn onboard_state() {
     assert_wire(
         &OnboardState {
             mode: OnboardMode::Onboard,
-            active_profile: Some(5),
+            active_profile: ProfileIndex::new(5),
             profiles: vec![OnboardProfile {
-                index: 5,
+                index: ProfileIndex::new(5).unwrap(),
                 name: Some("Stock".into()),
                 enabled: true,
             }],

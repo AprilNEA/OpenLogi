@@ -14,7 +14,7 @@ use hidpp::{
     protocol::v20::{self, Hidpp20Error},
 };
 use openlogi_core::binding::ButtonId;
-use openlogi_core::hid::{ReportRate, WriteError};
+use openlogi_core::hid::{ProfileIndex, ReportRate, WriteError};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -27,8 +27,8 @@ use crate::write::set_report_rate_on_channel;
 pub enum OnboardTarget {
     /// Host mode.
     Host(HostMode),
-    /// An onboard profile (1-based).
-    Profile(u8),
+    /// An onboard profile.
+    Profile(ProfileIndex),
 }
 
 /// Host-mode capture.
@@ -88,7 +88,7 @@ enum ArmedMode {
         host: HostMode,
         captured: Vec<(u8, ButtonId)>,
     },
-    Profile(u8),
+    Profile(ProfileIndex),
 }
 
 impl ArmedOnboard {
@@ -165,12 +165,15 @@ impl ArmedOnboard {
     }
 }
 
-async fn apply_profile(onboard: &OnboardProfilesFeature, index: u8) -> Result<(), Hidpp20Error> {
+async fn apply_profile(
+    onboard: &OnboardProfilesFeature,
+    index: ProfileIndex,
+) -> Result<(), Hidpp20Error> {
     if onboard.get_mode().await? != OnboardMode::Onboard {
         onboard.set_mode(OnboardMode::Onboard).await?;
     }
-    if onboard.get_current_profile().await? != Some(index) {
-        onboard.set_current_profile(index).await?;
+    if onboard.get_current_profile().await? != Some(index.get()) {
+        onboard.set_current_profile(index.get()).await?;
     }
     Ok(())
 }

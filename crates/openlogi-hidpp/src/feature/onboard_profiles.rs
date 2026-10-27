@@ -2,6 +2,8 @@
 //!
 //! Reverse-engineered (libratbag), checked on a G502 LIGHTSPEED. Never writes flash.
 
+use std::num::NonZeroU8;
+
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use openlogi_hidpp_derive::Feature;
 
@@ -69,7 +71,7 @@ pub struct OnboardProfilesInfo {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ProfileEntry {
     /// 1-based index.
-    pub index: u8,
+    pub index: NonZeroU8,
     /// Flash sector.
     pub sector: u16,
     /// Whether it can be made current.
@@ -106,19 +108,19 @@ impl OnboardProfilesFeature {
     }
 
     /// The active profile's 1-based index, or `None` in host mode.
-    pub async fn get_current_profile(&self) -> Result<Option<u8>, Hidpp20Error> {
+    pub async fn get_current_profile(&self) -> Result<Option<NonZeroU8>, Hidpp20Error> {
         let payload = self
             .endpoint
             .call(FN_GET_CURRENT_PROFILE, [0; 3])
             .await?
             .extend_payload();
-        Ok((payload[1] != 0).then_some(payload[1]))
+        Ok(NonZeroU8::new(payload[1]))
     }
 
     /// Makes the enabled profile `index` (1-based) current.
-    pub async fn set_current_profile(&self, index: u8) -> Result<(), Hidpp20Error> {
+    pub async fn set_current_profile(&self, index: NonZeroU8) -> Result<(), Hidpp20Error> {
         self.endpoint
-            .call(FN_SET_CURRENT_PROFILE, [0, index, 0])
+            .call(FN_SET_CURRENT_PROFILE, [0, index.get(), 0])
             .await?;
         Ok(())
     }
@@ -209,7 +211,7 @@ fn directory_from_bytes(bytes: &[u8], max_entries: usize) -> Vec<ProfileEntry> {
             (sector != 0xffff).then_some((sector, enabled))
         })
         .filter_map(|(sector, enabled)| {
-            let index = u8::try_from(sector & 0x00ff).ok().filter(|&i| i != 0)?;
+            let index = NonZeroU8::new(u8::try_from(sector & 0x00ff).ok()?)?;
             Some(ProfileEntry {
                 index,
                 sector,
@@ -258,22 +260,26 @@ mod tests {
             entries,
             [
                 ProfileEntry {
-                    index: 1,
+                    index: nz(1),
                     sector: 1,
                     enabled: true
                 },
                 ProfileEntry {
-                    index: 2,
+                    index: nz(2),
                     sector: 2,
                     enabled: false
                 },
                 ProfileEntry {
-                    index: 5,
+                    index: nz(5),
                     sector: 5,
                     enabled: true
                 },
             ]
         );
+    }
+
+    fn nz(index: u8) -> NonZeroU8 {
+        NonZeroU8::new(index).unwrap()
     }
 
     #[test]
@@ -284,7 +290,7 @@ mod tests {
     #[test]
     fn rom_directory_entries_keep_their_low_byte_index() {
         let entries = directory_from_bytes(&[0x01, 0x01, 0x01, 0xff, 0xff, 0xff, 0, 0], 2);
-        assert_eq!(entries[0].index, 1);
+        assert_eq!(entries[0].index, nz(1));
         assert_eq!(entries[0].sector, 0x0101);
     }
 

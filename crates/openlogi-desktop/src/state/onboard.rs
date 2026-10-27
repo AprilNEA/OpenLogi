@@ -163,9 +163,15 @@ fn active_memory(
 
 #[cfg(test)]
 mod tests {
+    use openlogi_core::hid::ProfileIndex;
+
     use super::*;
 
-    fn reading(mode: OnboardMode, active_profile: Option<u8>) -> OnboardState {
+    fn profile(index: u8) -> ProfileIndex {
+        ProfileIndex::new(index).unwrap()
+    }
+
+    fn reading(mode: OnboardMode, active_profile: Option<ProfileIndex>) -> OnboardState {
         OnboardState {
             mode,
             active_profile,
@@ -177,14 +183,14 @@ mod tests {
     /// profile: the card must not claim OpenLogi is in control.
     #[test]
     fn the_mouse_reading_wins_over_the_requested_mode() {
-        let on_profile = reading(OnboardMode::Onboard, Some(5));
+        let on_profile = reading(OnboardMode::Onboard, Some(profile(5)));
         assert_eq!(
             active_memory(Some(&on_profile), Some(OnboardMemory::Off)),
-            Some(OnboardMemory::Profile(5))
+            Some(OnboardMemory::Profile(profile(5)))
         );
         let in_host = reading(OnboardMode::Host, None);
         assert_eq!(
-            active_memory(Some(&in_host), Some(OnboardMemory::Profile(1))),
+            active_memory(Some(&in_host), Some(OnboardMemory::Profile(profile(1)))),
             Some(OnboardMemory::Off)
         );
     }
@@ -192,8 +198,8 @@ mod tests {
     #[test]
     fn the_requested_mode_stands_in_until_the_mouse_is_read() {
         assert_eq!(
-            active_memory(None, Some(OnboardMemory::Profile(2))),
-            Some(OnboardMemory::Profile(2))
+            active_memory(None, Some(OnboardMemory::Profile(profile(2)))),
+            Some(OnboardMemory::Profile(profile(2)))
         );
         assert_eq!(active_memory(None, None), None);
     }
