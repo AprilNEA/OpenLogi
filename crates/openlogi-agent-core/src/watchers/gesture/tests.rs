@@ -181,6 +181,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
         let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
             false,
             VerticalScrollSensitivity::default(),
+            openlogi_core::config::SmoothScrollTuning::default(),
         )))
         .unwrap();
         let (shutdown_tx, shutdown) = oneshot::channel();
@@ -804,6 +805,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
     let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
         false,
         VerticalScrollSensitivity::default(),
+        openlogi_core::config::SmoothScrollTuning::default(),
     )))
     .unwrap();
     let mut dispatcher = InputDispatcher::new(GestureOutputs::new(

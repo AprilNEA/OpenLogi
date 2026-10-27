@@ -46,7 +46,7 @@ use crate::capture_plan::{
 use crate::hardware::DeviceAccess;
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::hook::SharedHookMaps;
-use crate::runtime::scroll::ScrollInputHandle;
+use crate::runtime::scroll::{HidppWheel, ScrollInputHandle};
 use crate::runtime::{ActionDispatcher, HidppSessionId};
 
 /// Output capabilities shared by every HID++ gesture capture session.
@@ -77,11 +77,21 @@ impl GestureOutputs {
         self.scroll.cancel_hidpp_session(session);
     }
 
-    fn post_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {
-        if !self.scroll.try_hidpp_scroll(session, delta) {
+    fn post_scroll(
+        &self,
+        session: &HidppSessionId,
+        wheel: HidppWheel,
+        delta: ScrollDelta,
+        sensitivity: f64,
+    ) {
+        if let Err(direct) = self
+            .scroll
+            .try_hidpp_scroll(session, wheel, delta, sensitivity)
+        {
             // HID++ diversion consumed the physical input already, so direct
-            // synthesis is this source's fail-open path.
-            openlogi_inject::post_scroll(delta);
+            // synthesis is this source's fail-open path. `direct` carries the
+            // step the eased output would have applied.
+            openlogi_inject::post_scroll(direct);
         }
     }
 
