@@ -1277,8 +1277,9 @@ impl Agent for MockAgent {
         Ok(stored.clone())
     }
 
-    /// The mock has no other computer to move to, so the switch only moves
-    /// the reading's current channel.
+    /// The device leaves this computer, as a real one does: it goes offline
+    /// and its reading keeps this computer's channel as current. The
+    /// console's `online <n>` brings it back, as the channel button would.
     async fn switch_easy_switch_host(
         self,
         _: Context,
@@ -1286,12 +1287,14 @@ impl Agent for MockAgent {
         slot: u8,
     ) -> Result<(), WriteError> {
         let mut state = self.state.lock().await;
-        let settings = state.settings_for_mut(&route)?;
-        let stored = profile_value_mut(&mut settings.easy_switch, &route, 0x1815)?;
+        let settings = state.settings_for(&route)?;
+        let stored = profile_value(&settings.easy_switch, &route, 0x1815)?;
         if !stored.slot(slot).is_some_and(|host| host.paired) {
             return Err(WriteError::HostSlotEmpty { slot });
         }
-        stored.current = Some(slot);
+        if let Some(online) = state.online_mut(&route) {
+            *online = false;
+        }
         info!(%route, slot, "switch_easy_switch_host");
         Ok(())
     }
