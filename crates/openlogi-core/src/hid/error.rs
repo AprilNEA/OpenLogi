@@ -181,8 +181,8 @@ pub enum WriteError {
     /// Nothing was written.
     #[error("the device does not let software rename its Easy-Switch hosts")]
     HostRenameUnsupported,
-    /// A rename of an Easy-Switch slot that has no computer paired, or that
-    /// the device does not have.
+    /// A rename of, or a switch to, an Easy-Switch slot that has no computer
+    /// paired, or that the device does not have.
     ///
     /// Nothing was written.
     #[error("Easy-Switch channel {} has no paired computer", u16::from(*slot) + 1)]
@@ -334,6 +334,9 @@ pub enum HidppOperation {
     ReadDisableKeys,
     /// Write and verify HID++ `0x4521` disabled-key mask. Appended last.
     WriteDisableKeys,
+    /// Move a device to another Easy-Switch host with `0x1814` ChangeHost.
+    /// Appended last — variant order is wire format.
+    SwitchHost,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

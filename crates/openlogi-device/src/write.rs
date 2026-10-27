@@ -54,7 +54,7 @@ pub use dpi_led::{DpiLed, set_dpi_led_on};
 pub(crate) use easy_switch::read_name as read_host_friendly_name;
 pub use easy_switch::{
     get_easy_switch_hosts, get_easy_switch_hosts_on, rename_easy_switch_host,
-    rename_easy_switch_host_on,
+    rename_easy_switch_host_on, switch_easy_switch_host_on,
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};

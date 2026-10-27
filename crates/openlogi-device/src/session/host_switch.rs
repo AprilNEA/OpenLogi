@@ -1140,7 +1140,7 @@ where
 /// `name_len` is independent evidence the slot has a stored pairing, so it
 /// overrides an `Empty` status; only a slot with both `Empty` and no name is
 /// treated as truly empty.
-async fn host_slot_is_empty(device: &mut Device, host: u8) -> bool {
+pub(crate) async fn host_slot_is_empty(device: &mut Device, host: u8) -> bool {
     let feature = timed_hidpp(
         "locating hosts-info feature",
         device.root().get_feature(HostsInfoFeature::ID),

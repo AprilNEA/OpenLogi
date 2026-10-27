@@ -92,8 +92,8 @@ pub use write::{
     set_keyboard_color_with_on, set_pointer_speed_on, set_report_rate, set_report_rate_on,
     set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
     set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
-    set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift, toggle_smartshift_on,
-    update_backlight, update_backlight_on, watch_litra,
+    set_smartshift_sensitivity, set_smartshift_torque, switch_easy_switch_host_on,
+    toggle_smartshift, toggle_smartshift_on, update_backlight, update_backlight_on, watch_litra,
 };
 
 /// Scripted transport helpers for tests in higher layers.
