@@ -46,7 +46,7 @@ use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
 pub use main_wheel::MainWheelDivert;
-pub(crate) use spy::SpyRestore;
+pub(crate) use spy::HostRestore;
 use spy::{ArmedOnboard, SpyEdges};
 pub use spy::{HostMode, OnboardTarget, SlotRoute};
 
@@ -237,11 +237,7 @@ pub async fn run_capture_session(
     for button in armed.diverted_buttons() {
         let _ = host.sink.send(CapturedInput::ButtonDiverted(button));
     }
-    if armed
-        .onboard
-        .as_ref()
-        .is_some_and(|onboard| onboard.spy().is_some())
-    {
+    if armed.onboard.as_ref().is_some_and(ArmedOnboard::is_host) {
         let _ = host.sink.send(CapturedInput::HostModeEntered);
     }
     Ok(run_capture(shared, GestureCapture::new(armed), host).await)
