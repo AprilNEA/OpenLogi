@@ -77,6 +77,50 @@ pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScr
     post_continuous_scroll(delta, Some(phase));
 }
 
+/// Post one main-wheel event of integer pixels (no quantizer: the caller
+/// carries its own remainder), phaseless and continuous, with the line field
+/// `trunc(line_delta)` and the fixed-point line field `round(line_delta)`,
+/// both zero while the caller's line accumulator has not flushed.
+pub(in crate::inject) fn post_wheel_pixels(pixels: i32, line_delta: f64) {
+    if let Some(event) = wheel_pixel_event(pixels, line_delta) {
+        event.post(CGEventTapLocation::HID);
+    }
+}
+
+/// Build (without posting) one tagged wheel pixel event.
+fn wheel_pixel_event(pixels: i32, line_delta: f64) -> Option<CGEvent> {
+    let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        tracing::warn!("CGEventSource::new failed for wheel pixels");
+        return None;
+    };
+    let Ok(event) = CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, 2, pixels, 0, 0)
+    else {
+        tracing::warn!("CGEvent::new_scroll_event failed for wheel pixels");
+        return None;
+    };
+    event.set_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1);
+    // Same write order as `set_continuous_axis`: lines first, points last, so
+    // the point delta stays the authoritative distance.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "saturating float-to-int on a line count of a few lines"
+    )]
+    event.set_integer_value_field(
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
+        line_delta.trunc() as i64,
+    );
+    event.set_double_value_field(
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
+        line_delta.round(),
+    );
+    event.set_integer_value_field(
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
+        pixels.into(),
+    );
+    tag_synthetic(&event);
+    Some(event)
+}
+
 /// Post one continuous pixel event, phaseless (`None`) or stamped with a
 /// gesture phase.
 ///
@@ -277,6 +321,35 @@ mod tests {
                 crate::SYNTHETIC_EVENT_USER_DATA
             );
         }
+    }
+
+    #[test]
+    fn wheel_pixel_event_carries_pixels_and_line_fields_without_a_phase() {
+        let event = wheel_pixel_event(-15, -1.5).expect("a wheel pixel event");
+        let int = |field| event.get_integer_value_field(field);
+        assert_eq!(int(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1), -15);
+        assert_eq!(int(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1), -1);
+        assert_eq!(int(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS), 1);
+        assert_eq!(int(SCROLL_PHASE), 0);
+        assert_eq!(int(MOMENTUM_PHASE), 0);
+        assert_eq!(
+            int(EventField::EVENT_SOURCE_USER_DATA),
+            crate::SYNTHETIC_EVENT_USER_DATA
+        );
+        let fixed =
+            event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1);
+        assert!((fixed + 2.0).abs() < 1e-4, "{fixed}");
+
+        // Between line flushes the line fields stay zero.
+        let plain = wheel_pixel_event(-3, 0.0).expect("a wheel pixel event");
+        assert_eq!(
+            plain.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1),
+            -3
+        );
+        assert_eq!(
+            plain.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1),
+            0
+        );
     }
 
     #[test]
