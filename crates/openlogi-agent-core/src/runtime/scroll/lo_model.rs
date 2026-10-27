@@ -17,7 +17,7 @@
 //! than from the OS event's own timestamp, so events delivered in one batch
 //! collapse onto the 8 ms floor and read as a faster flick than they were.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use openlogi_core::scroll::{WHEEL_PIXELS_PER_NOTCH, WHEEL_REFERENCE_DPI};
 
@@ -280,10 +280,69 @@ fn trunc_to_i32(whole: f64) -> i32 {
     whole as i32
 }
 
+/// How long after a middle-button press wheel reports are treated as the
+/// press disturbing the wheel rather than as scrolling.
+///
+/// An assumption: the traces recorded around middle clicks show no effect
+/// either way, so this window is not confirmed by them.
+const MIDDLE_PRESS_WINDOW: Duration = Duration::from_millis(150);
+
+/// Tracks the most recent middle-button press so the wheel reports a press
+/// shakes loose can be dropped. A release does not extend the window.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct MiddlePressWindow {
+    last_press: Option<Instant>,
+}
+
+impl MiddlePressWindow {
+    /// Record a middle-button press at `at`.
+    pub(super) fn press(&mut self, at: Instant) {
+        self.last_press = Some(at);
+    }
+
+    /// Whether a wheel report arriving at `at` falls inside the window.
+    pub(super) fn disturbs(&self, at: Instant) -> bool {
+        self.last_press
+            .is_some_and(|press| at.saturating_duration_since(press) < MIDDLE_PRESS_WINDOW)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+
+    #[test]
+    fn a_middle_press_disturbs_only_the_reports_that_follow_it_closely() {
+        let t0 = Instant::now();
+        let mut window = MiddlePressWindow::default();
+        assert!(!window.disturbs(t0), "no press yet");
+        window.press(t0);
+        assert!(window.disturbs(t0));
+        assert!(window.disturbs(t0 + Duration::from_millis(149)));
+        assert!(!window.disturbs(t0 + Duration::from_millis(150)));
+        assert!(!window.disturbs(t0 + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn a_report_stamped_before_the_press_is_not_disturbed() {
+        let t0 = Instant::now();
+        let mut window = MiddlePressWindow::default();
+        window.press(t0 + Duration::from_millis(20));
+        assert!(
+            window.disturbs(t0),
+            "saturating: an earlier stamp reads as zero elapsed"
+        );
+    }
+
+    #[test]
+    fn a_new_press_restarts_the_window() {
+        let t0 = Instant::now();
+        let mut window = MiddlePressWindow::default();
+        window.press(t0);
+        window.press(t0 + Duration::from_millis(100));
+        assert!(window.disturbs(t0 + Duration::from_millis(200)));
+        assert!(!window.disturbs(t0 + Duration::from_millis(250)));
+    }
 
     /// Notches a 15-steps-per-notch device reports for `steps` hi-res steps.
     fn notches(steps: i64) -> f64 {

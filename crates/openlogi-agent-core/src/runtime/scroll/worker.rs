@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use openlogi_core::config::VerticalScrollSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use tracing::{trace, warn};
 
-use super::lo_model::LoWheelModel;
+use super::lo_model::{LoWheelModel, MiddlePressWindow};
 use super::{ScrollEngine, ScrollFrame, ScrollSource, WheelDelta, WheelPixels};
 use crate::runtime::{HidppSessionId, receive_command};
 
@@ -230,9 +230,33 @@ pub struct ScrollInputHandle {
     generation: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
     preferences: Arc<ScrollPreferences>,
+    middle_press: Arc<Mutex<MiddlePressWindow>>,
 }
 
 impl ScrollInputHandle {
+    /// Tell the wheel model the middle button changed state.
+    ///
+    /// A press opens a short window in which wheel reports are dropped on the
+    /// model paths (a diverted main wheel, and a hooked vertical wheel under
+    /// smoothing), because the press itself disturbs the wheel. A release
+    /// does not extend it. The window length is an assumption, see
+    /// `MIDDLE_PRESS_WINDOW`.
+    pub fn on_middle_button(&self, pressed: bool) {
+        if pressed {
+            self.middle_press
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .press(Instant::now());
+        }
+    }
+
+    fn middle_press_disturbs(&self, at: Instant) -> bool {
+        self.middle_press
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .disturbs(at)
+    }
+
     /// Queue one ordinary wheel impulse from the current OS-hook thread.
     ///
     /// Pixel input, zero/non-finite distance, a full queue, or an unavailable
@@ -255,6 +279,10 @@ impl ScrollInputHandle {
         };
         let preferences = self.preferences.load();
         if preferences.smooth_scroll {
+            if impulse.x == 0.0 && self.middle_press_disturbs(Instant::now()) {
+                // Swallowed: the press disturbed the wheel, not the user.
+                return true;
+            }
             return self.try_enqueue(
                 ScrollSource::current_hook(),
                 impulse,
@@ -324,6 +352,9 @@ impl ScrollInputHandle {
         let Ok(impulse) = WheelDelta::try_from(delta) else {
             return Err(delta);
         };
+        if self.accepting.load(Ordering::Acquire) && self.middle_press_disturbs(Instant::now()) {
+            return Ok(());
+        }
         let queued = self.accepting.load(Ordering::Acquire)
             && self.try_enqueue(
                 ScrollSource::Hidpp(session.clone()),
@@ -441,6 +472,7 @@ impl ScrollRuntime {
             generation: Arc::clone(&generation),
             accepting: Arc::new(AtomicBool::new(true)),
             preferences: Arc::clone(&preferences),
+            middle_press: Arc::default(),
         };
         let worker = thread::Builder::new()
             .name("openlogi-scroll".into())
@@ -750,6 +782,7 @@ mod tests {
                 generation: Arc::new(AtomicU64::new(0)),
                 accepting: Arc::new(AtomicBool::new(true)),
                 preferences,
+                middle_press: Arc::default(),
             },
             receiver,
             control_rx,
@@ -1859,5 +1892,43 @@ mod tests {
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, f64::MAX)));
         let (frames, direct, pixels) = drain(input, &commands, &controls);
         assert!(frames.is_empty() && direct.is_empty() && pixels.is_empty());
+    }
+
+    #[test]
+    fn a_middle_press_drops_model_reports_but_not_the_thumb_wheel_or_direct_output() {
+        let (input, receiver, _controls) = standalone_input(8, preferences(true, 14));
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        input.on_middle_button(true);
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
+            Ok(())
+        );
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+        assert!(
+            receiver.try_recv().is_err(),
+            "both vertical reports dropped"
+        );
+        assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0)));
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(1.0, 0.0)));
+        assert_eq!(
+            std::iter::from_fn(|| receiver.try_recv().ok()).count(),
+            2,
+            "horizontal input is not the model's"
+        );
+    }
+
+    #[test]
+    fn without_a_press_or_after_a_release_alone_reports_flow() {
+        let (input, receiver, _controls) = standalone_input(8, preferences(true, 14));
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        input.on_middle_button(false);
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
+            Ok(())
+        );
+        assert!(
+            receiver.try_recv().is_ok(),
+            "a release alone opens no window"
+        );
     }
 }
