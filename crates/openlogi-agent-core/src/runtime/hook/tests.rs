@@ -1,7 +1,7 @@
 //! Regression tests for OS-hook state and dispatch policy.
 
 use super::*;
-use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
+use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding, MultiClickBinding};
 use openlogi_core::config::KeyModifiers;
 
 fn token(id: u64, button: ButtonId) -> PressToken {
@@ -607,6 +607,15 @@ fn native_thumbwheel_scroll_stays_os_native() {
 #[test]
 fn long_press_never_passes_through_as_a_native_click() {
     let binding = Binding::LongPress(LongPressBinding::new(
+        default_binding(ButtonId::Back),
+        Action::MissionControl,
+    ));
+    assert!(!binding_is_native_click(ButtonId::Back, &binding));
+}
+
+#[test]
+fn multi_click_never_passes_through_as_a_native_click() {
+    let binding = Binding::MultiClick(MultiClickBinding::new(
         default_binding(ButtonId::Back),
         Action::MissionControl,
     ));

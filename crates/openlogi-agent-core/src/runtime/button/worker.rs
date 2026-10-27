@@ -225,8 +225,10 @@ fn emit_settled_events(
         events.into_iter().partition(|event| match event {
             ButtonRuntimeEvent::Triggered { press, .. }
             | ButtonRuntimeEvent::Ended { press, .. } => {
-                matches!(press.behavior, PressBehavior::LongPressFired)
-                    && due_presses.contains(press.token())
+                matches!(
+                    press.behavior,
+                    PressBehavior::LongPressFired | PressBehavior::MultiClickSettled
+                ) && due_presses.contains(press.token())
             }
             ButtonRuntimeEvent::Started(_) => false,
         });
@@ -267,7 +269,10 @@ pub(super) fn process_input(
     emit: &mut impl FnMut(ButtonRuntimeEvent),
 ) {
     match input {
-        ButtonInput::Down(press) => {
+        ButtonInput::Down(mut press) => {
+            if let Some(first) = state.take_awaiting_multi_click(&press.token.key) {
+                join_multi_click(first, &mut press, emit);
+            }
             if let Some(stale) = state.press(press.clone()) {
                 emit(ButtonRuntimeEvent::Ended {
                     press: stale,
@@ -277,6 +282,9 @@ pub(super) fn process_input(
             emit(ButtonRuntimeEvent::Started(press));
         }
         ButtonInput::Up { key, released_at } => {
+            if state.open_multi_click_window(&key, released_at) {
+                return;
+            }
             if let Some(mut press) = state.release(&key) {
                 if let Some(action) = press.fire_long(released_at) {
                     emit(ButtonRuntimeEvent::Triggered {
@@ -288,6 +296,21 @@ pub(super) fn process_input(
             }
         }
         ButtonInput::Pulse(press) => {
+            // A pulse is a whole click: for a multi-click it is a press and
+            // its release together, so a pulse pair can still make a double.
+            if let Some(pressed_at) = press.behavior.multi_click_pressed_at() {
+                let key = press.token.key.clone();
+                process_input(state, ButtonInput::Down(press), emit);
+                process_input(
+                    state,
+                    ButtonInput::Up {
+                        key,
+                        released_at: pressed_at,
+                    },
+                    emit,
+                );
+                return;
+            }
             if let Some(stale) = state.press(press.clone()) {
                 emit(ButtonRuntimeEvent::Ended {
                     press: stale,
@@ -315,8 +338,51 @@ pub(super) fn emit_selected_long_presses(
     emit: &mut impl FnMut(ButtonRuntimeEvent),
 ) {
     for (press, action) in state.fire_selected_long_presses(tokens, now) {
-        emit(ButtonRuntimeEvent::Triggered { press, action });
+        let settled = matches!(press.behavior, PressBehavior::MultiClickSettled);
+        emit(ButtonRuntimeEvent::Triggered {
+            press: press.clone(),
+            action,
+        });
+        if settled {
+            emit(ButtonRuntimeEvent::Ended {
+                press,
+                reason: EndReason::Released,
+            });
+        }
     }
+}
+
+/// A press arrived while `first` awaited its second click. Inside the window
+/// it becomes the second click and the first ends without an action of its
+/// own; past the window (the worker was merely late to settle it) the first
+/// still owes its single click.
+fn join_multi_click(
+    first: ActivePress,
+    press: &mut ActivePress,
+    emit: &mut impl FnMut(ButtonRuntimeEvent),
+) {
+    if let PressBehavior::MultiClickAwaiting {
+        click, deadline, ..
+    } = &first.behavior
+    {
+        match &press.behavior {
+            PressBehavior::MultiClickDown {
+                double, pressed_at, ..
+            } if pressed_at <= deadline => {
+                press.behavior = PressBehavior::MultiClickSecond {
+                    double: double.clone(),
+                };
+            }
+            _ => emit(ButtonRuntimeEvent::Triggered {
+                press: first.clone(),
+                action: click.clone(),
+            }),
+        }
+    }
+    emit(ButtonRuntimeEvent::Ended {
+        press: first,
+        reason: EndReason::Released,
+    });
 }
 
 fn emit_released(press: ActivePress, emit: &mut impl FnMut(ButtonRuntimeEvent)) {
