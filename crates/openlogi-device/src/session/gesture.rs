@@ -48,7 +48,7 @@ use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
 pub use main_wheel::MainWheelDivert;
 pub(crate) use spy::SpyRestore;
 use spy::{ArmedOnboard, SpyEdges};
-pub use spy::{HostMode, OnboardTarget};
+pub use spy::{HostMode, OnboardTarget, SlotRoute};
 
 use super::capture_restore::ArmedReporting;
 pub use super::capture_restore::{

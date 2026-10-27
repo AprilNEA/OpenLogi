@@ -936,7 +936,7 @@ async fn host_rearm_reports_a_spy_that_did_not_start() {
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let spec = CaptureSpec {
         onboard: Some(OnboardTarget::Host(HostMode {
-            slots: vec![(ButtonId::G9, true)],
+            slots: vec![(ButtonId::G9, SlotRoute::Captured)],
             report_rate: None,
         })),
         ..CaptureSpec::default()
@@ -992,7 +992,7 @@ async fn a_host_mode_session_reports_entering_host_mode() {
         let (_signal, device_io) = crate::device_io_channel();
         let spec = CaptureSpec {
             onboard: Some(OnboardTarget::Host(HostMode {
-                slots: vec![(ButtonId::G9, true)],
+                slots: vec![(ButtonId::G9, SlotRoute::Captured)],
                 report_rate: None,
             })),
             ..CaptureSpec::default()

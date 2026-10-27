@@ -21,6 +21,7 @@ use openlogi_hid::DeviceRoute;
 use openlogi_hid::reprog_controls::DPI_MODE_SHIFT_CIDS;
 use openlogi_hid::session::gesture::{
     CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS, HostMode, OnboardTarget,
+    SlotRoute,
 };
 use tokio::sync::watch;
 
@@ -119,7 +120,12 @@ impl DeviceCapturePlan {
                                     && !keeps_gestures(button)
                                     && layout.remappable().any(|b| b == button))
                                 || diverted.iter().any(|&(_, b)| b == button);
-                            (button, captured)
+                            let route = if captured {
+                                SlotRoute::Captured
+                            } else {
+                                SlotRoute::Native
+                            };
+                            (button, route)
                         })
                         .collect(),
                     report_rate: config.report_rate(key),
@@ -462,7 +468,7 @@ mod tests {
             .any(|&(_, diverted)| diverted == button)
     }
 
-    fn host_slots(plan: &DeviceCapturePlan) -> Option<Vec<(ButtonId, bool)>> {
+    fn host_slots(plan: &DeviceCapturePlan) -> Option<Vec<(ButtonId, SlotRoute)>> {
         match &plan.target.spec.onboard {
             Some(OnboardTarget::Host(host)) => Some(host.slots.clone()),
             _ => None,
@@ -479,7 +485,11 @@ mod tests {
         cfg.set_binding("g502", ButtonId::G9, Binding::Single(Action::Copy));
         let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
         let slots = host_slots(&plan).expect("host mode");
-        let captured: Vec<_> = slots.iter().filter(|(_, c)| *c).map(|(b, _)| *b).collect();
+        let captured: Vec<_> = slots
+            .iter()
+            .filter(|(_, route)| *route == SlotRoute::Captured)
+            .map(|(b, _)| *b)
+            .collect();
         assert_eq!(
             captured,
             [
@@ -495,7 +505,11 @@ mod tests {
 
         cfg.set_binding("g502", ButtonId::Back, Binding::Single(Action::Copy));
         let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
-        assert!(host_slots(&plan).unwrap().contains(&(ButtonId::Back, true)));
+        assert!(
+            host_slots(&plan)
+                .unwrap()
+                .contains(&(ButtonId::Back, SlotRoute::Captured))
+        );
     }
 
     #[test]
@@ -505,16 +519,16 @@ mod tests {
         cfg.set_binding("g502", ButtonId::Forward, Binding::Single(Action::GShift));
         let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
         let slots = host_slots(&plan).expect("host mode");
-        assert!(slots.contains(&(ButtonId::MiddleClick, true)));
-        assert!(slots.contains(&(ButtonId::Back, true)));
-        assert!(slots.contains(&(ButtonId::LeftClick, false)));
+        assert!(slots.contains(&(ButtonId::MiddleClick, SlotRoute::Captured)));
+        assert!(slots.contains(&(ButtonId::Back, SlotRoute::Captured)));
+        assert!(slots.contains(&(ButtonId::LeftClick, SlotRoute::Native)));
 
         cfg.set_gesture_mode("g502", ButtonId::Back, true);
         let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
         assert!(
             host_slots(&plan)
                 .unwrap()
-                .contains(&(ButtonId::Back, false)),
+                .contains(&(ButtonId::Back, SlotRoute::Native)),
             "a gesture button keeps its native report for the OS hook"
         );
     }
@@ -528,9 +542,12 @@ mod tests {
         let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
         let slots = host_slots(&plan).expect("host mode");
         for button in [ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward] {
-            assert!(slots.contains(&(button, false)), "{button:?} stays native");
+            assert!(
+                slots.contains(&(button, SlotRoute::Native)),
+                "{button:?} stays native"
+            );
         }
-        assert!(slots.contains(&(ButtonId::G9, true)));
+        assert!(slots.contains(&(ButtonId::G9, SlotRoute::Captured)));
     }
 
     #[test]

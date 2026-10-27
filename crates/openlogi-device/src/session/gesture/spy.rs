@@ -31,11 +31,20 @@ pub enum OnboardTarget {
     Profile(ProfileIndex),
 }
 
+/// Where host mode sends one button slot's presses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotRoute {
+    /// The button's own HID report, as the OS sees it.
+    Native,
+    /// Muted in the mapping and dispatched from spy reports.
+    Captured,
+}
+
 /// Host-mode capture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostMode {
-    /// Every slot, and whether it is captured.
-    pub slots: Vec<(ButtonId, bool)>,
+    /// Every slot, and where its presses go.
+    pub slots: Vec<(ButtonId, SlotRoute)>,
     /// Report rate to set.
     pub report_rate: Option<ReportRate>,
 }
@@ -44,12 +53,9 @@ impl HostMode {
     fn mapping(&self) -> Vec<u8> {
         self.slots
             .iter()
-            .map(|&(button, captured)| {
-                if captured {
-                    0
-                } else {
-                    native_hid_button(button)
-                }
+            .map(|&(button, route)| match route {
+                SlotRoute::Captured => 0,
+                SlotRoute::Native => native_hid_button(button),
             })
             .collect()
     }
@@ -58,7 +64,7 @@ impl HostMode {
         self.slots
             .iter()
             .zip(0u8..)
-            .filter(|((_, captured), _)| *captured)
+            .filter(|((_, route), _)| *route == SlotRoute::Captured)
             .map(|(&(button, _), slot)| (slot, button))
     }
 }
@@ -320,13 +326,13 @@ mod tests {
     fn host() -> HostMode {
         HostMode {
             slots: vec![
-                (ButtonId::LeftClick, false),
-                (ButtonId::RightClick, false),
-                (ButtonId::MiddleClick, false),
-                (ButtonId::Back, true),
-                (ButtonId::Forward, false),
-                (ButtonId::G6, true),
-                (ButtonId::WheelTiltRight, false),
+                (ButtonId::LeftClick, SlotRoute::Native),
+                (ButtonId::RightClick, SlotRoute::Native),
+                (ButtonId::MiddleClick, SlotRoute::Native),
+                (ButtonId::Back, SlotRoute::Captured),
+                (ButtonId::Forward, SlotRoute::Native),
+                (ButtonId::G6, SlotRoute::Captured),
+                (ButtonId::WheelTiltRight, SlotRoute::Native),
             ],
             report_rate: None,
         }
