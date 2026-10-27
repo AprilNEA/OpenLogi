@@ -53,10 +53,11 @@ fn invalid_argument(request: &[u8], response: &mut [u8]) {
     response[5] = 0x02;
 }
 
-/// A mouse whose only capturable feature is a `0x2121` wheel with multiplier
-/// 8, `flags` capabilities and mode byte 0 starting at `mode`. The returned
+/// A mouse whose only capturable feature is a `0x2121` wheel with `multiplier`
+/// units per notch, `flags` capabilities and mode byte 0 starting at `mode`. The returned
 /// cell is the wheel's live mode.
 fn wheel_device(
+    multiplier: u8,
     flags: u8,
     mode: u8,
     reply: SetReply,
@@ -83,7 +84,7 @@ fn wheel_device(
                 invalid_argument(request, &mut response);
             }
             (HIRES, 0) => {
-                response[4] = 8;
+                response[4] = multiplier;
                 response[5] = flags;
             }
             (HIRES, 1) => response[4..7].copy_from_slice(&*mode),
@@ -146,7 +147,17 @@ struct Armed {
 }
 
 async fn arm(flags: u8, mode: u8, reply: SetReply, spec: &CaptureSpec) -> Armed {
-    let (raw, handle, mode) = wheel_device(flags, mode, reply);
+    arm_with_multiplier(8, flags, mode, reply, spec).await
+}
+
+async fn arm_with_multiplier(
+    multiplier: u8,
+    flags: u8,
+    mode: u8,
+    reply: SetReply,
+    spec: &CaptureSpec,
+) -> Armed {
+    let (raw, handle, mode) = wheel_device(multiplier, flags, mode, reply);
     let channel = scripted_channel(raw).await;
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let mut armed = ArmedControls::default();
@@ -181,6 +192,41 @@ async fn arming_diverts_the_wheel_in_the_configured_mode() {
         .as_ref()
         .expect("the wheel is armed");
     assert_eq!(wheel.per_notch.get(), 8);
+}
+
+/// A wheel reporting a multiplier of 0 or 1 has no high-resolution mode to
+/// request: arming diverts it without the resolution bit and teardown hands
+/// it back in the native resolution it started in.
+#[tokio::test]
+async fn a_wheel_without_a_multiplier_is_diverted_but_never_asked_for_high_resolution() {
+    for multiplier in [0, 1] {
+        let armed = arm_with_multiplier(
+            multiplier,
+            0,
+            0,
+            SetReply::Apply,
+            &spec(Some(ScrollResolution::High), None),
+        )
+        .await;
+        armed.result.as_ref().unwrap();
+        assert_eq!(
+            armed
+                .controls
+                .main_wheel
+                .as_ref()
+                .expect("the wheel is armed")
+                .per_notch
+                .get(),
+            multiplier.max(1),
+            "multiplier {multiplier}: one unit per notch keeps reports exact"
+        );
+        let handle = restore(armed).await;
+        assert_eq!(
+            mode_writes(&handle),
+            [[DIVERTED, PRIORITY, RATE], [0, PRIORITY, RATE]],
+            "multiplier {multiplier}: no high-resolution bit either way"
+        );
+    }
 }
 
 /// Unset fields keep the wheel's own values, and a wheel that cannot invert
