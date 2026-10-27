@@ -16,12 +16,8 @@
 //! gates on — and only a paired slot, the only kind Options+ offers to
 //! rename. The name is read back afterwards.
 //!
-//! A switch moves the device to another slot with `0x1814 ChangeHost`, as
-//! the device's own channel key does. `setCurrentHost` is fire-and-forget:
-//! the device acts on it by leaving this computer, so nothing is read back.
-//! A slot the device reports as empty is refused first, because a device
-//! sent there drops off and does not come back until someone presses its
-//! channel key.
+//! Switching to a slot belongs to the host-switch session, the one owner of
+//! `0x1814 ChangeHost` (`session::host_switch::direct`).
 
 use std::sync::Arc;
 
@@ -30,7 +26,6 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature as _,
-        change_host::ChangeHostFeature,
         hosts_info::{
             HOST_NAME_CHUNK_LEN, HostBusType, HostIndex, HostOsType, HostSlotStatus,
             HostsInfoCapabilities, HostsInfoFeature,
@@ -43,7 +38,6 @@ use tracing::debug;
 use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
-use crate::session::host_switch::host_slot_is_empty;
 use openlogi_core::hid::{EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind};
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
@@ -296,38 +290,6 @@ async fn rename_easy_switch_host_on_channel(
     }
     debug!(index, slot, "host name written");
     Ok(after)
-}
-
-/// Move the device on an already-open [`SharedChannel`] to Easy-Switch
-/// `slot` (zero-based) and answer whether it was sent away: `false` when the
-/// device already uses `slot`. A device without `0x1814` fails with
-/// [`WriteError::FeatureUnsupported`]; a slot the device does not have, or
-/// reports empty, with [`WriteError::HostSlotEmpty`] before anything is sent.
-/// Once the request is out, the device leaves this computer.
-pub async fn switch_easy_switch_host_on(
-    shared: &SharedChannel,
-    slot: u8,
-) -> Result<bool, WriteError> {
-    let index = shared.device_index();
-    let mut device = Device::new(Arc::clone(shared.channel()), index)
-        .await
-        .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let feature = open_feature::<ChangeHostFeature>(&mut device).await?;
-    let classify = |e| classify_hidpp_error(e, HidppOperation::SwitchHost, ChangeHostFeature::ID);
-    let info = feature.get_host_info().await.map_err(classify)?;
-    if slot >= info.host_count {
-        return Err(WriteError::HostSlotEmpty { slot });
-    }
-    if info.current_host == slot {
-        debug!(index, slot, "device already uses the requested host");
-        return Ok(false);
-    }
-    if host_slot_is_empty(&mut device, slot).await {
-        return Err(WriteError::HostSlotEmpty { slot });
-    }
-    feature.set_current_host(slot).await.map_err(classify)?;
-    debug!(index, slot, "host switch sent");
-    Ok(true)
 }
 
 #[cfg(test)]

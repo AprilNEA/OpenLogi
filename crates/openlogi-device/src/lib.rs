@@ -64,7 +64,7 @@ pub use session::host_switch::{
     FollowerLink, FollowerRelease, HostSwitchError, HostSwitchFollowUp, HostSwitchRestoreOutcome,
     HostSwitchSessionFailure, HostSwitchSessionOutcome, HostSwitchStopReason, LeadCookie,
     PendingHostSwitchRestore, link_follower_cookies_on, release_follower_cookies_on,
-    run_host_switch_session, switch_linked_hosts,
+    run_host_switch_session, switch_easy_switch_host_on, switch_linked_hosts,
 };
 pub use session::keyboard::{
     RESERVED_KEYBOARD_CONTROLS, is_reserved_keyboard_control, run_keyboard_capture_session,
@@ -92,8 +92,8 @@ pub use write::{
     set_keyboard_color_with_on, set_pointer_speed_on, set_report_rate, set_report_rate_on,
     set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
     set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
-    set_smartshift_sensitivity, set_smartshift_torque, switch_easy_switch_host_on,
-    toggle_smartshift, toggle_smartshift_on, update_backlight, update_backlight_on, watch_litra,
+    set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift, toggle_smartshift_on,
+    update_backlight, update_backlight_on, watch_litra,
 };
 
 /// Scripted transport helpers for tests in higher layers.

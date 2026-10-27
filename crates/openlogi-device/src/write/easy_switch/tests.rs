@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+use crate::session::host_switch::switch_easy_switch_host_on;
 
 /// The `0x1815` feature index on the scripted keyboard.
 const HOSTS_INDEX: u8 = 0x0c;
