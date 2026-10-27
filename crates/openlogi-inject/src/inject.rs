@@ -702,7 +702,9 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x27 => Some(u16::from(b'0')),
         0x3a..=0x45 => Some(0x70 + u16::from(usage - 0x3a)),
         0x68..=0x6f => Some(0x7c + u16::from(usage - 0x68)),
-        0x28 => Some(0x0d),
+        // Keypad Enter (0x58) shares VK_RETURN; only the extended-key flag,
+        // which this table cannot carry, tells it from the main Enter.
+        0x28 | 0x58 => Some(0x0d),
         0x29 => Some(0x1b),
         0x2a => Some(0x08),
         0x2b => Some(0x09),
@@ -727,6 +729,18 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x50 => Some(0x25),
         0x51 => Some(0x28),
         0x52 => Some(0x26),
+        // Keypad: VK_DIVIDE, VK_MULTIPLY, VK_SUBTRACT, VK_ADD.
+        0x54 => Some(0x6f),
+        0x55 => Some(0x6a),
+        0x56 => Some(0x6d),
+        0x57 => Some(0x6b),
+        // VK_NUMPAD1..VK_NUMPAD9, VK_NUMPAD0, VK_DECIMAL.
+        0x59..=0x61 => Some(0x61 + u16::from(usage - 0x59)),
+        0x62 => Some(0x60),
+        0x63 => Some(0x6e),
+        // WinUser.h's VK_OEM_NEC_EQUAL, "'=' key on numpad": Windows has no
+        // other virtual key for it.
+        0x67 => Some(0x92),
         _ => None,
     }
 }
@@ -1171,6 +1185,25 @@ mod tests {
         assert_eq!(hid_usage_to_windows(0x50), Some(0x25)); // Left
         assert_eq!(hid_usage_to_windows(0x2c), Some(0x20)); // Space
         assert_eq!(hid_usage_to_windows(0x33), Some(0xba)); // Semicolon
+        assert_eq!(hid_usage_to_windows(0x56), Some(0x6d)); // Keypad -
+        assert_eq!(hid_usage_to_windows(0x57), Some(0x6b)); // Keypad +
+        assert_eq!(hid_usage_to_windows(0x59), Some(0x61)); // Keypad 1
+        assert_eq!(hid_usage_to_windows(0x61), Some(0x69)); // Keypad 9
+        assert_eq!(hid_usage_to_windows(0x62), Some(0x60)); // Keypad 0
+        assert_eq!(hid_usage_to_windows(0x63), Some(0x6e)); // Keypad .
         assert_eq!(hid_usage_to_windows(0xff), None);
+    }
+
+    #[test]
+    fn every_shortcut_usage_has_a_windows_virtual_key() {
+        use openlogi_core::binding::KeyboardUsage;
+
+        use super::hid_usage_to_windows;
+
+        for code in 0..=u8::MAX {
+            if KeyboardUsage::try_new(code).is_ok() {
+                assert!(hid_usage_to_windows(code).is_some(), "usage {code:#04x}");
+            }
+        }
     }
 }
