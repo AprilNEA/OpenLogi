@@ -1,5 +1,21 @@
 //! Platform-neutral scroll distances.
 
+/// Notches a mouse wheel travels per inch of on-screen distance at unit gain,
+/// as measured from recorded Options+ event traces.
+const WHEEL_NOTCHES_PER_INCH: f64 = 7.714_285_714_285_714;
+
+/// The screen resolution wheel distances are measured against, in pixels per
+/// inch. Pixel distances divided by it give the inches a wheel speed model
+/// works in.
+pub const WHEEL_REFERENCE_DPI: f64 = 100.0;
+
+/// Pixels one wheel notch scrolls at unit gain (about 12.96).
+///
+/// The one owner of how far a notch is: the main-wheel model scales its pixel
+/// output from it and the injector converts model pixels back to wheel ticks
+/// on platforms without pixel output, so the two cannot drift apart.
+pub const WHEEL_PIXELS_PER_NOTCH: f64 = WHEEL_REFERENCE_DPI / WHEEL_NOTCHES_PER_INCH;
+
 /// A signed two-axis scroll distance with an explicit unit.
 ///
 /// Positive horizontal values scroll right; positive vertical values scroll
@@ -73,7 +89,15 @@ impl ScrollDelta {
 
 #[cfg(test)]
 mod tests {
-    use super::ScrollDelta;
+    use super::{ScrollDelta, WHEEL_PIXELS_PER_NOTCH};
+
+    #[test]
+    fn a_notch_is_about_thirteen_pixels() {
+        assert!(
+            (WHEEL_PIXELS_PER_NOTCH - 12.963).abs() < 1e-3,
+            "{WHEEL_PIXELS_PER_NOTCH}"
+        );
+    }
 
     #[test]
     fn units_remain_distinct() {
