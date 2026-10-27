@@ -176,6 +176,21 @@ impl ActionExecutor {
         );
     }
 
+    /// `device_key`'s session entered host mode, which may have loaded the
+    /// stored profile's DPI: write the saved one again, as a reconnect does.
+    fn host_mode_entered(&self, device_key: &str) {
+        let Some(write) = self.pointer_speeds.host_mode_write(device_key) else {
+            return;
+        };
+        if let Some(dpi) = write.dpi()
+            && let Ok(mut cycles) = self.dpi_cycle.write()
+        {
+            cycles.reapplied(device_key, dpi);
+        }
+        info!(target = ?write.target, "host mode entered → writing the saved DPI");
+        self.write_speed(write);
+    }
+
     /// Step `device_key`'s DPI presets one up or down, without wrapping.
     fn step_dpi(&self, device_key: Option<&str>, up: bool) -> Option<(Dpi, Option<DeviceRoute>)> {
         match self.dpi_cycle.write() {
@@ -538,6 +553,12 @@ impl ActionRuntime {
 
 impl ActionDispatcher {
     /// Route one action without blocking the input callback.
+    /// Write `device_key`'s saved DPI again after its session entered host
+    /// mode.
+    pub(crate) fn host_mode_entered(&self, device_key: &str) {
+        self.executor.host_mode_entered(device_key);
+    }
+
     pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.executor.dispatch(action, device_key);
     }
@@ -1099,6 +1120,30 @@ mod tests {
             Some(Dpi::new(1200)),
             "the release restores, so it keeps the reading until it lands"
         );
+    }
+
+    /// After a session enters host mode the saved DPI is written again, and
+    /// a DPI shift returns to it rather than to a preset picked before.
+    #[test]
+    fn entering_host_mode_writes_the_saved_dpi_again() {
+        let speeds = Arc::new(PointerSpeeds::default());
+        speeds.publish(
+            None,
+            [crate::pointer_speed::SpeedMouse {
+                key: "mouse".to_string(),
+                route: DeviceRoute::Bolt {
+                    receiver_uid: "AA00".into(),
+                    slot: 1,
+                },
+                saved: crate::pointer_speed::SavedSpeed::Dpi(Some(Dpi::new(1600))),
+            }],
+        );
+        let mut executor = dpi_shift_executor(Some(Dpi::new(400)));
+        executor.pointer_speeds = speeds;
+
+        executor.host_mode_entered("mouse");
+        let cycles = executor.dpi_cycle.read().expect("dpi_cycle lock");
+        assert_eq!(cycles.current("mouse"), Some(Dpi::new(1600)));
     }
 
     #[test]

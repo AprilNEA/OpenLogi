@@ -48,9 +48,7 @@ use crate::hardware::{
 };
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
-use crate::pointer_speed::{
-    AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedTarget, SpeedWrite,
-};
+use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
@@ -1445,18 +1443,13 @@ impl Orchestrator {
                 .map(openlogi_hid::SmartShiftStatus::from),
         };
         // The saved DPI goes out with the speed write on a DPI mouse.
-        let written_dpi =
-            settings
-                .dpi
-                .or_else(|| match speed_write.as_ref().map(|write| &write.target) {
-                    Some(SpeedTarget::Dpi(openlogi_hid::DpiTarget::Value(dpi))) => Some(*dpi),
-                    _ => None,
-                });
+        let written_dpi = settings
+            .dpi
+            .or_else(|| speed_write.as_ref().and_then(SpeedWrite::dpi));
         if let Some(dpi) = written_dpi
             && let Ok(mut cycles) = self.shared.dpi_cycle.write()
-            && let Some(state) = cycles.by_key.get_mut(key)
         {
-            state.reapplied(dpi);
+            cycles.reapplied(key, dpi);
         }
         if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(

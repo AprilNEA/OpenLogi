@@ -200,6 +200,16 @@ pub(crate) struct SpeedWrite {
     pub(crate) led: Option<bool>,
 }
 
+impl SpeedWrite {
+    /// The DPI this write sets, when it names one.
+    pub(crate) fn dpi(&self) -> Option<Dpi> {
+        match self.target {
+            SpeedTarget::Dpi(DpiTarget::Value(dpi)) => Some(dpi),
+            _ => None,
+        }
+    }
+}
+
 /// A write of the settings app, numbered when it was requested.
 pub(crate) struct AppWrite {
     /// Its place among the mouse's pointer-speed writes.
@@ -381,6 +391,18 @@ impl PointerSpeeds {
             ticket: self.order.request(route),
             restore,
         })
+    }
+
+    /// The write the mouse `key` names owes after its session entered host
+    /// mode again, which loads the stored profile's DPI: the one a reconnect
+    /// owes.
+    pub(crate) fn host_mode_write(&self, key: &str) -> Option<SpeedWrite> {
+        let (route, saved) = {
+            let state = self.lock();
+            let mouse = state.online.get(key)?;
+            (mouse.route.clone(), mouse.saved)
+        };
+        self.reapply(key, &route, saved)
     }
 
     /// A DPI preset action writes `dpi` to the mouse at `route`. Ends the

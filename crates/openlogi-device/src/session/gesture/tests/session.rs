@@ -950,3 +950,72 @@ async fn host_rearm_reports_a_spy_that_did_not_start() {
     spy_fails.store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(!armed.rearm().await);
 }
+
+/// A session that puts the mouse in host mode says so, so the agent writes
+/// the saved DPI that leaving onboard mode may have replaced.
+#[tokio::test]
+async fn a_host_mode_session_reports_entering_host_mode() {
+    const ONBOARD: u8 = 9;
+    const SPY: u8 = 10;
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        let mut response = vec![0; 20];
+        response[..4].copy_from_slice(&request[..4]);
+        response[0] = 0x11;
+        match (request[2], request[3] >> 4) {
+            (0, 1) => response[4] = 4,
+            (0, 0) => {
+                response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                    0x8100 => ONBOARD,
+                    0x8110 => SPY,
+                    _ => 0,
+                };
+            }
+            (ONBOARD | SPY, _) => {}
+            _ => panic!("unexpected capture request: {request:02x?}"),
+        }
+        Some(response)
+    });
+    let channel = scripted_channel(raw).await;
+    let (sink, mut inputs) = mpsc::unbounded_channel();
+    let (shutdown, shutdown_rx) = oneshot::channel();
+    let session = tokio::spawn(async move {
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc539,
+        };
+        let registry = ChannelRegistry::default();
+        registry.replace_node(
+            NodeId::from("mouse-node".to_owned()),
+            [route.clone()],
+            channel,
+        );
+        let (_signal, device_io) = crate::device_io_channel();
+        let spec = CaptureSpec {
+            onboard: Some(OnboardTarget::Host(HostMode {
+                slots: vec![(ButtonId::G9, true)],
+                report_rate: None,
+            })),
+            ..CaptureSpec::default()
+        };
+        let host = CaptureHost {
+            sink,
+            shutdown: shutdown_rx,
+            channel_slot: Arc::new(std::sync::RwLock::new(None)),
+            registry: &registry,
+            device_io,
+        };
+        run_capture_session(route, spec, host).await
+    });
+
+    let input = tokio::time::timeout(std::time::Duration::from_secs(2), inputs.recv())
+        .await
+        .expect("the session reports in time")
+        .expect("the session is running");
+    assert_eq!(input, CapturedInput::HostModeEntered);
+    shutdown.send(CaptureSessionStop::Shutdown).unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), session)
+        .await
+        .expect("the session stops")
+        .expect("the session task does not panic");
+    assert!(matches!(outcome, Ok(CaptureSessionOutcome::Restored)));
+}

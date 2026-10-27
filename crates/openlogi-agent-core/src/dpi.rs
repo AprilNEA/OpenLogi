@@ -41,6 +41,14 @@ impl DpiCycles {
         self.by_key.get(key)?.current
     }
 
+    /// `key`'s mouse was set back to its saved `dpi`; see
+    /// [`DpiCycleState::reapplied`].
+    pub fn reapplied(&mut self, key: &str, dpi: Dpi) {
+        if let Some(state) = self.by_key.get_mut(key) {
+            state.reapplied(dpi);
+        }
+    }
+
     /// The write target for `key` (same fallback as [`Self::state_for`])
     /// without a mutable borrow — for dispatch that only needs the route, like
     /// the SmartShift toggle.

@@ -853,3 +853,29 @@ fn a_dpi_shift_restore_takes_over_its_own_end_of_precision_mode() {
     assert_ne!(off.restore.as_ref(), Some(&own));
     assert!(speeds.shift_restore("a", &route(1), Some(&own)).is_none());
 }
+
+/// Entering host mode again owes the write a reconnect owes: the saved DPI,
+/// or the precision DPI while the mode is on; nothing with no DPI saved.
+#[test]
+fn host_mode_owes_the_reconnect_write() {
+    let speeds = PointerSpeeds::default();
+    speeds.publish(
+        None,
+        [
+            dpi_mouse("saved", 1, Some(Dpi::new(1200))),
+            dpi_mouse("unsaved", 2, None),
+        ],
+    );
+    let write = speeds.host_mode_write("saved").expect("a saved DPI");
+    assert_eq!(write.dpi(), Some(Dpi::new(1200)));
+    assert_eq!(write.route, route(1));
+    assert!(speeds.host_mode_write("unsaved").is_none());
+    assert!(speeds.host_mode_write("offline").is_none());
+
+    speeds
+        .toggle_precision(Some("saved"), PrecisionPress::Assigned)
+        .expect("precision on");
+    let write = speeds.host_mode_write("saved").expect("the precision DPI");
+    assert_eq!(write.target, dpi(DpiTarget::Lowest));
+    assert_eq!(write.dpi(), None);
+}

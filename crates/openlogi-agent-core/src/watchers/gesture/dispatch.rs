@@ -212,6 +212,7 @@ impl InputDispatcher {
         if self.record_thumbwheel_direction(key, input) {
             return;
         }
+
         match input {
             CapturedInput::Gesture(button, direction) => {
                 let Some(press) = self.held_presses.get(session, button) else {
@@ -309,6 +310,7 @@ impl InputDispatcher {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
             CapturedInput::Interrupted => self.cancel_session(session),
+            CapturedInput::HostModeEntered => self.outputs.actions.host_mode_entered(key),
         }
     }
 

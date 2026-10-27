@@ -119,6 +119,10 @@ pub enum CapturedInput {
     /// The device power-cycled with buttons held. Their presses are over, but
     /// nobody let go: they end without the action a release would run.
     Interrupted,
+    /// The session put the mouse in host mode. A session it replaced left
+    /// onboard mode, which loads the stored profile's DPI, so the agent
+    /// writes the saved one again.
+    HostModeEntered,
 }
 
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the
@@ -229,6 +233,13 @@ pub async fn run_capture_session(
     let armed = arm_controls(&shared, &spec, host.registry).await?;
     if let Some(direction) = armed.thumbwheel_direction() {
         let _ = host.sink.send(direction);
+    }
+    if armed
+        .onboard
+        .as_ref()
+        .is_some_and(|onboard| onboard.spy().is_some())
+    {
+        let _ = host.sink.send(CapturedInput::HostModeEntered);
     }
     Ok(run_capture(shared, GestureCapture::new(armed), host).await)
 }
