@@ -520,12 +520,8 @@ impl ButtonState {
                 *target = current;
             }
         }
-        // A multi-click awaiting its second click is already released: it
-        // holds no output, and the pointer moving on within the window must
-        // not swallow the click it still owes.
         self.active.extract_if(|_, press| {
-            !matches!(press.behavior, PressBehavior::MultiClickAwaiting { .. })
-                && matches!(press.target, ActionDispatchTarget::Pointer { target, .. } if target != current)
+            matches!(press.target, ActionDispatchTarget::Pointer { target, .. } if target != current)
         })
             .map(|(_, press)| press)
             .collect()
