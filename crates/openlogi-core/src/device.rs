@@ -223,9 +223,10 @@ impl Capabilities {
     /// unless its model has a `GamingLayout`.
     ///
     /// Derived, not stored, so `buttons` keeps meaning ReprogControls in every
-    /// config and cache already written.
+    /// config and cache already written. Consumers ask
+    /// [`GamingButtons::for_device`](crate::binding::GamingButtons::for_device).
     #[must_use]
-    pub const fn no_button_diversion(&self) -> bool {
+    pub(crate) const fn no_button_diversion(&self) -> bool {
         !self.buttons && (self.onboard_profiles || self.button_spy)
     }
 

@@ -9,6 +9,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
+use openlogi_core::binding::GamingButtons;
 use openlogi_core::device::{Capabilities, DeviceKind};
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
@@ -132,7 +133,8 @@ impl DetailTab {
         // A G-series mouse has no ReprogControls, but the OS hook still remaps
         // its middle/back/forward, so it gets the panel too. The model draws
         // only what such a mouse can deliver (#392, #730, #877).
-        let buttons = caps.buttons || caps.no_button_diversion();
+        let gaming = GamingButtons::for_device(&record.model_key, Some(&caps)).is_some();
+        let buttons = caps.buttons || gaming;
         if buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
@@ -159,7 +161,6 @@ impl DetailTab {
         // editor too — otherwise the ring opens but has nothing configured
         // in it and no way to configure it (#1833).
         // A G-series mouse gets no ring: its buttons are for games.
-        let gaming = caps.onboard_profiles || caps.button_spy;
         if caps.haptic_panel || (buttons && can_show_mouse_model && !gaming) || shows_keys_tab {
             tabs.push(Self::ActionsRing);
         }

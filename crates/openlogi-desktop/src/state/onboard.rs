@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use gpui::App;
-use openlogi_core::binding::{GamingLayout, STANDARD_BUTTONS};
+use openlogi_core::binding::{GamingButtons, GamingLayout};
 use openlogi_core::config::OnboardMemory;
 use openlogi_core::hid::{OnboardMode, OnboardState};
 
@@ -30,12 +30,11 @@ impl AppState {
     /// layout, or the standard buttons for a model nobody has dumped.
     #[must_use]
     pub fn current_button_layout(&self) -> Option<&'static GamingLayout> {
-        self.current_gaming_layout().or_else(|| {
-            self.current_record()
-                .and_then(|record| record.capabilities)
-                .is_some_and(|capabilities| capabilities.no_button_diversion())
-                .then_some(&STANDARD_BUTTONS)
-        })
+        self.current_record()
+            .and_then(|record| {
+                GamingButtons::for_device(&record.model_key, record.capabilities.as_ref())
+            })
+            .map(GamingButtons::layout)
     }
 
     #[must_use]

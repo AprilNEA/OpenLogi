@@ -1510,7 +1510,10 @@ fn a_gaming_keyboard_gets_no_keys_or_mouse_tabs() {
         0x0000, 0x0001, 0x0003, 0x0005, 0x0020, 0x8071, 0x8081, 0x1bc0, 0x40a3, 0x4522, 0x4540,
         0x8010, 0x8040, 0x8100, 0x8060, 0x00c2, 0x00d0,
     ]);
-    assert!(g713.no_button_diversion());
+    assert_eq!(
+        openlogi_core::binding::GamingButtons::for_device("0c339", Some(&g713)),
+        Some(openlogi_core::binding::GamingButtons::Standard)
+    );
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, Some(g713)));
     assert!(!tabs.contains(&DetailTab::Keys));
     assert!(!tabs.contains(&DetailTab::Buttons) && !tabs.contains(&DetailTab::ActionsRing));

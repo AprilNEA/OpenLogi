@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Binding, ButtonId, GamingLayout};
+use openlogi_core::binding::{Binding, ButtonId, GamingButtons, GamingLayout};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
     AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
@@ -805,10 +805,7 @@ impl Orchestrator {
             .iter()
             .find(|dev| dev.config_key == key)
             .is_some_and(|dev| {
-                GamingLayout::for_model_key(&dev.model_key).is_some()
-                    || dev
-                        .capabilities
-                        .is_some_and(|capabilities| capabilities.no_button_diversion())
+                GamingButtons::for_device(&dev.model_key, dev.capabilities.as_ref()).is_some()
             })
     }
 

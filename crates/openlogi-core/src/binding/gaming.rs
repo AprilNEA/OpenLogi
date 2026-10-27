@@ -2,6 +2,7 @@
 //! Slot `n` is spy bit `n` and asset slot `g{n + 1}`.
 
 use super::button::ButtonId;
+use crate::device::Capabilities;
 
 /// One model's button slots.
 #[derive(Debug, PartialEq, Eq)]
@@ -64,6 +65,43 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
 
 const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED];
 
+/// Whether a device is a G-series mouse, and which buttons it offers. The
+/// agent, the tabs and the Buttons panel all ask this one verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GamingButtons {
+    /// A model whose `0x8110` layout was dumped: host mode captures every
+    /// slot.
+    Dumped(&'static GamingLayout),
+    /// A device with the gaming tables and no ReprogControls whose layout
+    /// nobody has dumped: only [`STANDARD_BUTTONS`], which the OS hook
+    /// remaps.
+    Standard,
+}
+
+impl GamingButtons {
+    /// The verdict for `model_key` with `capabilities`, which is `None` for a
+    /// device never probed; a dumped model answers without them. `None` for a
+    /// device that diverts its controls through ReprogControls.
+    #[must_use]
+    pub fn for_device(model_key: &str, capabilities: Option<&Capabilities>) -> Option<Self> {
+        if let Some(layout) = GamingLayout::for_model_key(model_key) {
+            return Some(Self::Dumped(layout));
+        }
+        capabilities
+            .is_some_and(Capabilities::no_button_diversion)
+            .then_some(Self::Standard)
+    }
+
+    /// The buttons the Buttons panel draws.
+    #[must_use]
+    pub const fn layout(self) -> &'static GamingLayout {
+        match self {
+            Self::Dumped(layout) => layout,
+            Self::Standard => &STANDARD_BUTTONS,
+        }
+    }
+}
+
 impl GamingLayout {
     /// The layout for a HID++ model key.
     #[must_use]
@@ -106,6 +144,24 @@ impl GamingLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gaming_buttons_name_the_dumped_layout_or_the_standard_buttons() {
+        let gaming = Capabilities::from_feature_ids(&[0x2201, 0x8100, 0x8110]);
+        let mx = Capabilities::from_feature_ids(&[0x1b04, 0x2201]);
+        assert_eq!(
+            GamingButtons::for_device("0407f", None),
+            Some(GamingButtons::Dumped(&G502_LIGHTSPEED)),
+            "a dumped model answers before it is probed"
+        );
+        assert_eq!(
+            GamingButtons::for_device("0409f", Some(&gaming)),
+            Some(GamingButtons::Standard)
+        );
+        assert_eq!(GamingButtons::Standard.layout(), &STANDARD_BUTTONS);
+        assert_eq!(GamingButtons::for_device("0409f", None), None);
+        assert_eq!(GamingButtons::for_device("2b042", Some(&mx)), None);
+    }
 
     #[test]
     fn g502_lightspeed_slots_match_the_hardware_dump() {
