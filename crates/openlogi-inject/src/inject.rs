@@ -656,6 +656,46 @@ pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
     }
 }
 
+/// The wheel-tick delta backends without pixel output (Windows, Linux) post
+/// for `pixels` of main-wheel output.
+#[cfg(any(test, not(target_os = "macos")))]
+fn wheel_pixels_as_ticks(pixels: i32) -> ScrollDelta {
+    ScrollDelta::wheel_ticks(
+        0.0,
+        f64::from(pixels) / openlogi_core::scroll::WHEEL_PIXELS_PER_NOTCH,
+    )
+}
+
+/// Synthesise one vertical main-wheel event of `pixels` pixels.
+///
+/// `pixels` is the integer pixel distance (positive scrolls up); no scaling or
+/// quantizing happens here, the caller carries any sub-pixel remainder.
+/// `line_delta` is the accumulated line distance, zero on most events. On
+/// macOS this is a phaseless continuous pixel event (`scrollPhase = 0`,
+/// `momentumPhase = 0`, `isContinuous = 1`) whose integer line field is
+/// `trunc(line_delta)` and whose fixed-point line field is
+/// `round(line_delta)`, the fields recorded Options+ wheel events carry.
+/// Other platforms inject the pixels as fractional wheel ticks of
+/// `openlogi_core::scroll::WHEEL_PIXELS_PER_NOTCH` pixels each
+/// (`wheel_pixels_as_ticks`): their
+/// backends take wheel ticks only and drop pixel deltas, and their
+/// quantizers carry the fraction. Zero pixels and non-finite lines are
+/// dropped.
+pub fn post_wheel_pixels(pixels: i32, line_delta: f64) {
+    if pixels == 0 || !line_delta.is_finite() {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_wheel_pixels(pixels, line_delta);
+        }
+        _ => {
+            let _ = line_delta;
+            post_scroll(wheel_pixels_as_ticks(pixels));
+        }
+    }
+}
+
 /// Synthesise one frame of a phased scroll gesture.
 ///
 /// Unlike [`post_smooth_scroll`], macOS stamps the frame's phase onto the
@@ -754,7 +794,30 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::{HeldKey, HeldOutput, HoldTransition};
-    use super::{QuantizedScroll, ScrollQuantizer};
+    use super::{QuantizedScroll, ScrollQuantizer, wheel_pixels_as_ticks};
+
+    /// Windows and Linux reject pixel deltas, so main-wheel pixels must reach
+    /// them as wheel ticks of the right sign and size.
+    #[test]
+    fn wheel_pixels_become_wheel_ticks_off_macos() {
+        let ScrollDelta::WheelTicks { x, y } = wheel_pixels_as_ticks(1000) else {
+            panic!("main-wheel pixels must not stay pixel deltas");
+        };
+        assert!(x.abs() < f64::EPSILON, "{x}");
+        assert!((y - 77.14).abs() < 0.01, "{y}");
+        assert!(matches!(
+            wheel_pixels_as_ticks(-13),
+            ScrollDelta::WheelTicks { y, .. } if y < 0.0
+        ));
+
+        // A run of 12 px reports keeps its cumulative distance through the
+        // backend quantizer: 1200 px is 92.57 ticks, i.e. 11108.6 of 120 units, rounded by the carry.
+        let mut quantizer = ScrollQuantizer::default();
+        let total: i32 = (0..100)
+            .map(|_| quantizer.quantize(wheel_pixels_as_ticks(12), 120.0).y)
+            .sum();
+        assert_eq!(total, 11_109);
+    }
 
     /// Synthetic high-resolution input: eight eighth-ticks must total exactly
     /// one Windows/Linux wheel detent (120 raw units). This is deterministic
