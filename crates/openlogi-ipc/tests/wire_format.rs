@@ -116,7 +116,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 44);
+    assert_eq!(PROTOCOL_VERSION, 45);
 }
 
 #[test]
@@ -1254,6 +1254,8 @@ fn pointer_speed_and_precision_mode() {
     );
     // Appended at the end of `Action`, so every earlier index is unchanged.
     assert_wire(&Action::TogglePrecisionMode, "36");
+    assert_wire(&Action::ZoomIn, "3d");
+    assert_wire(&Action::ZoomOut, "3e");
 }
 
 /// The press force of a force-sensing button (the MX Master 4's Haptic Sense

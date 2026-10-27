@@ -170,7 +170,9 @@ pub use succession::Identity;
 ///      host switching of one device. `AgentSnapshot::flow` appended —
 ///      whether Flow is enabled, and the coarse link state of each
 ///      configured peer.
-pub const PROTOCOL_VERSION: u32 = 44;
+/// v45: `Action::{ZoomIn, ZoomOut}` appended — thumb-wheel continuous
+///      magnification and button/ring zoom shortcuts.
+pub const PROTOCOL_VERSION: u32 = 45;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

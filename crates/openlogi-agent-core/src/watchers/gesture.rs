@@ -89,6 +89,16 @@ impl GestureOutputs {
         }
     }
 
+    fn post_magnify(&self, session: &HidppSessionId, magnification: f64) {
+        if !self.scroll.try_hidpp_magnify(session, magnification) {
+            // Fail-open burst when the scroll worker is unavailable or full:
+            // `Began` with a non-zero delta emits `Began(0)` + `Changed(delta)`,
+            // and `Ended(0)` closes the gesture immediately.
+            openlogi_inject::post_magnify(magnification, openlogi_inject::SmoothScrollPhase::Began);
+            openlogi_inject::post_magnify(0.0, openlogi_inject::SmoothScrollPhase::Ended);
+        }
+    }
+
     /// Post a diverted main wheel's scroll, eased by the scroll runtime
     /// under its device's resolved momentum-scrolling settings.
     fn post_main_wheel_scroll(
