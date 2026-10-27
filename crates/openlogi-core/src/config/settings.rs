@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
+use std::time::Duration;
 
 use az::SaturatingAs;
 use nutype::nutype;
@@ -230,6 +231,9 @@ pub struct AppSettings {
     /// continuous pixel input is never scaled.
     #[serde(default)]
     pub vertical_scroll_sensitivity: VerticalScrollSensitivity,
+    /// Magic Mouse–style momentum for a smoothed main wheel. Off by default.
+    #[serde(default)]
+    pub momentum_scrolling: MomentumScrolling,
     /// Which app icon the user picked. Applied at launch, and whenever it
     /// changes, by whichever process owns a surface showing one — on macOS the
     /// GUI hands the choice to the Dock and writes it onto the bundle (so the
@@ -500,6 +504,7 @@ impl Default for AppSettings {
             capture_mouse_events: true,
             smooth_scroll: false,
             vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
+            momentum_scrolling: MomentumScrolling::default(),
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,
@@ -515,6 +520,175 @@ impl Default for AppSettings {
             low_battery_notifications: true,
             lock_key_notifications: true,
             animate_desktop_switch: true,
+        }
+    }
+}
+
+/// Magic Mouse–style momentum scrolling for a mouse whose main wheel OpenLogi
+/// smooths (its per-device Smooth wheel switch).
+///
+/// Once SmartShift lets the wheel spin freely, the page glides off at the
+/// speed the wheel was spun, slows along the chosen [`GlideShape`], and stops
+/// the moment a finger stops the wheel. Ratchet scrolling stays notch by
+/// notch. This is the on-disk shape; consumers take [`Self::resolve`], which
+/// clamps a hand-edited value into its range once, so no consumer
+/// re-validates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MomentumScrolling {
+    /// Whether momentum scrolling is on. **Off by default.**
+    pub enabled: bool,
+    /// How far one wheel notch scrolls, in reference pixels — ratchet steps
+    /// and the glide's start speed alike. macOS receives pixel events; other
+    /// platforms scale native wheel ticks relative to the default distance,
+    /// leaving their final pixel distance to the application.
+    pub pixels_per_notch: u16,
+    /// How the glide slows down toward its stop.
+    pub glide_shape: GlideShape,
+    /// The fastest one spin sends the page gliding, in pixels per second;
+    /// repeated spins speed it up to three times past it.
+    pub max_glide_speed: u16,
+    /// The glide's time constant, in milliseconds: it covers its start speed
+    /// times this, whatever its shape.
+    pub glide_ms: u16,
+    /// Speed-up per repeated spin onto a still-running glide, in percent
+    /// (135 = ×1.35 per spin); 100 turns it off.
+    pub repeat_boost: u16,
+}
+
+/// How a glide slows toward its stop: its speed falls as `(1 − t/T)^p`.
+/// Every shape covers the same distance; a higher `p` brakes earlier and
+/// trails a longer, softer tail.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GlideShape {
+    /// Holds its speed and brakes late (`p` = ½).
+    Sharp,
+    /// Brakes evenly (`p` = 1).
+    Linear,
+    /// Eases out gently (`p` = 2).
+    #[default]
+    Smooth,
+    /// Trails a long, soft tail (`p` = 4).
+    Floaty,
+}
+
+impl GlideShape {
+    /// Every shape, sharpest first.
+    pub const ALL: [Self; 4] = [Self::Sharp, Self::Linear, Self::Smooth, Self::Floaty];
+
+    /// The exponent `p` of the glide's speed curve. Crate-private: consumers
+    /// read the curve through [`GlideCurve`](crate::scroll::GlideCurve).
+    #[must_use]
+    pub(crate) const fn exponent(self) -> f64 {
+        match self {
+            Self::Sharp => 0.5,
+            Self::Linear => 1.0,
+            Self::Smooth => 2.0,
+            Self::Floaty => 4.0,
+        }
+    }
+}
+
+/// Momentum-scrolling settings resolved for the agent: every value inside its
+/// selectable range and in physical units. Only [`MomentumScrolling::resolve`]
+/// builds one, and only while momentum scrolling is on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MomentumParams {
+    pixels_per_notch: f64,
+    glide_shape: GlideShape,
+    max_glide_speed: f64,
+    glide_length: Duration,
+    repeat_boost: f64,
+}
+
+impl MomentumParams {
+    /// Reference pixels one wheel notch scrolls.
+    #[must_use]
+    pub const fn pixels_per_notch(&self) -> f64 {
+        self.pixels_per_notch
+    }
+
+    /// How the glide slows toward its stop.
+    #[must_use]
+    pub const fn glide_shape(&self) -> GlideShape {
+        self.glide_shape
+    }
+
+    /// The fastest one spin sends the page gliding, px/s.
+    #[must_use]
+    pub const fn max_glide_speed(&self) -> f64 {
+        self.max_glide_speed
+    }
+
+    /// The glide's time constant: it covers its start speed times this.
+    #[must_use]
+    pub const fn glide_length(&self) -> Duration {
+        self.glide_length
+    }
+
+    /// Glide multiplier per repeated spin, `>= 1.0` (1 is off).
+    #[must_use]
+    pub const fn repeat_boost(&self) -> f64 {
+        self.repeat_boost
+    }
+}
+
+impl MomentumScrolling {
+    /// Selectable pixels per notch.
+    pub const PIXELS_PER_NOTCH_MIN: u16 = 10;
+    /// See [`Self::PIXELS_PER_NOTCH_MIN`].
+    pub const PIXELS_PER_NOTCH_MAX: u16 = 60;
+    /// Selectable max glide speeds, px/s.
+    pub const MAX_GLIDE_SPEED_MIN: u16 = 2000;
+    /// See [`Self::MAX_GLIDE_SPEED_MIN`].
+    pub const MAX_GLIDE_SPEED_MAX: u16 = 15000;
+    /// Selectable glide lengths, ms.
+    pub const GLIDE_MS_MIN: u16 = 150;
+    /// See [`Self::GLIDE_MS_MIN`].
+    pub const GLIDE_MS_MAX: u16 = 1200;
+    /// Largest selectable repeat speed-up, percent.
+    pub const REPEAT_BOOST_MAX: u16 = 200;
+
+    /// The settings the agent runs with, each clamped into its range — or
+    /// `None` while momentum scrolling is off.
+    #[must_use]
+    pub fn resolve(&self) -> Option<MomentumParams> {
+        self.enabled.then(|| self.params())
+    }
+
+    /// These settings clamped into their ranges, whether or not momentum
+    /// scrolling is on — for showing what they would do.
+    #[must_use]
+    pub fn params(&self) -> MomentumParams {
+        MomentumParams {
+            pixels_per_notch: f64::from(
+                self.pixels_per_notch
+                    .clamp(Self::PIXELS_PER_NOTCH_MIN, Self::PIXELS_PER_NOTCH_MAX),
+            ),
+            glide_shape: self.glide_shape,
+            max_glide_speed: f64::from(
+                self.max_glide_speed
+                    .clamp(Self::MAX_GLIDE_SPEED_MIN, Self::MAX_GLIDE_SPEED_MAX),
+            ),
+            glide_length: Duration::from_millis(u64::from(
+                self.glide_ms.clamp(Self::GLIDE_MS_MIN, Self::GLIDE_MS_MAX),
+            )),
+            repeat_boost: f64::from(self.repeat_boost.clamp(100, Self::REPEAT_BOOST_MAX)) / 100.0,
+        }
+    }
+}
+
+impl Default for MomentumScrolling {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            // About what a line event scrolls in a native macOS view.
+            pixels_per_notch: 28,
+            glide_shape: GlideShape::Smooth,
+            max_glide_speed: 8000,
+            glide_ms: 400,
+            repeat_boost: 135,
         }
     }
 }
@@ -898,6 +1072,73 @@ mod tests {
             ThumbwheelSensitivity::from_rounded(f32::INFINITY),
             ThumbwheelSensitivity::MAX
         );
+    }
+
+    #[test]
+    fn momentum_scrolling_is_off_and_defaulted_in_older_configs() {
+        let settings: AppSettings = toml::from_str("smooth_scroll = true").expect("parse");
+        assert_eq!(settings.momentum_scrolling, MomentumScrolling::default());
+        assert!(!settings.momentum_scrolling.enabled);
+
+        let settings: AppSettings = toml::from_str(
+            "[momentum_scrolling]\nenabled = true\nmax_glide_speed = 12000\nglide_shape = \"floaty\"",
+        )
+        .expect("parse");
+        assert!(settings.momentum_scrolling.enabled);
+        assert_eq!(settings.momentum_scrolling.max_glide_speed, 12000);
+        assert_eq!(settings.momentum_scrolling.glide_shape, GlideShape::Floaty);
+        assert_eq!(
+            settings.momentum_scrolling.glide_ms,
+            MomentumScrolling::default().glide_ms
+        );
+    }
+
+    #[test]
+    fn momentum_resolves_only_while_on_and_clamps_hand_edited_values() {
+        assert_eq!(MomentumScrolling::default().resolve(), None);
+
+        let defaults = MomentumScrolling {
+            enabled: true,
+            ..MomentumScrolling::default()
+        }
+        .resolve()
+        .expect("on");
+        assert!((defaults.pixels_per_notch() - 28.0).abs() < f64::EPSILON);
+        assert_eq!(defaults.glide_shape(), GlideShape::Smooth);
+        assert!((defaults.max_glide_speed() - 8000.0).abs() < f64::EPSILON);
+        assert_eq!(defaults.glide_length(), Duration::from_millis(400));
+        assert!((defaults.repeat_boost() - 1.35).abs() < f64::EPSILON);
+
+        let low = MomentumScrolling {
+            enabled: true,
+            pixels_per_notch: 0,
+            max_glide_speed: 0,
+            glide_ms: 0,
+            repeat_boost: 0,
+            ..MomentumScrolling::default()
+        }
+        .resolve()
+        .expect("on");
+        assert!((low.pixels_per_notch() - 10.0).abs() < 1e-9);
+        assert!((low.max_glide_speed() - 2000.0).abs() < 1e-9);
+        assert_eq!(low.glide_length(), Duration::from_millis(150));
+        assert!((low.repeat_boost() - 1.0).abs() < 1e-9);
+
+        let high = MomentumScrolling {
+            enabled: true,
+            pixels_per_notch: u16::MAX,
+            glide_shape: GlideShape::Sharp,
+            max_glide_speed: u16::MAX,
+            glide_ms: u16::MAX,
+            repeat_boost: u16::MAX,
+        }
+        .resolve()
+        .expect("on");
+        assert!((high.pixels_per_notch() - 60.0).abs() < 1e-9);
+        assert_eq!(high.glide_shape(), GlideShape::Sharp);
+        assert!((high.max_glide_speed() - 15000.0).abs() < 1e-9);
+        assert_eq!(high.glide_length(), Duration::from_millis(1200));
+        assert!((high.repeat_boost() - 2.0).abs() < 1e-9);
     }
 
     #[test]
