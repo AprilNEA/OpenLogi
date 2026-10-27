@@ -113,10 +113,12 @@ impl DeviceCapturePlan {
         self.target.spec.onboard = match config.effective_onboard_memory(key, layout) {
             None => None,
             Some(OnboardMemory::Profile(index)) => Some(OnboardTarget::Profile(index)),
-            Some(OnboardMemory::Off) => layout.map(|layout| {
+            Some(OnboardMemory::Off) => {
                 let diverted = &self.target.spec.divert_buttons;
-                OnboardTarget::Host(HostMode {
-                    slots: layout
+                // Without a layout, host mode only hands DPI and report rate
+                // to the host.
+                let slots = layout.map_or_else(Vec::new, |layout| {
+                    layout
                         .buttons()
                         .map(|button| {
                             let captured = layout.needs_host_mode(button)
@@ -132,10 +134,13 @@ impl DeviceCapturePlan {
                             };
                             (button, route)
                         })
-                        .collect(),
+                        .collect()
+                });
+                Some(OnboardTarget::Host(HostMode {
+                    slots,
                     report_rate: config.report_rate(key),
-                })
-            }),
+                }))
+            }
         };
         self
     }
@@ -448,7 +453,7 @@ pub fn plan_for_device(
 #[cfg(test)]
 mod tests {
     use openlogi_core::binding::{Binding, LongPressBinding, WheelHoldBinding};
-    use openlogi_core::hid::ProfileIndex;
+    use openlogi_core::hid::{ProfileIndex, ReportRate};
     use openlogi_hid::reprog_controls::{
         GESTURE_BUTTON_CID, HAPTIC_PANEL_CID, MULTIPLATFORM_GESTURE_BUTTON_CID,
     };
@@ -670,9 +675,24 @@ mod tests {
             plan.target.spec.onboard,
             Some(OnboardTarget::Profile(ProfileIndex::new(5).unwrap()))
         );
-        cfg.set_onboard_memory("g502", Some(OnboardMemory::Off));
-        let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, None);
-        assert_eq!(plan.target.spec.onboard, None);
+    }
+
+    /// A mouse nobody has dumped still takes OpenLogi control, for its DPI and
+    /// report rate, but no button is captured.
+    #[test]
+    fn openlogi_control_without_a_layout_captures_no_buttons() {
+        let mut cfg = Config::default();
+        cfg.set_binding("g403", ButtonId::Back, Binding::Single(Action::Copy));
+        cfg.set_onboard_memory("g403", Some(OnboardMemory::Off));
+        cfg.set_report_rate("g403", ReportRate::new(500));
+        let plan = plan_for_device(&cfg, "g403", route(), None, 0, true).with_onboard(&cfg, None);
+        assert_eq!(
+            plan.target.spec.onboard,
+            Some(OnboardTarget::Host(HostMode {
+                slots: Vec::new(),
+                report_rate: Some(ReportRate::new(500)),
+            }))
+        );
     }
 
     #[test]
