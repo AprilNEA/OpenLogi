@@ -51,9 +51,15 @@ mod response {
                 self.state = None;
                 self.pending_end = None;
             }
+            // An unknown status is not evidence that an existing roll ended.
+            if matches!(phase, RotationStatus::Other(_)) && increments == 0 {
+                return false;
+            }
             // Some supported firmware supplies rotation but no phase. Infer
             // progress from that movement without turning zero reports into it.
-            let unphased_motion = phase == RotationStatus::Inactive && increments != 0;
+            let unphased_motion =
+                matches!(phase, RotationStatus::Inactive | RotationStatus::Other(_))
+                    && increments != 0;
             let phase = if unphased_motion {
                 RotationStatus::Active
             } else {
@@ -92,7 +98,7 @@ mod response {
                     self.pending_end = Some(now + INACTIVITY);
                     false
                 }
-                RotationStatus::Inactive => false,
+                RotationStatus::Inactive | RotationStatus::Other(_) => false,
             }
         }
 

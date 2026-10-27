@@ -4,8 +4,14 @@
 # from the root Cargo.toml, so the whole workspace moves on a single shared
 # version. `version_group` ties the crates together so they are always bumped and
 # released in lockstep (the highest next version among them wins), and a single
-# `v{version}` tag is cut for the workspace as a whole — which is what
-# `.github/workflows/release.yml` listens on to build the macOS DMG.
+# stable `v{version}` tag is cut for the workspace as a whole — which is what
+# `.github/workflows/release.yml` listens on to build the release.
+#
+# Beta tags (`v{version}-beta.{N}`) do not come from release-plz.
+# `.github/workflows/prerelease.yml` cuts them on `master` while a release PR
+# is open, without a version bump: `{version}` is the version that PR
+# prepares. `release.yml` builds and publishes both kinds of tag, and
+# `cargo xtask release version` tells them apart.
 #
 # release-plz cuts the tag only; it does NOT create the GitHub Release. The tag
 # triggers release.yml, which is the single owner of the GitHub Release: softprops

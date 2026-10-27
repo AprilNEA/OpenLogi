@@ -430,6 +430,7 @@ const PERSISTED_ACTION_NAMES: &[&str] = &[
     "ShowDesktop",
     "Sleep",
     "TapKeyHoldingModifiers",
+    "TogglePrecisionMode",
     "ToggleSmartShift",
     "TypeText",
     "Undo",

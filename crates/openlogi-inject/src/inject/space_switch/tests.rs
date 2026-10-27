@@ -305,3 +305,164 @@ fn dropped_or_panicking_worker_releases_waiter_without_false_acknowledgement() {
     );
     assert_eq!(wait.wait(Instant::now()), Ok(()));
 }
+
+const BOTH_DIRECTIONS: [Direction; 2] = [Direction::Previous, Direction::Next];
+
+#[test]
+fn slide_posts_one_frame_per_options_plus_period() {
+    for direction in BOTH_DIRECTIONS {
+        let frames = slide(direction);
+        assert_eq!(frames[0].at, Duration::ZERO);
+        for pair in frames.windows(2) {
+            assert_eq!(
+                pair[1].at.checked_sub(pair[0].at),
+                Some(Duration::from_micros(16_600)),
+                "frames are posted in time order, one period apart"
+            );
+        }
+        // 19 moving frames, then the release one period after the last.
+        assert_eq!(frames.len(), 20);
+        assert_eq!(
+            frames.last().map(|frame| frame.at),
+            Some(Duration::from_micros(315_400))
+        );
+    }
+}
+
+#[test]
+fn slide_begins_once_then_changes_then_ends_once() {
+    for direction in BOTH_DIRECTIONS {
+        let phases: Vec<_> = slide(direction).iter().map(|frame| frame.phase).collect();
+        let (first, rest) = phases.split_first().expect("a slide has frames");
+        let (last, middle) = rest.split_last().expect("a slide has a release");
+        assert_eq!(*first, SlidePhase::Began);
+        assert!(middle.iter().all(|phase| *phase == SlidePhase::Changed));
+        assert_eq!(*last, SlidePhase::Ended);
+    }
+}
+
+#[test]
+fn slide_progress_moves_monotonically_toward_the_neighbour() {
+    for direction in BOTH_DIRECTIONS {
+        let frames = slide(direction);
+        let travel: Vec<f64> = frames
+            .iter()
+            .map(|frame| frame.progress * direction.sign())
+            .collect();
+        // The first frame already moves: a Began at zero would not tell the
+        // Dock which way to go.
+        assert!((travel[0] - 0.15).abs() < 1e-12, "{travel:?}");
+        let moving = &travel[..travel.len() - 1];
+        for pair in moving.windows(2) {
+            assert!(pair[1] > pair[0], "travel must grow: {travel:?}");
+        }
+        assert!(moving.iter().all(|t| *t > 0.0 && *t < 1.0), "{travel:?}");
+        // The release lets go where the last frame left off, past 95%.
+        assert_eq!(travel.last(), moving.last());
+        assert!(travel.last().is_some_and(|t| *t > 0.95), "{travel:?}");
+    }
+}
+
+#[test]
+fn slide_eases_out() {
+    let frames = slide(Direction::Next);
+    let steps: Vec<f64> = frames[..frames.len() - 1]
+        .windows(2)
+        .map(|pair| pair[1].progress - pair[0].progress)
+        .collect();
+    for pair in steps.windows(2) {
+        // Each frame covers 15% of what is left, so every step is 85% of
+        // the one before it.
+        assert!((pair[1] / pair[0] - 0.85).abs() < 1e-9, "{steps:?}");
+    }
+}
+
+/// A clock that moves only when the slide sleeps. One sleep can end late.
+struct FakePace {
+    now: Duration,
+    /// The index of the sleep that ends late, and by how much.
+    late: Option<(usize, Duration)>,
+    sleeps: usize,
+    /// Each posted frame with the clock time it went out.
+    posted: Vec<(Duration, usize)>,
+}
+
+impl FakePace {
+    fn starting_at(now: Duration) -> Self {
+        Self {
+            now,
+            late: None,
+            sleeps: 0,
+            posted: vec![],
+        }
+    }
+}
+
+impl Pace<usize> for FakePace {
+    fn now(&self) -> Duration {
+        self.now
+    }
+    fn sleep(&mut self, duration: Duration) {
+        self.now += duration;
+        if let Some((index, by)) = self.late
+            && index == self.sleeps
+        {
+            self.now += by;
+        }
+        self.sleeps += 1;
+    }
+    fn post(&mut self, frame: &usize) {
+        self.posted.push((self.now, *frame));
+    }
+}
+
+/// The slide's frame times, each with its index as the frame.
+fn indexed_slide() -> Vec<(Duration, usize)> {
+    slide(Direction::Next)
+        .iter()
+        .enumerate()
+        .map(|(index, frame)| (frame.at, index))
+        .collect()
+}
+
+#[test]
+fn pace_posts_every_frame_at_its_time_from_the_start() {
+    let frames = indexed_slide();
+    let start = Duration::from_secs(5);
+    let mut out = FakePace::starting_at(start);
+    pace(&frames, &mut out);
+    let expected: Vec<_> = frames
+        .iter()
+        .map(|(at, index)| (start + *at, *index))
+        .collect();
+    assert_eq!(out.posted, expected);
+    // The first frame is due at once; every later one waits one period.
+    assert_eq!(out.sleeps, frames.len() - 1);
+}
+
+#[test]
+fn a_late_wakeup_delays_only_the_frames_already_due() {
+    let frames = indexed_slide();
+    let start = Duration::from_secs(5);
+    let mut out = FakePace::starting_at(start);
+    // The sleep before frame 3 (due at 49.8 ms) ends 40 ms late, so the
+    // clock reads 89.8 ms when it wakes.
+    out.late = Some((2, Duration::from_millis(40)));
+    pace(&frames, &mut out);
+    let woke = start + Duration::from_micros(89_800);
+    let posted_at: Vec<_> = out.posted.iter().map(|(at, _)| *at).collect();
+    for (index, (at, _)) in frames.iter().enumerate() {
+        let expected = match index {
+            // Frames 3, 4 (66.4 ms) and 5 (83.0 ms) are due by the late
+            // wakeup and go out at once, with no sleep between them.
+            3..=5 => woke,
+            // Every other frame keeps its time from the start, so the
+            // slide still ends on time.
+            _ => start + *at,
+        };
+        assert_eq!(posted_at[index], expected, "frame {index}: {posted_at:?}");
+    }
+    let order: Vec<_> = out.posted.iter().map(|(_, index)| *index).collect();
+    assert_eq!(order, (0..frames.len()).collect::<Vec<_>>());
+    assert_eq!(out.sleeps, frames.len() - 3);
+}

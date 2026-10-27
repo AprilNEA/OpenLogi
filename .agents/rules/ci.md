@@ -148,7 +148,7 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 |---|---|---|
 | `rustfmt` | `cargo fmt --all -- --check` | any |
 | `typos` | `typos --config .config/typos.toml .` | any (needs `typos`; included in the devenv shell) |
-| `ast-grep` | `ast-grep scan` | any (needs `ast-grep`; included in the devenv shell). The single-source-of-truth guards stored with their owners and registered in root `sgconfig.yml` |
+| `ast-grep` | `ast-grep scan`, then `ast-grep scan .github` | any (needs `ast-grep`; included in the devenv shell). The single-source-of-truth guards stored with their owners and registered in root `sgconfig.yml` |
 | `publish closure` | `cargo xtask release check-publish` | any |
 | `shell` | `git ls-files -z \| xargs -0 shfmt -f` piped into `xargs shellcheck` and `xargs shfmt -d` | any (needs `shellcheck` + `shfmt`; both are in the devenv shell) |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | **Linux** is the CI job. Host clippy on macOS/Windows compiles a different `cfg` |
@@ -179,6 +179,7 @@ Load the [ast-grep skill](../skills/ast-grep/SKILL.md) for structural searches, 
 - Register each rule directory in the root `sgconfig.yml`. Keep one project config. Rule `files` and `ignores` selectors are relative to that project root, not the YAML file.
 - Preserve unique rule IDs and name the owner in the diagnostic. For the consolidation trigger, follow [Single source of truth](../../AGENTS.md#single-source-of-truth).
 - Choose traversal depth for the intended relationship. Use `stopBy: end` only when the rule must search all ancestors or descendants.
+- `ast-grep scan` skips hidden directories. A rule over `.github` (workflows, `.github/scripts`) runs in CI and `cargo xtask ci ast-grep` only through their explicit `ast-grep scan .github`; the prek hook passes staged files by name, which ast-grep scans even under `.github`. Check such a rule with `ast-grep scan .github`.
 - Run `ast-grep scan` from the repository root after a rule or config change. The current tree must pass. Verify that the prohibited copy fails, the owner passes, and unrelated code passes. Use the pre-consolidation commit or a temporary fixture tree. Include a consumer in another crate when the guard applies across crates; `ast-grep test` snippets alone do not prove path selectors.
 - When moving rules, compare rule IDs and contents before and after. Confirm that `ast-grep scan --inspect summary` loads every rule, then repeat the path checks above. Keep rule-directory ownership in `.github/CODEOWNERS`.
 
@@ -221,8 +222,8 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | rustdoc / moved trait impls / hidpp derive | `rustdoc` |
 | `crates/openlogi-ipc/**` or wire types | `cargo test -p openlogi-ipc --test wire_format` |
 | `crates/openlogi-ui/locales/**` | `cargo test -p openlogi-ui locale`; also `cargo test -p openlogi-desktop i18n` when binary wiring or desktop resolution changed |
-| `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `nix fmt -- --check devenv.nix` and `devenv --no-tui shell -- true` |
-| `flake.nix` / `flake.lock` / `packaging/linux/**` | Nix CI: `nix fmt -- --check flake.nix devenv.nix packaging/linux/package.nix packaging/linux/nixos-module.nix` and `nix flake check --all-systems --no-build --show-trace` |
+| `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `(cd packaging && nix fmt -- --check ../devenv.nix)` and `devenv --no-tui shell -- true` |
+| `flake.nix` / `packaging/flake.*` / `packaging/linux/**` | Nix CI: `(cd packaging && nix fmt -- --check flake.nix linux/package.nix linux/nixos-module.nix ../flake.nix ../devenv.nix)`, `nix flake check ./packaging --all-systems --no-build --show-trace`, and, for the deprecated root alias, `nix flake check --all-systems --no-build --no-write-lock-file` |
 | `xtask/src/commands/lint/**` | `cargo test -p xtask lint::` and `cargo xtask lint sweep-allows`; the PR runs Stale allows on all three hosts |
 | `xtask/**` / `packaging/**` | unsigned `cargo xtask` package for that platform; the Build workflow is not part of `cargo xtask ci` |
 
@@ -232,7 +233,8 @@ Not part of `ci.yml`, not in the default run:
 
 - **Nix CI** (path-filtered): evaluate + format, then `nix build` the package on
   x86_64-linux and aarch64-linux. Local: the `nix fmt` / `nix flake check`
-  commands above; a full `nix build` matches the build job on Linux.
+  commands above; a full `nix build ./packaging#openlogi` matches the build job
+  on Linux. `nix fmt` takes no Flake argument, so it runs from `packaging/`.
 - **devenv CI** (path-filtered): format `devenv.nix` and `devenv --no-tui shell -- true`.
 - **Build**: unsigned installers on every PR. Run the matching `cargo xtask`
   package command only when the diff touches packaging.

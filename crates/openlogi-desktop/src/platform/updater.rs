@@ -28,6 +28,11 @@
 //! Sparkle's update window, which carries the release notes and the install
 //! button.
 //!
+//! Both backends follow one [`UpdateChannel`], which [`install`] decides once
+//! per launch with [`UpdateChannel::followed`]: the engine reads that
+//! channel's manifest, and Sparkle also offers the appcast items tagged with
+//! it. A channel picked in Settings → Updates applies after a restart.
+//!
 //! [`AppSettings::auto_install_updates`] is owned by the config; Sparkle's
 //! `automaticallyDownloadsUpdates` mirrors it. Sparkle's update window has a
 //! checkbox for the same preference, so a change made there is adopted back
@@ -39,20 +44,49 @@ use gpui_updater::{
 };
 use gpui_updater_sparkle::{SparkleDriver, SparkleOptions, StagedUpdatePolicy};
 use openlogi_core::config::AppSettings;
+use openlogi_core::update_feed::UpdateChannel;
 
 use crate::state::AppState;
 
-const MANIFEST_URL: &str = match option_env!("OPENLOGI_UPDATE_MANIFEST_URL") {
-    Some(url) => url,
-    None => "https://updates.openlogi.org/channels/stable/latest.json",
+/// The update host, embedded at build time by the release workflow. A build
+/// without one reads the official host. So does a build with an empty one,
+/// which is what an unsigned CI build gets.
+const UPDATE_BASE_URL: &str = match option_env!("OPENLOGI_UPDATE_BASE_URL") {
+    Some(url) if !url.is_empty() => url,
+    _ => "https://updates.openlogi.org",
 };
 
-/// Host of the compiled update manifest URL, without credentials or path data.
+/// The channel the shared updater follows this launch, as [`install`]
+/// decided it.
+struct ChannelInUse(UpdateChannel);
+
+impl Global for ChannelInUse {}
+
+/// The channel the shared updater follows this launch. Before [`install`]
+/// runs, the channel the current settings name.
+pub(crate) fn channel_in_use(cx: &App) -> UpdateChannel {
+    cx.try_global::<ChannelInUse>().map_or_else(
+        || followed_channel(AppState::try_read(cx).map(AppState::app_settings)),
+        |in_use| in_use.0,
+    )
+}
+
+/// The channel `settings` make this build follow; without settings, the
+/// running version's channel.
+pub(crate) fn followed_channel(settings: Option<&AppSettings>) -> UpdateChannel {
+    UpdateChannel::followed(
+        settings.and_then(|settings| settings.update_channel),
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
+/// Host of the compiled update host URL, without credentials or path data.
 ///
-/// The release bundle's Sparkle feed (`SUFeedURL`) lives on the same host:
-/// `xtask macos package` derives both from `OPENLOGI_UPDATE_BASE_URL`.
+/// Every channel's manifest, and the release bundle's Sparkle feed
+/// (`SUFeedURL`), live on this host: the app and `xtask macos package` both
+/// read it from `OPENLOGI_UPDATE_BASE_URL`.
 pub(crate) fn manifest_host() -> Result<String, url::ParseError> {
-    manifest_host_from_url(MANIFEST_URL)
+    manifest_host_from_url(UPDATE_BASE_URL)
 }
 
 fn manifest_host_from_url(manifest_url: &str) -> Result<String, url::ParseError> {
@@ -93,11 +127,12 @@ impl Global for UpdaterObserver {}
 /// closed: `check` returns an error rather than installing an unverified
 /// artifact.
 pub fn new_entity(cx: &mut App) -> Entity<Updater> {
-    cx.new(engine_updater)
+    let channel = channel_in_use(cx);
+    cx.new(|cx| engine_updater(channel, cx))
 }
 
-fn engine_updater(cx: &mut Context<Updater>) -> Updater {
-    let source = StaticManifestSource::new(MANIFEST_URL)
+fn engine_updater(channel: UpdateChannel, cx: &mut Context<Updater>) -> Updater {
+    let source = StaticManifestSource::new(channel.manifest_url(UPDATE_BASE_URL))
         .os(std::env::consts::OS)
         .arch(release_arch())
         .format(release_format());
@@ -140,10 +175,16 @@ fn release_format() -> &'static str {
 
 /// The Sparkle.framework the running bundle embeds, or `None` — and the engine
 /// takes over — when it embeds none or Sparkle cannot run.
-fn load_sparkle() -> Option<SparkleDriver> {
+///
+/// Sparkle always offers the appcast's untagged items, the stable releases.
+/// Off the stable channel it also offers the items tagged with `channel`.
+fn load_sparkle(channel: UpdateChannel) -> Option<SparkleDriver> {
     // Settings → Updates offers "Restart to Update" itself, so Sparkle prompts
     // for nothing once an update is staged; it still installs on quit.
-    let options = SparkleOptions::new().staged_updates(StagedUpdatePolicy::HostRelaunches);
+    let mut options = SparkleOptions::new().staged_updates(StagedUpdatePolicy::HostRelaunches);
+    if channel != UpdateChannel::Stable {
+        options = options.channel(channel.as_str());
+    }
     SparkleDriver::load(options).unwrap_or_else(|error| {
         tracing::warn!(%error, "Sparkle is embedded but cannot run; updating through the built-in engine");
         None
@@ -154,9 +195,12 @@ fn load_sparkle() -> Option<SparkleDriver> {
 /// exactly one check on launch. Call once from the GPUI `run` closure, on the
 /// main thread (Sparkle requires it).
 pub fn install(cx: &mut App, settings: &AppSettings) {
-    let updater = cx.new(|cx| match load_sparkle() {
+    let channel = followed_channel(Some(settings));
+    tracing::info!(channel = channel.as_str(), "update channel");
+    cx.set_global(ChannelInUse(channel));
+    let updater = cx.new(|cx| match load_sparkle(channel) {
         Some(sparkle) => Updater::with_driver(sparkle, cx),
-        None => engine_updater(cx),
+        None => engine_updater(channel, cx),
     });
     with_sparkle(&updater, cx, |sparkle| {
         // OpenLogi never polls — see the module docs.
@@ -383,6 +427,44 @@ mod tests {
                     enabled
                 );
             }
+        });
+    }
+
+    /// A channel picked after launch is committed, but this launch's updater
+    /// keeps the channel it started on.
+    #[gpui::test]
+    fn a_picked_channel_commits_and_applies_at_the_next_launch(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let state = cx.new(|_| {
+                AppState::new(Sources::in_memory(
+                    Config::ephemeral(),
+                    &AssetResolver::new(),
+                    commands,
+                ))
+            });
+            AppState::set_global(state, cx);
+            let settings = AppState::try_read(cx).unwrap().app_settings().clone();
+            assert!(!settings.check_for_updates, "no check may run in this test");
+            assert_eq!(settings.update_channel, None);
+            let launched = followed_channel(None);
+            assert_eq!(channel_in_use(cx), launched);
+            install(cx, &settings);
+
+            let picked = match launched {
+                UpdateChannel::Stable => UpdateChannel::Beta,
+                UpdateChannel::Beta => UpdateChannel::Stable,
+            };
+            AppState::apply(cx, |state| state.commit_update_channel(picked));
+            let committed = AppState::try_read(cx).unwrap().app_settings().clone();
+            assert_eq!(committed.update_channel, Some(picked));
+            assert_eq!(followed_channel(Some(&committed)), picked);
+            assert_eq!(channel_in_use(cx), launched);
+            assert_eq!(
+                crate::services::diagnostics::collect(cx).app.update_channel,
+                Some(launched),
+                "the report names the channel the updater uses, not the pending pick"
+            );
         });
     }
 

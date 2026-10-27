@@ -8,10 +8,11 @@
 //! the mouse; the read-back then replaces the optimistic pick.
 
 use gpui::{AnyElement, App, IntoElement, ParentElement, Styled, div};
-use gpui_component::{Selectable as _, button::Button, h_flex, v_flex};
+use gpui_component::{Selectable as _, h_flex, v_flex};
 use openlogi_core::hid::ReportRate;
 
 use crate::state::{AppState, DeviceKey, ReportRateLoad};
+use crate::ui::components::Pill;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -70,7 +71,6 @@ pub(super) fn report_rate_section(
         ReportRateLoad::Failed(_) => retry_line(
             "report-rate-retry",
             tr!("pointer.couldnt_read_report_rate_click_to_retry"),
-            pal,
             move |cx| AppState::apply(cx, |state| state.retry_report_rate_read(&key)),
         )
         .into_any_element(),
@@ -98,11 +98,12 @@ pub(super) fn report_rate_section(
 
 /// One rate pill. Clicking it writes `rate` to the selected mouse.
 fn rate_pill(rate: ReportRate, selected: bool) -> impl IntoElement {
-    Button::new(("report-rate", usize::from(rate.into_inner())))
-        .compact()
-        .label(tr!("pointer.report_rate_hz", rate => rate))
-        .selected(selected)
-        .on_click(move |_event, _window, cx| {
-            AppState::apply(cx, |state| state.commit_report_rate(rate));
-        })
+    Pill::new(
+        ("report-rate", usize::from(rate.into_inner())),
+        tr!("pointer.report_rate_hz", rate => rate),
+    )
+    .selected(selected)
+    .on_click(move |_event, _window, cx| {
+        AppState::apply(cx, |state| state.commit_report_rate(rate));
+    })
 }

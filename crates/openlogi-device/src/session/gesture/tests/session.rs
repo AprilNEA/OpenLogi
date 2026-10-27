@@ -1,6 +1,8 @@
 //! The capture session lifecycle: arming, restore through a replacement channel, rollback, and teardown order.
 
 use super::*;
+use crate::channel::registry::PublicationState;
+use crate::channel::scripted::feature_error;
 
 #[tokio::test]
 async fn alternate_gesture_control_arming_respects_mode_and_capabilities() {
@@ -314,50 +316,60 @@ fn diverted_gesture(
 }
 
 #[tokio::test]
-async fn pending_restore_follows_a_device_to_another_receiver_route() {
-    let retired_route = DeviceRoute::Bolt {
+async fn pending_restore_follows_receiver_and_direct_transport_handoffs() {
+    let bolt = DeviceRoute::Bolt {
         receiver_uid: "receiver-a".to_owned(),
         slot: 4,
     };
-    let successor_route = DeviceRoute::Bolt {
+    let other_bolt = DeviceRoute::Bolt {
         receiver_uid: "receiver-b".to_owned(),
         slot: 2,
     };
-    let (retired_raw, retired_handle) = ScriptedRawHidChannel::with_responder(|_| None);
-    let retired_channel = scripted_channel(retired_raw).await;
-    let pending = diverted_gesture(&retired_route, &retired_channel);
-    let registry = ChannelRegistry::default();
-    registry.replace_node(
-        NodeId::from("receiver-a-node".to_owned()),
-        [retired_route],
-        retired_channel,
-    );
-    let (successor_raw, successor_handle) =
-        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
-    registry.replace_node(
-        NodeId::from("receiver-b-node".to_owned()),
-        [successor_route.clone()],
-        scripted_channel(successor_raw).await,
-    );
+    let direct = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb042,
+    };
+    for (retired_route, successor_route) in [
+        (bolt.clone(), other_bolt),
+        (bolt.clone(), direct.clone()),
+        (direct, bolt),
+    ] {
+        let (retired_raw, retired_handle) = ScriptedRawHidChannel::with_responder(|_| None);
+        let retired_channel = scripted_channel(retired_raw).await;
+        let pending = diverted_gesture(&retired_route, &retired_channel);
+        let registry = ChannelRegistry::default();
+        registry.replace_node(
+            NodeId::from("receiver-a-node".to_owned()),
+            [retired_route],
+            retired_channel,
+        );
+        let (successor_raw, successor_handle) =
+            ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+        registry.replace_node(
+            NodeId::from("receiver-b-node".to_owned()),
+            [successor_route.clone()],
+            scripted_channel(successor_raw).await,
+        );
 
-    assert!(matches!(
-        restore_after_stop(
-            CaptureStop::Handoff(successor_route),
-            Some(pending),
-            &registry,
-        )
-        .await,
-        CaptureSessionOutcome::Restored
-    ));
-    assert!(
-        retired_handle.written_reports().is_empty(),
-        "handoff must not time out against the receiver the device left"
-    );
-    assert_eq!(
-        successor_handle.written_reports().len(),
-        1,
-        "native reporting must be restored before capture arms on the successor route"
-    );
+        assert!(matches!(
+            restore_after_stop(
+                CaptureStop::Handoff(successor_route),
+                Some(pending),
+                &registry,
+            )
+            .await,
+            CaptureSessionOutcome::Restored
+        ));
+        assert!(
+            retired_handle.written_reports().is_empty(),
+            "handoff must not time out against the receiver the device left"
+        );
+        assert_eq!(
+            successor_handle.written_reports().len(),
+            1,
+            "native reporting must be restored before capture arms on the successor route"
+        );
+    }
 }
 
 #[tokio::test]
@@ -589,6 +601,81 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
 }
 
 #[tokio::test]
+async fn an_offline_receiver_slot_restores_on_return_to_the_same_usb_channel() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".into(),
+        slot: 2,
+    };
+    let sibling = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".into(),
+        slot: 3,
+    };
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(|request| Some(request.to_vec()));
+    let channel = scripted_channel(raw).await;
+    let registry = ChannelRegistry::default();
+    let node = NodeId::from("receiver-node".to_owned());
+    registry.replace_node(
+        node.clone(),
+        [route.clone(), sibling.clone()],
+        channel.clone(),
+    );
+    let shared = SharedChannel::new(channel.clone(), route.clone());
+    let pending = PendingCaptureRestore::new(
+        &shared,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting::pointer(
+                reprog_controls::GESTURE_BUTTON_CID,
+                reporting(false, None),
+                PointerDivert::RawXy,
+            )],
+        ),
+        None,
+        None,
+    );
+    registry.replace_node(node.clone(), [sibling.clone()], channel.clone());
+    let before = handle.written_reports().len();
+    let pending = match restore_after_stop(
+        stop_for_current_publication(&registry, &shared),
+        pending,
+        &registry,
+    )
+    .await
+    {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => {
+            panic!("the inactive slot still owes native restoration")
+        }
+    };
+    assert_eq!(
+        handle.written_reports().len(),
+        before,
+        "no restoration writes on an inactive slot"
+    );
+    registry.replace_node(node.clone(), [], channel.clone());
+    assert_eq!(
+        registry.publication(&shared),
+        PublicationState::SlotOffline,
+        "an all-offline receiver still owns its USB channel"
+    );
+    let pending = match pending.retry(&registry).await {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => panic!("an offline slot cannot finish its restore"),
+    };
+    assert_eq!(handle.written_reports().len(), before);
+    registry.replace_node(node, [route, sibling], channel);
+    assert!(
+        matches!(
+            pending.retry(&registry).await,
+            CaptureSessionOutcome::Restored
+        ),
+        "the receiver never unplugged; returning to its original USB channel must release the old debt"
+    );
+    assert_eq!(handle.written_reports().len(), before + 1);
+}
+
+#[tokio::test]
 async fn capture_listener_outlives_native_reporting_restore() {
     struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
 
@@ -658,7 +745,16 @@ async fn channel_change_takes_teardown_precedence_over_ready_shutdown() {
 pub(super) fn thumbwheel_device(
     status: [u8; 2],
 ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
-    ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+    ScriptedRawHidChannel::with_dynamic_responder(thumbwheel_responder(status, true))
+}
+
+/// [`thumbwheel_device`]'s responder. Without `answers_info`, the wheel
+/// refuses `getThumbwheelInfo` with `InvalidArgument`.
+fn thumbwheel_responder(
+    status: [u8; 2],
+    answers_info: bool,
+) -> impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static {
+    move |request| {
         let mut response = vec![0; 20];
         response[..4].copy_from_slice(&request[..4]);
         response[0] = 0x11;
@@ -669,6 +765,7 @@ pub(super) fn thumbwheel_device(
                     response[4] = 3;
                 }
             }
+            (3, 0) if !answers_info => return Some(feature_error(request, 0x02)),
             // getThumbwheelInfo: native 20, diverted 120, default_dir 1.
             (3, 0) => response[4..9].copy_from_slice(&[0, 20, 0, 120, 1]),
             (3, 1) => response[4..6].copy_from_slice(&status),
@@ -676,7 +773,24 @@ pub(super) fn thumbwheel_device(
             _ => panic!("unexpected capture request: {request:02x?}"),
         }
         Some(response)
-    })
+    }
+}
+
+/// Every `setThumbwheelReporting` payload `handle` saw, in order.
+fn reporting_writes(handle: &crate::replay::ReplayChannelHandle) -> Vec<[u8; 2]> {
+    handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == 3 && report[3] >> 4 == 2)
+        .map(|report| [report[4], report[5]])
+        .collect()
+}
+
+fn thumbwheel_spec() -> CaptureSpec {
+    CaptureSpec {
+        capture_thumbwheel: true,
+        ..CaptureSpec::default()
+    }
 }
 
 /// Arm the thumb wheel, then hand it back through the capture restore path,
@@ -696,12 +810,8 @@ async fn arm_then_restore_thumbwheel(status: [u8; 2]) -> Vec<[u8; 2]> {
     );
     let shared = SharedChannel::new(channel.clone(), route);
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
-    let spec = CaptureSpec {
-        capture_thumbwheel: true,
-        ..CaptureSpec::default()
-    };
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+    arm_controls_into(&device, &channel, 0xff, &thumbwheel_spec(), &mut armed)
         .await
         .unwrap();
     let pending = armed
@@ -711,12 +821,7 @@ async fn arm_then_restore_thumbwheel(status: [u8; 2]) -> Vec<[u8; 2]> {
         pending.allow_current_channel().retry(&registry).await,
         CaptureSessionOutcome::Restored
     ));
-    handle
-        .written_reports()
-        .into_iter()
-        .filter(|report| report[2] == 3 && report[3] >> 4 == 2)
-        .map(|report| [report[4], report[5]])
-        .collect()
+    reporting_writes(&handle)
 }
 
 #[tokio::test]
@@ -734,11 +839,55 @@ async fn thumbwheel_restore_keeps_the_native_inversion_found_before_capture() {
 }
 
 #[tokio::test]
-async fn thumbwheel_left_diverted_is_restored_native_without_its_diverted_sign() {
-    // Already diverted (a session that never tore down): its invert byte is
-    // that owner's sign normalisation, so it must not become native inversion.
+async fn thumbwheel_found_diverted_is_handed_back_diverted() {
+    // Diverted before capture, e.g. by another HID++ client: teardown returns
+    // that mode and that sign rather than switching the wheel to native.
     assert_eq!(
         arm_then_restore_thumbwheel([0x01, 0x01]).await,
-        vec![[0x01, 0x00], [0x00, 0x00]]
+        vec![[0x01, 0x00], [0x01, 0x01]]
     );
+    assert_eq!(
+        arm_then_restore_thumbwheel([0x01, 0x00]).await,
+        vec![[0x01, 0x00], [0x01, 0x00]]
+    );
+}
+
+/// Without `getThumbwheelInfo` the wheel's diverted reports have no known
+/// sign or scale, so a wheel that refuses the info read stays native: arming
+/// goes on without it, owes it nothing, and never writes its reporting.
+#[tokio::test]
+async fn a_thumbwheel_refusing_its_info_read_is_left_native() {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(thumbwheel_responder([0x00, 0x00], false));
+    let channel = scripted_channel(raw).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &thumbwheel_spec(), &mut armed)
+        .await
+        .unwrap();
+    assert!(armed.thumb.is_none(), "the wheel must not be owned");
+    assert_eq!(reporting_writes(&handle), Vec::<[u8; 2]>::new());
+}
+
+/// Whether `report` is a `getThumbwheelInfo` request.
+fn is_thumbwheel_info_read(report: &[u8]) -> bool {
+    report[2] == 3 && report[3] >> 4 == 0
+}
+
+/// A transport failure on the info read fails arming before any divert, so
+/// the session retries instead of diverting the wheel blind.
+#[tokio::test]
+async fn a_transport_failure_reading_thumbwheel_info_fails_arming_before_any_divert() {
+    let (raw, handle) = ScriptedRawHidChannel::with_failing_writes(
+        thumbwheel_responder([0x00, 0x00], true),
+        is_thumbwheel_info_read,
+    );
+    let channel = scripted_channel(raw).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &thumbwheel_spec(), &mut armed)
+        .await
+        .unwrap_err();
+    assert!(armed.thumb.is_none(), "the wheel must not be owned");
+    assert_eq!(reporting_writes(&handle), Vec::<[u8; 2]>::new());
 }

@@ -1655,6 +1655,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ct-codecs"
+version = "1.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fd9f3db6f2cfef61c10613071955154ffdc9e515daebff26de4b54e35038fdd"
+
+[[package]]
 name = "ctor"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1774,7 +1780,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1874,6 +1880,9 @@ name = "ed25519-compact"
 version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
+dependencies = [
+ "getrandom 0.4.2",
+]
 
 [[package]]
 name = "educe"
@@ -2047,7 +2056,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3344,6 +3353,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-updater-core"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26d2aff421b77aef4e40cb13205b67fd5b1282b493a62c10fd8ca2be59268484"
+dependencies = [
+ "base64",
+ "ed25519-compact",
+ "minisign-verify",
+ "roxmltree 0.20.0",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "gpui-updater-pre"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3351,7 +3379,27 @@ checksum = "c11ccca59c85b01241ea8a899cf49bad9e24fb8bbb02669e689eaa88daa76de7"
 dependencies = [
  "futures",
  "gpui-pre",
- "gpui-updater-core",
+ "gpui-updater-core 0.2.0",
+]
+
+[[package]]
+name = "gpui-updater-release"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f462ce895f79c20663d0fa215aec8ef3b64dc96057bd9b3d48d8cff3b524c9f3"
+dependencies = [
+ "base64",
+ "ed25519-compact",
+ "gpui-updater-core 0.4.4",
+ "minisign",
+ "plist",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
 ]
 
 [[package]]
@@ -3361,7 +3409,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05cd3fd0aff428e5524d263e71e00992100aae72a76af00188d28e3740c20e05"
 dependencies = [
  "block2 0.6.2",
- "gpui-updater-core",
+ "gpui-updater-core 0.2.0",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
  "thiserror 2.0.18",
@@ -4160,7 +4208,7 @@ version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a1886916523694cd6ea3d175f03a1e5010699a2a4cc13696d83d7bea1d80638"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4626,6 +4674,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "minisign"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26541387415a1e829df5d532aad019fb11bc723e2b5bc99edefa4cf5bfad0de7"
+dependencies = [
+ "ct-codecs",
+ "getrandom 0.2.17",
+ "rpassword",
+ "scrypt",
+]
+
+[[package]]
 name = "minisign-verify"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4847,7 +4907,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5477,7 +5537,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "anyhow",
  "openlogi-cli",
@@ -5486,7 +5546,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-agent"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "dispatch2",
  "embed-resource",
@@ -5526,11 +5586,12 @@ dependencies = [
 
 [[package]]
 name = "openlogi-agent-core"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "axwatch",
  "futures-lite",
  "openlogi-core",
+ "openlogi-device",
  "openlogi-fixture",
  "openlogi-hid",
  "openlogi-hook",
@@ -5542,7 +5603,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-assets"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "atomic-write-file",
  "backon",
@@ -5577,7 +5638,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-camera"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "block2 0.6.2",
  "objc2 0.6.4",
@@ -5595,7 +5656,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-cli"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "anyhow",
  "atomic-write-file",
@@ -5619,10 +5680,11 @@ dependencies = [
 
 [[package]]
 name = "openlogi-core"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "atomic-write-file",
  "az",
+ "bitflags 2.13.1",
  "etcetera",
  "fluent-langneg",
  "num_enum",
@@ -5645,7 +5707,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-desktop"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "anyhow",
  "appcatalog",
@@ -5692,7 +5754,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-device"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "futures-concurrency",
  "futures-lite",
@@ -5710,11 +5772,11 @@ dependencies = [
 
 [[package]]
 name = "openlogi-device-registry"
-version = "0.8.15"
+version = "0.8.18"
 
 [[package]]
 name = "openlogi-fixture"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "openlogi-core",
  "serde",
@@ -5726,7 +5788,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hid"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "atomic-write-file",
  "futures-concurrency",
@@ -5748,7 +5810,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hidpp"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -5768,7 +5830,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hidpp-derive"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5777,7 +5839,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hook"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "axwatch",
  "block2 0.6.2",
@@ -5808,7 +5870,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-inject"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "block2 0.6.2",
  "core-foundation 0.10.0",
@@ -5816,12 +5878,14 @@ dependencies = [
  "dispatch2",
  "evdev",
  "libc",
+ "mach2",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-application-services",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "objc2-io-kit",
  "opener",
  "openlogi-core",
  "serde",
@@ -5834,7 +5898,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-ipc"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "bincode",
  "futures-lite",
@@ -5849,7 +5913,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-overlay"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -5874,7 +5938,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-permissions"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "objc2 0.6.4",
  "objc2-io-kit",
@@ -5886,7 +5950,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-ui"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "gpui-pre",
  "openlogi-core",
@@ -6912,6 +6976,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpassword"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a1efe12a1469752d0e6ff5ebec0b6ef4924cc5c4c71046b0ec730040535819d"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rust-embed"
 version = "8.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7044,7 +7129,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7111,7 +7196,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7122,9 +7207,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -7172,6 +7257,15 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "salsa20"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97a22f5af31f73a954c10289c93e8a50cc23d971e80ee446f1f6f7137a088213"
+dependencies = [
+ "cipher",
+]
 
 [[package]]
 name = "same-file"
@@ -7250,6 +7344,17 @@ dependencies = [
  "objc-foundation",
  "objc_id",
  "once_cell",
+]
+
+[[package]]
+name = "scrypt"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0516a385866c09368f0b5bcd1caff3366aace790fcd46e2bb032697bb172fd1f"
+dependencies = [
+ "pbkdf2",
+ "salsa20",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -8102,7 +8207,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8290,9 +8395,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
@@ -9246,18 +9351,18 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.7"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -9495,7 +9600,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -10470,20 +10575,21 @@ checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
 
 [[package]]
 name = "xtask"
-version = "0.8.15"
+version = "0.8.18"
 dependencies = [
  "anyhow",
  "appicon",
  "base64",
  "clap",
  "comfy-table",
- "ed25519-compact",
  "fs-err",
+ "gpui-updater-release",
  "openlogi-core",
  "path-absolutize",
  "plist",
  "quote",
  "roxmltree 0.20.0",
+ "semver",
  "serde",
  "serde_json",
  "sha2_hasher",
@@ -10493,6 +10599,7 @@ dependencies = [
  "tempfile",
  "time",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
  "which 8.0.4",
  "xshell",
 ]

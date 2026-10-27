@@ -64,10 +64,15 @@ crate's own load-bearing behavior.
   publishing `Armed` again, or the watchdog judges a probe that already returned against
   the pre-probe mark. Both exit logs carry `stalled_ms` (uptime since the stall began)
   and `watched_ms`; a wide gap between them is the process-frozen signature.
-- The off-main `frontmost_application` read keeps its explicit `autoreleasepool` — the
-  watcher thread has no run loop; that is the only place in this crate a pool belongs.
-  Every string it copies out (bundle id *and* localized name) must be owned before the
-  pool drops.
+- The off-main `frontmost_application` and `secure_input_app` reads keep their explicit
+  `autoreleasepool` — their watcher threads have no run loop; those are the only places
+  in this crate a pool belongs. Every string they copy out (bundle id *and* localized
+  name) must be owned before the pool drops.
+- Secure Event Input hides `KeyDown` / `KeyUp` from every tap while any process holds it;
+  mouse events and `FlagsChanged` still arrive. `secure_input_enabled` /
+  `secure_input_app` report it off the tap thread so the GUI can say why key bindings
+  stopped. Never read them from the tap callback: the app read is an AppKit and
+  WindowServer round trip.
 - This crate ships non-macOS implementations (evdev/uinput, WH_MOUSE_LL) that a
   macOS-green build never compiles. CI lints them; treat the linux/windows CI jobs as
   the check, not local builds.

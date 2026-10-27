@@ -23,5 +23,12 @@ runner = ".cargo/run-macos.sh"
 # A fixed Xcode.app path breaks non-GUI builds with only Command Line Tools.
 # GUI builds require full Xcode with the Metal Toolchain.
 
+# Clippy only searches the crate directory and its parents for clippy.toml.
+# Point it at .cargo/clippy.toml so the workspace config lives beside the other
+# cargo settings. `relative` resolves against the repo root, like `runner`
+# above. An exported CLIPPY_CONF_DIR still takes precedence.
+[env]
+CLIPPY_CONF_DIR = { value = ".cargo", relative = true }
+
 [alias]
 xtask = "run -p xtask --"

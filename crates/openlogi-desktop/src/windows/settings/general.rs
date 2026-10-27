@@ -45,8 +45,15 @@ pub(super) fn general_page(
                 SettingField::render(move |_, _, cx| thumbwheel_sensitivity_field(&thumbwheel, cx)),
             )
             .description(tr!("pointer.thumbwheel_sensitivity_description")),
-        )
-        .item(launch_at_login_item());
+        );
+    // Only macOS animates a desktop switch, so only macOS shows the switch.
+    // `cfg!` keeps the item and its setter compiled, and used, everywhere.
+    let group = if cfg!(target_os = "macos") {
+        group.item(animate_desktop_switch_item())
+    } else {
+        group
+    };
+    let group = group.item(launch_at_login_item());
 
     // Switched off under System Settings › Login Items: nothing can start
     // the service until the user flips it back on there — surface it instead
@@ -140,6 +147,20 @@ fn smooth_scrolling_item() -> SettingItem {
         ),
     )
     .description(tr!("pointer.smooth_scrolling_description"))
+}
+
+/// The switch for the Previous/Next Desktop slide.
+fn animate_desktop_switch_item() -> SettingItem {
+    SettingItem::new(
+        tr!("app.animate_desktop_switch"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().animate_desktop_switch),
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_animate_desktop_switch(enabled));
+            },
+        ),
+    )
+    .description(tr!("app.animate_desktop_switch_description"))
 }
 
 /// The switch for the overlay's low-battery notices.

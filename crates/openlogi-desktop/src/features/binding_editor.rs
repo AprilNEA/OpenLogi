@@ -97,7 +97,9 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::VolumeUp => "action-icons/volume-2.svg",
         Action::VolumeDown => "action-icons/volume-1.svg",
         Action::MuteVolume => "action-icons/volume-x.svg",
-        Action::CycleDpiPresets | Action::SetDpiPreset(_) => "action-icons/gauge.svg",
+        Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::TogglePrecisionMode => {
+            "action-icons/gauge.svg"
+        }
         Action::ToggleSmartShift => "action-icons/refresh-cw.svg",
         Action::ScrollUp => "action-icons/chevrons-up.svg",
         Action::ScrollDown => "action-icons/chevrons-down.svg",

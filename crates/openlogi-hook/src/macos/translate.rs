@@ -128,8 +128,9 @@ fn modifiers_from_flags(flags: CGEventFlags) -> KeyModifiers {
 /// non-key event types (the mouse path handles those), for `FlagsChanged`
 /// (modifier state rides on the next key event via its flags; a standalone
 /// flags change carries no key of interest to the remapper), and for a key
-/// OpenLogi itself posted: a shortcut bound to a remapped key must not fire
-/// that key's own binding, or two keys bound to each other would loop.
+/// OpenLogi itself posted or typed through its virtual HID keyboard: a
+/// shortcut bound to a remapped key must not fire that key's own binding, or
+/// two keys bound to each other would loop.
 pub(super) fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEvent> {
     let pressed = match etype {
         CGEventType::KeyDown => true,
@@ -139,6 +140,7 @@ pub(super) fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEv
     };
     if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
         == openlogi_inject::SYNTHETIC_EVENT_USER_DATA
+        || from_virtual_keyboard(event)
     {
         return None;
     }
@@ -148,6 +150,19 @@ pub(super) fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEv
         keycode,
         pressed,
         modifiers: modifiers_from_flags(event.get_flags()),
+    })
+}
+
+/// Whether `event` came from OpenLogi's virtual HID keyboard. Its keys
+/// carry no source user data, because the HID event system, not OpenLogi,
+/// creates their `CGEvent`s; the device's product name identifies them.
+fn from_virtual_keyboard(event: &CGEvent) -> bool {
+    event_sender_id(event).is_some_and(|sender| {
+        sender_device_info(sender)
+            .event_device
+            .product_name
+            .as_deref()
+            .is_some_and(openlogi_inject::is_virtual_keyboard_product)
     })
 }
 

@@ -19,7 +19,7 @@ use crate::{
         battery_voltage::BatteryVoltageFeature,
         brightness_control::BrightnessControlFeature,
         change_host::ChangeHostFeature,
-        color_led_effects::ColorLedEffectsFeature,
+        color_led_effects::{ColorLedEffectsFeature, ColorLedEffectsV1Feature},
         crown::CrownFeature,
         device_friendly_name::DeviceFriendlyNameFeature,
         device_information::DeviceInformationFeature,
@@ -34,11 +34,13 @@ use crate::{
         fn_inversion::{
             FnInversionFeature, FnInversionMultiHostFeature, FnInversionWithDefaultStateFeature,
         },
+        force_sensing_button::ForceSensingButtonFeature,
         gestures2::Gestures2Feature,
         haptic_feedback::HapticFeedbackFeature,
         hires_wheel::HiResWheelFeature,
         hosts_info::HostsInfoFeature,
         illumination::IlluminationFeature,
+        led_control::LedControlFeature,
         lock_key_state::LockKeyStateFeature,
         mode_status::ModeStatusFeature,
         mouse_pointer::MousePointerFeature,
@@ -179,7 +181,7 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x1001 "BatteryVoltage" => BatteryVoltageFeature,
     0x1004 "UnifiedBattery" => UnifiedBatteryFeature,
     0x1010 "ChargingControl",
-    0x1300 "LedControl",
+    0x1300 "LedControl" => LedControlFeature,
     0x1800 "GenericTest",
     0x1802 "DeviceReset",
     0x1805 "OobState",
@@ -191,9 +193,7 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x1983 "Backlight3",
     0x1990 "Illumination" => IlluminationFeature,
     0x19b0 "HapticFeedback" => HapticFeedbackFeature,
-    // Reverse-engineered name observed in MX Master 4 metadata; no public HID++
-    // definition is available, so it remains intentionally unimplemented.
-    0x19c0 "ForceSensingButton",
+    0x19c0 "ForceSensingButton" => ForceSensingButtonFeature,
     0x1a00 "PresenterControl",
     0x1a01 "Sensor3D",
     0x1b00 "ReprogControls",
@@ -257,7 +257,7 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x8040 "BrightnessControl" => BrightnessControlFeature,
     0x8060 "AdjustableReportRate" => ReportRateFeature,
     0x8061 "ExtendedAdjustableReportRate" => ExtendedReportRateFeature,
-    0x8070 "ColorLedEffects" => ColorLedEffectsFeature,
+    0x8070 "ColorLedEffects" => ColorLedEffectsFeature, ColorLedEffectsV1Feature,
     0x8071 "RgbEffects" => RgbEffectsFeature,
     0x8080 "PerKeyLighting",
     0x8081 "PerKeyLighting2" => PerKeyLightingFeature,
@@ -286,9 +286,8 @@ mod tests {
         // several versioned implementations under a single feature id. Every
         // row's id must match its impls' real `CreatableFeature::ID`, so the
         // two-impl row lists `FeatureSetFeature` twice under its own id
-        // (0x0001) rather than pairing it with an unrelated feature — no
-        // current registry entry actually ships two version-gated impls
-        // under one id, but the macro's counting behaviour is the same.
+        // (0x0001) rather than pairing it with an unrelated feature. The
+        // real two-impl row (`0x8070`) is covered by its own feature tests.
         let map: HashMap<u16, KnownFeature> = known_features! {
             0x0002 "NameOnly",
             0x0000 "OneImpl" => RootFeature,

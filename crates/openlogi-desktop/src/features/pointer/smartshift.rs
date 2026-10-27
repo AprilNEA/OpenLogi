@@ -17,9 +17,7 @@ use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
     Subscription, Window, div, px, rgb,
 };
-use gpui_component::{
-    Disableable as _, Selectable as _, button::Button, h_flex, slider::Slider, v_flex,
-};
+use gpui_component::{Disableable as _, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::config::{
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ThumbwheelSensitivity,
 };
@@ -32,7 +30,7 @@ use crate::state::{
     StateEvents,
 };
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::components::Toggle;
+use crate::ui::components::{Pill, Toggle};
 use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -345,7 +343,6 @@ impl Render for SmartShiftPanel {
             SmartShiftLoad::Failed(_) => retry_line(
                 "smartshift-retry",
                 tr!("pointer.couldnt_read_smartshift_click_to_retry"),
-                pal,
                 retry_smartshift_closure(key.clone()),
             )
             .into_any_element(),
@@ -387,7 +384,6 @@ fn smartshift_write_feedback(
             retry_line(
                 "smartshift-confirm-retry",
                 tr!("pointer.couldnt_read_smartshift_click_to_retry"),
-                pal,
                 retry_smartshift_closure(key),
             )
             .into_any_element(),
@@ -446,9 +442,7 @@ fn mode_pill(label: SharedString, selected: bool, status: SmartShiftStatus) -> i
         SmartShiftMode::Free => "smartshift-mode-free",
         SmartShiftMode::Ratchet => "smartshift-mode-ratchet",
     };
-    Button::new(id)
-        .compact()
-        .label(label)
+    Pill::new(id, label)
         .selected(selected)
         .on_click(move |_event, _window, cx| {
             AppState::update_smartshift(cx, status);

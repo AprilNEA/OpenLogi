@@ -12,7 +12,6 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction, Shortcut,
 };
-use openlogi_core::config::FunctionKey;
 
 use super::{HeldKey, HeldModifiers, KeyPhase};
 pub(crate) mod zoom;
@@ -51,6 +50,7 @@ mod dock;
     reason = "Text Input Source Services and UCKeyTranslate have no objc2 bindings"
 )]
 mod keyboard_layout;
+mod keycode;
 mod main_thread;
 #[expect(
     unsafe_code,
@@ -58,17 +58,21 @@ mod main_thread;
 )]
 mod menu_shortcut;
 mod scroll;
-/// DockSwipe events with read-only, per-display Space confirmation.
+/// Space switches — DockSwipe events, instant or a timed slide, or the user's
+/// Space shortcut for a slide — with read-only, per-display Space
+/// confirmation.
 #[expect(
     unsafe_code,
     reason = "read-only SkyLight SPI and AppKit notification registration require FFI"
 )]
 mod spaces;
-/// Screenshots, posted through their system symbolic hotkey records.
+/// Screenshots and Space switches, posted through their system symbolic
+/// hotkey records.
 ///
-/// That respects the user's configured shortcut instead of assuming one, is
-/// independent of the keyboard layout because each record names a physical
-/// key, and temporarily enables a hotkey the user has disabled.
+/// That respects the user's configured shortcut instead of assuming one, and
+/// is independent of the keyboard layout because each record names a
+/// physical key. Screenshots temporarily enable a hotkey the user has
+/// disabled; Space switches only read theirs.
 #[expect(
     unsafe_code,
     reason = "CGS symbolic hotkey SPI is only reachable via dlopen/dlsym FFI"
@@ -76,17 +80,20 @@ mod spaces;
 mod symbolic_hotkey;
 #[cfg(test)]
 mod tests;
+mod virtual_keyboard;
 
 use app_services::symbol as app_services_symbol;
 pub(super) use browser::ax_browser_navigate;
 use dock::{app_expose, launchpad, mission_control, show_desktop};
 use keyboard_layout::layout_key;
+use keycode::hid_usage_to_macos;
 use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
-pub(super) use spaces::natural_scrolling;
+pub(super) use spaces::{natural_scrolling, set_desktop_switch};
 use spaces::{next_desktop, previous_desktop};
 use symbolic_hotkey::{capture_region, screenshot};
+pub use virtual_keyboard::{VirtualKeyboard, is_virtual_keyboard_product};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -363,8 +370,18 @@ fn tag_synthetic(ev: &CGEvent) {
     );
 }
 
-/// Post one keyboard edge for `vk` with `flags` set.
+/// Post one keyboard edge for `vk`: through the virtual HID keyboard when it
+/// carries the edge, otherwise as a `CGEvent` with `flags` set. The virtual
+/// keyboard ignores `flags`, because it already holds the modifier keys
+/// whose edges preceded this one.
 fn post_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) {
+    if !virtual_keyboard::edge(vk, phase) {
+        post_cg_key_phase(vk, flags, phase);
+    }
+}
+
+/// Post one keyboard edge for `vk` with `flags` set as a `CGEvent`.
+fn post_cg_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) {
     if let Some(event) = key_event(vk, flags, phase) {
         event.post(CGEventTapLocation::HID);
     }
@@ -387,10 +404,13 @@ fn key_event(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> Option<CGEvent> {
     Some(event)
 }
 
-/// Post a key-down + key-up pair for `vk` with `flags` set.
+/// Post a key-down + key-up pair for `vk` with `flags` set: through the
+/// virtual HID keyboard when it carries the pair, otherwise as `CGEvent`s.
 fn post_key(vk: u16, flags: CGEventFlags) {
-    post_key_phase(vk, flags, KeyPhase::Down);
-    post_key_phase(vk, flags, KeyPhase::Up);
+    if !virtual_keyboard::tap(vk, flags) {
+        post_cg_key_phase(vk, flags, KeyPhase::Down);
+        post_cg_key_phase(vk, flags, KeyPhase::Up);
+    }
 }
 
 /// Type an arbitrary unicode string by emitting one key event per character,
@@ -510,6 +530,16 @@ fn held_key(usage: KeyboardUsage, phase: KeyPhase, modifiers: HeldModifiers) -> 
     }
 }
 
+/// Whether a held chord keeps the ordinary key `vk` down. Only meaningful
+/// under the held-chord lock, which orders every held-key edge.
+fn held_key_down(vk: u16) -> bool {
+    HELD_KEY_PRESSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .values()
+        .any(|&held| held == vk)
+}
+
 fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
     if modifiers.contains(HeldKey::Command) {
@@ -542,51 +572,6 @@ fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
         flags |= CGEventFlags::CGEventFlagAlternate;
     }
     flags
-}
-
-/// Map a platform-neutral USB HID keyboard usage to a macOS virtual key.
-fn hid_usage_to_macos(usage: u8) -> Option<u16> {
-    const LETTERS: [u16; 26] = [
-        0x00, 0x0b, 0x08, 0x02, 0x0e, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2e, 0x2d, 0x1f,
-        0x23, 0x0c, 0x0f, 0x01, 0x11, 0x20, 0x09, 0x0d, 0x07, 0x10, 0x06,
-    ];
-    const DIGITS: [u16; 10] = [0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1a, 0x1c, 0x19, 0x1d];
-    /// `kVK_F20`, one past the programmable row [`FunctionKey`] covers.
-    const F20: u16 = 0x5a;
-    let function = |n: u8| FunctionKey::nth_f(u16::from(n)).map(FunctionKey::keycode);
-    match usage {
-        0x04..=0x1d => LETTERS.get(usize::from(usage - 0x04)).copied(),
-        0x1e..=0x27 => DIGITS.get(usize::from(usage - 0x1e)).copied(),
-        0x3a..=0x45 => function(usage - 0x3a + 1),
-        0x68..=0x6e => function(usage - 0x68 + 13),
-        0x6f => Some(F20),
-        0x28 => Some(0x24),
-        0x29 => Some(FunctionKey::Esc.keycode()),
-        0x2a => Some(0x33),
-        0x2b => Some(0x30),
-        0x2c => Some(0x31),
-        0x2d => Some(0x1b),
-        0x2e => Some(0x18),
-        0x2f => Some(0x21),
-        0x30 => Some(0x1e),
-        0x31 => Some(0x2a),
-        0x33 => Some(0x29),
-        0x34 => Some(0x27),
-        0x35 => Some(0x32),
-        0x36 => Some(0x2b),
-        0x37 => Some(0x2f),
-        0x38 => Some(0x2c),
-        0x4a => Some(0x73),
-        0x4b => Some(0x74),
-        0x4c => Some(0x75),
-        0x4d => Some(0x77),
-        0x4e => Some(0x79),
-        0x4f => Some(0x7c),
-        0x50 => Some(0x7b),
-        0x51 => Some(0x7d),
-        0x52 => Some(0x7e),
-        _ => None,
-    }
 }
 
 pub(super) fn run_apple_script(src: &str) {

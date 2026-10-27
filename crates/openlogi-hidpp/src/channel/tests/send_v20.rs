@@ -86,7 +86,7 @@ fn send_v20_broadcast_event_does_not_resolve_pending_request() {
         let response = v20::Message::Short(header, [0xaa, 0xbb, 0xcc]);
 
         // Software ID 0 is reserved for unsolicited device notifications
-        // (see `feature::event_payload`). The request above uses a non-zero
+        // (see `feature::inbound_report`). The request above uses a non-zero
         // ID, so an incoming broadcast sharing device/feature but using ID 0
         // must be routed to listeners, not consumed as this request's
         // response.

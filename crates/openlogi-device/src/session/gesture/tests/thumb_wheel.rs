@@ -50,18 +50,24 @@ fn a_rolling_report_is_a_roll_even_when_it_flags_a_tap() {
 /// `rotation_status` separates it from a deliberate tap.
 #[test]
 fn the_release_that_ends_a_roll_is_not_a_tap() {
-    assert_eq!(
-        thumbwheel_input(
-            thumb_event(0, RotationStatus::Stop, true),
-            RotationStatus::Active,
-            TRACED_RES
-        ),
-        Some(CapturedInput::Scroll {
-            increments: 0,
-            resolution: TRACED_RES,
-            status: thumbwheel::RotationStatus::Stop,
-        })
-    );
+    for previous in [
+        RotationStatus::Inactive,
+        RotationStatus::Start,
+        RotationStatus::Active,
+    ] {
+        assert_eq!(
+            thumbwheel_input(
+                thumb_event(0, RotationStatus::Stop, true),
+                previous,
+                TRACED_RES
+            ),
+            Some(CapturedInput::Scroll {
+                increments: 0,
+                resolution: TRACED_RES,
+                status: thumbwheel::RotationStatus::Stop,
+            })
+        );
+    }
 }
 
 /// A firmware that drops a roll's `Stop` reports the release as `Inactive`,
@@ -129,6 +135,40 @@ fn contact_without_rotation_or_a_tap_carries_no_input() {
             TRACED_RES
         ),
         None
+    );
+}
+
+/// A status byte the spec does not define does not say the wheel is settled,
+/// so a zero-rotation report carrying one is not a tap, tap bit or not.
+#[test]
+fn an_unrecognised_status_never_delivers_a_tap() {
+    for previous in [RotationStatus::Inactive, RotationStatus::Stop] {
+        assert_eq!(
+            thumbwheel_input(
+                thumb_event(0, RotationStatus::Other(4), true),
+                previous,
+                TRACED_RES
+            ),
+            None,
+            "after {previous:?}"
+        );
+    }
+}
+
+/// Only the tap is ruled out: the report's own rotation is still a roll.
+#[test]
+fn an_unrecognised_status_still_scrolls() {
+    assert_eq!(
+        thumbwheel_input(
+            thumb_event(5, RotationStatus::Other(0xff), true),
+            RotationStatus::Inactive,
+            TRACED_RES
+        ),
+        Some(CapturedInput::Scroll {
+            increments: 5,
+            resolution: TRACED_RES,
+            status: RotationStatus::Other(0xff),
+        })
     );
 }
 
@@ -219,5 +259,23 @@ async fn a_reconnect_forgets_a_roll_left_open() {
             scroll(3, RotationStatus::Active),
             CapturedInput::ButtonPulse(ButtonId::Thumbwheel)
         ]
+    );
+}
+
+/// Through the session's handler: zero-rotation reports with status bytes the
+/// spec does not define fire nothing despite their tap bit, and they leave no
+/// roll open, so the next tap on the settled wheel still fires.
+#[tokio::test]
+async fn an_unknown_status_byte_with_a_tap_is_not_a_click() {
+    let capture = armed_thumbwheel_capture().await;
+    let (sink, mut inputs) = mpsc::unbounded_channel();
+    let handler = capture.report_handler(0xff, sink);
+    handler(&wheel_report(0, 0x04, true));
+    handler(&wheel_report(0, 0xff, true));
+    assert_eq!(received(&mut inputs), Vec::new());
+    handler(&wheel_report(0, 0, true));
+    assert_eq!(
+        received(&mut inputs),
+        vec![CapturedInput::ButtonPulse(ButtonId::Thumbwheel)]
     );
 }

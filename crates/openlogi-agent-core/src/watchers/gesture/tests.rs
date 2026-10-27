@@ -171,9 +171,13 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             device_io,
             transport_turns: crate::hardware::TransportTurns::default(),
         };
-        let mut actions =
-            crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring)
-                .unwrap();
+        let mut actions = crate::runtime::ActionRuntime::new(
+            Arc::default(),
+            Arc::default(),
+            device_access.clone(),
+            ring,
+        )
+        .unwrap();
         let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
             false,
             VerticalScrollSensitivity::default(),
@@ -800,7 +804,8 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         transport_turns: crate::hardware::TransportTurns::default(),
     };
     let mut actions =
-        crate::runtime::ActionRuntime::new(Arc::default(), device_access, ring).unwrap();
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
     let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
         false,
         VerticalScrollSensitivity::default(),

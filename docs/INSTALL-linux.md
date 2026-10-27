@@ -18,61 +18,69 @@
 
 ## Install a release package
 
-Download the installer to a file over HTTPS, inspect it, and then run it. Do
-not use `curl | sh`:
+Install `minisign` through your distribution, then run the installer as your
+normal user (not with `sudo`):
 
 ```sh
-curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  --fail --location --silent --show-error \
-  --retry 3 --retry-connrefused \
-  --output openlogi-install.sh \
-  https://raw.githubusercontent.com/AprilNEA/OpenLogi/master/packaging/linux/install.sh
-less openlogi-install.sh
-sh openlogi-install.sh
-rm openlogi-install.sh
+curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-By default the script resolves the latest GitHub release, detects
-`x86_64`/`aarch64` and apt, dnf, yum, zypper, rpm, or pacman, then downloads
-the exact matching `.deb`, `.rpm`, or `.pkg.tar.zst`. It downloads that
-package's detached signature and authenticates it against the minisign public
-key embedded in the reviewed script. It also downloads the release's
-`SHA256SUMS`, extracts exactly one entry for the selected file, and verifies it
-before invoking only the package-manager command with `sudo`.
-nFPM's package scripts remain responsible for reloading udev and desktop/icon
-caches. Run the installer as your normal user; it refuses an invocation of the
-whole script through `sudo`.
+The script resolves the latest GitHub release, detects `x86_64`/`aarch64` and
+apt, dnf, yum, zypper, rpm, or pacman, then downloads the exact matching
+`.deb`, `.rpm`, or `.pkg.tar.zst`. It authenticates that package's detached
+signature against the minisign public key embedded in the script, verifies the
+package's one entry in the release `SHA256SUMS`, and only then runs the
+package-manager command with `sudo`. nFPM's package scripts reload udev and the
+desktop/icon caches. The installer refuses to run as root.
+
+### Review the installer first
+
+The one-line command trusts the `install.sh` attached to the release. To read
+and verify the script before it runs, download it with its signature instead:
+
+```sh
+base=https://github.com/AprilNEA/OpenLogi/releases/latest/download
+curl --proto '=https' --tlsv1.2 -fsSLO "$base/install.sh"
+curl --proto '=https' --tlsv1.2 -fsSLO "$base/install.sh.minisig"
+minisign -Vm install.sh -P RWRRkFtw+rqkvTlCTGKUszSE5dX9CK1teaQD45jO4P9rYlWLO4/nHVUF
+less install.sh
+sh install.sh
+```
+
+The public key is the same one the script embeds for package signatures.
 
 Useful options:
 
 ```sh
 # Pin a release (an optional leading v is accepted):
-sh openlogi-install.sh --version "$VERSION"
+sh install.sh --version "$VERSION"
+
+# Pass options through the one-line command with `sh -s --`:
+curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh -s -- --dry-run
 
 # Override detection, verify without installing, or leave the agent stopped:
-sh openlogi-install.sh --package-manager zypper
-sh openlogi-install.sh --dry-run
-sh openlogi-install.sh --no-start
+sh install.sh --package-manager zypper
+sh install.sh --dry-run
+sh install.sh --no-start
 ```
 
 The installer enables and starts `openlogi-agent.service` for the current user
 when systemd is available; failure to reach the user service manager does not
-roll back an otherwise successful package installation. Tagged releases with
-a complete Linux build also attach `install.sh`, `install.sh.minisig`, and a
-`SHA256SUMS` entry for manual verification.
+roll back an otherwise successful package installation.
 
 ## NixOS
 
-The repository Flake provides a package and a NixOS module for x86_64 and
-aarch64 Linux. Importing the module is preferred over adding the package to
-`environment.systemPackages` by itself: the module also registers the udev
-rules required for device access and manages the agent's user service.
+The Flake in the repository's `packaging/` directory provides a package and a
+NixOS module for x86_64 and aarch64 Linux. Importing the module is preferred
+over adding the package to `environment.systemPackages` by itself: the module
+also registers the udev rules required for device access and manages the
+agent's user service.
 
 ```nix
 {
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.openlogi = {
-    url = "github:AprilNEA/OpenLogi";
+    url = "github:AprilNEA/OpenLogi?dir=packaging";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -101,8 +109,13 @@ rules without automatically starting the agent. It remains available as
 For a build without installing the module:
 
 ```sh
-nix build github:AprilNEA/OpenLogi#openlogi
+nix build 'github:AprilNEA/OpenLogi?dir=packaging#openlogi'
 ```
+
+Earlier versions of this guide used `github:AprilNEA/OpenLogi` without
+`?dir=packaging`. That URL now points to a deprecated alias: it needs Nix 2.26
+or newer, prints a warning on every evaluation, and will be removed in a later
+release. Add `?dir=packaging` to the input URL to move off it.
 
 ## Flatpak
 
@@ -321,5 +334,5 @@ use the keyboard fallbacks above.
 
 | Limitation | Status |
 |---|---|
-| Wayland: per-application profile switching | Requires XWayland (`WM_CLASS` lookup uses X11) |
+| Wayland: per-application profile switching | Native on wlroots compositors (sway, Hyprland, …); GNOME needs the [companion extension](../crates/openlogi-hook/gnome-shell-extension/README.md); KDE falls back to XWayland. wlroots reports the xdg-shell `app_id` while X11 and GNOME report `WM_CLASS`, so a profile keyed under one does not match under the other |
 | Button capture: middle / mode-shift / thumbwheel | Side buttons only today |

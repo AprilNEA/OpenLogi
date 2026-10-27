@@ -14,6 +14,7 @@ use gpui_component::{
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
+use super::force_sensing::{PressForce, force_sensing_row};
 use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
@@ -42,6 +43,10 @@ pub(super) struct BindingInspectorData<'a> {
     pub wheel_hold: &'a BTreeSet<ButtonId>,
     pub editing_app: Option<&'a str>,
     pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
+    /// The haptic panel's press-force row, present only while
+    /// [`ForceSensingFacts::current`](super::force_sensing::ForceSensingFacts::current)
+    /// says it shows.
+    pub press_force: Option<PressForce<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -235,6 +240,10 @@ fn button_inspector(
                     )
                 })
         })
+        .children(
+            data.press_force
+                .map(|press_force| force_sensing_row(press_force, pal)),
+        )
         .when(picker.open, |panel| {
             panel.child(action_library(
                 "inspector-action",
@@ -435,6 +444,10 @@ fn gesture_inspector(
                         cx.notify();
                     });
                 }),
+        )
+        .children(
+            data.press_force
+                .map(|press_force| force_sensing_row(press_force, pal)),
         )
         .when(picker.open, |panel| {
             panel.child(action_library(
@@ -998,6 +1011,7 @@ mod tests {
             wheel_hold,
             editing_app: None,
             overridden: None,
+            press_force: None,
         }
     }
 

@@ -980,25 +980,27 @@ fn zoom_cancellation_clears_raw_history_and_pending_end() {
 
 #[test]
 fn zoom_rotation_without_phase_still_recognizes_and_fires_both_directions() {
-    use openlogi_hid::thumbwheel::RotationStatus::Inactive;
+    use openlogi_hid::thumbwheel::RotationStatus::{Inactive, Other};
     let now = Instant::now();
-    for sign in [-1, 1] {
-        let mut wheel = WheelAccumulators::default();
-        for expected in [
-            WheelOutput::Idle,
-            WheelOutput::Idle,
-            WheelOutput::FireAction(1),
-            WheelOutput::FireAction(1),
-        ] {
+    for phase in [Inactive, Other(0xff)] {
+        for sign in [-1, 1] {
+            let mut wheel = WheelAccumulators::default();
+            for expected in [
+                WheelOutput::Idle,
+                WheelOutput::Idle,
+                WheelOutput::FireAction(1),
+                WheelOutput::FireAction(1),
+            ] {
+                assert_eq!(
+                    phased_zoom_report(&mut wheel, 100 * sign, phase, now),
+                    expected
+                );
+            }
             assert_eq!(
-                phased_zoom_report(&mut wheel, 100 * sign, Inactive, now),
-                expected
+                phased_zoom_report(&mut wheel, 0, phase, now),
+                WheelOutput::Idle
             );
         }
-        assert_eq!(
-            phased_zoom_report(&mut wheel, 0, Inactive, now),
-            WheelOutput::Idle
-        );
     }
 }
 
@@ -1019,6 +1021,29 @@ fn zoom_unphased_movement_continues_after_a_pending_end() {
     );
     assert_eq!(
         phased_zoom_report(&mut wheel, 100, Inactive, now + Duration::from_millis(20)),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn an_unknown_zero_motion_status_does_not_end_zoom_progress() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Other, Start};
+    let now = Instant::now();
+    let mut wheel = WheelAccumulators::default();
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 0, Start, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 0, Other(0xff), now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, now),
         WheelOutput::FireAction(1)
     );
 }

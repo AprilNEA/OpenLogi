@@ -31,6 +31,8 @@ fn snapshot() -> AgentSnapshot {
             agent_version: "test-agent".into(),
             input_monitoring_granted: true,
             hid_open_failures: false,
+            secure_input: openlogi_ipc::SecureInput::Off,
+            virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
         },
         inventory: vec![DeviceInventory {
             receiver: ReceiverInfo {
@@ -203,6 +205,7 @@ async fn status_has_a_separate_explicit_json_contract() {
             "agent_version": "test-agent", "inventory": "ready",
             "accessibility_granted": false, "input_monitoring_granted": true,
             "hook_installed": false, "hid_open_failures": false, "launch_at_login": true,
+            "virtual_keyboard": "unsupported",
         })
     );
 }
@@ -577,6 +580,24 @@ async fn unsupported_device_error_survives_the_json_boundary_without_a_write() {
     .await;
     assert_eq!(result["ok"], false);
     assert_eq!(result["error"]["code"], "unsupported_feature");
+}
+
+#[test]
+fn press_force_refusals_share_the_existing_codes() {
+    for (error, code) in [
+        (WriteError::ForceSensingUnchangeable, "unsupported_feature"),
+        (
+            WriteError::ForceSensingNotApplied {
+                requested: 4500,
+                actual: 5089,
+            },
+            "readback_mismatch",
+        ),
+    ] {
+        let result = envelope(Err(error.into()));
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"]["code"], code);
+    }
 }
 
 #[test]

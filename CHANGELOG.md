@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.18] - 2026-10-25
+
+### Added
+
+- *(assets)* ask the jsDelivr data API for the newest asset release ([#2040](https://github.com/AprilNEA/OpenLogi/pull/2040))
+- *(desktop)* add a keyboard backlight duration timer ([#1879](https://github.com/AprilNEA/OpenLogi/pull/1879))
+- *(core,agent,gui)* add guarded disable-keys controls ([#993](https://github.com/AprilNEA/OpenLogi/pull/993))
+- *(core,agent,gui)* add a press force setting for the MX Master 4 Haptic Sense Panel ([#2021](https://github.com/AprilNEA/OpenLogi/pull/2021))
+- *(hidpp)* add capability-bound force sensing buttons ([#2016](https://github.com/AprilNEA/OpenLogi/pull/2016))
+- *(release)* cut betas from a workflow and tell the tap about them ([#2005](https://github.com/AprilNEA/OpenLogi/pull/2005))
+- *(release)* build a beta at its own version ([#2004](https://github.com/AprilNEA/OpenLogi/pull/2004))
+- *(xtask,ci)* compose update channel files from per-release records ([#2000](https://github.com/AprilNEA/OpenLogi/pull/2000))
+- *(agent)* drive the mock agent from a stdin control console ([#2003](https://github.com/AprilNEA/OpenLogi/pull/2003))
+
+### Fixed
+
+- *(assets)* follow the 0.1 asset release line instead of pinning 0.1.0 ([#2039](https://github.com/AprilNEA/OpenLogi/pull/2039))
+- *(i18n)* translate the receiver chooser, old-pairing cleanup, and update channel in Czech ([#2034](https://github.com/AprilNEA/OpenLogi/pull/2034))
+- *(cli)* route backlight operations through the agent ([#2031](https://github.com/AprilNEA/OpenLogi/pull/2031))
+- *(windows)* post the layout's scan code with keys a layout can move ([#2028](https://github.com/AprilNEA/OpenLogi/pull/2028))
+- *(overlay)* draw the Windows Actions Ring without a window frame ([#1913](https://github.com/AprilNEA/OpenLogi/pull/1913))
+- *(agent)* re-apply volatile settings after replacing a dead channel ([#1997](https://github.com/AprilNEA/OpenLogi/pull/1997))
+- *(i18n)* translate the disable-keys strings in 22 locales ([#2024](https://github.com/AprilNEA/OpenLogi/pull/2024))
+- *(deps)* update Tokio for AsyncFd soundness advisory ([#2019](https://github.com/AprilNEA/OpenLogi/pull/2019))
+- *(device)* bound Bolt receiver identity reads ([#2009](https://github.com/AprilNEA/OpenLogi/pull/2009))
+- *(release)* name Sparkle deltas so Sparkle applies them ([#2002](https://github.com/AprilNEA/OpenLogi/pull/2002))
+
+## [0.8.17] - 2026-10-22
+
+### Added
+
+- *(agent)* report whether the virtual HID keyboard carries keys ([#1991](https://github.com/AprilNEA/OpenLogi/pull/1991))
+- *(device)* recognize the Logitech G600 as a standalone mouse ([#1961](https://github.com/AprilNEA/OpenLogi/pull/1961))
+- *(desktop)* let users follow the beta update channel ([#1980](https://github.com/AprilNEA/OpenLogi/pull/1980))
+- *(xtask)* read the release channel and build version from the tag ([#1978](https://github.com/AprilNEA/OpenLogi/pull/1978))
+
+### Fixed
+
+- *(gui)* preserve long-press actions when editing a button action ([#1876](https://github.com/AprilNEA/OpenLogi/pull/1876))
+- *(hid)* keep long-only HID++ collections long-only on Windows ([#1983](https://github.com/AprilNEA/OpenLogi/pull/1983))
+- *(device)* stop a cached probe from hiding a dead direct channel ([#1979](https://github.com/AprilNEA/OpenLogi/pull/1979))
+- *(hook)* log both windows when the pointer gate rejects a keyboard action ([#1966](https://github.com/AprilNEA/OpenLogi/pull/1966))
+- *(release)* load only the Codex fields 1Password holds and surface why notes fall back ([#1987](https://github.com/AprilNEA/OpenLogi/pull/1987))
+- *(macos)* switch Spaces through the user's shortcut so the Dock slides ([#1847](https://github.com/AprilNEA/OpenLogi/pull/1847))
+- *(macos)* carry integer wheel ticks on synthetic line scroll events ([#1969](https://github.com/AprilNEA/OpenLogi/pull/1969))
+- *(hid)* read whole Bolt slot names, from 0x0005 or both codename chunks ([#1962](https://github.com/AprilNEA/OpenLogi/pull/1962))
+- *(linux)* stop counting our own pass-through mouse in the input access probe ([#1971](https://github.com/AprilNEA/OpenLogi/pull/1971))
+
+## [0.8.16] - 2026-10-21
+
+### Highlights
+
+- **macOS: shortcut keys go through a virtual HID keyboard.** When a button
+  sends a keyboard shortcut, the signed OpenLogi Agent presses the keys on a
+  virtual keyboard named "OpenLogi Virtual Keyboard". macOS handles them as keys
+  from a USB keyboard. This targets shortcuts that work from a real keyboard but
+  did not work from OpenLogi ([#1653](https://github.com/AprilNEA/OpenLogi/issues/1653),
+  [#744](https://github.com/AprilNEA/OpenLogi/issues/744)). Apple granted
+  OpenLogi the restricted HID virtual-device entitlement for this
+  ([#1918](https://github.com/AprilNEA/OpenLogi/pull/1918),
+  [#1929](https://github.com/AprilNEA/OpenLogi/pull/1929)). No new permission is
+  needed. Builds from source, and a system that does not let the agent create
+  the device, type keys as before.
+
+### Added
+
+- *(pointer)* light the DPI LED in precision mode ([#1934](https://github.com/AprilNEA/OpenLogi/pull/1934))
+- *(pointer)* precision mode on mice with adjustable DPI ([#1932](https://github.com/AprilNEA/OpenLogi/pull/1932))
+- *(release)* ship Sparkle delta updates ([#1925](https://github.com/AprilNEA/OpenLogi/pull/1925))
+- *(core,agent,gui)* pointer speed and precision mode for 0x2205 mice ([#1922](https://github.com/AprilNEA/OpenLogi/pull/1922))
+- *(xtask,ci)* sign the macOS agent with its HID virtual-device profile ([#1929](https://github.com/AprilNEA/OpenLogi/pull/1929))
+- *(macos,gui)* say when Secure Input pauses key remapping ([#1926](https://github.com/AprilNEA/OpenLogi/pull/1926))
+- *(inject,gui)* slide desktop switches like a three-finger swipe ([#1921](https://github.com/AprilNEA/OpenLogi/pull/1921))
+- *(inject)* type synthesized macOS keys through a virtual HID keyboard ([#1918](https://github.com/AprilNEA/OpenLogi/pull/1918))
+
+### Fixed
+
+- *(hidpp)* publish the 0x8071 nv-effect sync event as raw bytes ([#1951](https://github.com/AprilNEA/OpenLogi/pull/1951))
+- *(core,device,agent,gui)* choose the receiver before pairing a device ([#1614](https://github.com/AprilNEA/OpenLogi/pull/1614))
+- *(hidpp,device)* read the 0x2201 default DPI only from feature version 1 ([#1952](https://github.com/AprilNEA/OpenLogi/pull/1952))
+- *(device)* read the 0x1000 battery capability before mapping levels ([#1938](https://github.com/AprilNEA/OpenLogi/pull/1938))
+- *(hidpp,device)* publish 0x1b04 reporting changes made by other clients ([#1946](https://github.com/AprilNEA/OpenLogi/pull/1946))
+- *(hidpp)* decode unified battery status bytes 3-5 by feature version ([#1941](https://github.com/AprilNEA/OpenLogi/pull/1941))
+- *(device)* drop short 0x2121 movements and re-read SmartShift on a ratchet switch ([#1944](https://github.com/AprilNEA/OpenLogi/pull/1944))
+- *(agent)* hand the haptic enable back after Actions Ring sessions ([#1942](https://github.com/AprilNEA/OpenLogi/pull/1942))
+- *(hidpp,device)* reconcile DPI after a sensor calibration broadcast ([#1947](https://github.com/AprilNEA/OpenLogi/pull/1947))
+- *(gui)* save a DPI only after the device confirms it ([#1943](https://github.com/AprilNEA/OpenLogi/pull/1943))
+- *(hidpp,device,cli)* keep getFwInfo transport bytes 9-15 raw ([#1945](https://github.com/AprilNEA/OpenLogi/pull/1945))
+- *(hidpp,device)* re-read settings on a 0x4521 disabled-key report ([#1940](https://github.com/AprilNEA/OpenLogi/pull/1940))
+- *(hidpp)* bound 0x2111 torque and refuse a short capabilities reply ([#1939](https://github.com/AprilNEA/OpenLogi/pull/1939))
+- *(hidpp)* gate the illumination effective maximum in its wrapper ([#1937](https://github.com/AprilNEA/OpenLogi/pull/1937))
+- *(hidpp,device)* write all 0x8070 zones safely and gate v1 functions ([#1936](https://github.com/AprilNEA/OpenLogi/pull/1936))
+- *(device)* restore thumb-wheel reporting as found and harden its capture ([#1935](https://github.com/AprilNEA/OpenLogi/pull/1935))
+- *(hidpp)* keep unmodelled backlight option bits on write ([#1933](https://github.com/AprilNEA/OpenLogi/pull/1933))
+- *(desktop)* show Pointer tab for mice and trackballs with software scroll inversion ([#1880](https://github.com/AprilNEA/OpenLogi/pull/1880))
+- *(device,agent)* move linked devices after a keyboard that switches by itself ([#1920](https://github.com/AprilNEA/OpenLogi/pull/1920))
+- *(deps)* bump rustls-webpki and webpki roots for emSign advisories ([#1924](https://github.com/AprilNEA/OpenLogi/pull/1924))
+- *(agent)* relaunch when Input Monitoring is granted after launch ([#1919](https://github.com/AprilNEA/OpenLogi/pull/1919))
+
 ## [0.8.15] - 2026-10-20
 
 ### Added

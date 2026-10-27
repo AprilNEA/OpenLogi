@@ -1,7 +1,7 @@
 # Nix package for OpenLogi on Linux (CLI + agent + GUI/overlay).
 #
-# Build via the flake:
-#   nix build .#openlogi
+# Build via the flake in packaging/:
+#   nix build ./packaging#openlogi
 #
 # ## Why this doesn't suffer the #262 cargoHash churn
 #

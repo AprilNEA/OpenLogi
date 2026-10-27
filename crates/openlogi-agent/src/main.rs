@@ -19,6 +19,8 @@
 mod activity_macos;
 mod autostart;
 mod binary_watch;
+#[cfg(target_os = "macos")]
+mod input_monitoring;
 mod lifecycle;
 mod logging;
 mod overlay;
@@ -42,11 +44,18 @@ mod takeover;
 mod tray;
 #[cfg(target_os = "windows")]
 mod tray_windows;
+mod virtual_keyboard;
 
 use openlogi_core::config::Config;
 use tracing::{info, warn};
 
 fn main() {
+    // A probe instance answers and leaves before any agent machinery — log,
+    // singleton lock, devices — starts.
+    #[cfg(target_os = "macos")]
+    if input_monitoring::answer_probe_if_asked() {
+        return;
+    }
     logging::init();
 
     // Single-instance guard: the agent owns all device I/O, the CGEventTap, and

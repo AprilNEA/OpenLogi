@@ -39,10 +39,12 @@ be copied manually to the generated physical keys. Pre-v7 thumb-wheel scroll
 pairs on the old defaults are migrated in both device and per-application
 profiles so they keep their native direction. v9 adds the `[apps]` alias table;
 v8 files load unchanged.
+v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
+header before parsing its fields. A v9 file without the policy still loads.
 
 ## Shape
 
-`schema_version` is required and currently `9`. `selected_device` is an
+`schema_version` is required and currently `10`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -90,6 +92,16 @@ optional physical device key.
   one on screen. The state a keyboard reports when it connects is not
   announced. With the setting off the agent shows nothing, and an indicator
   already on screen still closes on its own. Fn Lock is not shown.
+- `animate_desktop_switch` (default `true`, macOS only): Previous Desktop and
+  Next Desktop slide to the neighbouring Space. The agent types the "Move left
+  a space" or "Move right a space" shortcut from System Settings → Keyboard →
+  Keyboard Shortcuts → Mission Control, so the Dock plays the slide it plays
+  for the keyboard. When that shortcut is off, the agent posts the slide the
+  way a three-finger swipe does: 20 frames, one every 16.6 ms, and each moving
+  frame covers 15% of the distance left; the Dock finishes the slide. That
+  action returns when the last frame is posted, about 315 ms later. With the
+  setting off, the agent posts two frames and the Dock changes Space at once.
+  A change applies from the next switch. Windows and Linux ignore the setting.
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use
@@ -165,18 +177,136 @@ Common device fields are:
   changed since the save. With `auto_camera` on, a power change on the light
   is a manual choice until the next camera transition, like the power switch
   in the settings app
-- `host_switch_targets` and `fn_lock` for compatible keyboards
+- `host_switch_targets` for keyboards with Easy-Switch keys (HID++ `0x1814`):
+  the config keys of the mice and other devices that move with the keyboard
+  when it switches hosts. A linked device moves to its slot whose host name
+  (HID++ `0x1815`) matches the keyboard's new slot, and otherwise to the slot
+  with the same number. The agent also writes the linked device's `0x1814`
+  cookies, so that Logi Options+ on the keyboard's other hosts moves the same
+  devices. It does not replace a cookie that names another keyboard. Removing
+  a link clears the keyboard's cookie. When the device is offline or the clear
+  fails, the agent clears it when the device is next online, unless the agent
+  restarts first. A disabled device gets no cookie writes. When it is enabled
+  again, the agent writes the cookie changes that it skipped. The agent
+  remembers each keyboard's cookie while it runs, so it can also write or
+  clear a link when the keyboard is asleep or its receiver is unplugged. After
+  a restart, the agent knows the cookie again once the keyboard reports it
+- `fn_lock` for compatible keyboards
+- `disabled_keys` for keyboards with HID++ `0x4521`: the keys the keyboard
+  suppresses in hardware (see [Disabled keys](#disabled-keys)). Absent leaves
+  the setting unmanaged; an explicit empty array enables all supported known
+  keys
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+
   does; `false` leaves the keyboard's layout to its own shortcuts
 - `report_rate` for mice with an adjustable report rate (HID++ `0x8060` or
   `0x8061`), in hertz. The agent writes it when the mouse reconnects over a
   connection that offers that rate; absent leaves the mouse's own rate
+- `pointer_speed` for mice that scale their own pointer motion instead of
+  adjustable DPI (HID++ `0x2205`, for example the MX Ergo and the M590), in
+  1/256 steps: `256` is 1×, and the value must be in `32..=768` (0.125× to
+  3×), the range Logi Options+ writes. The agent writes it when the mouse
+  connects; absent leaves the mouse's own speed. The desktop app sets it with
+  the Pointer speed slider, where 50 % is 1×
+- `force_sensing` for devices with a force-sensing button whose press force
+  software can change (HID++ `0x19c0`, the MX Master 4's Haptic Sense Panel),
+  as a raw device value with no unit: lower is a lighter press. The range
+  differs from unit to unit (one MX Master 4 reports `4071..=6768` with a
+  default of `5089`), so the agent clamps the value into the range the device
+  reports, then writes it when the device connects; absent leaves the device's
+  own force, and the agent never writes one. The desktop app sets it with the
+  Press force slider in the Haptic Sense Panel's inspector on the mouse page,
+  which saves the force the device reads back
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or
 `shift+command+f5`. Supported trigger modifiers are `shift`, `control`,
 `option`, and `command`; aliases such as `ctrl`, `alt`, and `cmd` are accepted.
+
+### Disabled keys
+
+The Device tab shows a **Disabled keys** card only when the device advertises
+HID++ `0x4521`. It reads the supported mask from the keyboard and offers only
+the supported keys: Caps Lock, Num Lock, Scroll Lock, Insert, and Windows /
+Command (labelled for the host OS). A switch **on disables that key**. This is
+a firmware setting, not key remapping: disabling Caps Lock also suppresses a
+host-side action assigned to it, such as switching the input language.
+
+For example, under an existing physical-device entry:
+
+```toml
+disabled_keys = ["caps_lock", "windows_command"]
+```
+
+The other accepted names are `num_lock`, `scroll_lock`, and `insert`. Removing
+the field stops managing this setting; `disabled_keys = []` instead requests
+that every supported known key be enabled. OpenLogi preserves advertised
+disabled bits it does not recognise, rather than clearing firmware settings
+outside these five controls.
+
+Controls require an online device with a persistent identity, a writable
+configuration, and a successful read. A change is written to the keyboard and
+read back before the app saves the confirmed known keys and asks the agent to
+reload. An error or timeout is not proof that the keyboard stayed unchanged:
+the app discards its old value, reads again, and prevents further edits until
+that read succeeds. **Retry** retries an exhausted read. An unconfirmed request
+is never saved as the device's setting. **Save Retry** and **Reload Retry**
+recover their respective persistence steps without repeating the hardware
+write. Save Retry rereads the configuration to preserve external edits and
+refreshes the app's settings and binding displays from that revision, even if
+the subsequent save must be retried again.
+
+Reload acceptance is tied to the saved file revision of each change, even when
+several requests share one agent reload. Acceptance of a newer save does not
+confirm an older one. If the file changed externally, the app refreshes it
+without overwriting it, requests acceptance of that exact revision, and then
+reads the keyboard again before editing resumes. This also covers another edit
+between the agent's reload and the app's refresh. It applies to every keyboard,
+including when Save Retry or a save of another setting finds the external edit.
+A failed refresh or agent reload keeps editing blocked; **Reload Retry** resumes
+this reconciliation. A device read alone cannot
+resolve an unconfirmed file revision.
+
+Recovery stays inside the device card, using the same status and retry controls
+as other device settings. Messages follow the selected interface language;
+technical read, write, and configuration errors are recorded in the app logs.
+Switches and recovery actions retain identity per physical device, not per
+translated label or connection route. Each switch's accessible name states the
+disable action and the key.
+
+The agent reapplies a managed device's configured policy on initial discovery,
+reconnect, and wake, with bounded delayed confirmation attempts. If an
+unconfirmed manual write may have changed hardware, it schedules restoration
+of the latest confirmed choice (including a choice not yet saved by the app),
+without overtaking a newer pending request. Once a restoring write is queued,
+the agent moves the keyboard's published settings revision, so an open app reads
+the keyboard again after that write. New configuration or a retired
+connection invalidates obsolete work. Failed inventory scans do not count as
+successful confirmation: they use bounded delayed retries, retaining pending
+confirmation for the normal recovery scan after those retries are exhausted.
+An unreachable keyboard cannot be guaranteed to accept a setting; reconnect
+or wake starts a new lifecycle attempt.
+
+Manual writes retain their setting turn, receiver lease, and transport turn
+until each submitted native report completes, including discovery and readback
+reports. Cancellation is checked before submitting the next report. A completed
+write becomes the recovery baseline only when the requester consumes its
+successful result; an unread result is still unconfirmed. Reads of this setting
+queue behind already scheduled policy writes, including workers that have not
+started running yet. Ordinary standalone reads still use bounded query timeouts.
+A native driver operation that never completes can therefore keep subsequent
+writes waiting; a requester timeout does not make it safe to release that turn.
+A request cancelled before its first report leaves the queue at once and
+releases the turns and lease it was waiting for.
+
+When a receiver slot or a directly connected keyboard reports a different known
+unit ID or serial, the agent retires the former device's requests and starts a
+fresh discovery retry budget. Learning previously missing identity information
+for the same slot, or a serial for a direct keyboard with the same nonzero unit
+ID, instead preserves active work and its remaining budget. Replacement cannot
+be detected from a slot alone when neither snapshot provides distinguishing
+identity, and a direct keyboard without a nonzero unit ID counts as new when its
+identity changes.
 
 ### Application aliases
 
@@ -231,6 +361,34 @@ under a profile. The desktop app does not create aliases; write them here.
 
 Action names are the serialized Rust variant names, including `Copy`,
 `BrowserBack`, `PlayPause`, `CycleDpiPresets`, and `ShowActionsRing`.
+
+`TogglePrecisionMode` switches a mouse between its saved speed and its
+slowest speed, as in Logi Options+:
+
+| Mouse | Slowest speed | Saved speed | When none is saved |
+| --- | --- | --- | --- |
+| Has `0x2205` and no adjustable DPI, such as the MX Ergo | 0.125× | `pointer_speed` | 1× |
+| Has adjustable DPI (`0x2201` / `0x2202`) | The lowest DPI the sensor lists | `dpi` | The sensor's default DPI |
+
+`CycleDpiPresets` also switches precision mode on a `0x2205` mouse, because
+that mouse has no adjustable DPI; DPI presets saved for it are ignored. This
+makes the MX Ergo's precision button work with its default binding. On a mouse
+with adjustable DPI, `CycleDpiPresets` keeps cycling the DPI presets.
+
+A mouse with a DPI LED (HID++ `0x1300`), such as the MX Ergo, shows the mode
+on that LED, as in Logi Options+. The LED lights when precision mode starts
+and goes dark when it ends. OpenLogi takes control of the LED from the
+firmware the first time precision mode starts, and keeps it. A mouse that
+never uses precision mode keeps the LED behavior of its firmware.
+
+Precision mode stays on when the mouse reconnects. It ends at the next press,
+at a speed or DPI change from the desktop app or `config.toml`, and at a
+binding change for that mouse. On a mouse with adjustable DPI, a DPI preset
+action also ends it. A change made while the mouse is offline also ends it,
+and the mouse reconnects at its saved speed, or at the speed for none saved.
+After an agent restart, precision mode is off. A mouse with a saved speed gets
+that speed when the agent connects to it. A mouse without one keeps the
+slowest speed until precision mode is switched on and off again.
 Payload actions use a one-key inline table:
 
 ```toml

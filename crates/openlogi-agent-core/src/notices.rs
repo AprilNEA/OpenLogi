@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use openlogi_core::config::AppSettings;
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 use openlogi_ipc::{Generation, Notice, NoticeKind, NoticeObservation, OBSERVE_HOLD};
 use tokio::sync::watch;
@@ -138,18 +139,42 @@ impl NoticeBoard {
 /// been charged. A reading that wobbles around the threshold is not a new
 /// discharge.
 ///
-/// While the user has the notices off, the watch still takes in every
-/// reading with [`Self::observe_muted`], so a recharge in that time still
-/// ends the device's discharge.
+/// While the user has the notices off, [`Self::take_reading`] still takes in
+/// every reading, so a recharge in that time still ends the device's
+/// discharge.
 #[derive(Debug, Default)]
 pub struct LowBatteryWatch {
     announced: HashSet<String>,
 }
 
 impl LowBatteryWatch {
+    /// Take in `device`'s latest reading under the user's
+    /// [`AppSettings::low_battery_notifications`] choice. Answers whether to
+    /// announce its low battery now.
+    ///
+    /// While the notices are off, the reading is still taken in, muted: a
+    /// recharge in that time ends the device's discharge, and a battery that
+    /// ran low meanwhile is announced on the first reading after they are
+    /// turned on.
+    ///
+    /// An offline device reports only its last known battery, which says
+    /// nothing new, so callers pass the readings of online devices only.
+    pub fn take_reading(
+        &mut self,
+        settings: &AppSettings,
+        device: &str,
+        battery: &BatteryInfo,
+    ) -> bool {
+        if settings.low_battery_notifications {
+            return self.observe(device, battery);
+        }
+        self.observe_muted(device, battery);
+        false
+    }
+
     /// Take in `device`'s latest reading. Answers whether to announce its low
     /// battery now.
-    pub fn observe(&mut self, device: &str, battery: &BatteryInfo) -> bool {
+    fn observe(&mut self, device: &str, battery: &BatteryInfo) -> bool {
         if battery.needs_attention() {
             return self.announced.insert(device.to_owned());
         }
@@ -161,7 +186,7 @@ impl LowBatteryWatch {
     /// A recharge still ends its discharge. A low reading is not marked as
     /// announced, so the first low reading after the notices are back on
     /// announces it. A reading that needs attention is never a recharge.
-    pub fn observe_muted(&mut self, device: &str, battery: &BatteryInfo) {
+    fn observe_muted(&mut self, device: &str, battery: &BatteryInfo) {
         if recharged(battery) {
             self.announced.remove(device);
         }

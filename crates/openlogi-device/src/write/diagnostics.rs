@@ -11,7 +11,7 @@ use hidpp::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
     feature::feature_set::FeatureSetFeature,
-    feature::unified_battery::UnifiedBatteryFeature,
+    feature::unified_battery::{BatteryInfo as UnifiedBatteryInfo, UnifiedBatteryFeature},
     protocol::v20::Hidpp20Error,
 };
 
@@ -159,16 +159,13 @@ pub async fn read_battery_raw(
             .await
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
 
-        match open_feature::<UnifiedBatteryFeature>(&mut device).await {
-            Ok(feature) => {
+        match super::open_feature_with_version::<UnifiedBatteryFeature>(&mut device).await {
+            Ok((feature, version)) => {
                 let info = feature
                     .get_battery_info()
                     .await
                     .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-                return Ok(format!(
-                    "0x1004 UnifiedBattery: percentage={} level={:?} status={:?}",
-                    info.charging_percentage, info.level, info.status
-                ));
+                return Ok(unified_battery_line(version, info));
             }
             Err(WriteError::FeatureUnsupported { .. }) => {}
             Err(e) => return Err(e),
@@ -210,6 +207,31 @@ pub async fn read_battery_raw(
     .await
 }
 
+/// The [`read_battery_raw`] line for a `0x1004` status at feature `version`.
+/// The fields after the charging status print as raw bytes; a field that the
+/// version or a short reply leaves out is not printed.
+fn unified_battery_line(version: u8, info: UnifiedBatteryInfo) -> String {
+    let extended = info.extended(version);
+    let fields: String = [
+        extended
+            .external_power
+            .map(|value| format!(" external_power={:#04x}", value.raw())),
+        extended
+            .fast_charging
+            .map(|value| format!(" fast_charging={:#04x}", value.raw())),
+        extended
+            .removable_battery
+            .map(|value| format!(" removable_battery={:#04x}", value.raw())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    format!(
+        "0x1004 UnifiedBattery: version={version} percentage={} level={:?} status={:?}{fields}",
+        info.charging_percentage, info.level, info.status
+    )
+}
+
 /// Firmware fields for one entity whose record the device answered and this
 /// parser decoded.
 ///
@@ -236,28 +258,27 @@ pub struct FirmwareEntityInfo {
     pub build: u16,
     /// Whether this is the entity currently running.
     pub active: bool,
-    /// USB or wireless product ID the entity runs under. A bootloader entity
-    /// reports the PID the device enumerates as while in DFU mode; only the
-    /// active entity is required to report a real value, so an inactive one
-    /// may be zero.
-    pub transport_pid: u16,
-    /// Optional extra versioning bytes. Device-specific and usually all zero,
-    /// carried verbatim because a device that does populate them is exactly
-    /// the device a report is being collected for.
-    pub extra_version: [u8; 5],
+    /// Product ID of the device on the link the request used, as
+    /// [`DeviceEntityFirmwareInfo::transport_pid`] decides it. `None` for every
+    /// entity whose transport-specific bytes are not known to hold a PID.
+    pub transport_pid: Option<u16>,
+    /// Reply bytes 9 to 15, the transport-specific region, verbatim. Their
+    /// meaning depends on the entity and the link, and a device that fills
+    /// them in is exactly the device a report is being collected for.
+    pub transport_specific_info: [u8; 7],
 }
 
 impl From<DeviceEntityFirmwareInfo> for FirmwareEntityInfo {
     fn from(info: DeviceEntityFirmwareInfo) -> Self {
         Self {
+            transport_pid: info.transport_pid(),
             kind: info.entity_type,
             prefix: info.firmware_prefix,
             number: info.firmware_number,
             revision: info.revision,
             build: info.build,
             active: info.active,
-            transport_pid: info.transport_pid,
-            extra_version: info.extra_version,
+            transport_specific_info: info.transport_specific_info,
         }
     }
 }

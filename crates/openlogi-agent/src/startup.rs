@@ -137,14 +137,18 @@ impl InputServices {
     fn start(shared: &SharedHandles) -> Option<Self> {
         let ring = Arc::new(ActionRingManager::default());
         let (sender, triggers) = tokio::sync::mpsc::unbounded_channel();
-        let action_runtime =
-            match ActionRuntime::new(shared.dpi_cycle.clone(), shared.device_access(), sender) {
-                Ok(runtime) => runtime,
-                Err(e) => {
-                    warn!(error = %e, "could not start button lifecycle worker — agent exiting");
-                    return None;
-                }
-            };
+        let action_runtime = match ActionRuntime::new(
+            shared.dpi_cycle.clone(),
+            shared.pointer_speeds(),
+            shared.device_access(),
+            sender,
+        ) {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                warn!(error = %e, "could not start button lifecycle worker — agent exiting");
+                return None;
+            }
+        };
         let scroll_runtime = match ScrollRuntime::spawn(Arc::clone(&shared.scroll_preferences)) {
             Ok(runtime) => runtime,
             Err(e) => {
@@ -241,8 +245,10 @@ pub(crate) enum WatcherEvent {
     Pointer(openlogi_hook::PointerContext),
     /// The Accessibility grant flipped.
     Accessibility(bool),
-    /// The Input Monitoring grant flipped.
-    InputMonitoring(bool),
+    /// Where the agent stands with Input Monitoring changed.
+    InputMonitoring(watchers::input_monitoring::InputMonitoring),
+    /// macOS Secure Event Input turned on or off, or moved to another app.
+    SecureInput(openlogi_ipc::SecureInput),
     /// A standalone light was read, or announced a change.
     Light(watchers::light::LightEvent),
     /// A watcher's channel closed (its thread died). Emitted once; the
@@ -260,6 +266,7 @@ pub(crate) enum Watcher {
     Pointer,
     Accessibility,
     InputMonitoring,
+    SecureInput,
     Light,
 }
 
@@ -331,9 +338,20 @@ pub(crate) fn spawn_state_watchers(
             WatcherEvent::Accessibility,
         ),
         tagged(
-            watchers::input_monitoring::spawn(GRANT_HEARTBEAT),
+            watchers::input_monitoring::spawn(
+                GRANT_HEARTBEAT,
+                std::cfg_select! {
+                    target_os = "macos" => { crate::input_monitoring::fresh_grant }
+                    _ => { || None }
+                },
+            ),
             Watcher::InputMonitoring,
             WatcherEvent::InputMonitoring,
+        ),
+        tagged(
+            watchers::secure_input::spawn(watchers::secure_input::PERIOD),
+            Watcher::SecureInput,
+            WatcherEvent::SecureInput,
         ),
         stream::unfold((lights, light_watcher), |(mut rx, watcher)| async move {
             let event = rx.recv().await?;

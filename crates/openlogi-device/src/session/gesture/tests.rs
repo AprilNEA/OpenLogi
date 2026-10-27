@@ -16,6 +16,7 @@ use crate::session::restore::rollback_start;
 use crate::{ChannelRegistry, DeviceRoute};
 
 mod accumulator;
+mod foreign_change;
 mod main_wheel;
 mod restore;
 mod session;

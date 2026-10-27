@@ -10,6 +10,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use openlogi_core::hid::LOGITECH_VENDOR_ID;
+use openlogi_core::uinput;
 
 use crate::PermissionStatus;
 
@@ -156,22 +157,40 @@ fn probe_logitech_event() -> EventProbe {
     let Ok(entries) = fs::read_dir("/dev/input") else {
         return EventProbe::NonePresent;
     };
-    let outcomes = entries
+    let names: Vec<String> = entries
         .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .into_string()
-                .is_ok_and(|name| name.starts_with("event") && is_hookable_logitech_mouse(&name))
-        })
-        .map(|entry| {
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    classify_event_nodes(
+        names.iter().map(String::as_str),
+        |node, attr| fs::read_to_string(format!("/sys/class/input/{node}/device/{attr}")).ok(),
+        |node| {
             fs::OpenOptions::new()
                 .read(true)
-                .open(entry.path())
+                .open(Path::new("/dev/input").join(node))
                 .map(|_| ())
                 .map_err(|e| e.kind())
-        });
-    fold_event_access(outcomes)
+        },
+    )
+}
+
+/// The decision half of [`probe_logitech_event`], over `/dev/input` entry
+/// names, a sysfs attribute reader (`attr(node, "id/vendor")`), and an
+/// `open()` — so which nodes count is testable without device nodes. Only a
+/// candidate node is opened.
+pub(crate) fn classify_event_nodes<'a>(
+    nodes: impl IntoIterator<Item = &'a str>,
+    attr: impl Fn(&str, &str) -> Option<String>,
+    open: impl Fn(&str) -> Result<(), ErrorKind>,
+) -> EventProbe {
+    fold_event_access(
+        nodes
+            .into_iter()
+            .filter(|node| {
+                node.starts_with("event") && is_hookable_logitech_mouse(|name| attr(node, name))
+            })
+            .map(open),
+    )
 }
 
 /// Fold each node's open outcome into an [`EventProbe`], denial first.
@@ -212,10 +231,16 @@ pub(crate) fn fold_event_access(
 /// both clicks and moves relatively. The combo-device exclusions it also applies
 /// are omitted deliberately: they decide whether grabbing is *safe*, while this
 /// only needs to know which nodes are candidates at all.
-fn is_hookable_logitech_mouse(event_name: &str) -> bool {
-    let attr = |name: &str| {
-        fs::read_to_string(format!("/sys/class/input/{event_name}/device/{name}")).ok()
-    };
+///
+/// OpenLogi's own uinput devices are excluded first, as the hook excludes them.
+/// A pass-through mouse mirrors the vendor and capabilities of the mouse it
+/// re-injects, so it passes every other test here — yet its node is created by
+/// the agent, root-owned without a `uaccess` ACL, and never grabbed. Counting it
+/// reported `Denied` whenever the agent was hooking a mouse (#1959).
+fn is_hookable_logitech_mouse(attr: impl Fn(&str) -> Option<String>) -> bool {
+    if attr("name").is_some_and(|name| uinput::is_own_device(name.trim_end_matches('\n'))) {
+        return false;
+    }
     let logitech = attr("id/vendor")
         .and_then(|vendor| u16::from_str_radix(vendor.trim(), 16).ok())
         .is_some_and(|vid| vid == LOGITECH_VENDOR_ID);

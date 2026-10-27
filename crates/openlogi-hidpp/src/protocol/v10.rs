@@ -1,10 +1,13 @@
 //! Implements functionality specific to HID++1.0.
 
+use std::time::Duration;
+
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use thiserror::Error;
 
 use crate::channel::{
-    ChannelError, HidppChannel, HidppMessage, LONG_REPORT_LENGTH, SHORT_REPORT_LENGTH,
+    ChannelError, HidppChannel, HidppMessage, LONG_REPORT_LENGTH, SEND_RESPONSE_TIMEOUT,
+    SHORT_REPORT_LENGTH,
 };
 
 /// Represents the header that every [`HidppMessage`] of HID++1.0 starts with.
@@ -217,7 +220,7 @@ impl HidppChannel {
         address: u8,
         parameters: [u8; 3],
     ) -> Result<[u8; 16], Hidpp10Error> {
-        self.read_long_register_matching(device, address, parameters, None)
+        self.read_long_register_matching(device, address, parameters, None, SEND_RESPONSE_TIMEOUT)
             .await
     }
 
@@ -236,11 +239,33 @@ impl HidppChannel {
         sub_register: u8,
         parameters: [u8; 2],
     ) -> Result<[u8; 16], Hidpp10Error> {
+        self.read_long_sub_register_with_timeout(
+            device,
+            address,
+            sub_register,
+            parameters,
+            SEND_RESPONSE_TIMEOUT,
+        )
+        .await
+    }
+
+    /// [`Self::read_long_sub_register`], waiting at most `timeout` for the
+    /// reply instead of [`SEND_RESPONSE_TIMEOUT`]. For an optional read that
+    /// must not spend a caller's probe budget on a lost report.
+    pub async fn read_long_sub_register_with_timeout(
+        &self,
+        device: u8,
+        address: u8,
+        sub_register: u8,
+        parameters: [u8; 2],
+        timeout: Duration,
+    ) -> Result<[u8; 16], Hidpp10Error> {
         self.read_long_register_matching(
             device,
             address,
             [sub_register, parameters[0], parameters[1]],
             Some(sub_register),
+            timeout,
         )
         .await
     }
@@ -251,12 +276,13 @@ impl HidppChannel {
         address: u8,
         parameters: [u8; 3],
         echo: Option<u8>,
+        timeout: Duration,
     ) -> Result<[u8; 16], Hidpp10Error> {
         let mut data = [address, 0x00, 0x00, 0x00];
         data[1..].copy_from_slice(&parameters);
 
         let response = Message::from(
-            self.send(
+            self.send_with_timeout(
                 Message::Short(
                     MessageHeader {
                         device_index: device,
@@ -268,6 +294,7 @@ impl HidppChannel {
                 move |raw| {
                     is_rap_response(device, MessageType::GetLongRegister, address, echo, raw)
                 },
+                timeout,
             )
             .await?,
         );

@@ -34,7 +34,7 @@ access devices directly.
 | `crates/openlogi-assets` | Device-render registry + cached fetch from OpenLogi asset mirrors |
 | `crates/openlogi-cli` | CLI dispatch: agent-backed inventory when available, plus direct hardware diagnostics |
 | `crates/openlogi-hook` | OS input capture: CGEventTap / evdev+uinput / WH_MOUSE_LL |
-| `crates/openlogi-inject` | OS input synthesis: CGEvent / uinput+MPRIS / SendInput |
+| `crates/openlogi-inject` | OS input synthesis: CGEvent + virtual HID keyboard / uinput+MPRIS / SendInput |
 | `crates/openlogi-agent-core` | Shared agent orchestration: hook runtime, HID++ writes, DPI cycle, Actions Ring session state |
 | `crates/openlogi-ipc` | The tarpc IPC contract (`src/ipc.rs`) + its local-socket transport, shared by the agent and its clients |
 | `crates/openlogi-agent` | The `openlogi-agent` binary — runtime HID/input server |
@@ -150,7 +150,7 @@ A skipped job is **not** a pass. These procedures do not authorize a push.
 
 ## Rust standards
 
-Edition 2024, MSRV = current stable (1.98), one shared workspace lint table. The
+Edition 2024, MSRV = current stable (1.99), one shared workspace lint table. The
 floor tracks stable instead of trailing it — raise it the day a release ships
 something worth using, and run `devenv update rust-overlay` with it so the local
 toolchain stops being older than CI's. The full standards — the
@@ -180,16 +180,17 @@ loaded for any Rust or `Cargo.toml` edit.
 
 ## Releases
 
-release-plz drives releases: one unified workspace version, ONE root `CHANGELOG.md`
-(never per-crate changelogs), and a single `v{version}` tag that only release-plz
-creates — **never hand-create the tag**. Published GitHub releases are immutable:
+release-plz drives releases: one unified workspace version and ONE root `CHANGELOG.md`
+(never per-crate changelogs). Only release-plz creates a stable `v{version}` tag, and
+only `.github/workflows/prerelease.yml` creates a beta `v{version}-beta.{N}` tag —
+**never hand-create either tag**. Published GitHub releases are immutable:
 never re-run a failed release job or re-dispatch on an existing tag.
 `release-plz.toml` is the versioning contract — don't trim it.
 
 ## Maintaining agent guidance
 
 - Keep one source for each instruction. `AGENTS.md` owns global guidance;
-  `CLAUDE.md` imports it. Shared rule files live in `.agents/rules/`;
+  `.claude/CLAUDE.md` imports it. Shared rule files live in `.agents/rules/`;
   `.claude/rules` is only a relative symlink to that directory. Edit and link
   the canonical files. Keep crate-specific contracts in their own `AGENTS.md`
   and task procedures in skills. Link shared skills instead of copying them.

@@ -23,6 +23,7 @@ use openlogi_core::hid::{Dpi, SmartShiftStatus};
 use tokio::sync::mpsc;
 use tracing::warn;
 
+pub use backlight::DurationSteps;
 pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
 pub(crate) use device_session::ObservedConnection;
@@ -32,7 +33,8 @@ pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
-    BacklightLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ReportRateLoad, SmartShiftLoad,
+    BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
+    PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -55,11 +57,14 @@ use agent::AgentSession;
 use bindings::BindingState;
 use device_store::DeviceStore;
 pub(crate) use devices::camera_model_info;
+pub(crate) use disable_keys::{DisableKeysError, DisableKeysPersistenceStatus};
 use light::LightSession;
 use pointer::PointerState;
 
 use crate::services::assets::AssetResolver;
 use crate::services::device_reads::DeviceReads;
+pub(crate) use crate::services::disable_keys_reads::ConfigReconciliation;
+use crate::services::disable_keys_reads::DisableKeysReads;
 use crate::state::config::ConfigState;
 use crate::state::devices::{build_device_list, pick_initial_device};
 
@@ -73,16 +78,20 @@ mod device_key;
 mod device_session;
 mod device_store;
 mod devices;
+mod disable_keys;
 mod dpi;
 mod easy_switch;
 mod events;
 mod fn_lock;
+mod force_sensing;
 mod inventory;
 mod light;
 mod lighting;
 mod load;
 mod os_layout;
 mod pointer;
+mod pointer_speed;
+mod reconciliation;
 mod report_rate;
 mod scroll;
 mod settings;
@@ -180,8 +189,16 @@ pub struct AppState {
     action_ring_editing_apps: BTreeMap<String, String>,
     /// DPI/SmartShift reads and the active pointer editor value.
     pointer: PointerState,
+    /// Dedicated generation-fenced Disable Keys read owner.
+    disable_keys_reads: DisableKeysReads,
+    /// Monotonic identity for Disable Keys write/reload transactions.
+    next_disable_keys_request_id: u64,
     /// Standalone-light sequencing and aggregate camera activity.
     lights: LightSession,
+    /// Which timer steps the backlight card is showing. A disclosure, not a
+    /// keyboard setting: the keyboard keeps whatever duration was last
+    /// written, and switching this writes nothing.
+    duration_steps: DurationSteps,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
@@ -227,8 +244,11 @@ impl AppState {
             state.confirm_current_smartshift(cx);
             state.load_current_fn_lock(cx);
             state.load_current_report_rate(cx);
+            state.load_current_pointer_speed(cx);
+            state.load_current_force_sensing(cx);
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);
+            state.load_current_disable_keys(cx);
         });
     }
 
@@ -285,6 +305,9 @@ impl AppState {
             action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
             lights: LightSession::default(),
+            duration_steps: DurationSteps::Short,
+            disable_keys_reads: DisableKeysReads::default(),
+            next_disable_keys_request_id: 0,
             ipc_commands,
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,
@@ -339,7 +362,13 @@ impl AppState {
     ) -> bool {
         if self.persist_config(what) {
             let revision = self.config.revision();
-            self.send_ipc(crate::services::ipc::ReloadConfig { chosen, revision });
+            let mut reload = crate::services::ipc::ReloadConfig {
+                chosen,
+                revision,
+                ..Default::default()
+            };
+            self.track_external_config_reload(&mut reload);
+            self.send_config_reload(reload);
             true
         } else {
             false
@@ -366,6 +395,37 @@ impl AppState {
         }
     }
 
+    /// Replace local projections after another writer replaced a GUI save,
+    /// without persisting the GUI's older choice. A recovery retry must still
+    /// confirm the refreshed revision with the agent and then re-read hardware.
+    /// Both outcomes carry invalidation events; only `Ok` confirms that the
+    /// local projections adopted the external file.
+    fn reconcile_external_config(&mut self) -> Result<StateEvents, StateEvents> {
+        let mut events = StateEvents::none();
+        for key in self.disable_keys_reads.reconcile_external_config() {
+            events = events.and(StateEvent::DisableKeysChanged(key));
+        }
+        let events = events.and(self.disable_keys_config_events());
+        let previous_language = self.config.app_settings.language.clone();
+        if let Err(error) = self.config.refresh_feature() {
+            warn!(%error, "could not reconcile externally edited configuration");
+            return Err(events.and(StateEvent::SettingsChanged));
+        }
+        self.disable_keys_reads.external_config_refreshed();
+        let language_changed = self.config.app_settings.language != previous_language;
+        self.restore_config_projections();
+        let events = events
+            .and(StateEvent::SettingsChanged)
+            .and(self.for_current_device(StateEvent::BindingsChanged))
+            .and(self.for_current_device(StateEvent::DpiChanged));
+        Ok(if language_changed {
+            openlogi_core::locale::activate(self.config.app_settings.language.as_deref());
+            StateEvents::from(StateEvent::LanguageChanged).and(events)
+        } else {
+            events
+        })
+    }
+
     /// Current config failure, shown as a fail-closed whole-window notice.
     #[must_use]
     pub fn config_issue(&self) -> Option<&str> {
@@ -381,6 +441,23 @@ impl AppState {
             StateEvent::SettingsChanged.into()
         } else {
             StateEvents::none()
+        }
+    }
+
+    /// Apply the agent's acknowledgement of a GUI save.
+    pub fn apply_saved_config_reload_result(
+        &mut self,
+        result: Result<openlogi_ipc::SavedConfigVerdict, openlogi_ipc::ConfigReloadError>,
+    ) -> StateEvents {
+        match result {
+            Ok(openlogi_ipc::SavedConfigVerdict::Accepted) => {
+                self.apply_config_reload_result(Ok(()))
+            }
+            Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave) => {
+                let _ = self.config.apply_reload_result(Ok(()));
+                self.reconcile_saved_config()
+            }
+            Err(error) => self.apply_config_reload_result(Err(error)),
         }
     }
     /// A clone of the IPC command sender used by the state entity to issue

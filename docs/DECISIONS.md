@@ -4,6 +4,248 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: Backlight writes invalidate other clients' device readings
+
+A successful CLI backlight write could leave the already-open GUI showing the
+previous setting: the write's readback went only to its requester, and firmware
+does not guarantee a settings broadcast for that write.
+
+The agent uses the existing orchestrator-owned `settings_revision` epoch to
+invalidate client readings after a backlight transaction settles. It announces
+errors too, because a write may have reached hardware before confirmation failed.
+No returned value is broadcast as truth and no configuration file is changed.
+An agent-owned task finishes the transaction and publication if its requesting
+client disconnects. Admission reserves the existing per-route write order before
+task scheduling; hardware execution keeps its existing timeout, excluding queue
+wait. The orchestrator lock is never held over hardware I/O.
+
+Desktop invalidates its existing backlight cache rather than joining a read
+started before the revision. If a revision arrives while local writes are still
+pending, it reads again after their replies settle: a delayed local reply may
+predate a newer write from another client. This reconciliation issues no write,
+preserves later local intent, and is discarded with the old route's read state.
+The notification uses the existing snapshot contract, not a new wire field or
+polling timer.
+
+## 2026-10: Channel files are composed from per-release records
+
+Beta releases share the update host with stable ones. A beta publish must
+change what `beta` offers and leave what `stable` offers as it is. A stable
+hotfix published after a newer beta must not take that beta off the beta
+channel. So each release uploads an immutable feed record to
+`releases/<tag>/feed/`: its own `latest.json` and one single-item appcast per
+architecture. Every publish then composes all channel files again from all
+records (`cargo xtask release channels`).
+
+- **Composed again, not edited in place.** Reading the current channel file,
+  adding an item and writing it back would make each file depend on the order
+  in which tags published. A failed publish would leave it wrong until someone
+  repaired it by hand. Composing from the records gives the same files in any
+  order.
+- **Newest by build version, not by tag version.** A beta's build version is
+  the stable release it was cut from, plus its beta number, so build order
+  follows the commits. Sparkle and Windows Installer compare build versions.
+  The built-in update engine compares release versions, and never offers a
+  lower one. The two orders disagree whenever a beta is numbered past a
+  release cut after it, which happens when the release PR's version goes
+  down in between. The later release can be stable (`0.9.0-beta.5`, then
+  `0.8.19`) or another beta (`0.9.0-beta.3`, then `0.8.19-beta.10`). The
+  channels offer the release cut last, which has the earlier one's changes.
+  Sparkle moves a Mac to it; the built-in engine keeps the higher-numbered
+  beta until a release numbered past it. We accept this: `release channels`
+  warns whenever a beta is numbered past what the beta channel offers, so
+  that a release numbered past the beta can follow.
+- **Items copied byte for byte.** The composer never signs. The EdDSA
+  signatures stay the ones `release appcast` made, and the private key stays
+  in that one step.
+- **One appcast per architecture for both channels.** This is Sparkle's own
+  channel model: the beta item carries
+  `<sparkle:channel>beta</sparkle:channel>`, and Sparkle offers it only to an
+  app that allows the beta channel.
+- **The bucket lists the releases, not GitHub Releases.** The updater can offer
+  only what is on R2, and reading R2 needs no GitHub token. Releases up to
+  `v0.8.17` have no record. Until a stable release has one, the current stable
+  channel files stand in for it; after that they are not read.
+- **A record counts once its manifest is up.** A record's appcasts upload
+  first and its `latest.json` last. A record directory without `latest.json`
+  is an upload that stopped part way, and the composer skips it, so it cannot
+  block later releases. A record with its manifest but a file missing or
+  wrong is an error.
+
+## 2026-10: The mock agent's console drives the agent's own indicator state
+
+`openlogi-agent-mock` reads one command per stdin line while the GUI and
+overlay stay connected. A developer can then see a low battery, an offline or
+failing device, a lock-key or backlight indicator, or an agent restart with no
+hardware. Logi Options+ 2.8 has comparable hooks in its agent: a simulated
+device on its HID write path and a fake battery feature. OpenLogi puts the
+same kind of control in its separate mock binary, so the agent ships none.
+
+- **The agent's state machines, not copies.** A battery reading goes through
+  `LowBatteryWatch::take_reading`, a lock key through
+  `LockKeyIndicator::announce`, and a backlight level through
+  `BacklightOverlayManager`. The orchestrator uses the same calls, so the
+  user's settings, the once-per-discharge rule, and the 1.5-second lifetime
+  behave as they do in the agent. `take_reading` and `announce` replace the
+  separate public calls that the orchestrator used to sequence by itself, so
+  no caller can skip the settings check.
+- **Words for people, values for tests.** Tests build `Command` values and
+  call `MockAgent::apply` with explicit `AppSettings`. No test reads a config
+  file or depends on the command words.
+- **A thread of its own for stdin.** Tokio's `stdin` reads on the blocking
+  pool and cannot cancel the read, so it can hold up runtime shutdown. A std
+  thread reads the lines and one task applies them in order. When stdin
+  closes, the console stops and the mock keeps serving.
+- **Semantic state only.** The console changes what the IPC contract already
+  exposes. It does not model HID channels, reports, or barriers. Those stay
+  the Phase 4 replay scenarios in
+  [MOCK_DEVICE_TESTING.md](MOCK_DEVICE_TESTING.md#phase-4-lifecycle-and-fault-scenarios).
+- **`disconnect` closes connections, not the process.** Each connection
+  waits on a shared signal beside its requests. The overlay's agent-lost path
+  and the GUI's reconnect can then be tried without losing the mock's state.
+
+Verified with unit tests of every command and an in-memory connection that
+`disconnect` closes, and by piping commands into the built binary on macOS.
+Nobody has watched the GUI or the overlay follow the console yet.
+
+## 2026-10: An animated desktop switch types the user's Space shortcut first
+
+0.8.16 shipped the timed DockSwipe slide of the next entry. Users on macOS
+26.6.1 and 27.0.1 report that it is slower than a native Ctrl+←/→ switch
+(#1722) and that it stutters in the middle (#1972). The Dock plays its own
+slide for that shortcut. An animated switch therefore types the user's "Move
+left a space" or "Move right a space" shortcut (symbolic hotkeys 79 and 81),
+as #1847 proposed. This revisits the "Not the shortcut" point below.
+
+- **Typed as a keyboard types it.** Each modifier goes down as a key of its
+  own, and an arrow key carries the numeric-pad flag. WindowServer ignores a
+  synthesized hotkey in any other shape (#1653).
+- **Through the virtual HID keyboard when it is installed.** Each edge goes
+  through the device, as a held chord's edges do. An edge the device does not
+  carry goes out as its `CGEvent`. Every `CGEvent` is built before the first
+  edge goes out.
+- **Held chords stay intact.** The keystroke is typed under the held-chord
+  lock. A held modifier the shortcut does not use is lifted for the keystroke
+  and pressed again after it. A held modifier the shortcut uses stays down.
+- **The slide stays as the fallback.** Its frames are built before the gate.
+  They are posted when the shortcut is off or cannot be read, and when a held
+  chord holds the shortcut's key down. A rebound shortcut is read from its
+  record, so it still switches with the Dock's slide.
+- **Instant stays a DockSwipe.** With `animate_desktop_switch` off, the switch
+  posts the two-frame DockSwipe, because the shortcut always animates.
+
+Verified: unit tests check the order, flags and routing key of every edge.
+#1847's author switched both ways with the Dock's slide on macOS 27.0.1. That
+run used the `CGEvent` edges, because the test process had no virtual
+keyboard. On 0.8.16, #1653's reporter switched Spaces with the slide through
+a Ctrl+←/→ binding on the virtual keyboard. That binding sends the same four
+reports as this keystroke. Not verified on hardware: this keystroke through
+the virtual keyboard, and the fallback slide.
+
+## 2026-10: Desktop switches slide like an Options+ three-finger swipe, and can switch at once
+
+Previous Desktop and Next Desktop on macOS posted a DockSwipe of two frames,
+Began and Ended, so the Dock changed Space with no slide (#1673). Two pull
+requests proposed a slide. #1847 posts the user's "Move left a space" and
+"Move right a space" shortcuts (symbolic hotkeys 79 and 81) and falls back to
+the DockSwipe when they are off. #1672 posts DockSwipe frames that follow a
+live drag. OpenLogi posts timed DockSwipe frames, as Logi Options+ does for
+its three-finger swipe, and keeps the two-frame switch as an option.
+
+- **The Options+ timing.** Logi Options+ 2.8 posts one DockSwipe frame per
+  tick of a 16.6 ms timer (`injectionPeriodInMs` in
+  `gesture_handler_3_finger_horz_swipe`), and each tick consumes 15% of the
+  motion still pending. OpenLogi has no hand to follow, so it starts with one
+  desktop width pending. It posts 19 moving frames, 16.6 ms apart, until less
+  than 5% remains (progress 0.954). An Ended frame with an exit velocity then
+  lets the Dock finish. The progress is past the Options+ completion threshold
+  (0.3), so the Dock completes the switch. These values come from static
+  analysis of the Options+ binary, not from a trace of its events.
+- **Not the shortcut.** Options+ also has a Ctrl+Arrow keystroke for a
+  one-shot move (`+[injector InjectMoveToLeftSpace]`), which is close to
+  #1847. The static analysis did not find which actions call it. The shortcut
+  can be off or rebound, and then #1847 switches with no slide again. The
+  DockSwipe needs no user setting, and the Space confirmation per display
+  stays as it is.
+- **Frame fields from #1672.** Up to macOS 26 a slide frame carries the
+  fields #1672 found, with the progress in field 124. macOS 27 reads an
+  attached `IOHIDEvent` instead (#1703). There each frame carries the same
+  progress in its DockSwipe progress field, and the Ended frame adds the
+  velocity child, as Mac Mouse Fix posts its swipes on macOS 27. One
+  `LazyLock` owns the choice of layout, and an ast-grep rule keeps it the
+  only one.
+- **On by default, with an off switch.** `animate_desktop_switch` is on,
+  because the Options+ swipe animates. Off restores the two-frame switch for
+  users who prefer no slide. Only macOS reads it, and the settings page shows
+  it only on macOS.
+- **The action waits for the slide to be posted.** The action worker posts
+  every frame before it takes the next action, about 315 ms, so two switches
+  in a row do not mix their frames. A switch that starts while another is
+  under way is skipped, as before.
+
+Verified on macOS 26.7 with a screen recording: the slide shows about eight
+intermediate frames at 30 fps, and the two-frame switch jumps in one frame.
+The macOS 27 slide is verified only as event construction in unit tests;
+nobody has run it on macOS 27 yet.
+
+## 2026-10: macOS key synthesis types through a virtual HID keyboard when entitled
+
+A key that `CGEventPost` injects enters the window server as software input.
+Some system consumers treat it differently from a key typed on a keyboard:
+issues #1653 and #744 report shortcuts that a real keyboard triggers and a
+posted event does not. An `IOHIDUserDevice` keyboard reports its keys into the
+HID event system, where a USB keyboard's keys enter. The agent therefore
+creates one at arming and sends shortcut keys through it.
+
+- **The entitlement decides, at run time.** Creating the device needs the
+  restricted `com.apple.developer.hid.virtual.device` entitlement. Apple grants
+  it only through a provisioning profile, and AMFI kills a process that claims
+  it without one (an ad-hoc signed probe exited with `SIGKILL` on macOS 26.7).
+  Release builds embed a Developer ID profile for `org.openlogi.agent` that
+  grants it. Local and dev builds carry none, so there creation fails and
+  every key stays on `CGEventPost`.
+- **The claim and its profile ship together, or neither does.**
+  `xtask/src/commands/macos/bundle/provisioning.rs` embeds the profile and
+  writes the agent's entitlements from it, so no entitlements file can claim
+  the grant alone. Before the build starts, it rejects a profile that would get
+  the agent killed on a user's Mac: one limited to registered devices, one for
+  another App ID, one without the grant, or an expired one. After signing, it
+  checks that the profile includes the signing certificate. The release
+  workflow requires the profile, so a signed release cannot fall back to
+  `CGEventPost` without anyone noticing.
+- **Logi Options+ creates the same kind of device, but sends nothing through
+  it.** Its 2.8.981479 agent holds the entitlement and a Developer ID profile.
+  `gestures::create_virtual_hid_keyboard` passes only a `ReportDescriptor` (a
+  65-byte boot keyboard with five key slots and an LED output report). The
+  binary imports no `IOHIDUserDeviceHandleReport*` function, and the gesture
+  then posts F14 or F15 as `CGEvent`s. OpenLogi's use of input reports has no
+  Options+ precedent to copy.
+- **A boot keyboard without outputs.** The descriptor has the modifier bitmap,
+  a reserved byte and six key slots: an eight-byte input report without a
+  report ID. It declares no LED report, because a device without a dispatch
+  queue receives no output reports. The properties set only the descriptor
+  and `Product`. Without a vendor ID, `openlogi-hid`'s Logitech filter never
+  opens the device.
+- **A key is released on the path that pressed it.** A key without a HID usage,
+  a press beyond six keys, and an up edge whose down edge the device did not
+  carry all go out as `CGEvent`s. A tap reports its release before it returns,
+  so the device holds keys only for held chords. A rejected report removes the
+  device and reports every key released; key synthesis then posts `CGEvent`s
+  for the rest of the process. The keys that held chords still own go down
+  again as `CGEvent`s, so each chord's release finds its keys down.
+- **The hook recognises the device by name.** Its key events carry no
+  `SYNTHETIC_EVENT_USER_DATA`, because the HID event system creates them. The
+  hook resolves each key event's sender to the device's `Product` and skips
+  OpenLogi's own, as it skips a tagged `CGEvent`.
+- **The agent owns it.** Only the armed agent creates the device. The exit path
+  removes it after the input workers stop, so a chord released during shutdown
+  still reaches it. The CLI and the GUI keep posting `CGEvent`s.
+
+Verified with unit tests of the report state, the routing and the descriptor,
+and by running an unentitled build: creation fails and keys keep the
+`CGEvent` path. Nobody has run an entitled build, so the report path and its
+effect on #1653 and #744 are not verified.
+
 ## 2026-10: One application on every platform is an `[apps]` alias
 
 A per-app profile was keyed by the identifier one platform reports: a macOS
@@ -299,10 +541,18 @@ engine stays the fallback everywhere else.
   at `appcast-<arch>.xml`, which keeps the matrix and the DMGs as they are. A
   universal bundle would allow one feed but doubles every binary in the
   download and changes what the release builds.
-- **Signed on Linux, in Rust.** `release appcast` signs in the publish job with
-  `ed25519-compact`, checked against signatures Sparkle's own `sign_update`
-  made, instead of running Sparkle's macOS-only tools there. It refuses a
-  private key that does not match the public key the bundles embed.
+- **Signed on Linux, in Rust.** `release appcast` signs in the publish job
+  through `gpui-updater-release`, checked against signatures Sparkle's own
+  `sign_update` made, instead of running Sparkle's macOS-only tools there. It
+  refuses a private key that does not match the public key the bundles embed.
+- **Deltas from the three newest Sparkle releases, made on macOS.** Sparkle
+  offers a delta only to an app at exactly its base version, so three bases
+  cover most installs and keep the macOS leg's time bounded; everyone else
+  takes the full DMG. `BinaryDelta` is macOS-only, so the build leg makes the
+  deltas from the stapled DMG and the Linux publish job only signs and lists
+  them. A delta is kept only after it rebuilds the new app exactly, and one
+  that cannot be made never blocks the release. For 0.8.14 → 0.8.15 on arm64
+  the delta is 3.7 MB against a 21.2 MB DMG.
 - **`CFBundleVersion` is the crate version.** Sparkle compares the appcast's
   `sparkle:version` against it, and cargo-bundle writes the build's UTC
   timestamp there, which would rank above every release. xtask stamps the

@@ -6,7 +6,11 @@
 
 use std::fmt;
 
+use nutype::nutype;
+use serde::de::{self, MapAccess, Visitor};
+use serde::ser::SerializeStruct as _;
 use serde::{Deserialize, Serialize};
+use thiserror::Error as ThisError;
 
 /// How the firmware decides the backlight brightness level.
 ///
@@ -79,39 +83,249 @@ pub struct BacklightState {
     /// Which [`BacklightChange`]s the keyboard accepts.
     #[serde(default)]
     pub controls: BacklightControls,
+    /// How long the keys stay lit after typing stops.
+    ///
+    /// From the keyboard's hands-out fade-out, which Logi Options+ shows as
+    /// the backlight timer. `None` when the keyboard does not offer a
+    /// duration or reports none. A value outside the steps the panel is
+    /// showing is still reported as stored — a longer timer stays visible
+    /// instead of being snapped to 30 seconds.
+    ///
+    /// `serde(default)` only keeps recorded JSON fixtures that predate the
+    /// field loading; the IPC encoding always carries it.
+    #[serde(default)]
+    pub duration: Option<BacklightDuration>,
 }
 
-/// What software may change on a keyboard backlight beyond turning it on or
-/// off, from the `0x1982` capability bits and feature version.
-///
-/// Crosses the agent↔GUI IPC inside [`BacklightState`], so field order is
-/// wire format — changes require a `PROTOCOL_VERSION` bump (guarded by
-/// `openlogi-ipc/tests/wire_format.rs`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BacklightControls {
-    /// Software can switch between the ambient-light sensor choosing the
-    /// level and holding one (permanent-manual mode): the keyboard supports
-    /// both.
-    pub automatic: bool,
-    /// Software can pick the level: permanent-manual mode, `0x1982` version 3
-    /// or later, and more than one level.
-    pub level: bool,
-    /// The firmware can turn the backlight off on a low battery.
-    pub power_save: bool,
+bitflags::bitflags! {
+    /// What software may change on a keyboard backlight beyond turning it on
+    /// or off, derived from the `0x1982` capability bits and feature version.
+    ///
+    /// A bit set: the offers are independent — the `0x1982` layout reports
+    /// some without others, and a named-field struct of bools is exactly the
+    /// shape `clippy::struct_excessive_bools` hears as an untyped state
+    /// machine. Crosses the agent↔GUI IPC inside [`BacklightState`] as a
+    /// single byte — changes to that layout require a `PROTOCOL_VERSION`
+    /// bump (guarded by `openlogi-ipc/tests/wire_format.rs`) — while
+    /// recorded profiles write the released three-field object left as
+    /// `automatic`/`level`/`power_save`, plus `duration`, and read that
+    /// shape from released builds.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct BacklightControls: u8 {
+        /// Software can switch between the ambient-light sensor choosing the
+        /// level and holding one (permanent-manual mode): the keyboard
+        /// supports both.
+        const AUTOMATIC = 1 << 0;
+        /// Software can pick the level: permanent-manual mode, `0x1982`
+        /// version 3 or later, and more than one level.
+        const LEVEL = 1 << 1;
+        /// The firmware can turn the backlight off on a low battery.
+        const POWER_SAVE = 1 << 2;
+        /// Software can set how long the keys stay lit after typing stops:
+        /// `0x1982` version 3 or later, which is the layout those durations
+        /// are written in.
+        const DURATION = 1 << 3;
+    }
+}
+
+impl Default for BacklightControls {
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
 impl BacklightControls {
     /// Whether `change` is one this keyboard accepts, ignoring the level
-    /// range: [`BacklightChange::Level`] also needs a level below
-    /// [`BacklightState::nb_levels`].
+    /// range and the duration range: [`BacklightChange::Level`] also needs a
+    /// level below [`BacklightState::nb_levels`], and
+    /// [`BacklightChange::Duration`] a validated timer.
     #[must_use]
-    pub fn allow(self, change: BacklightChange) -> bool {
+    pub const fn allow(self, change: BacklightChange) -> bool {
         match change {
             BacklightChange::Enabled(_) => true,
-            BacklightChange::Automatic(_) => self.automatic,
-            BacklightChange::Level(_) => self.level,
-            BacklightChange::PowerSave(_) => self.power_save,
+            BacklightChange::Automatic(_) => self.contains(Self::AUTOMATIC),
+            BacklightChange::Level(_) => self.contains(Self::LEVEL),
+            BacklightChange::PowerSave(_) => self.contains(Self::POWER_SAVE),
+            BacklightChange::Duration(_) => self.contains(Self::DURATION),
         }
+    }
+}
+
+/// Field names of the object shape recorded profiles carry: the released
+/// three fields, `duration` new here. Records from released builds have no
+/// `duration` key.
+const CONTROLS_FIELDS: [&str; 4] = ["automatic", "level", "power_save", "duration"];
+
+impl Serialize for BacklightControls {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            // The released three-field object, written back through this
+            // build's `duration` bit; a re-recorded profile is a release
+            // record plus its `duration` key.
+            let mut object = serializer.serialize_struct("BacklightControls", 4)?;
+            object.serialize_field("automatic", &self.contains(Self::AUTOMATIC))?;
+            object.serialize_field("level", &self.contains(Self::LEVEL))?;
+            object.serialize_field("power_save", &self.contains(Self::POWER_SAVE))?;
+            object.serialize_field("duration", &self.contains(Self::DURATION))?;
+            object.end()
+        } else {
+            // The IPC payload carries the set as one byte.
+            self.bits().serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BacklightControls {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(ControlsVisitor::default())
+        } else {
+            u8::deserialize(deserializer).map(Self::from_bits_retain)
+        }
+    }
+}
+
+/// Reads either recorded profile shape: the released object or — so a future
+/// schema change cannot strand a reader — the set as its bit number.
+#[derive(Default)]
+struct ControlsVisitor {
+    controls: BacklightControls,
+}
+
+impl<'de> Visitor<'de> for ControlsVisitor {
+    type Value = BacklightControls;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "the recorded backlight controls object (three released fields plus \
+             `duration`) or the controls as a bit number",
+        )
+    }
+
+    /// The recorded object shape: missing bits are `false`, matching the
+    /// `#[serde(default)]` the removed fields carried.
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut value = Self::default();
+        while let Some(key) = map.next_key::<String>()? {
+            let bit = match key.as_str() {
+                "automatic" => BacklightControls::AUTOMATIC,
+                "level" => BacklightControls::LEVEL,
+                "power_save" => BacklightControls::POWER_SAVE,
+                "duration" => BacklightControls::DURATION,
+                other => return Err(de::Error::unknown_field(other, &CONTROLS_FIELDS)),
+            };
+            if map.next_value()? {
+                value.controls |= bit;
+            }
+        }
+        Ok(value.controls)
+    }
+
+    /// A future build may record the set as its bit number.
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        let bits = u8::try_from(value).map_err(|_| {
+            de::Error::invalid_value(
+                de::Unexpected::Unsigned(value),
+                &"a backlight controls bit set within one byte",
+            )
+        })?;
+        Ok(BacklightControls::from_bits_retain(bits))
+    }
+}
+
+/// One keyboard fade-out the `0x1982` timer can store: a positive multiple
+/// of five seconds, at most two hours — one unit through `0x05a0`.
+///
+/// Validated rather than a bare `u16`, so no calling layer re-checks the
+/// 5-second rule and [`BacklightChange::Duration`] cannot carry a timer the
+/// write layer would have to reject. The wire and the TOML still carry plain
+/// seconds; serde goes through the same validation.
+#[nutype(
+    validate(with = validate_fade_out, error = BacklightDurationError),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct BacklightDuration(u16);
+
+impl BacklightDuration {
+    /// Seconds in one HID++ `0x1982` fade-out unit.
+    pub const UNIT_SECONDS: u16 = 5;
+
+    /// Longest fade-out `0x1982` stores, in units.
+    pub const MAX_UNITS: u16 = 0x05a0;
+
+    /// Longest fade-out `0x1982` stores: two hours.
+    pub const MAX_SECONDS: u16 = Self::MAX_UNITS * Self::UNIT_SECONDS;
+
+    /// The duration in seconds.
+    #[must_use]
+    pub fn seconds(self) -> u16 {
+        self.into_inner()
+    }
+
+    /// The duration in the feature's stored units, `1..=[Self::MAX_UNITS]`.
+    #[must_use]
+    pub fn units(self) -> u16 {
+        self.into_inner() / Self::UNIT_SECONDS
+    }
+
+    /// The fade-out stored in `units`, or `None` when the device reported
+    /// none (`0`, what a keyboard without the timer writes) or a length
+    /// beyond the two hours this feature version stores.
+    #[must_use]
+    pub fn from_units(units: u16) -> Option<Self> {
+        Self::try_new(units.checked_mul(Self::UNIT_SECONDS)?).ok()
+    }
+}
+
+/// Why a value is not a [`BacklightDuration`].
+#[derive(Clone, Debug, PartialEq, Eq, ThisError)]
+pub enum BacklightDurationError {
+    /// No positive multiple of the 5-second unit: `0`.
+    #[error("the fade-out must be a positive multiple of five seconds, {0} was given")]
+    BelowOneUnit(u16),
+    /// A value between two 5-second steps.
+    #[error("the fade-out must be a multiple of five seconds, {0} was given")]
+    BetweenSteps(u16),
+    /// A fade-out longer than the two hours `0x1982` stores.
+    #[error("the fade-out cannot exceed two hours (7200 seconds), {0} was given")]
+    BeyondTwoHours(u16),
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "nutype hands the validator a reference to the inner value"
+)]
+fn validate_fade_out(seconds: &u16) -> Result<(), BacklightDurationError> {
+    let seconds = *seconds;
+    if seconds < BacklightDuration::UNIT_SECONDS {
+        Err(BacklightDurationError::BelowOneUnit(seconds))
+    } else if !seconds.is_multiple_of(BacklightDuration::UNIT_SECONDS) {
+        Err(BacklightDurationError::BetweenSteps(seconds))
+    } else if seconds > BacklightDuration::MAX_SECONDS {
+        Err(BacklightDurationError::BeyondTwoHours(seconds))
+    } else {
+        Ok(())
     }
 }
 
@@ -132,6 +346,8 @@ pub enum BacklightChange {
     Level(u8),
     /// Turn battery saving on or off.
     PowerSave(bool),
+    /// Keep the keys lit this long after typing stops.
+    Duration(BacklightDuration),
 }
 
 impl fmt::Display for BacklightChange {
@@ -142,6 +358,7 @@ impl fmt::Display for BacklightChange {
             Self::Automatic(on) => write!(f, "automatic brightness {}", on_off(on)),
             Self::Level(level) => write!(f, "backlight level {level}"),
             Self::PowerSave(on) => write!(f, "battery saving {}", on_off(on)),
+            Self::Duration(seconds) => write!(f, "backlight duration {}s", seconds.seconds()),
         }
     }
 }
@@ -158,6 +375,8 @@ impl BacklightState {
     #[must_use]
     pub fn accepts(self, change: BacklightChange) -> bool {
         self.controls.allow(change)
+            // A duration is valid by construction; only a level needs an
+            // in-range check against this keyboard.
             && match change {
                 BacklightChange::Level(level) => level < self.nb_levels,
                 _ => true,
@@ -212,6 +431,7 @@ impl BacklightState {
                 next.current_level = level;
             }
             BacklightChange::PowerSave(on) => next.power_save = on,
+            BacklightChange::Duration(seconds) => next.duration = Some(seconds),
         }
         next.status = if !next.enabled {
             BacklightStatus::DisabledBySoftware
@@ -242,6 +462,12 @@ mod tests {
         assert_eq!(max_backlight_level(0), 0);
     }
 
+    /// A test duration that is one of the panel steps; the type itself
+    /// guarantees legality.
+    fn duration(seconds: u16) -> BacklightDuration {
+        BacklightDuration::try_from(seconds).expect("a listed step is a valid duration")
+    }
+
     fn lit() -> BacklightState {
         BacklightState {
             enabled: true,
@@ -250,11 +476,11 @@ mod tests {
             current_level: 4,
             nb_levels: 8,
             power_save: true,
-            controls: BacklightControls {
-                automatic: true,
-                level: true,
-                power_save: true,
-            },
+            duration: Some(duration(30)),
+            controls: BacklightControls::AUTOMATIC
+                | BacklightControls::LEVEL
+                | BacklightControls::POWER_SAVE
+                | BacklightControls::DURATION,
         }
     }
 
@@ -269,6 +495,7 @@ mod tests {
             BacklightChange::Automatic(false),
             BacklightChange::Level(3),
             BacklightChange::PowerSave(false),
+            BacklightChange::Duration(duration(15)),
         ] {
             assert!(all.accepts(change), "{change}");
             assert!(!none.accepts(change), "{change}");
@@ -282,6 +509,44 @@ mod tests {
         assert!(lit().accepts(BacklightChange::Level(0)));
         assert!(lit().accepts(BacklightChange::Level(7)));
         assert!(!lit().accepts(BacklightChange::Level(8)));
+    }
+
+    #[test]
+    fn a_duration_is_validated_at_construction_not_at_use() {
+        // 35 seconds is a legal fade-out, just not a short step.
+        assert!(lit().accepts(BacklightChange::Duration(duration(35))));
+        let duration = BacklightDuration::try_from(30).expect("30 is a step");
+        assert_eq!(duration.seconds(), 30);
+        assert_eq!(
+            duration.units(),
+            6,
+            "the feature stores 5-second units; 6 units is the 30 second step"
+        );
+        assert_eq!(BacklightDuration::from_units(6), Some(duration));
+        assert_eq!(
+            BacklightDuration::from_units(BacklightDuration::MAX_UNITS),
+            BacklightDuration::try_from(BacklightDuration::MAX_SECONDS).ok()
+        );
+        // The device may report it has no timer written.
+        assert_eq!(BacklightDuration::from_units(0), None);
+        // Each rejection names exactly what a caller typed wrong.
+        assert_eq!(
+            BacklightDuration::try_from(0).unwrap_err(),
+            BacklightDurationError::BelowOneUnit(0)
+        );
+        assert_eq!(
+            BacklightDuration::try_from(7).unwrap_err(),
+            BacklightDurationError::BetweenSteps(7)
+        );
+        assert_eq!(
+            BacklightDuration::try_from(7_205).unwrap_err(),
+            BacklightDurationError::BeyondTwoHours(7_205)
+        );
+        assert_eq!(
+            BacklightDuration::try_from(7_200).err(),
+            None,
+            "two hours is the longest the feature stores"
+        );
     }
 
     #[test]
@@ -310,6 +575,10 @@ mod tests {
         assert_eq!(
             BacklightChange::PowerSave(true).to_string(),
             "battery saving on"
+        );
+        assert_eq!(
+            BacklightChange::Duration(duration(15)).to_string(),
+            "backlight duration 15s"
         );
     }
 
@@ -389,6 +658,23 @@ mod tests {
         assert_eq!(set.current_level, 2);
         assert_eq!(set.mode, BacklightMode::PermanentManual);
         assert_eq!(set.status, BacklightStatus::PermanentManual);
+    }
+
+    #[test]
+    fn a_duration_changes_only_the_timer() {
+        let shorter = lit().changed(BacklightChange::Duration(duration(15)));
+        assert_eq!(
+            shorter,
+            BacklightState {
+                duration: Some(duration(15)),
+                ..lit()
+            }
+        );
+        // Already on that step: nothing visible would change.
+        assert_eq!(
+            lit().changed(BacklightChange::Duration(duration(30))),
+            lit()
+        );
     }
 
     #[test]

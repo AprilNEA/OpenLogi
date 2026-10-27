@@ -233,17 +233,36 @@ pub struct DeviceEntityFirmwareInfo {
     /// Exactly one entity will be active at any given time.
     pub active: bool,
 
-    /// The transport protocol PID.
+    /// Bytes 9 to 15 of the reply, exactly as the device sent them.
     ///
-    /// If this entity is the active one (see [`Self::active`]), this will be
-    /// set to the actual PID. If it is not, this field COULD be all-zero.
-    pub transport_pid: u16,
-
-    /// Optional extra versioning information.
-    pub extra_version: [u8; 5],
+    /// Logitech's 2012 HID++ 2.0 draft calls this region
+    /// `transportLayer_Specific_info`, and Logi Options+ 2.8 keeps it as one
+    /// raw seven-byte value. Its meaning depends on the entity and the link,
+    /// so this field does not interpret it. [`Self::transport_pid`] reads a
+    /// PID out of it only where the evidence supports one.
+    pub transport_specific_info: [u8; 7],
 }
 
 impl DeviceEntityFirmwareInfo {
+    /// The PID of the device on the link that carried this request, when the
+    /// transport-specific region is known to hold it.
+    ///
+    /// Logitech's `0x0003` version 1 document names bytes 9 and 10 `trPid`,
+    /// big-endian: the USB PID over USB, the Bluetooth PID over Bluetooth,
+    /// the eQuad ID over eQuad. That document defines only entity types 0 to
+    /// 2, and a wired G502 LIGHTSPEED shows the field is not universal: its
+    /// running main application reports its USB PID there, but its dormant
+    /// bootloader reports a different one. So this returns a PID only for
+    /// the active [`DeviceEntityType::MainApplication`] entity, and `None`
+    /// for every other entity. [`Self::transport_specific_info`] still holds
+    /// the raw bytes.
+    #[must_use]
+    pub fn transport_pid(&self) -> Option<u16> {
+        let [high, low, ..] = self.transport_specific_info;
+        (self.active && self.entity_type == DeviceEntityType::MainApplication)
+            .then_some(u16::from_be_bytes([high, low]))
+    }
+
     fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
         // The version is one four-digit field, as Options+ reads it: number
         // and revision are its high and low two digits. A binary version is
@@ -261,8 +280,9 @@ impl DeviceEntityFirmwareInfo {
             revision,
             build: four_digit_field(u16::from_be_bytes([payload[6], payload[7]])),
             active: payload[8] & 1 != 0,
-            transport_pid: u16::from_be_bytes([payload[9], payload[10]]),
-            extra_version: [
+            transport_specific_info: [
+                payload[9],
+                payload[10],
                 payload[11],
                 payload[12],
                 payload[13],

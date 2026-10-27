@@ -158,6 +158,17 @@ impl AppState {
             .map(DeviceRecord::device_key)
             .collect();
         let settings_moved = settings_moved(&self.devices.records, &merged_list);
+        let reconnected = reconnected(&self.devices.records, &merged_list);
+        let disable_keys_invalidated: Vec<DeviceKey> = merged_list
+            .iter()
+            .filter(|new| {
+                self.devices.records.iter().any(|old| {
+                    old.config_key == new.config_key
+                        && (old.route != new.route || old.online != new.online)
+                })
+            })
+            .map(DeviceRecord::device_key)
+            .collect();
 
         self.devices.replace(merged_list, new_index);
         for key in &rerouted {
@@ -169,6 +180,14 @@ impl AppState {
         for key in &settings_moved {
             // The old readings stay on screen until the device answers.
             self.pointer.reads.revalidate_device_settings(key);
+            self.disable_keys_reads.revalidate_device_settings(key);
+        }
+        for key in &reconnected {
+            self.pointer_speed_reconnected(key);
+            self.force_sensing_reconnected(key);
+        }
+        for key in &disable_keys_invalidated {
+            self.invalidate_disable_keys(key);
         }
         let present: HashSet<_> = self
             .devices
@@ -178,6 +197,8 @@ impl AppState {
             .collect();
         self.pointer
             .reads
+            .retain_present(|key| present.contains(key));
+        self.disable_keys_reads
             .retain_present(|key| present.contains(key));
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
@@ -394,6 +415,9 @@ impl AppState {
                 Some(Load::Failed(_))
             ) {
                 self.retry_smartshift(&key);
+            }
+            if matches!(self.disable_keys_reads.load(&key), Load::Failed(_)) {
+                self.disable_keys_reads.retry(&key);
             }
         }
         // The pointer editor value follows the active device; adopt the newly
@@ -731,6 +755,21 @@ pub(super) fn settings_moved(old: &[DeviceRecord], new: &[DeviceRecord]) -> Vec<
                     && old.route == new.route
                     && old.settings_revision != new.settings_revision
             })
+        })
+        .map(DeviceRecord::device_key)
+        .collect()
+}
+
+/// The devices in `new` that came back online since `old`: offline before,
+/// or online on another route. The agent writes their saved settings again
+/// when they connect.
+pub(super) fn reconnected(old: &[DeviceRecord], new: &[DeviceRecord]) -> Vec<DeviceKey> {
+    new.iter()
+        .filter(|new| {
+            new.online
+                && old.iter().any(|old| {
+                    old.config_key == new.config_key && (!old.online || old.route != new.route)
+                })
         })
         .map(DeviceRecord::device_key)
         .collect()

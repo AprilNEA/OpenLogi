@@ -233,7 +233,9 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
         self.failures.retain(|node, _| seen.contains(node));
     }
 
-    #[cfg(test)]
+    /// Whether the node's last complete inventory is still served — live, or
+    /// replayed within its grace. `false` once the grace expired and the live
+    /// result surfaced instead.
     pub(super) fn contains_last_good(&self, node: &K) -> bool {
         self.last_good.contains_key(node)
     }

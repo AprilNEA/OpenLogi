@@ -1,9 +1,10 @@
-# Owner: openlogi_inject::uinput — the names of OpenLogi's uinput devices and
-# the check that recognizes them.
-id: inject-uinput-device-owner
+# Owners: openlogi_core::uinput — the names of OpenLogi's uinput devices and
+# the check that recognizes them — and openlogi_inject::uinput::builder, the
+# one place that creates them under those names.
+id: core-uinput-device-owner
 language: rust
 severity: error
-message: Create uinput devices with openlogi_inject::uinput::builder and recognize them with uinput::is_own_device, the uinput device-name owner.
+message: Create uinput devices with openlogi_inject::uinput::builder, and name and recognize them only through openlogi_core::uinput (Device::name, is_own_device), the uinput device-name owner.
 note: |
   The Linux hook refused devices by a name prefix that openlogi-inject
   repeated by hand when it named its action injector, so a rename had to
@@ -18,6 +19,7 @@ note: |
 files:
   - crates/**/*.rs
 ignores:
+  - crates/openlogi-core/src/uinput.rs
   - crates/openlogi-inject/src/uinput.rs
 rule:
   any:

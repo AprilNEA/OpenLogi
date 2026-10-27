@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use openlogi_core::config::AppSettings;
 use openlogi_ipc::{Generation, LockKeyChange, LockKeyObservation, OBSERVE_HOLD};
 use tokio::sync::watch;
 
@@ -33,12 +34,26 @@ impl Default for LockKeyIndicator {
 }
 
 impl LockKeyIndicator {
+    /// Show a lock key a keyboard turned on or off, unless the user turned
+    /// [`AppSettings::lock_key_notifications`] off or this platform gives the
+    /// key no meaning. Answers whether the change is shown.
+    ///
+    /// Call it inside a Tokio runtime: a task ends the change when its time is
+    /// up.
+    #[must_use]
+    pub fn announce(&self, change: LockKeyChange, settings: &AppSettings) -> bool {
+        if !settings.lock_key_notifications || !change.key.is_indicated_here() {
+            return false;
+        }
+        self.show(change, settings.language.clone());
+        true
+    }
+
     /// Show `change` for [`DISPLAY_LIFETIME`], replacing the change on show.
     ///
     /// `language` is the configured UI locale, or `None` to follow the
-    /// overlay host's. Call it inside a Tokio runtime: a task ends the change
-    /// when its time is up.
-    pub fn show(&self, change: LockKeyChange, language: Option<String>) {
+    /// overlay host's.
+    fn show(&self, change: LockKeyChange, language: Option<String>) {
         let mut generation = 0;
         self.published.send_modify(|observation| {
             observation.generation = observation.generation.wrapping_add(1);

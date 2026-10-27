@@ -30,7 +30,13 @@ use tokio::time::Instant;
 /// round-trip back.
 const SESSION_GRACE: Duration = Duration::from_secs(3);
 
-const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_GRACE);
+/// How long a session lives after [`ActionRingManager::begin`] opens it.
+///
+/// No session outlives this: hover, activation, and cancel all find an older
+/// one expired. Work that must not outlast a session, but may never hear it
+/// close (the overlay can exit without cancelling), ends this long after the
+/// session opened.
+pub const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_GRACE);
 
 /// Immutable input used to open one ring session.
 pub struct ActionRingSessionSpec {
@@ -161,22 +167,26 @@ impl ActionRingManager {
         invocation
     }
 
-    /// Dismiss the showing session, if any, and return whether one was
-    /// dismissed — which is what lets a second press of the ring trigger toggle
-    /// the ring closed.
+    /// Dismiss the showing session, if any, and return its session id —
+    /// which is what lets a second press of the ring trigger toggle the ring
+    /// closed, and tells the caller which session that press ended.
     ///
     /// Dismissing simply removes the session. The old wire format could only
     /// carry invocations, so a dismissal had to be encoded as an *empty*
     /// invocation for the overlay to acknowledge; observing state needs no such
     /// placeholder, and a trigger press racing the close now finds no session
     /// and opens a fresh ring.
-    pub fn dismiss_active(&self) -> bool {
+    pub fn dismiss_active(&self) -> Option<u64> {
         let mut state = self.state();
         self.expire_and_publish(&mut state);
-        let dismissed = state.showing();
-        if dismissed {
-            state.active = None;
-        }
+        let dismissed = if state.showing() {
+            state
+                .active
+                .take()
+                .map(|session| session.invocation.session_id)
+        } else {
+            None
+        };
         self.publish(&state);
         dismissed
     }
@@ -347,25 +357,25 @@ mod tests {
         let manager = ActionRingManager::default();
 
         // Nothing showing yet: the first press must open, not dismiss.
-        assert!(!manager.dismiss_active());
+        assert_eq!(manager.dismiss_active(), None);
         let opened = manager.begin(spec());
         let showing = manager.observe(0).await;
         assert_eq!(showing.invocation, Some(opened.clone()));
 
         // Second press: dismissed, and the overlay observes "no ring" rather
         // than a placeholder invocation it has to acknowledge.
-        assert!(manager.dismiss_active());
+        assert_eq!(manager.dismiss_active(), Some(opened.session_id));
         let dismissed = manager.observe(showing.generation).await;
         assert_eq!(dismissed.invocation, None);
 
         // Nothing is showing, so a third press opens again.
-        assert!(!manager.dismiss_active());
+        assert_eq!(manager.dismiss_active(), None);
         let reopened = manager.begin(spec());
         assert!(!reopened.slots.is_empty());
 
         // A stale Cancel for the dismissed session must not kill the new one.
         manager.cancel(opened.session_id);
-        assert!(manager.dismiss_active());
+        assert_eq!(manager.dismiss_active(), Some(reopened.session_id));
     }
 
     #[test]
@@ -435,7 +445,7 @@ mod tests {
         let manager = ActionRingManager::default();
         let mut ring = manager.subscribe();
         let closes: [fn(&ActionRingManager, u64); 3] = [
-            |manager, _| assert!(manager.dismiss_active()),
+            |manager, session| assert_eq!(manager.dismiss_active(), Some(session)),
             |manager, session| {
                 manager
                     .activate(session, ActionRingSlot::Top)

@@ -49,6 +49,29 @@ pub async fn determine_version(
     chan: &HidppChannel,
     device_index: u8,
 ) -> Result<Option<ProtocolVersion>, ChannelError> {
+    determine_version_with(chan, device_index, WriteCompletion::Bounded).await
+}
+
+/// Probe the protocol in an owned transaction. Drive this future through
+/// native write completion even if its requester stops waiting.
+pub async fn determine_version_write_through(
+    chan: &HidppChannel,
+    device_index: u8,
+) -> Result<Option<ProtocolVersion>, ChannelError> {
+    determine_version_with(chan, device_index, WriteCompletion::Drain).await
+}
+
+/// Per-call lifetime policy; never changes a shared channel's timeout mode.
+pub(crate) enum WriteCompletion {
+    Bounded,
+    Drain,
+}
+
+async fn determine_version_with(
+    chan: &HidppChannel,
+    device_index: u8,
+    completion: WriteCompletion,
+) -> Result<Option<ProtocolVersion>, ChannelError> {
     // To determine the protocol version, we send a HID++2.0 ping message
     // feature with index 0x00, function 0x01).
     // Devices supporting protocol >=2.0 will respond with a defined response
@@ -68,29 +91,34 @@ pub async fn determine_version(
         [0x00, 0x00, 0x00],
     );
 
-    let response = chan
-        .send(msg.into(), move |resp| {
-            // If we receive a valid HID++2.0 response, we'll use that.
-            if v20::Message::from(*resp).header() == msg.header() {
-                return true;
-            }
+    let matches = move |resp: &crate::channel::HidppMessage| {
+        // If we receive a valid HID++2.0 response, we'll use that.
+        if v20::Message::from(*resp).header() == msg.header() {
+            return true;
+        }
 
-            // We only care about HID++1.0 error messages, which are always short according
-            // to the spec.
-            if let v10::Message::Short(header, payload) = v10::Message::from(*resp)
+        // We only care about HID++1.0 error messages, which are always short according
+        // to the spec.
+        if let v10::Message::Short(header, payload) = v10::Message::from(*resp)
                 && header.device_index == device_index
                     && header.sub_id == v10::MessageType::Error.into()
                     // The feature index we sent would be interpreted as the sub ID by HID++1.0, which is included in the error message.
                     && payload[0] == 0x00
                     // The function & software IDs would be interpreted as the register address in HID++1.0.
                     && payload[1] == nibble::combine(msg.header().function_id, sw_id)
-            {
-                return true;
-            }
+        {
+            return true;
+        }
 
-            false
-        })
-        .await?;
+        false
+    };
+    let response = match completion {
+        WriteCompletion::Bounded => chan.send(msg.into(), matches).await,
+        WriteCompletion::Drain => {
+            chan.send_write_through(msg.into(), matches, crate::channel::SEND_RESPONSE_TIMEOUT)
+                .await
+        }
+    }?;
 
     let v20_msg = v20::Message::from(response);
     if v20_msg.header() == msg.header() {

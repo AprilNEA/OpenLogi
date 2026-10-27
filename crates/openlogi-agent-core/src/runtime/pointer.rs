@@ -2,6 +2,7 @@
 
 use openlogi_core::binding::{Action, Effect, NativeAction};
 use openlogi_hook::PointerTarget;
+use tracing::debug;
 
 use super::ActionDispatchTarget;
 
@@ -29,7 +30,9 @@ impl ActionDispatchTarget {
         else {
             return Some(self);
         };
-        if !pointer_action_allowed(action, target, current(), || is_focused(target)) {
+        let current = current();
+        if !pointer_action_allowed(action, target, current, || is_focused(target)) {
+            debug!(action = %action.label(), captured = ?target, ?current, "mouse action target unavailable, moved, or not focused — skipped");
             return None;
         }
         // Safari's existing AX implementation uses AXFocusedWindow. It is

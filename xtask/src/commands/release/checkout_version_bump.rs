@@ -1,9 +1,9 @@
-use std::io::Write as _;
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use xshell::{Shell, cmd};
 
+use crate::support::github_output;
 use crate::support::manifest::{parse_workspace_package, workspace_package};
 
 const RELEASE_BRANCH: &str = "master";
@@ -89,21 +89,7 @@ fn manifest_version_commit(sh: &Shell, version: &str) -> Result<Option<String>> 
 }
 
 fn write_skip_output(skip: bool) -> Result<()> {
-    let Some(path) = std::env::var_os("GITHUB_OUTPUT") else {
-        return Ok(());
-    };
-    let mut output = fs_err::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| {
-            format!(
-                "opening GitHub Actions output {}",
-                PathBuf::from(path).display()
-            )
-        })?;
-    writeln!(output, "skip={skip}")?;
-    Ok(())
+    github_output::write(&[("skip", if skip { "true" } else { "false" })])
 }
 
 #[cfg(test)]

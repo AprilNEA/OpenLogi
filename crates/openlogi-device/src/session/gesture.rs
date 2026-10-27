@@ -40,12 +40,13 @@ use crate::SharedChannel;
 use crate::channel::route::DeviceRoute;
 
 pub use super::capture::CaptureHost;
-use super::capture::{ArmedCapture, Liveness, run_capture};
+use super::capture::{ArmedCapture, Liveness, ReportingChangeStream, run_capture};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
 pub use main_wheel::MainWheelDivert;
 
+use super::capture_restore::ArmedReporting;
 pub use super::capture_restore::{
     CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome,
     CaptureSessionStop, PendingCaptureRestore,
@@ -343,6 +344,9 @@ impl ArmedCapture for GestureCapture {
                 && let Some(event) = hires_wheel::decode_event(msg, device_index, idx)
             {
                 if let HiResWheelEvent::RatchetSwitch(state) = event {
+                    // Not input. The inventory's listener on this channel
+                    // counts it as a setting change, so clients re-read
+                    // SmartShift.
                     debug!(index = device_index, ?state, "wheel ratchet switched");
                 } else if let Some(input) = main_wheel::movement_input(event, per_notch) {
                     let _ = sink.send(input);
@@ -363,6 +367,14 @@ impl ArmedCapture for GestureCapture {
 
     async fn rearm(&self) {
         self.armed.rearm().await;
+    }
+
+    fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
+        self.armed.armed_reporting()
+    }
+
+    fn take_reporting_changes(&mut self) -> Option<ReportingChangeStream> {
+        self.armed.take_reporting_changes()
     }
 
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
@@ -391,17 +403,27 @@ impl ArmedCapture for GestureCapture {
 /// included. Logi Options+ reads the same sequence as a `Stop`
 /// (`devio_feature_2150::convert`, "Inconsistent transition from ACTIVE to
 /// INACTIVE. Consider this a STOP.").
+///
+/// A status byte the spec does not define never delivers a tap: only
+/// `Inactive` says the wheel is settled. Its rotation still scrolls.
 fn thumbwheel_input(
     event: thumbwheel::ThumbwheelEvent,
     previous: RotationStatus,
     resolution: WheelResolution,
 ) -> Option<CapturedInput> {
-    if event.rotation != 0 || event.rotation_status.is_rolling() || previous.leaves_roll_open() {
+    if event.rotation != 0
+        || event.rotation_status.leaves_roll_open()
+        || event.rotation_status == RotationStatus::Stop
+        || previous.leaves_roll_open()
+    {
         return Some(CapturedInput::Scroll {
             increments: event.rotation,
             resolution,
             status: event.rotation_status,
         });
+    }
+    if !event.rotation_status.is_at_rest() {
+        return None;
     }
     event
         .single_tap

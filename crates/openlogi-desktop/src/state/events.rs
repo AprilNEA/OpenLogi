@@ -55,10 +55,16 @@ pub(crate) enum StateEvent {
     FnLockChanged(DeviceKey),
     /// The mouse's report-rate read landed or changed.
     ReportRateChanged(DeviceKey),
+    /// The mouse's pointer-speed read landed or changed.
+    PointerSpeedChanged(DeviceKey),
+    /// The device's press-force read landed or changed.
+    ForceSensingChanged(DeviceKey),
     /// The keyboard's backlight read landed or changed.
     BacklightChanged(DeviceKey),
     /// The device's Easy-Switch host read landed or changed.
     EasySwitchChanged(DeviceKey),
+    /// Disable Keys data, write, or persistence recovery changed.
+    DisableKeysChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -92,8 +98,11 @@ impl StateEvent {
             | Self::SmartShiftChanged(key)
             | Self::FnLockChanged(key)
             | Self::ReportRateChanged(key)
+            | Self::PointerSpeedChanged(key)
+            | Self::ForceSensingChanged(key)
             | Self::BacklightChanged(key)
             | Self::EasySwitchChanged(key)
+            | Self::DisableKeysChanged(key)
             | Self::LightingChanged(key)
             | Self::DeviceConfigChanged(key) => Some(key),
             Self::AgentChanged
@@ -241,8 +250,11 @@ impl AppState {
             | StateEvent::SmartShiftChanged(_)
             | StateEvent::FnLockChanged(_)
             | StateEvent::ReportRateChanged(_)
+            | StateEvent::PointerSpeedChanged(_)
+            | StateEvent::ForceSensingChanged(_)
             | StateEvent::BacklightChanged(_)
             | StateEvent::EasySwitchChanged(_)
+            | StateEvent::DisableKeysChanged(_)
             | StateEvent::LightingChanged(_)
             | StateEvent::CameraChanged
             | StateEvent::CameraPermissionChanged

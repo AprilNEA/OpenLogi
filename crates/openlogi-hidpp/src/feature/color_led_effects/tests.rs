@@ -250,3 +250,116 @@ fn zone_info_refuses_a_short_reply() {
     let reply = zone_info_reply(2, Message::Short(zone_info_header(), [2, 0x00, 0x01]));
     assert_matches!(reply, Err(Hidpp20Error::UnsupportedResponse));
 }
+
+/// Walks the feature table of a mock device that lists `0x8070` at
+/// `version`, and returns whether the device then provides
+/// `(ColorLedEffectsFeature, ColorLedEffectsV1Feature)`.
+fn enumerated_color_led_effects(version: u8) -> (bool, bool) {
+    use std::sync::Arc;
+
+    use super::{ColorLedEffectsFeature, ColorLedEffectsV1Feature};
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::device::Device;
+    use crate::nibble::U4;
+    use crate::protocol::v20::{Message, MessageHeader};
+
+    let header = |feature_index, function| MessageHeader {
+        device_index: 3,
+        feature_index,
+        function_id: U4::from_lo(function),
+        software_id: U4::from_lo(1),
+    };
+    // A `FeatureSet.getFeatureId` reply: the id, no type flags, the version.
+    let entry = |id: u16, version: u8| {
+        let mut payload = [0; 16];
+        payload[..2].copy_from_slice(&id.to_be_bytes());
+        payload[3] = version;
+        payload
+    };
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        for reply in [
+            // Root ping: HID++ 4.2.
+            Message::Short(header(0, 1), [4, 2, 0]),
+            // Root getFeature(0x0001): FeatureSet sits at index 1.
+            Message::Short(header(0, 0), [1, 0, 0]),
+            // FeatureSet: two entries after the root.
+            Message::Short(header(1, 0), [2, 0, 0]),
+            Message::Long(header(1, 1), entry(0x0001, 0)),
+            Message::Long(header(1, 1), entry(0x8070, version)),
+        ] {
+            handle.queue_response(reply.into());
+        }
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let mut device = Device::new(channel, 3)
+            .await
+            .expect("the mock device answers the ping");
+        device
+            .enumerate_features()
+            .await
+            .expect("the mock device answers every table entry");
+        (
+            device.provides_feature::<ColorLedEffectsFeature>(),
+            device.provides_feature::<ColorLedEffectsV1Feature>(),
+        )
+    })
+}
+
+#[test]
+fn a_version_0_device_gets_no_version_1_functions() {
+    // Logi Options+ 2.8 sends functions 4, 5, 7, 8 and 13 only to version 1
+    // or later (static analysis). The zone and effect functions stay.
+    assert_eq!(enumerated_color_led_effects(0), (true, false));
+}
+
+#[test]
+fn a_version_1_or_later_device_gets_both_function_sets() {
+    assert_eq!(enumerated_color_led_effects(1), (true, true));
+    assert_eq!(enumerated_color_led_effects(7), (true, true));
+}
+
+#[test]
+fn version_1_functions_keep_their_wire_layout() {
+    use std::sync::Arc;
+
+    use super::ColorLedEffectsV1Feature;
+    use super::types::{SwControl, SwControlState};
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::protocol::v20::{Message, MessageHeader};
+
+    let header = |function| MessageHeader {
+        device_index: 3,
+        feature_index: 8,
+        function_id: crate::nibble::U4::from_lo(function),
+        software_id: crate::nibble::U4::from_lo(1),
+    };
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let feature = ColorLedEffectsV1Feature::new(channel, 3, 8);
+
+        // getSwControl (function 7): byte 0 is the owner, byte 1 the
+        // sync-event flag.
+        handle.queue_response(Message::Short(header(7), [0x01, 0x01, 0x00]).into());
+        let state = feature.get_sw_control().await.expect("a valid reply");
+        assert_eq!(
+            state,
+            SwControlState {
+                control: SwControl::Software,
+                sync_events: true,
+            }
+        );
+
+        // synchronizeEffect (function 13): zone, reserved, big-endian drift.
+        handle.queue_response(Message::Long(header(13), [0; 16]).into());
+        feature
+            .synchronize_effect(0xff, -2)
+            .await
+            .expect("an acknowledged write");
+
+        let written = handle.written_reports();
+        assert_eq!(written[0], [0x10, 3, 8, 0x71, 0, 0, 0]);
+        assert_eq!(written[1][..8], [0x11, 3, 8, 0xd1, 0xff, 0x00, 0xff, 0xfe]);
+    });
+}

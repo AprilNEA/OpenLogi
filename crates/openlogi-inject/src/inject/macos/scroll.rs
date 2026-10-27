@@ -12,6 +12,8 @@ static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static WHEEL_TICK_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
 // `core-graphics` 0.25 does not expose these `CGEventTypes.h` fields.
 const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
@@ -37,7 +39,7 @@ pub(super) fn dispatch_scroll(dx: i8, dy: i8) {
 
 pub(in crate::inject) fn post_scroll(delta: ScrollDelta) {
     if let ScrollDelta::WheelTicks { x, y } = delta {
-        if let Some(event) = wheel_scroll_event(x, y, None) {
+        if let Some(event) = wheel_scroll_event(x, y, wheel_ticks(x, y), None) {
             event.post(CGEventTapLocation::HID);
         }
         return;
@@ -90,7 +92,7 @@ fn post_continuous_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) 
         if phase.is_none() && x == 0.0 && y == 0.0 {
             return;
         }
-        if let Some(event) = wheel_scroll_event(x, y, phase) {
+        if let Some(event) = wheel_scroll_event(x, y, wheel_ticks(x, y), phase) {
             event.post(CGEventTapLocation::HID);
         }
         return;
@@ -134,10 +136,32 @@ fn continuous_scroll_event(
     Some(ev)
 }
 
+/// The whole-line tick count for one wheel event, carrying the fraction to the
+/// next event so the ticks of a stream add up to its distance.
+fn wheel_ticks(x: f64, y: f64) -> QuantizedScroll {
+    let Ok(mut quantizer) = WHEEL_TICK_QUANTIZER.lock() else {
+        tracing::warn!("macOS wheel-tick quantizer mutex poisoned");
+        return QuantizedScroll::default();
+    };
+    quantizer.quantize(ScrollDelta::wheel_ticks(x, y), 1.0)
+}
+
 /// Build (without posting) one tagged, non-continuous wheel event whose signed
 /// 16.16 line distance keeps the fractional part instead of rounding to whole
 /// lines.
-fn wheel_scroll_event(x: f64, y: f64, phase: Option<SmoothScrollPhase>) -> Option<CGEvent> {
+///
+/// `ticks` fills the integer line delta, which a device's wheel events always
+/// carry: Chromium reads it — not the fixed-point distance — as the event's
+/// `wheel_ticks` (`WebMouseWheelEventBuilder::Build`), and Blink derives the
+/// legacy `wheelDelta` VS Code scrolls by from it, so a zero there leaves VS
+/// Code still. It is written before the fixed-point delta so the fractional
+/// distance every other reader uses stays the canonical one.
+fn wheel_scroll_event(
+    x: f64,
+    y: f64,
+    ticks: QuantizedScroll,
+    phase: Option<SmoothScrollPhase>,
+) -> Option<CGEvent> {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for wheel scroll");
         return None;
@@ -146,6 +170,8 @@ fn wheel_scroll_event(x: f64, y: f64, phase: Option<SmoothScrollPhase>) -> Optio
         tracing::warn!("CGEvent::new_scroll_event failed for wheel scroll");
         return None;
     };
+    ev.set_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1, ticks.y.into());
+    ev.set_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2, ticks.x.into());
     ev.set_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1, y);
     ev.set_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2, x);
     ev.set_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 0);
@@ -259,14 +285,20 @@ mod tests {
             EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
             EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
         ];
-        let phaseless = wheel_scroll_event(-0.025, 0.05, None).expect("a wheel event");
+        let phaseless = wheel_scroll_event(-0.025, 0.05, QuantizedScroll::default(), None)
+            .expect("a wheel event");
         let before = fields.map(|field| phaseless.get_double_value_field(field));
         assert!((before[0] - 0.05).abs() < 1.0e-4);
         assert!((before[1] + 0.025).abs() < 1.0e-4);
         assert_eq!(phaseless.get_integer_value_field(SCROLL_PHASE), 0);
 
-        let phased = wheel_scroll_event(-0.025, 0.05, Some(SmoothScrollPhase::Changed))
-            .expect("a wheel event");
+        let phased = wheel_scroll_event(
+            -0.025,
+            0.05,
+            QuantizedScroll::default(),
+            Some(SmoothScrollPhase::Changed),
+        )
+        .expect("a wheel event");
         let after = fields.map(|field| phased.get_double_value_field(field));
         assert!((after[0] - before[0]).abs() < f64::EPSILON);
         assert!((after[1] - before[1]).abs() < f64::EPSILON);
@@ -282,5 +314,30 @@ mod tests {
             phased.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
             crate::SYNTHETIC_EVENT_USER_DATA
         );
+    }
+
+    /// The integer line delta carries the ticks Chromium reads, while the
+    /// fixed-point distance written after it keeps its fraction.
+    #[test]
+    fn wheel_event_carries_integer_ticks_beside_fractional_distance() {
+        // Neither the rounded (-1, 2) nor the truncated (0, 1) distance, so
+        // the test fails if writing the fixed-point fields replaces the
+        // carried ticks with ones derived from the distance.
+        let ticks = QuantizedScroll { x: -2, y: 3 };
+        let event = wheel_scroll_event(-0.75, 1.6, ticks, None).expect("a wheel event");
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1),
+            3
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2),
+            -2
+        );
+        let y =
+            event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1);
+        let x =
+            event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2);
+        assert!((y - 1.6).abs() < 1.0e-4, "{y}");
+        assert!((x + 0.75).abs() < 1.0e-4, "{x}");
     }
 }

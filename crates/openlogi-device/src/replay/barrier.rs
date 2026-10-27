@@ -52,6 +52,34 @@ impl ResponseGates {
 }
 
 #[derive(Default)]
+pub(super) struct WriteCompletionGates {
+    pending: Mutex<HashMap<RequestKey, VecDeque<Arc<WriteCompletionBarrierState>>>>,
+}
+
+impl WriteCompletionGates {
+    pub(super) fn hold(&self, request_match: RequestMatch, request: &[u8]) -> ReplayWriteBarrier {
+        let state = Arc::new(WriteCompletionBarrierState::default());
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(RequestKey::from_exchange(request_match, request))
+            .or_default()
+            .push_back(Arc::clone(&state));
+        ReplayWriteBarrier { state }
+    }
+
+    pub(super) fn take(&self, actual: &[u8]) -> Option<Arc<WriteCompletionBarrierState>> {
+        let exact = RequestKey::Exact(actual.to_vec());
+        let hidpp20 = RequestKey::Hidpp20(RequestMatch::Hidpp20.request_key(actual));
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        pending
+            .get_mut(&exact)
+            .and_then(VecDeque::pop_front)
+            .or_else(|| pending.get_mut(&hidpp20).and_then(VecDeque::pop_front))
+    }
+}
+
+#[derive(Default)]
 struct ResponseBarrierRuntime {
     request_written: bool,
     released: bool,
@@ -134,6 +162,91 @@ impl ReplayResponseBarrier {
     }
 
     /// Release the held response. Releasing before the request is written is supported.
+    pub fn release(&self) {
+        self.state.release();
+    }
+}
+
+#[derive(Default)]
+struct WriteCompletionBarrierRuntime {
+    accepted: bool,
+    released: bool,
+}
+
+#[derive(Default)]
+pub(super) struct WriteCompletionBarrierState {
+    runtime: Mutex<WriteCompletionBarrierRuntime>,
+    accepted: Notify,
+    released: Notify,
+}
+
+impl WriteCompletionBarrierState {
+    pub(super) fn accept(&self) {
+        self.runtime
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .accepted = true;
+        self.accepted.notify_waiters();
+    }
+
+    pub(super) async fn wait_for_release(&self) {
+        loop {
+            let released = self.released.notified();
+            if self
+                .runtime
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .released
+            {
+                return;
+            }
+            released.await;
+        }
+    }
+
+    fn is_accepted(&self) -> bool {
+        self.runtime
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .accepted
+    }
+
+    fn release(&self) {
+        self.runtime
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .released = true;
+        self.released.notify_waiters();
+    }
+}
+
+/// One accepted replay raw write whose native completion waits for an explicit
+/// release. This models an operating system that accepted a HID report while
+/// the Rust `write_report` future is still pending.
+#[derive(Clone)]
+pub struct ReplayWriteBarrier {
+    state: Arc<WriteCompletionBarrierState>,
+}
+
+impl ReplayWriteBarrier {
+    /// Wait until the matching report has reached the raw transport.
+    pub async fn write_accepted(&self) {
+        loop {
+            let accepted = self.state.accepted.notified();
+            if self.state.is_accepted() {
+                return;
+            }
+            accepted.await;
+        }
+    }
+
+    /// Whether the matching report has reached the raw transport.
+    #[must_use]
+    pub fn is_write_accepted(&self) -> bool {
+        self.state.is_accepted()
+    }
+
+    /// Complete the held raw write.
     pub fn release(&self) {
         self.state.release();
     }
