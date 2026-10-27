@@ -112,7 +112,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 41);
+    assert_eq!(PROTOCOL_VERSION, 42);
 }
 
 #[test]
@@ -449,6 +449,7 @@ fn key_combo_modifier_bits() {
     let combo = |text: &str| text.parse::<KeyCombo>().expect("valid chord");
     assert_wire(&combo("Cmd+L"), "010f");
     assert_wire(&combo("Super+L"), "100f");
+    assert_wire(&combo("Insert"), "0049");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to

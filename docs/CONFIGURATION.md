@@ -406,6 +406,13 @@ platform's logo key — Command on macOS, the Windows key, `KEY_LEFTMETA` on Lin
 so `Win+L` locks Windows and `Super+End` reaches GNOME and KDE shortcuts bound to
 Super.
 
+A chord has exactly one other key, and it may stand alone (`PageUp` with no
+modifier): a letter, a digit, `` - = [ ] \ ; ' ` , . / ``, `F1` to `F20`,
+`Enter`, `Escape` (`Esc`), `Backspace`, `Tab`, `Space`, the arrows `Left`,
+`Right`, `Up`, `Down`, and the editing keys `Insert` (`Ins`), `Delete` (`Del`),
+`Home`, `End`, `PageUp` (`PgUp`), and `PageDown` (`PgDn`). Names are
+case-insensitive. On macOS, `Insert` presses the Help key.
+
 `CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
 the chord down until the originating physical button is released, and also
 releases it if capture is interrupted, the binding becomes invalid, or the
