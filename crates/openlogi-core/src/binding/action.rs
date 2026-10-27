@@ -219,6 +219,16 @@ pub enum Action {
     /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
     /// lit while the mode is on. Does nothing on other devices.
     TogglePrecisionMode,
+
+    // ── Navigation (appended) ────────────────────────────────────────────────
+    /// Zoom in with native magnification on macOS or Control-wheel elsewhere.
+    ZoomIn,
+    /// Zoom out with native magnification on macOS or Control-wheel elsewhere.
+    ZoomOut,
+    /// Zoom in using the application's keyboard shortcut on every platform.
+    ZoomInShortcut,
+    /// Zoom out using the application's keyboard shortcut on every platform.
+    ZoomOutShortcut,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -310,6 +320,10 @@ macro_rules! for_each_unit_action {
             NextDesktop "Next Desktop" "actions.next_desktop" Navigation NextDesktop,
             ShowDesktop "Show Desktop" "actions.show_desktop" Navigation Monitor,
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
+            ZoomIn "Zoom In" "actions.zoom_in" Navigation ZoomIn,
+            ZoomOut "Zoom Out" "actions.zoom_out" Navigation ZoomOut,
+            ZoomInShortcut "Zoom In (Shortcut)" "actions.zoom_in_shortcut" Navigation ZoomIn,
+            ZoomOutShortcut "Zoom Out (Shortcut)" "actions.zoom_out_shortcut" Navigation ZoomOut,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,

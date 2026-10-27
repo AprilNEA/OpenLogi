@@ -1,6 +1,8 @@
 //! OS input-event synthesis split out of openlogi-core so the core stays platform- and IO-free.
 
 mod inject;
+mod zoom;
+pub use zoom::{ZoomContext, ZoomGesture, ZoomPhase, cursor_location, zoom_process_id};
 #[cfg(target_os = "linux")]
 pub mod uinput;
 

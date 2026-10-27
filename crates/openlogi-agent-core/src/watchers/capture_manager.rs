@@ -41,6 +41,9 @@ pub(super) trait CaptureManager {
         published: &watch::Receiver<Self::Published>,
     ) -> bool;
 
+    /// Cancel host output immediately when the device-I/O gate pauses capture.
+    fn pause_input(&mut self) {}
+
     /// The next instant recovery work can make progress, if any.
     fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant>;
 
@@ -150,7 +153,7 @@ pub(super) async fn run<M: CaptureManager>(
             },
             allowed = device_io.changed() => match allowed {
                 Some(true) => reconcile = true,
-                Some(false) => {}
+                Some(false) => manager.pause_input(),
                 None => return ManagerCompletion::Unexpected,
             },
             open = wait_for_registry_change(&mut registry_changes, has_pending_restores) => {

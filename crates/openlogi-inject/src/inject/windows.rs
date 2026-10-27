@@ -5,10 +5,10 @@ use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
 
@@ -139,6 +139,8 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
+        Shortcut::ZoomIn => "Ctrl+=",
+        Shortcut::ZoomOut => "Ctrl+-",
     };
     Ok(super::parse_shortcut(text))
 }
@@ -171,10 +173,58 @@ fn dispatch_native(native: NativeAction) {
         // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
         // hibernates instead when hibernation is enabled — no clean win from
         // a background agent, so the action is skipped on Windows for now.
+        NativeAction::ZoomIn => post_zoom(WHEEL_DELTA),
+        NativeAction::ZoomOut => post_zoom(-WHEEL_DELTA),
         NativeAction::Sleep => {
             tracing::debug!("Sleep has no Windows synthesis yet — action skipped");
         }
     }
+}
+
+/// Keep the shared held-key owner locked through the entire pulse so another
+/// held chord cannot acquire or release Control between its edges. Global
+/// SendInput routing and UIPI restrictions still apply; no window is targeted.
+fn post_zoom(wheel_units: i32) {
+    let output = super::HELD_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: querying a virtual-key state has no pointer or lifetime preconditions.
+    let control_held = output.owners.contains_key(&HeldKey::Control)
+        || unsafe { GetAsyncKeyState(i32::from(VK_CONTROL)) } < 0;
+    if !zoom_pulse(
+        control_held,
+        wheel_units,
+        |input| send_inputs(std::slice::from_ref(input)) == 1,
+        || std::thread::sleep(std::time::Duration::from_millis(5)),
+    ) {
+        tracing::warn!("Windows Control-wheel zoom injection failed");
+    }
+}
+
+/// Single-event submissions make acceptance unambiguous. A rejected wheel
+/// still releases our accepted Control-down; an existing Control owner gets
+/// neither modifier edge. Cleanup is retried if the OS rejects its first edge.
+fn zoom_pulse(
+    control_held: bool,
+    wheel_units: i32,
+    mut inject: impl FnMut(&INPUT) -> bool,
+    settle: impl FnOnce(),
+) -> bool {
+    if !control_held && !inject(&key_input(Key::from(VK_CONTROL), false)) {
+        return false;
+    }
+    let wheel_sent = inject(&mouse_input(MOUSEEVENTF_WHEEL, wheel_units));
+    settle();
+    if control_held {
+        return wheel_sent;
+    }
+    for _ in 0..3 {
+        if inject(&key_input(Key::from(VK_CONTROL), true)) {
+            return wheel_sent;
+        }
+    }
+    tracing::error!("Windows rejected Control release after zoom cleanup retries");
+    false
 }
 
 fn dispatch_media(key: MediaKey) {
@@ -218,6 +268,10 @@ fn post_click(button: MouseButton) {
 
 fn post_key(key: impl Into<Key>, modifiers: &[u16]) {
     let key = key.into();
+    // Keep transient chords from releasing a modifier inside a zoom pulse.
+    let _output = super::HELD_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
     for modifier in modifiers {
         inputs.push(key_input(Key::from(*modifier), false));
@@ -234,6 +288,10 @@ fn post_key(key: impl Into<Key>, modifiers: &[u16]) {
 /// (-1/0/1) scaled by `WHEEL_DELTA`, the fixed magnitude the four
 /// `Scroll*`/`HorizontalScroll*` actions have always used.
 fn dispatch_scroll(dx: i8, dy: i8) {
+    // Serialize wheel output with the complete Control-wheel zoom pulse.
+    let _output = super::HELD_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut inputs = Vec::with_capacity(2);
     if dy != 0 {
         inputs.push(mouse_input(MOUSEEVENTF_WHEEL, i32::from(dy) * WHEEL_DELTA));
@@ -247,6 +305,10 @@ fn dispatch_scroll(dx: i8, dy: i8) {
 }
 
 pub(super) fn post_scroll(delta: ScrollDelta) {
+    // Serialize wheel output with the complete Control-wheel zoom pulse.
+    let _output = super::HELD_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let ScrollDelta::WheelTicks { .. } = delta else {
         tracing::debug!("pixel scroll output is unsupported on Windows");
         return;
@@ -342,17 +404,17 @@ fn held_key(key: HeldKey, layout: ForegroundLayout) -> Option<Key> {
     }
 }
 
-fn send_inputs(inputs: &[INPUT]) {
+fn send_inputs(inputs: &[INPUT]) -> u32 {
     let Ok(input_count) = u32::try_from(inputs.len()) else {
         tracing::warn!(
             requested = inputs.len(),
             "too many SendInput events requested"
         );
-        return;
+        return 0;
     };
     let Ok(input_size) = i32::try_from(size_of::<INPUT>()) else {
         tracing::warn!("INPUT size does not fit the Win32 SendInput contract");
-        return;
+        return 0;
     };
     // SAFETY: inputs.as_ptr()/input_count describe a valid initialized INPUT slice; SendInput copies it and returns the count injected.
     let sent = unsafe { SendInput(input_count, inputs.as_ptr(), input_size) };
@@ -363,6 +425,7 @@ fn send_inputs(inputs: &[INPUT]) {
             "SendInput accepted fewer events than requested"
         );
     }
+    sent
 }
 
 fn key_input(key: Key, key_up: bool) -> INPUT {
@@ -474,6 +537,126 @@ mod tests {
         assert_eq!(
             (up.wVk, up.wScan, up.dwFlags),
             (key.vk, key.scan, KEYEVENTF_KEYUP)
+        );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum PulseEvent {
+        ControlDown,
+        ControlUp,
+        Wheel(i32),
+        Settled,
+    }
+
+    fn record_zoom(control_held: bool, wheel: i32, rejected: &[usize]) -> (bool, Vec<PulseEvent>) {
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut submissions = 0;
+        let accepted = super::zoom_pulse(
+            control_held,
+            wheel,
+            |input| {
+                let event = match input.r#type {
+                    super::INPUT_KEYBOARD => {
+                        // SAFETY: INPUT_KEYBOARD selects the initialized ki union member.
+                        let key = unsafe { input.Anonymous.ki };
+                        assert_eq!(key.wVk, super::VK_CONTROL);
+                        if key.dwFlags == super::KEYEVENTF_KEYUP {
+                            PulseEvent::ControlUp
+                        } else {
+                            assert_eq!(key.dwFlags, 0);
+                            PulseEvent::ControlDown
+                        }
+                    }
+                    super::INPUT_MOUSE => {
+                        // SAFETY: INPUT_MOUSE selects the initialized mi union member.
+                        let mouse = unsafe { input.Anonymous.mi };
+                        assert_eq!(mouse.dwFlags, super::MOUSEEVENTF_WHEEL);
+                        PulseEvent::Wheel(i32::from_ne_bytes(mouse.mouseData.to_ne_bytes()))
+                    }
+                    other => panic!("unexpected zoom input type {other}"),
+                };
+                events.borrow_mut().push(event);
+                let accepted = !rejected.contains(&submissions);
+                submissions += 1;
+                accepted
+            },
+            || events.borrow_mut().push(PulseEvent::Settled),
+        );
+        (accepted, events.into_inner())
+    }
+
+    #[test]
+    fn zoom_pulse_orders_signed_wheel_and_settling_before_release() {
+        for wheel in [120, -120] {
+            assert_eq!(
+                record_zoom(false, wheel, &[]),
+                (
+                    true,
+                    vec![
+                        PulseEvent::ControlDown,
+                        PulseEvent::Wheel(wheel),
+                        PulseEvent::Settled,
+                        PulseEvent::ControlUp,
+                    ]
+                )
+            );
+            assert_eq!(
+                record_zoom(true, wheel, &[]),
+                (true, vec![PulseEvent::Wheel(wheel), PulseEvent::Settled,])
+            );
+        }
+        assert_eq!(combo(Shortcut::ZoomIn).unwrap().rendered_label(), "Ctrl+=");
+        assert_eq!(combo(Shortcut::ZoomOut).unwrap().rendered_label(), "Ctrl+-");
+    }
+
+    #[test]
+    fn zoom_pulse_cleans_up_failed_wheel_and_retries_failed_release() {
+        assert_eq!(
+            record_zoom(false, 120, &[0]),
+            (false, vec![PulseEvent::ControlDown])
+        );
+        assert_eq!(
+            record_zoom(false, 120, &[1]),
+            (
+                false,
+                vec![
+                    PulseEvent::ControlDown,
+                    PulseEvent::Wheel(120),
+                    PulseEvent::Settled,
+                    PulseEvent::ControlUp,
+                ]
+            )
+        );
+        assert_eq!(
+            record_zoom(false, 120, &[2]),
+            (
+                true,
+                vec![
+                    PulseEvent::ControlDown,
+                    PulseEvent::Wheel(120),
+                    PulseEvent::Settled,
+                    PulseEvent::ControlUp,
+                    PulseEvent::ControlUp,
+                ]
+            )
+        );
+        assert_eq!(
+            record_zoom(false, 120, &[2, 3, 4]),
+            (
+                false,
+                vec![
+                    PulseEvent::ControlDown,
+                    PulseEvent::Wheel(120),
+                    PulseEvent::Settled,
+                    PulseEvent::ControlUp,
+                    PulseEvent::ControlUp,
+                    PulseEvent::ControlUp,
+                ]
+            )
+        );
+        assert_eq!(
+            record_zoom(true, 120, &[0]),
+            (false, vec![PulseEvent::Wheel(120), PulseEvent::Settled,])
         );
     }
 

@@ -19,7 +19,7 @@ use openlogi_core::binding::{Script, WorkflowStep};
 use openlogi_core::scroll::ScrollDelta;
 
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{VirtualKeyboard, is_virtual_keyboard_product};
 

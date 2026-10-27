@@ -33,7 +33,7 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
+use openlogi_core::binding::{Action, ActionRingIcon, ActionRingSlot, KeyCombo};
 use openlogi_core::config::{ConfigRevision, Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
@@ -112,7 +112,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 41);
+    assert_eq!(PROTOCOL_VERSION, 42);
 }
 
 #[test]
@@ -1213,4 +1213,19 @@ fn disable_keys_requests_are_appended() {
         },
         "2d000846303044434146450101",
     );
+}
+
+#[test]
+fn appended_zoom_actions_and_icons() {
+    assert_wire(&Action::HoldShortcut("Ctrl+A".parse().unwrap()), "340404");
+    assert_wire(
+        &Action::TapKeyHoldingModifiers("Ctrl+A".parse().unwrap()),
+        "350404",
+    );
+    assert_wire(&Action::ZoomIn, "37");
+    assert_wire(&Action::ZoomOut, "38");
+    assert_wire(&Action::ZoomInShortcut, "39");
+    assert_wire(&Action::ZoomOutShortcut, "3a");
+    assert_wire(&ActionRingIcon::ZoomIn, "36");
+    assert_wire(&ActionRingIcon::ZoomOut, "37");
 }

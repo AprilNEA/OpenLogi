@@ -700,8 +700,11 @@ impl Running {
         // The agent stays — at startup, or after a replacement that did not
         // happen — so ring sessions arm the haptic engine again.
         self.ring_haptics.resume();
-        self.hidpp_watchers =
-            WatcherFleet::Running(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
+        self.hidpp_watchers = WatcherFleet::Running(startup::spawn_hidpp_watchers(
+            &self.shared,
+            &self.inputs,
+            &self.observable,
+        ));
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
