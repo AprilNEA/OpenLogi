@@ -477,6 +477,28 @@ async fn restore_hands_the_wheel_back_in_its_original_resolution() {
     );
 }
 
+/// A native mode write that lands between the divert and the restore picks
+/// the configured resolution; the restore must not put the arming-time one
+/// back over it.
+#[tokio::test]
+async fn restore_leaves_a_resolution_a_native_write_chose_after_the_divert() {
+    let armed = arm(
+        0,
+        0,
+        SetReply::Apply,
+        &spec(Some(ScrollResolution::High), None),
+    )
+    .await;
+    armed.result.as_ref().unwrap();
+    *armed.mode.lock().unwrap() = [HIGH_RES, PRIORITY, RATE];
+    let handle = restore(armed).await;
+    assert_eq!(
+        mode_writes(&handle),
+        [[DIVERTED | HIGH_RES, PRIORITY, RATE]],
+        "the restore wrote nothing over the native write"
+    );
+}
+
 /// A wheel that already reported in high resolution keeps doing so.
 #[tokio::test]
 async fn restore_keeps_a_wheel_that_started_in_high_resolution() {
