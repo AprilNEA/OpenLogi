@@ -99,12 +99,17 @@ pub(super) async fn divert(
 /// Hand `feature`'s movement reports back to native HID: read-modify-write the
 /// target and the resolution (back to `resolution`, the one the wheel had
 /// before arming), so the native wheel is not left in the diverted
-/// resolution. A wheel already in that state is left untouched.
+/// resolution. A wheel already in that state is left untouched, and so is one
+/// that is no longer diverted: a native mode write landed after the divert
+/// and chose its own resolution, which this stale snapshot must not undo.
 pub(crate) async fn undivert(
     feature: &HiResWheelFeature,
     resolution: WheelResolution,
 ) -> Result<(), Hidpp20Error> {
     let current = feature.get_wheel_mode().await?;
+    if current.target == WheelEventTarget::Native {
+        return Ok(());
+    }
     let mut request = current;
     request.target = WheelEventTarget::Native;
     request.resolution = resolution;
