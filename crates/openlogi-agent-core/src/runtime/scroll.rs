@@ -106,6 +106,9 @@ struct ScrollFrame {
     /// The frame belongs to a phased gesture whose phases the application
     /// must see, rather than to smoothed wheel output.
     phased: bool,
+    /// The frame belongs to a continuous trackpad magnification gesture
+    /// (`delta.y` is the fractional magnification delta) rather than scroll.
+    magnify: bool,
 }
 
 impl ScrollFrame {
@@ -114,11 +117,21 @@ impl ScrollFrame {
             delta,
             phase,
             phased,
+            magnify: false,
+        }
+    }
+
+    fn as_magnify(self) -> Self {
+        Self {
+            magnify: true,
+            ..self
         }
     }
 
     fn post(self) {
-        if self.phased {
+        if self.magnify {
+            openlogi_inject::post_magnify(self.delta.y, self.phase);
+        } else if self.phased {
             openlogi_inject::post_phased_scroll(self.delta.into(), self.phase);
         } else {
             openlogi_inject::post_smooth_scroll(self.delta.into(), self.phase);

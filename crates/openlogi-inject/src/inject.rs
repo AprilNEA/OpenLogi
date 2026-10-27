@@ -644,6 +644,15 @@ pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
     }
 }
 
+/// Whether this platform synthesises continuous trackpad-style magnification
+/// gestures ([`post_magnify`]).
+///
+/// On macOS, thumb-wheel zoom bindings emit phased `NSEventTypeGesture`
+/// (`kIOHIDEventTypeZoom`) events so Cocoa, WebKit, PDFKit, and canvas apps
+/// zoom continuously. Linux and Windows have no OS-wide trackpad magnify event
+/// and fall back to repeatable zoom shortcuts (`Ctrl+=` / `Ctrl+-`).
+pub const SUPPORTS_CONTINUOUS_MAGNIFY: bool = cfg!(target_os = "macos");
+
 /// Synthesise one frame of a phased scroll gesture.
 ///
 /// Unlike [`post_smooth_scroll`], macOS stamps the frame's phase onto the
@@ -663,6 +672,27 @@ pub fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
         }
         _ => {
             post_smooth_scroll(delta, phase);
+        }
+    }
+}
+
+/// Synthesise one frame of a continuous trackpad-style magnification gesture.
+///
+/// `magnification` is the fractional scale change for this frame (`> 0` zooms
+/// in, `< 0` zooms out). On macOS this posts a phased `NSEventTypeGesture`
+/// (`kIOHIDEventTypeZoom`) sequence to the HID event tap so applications
+/// receive `magnifyWithEvent:` and `NSMagnificationGestureRecognizer` updates.
+/// Non-finite magnification is rejected at this I/O boundary.
+pub fn post_magnify(magnification: f64, phase: SmoothScrollPhase) {
+    if !magnification.is_finite() {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_magnify(magnification, phase);
+        }
+        _ => {
+            let _ = (magnification, phase);
         }
     }
 }

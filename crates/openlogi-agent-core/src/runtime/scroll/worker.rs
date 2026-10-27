@@ -101,6 +101,11 @@ enum ScrollOutputMode {
     Eased {
         at: Instant,
     },
+    /// Continuous trackpad magnification from a diverted thumb wheel.
+    Magnify {
+        at: Instant,
+        smooth: bool,
+    },
     Direct,
 }
 
@@ -136,6 +141,10 @@ impl ScrollInput {
     fn output_under(&self, smoothing: bool) -> ScrollOutputMode {
         match (self.output, &self.source) {
             (ScrollOutputMode::Eased { at }, _) => ScrollOutputMode::Eased { at },
+            (ScrollOutputMode::Magnify { at, .. }, _) => ScrollOutputMode::Magnify {
+                at,
+                smooth: smoothing,
+            },
             (
                 ScrollOutputMode::Smooth { at } | ScrollOutputMode::Phased { at },
                 ScrollSource::Hidpp(_),
@@ -283,6 +292,31 @@ impl ScrollInputHandle {
             Instant::now(),
         ) else {
             return false;
+        };
+        self.try_enqueue(ScrollSource::Hidpp(session.clone()), impulse, output)
+    }
+
+    /// Queue one diverted thumb-wheel magnification impulse from an active
+    /// HID++ session.
+    ///
+    /// With smoothing on the magnification is eased; with it off each tick is
+    /// emitted immediately inside a phased magnification gesture that ends
+    /// after [`PHASED_IDLE`](super::PHASED_IDLE).
+    #[must_use]
+    pub(crate) fn try_hidpp_magnify(&self, session: &HidppSessionId, magnification: f64) -> bool {
+        if !self.accepting.load(Ordering::Acquire)
+            || !magnification.is_finite()
+            || magnification == 0.0
+        {
+            return false;
+        }
+        let impulse = WheelDelta {
+            x: 0.0,
+            y: magnification,
+        };
+        let output = ScrollOutputMode::Magnify {
+            at: Instant::now(),
+            smooth: self.preferences.smooth_scroll_enabled(),
         };
         self.try_enqueue(ScrollSource::Hidpp(session.clone()), impulse, output)
     }
@@ -507,6 +541,7 @@ fn run_worker(
     emit_direct: &mut impl FnMut(WheelDelta),
 ) {
     let mut engine = ScrollEngine::default();
+    let mut magnify = ScrollEngine::default();
     let mut observed_smoothing = preferences.smooth_scroll_enabled();
     // An overflow-cancelled incarnation stays tombstoned so accepted input that
     // was already queued when control overtook the saturated queue is ignored.
@@ -525,20 +560,29 @@ fn run_worker(
                         && cancellations.advance_to(shared_generation.load(Ordering::Acquire))
                     {
                         engine.cancel_all(emit_smooth);
+                        magnify.cancel_all(&mut |frame| emit_smooth(frame.as_magnify()));
                     }
                     if cancellations.cancel(&session, cancelled_generation) {
-                        engine.cancel_source(&ScrollSource::Hidpp(session), emit_smooth);
+                        let source = ScrollSource::Hidpp(session);
+                        engine.cancel_source(&source, emit_smooth);
+                        magnify
+                            .cancel_source(&source, &mut |frame| emit_smooth(frame.as_magnify()));
                     }
                 }
                 ScrollControl::Shutdown(request) => {
                     engine.cancel_all(emit_smooth);
+                    magnify.cancel_all(&mut |frame| emit_smooth(frame.as_magnify()));
                     let _ = request.done.send(());
                     return;
                 }
             }
         }
 
-        let command = receive(engine.next_deadline());
+        let deadline = match (engine.next_deadline(), magnify.next_deadline()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let command = receive(deadline);
 
         // Settings can change while an idle worker waits for input. Observe the
         // new setting after receiving, so a toggle cancels the previous gesture
@@ -552,8 +596,10 @@ fn run_worker(
             // can no longer protect anything. A delayed old-generation control
             // is also ignored above instead of recreating it.
             engine.cancel_all(emit_smooth);
+            magnify.cancel_all(&mut |frame| emit_smooth(frame.as_magnify()));
         } else if toggled {
             engine.cancel_all(emit_smooth);
+            magnify.cancel_all(&mut |frame| emit_smooth(frame.as_magnify()));
         }
 
         match command {
@@ -565,6 +611,16 @@ fn run_worker(
                     ScrollOutputMode::Phased { at } => {
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
                     }
+                    ScrollOutputMode::Magnify { at, smooth: true } => {
+                        magnify.impulse(input.source, input.impulse, at, &mut |frame| {
+                            emit_smooth(frame.as_magnify());
+                        });
+                    }
+                    ScrollOutputMode::Magnify { at, smooth: false } => {
+                        magnify.phased_impulse(input.source, input.impulse, at, &mut |frame| {
+                            emit_smooth(frame.as_magnify());
+                        });
+                    }
                     ScrollOutputMode::Direct => {
                         engine.cancel_source(&input.source, emit_smooth);
                         emit_direct(input.impulse);
@@ -573,13 +629,17 @@ fn run_worker(
             }
             Ok(ScrollCommand::CancelSource(source)) => {
                 engine.cancel_source(&source, emit_smooth);
+                magnify.cancel_source(&source, &mut |frame| emit_smooth(frame.as_magnify()));
             }
             Ok(ScrollCommand::Input(_) | ScrollCommand::Wake) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                engine.advance_due(Instant::now(), emit_smooth);
+                let now = Instant::now();
+                engine.advance_due(now, emit_smooth);
+                magnify.advance_due(now, &mut |frame| emit_smooth(frame.as_magnify()));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 engine.cancel_all(emit_smooth);
+                magnify.cancel_all(&mut |frame| emit_smooth(frame.as_magnify()));
                 return;
             }
         }
@@ -1441,6 +1501,40 @@ mod tests {
             }
             assert_eq!(phase, openlogi_inject::SmoothScrollPhase::Changed);
         }
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn hidpp_magnify_emits_phased_magnification_frames_and_ends_after_idle() {
+        let (frames, received) = mpsc::channel();
+        let mut runtime = ScrollRuntime::spawn_with(
+            preferences(false, 14),
+            move |frame| {
+                frames
+                    .send(frame)
+                    .expect("test frame receiver remains open");
+            },
+            |_| {},
+        )
+        .expect("spawn scroll worker");
+        let input = runtime.input();
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        assert!(!input.try_hidpp_magnify(&session, 0.0));
+        assert!(!input.try_hidpp_magnify(&session, f64::NAN));
+        assert!(input.try_hidpp_magnify(&session, 0.05));
+        assert!(input.try_hidpp_magnify(&session, 0.05));
+
+        let wait = PHASED_IDLE * 20;
+        let first = received.recv_timeout(wait).expect("first magnify tick");
+        let second = received.recv_timeout(wait).expect("second magnify tick");
+        let end = received.recv_timeout(wait).expect("magnify idle end");
+        assert!(first.magnify && second.magnify && end.magnify);
+        assert_eq!(first.phase, openlogi_inject::SmoothScrollPhase::Began);
+        assert_eq!(second.phase, openlogi_inject::SmoothScrollPhase::Changed);
+        assert_eq!(end.phase, openlogi_inject::SmoothScrollPhase::Ended);
+        assert!((first.delta.y - 0.05).abs() < f64::EPSILON);
+        assert!((second.delta.y - 0.05).abs() < f64::EPSILON);
+        assert!(end.delta.is_zero());
         runtime.shutdown();
     }
 }
