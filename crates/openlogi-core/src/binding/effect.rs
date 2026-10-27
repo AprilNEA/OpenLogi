@@ -197,6 +197,9 @@ pub enum NativeAction {
     CaptureRegion,
     /// Put the computer to sleep.
     Sleep,
+    /// Zoom the content under the pointer like a trackpad double-tap
+    /// (macOS Smart Zoom).
+    SmartZoom,
 }
 
 /// A power-user scripting escape hatch, borrowed from the originating
@@ -258,6 +261,7 @@ impl Action {
             Action::Screenshot => Effect::Native(NativeAction::Screenshot),
             Action::CaptureRegion => Effect::Native(NativeAction::CaptureRegion),
             Action::Sleep => Effect::Native(NativeAction::Sleep),
+            Action::SmartZoom => Effect::Native(NativeAction::SmartZoom),
 
             Action::PlayPause => Effect::Media(MediaKey::PlayPause),
             Action::NextTrack => Effect::Media(MediaKey::NextTrack),
