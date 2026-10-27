@@ -318,15 +318,25 @@ pub fn default_labels(
 
 /// The fallback silhouette's hotspots for a device without an image. A
 /// G-series mouse keeps only the buttons its layout has: the generic DPI and
-/// gesture buttons are `0x1b04` controls it cannot capture.
+/// gesture buttons are `0x1b04` controls it cannot capture. The layout's
+/// other buttons get placed hotspots, so each one can still be opened.
 pub fn fallback_hotspots(layout: Option<&GamingLayout>, thumbwheel: bool) -> Vec<Hotspot> {
     let mut hotspots = super::hotspots::default_hotspots(thumbwheel);
     hotspots.retain(|hotspot| on_fallback(layout, hotspot));
+    for button in layout.into_iter().flat_map(GamingLayout::remappable) {
+        if !hotspots
+            .iter()
+            .any(|hotspot| hotspot.id.button() == Some(button))
+            && let Some(hotspot) = super::hotspots::gaming_fallback_hotspot(button)
+        {
+            hotspots.push(hotspot);
+        }
+    }
     hotspots
 }
 
 /// Whether the fallback silhouette shows `hotspot` for a device with `layout`.
-pub fn on_fallback(layout: Option<&GamingLayout>, hotspot: &Hotspot) -> bool {
+fn on_fallback(layout: Option<&GamingLayout>, hotspot: &Hotspot) -> bool {
     layout.is_none_or(|layout| {
         hotspot
             .id
@@ -447,32 +457,36 @@ mod tests {
         assert!(hotspots.iter().any(|h| h.id == ButtonId::G7.into()));
     }
 
-    /// A gaming mouse without ReprogControls keeps only what the OS hook can
-    /// remap. The DPI toggle, the gesture button and the thumb wheel are
-    /// HID++-only controls: offering them would take a binding and drop it.
+    /// A gaming mouse without an image keeps only what it can deliver: the
+    /// DPI toggle, the gesture button and the thumb wheel are HID++-only
+    /// controls, and offering them would take a binding and drop it. A model
+    /// nobody has dumped offers what the OS hook remaps; a dumped one also
+    /// gets placed hotspots for every other button its layout remaps.
     #[test]
-    fn an_undivertable_mouse_without_an_image_keeps_only_os_hook_targets() {
+    fn an_undivertable_mouse_without_an_image_keeps_only_what_it_delivers() {
         use openlogi_core::binding::STANDARD_BUTTONS;
-        let os_hook = [
-            ButtonId::MiddleClick.into(),
-            ButtonId::Back.into(),
-            ButtonId::Forward.into(),
-        ];
-        for layout in [
-            GamingLayout::for_model_key("0407f"),
-            Some(&STANDARD_BUTTONS),
-        ] {
-            let ids: Vec<_> = fallback_hotspots(layout, true)
+        let ids = |layout| -> Vec<_> {
+            fallback_hotspots(layout, true)
                 .iter()
                 .map(|hotspot| hotspot.id)
-                .collect();
-            assert_eq!(ids, os_hook);
-        }
+                .collect()
+        };
+        let os_hook: Vec<MouseControlId> =
+            [ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward]
+                .map(Into::into)
+                .into();
+        assert_eq!(ids(Some(&STANDARD_BUTTONS)), os_hook);
+
+        let g502 = GamingLayout::for_model_key("0407f").expect("the G502 layout");
+        let mut every: Vec<MouseControlId> = g502.remappable().map(Into::into).collect();
+        let mut drawn = ids(Some(g502));
+        every.sort_by_key(|id| format!("{id:?}"));
+        drawn.sort_by_key(|id| format!("{id:?}"));
+        assert_eq!(drawn, every, "every remappable button can be opened");
+
         assert_eq!(fallback_hotspots(None, true), default_hotspots(true));
     }
 
-    /// On an unverified model only G1–G5 are known, the standard HID buttons.
-    /// G6 and up are model-specific and must not be guessed.
     #[test]
     fn an_unverified_gaming_depot_marks_only_the_standard_buttons() {
         use openlogi_core::binding::STANDARD_BUTTONS;

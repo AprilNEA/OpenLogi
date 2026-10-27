@@ -18,9 +18,9 @@ use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection};
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
     LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
-    default_labels, labels_from_hotspots, on_fallback, side_view_width,
+    default_labels, fallback_hotspots, labels_from_hotspots, side_view_width,
 };
-use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
+use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::inspector::{
     ActionPickerContext, BindingInspectorData, ShortcutMode, binding_inspector,
 };
@@ -597,9 +597,8 @@ fn scaled_model(
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = default_hotspots(thumbwheel)
+        let hotspots = fallback_hotspots(layout, thumbwheel)
             .into_iter()
-            .filter(|hs| on_fallback(layout, hs))
             .map(|hs| Hotspot {
                 x: hs.x * scale,
                 y: hs.y * scale,
