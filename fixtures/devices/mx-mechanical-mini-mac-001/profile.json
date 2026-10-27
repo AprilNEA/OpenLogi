@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "id": "mx-mechanical-mini-mac-001-profile",
+  "name": "MX Mechanical Mini for Mac",
+  "inventories": [
+    {
+      "receiver": {
+        "name": "MX MCHNCL M",
+        "vendor_id": 1133,
+        "product_id": 45933,
+        "unique_id": null
+      },
+      "paired": [
+        {
+          "slot": 255,
+          "codename": "MX Mechanical Mini for Mac",
+          "wpid": null,
+          "kind": "keyboard",
+          "online": true,
+          "battery": {
+            "percentage": 100,
+            "level": "full",
+            "status": "discharging"
+          },
+          "model_info": {
+            "entity_count": 3,
+            "serial_number": "OL-SER-00001",
+            "unit_id": [
+              79,
+              76,
+              68,
+              1
+            ],
+            "transports": {
+              "usb": false,
+              "equad": false,
+              "btle": true,
+              "bluetooth": false
+            },
+            "model_ids": [
+              45933,
+              0,
+              0
+            ],
+            "extended_model_id": 0
+          },
+          "capabilities": {
+            "buttons": true,
+            "pointer": false,
+            "lighting": false,
+            "scroll_inversion": false,
+            "hires_wheel": false,
+            "thumbwheel": false,
+            "haptic_feedback": false,
+            "haptic_panel": false,
+            "dpi_gestures": false,
+            "fn_lock": true,
+            "os_layout": true,
+            "report_rate": false,
+            "backlight": true,
+            "easy_switch": true,
+            "virtual_thumbwheel": false,
+            "pointer_scaling": false,
+            "force_sensing": false,
+            "disable_keys": true
+          },
+          "settings_revision": 0
+        }
+      ]
+    }
+  ],
+  "standalone": [],
+  "settings": [
+    {
+      "route": {
+        "Direct": {
+          "vendor_id": 1133,
+          "product_id": 45933
+        }
+      },
+      "dpi": {
+        "support": "unsupported"
+      },
+      "smartshift": {
+        "support": "unsupported"
+      },
+      "wheel": {
+        "support": "unsupported"
+      },
+      "backlight": {
+        "support": "supported",
+        "value": {
+          "enabled": true,
+          "mode": "None",
+          "status": "TemporaryManual",
+          "current_level": 0,
+          "nb_levels": 8,
+          "power_save": true,
+          "controls": {
+            "automatic": false,
+            "level": false,
+            "power_save": true,
+            "duration": false
+          },
+          "duration": null
+        }
+      },
+      "fn_lock": {
+        "support": "supported",
+        "value": {
+          "fn_lock": true,
+          "default_fn_lock": false
+        }
+      },
+      "report_rate": {
+        "support": "unsupported"
+      },
+      "easy_switch": {
+        "support": "supported",
+        "value": {
+          "current": 0,
+          "slots": [
+            {
+              "index": 0,
+              "paired": true,
+              "connection": "Bluetooth",
+              "name": "Computer 1",
+              "name_max_len": 24,
+              "os": {
+                "kind": "MacOs",
+                "major": 26,
+                "minor": 5,
+                "patch": 1
+              }
+            },
+            {
+              "index": 1,
+              "paired": true,
+              "connection": "Bluetooth",
+              "name": "Computer 2",
+              "name_max_len": 24,
+              "os": null
+            },
+            {
+              "index": 2,
+              "paired": true,
+              "connection": "Bluetooth",
+              "name": "Computer 3",
+              "name_max_len": 24,
+              "os": null
+            }
+          ],
+          "can_rename": true
+        }
+      },
+      "pointer_speed": {
+        "support": "unsupported"
+      },
+      "force_sensing": {
+        "support": "unsupported"
+      },
+      "disable_keys": {
+        "support": "supported",
+        "value": {
+          "supported": 1,
+          "disabled": 0
+        }
+      },
+      "lighting": "unsupported",
+      "light": "unsupported"
+    }
+  ]
+}
