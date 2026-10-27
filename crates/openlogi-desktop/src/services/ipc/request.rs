@@ -331,6 +331,35 @@ impl Request for RenameEasySwitchHost {
     }
 }
 
+/// Move a device to another Easy-Switch slot now, answered as
+/// [`GuiUpdate::EasySwitchHostSwitched`]. The device leaves this computer
+/// once the agent sends it, so an answer that lands carries nothing.
+pub struct SwitchEasySwitchHost {
+    pub route: DeviceRoute,
+    /// Zero-based slot index.
+    pub slot: u8,
+    pub key: DeviceKey,
+}
+
+impl Request for SwitchEasySwitchHost {
+    type Answer = Result<(), WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .switch_easy_switch_host(context::current(), self.route.clone(), self.slot)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::EasySwitchHostSwitched {
+            key: self.key,
+            route: self.route,
+            slot: self.slot,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
 /// Apply a SmartShift configuration now.
 pub struct SetSmartShift {
     pub route: DeviceRoute,
@@ -977,6 +1006,7 @@ commands! {
     SetForceSensing,
     SetBacklight,
     RenameEasySwitchHost,
+    SwitchEasySwitchHost,
     ReadDpi,
     ReadSmartShift,
     ReadFnLock,

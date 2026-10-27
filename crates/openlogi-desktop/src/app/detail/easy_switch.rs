@@ -1,12 +1,15 @@
 //! The Device tab's Easy-Switch card: the computers a multi-host device keeps
 //! on its channels (HID++ `0x1815`), as Logi Options+ shows them — the
 //! channel, the computer's name and OS, how the channel connects — plus which
-//! one is this computer, with a rename for devices that allow it.
+//! one is this computer, with a rename for devices that allow it and a
+//! switch to every other paired channel.
 //!
 //! Nothing is stored on this computer: the device keeps each channel's name
 //! and OS in its own memory, so every row shows its last reading. A rename
 //! goes through [`AppState::rename_easy_switch_host`], which shows the name
-//! at once and lets the device's read-back replace it.
+//! at once and lets the device's read-back replace it. A switch asks first,
+//! then goes through [`AppState::switch_easy_switch_host`]; the device leaves
+//! this computer, so only a refusal comes back to the card.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -17,12 +20,12 @@ use gpui::{
     SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Disableable as _, Icon, IconName, WindowExt as _, button::Button, h_flex, input::InputState,
-    v_flex,
+    Disableable as _, Icon, IconName, WindowExt as _, button::Button, dialog::DialogButtonProps,
+    h_flex, input::InputState, v_flex,
 };
 use openlogi_core::hid::{EasySwitchHosts, EasySwitchSlot, HostConnection, WriteError};
 
-use crate::state::{AppState, DeviceKey, EasySwitchLoad, HostRenameRefusal};
+use crate::state::{AppState, DeviceKey, EasySwitchLoad, HostRenameRefusal, switch_target};
 use crate::ui::components::{PanelCard, control_input, save_cancel_footer};
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -33,6 +36,7 @@ pub(super) struct EasySwitchFacts {
     load: EasySwitchLoad,
     reachable: bool,
     refusal: Option<HostRenameRefusal>,
+    switch_refusal: Option<HostRenameRefusal>,
 }
 
 impl EasySwitchFacts {
@@ -49,6 +53,7 @@ impl EasySwitchFacts {
             load: state.current_easy_switch_load(),
             reachable: state.current_easy_switch_reachable(),
             refusal: state.current_host_rename_refusal(),
+            switch_refusal: state.current_host_switch_refusal(),
         })
     }
 }
@@ -62,12 +67,19 @@ pub(super) fn easy_switch_card(facts: Option<EasySwitchFacts>, pal: Palette) -> 
         load,
         reachable,
         refusal,
+        switch_refusal,
     } = facts?;
     let body: AnyElement = match load {
         EasySwitchLoad::Ready(hosts) if hosts.slots.is_empty() => return None,
-        EasySwitchLoad::Ready(hosts) => {
-            host_rows(&key, &hosts, reachable, refusal.as_ref(), pal).into_any_element()
-        }
+        EasySwitchLoad::Ready(hosts) => host_rows(
+            &key,
+            &hosts,
+            reachable,
+            refusal.as_ref(),
+            switch_refusal.as_ref(),
+            pal,
+        )
+        .into_any_element(),
         EasySwitchLoad::Unknown | EasySwitchLoad::Loading if !reachable => return None,
         EasySwitchLoad::Unknown | EasySwitchLoad::Loading => {
             status_line(tr!("device.reading_easy_switch"), pal).into_any_element()
@@ -91,12 +103,13 @@ pub(super) fn easy_switch_card(facts: Option<EasySwitchFacts>, pal: Palette) -> 
 }
 
 /// One row per channel, in the order the device's keys number them, then why
-/// the last rename did not land.
+/// the last rename did not land and why the last switch did not go out.
 fn host_rows(
     key: &DeviceKey,
     hosts: &Arc<EasySwitchHosts>,
     reachable: bool,
     refusal: Option<&HostRenameRefusal>,
+    switch_refusal: Option<&HostRenameRefusal>,
     pal: Palette,
 ) -> impl IntoElement {
     v_flex()
@@ -114,11 +127,18 @@ fn host_rows(
                 .text_color(pal.text_muted)
                 .child(refusal_text(refusal))
         }))
+        .children(switch_refusal.map(|refusal| {
+            div()
+                .debug_selector(|| "easy-switch-switch-refusal".into())
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!("device.host_switch_failed", channel => refusal.slot + 1))
+        }))
 }
 
-/// A channel: the computer's name over its details on the left, the rename
-/// button on the right. The text column shrinks and wraps, so a long name or
-/// translation cannot push the button out of the card.
+/// A channel: the computer's name over its details on the left, the switch
+/// and rename buttons on the right. The text column shrinks and wraps, so a
+/// long name or translation cannot push the buttons out of the card.
 fn host_row(
     key: &DeviceKey,
     hosts: &Arc<EasySwitchHosts>,
@@ -128,6 +148,7 @@ fn host_row(
 ) -> impl IntoElement {
     let index = usize::from(slot.index);
     let renamable = hosts.can_rename && slot.paired;
+    let switchable = switch_target(hosts, slot.index);
     h_flex()
         .id(("easy-switch-slot", index))
         .debug_selector(move || format!("easy-switch-slot-{index}"))
@@ -157,6 +178,24 @@ fn host_row(
                         .child(host_details(hosts, slot)),
                 ),
         )
+        .when(switchable, |row| {
+            let key = key.clone();
+            let slot = slot.clone();
+            row.child(
+                div()
+                    .debug_selector(move || format!("easy-switch-slot-{index}-switch"))
+                    .flex_none()
+                    .child(
+                        Button::new(("easy-switch-switch", index))
+                            .compact()
+                            .label(tr!("device.switch_host"))
+                            .disabled(!reachable)
+                            .on_click(move |_event, window, cx| {
+                                open_switch_confirmation(window, cx, key.clone(), &slot);
+                            }),
+                    ),
+            )
+        })
         .when(renamable, |row| {
             let key = key.clone();
             let slot = slot.clone();
@@ -250,6 +289,41 @@ fn name_caption(check: NameCheck, max: usize, tried: bool) -> SharedString {
         NameCheck::Empty if tried => tr!("device.host_name_empty"),
         NameCheck::Empty => tr!("device.host_name_length", used => 0, max => max),
     }
+}
+
+/// Confirm before sending the device away: once it switches, it answers
+/// only on the other computer until someone presses its channel key.
+fn open_switch_confirmation(
+    window: &mut Window,
+    cx: &mut App,
+    key: DeviceKey,
+    slot: &EasySwitchSlot,
+) {
+    let channel = slot.index + 1;
+    let index = slot.index;
+    let computer = host_title(slot);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        alert
+            .title(tr!("device.switch_to_channel_confirmation", channel => channel))
+            .description(tr!(
+                "device.switch_to_channel_description",
+                computer => computer.clone(),
+                channel => channel
+            ))
+            .button_props(
+                DialogButtonProps::default()
+                    .ok_text(tr!("device.switch_host"))
+                    .cancel_text(tr!("common.cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok({
+                let key = key.clone();
+                move |_event, _window, cx| {
+                    AppState::apply(cx, |state| state.switch_easy_switch_host(&key, index));
+                    true
+                }
+            })
+    });
 }
 
 fn open_rename_dialog(window: &mut Window, cx: &mut App, key: DeviceKey, slot: &EasySwitchSlot) {
@@ -391,6 +465,7 @@ mod tests {
                 load: Load::Ready(Arc::new(self.0.clone())),
                 reachable: true,
                 refusal: self.1.clone(),
+                switch_refusal: None,
             };
             div()
                 .w(px(360.))
@@ -442,6 +517,27 @@ mod tests {
         assert!(cx.debug_bounds("easy-switch-refusal").is_none());
     }
 
+    /// Channel 1 is this computer and channel 3 is empty, so only channel 2
+    /// can be switched to — whether or not the device renames.
+    #[gpui::test]
+    fn only_another_paired_channel_offers_a_switch_inside_its_row(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("fi");
+        for can_rename in [true, false] {
+            let cx = draw(cx, hosts(can_rename), None);
+            let row = cx.debug_bounds("easy-switch-slot-1").expect("row");
+            let button = cx
+                .debug_bounds("easy-switch-slot-1-switch")
+                .expect("channel 2 offers a switch");
+            assert!(
+                button.left() >= row.left() && button.right() <= row.right(),
+                "the switch {button:?} must sit inside its row {row:?}"
+            );
+            assert!(cx.debug_bounds("easy-switch-slot-0-switch").is_none());
+            assert!(cx.debug_bounds("easy-switch-slot-2-switch").is_none());
+        }
+    }
+
     #[gpui::test]
     fn a_device_that_cannot_rename_offers_no_rename(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
@@ -491,6 +587,7 @@ mod tests {
                 load: Load::Ready(Arc::new(hosts(true))),
                 reachable: self.reachable,
                 refusal: None,
+                switch_refusal: None,
             };
             div()
                 .size_full()
@@ -621,6 +718,7 @@ mod tests {
                         load,
                         reachable,
                         refusal: None,
+                        switch_refusal: None,
                     }),
                     pal,
                 )

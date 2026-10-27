@@ -71,7 +71,8 @@ pub use request::{
     ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadPointerSpeed, ReadReportRate,
     ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight,
     SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
-    SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
+    SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing, SwitchEasySwitchHost,
+    UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.
@@ -218,6 +219,19 @@ pub enum GuiUpdate {
         write: u64,
         /// The read-back, or why the rename did not land.
         result: Result<EasySwitchHosts, WriteError>,
+    },
+    /// Whether a device took an Easy-Switch host switch the GUI asked for.
+    /// Answers [`SwitchEasySwitchHost`].
+    EasySwitchHostSwitched {
+        /// The device that was asked to move.
+        key: DeviceKey,
+        /// The connection the switch went out on; an answer is stale once the
+        /// device moves, like [`Self::ReportRateWritten`]'s.
+        route: DeviceRoute,
+        /// The zero-based slot it was asked to move to.
+        slot: u8,
+        /// Nothing once the device is on its way, or why it stayed.
+        result: Result<(), WriteError>,
     },
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather

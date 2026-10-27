@@ -100,6 +100,8 @@ struct HostRenames {
     /// Why the newest answered rename did not land, until another is sent or
     /// one lands.
     refused: Option<HostRenameRefusal>,
+    /// Why the last host switch did not go out, until another is sent.
+    switch_refused: Option<HostRenameRefusal>,
 }
 
 impl HostRenames {
@@ -1107,6 +1109,61 @@ impl DeviceReads {
         self.host_renames
             .get(key)
             .and_then(|renames| renames.refused.as_ref())
+    }
+
+    /// Note a host switch about to go out on `route`, clearing why the last
+    /// one did not. Returns whether `key`'s Easy-Switch read is on `route`,
+    /// the only connection the switch may go out on.
+    pub(crate) fn begin_host_switch(&mut self, key: &DeviceKey, route: &DeviceRoute) -> bool {
+        if !self
+            .easy_switch
+            .get(key)
+            .is_some_and(|read| read.route == *route)
+        {
+            return false;
+        }
+        self.host_renames
+            .entry(key.clone())
+            .or_default()
+            .switch_refused = None;
+        true
+    }
+
+    /// The agent's answer to a host switch to `slot` that went out on
+    /// `route`. A switch that went out needs nothing: the device leaves, and
+    /// the inventory says so. A refused one is kept for the card and the
+    /// device is asked again, so the card shows where it really is. Only the
+    /// read subscribed on `route` takes the answer; returns whether it did.
+    pub(crate) fn finish_host_switch(
+        &mut self,
+        key: &DeviceKey,
+        route: &DeviceRoute,
+        slot: u8,
+        result: Result<(), WriteError>,
+    ) -> bool {
+        let Some(read) = self
+            .easy_switch
+            .get_mut(key)
+            .filter(|read| read.route == *route)
+        else {
+            return false;
+        };
+        if let Err(error) = result {
+            self.host_renames
+                .entry(key.clone())
+                .or_default()
+                .switch_refused = Some(HostRenameRefusal { slot, error });
+            read.query.revalidate();
+        }
+        true
+    }
+
+    /// Why `key`'s last host switch did not go out, while none was sent since.
+    #[must_use]
+    pub(crate) fn host_switch_refusal(&self, key: &DeviceKey) -> Option<&HostRenameRefusal> {
+        self.host_renames
+            .get(key)
+            .and_then(|renames| renames.switch_refused.as_ref())
     }
 
     /// Retry an exhausted Easy-Switch host query.

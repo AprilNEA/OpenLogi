@@ -389,6 +389,18 @@ impl Runtime {
                     });
                 });
             }
+            ipc::GuiUpdate::EasySwitchHostSwitched {
+                key,
+                route,
+                slot,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_easy_switch_host_switched(&key, &route, slot, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::DeviceUnpaired {
                 route,
                 intent,

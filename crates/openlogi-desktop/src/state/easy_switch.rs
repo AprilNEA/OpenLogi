@@ -11,6 +11,10 @@
 //! is kept for the card to explain and sends the query back to the device
 //! for the truth. The answer names the connection it was read on and is
 //! dropped once the device has moved to another one.
+//!
+//! A switch sends the device to another channel, as its own channel key
+//! does. The device leaves this computer when it lands, so the answer only
+//! matters when it did not: the refusal is kept for the card.
 
 use openlogi_core::hid::{DeviceRoute, EasySwitchHosts, WriteError};
 use tracing::{debug, warn};
@@ -21,10 +25,10 @@ use super::load::EasySwitchLoad;
 use super::{AppState, StateEvent};
 
 /// Why a host rename did not land, kept until another rename is sent or one
-/// lands.
+/// lands — or why a host switch did not go out, kept until another is sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HostRenameRefusal {
-    /// The zero-based slot the rename was for.
+    /// The zero-based slot the rename or switch was for.
     pub(crate) slot: u8,
     /// What the agent or device answered.
     pub(crate) error: WriteError,
@@ -163,6 +167,90 @@ impl AppState {
         StateEvent::EasySwitchChanged(key.clone()).into()
     }
 
+    /// Why the active device's last host switch did not go out, if it did
+    /// not and no switch was sent since.
+    #[must_use]
+    pub(crate) fn current_host_switch_refusal(&self) -> Option<HostRenameRefusal> {
+        self.current_record()
+            .and_then(|record| self.pointer.reads.host_switch_refusal(&record.device_key()))
+            .cloned()
+    }
+
+    /// Move the device `key` to Easy-Switch `slot` (zero-based) through the
+    /// agent. Once the switch goes out the device leaves this computer; a
+    /// refusal arrives as [`Self::apply_easy_switch_host_switched`].
+    ///
+    /// No-op unless `key` is the active device, it reports Easy-Switch hosts
+    /// and is reachable, its last reading — on the device's current
+    /// connection — shows `slot` paired, and `slot` is not the channel it
+    /// uses now. The card offers the switch only then, so the rest are
+    /// clicks from before the reading moved on.
+    pub fn switch_easy_switch_host(&mut self, key: &DeviceKey, slot: u8) -> StateEvents {
+        let events = self.for_current_device(StateEvent::EasySwitchChanged);
+        if !self.current_easy_switch_supported() || !self.is_current_device(key) {
+            debug!(key = %key, "host switch for a device that is no longer selected — ignoring it");
+            return events;
+        }
+        if !self.current_easy_switch_reachable() {
+            debug!(key = %key, "host switch for a device that is offline — ignoring it");
+            return events;
+        }
+        let Some(route) = self
+            .current_record()
+            .and_then(|record| record.route.clone())
+        else {
+            return events;
+        };
+        let EasySwitchLoad::Ready(hosts) = self.current_easy_switch_load() else {
+            return events;
+        };
+        if !switch_target(&hosts, slot) {
+            debug!(
+                slot,
+                "the device's last reading offers no switch to this slot — ignoring it"
+            );
+            return events;
+        }
+        if !self.pointer.reads.begin_host_switch(key, &route) {
+            debug!(
+                slot,
+                "the Easy-Switch reading is not on the device's connection yet — ignoring the switch"
+            );
+            return events;
+        }
+        self.send_ipc(crate::services::ipc::SwitchEasySwitchHost {
+            route,
+            slot,
+            key: key.clone(),
+        });
+        events
+    }
+
+    /// The agent's answer to the [`Self::switch_easy_switch_host`] switch to
+    /// `slot` that went out on `route`: a refusal is kept for the card and
+    /// the device is read again. An answer for a connection the device has
+    /// left is dropped.
+    pub fn apply_easy_switch_host_switched(
+        &mut self,
+        key: &DeviceKey,
+        route: &DeviceRoute,
+        slot: u8,
+        result: Result<(), WriteError>,
+    ) -> StateEvents {
+        if let Err(error) = &result {
+            warn!(%error, key = %key, slot, "host switch did not go out — re-reading the device");
+        }
+        if !self
+            .pointer
+            .reads
+            .finish_host_switch(key, route, slot, result)
+        {
+            debug!(key = %key, slot, "host switch answer for a connection no read is on — dropping it");
+            return StateEvents::none();
+        }
+        StateEvent::EasySwitchChanged(key.clone()).into()
+    }
+
     /// Re-run `key`'s exhausted Easy-Switch read — the "click to retry"
     /// affordance on a [`EasySwitchLoad::Failed`] device.
     pub(crate) fn retry_easy_switch_read(&mut self, key: &DeviceKey) -> StateEvents {
@@ -198,4 +286,10 @@ pub(crate) fn rename_target<'a>(
     let name = hosts.name_for(slot, name).ok()?;
     let shown = hosts.slot(slot).and_then(|entry| entry.name.as_deref());
     (shown != Some(name)).then_some(name)
+}
+
+/// Whether the card offers a switch to `slot`: a computer is paired there
+/// and the device is not on it already.
+pub(crate) fn switch_target(hosts: &EasySwitchHosts, slot: u8) -> bool {
+    hosts.current != Some(slot) && hosts.slot(slot).is_some_and(|entry| entry.paired)
 }
