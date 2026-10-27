@@ -3,16 +3,18 @@ use std::time::SystemTime;
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2_hasher::Sha2Hasher;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 // The manifest advertises the identity the shipped bundle is stamped with, so
 // both come from one constant.
 use openlogi_core::brand::APP_ID;
+use openlogi_core::update_feed::MANIFEST_FILE_NAME;
 
-const CHANNEL: &str = "stable";
-const MACOS_MINIMUM_OS_VERSION: &str = "13.0";
+use crate::support::release_tag::ReleaseTag;
+use crate::support::update_feed::{self, BASE_URL_ENV, MACOS_MINIMUM_OS_VERSION};
+
 /// Windows 10+. Informational — the client updater doesn't gate on it today,
 /// and everything that can run OpenLogi reports at least 10.0.
 const WINDOWS_MINIMUM_OS_VERSION: &str = "10.0";
@@ -22,14 +24,16 @@ pub(crate) struct Args {
     /// Directory containing release artifacts.
     #[arg(long, default_value = "dist")]
     dist: PathBuf,
-    /// Output manifest path.
-    #[arg(long, default_value = "dist/latest.json")]
-    output: PathBuf,
+    /// Root of the tree to upload to the update host. The manifest goes into
+    /// the release's feed record directory under it. Keep it out of
+    /// `--dist`, whose contents are uploaded as release assets.
+    #[arg(long, default_value = ".release/stage")]
+    stage: PathBuf,
     /// Release tag, for example `v0.2.0`.
     #[arg(long, env = "GITHUB_REF_NAME")]
     tag: String,
     /// Public update base URL, for example `https://updates.openlogi.org`.
-    #[arg(long, env = "OPENLOGI_UPDATE_BASE_URL")]
+    #[arg(long, env = BASE_URL_ENV)]
     base_url: String,
     /// Also emit the per-arch Windows `.msi`/`.zip` entries. Off by default so
     /// the manifest can never reference objects the release workflow's R2
@@ -40,30 +44,37 @@ pub(crate) struct Args {
     include_windows: bool,
 }
 
-#[derive(Serialize)]
-struct Manifest {
+/// The built-in update engine's manifest. A release's feed record holds the
+/// one for that release alone; `release channels` serves it from a channel
+/// directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Manifest {
     schema_version: u8,
-    app_id: &'static str,
-    version: String,
-    tag: String,
-    channel: &'static str,
+    app_id: String,
+    pub(super) version: String,
+    pub(super) tag: String,
+    /// The channel the file is served on. A release's own record names the
+    /// release's channel; `release channels` renames it to the directory's.
+    pub(super) channel: String,
     published_at: String,
     release_url: String,
     assets: Vec<Asset>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Asset {
     name: String,
     url: String,
     signature_url: String,
-    os: &'static str,
+    os: String,
     arch: String,
-    format: &'static str,
-    content_type: &'static str,
+    format: String,
+    content_type: String,
     size: u64,
     sha256: String,
-    minimum_os_version: &'static str,
+    minimum_os_version: String,
 }
 
 /// The per-OS constants of an updater-relevant artifact, derived from its file
@@ -78,12 +89,8 @@ struct Classified {
 }
 
 pub(crate) fn run(args: &Args) -> Result<()> {
-    let version = args.tag.strip_prefix('v').unwrap_or(&args.tag).to_string();
-    let release_base = format!(
-        "{}/releases/{}",
-        args.base_url.trim_end_matches('/'),
-        args.tag
-    );
+    let tag = ReleaseTag::parse(&args.tag)?;
+    let release_base = update_feed::release_url(&args.base_url, &tag);
     let assets = collect_assets(&args.dist, &release_base, args.include_windows)?;
     // The DMGs are the publish gate's guaranteed artifact set; the Windows
     // legs are best-effort per arch (a failed leg publishes without them), so
@@ -94,29 +101,42 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 
     let manifest = Manifest {
         schema_version: 1,
-        app_id: APP_ID,
-        version,
-        tag: args.tag.clone(),
-        channel: CHANNEL,
+        app_id: APP_ID.to_owned(),
+        version: tag.version().to_string(),
+        tag: tag.to_string(),
+        channel: tag.channel().as_str().to_owned(),
         published_at: OffsetDateTime::from(SystemTime::now())
             .format(&Rfc3339)
             .context("could not format current timestamp")?,
-        release_url: format!(
-            "https://github.com/AprilNEA/OpenLogi/releases/tag/{}",
-            args.tag
-        ),
+        release_url: update_feed::release_page_url(&tag),
         assets,
     };
 
-    if let Some(parent) = args.output.parent() {
-        fs_err::create_dir_all(parent)
-            .with_context(|| format!("could not create manifest directory {}", parent.display()))?;
+    let output = args
+        .stage
+        .join(update_feed::record_dir(&tag))
+        .join(MANIFEST_FILE_NAME);
+    manifest.write(&output)?;
+    println!("{}", output.display());
+    Ok(())
+}
+
+impl Manifest {
+    /// The manifest as the update host serves it.
+    pub(super) fn render(&self) -> Result<String> {
+        Ok(serde_json::to_string_pretty(self)? + "\n")
     }
-    fs_err::write(
-        &args.output,
-        serde_json::to_string_pretty(&manifest)? + "\n",
-    )
-    .with_context(|| format!("could not write manifest to {}", args.output.display()))
+
+    /// Write [`Self::render`] to `path`, creating its directory.
+    pub(super) fn write(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs_err::create_dir_all(parent).with_context(|| {
+                format!("could not create manifest directory {}", parent.display())
+            })?;
+        }
+        fs_err::write(path, self.render()?)
+            .with_context(|| format!("could not write manifest to {}", path.display()))
+    }
 }
 
 fn collect_assets(dist: &Path, release_base: &str, include_windows: bool) -> Result<Vec<Asset>> {
@@ -149,10 +169,10 @@ fn collect_assets(dist: &Path, release_base: &str, include_windows: bool) -> Res
             name: name.to_string(),
             url: format!("{release_base}/{name}"),
             signature_url: format!("{release_base}/{signature_name}"),
-            os: classified.os,
+            os: classified.os.to_owned(),
             arch: classified.arch,
-            format: classified.format,
-            content_type: classified.content_type,
+            format: classified.format.to_owned(),
+            content_type: classified.content_type.to_owned(),
             size: path
                 .metadata()
                 .with_context(|| format!("could not stat {}", path.display()))?
@@ -160,7 +180,7 @@ fn collect_assets(dist: &Path, release_base: &str, include_windows: bool) -> Res
             sha256: path
                 .sha256()
                 .with_context(|| format!("could not hash artifact {}", path.display()))?,
-            minimum_os_version: classified.minimum_os_version,
+            minimum_os_version: classified.minimum_os_version.to_owned(),
         });
     }
     assets.sort_by(|a, b| a.name.cmp(&b.name));

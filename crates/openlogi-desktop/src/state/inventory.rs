@@ -5,15 +5,16 @@ use std::collections::{BTreeMap, HashSet};
 use openlogi_core::config::{Config, DeviceIdentity};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::PhysicalDeviceKey;
+use openlogi_core::hid::DeviceRoute;
 use tracing::debug;
 
 use crate::services::assets::AssetResolver;
 use crate::services::assets::sync::{AssetTarget, model_key};
+use crate::services::ipc::{UnpairDevice, UnpairFailure, UnpairIntent};
 use crate::state::devices::{
     DeviceRecord, adopt_transient_record, build_device_list, direct_key_prefix,
     fold_by_inventory_key, receiver_uid_of, record_wire_pid, sort_device_list,
 };
-use openlogi_core::hid::DeviceRoute;
 
 use super::device_key::DeviceKey;
 use super::device_session::DeviceSession;
@@ -156,6 +157,18 @@ impl AppState {
             })
             .map(DeviceRecord::device_key)
             .collect();
+        let settings_moved = settings_moved(&self.devices.records, &merged_list);
+        let reconnected = reconnected(&self.devices.records, &merged_list);
+        let disable_keys_invalidated: Vec<DeviceKey> = merged_list
+            .iter()
+            .filter(|new| {
+                self.devices.records.iter().any(|old| {
+                    old.config_key == new.config_key
+                        && (old.route != new.route || old.online != new.online)
+                })
+            })
+            .map(DeviceRecord::device_key)
+            .collect();
 
         self.devices.replace(merged_list, new_index);
         for key in &rerouted {
@@ -163,6 +176,18 @@ impl AppState {
             if let Some(entry) = self.devices.sessions.get_mut(key) {
                 entry.smartshift.reset();
             }
+        }
+        for key in &settings_moved {
+            // The old readings stay on screen until the device answers.
+            self.pointer.reads.revalidate_device_settings(key);
+            self.disable_keys_reads.revalidate_device_settings(key);
+        }
+        for key in &reconnected {
+            self.pointer_speed_reconnected(key);
+            self.force_sensing_reconnected(key);
+        }
+        for key in &disable_keys_invalidated {
+            self.invalidate_disable_keys(key);
         }
         let present: HashSet<_> = self
             .devices
@@ -172,6 +197,8 @@ impl AppState {
             .collect();
         self.pointer
             .reads
+            .retain_present(|key| present.contains(key));
+        self.disable_keys_reads
             .retain_present(|key| present.contains(key));
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
@@ -189,6 +216,10 @@ impl AppState {
         let mut by_key = fold_by_inventory_key(&self.config, new_list);
         let mut adopted = self.adopt_transient_records(&mut by_key);
         let mut merged = Vec::with_capacity(by_key.len().max(self.devices.records.len()));
+        let folded_routes: Vec<DeviceRoute> = by_key
+            .values()
+            .flat_map(|record| record.stale_pairings.iter().cloned())
+            .collect();
 
         for previous in &self.devices.records {
             let inv = previous.inventory_key();
@@ -202,6 +233,18 @@ impl AppState {
             if let Some(record) = adopted.remove(&inv) {
                 clear_inventory_misses(&mut self.devices.sessions, &key);
                 merged.push(record);
+                continue;
+            }
+
+            // A slot the snapshot folded into another card as a leftover
+            // pairing is not missing; grace-keeping it would bring back the
+            // duplicate card the fold removed.
+            if previous
+                .route
+                .as_ref()
+                .is_some_and(|route| folded_routes.contains(route))
+            {
+                clear_inventory_misses(&mut self.devices.sessions, &key);
                 continue;
             }
 
@@ -382,6 +425,9 @@ impl AppState {
             ) {
                 self.retry_smartshift(&key);
             }
+            if matches!(self.disable_keys_reads.load(&key), Load::Failed(_)) {
+                self.disable_keys_reads.retry(&key);
+            }
         }
         // The pointer editor value follows the active device; adopt the newly
         // selected device's known DPI so the panel doesn't keep showing the
@@ -410,7 +456,196 @@ impl super::AppState {
     /// are never offered this — the next inventory snapshot would simply
     /// re-register them. Reports [`StateEvent::InventoryChanged`] once the
     /// card is gone.
+    ///
+    /// A receiver keeps a device's pairing until it is told to drop it, and
+    /// the next inventory would bring that card back (#1581), so a device on
+    /// a receiver is unpaired first; [`Self::apply_device_unpaired`] finishes
+    /// once the receiver has answered. A connected receiver lists every slot
+    /// it pairs, so a card without a route is one whose receiver is absent:
+    /// there is nothing to unpair, and once the receiver returns its slot
+    /// shows again with a route to unpair through. The card's leftover slots
+    /// ([`DeviceRecord::stale_pairings`]) are unpaired first, one at a time,
+    /// so none of them returns as a card without its settings.
     pub(crate) fn forget_device(&mut self, record_key: &str) -> StateEvents {
+        let Some(record) = self
+            .devices
+            .records
+            .iter()
+            .find(|record| record.record_key() == record_key)
+        else {
+            return StateEvents::none();
+        };
+        if record.online {
+            return StateEvents::none();
+        }
+        let config_key = record.persistent_config_key().map(str::to_string);
+        let Some(route @ (DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })) =
+            record.route.clone()
+        else {
+            return self.drop_device(record_key, config_key.as_deref());
+        };
+        let mut pending = record.stale_pairings.clone();
+        pending.push(route);
+        self.send_forget_unpair(record_key.to_string(), config_key, pending)
+    }
+
+    /// Ask the receiver to drop the first of `pending`, carrying the rest so
+    /// [`Self::apply_unpaired`] can continue once it is gone.
+    fn send_forget_unpair(
+        &mut self,
+        record_key: String,
+        config_key: Option<String>,
+        mut pending: Vec<DeviceRoute>,
+    ) -> StateEvents {
+        if pending.is_empty() {
+            return StateEvents::none();
+        }
+        let route = pending.remove(0);
+        let name = self.record_name(&record_key);
+        if self.send_ipc(UnpairDevice {
+            route,
+            intent: UnpairIntent::Forget {
+                record_key,
+                config_key,
+                pending,
+            },
+        }) {
+            StateEvents::none()
+        } else {
+            StateEvent::DeviceRemovalFailed {
+                name,
+                failure: UnpairFailure::AgentUnreachable,
+            }
+            .into()
+        }
+    }
+
+    /// The display name of `record_key`'s card, or the key itself once the
+    /// card is gone.
+    fn record_name(&self, record_key: &str) -> String {
+        self.devices
+            .records
+            .iter()
+            .find(|record| record.record_key() == record_key)
+            .map_or_else(
+                || record_key.to_string(),
+                |record| record.display_name.clone(),
+            )
+    }
+
+    /// Ask the receiver to drop every leftover slot folded into
+    /// `record_key`'s card ([`DeviceRecord::stale_pairings`]). The device, its
+    /// card, and its settings stay; once the receiver lets a slot go, the
+    /// agent's next inventory stops listing it.
+    pub(crate) fn remove_stale_pairings(&mut self, record_key: &str) -> StateEvents {
+        let Some(record) = self
+            .devices
+            .records
+            .iter()
+            .find(|record| record.record_key() == record_key)
+        else {
+            return StateEvents::none();
+        };
+        let name = record.display_name.clone();
+        let routes = record.stale_pairings.clone();
+        for route in routes {
+            let sent = self.send_ipc(UnpairDevice {
+                route,
+                intent: UnpairIntent::StalePairing { name: name.clone() },
+            });
+            if !sent {
+                return StateEvent::StalePairingRemovalFailed {
+                    name,
+                    failure: UnpairFailure::AgentUnreachable,
+                }
+                .into();
+            }
+        }
+        StateEvents::none()
+    }
+
+    /// The receiver's answer to an [`UnpairDevice`], dispatched on what the
+    /// removal was for.
+    pub(crate) fn apply_unpaired(
+        &mut self,
+        route: &DeviceRoute,
+        intent: UnpairIntent,
+        result: Result<(), UnpairFailure>,
+    ) -> StateEvents {
+        match intent {
+            UnpairIntent::Forget {
+                record_key,
+                config_key,
+                pending,
+            } if result.is_ok() && !pending.is_empty() => {
+                self.send_forget_unpair(record_key, config_key, pending)
+            }
+            UnpairIntent::Forget {
+                record_key,
+                config_key,
+                ..
+            } => self.apply_device_unpaired(&record_key, route, config_key.as_deref(), result),
+            UnpairIntent::StalePairing { name } => match result {
+                Ok(()) => StateEvents::none(),
+                Err(failure) => StateEvent::StalePairingRemovalFailed { name, failure }.into(),
+            },
+        }
+    }
+
+    /// The receiver's answer to [`Self::forget_device`]'s unpair. The
+    /// inventory rescan the unpair triggers may already have dropped the
+    /// card, so the settings go by `config_key` whether it is still shown or
+    /// not — unless the device is online again through another route, in
+    /// which case the card and settings are that pairing's now. Online
+    /// through the `route` just unpaired can only be a sighting from before
+    /// the unpair, so it does not count.
+    pub(crate) fn apply_device_unpaired(
+        &mut self,
+        record_key: &str,
+        route: &DeviceRoute,
+        config_key: Option<&str>,
+        result: Result<(), UnpairFailure>,
+    ) -> StateEvents {
+        match result {
+            Ok(()) if self.device_is_back(record_key, route, config_key) => StateEvents::none(),
+            Ok(()) => self.drop_device(record_key, config_key),
+            Err(failure) => StateEvent::DeviceRemovalFailed {
+                name: self.record_name(record_key),
+                failure,
+            }
+            .into(),
+        }
+    }
+
+    /// Whether the forgotten device is online again through a route other
+    /// than `unpaired` — as its old card, or as a new card that owns the same
+    /// settings.
+    fn device_is_back(
+        &self,
+        record_key: &str,
+        unpaired: &DeviceRoute,
+        config_key: Option<&str>,
+    ) -> bool {
+        self.devices.records.iter().any(|record| {
+            record.online
+                && record.route.as_ref() != Some(unpaired)
+                && (record.record_key() == record_key
+                    || config_key.is_some_and(|key| record.persistent_config_key() == Some(key)))
+        })
+    }
+
+    /// Drop `config_key`'s settings, then the card. Dropping the config entry
+    /// *is* the deletion, so the card only follows once the write lands. A
+    /// failed save restores the persisted revision, so returning early keeps
+    /// memory, disk, and the gallery in agreement: the device honestly stays
+    /// instead of vanishing until the next inventory refresh resurrects it.
+    fn drop_device(&mut self, record_key: &str, config_key: Option<&str>) -> StateEvents {
+        if let Some(config_key) = config_key {
+            self.config.edit(|config| config.remove_device(config_key));
+            if !self.persist_and_reload("device removed") {
+                return StateEvents::none();
+            }
+        }
         let Some(index) = self
             .devices
             .records
@@ -419,25 +654,7 @@ impl super::AppState {
         else {
             return StateEvents::none();
         };
-        let record = &self.devices.records[index];
-        if record.online {
-            return StateEvents::none();
-        }
-        let device_key = record.device_key();
-        let config_key = record.persistent_config_key().map(str::to_string);
-
-        // Dropping the config entry *is* the deletion, so the card only
-        // follows once the write lands. A failed save restores the persisted
-        // revision, so returning early keeps memory, disk, and the gallery in
-        // agreement: the device honestly stays instead of vanishing until the
-        // next inventory refresh resurrects it.
-        if let Some(config_key) = config_key {
-            self.config.edit(|config| config.remove_device(&config_key));
-            if !self.persist_and_reload("device removed") {
-                return StateEvents::none();
-            }
-        }
-
+        let device_key = self.devices.records[index].device_key();
         let mut records = self.devices.records.clone();
         records.remove(index);
         let selected = match self.devices.selected_index() {
@@ -593,6 +810,39 @@ fn bolt_route_sibling_of_identity_card(
         _ => receiver_uid_of(&identity.route_key)
             .is_some_and(|live_uid| live_uid.eq_ignore_ascii_case(&uid)),
     }
+}
+
+/// The devices in `new` that changed a setting themselves since `old` — Fn
+/// lock toggled on the keyboard, a DPI button — and whose readings must be
+/// re-read. Only a record still on its route qualifies: a revision is
+/// counted per channel, and a device that moved has its reads dropped
+/// instead.
+pub(super) fn settings_moved(old: &[DeviceRecord], new: &[DeviceRecord]) -> Vec<DeviceKey> {
+    new.iter()
+        .filter(|new| {
+            old.iter().any(|old| {
+                old.config_key == new.config_key
+                    && old.route == new.route
+                    && old.settings_revision != new.settings_revision
+            })
+        })
+        .map(DeviceRecord::device_key)
+        .collect()
+}
+
+/// The devices in `new` that came back online since `old`: offline before,
+/// or online on another route. The agent writes their saved settings again
+/// when they connect.
+pub(super) fn reconnected(old: &[DeviceRecord], new: &[DeviceRecord]) -> Vec<DeviceKey> {
+    new.iter()
+        .filter(|new| {
+            new.online
+                && old.iter().any(|old| {
+                    old.config_key == new.config_key && (!old.online || old.route != new.route)
+                })
+        })
+        .map(DeviceRecord::device_key)
+        .collect()
 }
 
 /// Reset `key`'s consecutive-miss counter — the device was just confirmed

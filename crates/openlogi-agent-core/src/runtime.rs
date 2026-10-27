@@ -7,6 +7,7 @@
 
 mod button;
 pub mod hook;
+mod pointer;
 pub mod scroll;
 
 use std::collections::HashMap;
@@ -21,8 +22,11 @@ use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
-use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
-use crate::{DpiCycleState, DpiCycles};
+use crate::hardware::{
+    DeviceAccess, toggle_smartshift_in_background, write_pointer_speed_in_background,
+};
+use crate::pointer_speed::{PrecisionPress, SpeedWrite};
+use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 /// Application identity captured with a physical press and retained through
 /// asynchronous button dispatch.
@@ -32,11 +36,36 @@ pub(crate) enum ActionDispatchTarget {
     SafariProcess(i32),
     /// The ordinary browser-navigation shortcut target captured outside Safari.
     Keyboard,
+    /// The pointer context that selected the binding. Validated off the tap
+    /// before output. An identified window or desktop is never substituted
+    /// with an unrelated foreground window; an unidentified target retains
+    /// the focused fallback captured with the press.
+    Pointer {
+        target: openlogi_hook::PointerTarget,
+        fallback_safari_pid: Option<i32>,
+    },
 }
 
 impl ActionDispatchTarget {
     fn capture() -> Self {
-        openlogi_hook::frontmost_safari_pid().map_or(Self::Keyboard, Self::SafariProcess)
+        Self::for_pointer(None, openlogi_hook::frontmost_safari_pid)
+    }
+
+    fn for_pointer(
+        target: Option<openlogi_hook::PointerTarget>,
+        capture_safari_pid: impl FnOnce() -> Option<i32>,
+    ) -> Self {
+        let safari_pid = match target {
+            None | Some(openlogi_hook::PointerTarget::Unavailable) => capture_safari_pid(),
+            Some(_) => None,
+        };
+        match target {
+            Some(target) => Self::Pointer {
+                target,
+                fallback_safari_pid: safari_pid,
+            },
+            None => safari_pid.map_or(Self::Keyboard, Self::SafariProcess),
+        }
     }
 }
 /// Held output owned by accepted press capabilities rather than by a capture
@@ -50,15 +79,15 @@ struct HeldShortcuts {
 
 impl HeldShortcuts {
     fn start(&mut self, press: &PressToken, action: &Action) -> bool {
-        let Some(combo) = action.held_combo() else {
+        let Some((combo, keys)) = action.held_chord() else {
             return false;
         };
         match self.by_press.entry(press.clone()) {
             std::collections::hash_map::Entry::Occupied(mut held) => {
-                held.get_mut().replace(combo);
+                held.get_mut().replace(combo, keys);
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(openlogi_inject::press_hold(combo));
+                slot.insert(openlogi_inject::press_hold(combo, keys));
             }
         }
         true
@@ -72,6 +101,7 @@ impl HeldShortcuts {
 #[derive(Clone)]
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
+    pointer_speeds: Arc<PointerSpeeds>,
     access: DeviceAccess,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
 }
@@ -81,7 +111,42 @@ impl ActionExecutor {
         self.dispatch_to(action, device_key, ActionDispatchTarget::capture());
     }
 
+    /// Turn precision mode on or off for the mouse `device_key` names, or
+    /// the selected device, and write the speed that follows. Returns
+    /// `false` when that device is not an online mouse that `press` acts on.
+    fn toggle_precision_mode(&self, device_key: Option<&str>, press: PrecisionPress) -> bool {
+        let Some((on, write)) = self.pointer_speeds.toggle_precision(device_key, press) else {
+            return false;
+        };
+        info!(on, target = ?write.target, "precision mode toggled → writing pointer speed");
+        self.write_speed(write);
+        true
+    }
+
+    /// Write `write` in the background, and settle the restore it carries
+    /// once it lands.
+    fn write_speed(&self, write: SpeedWrite) {
+        let speeds = Arc::clone(&self.pointer_speeds);
+        let SpeedWrite {
+            route,
+            target,
+            ticket,
+            restore,
+            led,
+        } = write;
+        write_pointer_speed_in_background(self.access.op(&route), ticket, target, led, move || {
+            if let Some(restore) = restore {
+                speeds.restored(&restore);
+            }
+        });
+    }
+
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
+        // The ring is drawn by OpenLogi at the cursor and acts on no window, so
+        // no pointer target gates it. It must not: while the ring is showing,
+        // the pointer is over the ring's own floating window, which classifies
+        // as `PointerTarget::Unavailable`, and a gated second trigger press
+        // could never close the ring.
         if matches!(action, Action::ShowActionsRing) {
             if self
                 .action_ring
@@ -92,15 +157,31 @@ impl ActionExecutor {
             }
             return;
         }
+        let Some(target) = target.resolve(action) else {
+            return;
+        };
 
         let next = match action {
-            Action::CycleDpiPresets => match self.dpi_cycle.write() {
-                Ok(mut guard) => guard.state_for(device_key).and_then(DpiCycleState::cycle),
-                Err(e) => {
-                    warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
-                    None
+            Action::CycleDpiPresets => {
+                // A mouse that scales its pointer with `0x2205` has no
+                // adjustable DPI. Its DPI button is the precision-mode button
+                // (MX Ergo CID 0xED), which Logi Options+ binds to precision
+                // mode, so the default binding switches between the saved
+                // speed and the precision speed (#1372). This check comes
+                // before the presets: such a mouse can still have presets
+                // saved by an older panel or by hand, and the mouse would
+                // refuse those DPI writes.
+                if self.toggle_precision_mode(device_key, PrecisionPress::DpiButton) {
+                    return;
                 }
-            },
+                match self.dpi_cycle.write() {
+                    Ok(mut guard) => guard.state_for(device_key).and_then(DpiCycleState::cycle),
+                    Err(e) => {
+                        warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
+                        None
+                    }
+                }
+            }
             Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
                 Ok(mut guard) => guard
                     .state_for(device_key)
@@ -124,10 +205,17 @@ impl ActionExecutor {
                 }
                 return;
             }
+            Action::TogglePrecisionMode => {
+                if !self.toggle_precision_mode(device_key, PrecisionPress::Assigned) {
+                    debug!("no online mouse with pointer scaling — precision toggle skipped");
+                }
+                return;
+            }
             // Browser navigation uses Safari's captured Accessibility target
-            // or the platform shortcut, not a native mouse click. Preserve the
-            // press-time target through queued dispatch and debounce duplicate
-            // capture paths before either output.
+            // or, elsewhere, the platform shortcut (on macOS pressed as the
+            // frontmost app's menu item), not a native mouse click. Preserve
+            // the press-time target through queued dispatch and debounce
+            // duplicate capture paths before either output.
             Action::BrowserBack | Action::BrowserForward => {
                 if let Some(reservation) = browser_nav_debounce_begin(action) {
                     if dispatch_browser_navigation(
@@ -154,7 +242,10 @@ impl ActionExecutor {
             // No target: a dev environment without a real device.
             if let Some(target) = target {
                 info!(%dpi, "DPI action → writing to device");
-                write_dpi_in_background(self.access.op(&target), dpi);
+                // Numbered with the pointer-speed writes: on a DPI mouse it
+                // ends precision mode, and an older precision write must not
+                // land after it.
+                self.write_speed(self.pointer_speeds.preset_write(&target, dpi));
             } else {
                 debug!(%dpi, "no target device — DPI write skipped");
             }
@@ -213,6 +304,9 @@ impl ButtonEventHandler {
         device_key: Option<&str>,
         target: ActionDispatchTarget,
     ) {
+        if action.held_chord().is_some() && target.resolve(action).is_none() {
+            return;
+        }
         if !self.held.start(press, action) {
             self.executor.dispatch_to(action, device_key, target);
         }
@@ -240,11 +334,13 @@ impl ActionRuntime {
     /// Build the action executor and its source-independent button worker.
     pub fn new(
         dpi_cycle: Arc<RwLock<DpiCycles>>,
+        pointer_speeds: Arc<PointerSpeeds>,
         access: DeviceAccess,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
+            pointer_speeds,
             access,
             action_ring,
         };
@@ -276,6 +372,19 @@ impl ActionDispatcher {
     /// Route one action without blocking the input callback.
     pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.executor.dispatch(action, device_key);
+    }
+
+    pub(crate) fn dispatch_pointer_action(
+        &self,
+        action: &Action,
+        device_key: Option<&str>,
+        target: Option<openlogi_hook::PointerTarget>,
+    ) {
+        self.executor.dispatch_to(
+            action,
+            device_key,
+            ActionDispatchTarget::for_pointer(target, openlogi_hook::frontmost_safari_pid),
+        );
     }
 
     /// Queue one OS-hook down edge without blocking the callback. The returned
@@ -317,6 +426,12 @@ impl ActionDispatcher {
         self.buttons.try_trigger_while_pressed(press, action)
     }
 
+    /// Record that the wheel moved while `press` was down, so a wheel-hold
+    /// button's release does not also fire its click.
+    pub(crate) fn try_wheel_while_pressed(&self, press: &PressToken) -> bool {
+        self.buttons.try_wheel_while_pressed(press)
+    }
+
     /// End a gesture hold whose release was lost before another button takes
     /// over the thread-local gesture accumulator.
     fn cancel_stale_hook_press(&self, press: &PressToken) {
@@ -336,9 +451,14 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        pointer_target: Option<openlogi_hook::PointerTarget>,
     ) -> Option<PressToken> {
-        self.buttons
-            .try_hidpp_down(session, button, binding, ActionDispatchTarget::capture())
+        self.buttons.try_hidpp_down(
+            session,
+            button,
+            binding,
+            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
+        )
     }
 
     /// Queue one HID++ up edge for a specific capture session.
@@ -353,9 +473,14 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        pointer_target: Option<openlogi_hook::PointerTarget>,
     ) {
-        self.buttons
-            .try_hidpp_pulse(session, button, binding, ActionDispatchTarget::capture());
+        self.buttons.try_hidpp_pulse(
+            session,
+            button,
+            binding,
+            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
+        );
     }
 
     /// Cancel presses from a HID++ session that is stopping or has died.
@@ -368,6 +493,13 @@ impl ActionDispatcher {
     /// generation are ignored even if they arrive after this call's wake-up.
     pub fn cancel_all_buttons(&self) {
         self.buttons.invalidate_all();
+    }
+
+    /// End only pointer-scoped presses when the hovered window changes.
+    /// Keyboard and explicitly focus-scoped holds keep their own lifecycles.
+    /// Preserve presses already admitted against the newly published target.
+    pub fn cancel_pointer_buttons_except(&self, current: openlogi_hook::PointerTarget) {
+        self.buttons.cancel_pointer_except(current);
     }
 
     /// Cancel only presses owned by an OS-hook callback. HID++ capture does not
@@ -457,6 +589,9 @@ fn dispatch_browser_navigation(
             keyboard();
             true
         }
+        ActionDispatchTarget::Pointer { .. } => {
+            unreachable!("pointer targets resolve before navigation")
+        }
     }
 }
 
@@ -465,6 +600,170 @@ mod tests {
     use super::*;
 
     static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn executor_with(pointer_speeds: Arc<PointerSpeeds>) -> ActionExecutor {
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (action_ring, _ring_rx) = tokio::sync::mpsc::unbounded_channel();
+        ActionExecutor {
+            dpi_cycle: Arc::default(),
+            pointer_speeds,
+            access: DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
+            },
+            action_ring,
+        }
+    }
+
+    /// The MX Ergo's precision button keeps its default Cycle DPI Presets
+    /// binding. The mouse has no DPI presets and scales its pointer with
+    /// `0x2205`, so each press switches precision mode instead of being
+    /// dropped (#1372). A mouse that is not scaled still drops the press.
+    #[test]
+    fn cycle_dpi_presets_toggles_precision_mode_on_a_scaled_mouse() {
+        let pointer_speeds = Arc::new(PointerSpeeds::default());
+        pointer_speeds.publish(
+            None,
+            [crate::pointer_speed::SpeedMouse {
+                key: "ergo".to_string(),
+                route: openlogi_core::hid::DeviceRoute::Unifying {
+                    receiver_uid: "UNIFYING".to_string(),
+                    slot: 1,
+                },
+                saved: crate::pointer_speed::SavedSpeed::Scaled(None),
+            }],
+        );
+        let executor = executor_with(pointer_speeds.clone());
+
+        executor.dispatch(&Action::CycleDpiPresets, Some("ergo"));
+        assert!(pointer_speeds.precision("ergo"));
+        executor.dispatch(&Action::CycleDpiPresets, Some("ergo"));
+        assert!(!pointer_speeds.precision("ergo"));
+
+        executor.dispatch(&Action::CycleDpiPresets, Some("master"));
+        assert!(!pointer_speeds.precision("master"));
+    }
+
+    /// Presets saved for a scaled mouse, by an older panel or by hand, do not
+    /// take the press: the mouse has no DPI to write them to.
+    #[test]
+    fn cycle_dpi_presets_prefers_precision_mode_over_saved_presets() {
+        let route = openlogi_core::hid::DeviceRoute::Unifying {
+            receiver_uid: "UNIFYING".to_string(),
+            slot: 1,
+        };
+        let pointer_speeds = Arc::new(PointerSpeeds::default());
+        pointer_speeds.publish(
+            None,
+            [crate::pointer_speed::SpeedMouse {
+                key: "ergo".to_string(),
+                route: route.clone(),
+                saved: crate::pointer_speed::SavedSpeed::Scaled(None),
+            }],
+        );
+        let mut executor = executor_with(pointer_speeds.clone());
+        let mut cycles = DpiCycles::default();
+        cycles.by_key.insert(
+            "ergo".to_string(),
+            DpiCycleState {
+                presets: vec![
+                    openlogi_core::hid::Dpi::new(800),
+                    openlogi_core::hid::Dpi::new(1600),
+                ],
+                index: 0,
+                target: Some(route),
+                capabilities: None,
+            },
+        );
+        executor.dpi_cycle = Arc::new(RwLock::new(cycles));
+
+        executor.dispatch(&Action::CycleDpiPresets, Some("ergo"));
+
+        assert!(pointer_speeds.precision("ergo"));
+        let cycles = executor.dpi_cycle.read().expect("dpi_cycle lock");
+        assert_eq!(cycles.by_key["ergo"].index, 0, "the presets did not cycle");
+    }
+
+    /// A DPI mouse has DPI to cycle, so its DPI button keeps cycling the
+    /// presets (#1931). Its precision button sets the lowest DPI, and a
+    /// preset press ends precision mode: the mouse leaves the lowest DPI.
+    #[test]
+    fn a_dpi_mouse_cycles_its_presets_and_a_preset_ends_precision_mode() {
+        let route = openlogi_core::hid::DeviceRoute::Unifying {
+            receiver_uid: "UNIFYING".to_string(),
+            slot: 2,
+        };
+        let pointer_speeds = Arc::new(PointerSpeeds::default());
+        pointer_speeds.publish(
+            None,
+            [crate::pointer_speed::SpeedMouse {
+                key: "master".to_string(),
+                route: route.clone(),
+                saved: crate::pointer_speed::SavedSpeed::Dpi(None),
+            }],
+        );
+        let mut executor = executor_with(pointer_speeds.clone());
+        let mut cycles = DpiCycles::default();
+        cycles.by_key.insert(
+            "master".to_string(),
+            DpiCycleState {
+                presets: vec![
+                    openlogi_core::hid::Dpi::new(800),
+                    openlogi_core::hid::Dpi::new(1600),
+                ],
+                index: 0,
+                target: Some(route),
+                capabilities: None,
+            },
+        );
+        executor.dpi_cycle = Arc::new(RwLock::new(cycles));
+
+        executor.dispatch(&Action::TogglePrecisionMode, Some("master"));
+        assert!(pointer_speeds.precision("master"));
+
+        executor.dispatch(&Action::CycleDpiPresets, Some("master"));
+        assert!(!pointer_speeds.precision("master"));
+        // No mouse answers in this test, so the preset write never lands
+        // and the restore stays owed.
+        assert!(pointer_speeds.restore_pending("master"));
+        let cycles = executor.dpi_cycle.read().expect("dpi_cycle lock");
+        assert_eq!(cycles.by_key["master"].index, 1, "the presets cycled");
+    }
+
+    #[test]
+    fn ring_trigger_reaches_the_ring_over_an_unavailable_pointer_target() {
+        // The second press that toggles the ring closed lands on the ring's
+        // own overlay window, which the pointer hit test reports as
+        // unavailable.
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (action_ring, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor = ActionExecutor {
+            dpi_cycle: Arc::default(),
+            pointer_speeds: Arc::default(),
+            access: DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
+            },
+            action_ring,
+        };
+
+        executor.dispatch_to(
+            &Action::ShowActionsRing,
+            Some("mouse"),
+            ActionDispatchTarget::for_pointer(
+                Some(openlogi_hook::PointerTarget::Unavailable),
+                || None,
+            ),
+        );
+
+        assert_eq!(ring_rx.try_recv(), Ok(Some("mouse".to_owned())));
+    }
     #[test]
     fn instantaneous_actions_do_not_enter_held_state() {
         let press = PressToken::hook_for_test(1, ButtonId::Back);

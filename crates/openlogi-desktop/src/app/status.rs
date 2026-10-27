@@ -10,8 +10,9 @@ use gpui_component::{
     spinner::Spinner,
     v_flex,
 };
+use openlogi_ipc::{AgentStatus, SecureInput};
 
-use crate::app::menu::OpenConfigFolder;
+use crate::app::menu::open_config_folder;
 use crate::ui::theme::{self, ContentWidth, FOOTER_H, Palette, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
@@ -102,6 +103,8 @@ pub(super) fn outdated_gui_body(cx: &App) -> Div {
 
 /// Fail-closed frame for config load/save/conflict/reload failures.
 pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
+    use gpui::InteractiveElement as _;
+
     notice_body(tr!("device.configuration"), message, cx)
         .size_full()
         .child(
@@ -110,7 +113,8 @@ pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
                 .child(
                     Button::new("open-config-folder")
                         .label(tr!("app.open_configuration_folder"))
-                        .on_click(|_, _, cx| cx.dispatch_action(&OpenConfigFolder)),
+                        .debug_selector(|| "open-config-folder".into())
+                        .on_click(|_, _, cx| open_config_folder(cx)),
                 )
                 .child(
                     Button::new("restart-after-config-error")
@@ -121,10 +125,50 @@ pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
         )
 }
 
+/// What the attention bar shows. Normal operation shows nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Attention {
+    /// The user dismissed the permission gate while Accessibility is still
+    /// unavailable.
+    Accessibility,
+    /// macOS Secure Event Input is hiding key presses from the hook, so the
+    /// user's OS-hook key bindings do not fire. Carries the name of the app
+    /// macOS attributes it to, when it names one.
+    SecureInput(Option<SharedString>),
+}
+
+impl Attention {
+    /// Decide the attention bar for `status`. `has_key_bindings` is whether
+    /// the user bound any key through the OS hook (the Keys tab's F-row).
+    ///
+    /// Secure Event Input pauses only those bindings: mouse buttons,
+    /// scrolling, gestures and HID++-diverted controls keep working. So it
+    /// shows only when such a binding exists and the hook that would run it
+    /// is installed. A missing Accessibility grant comes first: without it no
+    /// binding fires at all.
+    pub(super) fn for_status(status: &AgentStatus, has_key_bindings: bool) -> Option<Self> {
+        if !status.accessibility_granted {
+            return Some(Self::Accessibility);
+        }
+        match &status.secure_input {
+            SecureInput::On(app) if has_key_bindings && status.hook_installed => Some(
+                Self::SecureInput(app.as_ref().map(|app| app.display_name.clone().into())),
+            ),
+            SecureInput::On(_) | SecureInput::Off => None,
+        }
+    }
+
+    /// Whether adding the first key binding or removing the last one shows
+    /// or hides the bar for `status`. Only the root view draws the bar, so it
+    /// repaints on binding edits while this holds.
+    pub(super) fn depends_on_key_bindings(status: &AgentStatus) -> bool {
+        Self::for_status(status, true) != Self::for_status(status, false)
+    }
+}
+
 /// Contextual attention bar. Normal operation has no footer; this row appears
-/// only after the user dismissed the permission gate while Accessibility is
-/// still unavailable.
-pub(super) fn attention_footer(cx: &App) -> impl IntoElement {
+/// only while an [`Attention`] applies.
+pub(super) fn attention_footer(attention: Attention, cx: &App) -> impl IntoElement {
     let pal = theme::palette(cx);
     h_flex()
         .h(px(FOOTER_H))
@@ -134,7 +178,37 @@ pub(super) fn attention_footer(cx: &App) -> impl IntoElement {
         .items_center()
         .border_t_1()
         .border_color(pal.border)
-        .child(accessibility_status(pal))
+        .child(match attention {
+            Attention::Accessibility => accessibility_status(pal).into_any_element(),
+            Attention::SecureInput(app) => secure_input_status(app, pal).into_any_element(),
+        })
+}
+
+/// Why key bindings are not firing. Nothing to click: Secure Event Input ends
+/// when the app that turned it on turns it off.
+fn secure_input_status(app: Option<SharedString>, pal: Palette) -> impl IntoElement {
+    use gpui::InteractiveElement as _;
+
+    let message = match app {
+        Some(app) => tr!("keyboard.secure_input_pauses_remapping_for_app", app => app),
+        None => tr!("keyboard.secure_input_pauses_remapping"),
+    };
+    h_flex()
+        .gap_2()
+        .items_center()
+        .text_caption()
+        .text_color(pal.text_primary)
+        .child(
+            div()
+                .size_1p5()
+                .rounded_full()
+                .bg(rgb(theme::STATUS_CONNECTING)),
+        )
+        .child(
+            div()
+                .debug_selector(|| "secure-input-notice".into())
+                .child(message),
+        )
 }
 
 /// Accessibility affordance that requests the grant on click (the native

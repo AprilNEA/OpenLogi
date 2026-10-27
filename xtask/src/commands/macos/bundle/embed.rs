@@ -11,7 +11,7 @@ use xshell::{Shell, cmd};
 
 use super::identity::{Channel, Component};
 use crate::support::fs::ensure_file;
-use crate::support::info_plist::stamp_bundle_version;
+use crate::support::info_plist::{BundleVersions, stamp_bundle_version};
 
 /// A nested login-item helper embedded under `Contents/Library/LoginItems`.
 pub(crate) struct EmbeddedHelper {
@@ -87,11 +87,12 @@ pub(super) fn embed_helpers(
     release_dir: &Path,
     app: &Path,
     channel: Channel,
+    versions: &BundleVersions,
 ) -> Result<()> {
     let icon = root.join("crates/openlogi-desktop/icon/AppIcon.icns");
     ensure_file(&icon)?;
     for helper in &HELPERS {
-        embed_helper(root, release_dir, app, helper, &icon, channel)?;
+        embed_helper(root, release_dir, app, helper, &icon, channel, versions)?;
     }
     Ok(())
 }
@@ -103,6 +104,7 @@ fn embed_helper(
     helper: &EmbeddedHelper,
     icon: &Path,
     channel: Channel,
+    versions: &BundleVersions,
 ) -> Result<()> {
     let EmbeddedHelper { binary, label, .. } = *helper;
     println!("==> {label} (embed)");
@@ -121,7 +123,7 @@ fn embed_helper(
     let info_dst = helper.component.info_plist(app, channel);
     fs_err::copy(&info_src, &info_dst)
         .with_context(|| format!("could not write the {label} Info.plist"))?;
-    stamp_bundle_version(&info_dst, env!("CARGO_PKG_VERSION"))?;
+    stamp_bundle_version(&info_dst, versions)?;
 
     let resources = bundle.join("Contents/Resources");
     fs_err::create_dir_all(&resources)
@@ -162,7 +164,9 @@ pub(crate) fn agent_service_label(channel: Channel) -> String {
 /// One plist for both `launch_at_login` states: the preference is sunk into
 /// the agent, which idles out with a clean `exit(0)` — left down by
 /// `SuccessfulExit` — when started unwanted (the GUI's
-/// `platform::registration` doc has the model).
+/// `platform::registration` doc has the model). The agent tells a crash
+/// respawn from a login itself, by login session, since this plist gives both
+/// the same trigger (`docs/DECISIONS.md`, 2026-09).
 fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
     let nested = Component::Agent
         .nested_bundle_dir(channel)

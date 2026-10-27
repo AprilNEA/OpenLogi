@@ -5,12 +5,14 @@ use hidpp::{
     device::Device,
     feature::CreatableFeature,
     feature::FeatureType,
+    feature::adc_measurement::AdcMeasurementFeature,
     feature::battery_status::BatteryStatusFeature,
+    feature::battery_voltage::BatteryVoltageFeature,
     feature::device_information::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
     feature::feature_set::FeatureSetFeature,
-    feature::unified_battery::UnifiedBatteryFeature,
+    feature::unified_battery::{BatteryInfo as UnifiedBatteryInfo, UnifiedBatteryFeature},
     protocol::v20::Hidpp20Error,
 };
 
@@ -142,58 +144,133 @@ pub async fn dump_reprog_controls(
     .await
 }
 
+/// The battery features [`read_battery_raw`] reads, in the order it tries
+/// them: unified `0x1004`, legacy `0x1000`, voltage `0x1001`, then the `0x1F20`
+/// ADC. A device exposing none of them has no battery this command can read.
+pub const RAW_BATTERY_FEATURES: [u16; 4] = [
+    UnifiedBatteryFeature::ID,
+    BatteryStatusFeature::ID,
+    BatteryVoltageFeature::ID,
+    AdcMeasurementFeature::ID,
+];
+
 /// Diagnostic read of the device's raw battery report — the unified `0x1004`
-/// fields, or the legacy `0x1000` `discharge_level`/`next_level`/`status`. For
+/// fields, the legacy `0x1000` `discharge_level`/`next_level`/`status`, the
+/// `0x1001` measured voltage and charging flags, or the `0x1F20` ADC voltage
+/// and charging state. For
 /// `openlogi diag battery`: surfaces exactly what the firmware reports so a
 /// claim like "MX2S shows 0% while charging" can be confirmed against the wire
 /// instead of guessed (the GUI only ever shows the mapped value).
+///
+/// Fails with [`WriteError::FeatureUnsupported`] naming `0x1004`, the preferred
+/// feature, when the device exposes none of [`RAW_BATTERY_FEATURES`].
 pub async fn read_battery_raw(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
 ) -> Result<String, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-
-        match open_feature::<UnifiedBatteryFeature>(&mut device).await {
-            Ok(feature) => {
-                let info = feature
-                    .get_battery_info()
-                    .await
-                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-                return Ok(format!(
-                    "0x1004 UnifiedBattery: percentage={} level={:?} status={:?}",
-                    info.charging_percentage, info.level, info.status
-                ));
-            }
-            Err(WriteError::FeatureUnsupported { .. }) => {}
-            Err(e) => return Err(e),
-        }
-
-        match open_feature::<BatteryStatusFeature>(&mut device).await {
-            Ok(feature) => {
-                let info = feature
-                    .get_battery_level_status()
-                    .await
-                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-                return Ok(format!(
-                    "0x1000 BatteryStatus: discharge_level={} next_level={} status={:?}",
-                    info.discharge_level, info.next_level, info.status
-                ));
-            }
-            Err(WriteError::FeatureUnsupported { .. }) => {}
-            Err(e) => return Err(e),
-        }
-
-        // Reached only when neither 0x1004 nor 0x1000 is present; report the
-        // preferred feature rather than implying 0x1000 was specifically absent.
-        Err(WriteError::FeatureUnsupported {
-            feature_hex: 0x1004,
-        })
+        read_battery_raw_on_channel(&channel, index).await
     })
     .await
+}
+
+/// [`read_battery_raw`] against an already-open channel, the shape the tests
+/// drive a scripted device through.
+pub(crate) async fn read_battery_raw_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<String, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+
+    match super::open_feature_with_version::<UnifiedBatteryFeature>(&mut device).await {
+        Ok((feature, version)) => {
+            let info = feature
+                .get_battery_info()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(unified_battery_line(version, info));
+        }
+        Err(WriteError::FeatureUnsupported { .. }) => {}
+        Err(e) => return Err(e),
+    }
+
+    match open_feature::<BatteryStatusFeature>(&mut device).await {
+        Ok(feature) => {
+            let info = feature
+                .get_battery_level_status()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(format!(
+                "0x1000 BatteryStatus: discharge_level={} next_level={} status={:?}",
+                info.discharge_level, info.next_level, info.status
+            ));
+        }
+        Err(WriteError::FeatureUnsupported { .. }) => {}
+        Err(e) => return Err(e),
+    }
+
+    // The measured voltage, not the percentage the inventory interpolates from
+    // it: checking that estimate against the wire is what this command is for.
+    match open_feature::<BatteryVoltageFeature>(&mut device).await {
+        Ok(feature) => {
+            let info = feature
+                .get_battery_info()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(format!(
+                "0x1001 BatteryVoltage: voltage_mv={} critical={} status={:?}",
+                info.voltage_mv, info.critical, info.status
+            ));
+        }
+        Err(WriteError::FeatureUnsupported { .. }) => {}
+        Err(e) => return Err(e),
+    }
+
+    match open_feature::<AdcMeasurementFeature>(&mut device).await {
+        Ok(feature) => {
+            let measurement = feature
+                .get_adc_measurement()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(format!("0x1F20 AdcMeasurement: {measurement:?}"));
+        }
+        Err(WriteError::FeatureUnsupported { .. }) => {}
+        Err(e) => return Err(e),
+    }
+
+    // Reached only when none of the read features is present; report the
+    // preferred feature rather than implying 0x1F20 was specifically absent.
+    Err(WriteError::FeatureUnsupported {
+        feature_hex: UnifiedBatteryFeature::ID,
+    })
+}
+
+/// The [`read_battery_raw`] line for a `0x1004` status at feature `version`.
+/// The fields after the charging status print as raw bytes; a field that the
+/// version or a short reply leaves out is not printed.
+fn unified_battery_line(version: u8, info: UnifiedBatteryInfo) -> String {
+    let extended = info.extended(version);
+    let fields: String = [
+        extended
+            .external_power
+            .map(|value| format!(" external_power={:#04x}", value.raw())),
+        extended
+            .fast_charging
+            .map(|value| format!(" fast_charging={:#04x}", value.raw())),
+        extended
+            .removable_battery
+            .map(|value| format!(" removable_battery={:#04x}", value.raw())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    format!(
+        "0x1004 UnifiedBattery: version={version} percentage={} level={:?} status={:?}{fields}",
+        info.charging_percentage, info.level, info.status
+    )
 }
 
 /// Firmware fields for one entity whose record the device answered and this
@@ -211,36 +288,38 @@ pub struct FirmwareEntityInfo {
     pub kind: DeviceEntityType,
     /// Three-letter prefix of the firmware name, e.g. `MPM`.
     pub prefix: String,
-    /// Firmware number, BCD-decoded by the protocol layer.
+    /// Firmware number, decoded by the protocol layer from packed BCD, or from
+    /// binary when the firmware sends binary.
     pub number: u8,
-    /// Firmware revision, BCD-decoded by the protocol layer.
+    /// Firmware revision, decoded by the protocol layer from packed BCD, or from
+    /// binary when the firmware sends binary.
     pub revision: u8,
-    /// Firmware build, BCD-decoded by the protocol layer.
+    /// Firmware build, decoded by the protocol layer from packed BCD, or from
+    /// binary when the firmware sends binary.
     pub build: u16,
     /// Whether this is the entity currently running.
     pub active: bool,
-    /// USB or wireless product ID the entity runs under. A bootloader entity
-    /// reports the PID the device enumerates as while in DFU mode; only the
-    /// active entity is required to report a real value, so an inactive one
-    /// may be zero.
-    pub transport_pid: u16,
-    /// Optional extra versioning bytes. Device-specific and usually all zero,
-    /// carried verbatim because a device that does populate them is exactly
-    /// the device a report is being collected for.
-    pub extra_version: [u8; 5],
+    /// Product ID of the device on the link the request used, as
+    /// [`DeviceEntityFirmwareInfo::transport_pid`] decides it. `None` for every
+    /// entity whose transport-specific bytes are not known to hold a PID.
+    pub transport_pid: Option<u16>,
+    /// Reply bytes 9 to 15, the transport-specific region, verbatim. Their
+    /// meaning depends on the entity and the link, and a device that fills
+    /// them in is exactly the device a report is being collected for.
+    pub transport_specific_info: [u8; 7],
 }
 
 impl From<DeviceEntityFirmwareInfo> for FirmwareEntityInfo {
     fn from(info: DeviceEntityFirmwareInfo) -> Self {
         Self {
+            transport_pid: info.transport_pid(),
             kind: info.entity_type,
             prefix: info.firmware_prefix,
             number: info.firmware_number,
             revision: info.revision,
             build: info.build,
             active: info.active,
-            transport_pid: info.transport_pid,
-            extra_version: info.extra_version,
+            transport_specific_info: info.transport_specific_info,
         }
     }
 }
@@ -322,8 +401,8 @@ pub(crate) async fn dump_firmware_entities_on_channel(
             }),
             // The device answered about *this* entity and the answer was no:
             // it refused the read, or it sent a record this parser cannot
-            // decode (a G502's radio stack reports a build field that is not
-            // valid BCD). The rest of the table is still worth reading.
+            // decode (a firmware prefix that is not UTF-8). The rest of the
+            // table is still worth reading.
             Err(e @ (Hidpp20Error::Feature(_) | Hidpp20Error::UnsupportedResponse)) => {
                 entries.push(FirmwareEntity::Unreadable {
                     index: entity,

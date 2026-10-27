@@ -148,6 +148,15 @@ impl<Node, Channel> Registry<Node, Channel> {
         // carries no registry state and means only "read the SSOT again".
         self.changes.send_modify(|()| {});
     }
+
+    fn contains_channel(&self, channel: &Channel) -> bool {
+        self.state.read().is_ok_and(|state| {
+            state
+                .publications
+                .iter()
+                .any(|publication| (self.same_channel)(&publication.channel, channel))
+        })
+    }
 }
 
 impl<Node: Eq, Channel> Registry<Node, Channel> {
@@ -273,6 +282,41 @@ impl ChannelRegistry {
             shared.matches(route) && Arc::ptr_eq(channel, shared.channel())
         })
     }
+
+    /// How inventory publishes the connection `shared` was taken from now.
+    ///
+    /// This is the one place that tells an offline receiver slot from a
+    /// retired transport. Sessions map the verdict to their own stop reason
+    /// instead of recombining route lookups and transport checks.
+    #[must_use]
+    pub(crate) fn publication(&self, shared: &SharedChannel) -> PublicationState {
+        if self.is_current(shared) {
+            PublicationState::Current
+        } else if matches!(
+            shared.route(),
+            DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. }
+        ) && self.inner.lookup(shared.route()).is_none()
+            && self.inner.contains_channel(shared.channel())
+        {
+            PublicationState::SlotOffline
+        } else {
+            PublicationState::Retired
+        }
+    }
+}
+
+/// How inventory publishes a channel a session took earlier; the verdict of
+/// [`ChannelRegistry::publication`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationState {
+    /// The channel still wins its exact route on the same connection.
+    Current,
+    /// Inventory withdrew the receiver slot's route but still publishes the
+    /// USB transport, so the slot may return on the same connection.
+    SlotOffline,
+    /// Inventory removed or replaced the connection, or another publication
+    /// now wins the route. Do not write through it again.
+    Retired,
 }
 
 #[cfg(test)]

@@ -4,6 +4,663 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: Backlight writes invalidate other clients' device readings
+
+A successful CLI backlight write could leave the already-open GUI showing the
+previous setting: the write's readback went only to its requester, and firmware
+does not guarantee a settings broadcast for that write.
+
+The agent uses the existing orchestrator-owned `settings_revision` epoch to
+invalidate client readings after a backlight transaction settles. It announces
+errors too, because a write may have reached hardware before confirmation failed.
+No returned value is broadcast as truth and no configuration file is changed.
+An agent-owned task finishes the transaction and publication if its requesting
+client disconnects. Admission reserves the existing per-route write order before
+task scheduling; hardware execution keeps its existing timeout, excluding queue
+wait. The orchestrator lock is never held over hardware I/O.
+
+Desktop invalidates its existing backlight cache rather than joining a read
+started before the revision. If a revision arrives while local writes are still
+pending, it reads again after their replies settle: a delayed local reply may
+predate a newer write from another client. This reconciliation issues no write,
+preserves later local intent, and is discarded with the old route's read state.
+The notification uses the existing snapshot contract, not a new wire field or
+polling timer.
+
+## 2026-10: Channel files are composed from per-release records
+
+Beta releases share the update host with stable ones. A beta publish must
+change what `beta` offers and leave what `stable` offers as it is. A stable
+hotfix published after a newer beta must not take that beta off the beta
+channel. So each release uploads an immutable feed record to
+`releases/<tag>/feed/`: its own `latest.json` and one single-item appcast per
+architecture. Every publish then composes all channel files again from all
+records (`cargo xtask release channels`).
+
+- **Composed again, not edited in place.** Reading the current channel file,
+  adding an item and writing it back would make each file depend on the order
+  in which tags published. A failed publish would leave it wrong until someone
+  repaired it by hand. Composing from the records gives the same files in any
+  order.
+- **Newest by build version, not by tag version.** A beta's build version is
+  the stable release it was cut from, plus its beta number, so build order
+  follows the commits. Sparkle and Windows Installer compare build versions.
+  The built-in update engine compares release versions, and never offers a
+  lower one. The two orders disagree whenever a beta is numbered past a
+  release cut after it, which happens when the release PR's version goes
+  down in between. The later release can be stable (`0.9.0-beta.5`, then
+  `0.8.19`) or another beta (`0.9.0-beta.3`, then `0.8.19-beta.10`). The
+  channels offer the release cut last, which has the earlier one's changes.
+  Sparkle moves a Mac to it; the built-in engine keeps the higher-numbered
+  beta until a release numbered past it. We accept this: `release channels`
+  warns whenever a beta is numbered past what the beta channel offers, so
+  that a release numbered past the beta can follow.
+- **Items copied byte for byte.** The composer never signs. The EdDSA
+  signatures stay the ones `release appcast` made, and the private key stays
+  in that one step.
+- **One appcast per architecture for both channels.** This is Sparkle's own
+  channel model: the beta item carries
+  `<sparkle:channel>beta</sparkle:channel>`, and Sparkle offers it only to an
+  app that allows the beta channel.
+- **The bucket lists the releases, not GitHub Releases.** The updater can offer
+  only what is on R2, and reading R2 needs no GitHub token. Releases up to
+  `v0.8.17` have no record. Until a stable release has one, the current stable
+  channel files stand in for it; after that they are not read.
+- **A record counts once its manifest is up.** A record's appcasts upload
+  first and its `latest.json` last. A record directory without `latest.json`
+  is an upload that stopped part way, and the composer skips it, so it cannot
+  block later releases. A record with its manifest but a file missing or
+  wrong is an error.
+
+## 2026-10: The mock agent's console drives the agent's own indicator state
+
+`openlogi-agent-mock` reads one command per stdin line while the GUI and
+overlay stay connected. A developer can then see a low battery, an offline or
+failing device, a lock-key or backlight indicator, or an agent restart with no
+hardware. Logi Options+ 2.8 has comparable hooks in its agent: a simulated
+device on its HID write path and a fake battery feature. OpenLogi puts the
+same kind of control in its separate mock binary, so the agent ships none.
+
+- **The agent's state machines, not copies.** A battery reading goes through
+  `LowBatteryWatch::take_reading`, a lock key through
+  `LockKeyIndicator::announce`, and a backlight level through
+  `BacklightOverlayManager`. The orchestrator uses the same calls, so the
+  user's settings, the once-per-discharge rule, and the 1.5-second lifetime
+  behave as they do in the agent. `take_reading` and `announce` replace the
+  separate public calls that the orchestrator used to sequence by itself, so
+  no caller can skip the settings check.
+- **Words for people, values for tests.** Tests build `Command` values and
+  call `MockAgent::apply` with explicit `AppSettings`. No test reads a config
+  file or depends on the command words.
+- **A thread of its own for stdin.** Tokio's `stdin` reads on the blocking
+  pool and cannot cancel the read, so it can hold up runtime shutdown. A std
+  thread reads the lines and one task applies them in order. When stdin
+  closes, the console stops and the mock keeps serving.
+- **Semantic state only.** The console changes what the IPC contract already
+  exposes. It does not model HID channels, reports, or barriers. Those stay
+  the Phase 4 replay scenarios in
+  [MOCK_DEVICE_TESTING.md](MOCK_DEVICE_TESTING.md#phase-4-lifecycle-and-fault-scenarios).
+- **`disconnect` closes connections, not the process.** Each connection
+  waits on a shared signal beside its requests. The overlay's agent-lost path
+  and the GUI's reconnect can then be tried without losing the mock's state.
+
+Verified with unit tests of every command and an in-memory connection that
+`disconnect` closes, and by piping commands into the built binary on macOS.
+Nobody has watched the GUI or the overlay follow the console yet.
+
+## 2026-10: An animated desktop switch types the user's Space shortcut first
+
+0.8.16 shipped the timed DockSwipe slide of the next entry. Users on macOS
+26.6.1 and 27.0.1 report that it is slower than a native Ctrl+←/→ switch
+(#1722) and that it stutters in the middle (#1972). The Dock plays its own
+slide for that shortcut. An animated switch therefore types the user's "Move
+left a space" or "Move right a space" shortcut (symbolic hotkeys 79 and 81),
+as #1847 proposed. This revisits the "Not the shortcut" point below.
+
+- **Typed as a keyboard types it.** Each modifier goes down as a key of its
+  own, and an arrow key carries the numeric-pad flag. WindowServer ignores a
+  synthesized hotkey in any other shape (#1653).
+- **Through the virtual HID keyboard when it is installed.** Each edge goes
+  through the device, as a held chord's edges do. An edge the device does not
+  carry goes out as its `CGEvent`. Every `CGEvent` is built before the first
+  edge goes out.
+- **Held chords stay intact.** The keystroke is typed under the held-chord
+  lock. A held modifier the shortcut does not use is lifted for the keystroke
+  and pressed again after it. A held modifier the shortcut uses stays down.
+- **The slide stays as the fallback.** Its frames are built before the gate.
+  They are posted when the shortcut is off or cannot be read, and when a held
+  chord holds the shortcut's key down. A rebound shortcut is read from its
+  record, so it still switches with the Dock's slide.
+- **Instant stays a DockSwipe.** With `animate_desktop_switch` off, the switch
+  posts the two-frame DockSwipe, because the shortcut always animates.
+
+Verified: unit tests check the order, flags and routing key of every edge.
+#1847's author switched both ways with the Dock's slide on macOS 27.0.1. That
+run used the `CGEvent` edges, because the test process had no virtual
+keyboard. On 0.8.16, #1653's reporter switched Spaces with the slide through
+a Ctrl+←/→ binding on the virtual keyboard. That binding sends the same four
+reports as this keystroke. Not verified on hardware: this keystroke through
+the virtual keyboard, and the fallback slide.
+
+## 2026-10: Desktop switches slide like an Options+ three-finger swipe, and can switch at once
+
+Previous Desktop and Next Desktop on macOS posted a DockSwipe of two frames,
+Began and Ended, so the Dock changed Space with no slide (#1673). Two pull
+requests proposed a slide. #1847 posts the user's "Move left a space" and
+"Move right a space" shortcuts (symbolic hotkeys 79 and 81) and falls back to
+the DockSwipe when they are off. #1672 posts DockSwipe frames that follow a
+live drag. OpenLogi posts timed DockSwipe frames, as Logi Options+ does for
+its three-finger swipe, and keeps the two-frame switch as an option.
+
+- **The Options+ timing.** Logi Options+ 2.8 posts one DockSwipe frame per
+  tick of a 16.6 ms timer (`injectionPeriodInMs` in
+  `gesture_handler_3_finger_horz_swipe`), and each tick consumes 15% of the
+  motion still pending. OpenLogi has no hand to follow, so it starts with one
+  desktop width pending. It posts 19 moving frames, 16.6 ms apart, until less
+  than 5% remains (progress 0.954). An Ended frame with an exit velocity then
+  lets the Dock finish. The progress is past the Options+ completion threshold
+  (0.3), so the Dock completes the switch. These values come from static
+  analysis of the Options+ binary, not from a trace of its events.
+- **Not the shortcut.** Options+ also has a Ctrl+Arrow keystroke for a
+  one-shot move (`+[injector InjectMoveToLeftSpace]`), which is close to
+  #1847. The static analysis did not find which actions call it. The shortcut
+  can be off or rebound, and then #1847 switches with no slide again. The
+  DockSwipe needs no user setting, and the Space confirmation per display
+  stays as it is.
+- **Frame fields from #1672.** Up to macOS 26 a slide frame carries the
+  fields #1672 found, with the progress in field 124. macOS 27 reads an
+  attached `IOHIDEvent` instead (#1703). There each frame carries the same
+  progress in its DockSwipe progress field, and the Ended frame adds the
+  velocity child, as Mac Mouse Fix posts its swipes on macOS 27. One
+  `LazyLock` owns the choice of layout, and an ast-grep rule keeps it the
+  only one.
+- **On by default, with an off switch.** `animate_desktop_switch` is on,
+  because the Options+ swipe animates. Off restores the two-frame switch for
+  users who prefer no slide. Only macOS reads it, and the settings page shows
+  it only on macOS.
+- **The action waits for the slide to be posted.** The action worker posts
+  every frame before it takes the next action, about 315 ms, so two switches
+  in a row do not mix their frames. A switch that starts while another is
+  under way is skipped, as before.
+
+Verified on macOS 26.7 with a screen recording: the slide shows about eight
+intermediate frames at 30 fps, and the two-frame switch jumps in one frame.
+The macOS 27 slide is verified only as event construction in unit tests;
+nobody has run it on macOS 27 yet.
+
+## 2026-10: macOS key synthesis types through a virtual HID keyboard when entitled
+
+A key that `CGEventPost` injects enters the window server as software input.
+Some system consumers treat it differently from a key typed on a keyboard:
+issues #1653 and #744 report shortcuts that a real keyboard triggers and a
+posted event does not. An `IOHIDUserDevice` keyboard reports its keys into the
+HID event system, where a USB keyboard's keys enter. The agent therefore
+creates one at arming and sends shortcut keys through it.
+
+- **The entitlement decides, at run time.** Creating the device needs the
+  restricted `com.apple.developer.hid.virtual.device` entitlement. Apple grants
+  it only through a provisioning profile, and AMFI kills a process that claims
+  it without one (an ad-hoc signed probe exited with `SIGKILL` on macOS 26.7).
+  Release builds embed a Developer ID profile for `org.openlogi.agent` that
+  grants it. Local and dev builds carry none, so there creation fails and
+  every key stays on `CGEventPost`.
+- **The claim and its profile ship together, or neither does.**
+  `xtask/src/commands/macos/bundle/provisioning.rs` embeds the profile and
+  writes the agent's entitlements from it, so no entitlements file can claim
+  the grant alone. Before the build starts, it rejects a profile that would get
+  the agent killed on a user's Mac: one limited to registered devices, one for
+  another App ID, one without the grant, or an expired one. After signing, it
+  checks that the profile includes the signing certificate. The release
+  workflow requires the profile, so a signed release cannot fall back to
+  `CGEventPost` without anyone noticing.
+- **Logi Options+ creates the same kind of device, but sends nothing through
+  it.** Its 2.8.981479 agent holds the entitlement and a Developer ID profile.
+  `gestures::create_virtual_hid_keyboard` passes only a `ReportDescriptor` (a
+  65-byte boot keyboard with five key slots and an LED output report). The
+  binary imports no `IOHIDUserDeviceHandleReport*` function, and the gesture
+  then posts F14 or F15 as `CGEvent`s. OpenLogi's use of input reports has no
+  Options+ precedent to copy.
+- **A boot keyboard without outputs.** The descriptor has the modifier bitmap,
+  a reserved byte and six key slots: an eight-byte input report without a
+  report ID. It declares no LED report, because a device without a dispatch
+  queue receives no output reports. The properties set only the descriptor
+  and `Product`. Without a vendor ID, `openlogi-hid`'s Logitech filter never
+  opens the device.
+- **A key is released on the path that pressed it.** A key without a HID usage,
+  a press beyond six keys, and an up edge whose down edge the device did not
+  carry all go out as `CGEvent`s. A tap reports its release before it returns,
+  so the device holds keys only for held chords. A rejected report removes the
+  device and reports every key released; key synthesis then posts `CGEvent`s
+  for the rest of the process. The keys that held chords still own go down
+  again as `CGEvent`s, so each chord's release finds its keys down.
+- **The hook recognises the device by name.** Its key events carry no
+  `SYNTHETIC_EVENT_USER_DATA`, because the HID event system creates them. The
+  hook resolves each key event's sender to the device's `Product` and skips
+  OpenLogi's own, as it skips a tagged `CGEvent`.
+- **The agent owns it.** Only the armed agent creates the device. The exit path
+  removes it after the input workers stop, so a chord released during shutdown
+  still reaches it. The CLI and the GUI keep posting `CGEvent`s.
+
+Verified with unit tests of the report state, the routing and the descriptor,
+and by running an unentitled build: creation fails and keys keep the
+`CGEvent` path. Nobody has run an entitled build, so the report path and its
+effect on #1653 and #744 are not verified.
+
+## 2026-10: One application on every platform is an `[apps]` alias
+
+A per-app profile was keyed by the identifier one platform reports: a macOS
+bundle id, a Linux application id, or a Windows executable path. The same
+application has a different identifier on each platform, so a profile written
+on one did not apply on another. Logi Options+ 2.8 solves this with one
+`applicationId` and a list of detection rules per platform
+(`applications.json`). OpenLogi adds the same layer as a table in
+`config.toml`, and accepts the config format change (schema 9).
+
+- **A separate table, referenced by key.** `[apps.<alias>]` lists the
+  identifiers of one application per platform. A profile references it as
+  `app:<alias>`, the same way the existing `exe:<filename>` key names an
+  executable. Profiles keyed by a platform identifier keep working unchanged,
+  so no existing file needs to move. Later features that select an
+  application, such as scene templates, can take the same `app:` key.
+- **The most specific key wins.** The matcher tries the exact identifier, then
+  `exe:<filename>`, then the alias that lists the exact identifier, then the
+  alias that lists `exe:<filename>`. A profile keyed by the platform's own
+  identifier therefore wins over an alias profile. That lets one platform
+  differ from a shared profile.
+- **One alias per identifier.** Two aliases that list the same identifier for
+  one platform stop the load, because the matcher could not choose between
+  them. An identifier can repeat across platforms.
+- **An undefined alias stops the load.** A misspelled `app:` key would match
+  nothing and silently do nothing, so loading rejects it, as the strict schema
+  rejects other mistakes. Windows identifiers must be lower-case for the same
+  reason: Windows reports lower-case paths.
+- **One matcher.** `openlogi_core::app` owns both the `exe:` fallback and the
+  alias lookup for button profiles and Actions Ring layouts, and an ast-grep
+  rule keeps a second copy out.
+- **The desktop app reads aliases but does not write them yet.** It shows an
+  alias profile under the alias name and stops offering an application that
+  already runs under a profile. Sharing a profile across platforms from the
+  GUI, and a hint for an alias with no identifier on this platform, need new
+  strings in every locale. A later change adds them.
+
+Verified with unit tests, which CI runs on macOS, Linux, and Windows. Nobody
+has used one config on two platforms with a real application yet.
+
+## 2026-10: On Wayland, the ring opens a layer-shell surface on each display
+
+A Wayland client cannot read the global cursor position or place its own
+windows. Since #1004 the overlay has opened one ring window per display, and
+each window draws the ring where the pointer enters it. On GNOME 50 with two
+monitors, both rings appeared on one monitor (#1901). An ordinary window
+cannot name its output, Mutter put both windows on one display, and each
+window that heard the pointer drew a ring of its own.
+
+- **Layer-shell surfaces first.** A `wlr-layer-shell` surface names its
+  output. Each display gets one on the overlay layer, anchored to all four
+  edges and without keyboard focus. The surface has no size of its own, so
+  the compositor sizes it to the display. GPUI derives display bounds from an
+  integer scale, which is wrong under fractional scaling, so the overlay does
+  not use them here.
+- **Ordinary windows as the fallback.** GNOME does not offer
+  `wlr-layer-shell`, so there the overlay opens the maximized windows it
+  opened before. The overlay remembers the first refusal for the life of the
+  process, for rings and notices alike. GPUI binds the compositor's globals
+  once, and each refused request leaves behind the `wl_surface` GPUI created
+  for it.
+- **One window draws the ring.** The windows of one ring share one record of
+  which window heard the pointer last, and only that window draws the ring.
+  When the windows are stacked on one display, the last to hear the pointer
+  is the one on top, the only one a click can reach. A window that loses the
+  ring also drops its hovered slot.
+
+Verified with unit tests and a GPUI test that opens two ring windows for one
+ring. Nobody has run the Wayland paths on screen yet. CI builds and tests
+them on Linux.
+
+## 2026-10: The lock-key indicator follows Logi Options+ 2.8, without Fn Lock
+
+Logi Options+ 2.8 shows lock-key changes in its own on-screen indicator. Its
+`0x4220` handler compares each broadcast bitmask with the last one and posts
+one indicator per changed bit. Its `osd_resources.json` shows Caps Lock on
+every platform and Num Lock and Scroll Lock on Windows only. OpenLogi follows
+both rules.
+
+- **A baseline before the first change.** The agent reads the keyboard's lock
+  state (`GetLockState`) when it learns the device, and announces only bits
+  that change after that. Num Lock is usually on under Windows, so a keyboard
+  that connects must not announce it. A keyboard that goes offline, or that
+  reconnects between two scans, loses its baseline and is read again. Options+
+  probably reads a baseline at start too; that part of the disassembly is not
+  verified.
+- **The agent sees every change; the indicator shows the latest.** The device
+  layer hands changes to the agent in a small queue, not a latest-value cell,
+  so a change the platform rule drops (Num Lock on macOS) cannot hide one it
+  keeps (Caps Lock) reported with it. The indicator shows only the latest
+  change, so presses in quick succession can skip the states between them.
+- **The agent owns the indicator.** It shows a change for 1.5 seconds, the
+  backlight indicator's time, and a newer change replaces it. The overlay
+  hides the indicator when the connection to the agent drops, as it does for
+  notices.
+- **On by default.** One global switch, `lock_key_notifications`, turns it
+  off. The Options+ default for its setting was not found in the static
+  analysis.
+- **No Fn Lock yet.** Options+ also shows "Media Keys" and "F-Keys". OpenLogi
+  writes the Fn Lock state back to a keyboard when it reconnects, and the
+  keyboard reports that write like a key press, so the indicator would show
+  on every reconnect. That needs its own decision.
+
+Verified with unit tests. Nobody has seen the indicator on screen with a real
+keyboard yet.
+
+## 2026-10: Low-battery notices are drawn by the overlay, not sent as OS notifications
+
+Logi Options+ 2.8 shows a low battery in its own on-screen toast
+(`logi::overlay::battery_notification`, the `low_battery` entry of its
+`notification_resources.json`), on by default. It sends OS notifications only
+for macros and integrations. OpenLogi follows the same split.
+
+- **No notification permission.** An OS notification needs authorization on
+  macOS, a registered app identity on Windows, and a notification daemon on
+  Linux. The overlay runs whenever the agent is armed, with or without the
+  settings app, and already places windows per display.
+- **One rule for low.** `BatteryInfo::needs_attention` in `openlogi-core`
+  decides it for the agent's notice and the settings app's battery colour, and
+  an ast-grep rule keeps a second copy out.
+- **The agent owns a notice.** It decides when to post one and when it ends
+  (8 seconds), so an overlay that starts or reconnects sees only the notices
+  that are current. Notices travel in their own observation cell
+  (`observe_notices`), not in the agent snapshot, so a notice does not wake
+  every state observer. When the connection to the agent drops, the overlay
+  clears the cards at once, because nothing else would ever end them. The
+  backlight indicator follows the same rule.
+- **Once per discharge.** A device is announced when it becomes low, and
+  again only after it charges or reads 30% or more, so a reading that wobbles
+  around 20% does not repeat the notice.
+- **Not click-through.** The card sits at the bottom centre of the usable area
+  of the display under the cursor (macOS visible frame, Windows work area,
+  Wayland layer-shell surface anchored to the bottom edge, X11 display). It
+  opens without taking focus, and a click closes it.
+
+Verified with unit tests, and on screen on macOS against the mock agent's
+demo: the card appears at the bottom centre above the Dock and closes after 8
+seconds. A click to close is covered by unit tests only. The Windows and Linux
+windows are checked only by CI builds; nobody has seen them on screen yet.
+
+## 2026-10: Litra is reached over HID++ `0x1990`, with the raw report as fallback
+
+The "raw" Litra report `[0x11, 0xff, 0x04, …]` was always a HID++ 2.0 long
+report: device `0xff`, feature index 4, the `0x1990 Illumination` setters.
+Hard-coding the index sent writes to the wrong feature on any firmware that
+lists `0x1990` elsewhere, and nothing was ever read back. Logi Options+ 2.8
+resolves the index through the root feature, reads the light's ranges and
+state, and writes a value only when it differs from the one it read.
+
+- **HID++ first.** A command opens the light's own node as HID++, pings it,
+  looks `0x1990` up through the root feature and reads the light's ranges and
+  state. It writes only a changed value, reads the written control back, and
+  checks values against the ranges the light reports rather than the static
+  per-model ones.
+- **The effective maximum is gated.** `getBrightnessEffectiveMax` is read only
+  for feature version 1 with the dynamic-maximum flag set, as the
+  specification and Options+ gate it.
+- **The raw report stays as the fallback.** It is the path every earlier
+  release shipped and the only one proven on hardware. A light that opens but
+  does not answer the ping, list `0x1990` or have its state read within one
+  second gets it instead; without the deadline it would hold the command for
+  the channel's five-second request timeout. That answer is remembered per
+  route and OS node for the life of the process, so a light that comes back as
+  a different OS node is asked again. A refused open says nothing about the
+  light, so it falls back for that command only.
+- **No raw retry after a HID++ write.** Once the command has gone out over
+  HID++, a failure is returned rather than repeated as a raw report.
+- **One link per light.** The agent keeps the light's HID++ channel open and
+  listens on it, so commands and notifications share one channel and the
+  feature lookup runs once. A channel that stops answering is replaced on the
+  next command, and the listener follows the new one.
+- **A change on the light is the new setting.** Options+ broadcasts the state
+  a `0x1990` notification reports and stores it as the light's settings. The
+  agent keeps a value changed with the light's buttons or by another program
+  in place of the saved one, so a reconnect writes it back instead of undoing
+  it, and publishes it so the settings app can save it. A save of that control
+  or a write from OpenLogi replaces it; the power of a camera-linked light is
+  a manual choice until the next camera transition instead. The desktop app
+  saves each published change, except on a light with one of its own writes in
+  flight. The agent takes the controls a write sets before it writes and gives
+  them back only if the write fails, so a state published during the write
+  never offers the old change, and the app cannot save it over the value the
+  user just chose. The agent holds what a write took until the write settles,
+  so a reload during the write replaces it as it replaces any change, and a
+  failed write gives back only what is left. The app reloads its own saves
+  with `reload_saved_config`.
+  It writes each control it changes before it saves it, and the write takes
+  the change, so a saved value that differs from the one before is the app's
+  copy of an earlier report. That save leaves a newer change on the light in
+  place, so a press that reaches the agent after the app saved the previous
+  one is not written over. The save names the controls the user set without a
+  write, as on an offline light (`ChosenLight`): those, and the values the
+  save removed, replace the change. The save also names the revision of the
+  file it wrote (`ConfigRevision`, a digest of the text). A file the agent
+  reads at another revision was edited after the save, so it loads as a plain
+  reload. A plain `reload_config`, after a hand edit of `config.toml`, a CLI
+  edit or at startup, replaces the change wherever the saved value differs,
+  even when it matches an earlier report.
+- **OpenLogi's own writes are not changes on the light.** The light echoes
+  every setter as a notification. A notification that matches the value the
+  agent just wrote is the echo. A brightness the light's effective maximum
+  explains is the light's limit, not the user's choice, even when another
+  notification is read first: lowered to a limit below the old brightness or
+  the old limit, or raised from the limit it sat at once that limit rose. A
+  press read together with a limit it stays under is still the user's. Nor is
+  a brightness a request was clamped to: the light sends the clamp when a
+  request asks for more than the limit, and holds the limit, which nobody
+  chose. A clamp the light's button made still follows a press on it. A clamp
+  stops explaining the brightness once the button makes a clamp, or once a
+  later brightness differs from the clamped one. A notification that arrives
+  while the light is read makes the watcher read it again, at most three times
+  per notification; a light that keeps notifying is read again on the next
+  call without waiting. The published state still follows the write: the
+  watcher reports the state a write read back once, whether or not the light
+  echoes it, unless a later read replaced it.
+
+Verified against scripted lights only; the repository has no Litra capture yet.
+
+## 2026-10: RGB software control is held per session and handed back on exit
+
+A volatile `0x8071` effect shows only while the host holds software control,
+so a successful write keeps it. The agent used to keep it forever, which left
+a keyboard frozen on the last colour after OpenLogi quit, with no other host
+able to take it until a power cycle.
+
+- **Hand it back on a final exit.** Tray quit, uninstall, and SIGTERM return
+  cluster control to the firmware before the HID++ fleet stops, so lighting
+  goes back to the onboard effect. G HUB behaves this way, and Solaar's RGB
+  control restores firmware control on close to match it. It is also the rule
+  this agent already follows for diversion: leave the device in its native
+  state. Logi Options+ is no reference here: it builds the `0x8070`/`0x8071`
+  wrappers but never drives them, and claims only `0x1300` for the
+  precision-mode DPI LED.
+- **Not on a handover or replacement.** The successor repaints on arrival, so
+  releasing would only flash the onboard effect, and the successor's own
+  final exit still hands control back. A disconnect or crash cannot send
+  anything; the firmware drops volatile state on power loss.
+- **Clear only the bit that was set.** The release clears `ALL_CLUSTERS` and
+  keeps the other control and event flags from before the session's first
+  claim. Restoring that snapshot verbatim would leave control held forever
+  after an agent that never released it, which every earlier build was.
+- **The standalone CLI keeps the colour.** Leaving a colour set is the point
+  of `openlogi diag lighting`, so only the agent's exit consumes the leases.
+- **Lighting off is not a release.** It writes black under the same control;
+  releasing there would light the onboard effect instead.
+- **The exit waits for writes already running.** It refuses new lighting
+  writes first, then gives running ones a bounded wait to record their
+  leases, so a first write that claims while the agent quits is still handed
+  back. A write still running at the deadline keeps its control, and the
+  exit logs it.
+- **A lease belongs to one device.** It is bound to the connection the claim
+  went through and released only through that connection while inventory
+  still publishes it, which covers a replug. A receiver slot keeps the
+  receiver's connection when another device is paired into it, so every
+  write also records the unit ID the device reports (`0x0003`), including
+  one that finds control already held: the replacement may be held by this
+  session's earlier claim or by another host. A write with another unit ID
+  replaces the lease, and the release re-reads the unit ID and leaves a
+  different device alone. Inventory snapshots do not void leases: they trail
+  the channel a write goes through, so dropping a route's lease when a
+  snapshot shows its device gone could erase a claim already taken on the
+  replacement. A device without `0x0003` is identified by having none.
+- **`0x8081` per-key frames go under the same claim.** While the firmware
+  owns a cluster it draws its own effect over host frames. On a device with an
+  `0x8071` engine a per-key write therefore claims (with rollback), sets
+  Static as the base on every cluster that offers it, paints, and replays the
+  first frame after a fresh claim, as Solaar does. A device with only `0x8081`
+  has no engine to take over and is written as before.
+
+Verified against scripted devices only; the repository has no `0x8071` or
+`0x8081` capture yet.
+
+## 2026-10: macOS updates go through Sparkle, which never polls
+
+The built-in engine replaces the running bundle in place, so a standard user
+whose copy sits in an `/Applications` they cannot write to gets a permission
+error instead of an update, and there is no install on quit. Sparkle asks for
+administrator rights there and installs on quit. The signed macOS bundle now
+embeds Sparkle 2 (through `gpui-updater-sparkle`, loaded at run time) and the
+engine stays the fallback everywhere else.
+
+- **The privacy promise outranks Sparkle's defaults.** Updates are opt-in and
+  OpenLogi does not poll. The bundle ships `SUEnableAutomaticChecks = NO` and
+  the app switches the schedule off should the user defaults turn it on; the
+  one launch check is OpenLogi's own, behind **Check for updates**, and opens
+  no window. `SUAllowsAutomaticUpdates = YES` is what lets **Automatic updates**
+  work without the schedule: Sparkle's settings otherwise tie automatic
+  downloads to automatic checks (`SPUUpdaterSettings.m`). The config owns the
+  preference and Sparkle's `automaticallyDownloadsUpdates` mirrors it; a change
+  made with the checkbox in Sparkle's update window is adopted back.
+- **One feed per architecture, not a universal build.** The release ships an
+  arm64 and an x86_64 DMG from a build matrix; `SUFeedURL` points each bundle
+  at `appcast-<arch>.xml`, which keeps the matrix and the DMGs as they are. A
+  universal bundle would allow one feed but doubles every binary in the
+  download and changes what the release builds.
+- **Signed on Linux, in Rust.** `release appcast` signs in the publish job
+  through `gpui-updater-release`, checked against signatures Sparkle's own
+  `sign_update` made, instead of running Sparkle's macOS-only tools there. It
+  refuses a private key that does not match the public key the bundles embed.
+- **Deltas from the three newest Sparkle releases, made on macOS.** Sparkle
+  offers a delta only to an app at exactly its base version, so three bases
+  cover most installs and keep the macOS leg's time bounded; everyone else
+  takes the full DMG. `BinaryDelta` is macOS-only, so the build leg makes the
+  deltas from the stapled DMG and the Linux publish job only signs and lists
+  them. A delta is kept only after it rebuilds the new app exactly, and one
+  that cannot be made never blocks the release. For 0.8.14 → 0.8.15 on arm64
+  the delta is 3.7 MB against a 21.2 MB DMG.
+- **`CFBundleVersion` is the crate version.** Sparkle compares the appcast's
+  `sparkle:version` against it, and cargo-bundle writes the build's UTC
+  timestamp there, which would rank above every release. xtask stamps the
+  crate version, as it already did for the helpers, and refuses a Sparkle
+  bundle without it. Bundles from before Sparkle keep their timestamps, but
+  they update through the engine, which compares the version compiled into
+  the binary.
+- **Kept: `latest.json` and the DMG minisigs.** Bundles from before Sparkle read
+  only the manifest, and they reach a Sparkle bundle through it.
+- **Rejected: Sparkle's XPC services.** OpenLogi is not sandboxed, so they never
+  run; xtask removes them rather than sign and ship them.
+
+## 2026-09: Grant probes run on notification, with a heartbeat backstop
+
+The hook re-checked the Accessibility grant between every 500 ms run-loop
+slice — `AXIsProcessTrusted` plus a throwaway `CGEventTapCreate` — and the
+agent polled both privacy grants every 1.2 s for the GUI. Each probe is a
+WindowServer round trip that takes seconds around a sleep transition, which is
+where the probe-budget work (#952, #1282) came from. macOS posts two
+undocumented notifications when the list is edited, and the
+[`axwatch`](https://crates.io/crates/axwatch) crate observes both. Measured
+against tccd's event log on macOS 26: adding a row, switching it off and
+switching it on post both; removing the row posts only the Darwin one.
+
+- **Probe on cue.** `grant::ProbeCue` raises a flag from the watch's handler,
+  and the tap thread probes only on a raised flag; the two agent-core grant
+  watchers read on the same wakes. Detection latency for an announced edit is
+  unchanged (one slice); an unannounced one is bounded by the heartbeat.
+- **Keep the heartbeat and the probe.** The notifications are undocumented, and
+  a missing run loop, a code-signing rule or a future macOS can swallow them;
+  the reconciled probe remains the authority, at 5 s instead of 500 ms. A watch
+  that cannot start falls back to the old cadence with a warning, never
+  silently.
+- **Rejected: `AXIsProcessTrusted` alone on wake.** It stays `true` after the
+  row is removed — the very edit only the Darwin notification announces — so
+  the read cannot replace the probe.
+- **Not changed: `TAP_PROBE_BUDGET`.** Rarer probes make a collision with a
+  sleep transition rarer, not impossible; shrinking the budget waits for a
+  measured revoke→teardown on hardware.
+
+## 2026-09: A crash respawn re-arms by login session, not by exit code
+
+With `launch_at_login` off, the macOS dormancy gate read every launchd start as
+a login the user opted out of, and left 60 s later with the `exit(0)` launchd
+never respawns. A crash respawn takes the same path — the plist has one trigger
+(`SuccessfulExit` implies `RunAtLoad`) — so one hook-watchdog `exit(78)` on a
+lid close silently ended remapping until the user opened the GUI (#952).
+
+- **The gate asks the session, not launchd.** Arming records the login session
+  (kernel boot session UUID + audit session id) in the runtime dir; every final
+  `exit(0)` — tray Quit, uninstall, SIGTERM — erases it; a handover to a
+  scheduled successor (binary update, Input Monitoring relaunch) keeps it. A
+  start that finds its own session recorded re-arms at once; a login finds a
+  stale session and stays dormant. The boot half is required: audit ids repeat
+  across boots.
+- **Rejected: a second, crash-only plist** (`KeepAlive = {Crashed: true}`, no
+  `RunAtLoad`). `Crashed` does not cover `exit(78)` or a panic's `exit(101)`,
+  which are exactly the exits that need recovery, and it would reintroduce the
+  two-label registration the 2026-08 lifecycle work removed.
+- **SIGTERM is final.** launchd's logout and dev tooling mean "stop". The
+  stale-agent takeover (`takeover.rs`) sends it too, and there the successor
+  would rather find the record; it makes no difference, because the only
+  starts that reach the takeover are GUI kickstarts, and that GUI's
+  declaration arms the successor anyway.
+
+## 2026-09: The macOS device-I/O gate follows powerd, through an SPI, and fails open
+
+The gate that keeps HID access off while the Mac is dark (#656) was first built
+on `NSWorkspace` notifications (#1142): `WillSleep` / `ScreensDidSleep` /
+`SessionDidResignActive` closed it, `ScreensDidWake` / `SessionDidBecomeActive`
+reopened it. Those are edges, and macOS does not guarantee the wake edge —
+Apple DTS (developer forums thread 796109) confirms `ScreensDidWake` is skipped
+on some MacBooks for a lid-close/open cycle and that the system may not even
+run the app's run loop to deliver it. One dropped edge paused device I/O until
+the agent was restarted (#1281). The screen-sleep source was never a
+requirement in its own right: it stood in for "not a DarkWake", the state
+AppKit cannot name (`NSWorkspaceDidWakeNotification` fires for both).
+
+The gate now reads the thing it is actually about. `activity_macos` subscribes
+to powerd through `IOPMConnection`, which reports every Sleep / DarkWake /
+FullWake transition as the complete capability set of the new state and reads
+the current set on demand, so every input is a level: nothing pairs, a missed
+event is corrected by the next, no reconciler timer exists. The console level
+(fast user switching) comes from `CGSessionCopyCurrentDictionary`, with the
+AppKit session edges forwarded as hints and the level re-read on every power
+transition. A launch reads both levels before releasing its hold, so a
+watchdog relaunch during a sleep transition no longer guesses "awake" (#952).
+
+Three things decided the API:
+
+- **Only `IOPMConnection` names a DarkWake.** DTS states plainly that the
+  public API does not expose DarkWake at all: `IORegisterForSystemPower`
+  delivers `kIOMessageSystemHasPoweredOn` for a DarkWake as for a full wake,
+  so a gate on it cannot tell the one-second DarkWake blip #1281 was reported
+  with from the full wake that followed it. The undocumented `IOPMrootDomain`
+  "System Capabilities" registry key carries the same level but no events,
+  which is what forced #1283 into polling.
+- **It is an SPI, and that is accepted.** The functions are exported by IOKit
+  since 10.6 and prototyped only in Apple's open-source `IOKitUser`; the
+  shipping `pmset` is built on them. The hand-written `extern` is confined to
+  `activity_macos.rs` and inventoried in `.agents/rules/objc-ffi.md`. OpenLogi
+  is not App Store distributed.
+- **Losing the SPI fails open.** If the subscription cannot be made the gate
+  is told "permanent full wake" and follows the console alone, at error level.
+  That is pre-0.8.2 behaviour (hardware usable, #656 unprotected); failing
+  closed would leave an agent that can never touch hardware, which is the
+  outage #1281 describes.
+
 ## 2026-08: The agent stays one process; a crossing edge gets a wire, not an event layer
 
 The 2026-06 daemon split (#165) put the resident input machinery in

@@ -1,8 +1,8 @@
-use core_graphics::event::CGEventFlags;
+use core_graphics::event::{CGEventFlags, EventField};
 use openlogi_core::binding::Shortcut;
 
-use super::{combo, held_key_event, hid_usage_to_macos};
-use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
+use super::{LOCK_SCREEN_CHORD, combo, held_key_event, hid_usage_to_macos, key_event};
+use crate::inject::{HeldKey, HeldModifiers, KeyPhase, parse_shortcut};
 
 #[test]
 fn hid_usages_map_to_macos_virtual_keys() {
@@ -40,6 +40,19 @@ fn combo_table_pins_representative_shortcuts() {
     }
 }
 
+/// Lock Screen is the one chord outside the `combo` table, so the table loop
+/// above never parses it. Pin it the same way: it must parse to the chord the
+/// Apple menu shows, and its key must resolve to a macOS virtual key.
+#[test]
+fn lock_screen_chord_parses_and_resolves() {
+    let chord = parse_shortcut(LOCK_SCREEN_CHORD);
+    assert_eq!(chord.rendered_label(), "Cmd+Ctrl+Q");
+    assert!(
+        hid_usage_to_macos(chord.key().code()).is_some(),
+        "the Lock Screen chord has no macOS virtual-key mapping"
+    );
+}
+
 #[test]
 fn held_edges_carry_the_aggregate_modifier_state() {
     let mut modifiers = HeldModifiers::default();
@@ -62,4 +75,18 @@ fn held_edges_carry_the_aggregate_modifier_state() {
         .expect("Command has a macOS virtual-key mapping");
     assert!(!flags.contains(CGEventFlags::CGEventFlagCommand));
     assert!(flags.contains(CGEventFlags::CGEventFlagControl));
+}
+
+/// The hook skips a key edge only by this tag, so every edge the backend
+/// posts must carry it.
+#[test]
+fn posted_key_edges_carry_the_synthetic_tag() {
+    for phase in [KeyPhase::Down, KeyPhase::Up] {
+        let event =
+            key_event(0x0c, CGEventFlags::CGEventFlagCommand, phase).expect("a keyboard event");
+        assert_eq!(
+            event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
+            crate::SYNTHETIC_EVENT_USER_DATA
+        );
+    }
 }

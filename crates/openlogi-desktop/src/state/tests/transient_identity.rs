@@ -196,6 +196,7 @@ fn easyswitch_bolt_inventory(
                     extended_model_id: 0,
                 }),
                 capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+                settings_revision: 0,
             })
             .collect(),
     }

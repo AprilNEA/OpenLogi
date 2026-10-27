@@ -1,0 +1,107 @@
+name: Stale allows
+# `clippy::allow_attributes` makes every `#[allow]` give a reason, but an
+# `allow` that stops suppressing anything stays quiet forever. This removes
+# each one in turn on all three platforms and fails when a lint it names fires
+# on none of them. Every `allow` left in the tree fires on only some platforms
+# or builds, so no single host can decide.
+#
+# One lane locally: `cargo xtask lint sweep-allows`; the verdict across lanes:
+# `cargo xtask lint merge-allows <reports…>`.
+on:
+  schedule:
+    # Mondays, 05:41 UTC: after the weekly Nix build, before the work week.
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "xtask/src/commands/lint.rs"
+      - "xtask/src/commands/lint/**"
+      - ".github/workflows/stale-allows.yml"
+permissions:
+  contents: read
+concurrency:
+  group: stale-allows-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The same flags as ci.yml, so sccache serves the dependency graph from its
+  # runs. The sweep counts lints by code, so `-D warnings` does not hide them.
+  RUSTFLAGS: "-D warnings"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  # Weekly, and its edited trees are throwaway: read master's objects, add none.
+  SCCACHE_GHA_RW_MODE: READ_ONLY
+jobs:
+  sweep:
+    name: sweep (${{ matrix.os }})
+    strategy:
+      # Let the other lanes finish so one failure does not hide theirs. The
+      # verdict still needs all three (see below).
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cache: linux-stable-debug
+          - os: windows-latest
+            cache: windows-stable-debug
+          - os: macos-latest
+            cache: macos-stable-debug
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cargo
+          shared-key: ${{ matrix.cache }}
+          cache-targets: false
+          save-if: false
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev \
+            gcc g++ clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev \
+            libssl-dev libzstd-dev pkg-config
+      - run: cargo xtask lint sweep-allows --out stale-allows.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: stale-allows-${{ matrix.os }}
+          path: stale-allows.json
+          if-no-files-found: error
+  verdict:
+    name: verdict
+    # Only when every lane reported. An `allow` gated to the missing lane's
+    # platform is silent on the other two, so a partial merge would call it
+    # stale; the failed lane already fails the run.
+    needs: sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cargo
+          shared-key: linux-stable-debug
+          cache-targets: false
+          save-if: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: stale-allows-*
+          path: reports
+      # An explicit `shell: bash` adds `-o pipefail`; the default `bash -e`
+      # would take `tee`'s exit status and pass a failed verdict.
+      - shell: bash
+        run: cargo xtask lint merge-allows reports/*/stale-allows.json | tee -a "$GITHUB_STEP_SUMMARY"

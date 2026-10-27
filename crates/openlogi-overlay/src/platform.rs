@@ -1,4 +1,5 @@
-//! Native window policy for the standalone Actions Ring overlay.
+//! Native window policy for the standalone overlay: the Actions Ring and its
+//! notices.
 
 #[cfg(not(target_os = "windows"))]
 mod placement;
@@ -7,9 +8,91 @@ mod placement;
 mod windows;
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) use placement::RingPlacement;
+pub(crate) use placement::{NoticePlacement, RingPlacement};
 #[cfg(target_os = "windows")]
-pub(crate) use windows::RingPlacement;
+pub(crate) use windows::{NoticePlacement, RingPlacement};
+
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tracing::{debug, warn};
+
+/// Open the first of `alternatives` that shows a window, returning the first
+/// window it opened.
+///
+/// Each alternative is a whole set of windows, best first. Within a set, one
+/// window that fails to open must not sink the others; a set that opens none
+/// gives way to the next. A refusal the compositor repeats for the rest of the
+/// process ends its set at once.
+pub(crate) fn open_first<W, H>(
+    alternatives: Vec<Vec<W>>,
+    open: impl FnMut(W) -> anyhow::Result<H>,
+) -> Option<H> {
+    open_first_with(alternatives, open, refused_for_good)
+}
+
+fn open_first_with<W, H>(
+    alternatives: Vec<Vec<W>>,
+    mut open: impl FnMut(W) -> anyhow::Result<H>,
+    refused_for_good: impl Fn(&anyhow::Error) -> bool,
+) -> Option<H> {
+    let last = alternatives.len().saturating_sub(1);
+    for (index, windows) in alternatives.into_iter().enumerate() {
+        let mut first = None;
+        for window in windows {
+            match open(window) {
+                Ok(handle) => {
+                    first.get_or_insert(handle);
+                }
+                Err(error) if refused_for_good(&error) => {
+                    debug!(%error, "the compositor refuses this kind of overlay window");
+                    break;
+                }
+                Err(error) if index == last => warn!(%error, "could not open an overlay window"),
+                Err(error) => debug!(%error, "could not open a preferred overlay window"),
+            }
+        }
+        if first.is_some() {
+            return first;
+        }
+    }
+    None
+}
+
+/// Set once the compositor has refused a layer-shell surface.
+///
+/// GPUI binds the compositor's globals once, when it connects, so a refusal
+/// holds for the life of the process. Asking again would only be refused
+/// again, and each refused request leaves behind the `wl_surface` GPUI
+/// created for it.
+#[cfg(target_os = "linux")]
+static LAYER_SHELL_REFUSED: AtomicBool = AtomicBool::new(false);
+
+/// Whether `error` is the compositor refusing a layer-shell surface, which
+/// it then does for the rest of the process. A refusal is remembered.
+#[cfg(target_os = "linux")]
+fn refused_for_good(error: &anyhow::Error) -> bool {
+    let refused = error
+        .downcast_ref::<gpui::layer_shell::LayerShellNotSupportedError>()
+        .is_some();
+    if refused {
+        LAYER_SHELL_REFUSED.store(true, Ordering::Relaxed);
+    }
+    refused
+}
+
+/// Only a Wayland compositor refuses a kind of window for good.
+#[cfg(not(target_os = "linux"))]
+const fn refused_for_good(_error: &anyhow::Error) -> bool {
+    false
+}
+
+/// Whether the compositor has refused a layer-shell surface, so asking for
+/// another is pointless.
+#[cfg(target_os = "linux")]
+pub(crate) fn layer_shell_refused() -> bool {
+    LAYER_SHELL_REFUSED.load(Ordering::Relaxed)
+}
 
 /// Keep the overlay out of the Dock and app switcher.
 #[cfg(target_os = "macos")]
@@ -152,4 +235,161 @@ pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn display_containing(_x: f64, _y: f64) -> Option<CursorDisplay> {
     None
+}
+
+/// The part of `display` that windows may use — without the menu bar and the
+/// Dock — in the display's own top-left-origin points.
+///
+/// AppKit reports this per `NSScreen`, in its own bottom-left-origin global
+/// space; [`placement::usable_in_display`] finds the screen that is `display`
+/// and translates.
+#[cfg(target_os = "macos")]
+pub fn usable_area(display: &CursorDisplay) -> Option<gpui::Bounds<gpui::Pixels>> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSScreen;
+
+    let screens = NSScreen::screens(MainThreadMarker::new()?);
+    let primary_height = screens.firstObject()?.frame().size.height;
+    screens.to_vec().iter().find_map(|screen| {
+        let (frame, visible) = (screen.frame(), screen.visibleFrame());
+        placement::usable_in_display(
+            placement::CocoaRect {
+                x: frame.origin.x,
+                y: frame.origin.y,
+                width: frame.size.width,
+                height: frame.size.height,
+            },
+            placement::CocoaRect {
+                x: visible.origin.x,
+                y: visible.origin.y,
+                width: visible.size.width,
+                height: visible.size.height,
+            },
+            primary_height,
+            display.origin,
+        )
+    })
+}
+
+/// Linux resolves no native display, so there is no usable area to report.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn usable_area(_display: &CursorDisplay) -> Option<gpui::Bounds<gpui::Pixels>> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    /// A window that opens as `name`, or fails to with `reason`.
+    type Attempt = (&'static str, Result<(), &'static str>);
+
+    /// Open `alternatives`, recording each window tried; `refusal` is the one
+    /// failure the compositor repeats for good.
+    fn open(
+        alternatives: Vec<Vec<Attempt>>,
+        refusal: &'static str,
+    ) -> (Option<&'static str>, Vec<&'static str>) {
+        let tried = RefCell::new(Vec::new());
+        let opened = open_first_with(
+            alternatives,
+            |(name, outcome)| {
+                tried.borrow_mut().push(name);
+                outcome.map(|()| name).map_err(anyhow::Error::msg)
+            },
+            |error| error.to_string() == refusal,
+        );
+        (opened, tried.into_inner())
+    }
+
+    #[test]
+    fn the_first_set_that_opens_a_window_is_the_only_one_opened() {
+        let (opened, tried) = open(
+            vec![
+                vec![("left", Ok(())), ("right", Ok(()))],
+                vec![("fallback", Ok(()))],
+            ],
+            "refused",
+        );
+        assert_eq!(opened, Some("left"));
+        assert_eq!(tried, ["left", "right"]);
+    }
+
+    #[test]
+    fn one_window_that_fails_does_not_sink_the_rest_of_its_set() {
+        let (opened, tried) = open(
+            vec![
+                vec![("left", Err("lost its output")), ("right", Ok(()))],
+                vec![("fallback", Ok(()))],
+            ],
+            "refused",
+        );
+        assert_eq!(opened, Some("right"));
+        assert_eq!(tried, ["left", "right"]);
+    }
+
+    #[test]
+    fn a_set_that_opens_nothing_gives_way_to_the_next() {
+        let (opened, tried) = open(
+            vec![
+                vec![("left", Err("failed")), ("right", Err("failed"))],
+                vec![("fallback", Ok(()))],
+            ],
+            "refused",
+        );
+        assert_eq!(opened, Some("fallback"));
+        assert_eq!(tried, ["left", "right", "fallback"]);
+    }
+
+    #[test]
+    fn a_refusal_for_good_ends_its_set_at_once() {
+        let (opened, tried) = open(
+            vec![
+                vec![("left", Err("refused")), ("right", Ok(()))],
+                vec![("fallback", Ok(()))],
+            ],
+            "refused",
+        );
+        assert_eq!(opened, Some("fallback"));
+        assert_eq!(
+            tried,
+            ["left", "fallback"],
+            "the rest of the set is not asked for"
+        );
+    }
+
+    #[test]
+    fn nothing_opens_when_every_set_fails() {
+        let (opened, tried) = open(
+            vec![
+                vec![("left", Err("refused"))],
+                vec![("fallback", Err("failed"))],
+            ],
+            "refused",
+        );
+        assert_eq!(opened, None);
+        assert_eq!(tried, ["left", "fallback"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_layer_shell_refusal_ends_its_set_and_is_remembered() {
+        assert!(!refused_for_good(&anyhow::anyhow!("lost its output")));
+        let mut tried = Vec::new();
+        let opened = open_first(vec![vec!["left", "right"], vec!["fallback"]], |name| {
+            tried.push(name);
+            if name == "fallback" {
+                Ok(name)
+            } else {
+                Err(anyhow::Error::from(
+                    gpui::layer_shell::LayerShellNotSupportedError,
+                ))
+            }
+        });
+        assert_eq!(opened, Some("fallback"));
+        assert_eq!(tried, ["left", "fallback"]);
+        assert!(layer_shell_refused());
+    }
 }

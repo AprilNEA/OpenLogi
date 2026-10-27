@@ -183,7 +183,7 @@ impl AppCatalogPicker {
     pub(super) fn available_profiles(
         &self,
         observed: &HashSet<String>,
-        unavailable: &HashSet<String>,
+        unavailable: impl Fn(&str) -> bool,
     ) -> CatalogPresentation {
         let applications = match &self.load {
             CatalogLoad::Loading => return CatalogPresentation::Loading,
@@ -195,15 +195,10 @@ impl AppCatalogPicker {
             .iter()
             .filter_map(|application| {
                 let app = identity_for_application(application, observed, self.preferred_identity)?;
-                if unavailable.contains(&app) || !seen.insert(app.clone()) {
+                if unavailable(&app) || !seen.insert(app.clone()) {
                     return None;
                 }
-                Some(ProfileChoice {
-                    app,
-                    name: application.name.clone(),
-                    override_count: 0,
-                    persisted: false,
-                })
+                Some(ProfileChoice::application(app, application.name.clone()))
             })
             .collect::<Vec<_>>();
         profiles.sort_by(|left, right| {
@@ -280,9 +275,9 @@ fn preferred_identity_kind(runtime: Option<IdentityKind>) -> IdentityKind {
 
 /// The installed application's Finder icon for a profile identifier.
 ///
-/// Only macOS has an icon backend: its identifiers are bundle identifiers,
-/// which Launch Services renders to a small RGBA rendition. Blocking — run it
-/// on the background executor.
+/// Only macOS has an icon backend. Launch Services resolves bundle identifiers
+/// to a small RGBA rendition. Executable paths that do not resolve use the
+/// existing monogram fallback. Run this blocking lookup on the background executor.
 fn application_icon(identifier: &str) -> Option<Arc<RenderImage>> {
     #[cfg(target_os = "macos")]
     {

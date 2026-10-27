@@ -193,6 +193,11 @@ enum PressBehavior {
     },
     /// The long action fired; release must not also fire the short action.
     LongPressFired,
+    /// Wait for release, which fires `click` unless the wheel moved first.
+    WheelHoldPending { click: Action },
+    /// The wheel moved during the press, which made it a virtual thumb wheel;
+    /// release fires nothing.
+    WheelHoldScrolled,
 }
 
 impl PressBehavior {
@@ -206,27 +211,50 @@ impl PressBehavior {
                 long: binding.long().clone(),
                 deadline: pressed_at + LONG_PRESS_THRESHOLD,
             },
+            Some(Binding::WheelHold(binding)) => Self::WheelHoldPending {
+                click: binding.click().clone(),
+            },
         }
     }
 
     fn deadline(&self) -> Option<Instant> {
         match self {
             Self::LongPressPending { deadline, .. } => Some(*deadline),
-            Self::LifecycleOnly | Self::Immediate(_) | Self::LongPressFired => None,
+            Self::LifecycleOnly
+            | Self::Immediate(_)
+            | Self::LongPressFired
+            | Self::WheelHoldPending { .. }
+            | Self::WheelHoldScrolled => None,
         }
     }
 
     fn start_action(&self) -> Option<&Action> {
         match self {
             Self::Immediate(action) => Some(action),
-            Self::LifecycleOnly | Self::LongPressPending { .. } | Self::LongPressFired => None,
+            Self::LifecycleOnly
+            | Self::LongPressPending { .. }
+            | Self::LongPressFired
+            | Self::WheelHoldPending { .. }
+            | Self::WheelHoldScrolled => None,
         }
     }
 
     fn release_action(&self) -> Option<&Action> {
         match self {
             Self::LongPressPending { short, .. } => Some(short),
-            Self::LifecycleOnly | Self::Immediate(_) | Self::LongPressFired => None,
+            Self::WheelHoldPending { click } => Some(click),
+            Self::LifecycleOnly
+            | Self::Immediate(_)
+            | Self::LongPressFired
+            | Self::WheelHoldScrolled => None,
+        }
+    }
+
+    /// The wheel moved while this press was down. A wheel-hold press stops
+    /// owing its click; any other press is left as it is.
+    fn wheel_moved(&mut self) {
+        if matches!(self, Self::WheelHoldPending { .. }) {
+            *self = Self::WheelHoldScrolled;
         }
     }
 
@@ -315,9 +343,19 @@ pub(crate) enum ButtonRuntimeEvent {
 /// Inputs cannot represent `Up + action` or a source-authored `Cancel`.
 enum ButtonInput {
     Down(ActivePress),
-    Up { key: PressKey, released_at: Instant },
+    Up {
+        key: PressKey,
+        released_at: Instant,
+    },
     Pulse(ActivePress),
-    TriggerWhilePressed { token: PressToken, action: Action },
+    TriggerWhilePressed {
+        token: PressToken,
+        action: Action,
+    },
+    /// The wheel moved while the press `token` was down.
+    WheelWhilePressed {
+        token: PressToken,
+    },
 }
 
 enum ButtonCommand {
@@ -325,6 +363,7 @@ enum ButtonCommand {
     CancelStalePress(PressToken),
     CancelSource(ButtonSource),
     CancelHooks,
+    CancelPointerExcept(openlogi_hook::PointerTarget),
     Wake,
 }
 
@@ -358,6 +397,15 @@ impl ButtonState {
         self.active.remove(&token.key)
     }
 
+    /// Record wheel movement on the exact press `token`, if it is still live.
+    fn wheel_moved(&mut self, token: &PressToken) {
+        if let Some(press) = self.active.get_mut(&token.key)
+            && press.token == *token
+        {
+            press.behavior.wheel_moved();
+        }
+    }
+
     fn cancel_source(&mut self, source: &ButtonSource) -> Vec<ActivePress> {
         self.cancel_where(|key| key.source == *source)
     }
@@ -368,6 +416,23 @@ impl ButtonState {
 
     fn cancel_all(&mut self) -> Vec<ActivePress> {
         self.active.drain().map(|(_, press)| press).collect()
+    }
+
+    fn cancel_pointer_except(&mut self, current: openlogi_hook::PointerTarget) -> Vec<ActivePress> {
+        // A lifecycle-only press (a gesture hold) holds no output, and its own
+        // swipe may be what changed the hovered window (Next Desktop). Follow
+        // the pointer instead of canceling, so one hold can chain swipes; the
+        // press-time focus fallback stays with it.
+        for press in self.active.values_mut() {
+            if press.behavior == PressBehavior::LifecycleOnly
+                && let ActionDispatchTarget::Pointer { target, .. } = &mut press.target
+            {
+                *target = current;
+            }
+        }
+        self.active.extract_if(|_, press| matches!(press.target, ActionDispatchTarget::Pointer { target, .. } if target != current))
+            .map(|(_, press)| press)
+            .collect()
     }
 
     fn fire_selected_long_presses(
@@ -489,6 +554,10 @@ impl ButtonInputHandle {
         self.try_command(ButtonCommand::CancelHooks);
     }
 
+    pub(crate) fn cancel_pointer_except(&self, current: openlogi_hook::PointerTarget) {
+        self.try_command(ButtonCommand::CancelPointerExcept(current));
+    }
+
     pub(crate) fn try_hidpp_down(
         &self,
         session: &HidppSessionId,
@@ -535,6 +604,21 @@ impl ButtonInputHandle {
             ButtonInput::TriggerWhilePressed {
                 token: token.clone(),
                 action: action.clone(),
+            },
+        )
+    }
+
+    /// Tell the press `token` that the wheel moved while it was down, so a
+    /// wheel-hold press does not also fire its click on release.
+    pub(crate) fn try_wheel_while_pressed(&self, token: &PressToken) -> bool {
+        let generation = self.generation.load(Ordering::Acquire);
+        if token.generation != generation {
+            return false;
+        }
+        self.try_input(
+            generation,
+            ButtonInput::WheelWhilePressed {
+                token: token.clone(),
             },
         )
     }

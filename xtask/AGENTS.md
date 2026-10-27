@@ -49,7 +49,6 @@
   but it holds no bundling logic: that is `xtask macos dev-bundle`, which shares the
   identity/helper/plist tables with `macos bundle`. Keep it that way; the two drifted
   badly while they were separate implementations.
-  `.github/scripts/release-notes/` is a dedicated Node/Octokit tool; don't wrap it in xtask.
 - Shell that is really program logic belongs here instead: `cargo xtask release changelog`
   replaced a script whose version parsing and changelog editing were two embedded Python
   heredocs. The release-plz workflow builds the binary on `master` before checking out

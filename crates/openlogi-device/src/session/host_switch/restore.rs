@@ -7,7 +7,9 @@ use super::{ArmedControl, HostSwitchError, restore_host_controls};
 use crate::session::restore::{
     PendingRestore, RestoreOutcome, RestorePlan, SessionFailure, rollback_start,
 };
-use crate::{ChannelRegistry, DeviceIoGate, SharedChannel, reprog_controls::ReprogControlsV4};
+use crate::{
+    ChannelRegistry, DeviceIoGate, DeviceRoute, SharedChannel, reprog_controls::ReprogControlsV4,
+};
 
 /// How a host-switch session released its temporary firmware reporting state.
 #[must_use = "pending firmware restoration must be retained by the session manager"]
@@ -24,18 +26,42 @@ pub enum HostSwitchSessionOutcome {
         /// Owned capability for retrying restoration on a current publication.
         restore: PendingHostSwitchRestore,
     },
+    /// The keyboard switched hosts by itself, and the session already moved
+    /// the linked devices after it. Restoration waits for the keyboard to be
+    /// published again: a write now would wait for a keyboard that is gone.
+    Departed {
+        /// Owned capability for retrying restoration, when the session
+        /// changed the reporting of host keys.
+        restore: Option<PendingHostSwitchRestore>,
+    },
+}
+
+/// What the owner of a session does once it returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostSwitchFollowUp {
+    /// Start a successor session when the link is still published.
+    Rearm,
+    /// Move the linked devices and then the keyboard to this zero-based host.
+    Switch(u8),
+    /// Start no successor until inventory stops publishing the keyboard, or a
+    /// timeout passes: the keyboard is leaving this host.
+    AwaitDeparture,
 }
 
 impl HostSwitchSessionOutcome {
-    /// Split the transition intent from any retained firmware ownership.
+    /// Split the follow-up from any retained firmware ownership.
     #[must_use]
-    pub fn into_parts(self) -> (Option<u8>, Option<PendingHostSwitchRestore>) {
+    pub fn into_parts(self) -> (HostSwitchFollowUp, Option<PendingHostSwitchRestore>) {
+        let follow_up = |requested_host: Option<u8>| {
+            requested_host.map_or(HostSwitchFollowUp::Rearm, HostSwitchFollowUp::Switch)
+        };
         match self {
-            Self::Restored { requested_host } => (requested_host, None),
+            Self::Restored { requested_host } => (follow_up(requested_host), None),
             Self::RestorePending {
                 requested_host,
                 restore,
-            } => (requested_host, Some(restore)),
+            } => (follow_up(requested_host), Some(restore)),
+            Self::Departed { restore } => (HostSwitchFollowUp::AwaitDeparture, restore),
         }
     }
 }
@@ -80,6 +106,19 @@ pub type HostSwitchRestoreOutcome = RestoreOutcome<HostSwitchRestorePlan>;
 pub type HostSwitchSessionFailure = SessionFailure<HostSwitchError, HostSwitchRestorePlan>;
 
 impl PendingHostSwitchRestore {
+    /// Token aimed at `route` whose retry writes nothing and completes once
+    /// that route is current.
+    #[must_use]
+    pub fn detached(route: DeviceRoute) -> Self {
+        Self::without_channel(
+            route,
+            HostSwitchRestorePlan {
+                feature_index: 0,
+                controls: Vec::new(),
+            },
+        )
+    }
+
     /// The restore owed for `controls`, or `None` when nothing was armed.
     pub(super) fn new(
         retired: &SharedChannel,
@@ -121,12 +160,28 @@ pub(super) async fn rollback_host_switch_start(
 #[cfg(test)]
 mod tests {
     use super::super::{
-        HostSwitchStop, HostSwitchStopReason, monitor_host_switch, run_host_switch_session,
+        HostSwitchStop, HostSwitchStopReason, HostTrigger, KeyboardHosts, KeyboardPosition,
+        monitor_host_switch, run_host_switch_session,
     };
     use super::*;
-    use crate::DeviceRoute;
     use crate::backend::NodeId;
-    use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+    use crate::channel::scripted::{
+        ScriptedBackend, ScriptedRawHidChannel, feature_error, scripted_channel,
+    };
+    use crate::{ChannelPool, DeviceRoute};
+
+    /// A keyboard on host 0 of three, with `ChangeHost` version 0.
+    const POSITION: KeyboardPosition = KeyboardPosition {
+        feature_index: 0x04,
+        version: 0,
+        host_count: 3,
+        current_host: 0,
+        announces: false,
+    };
+
+    fn empty_pool() -> ChannelPool {
+        ChannelPool::with_backend(ScriptedBackend::new(Vec::new()))
+    }
     use crate::reprog_controls::{CidReporting, ControlId};
     use crate::session::host_switch::{ArmedControl, ReportingMode};
 
@@ -136,7 +191,16 @@ mod tests {
         response[1..4].copy_from_slice(&request[1..4]);
         match (request[2], request[3] >> 4) {
             (0, 1) => response[4] = 4,
-            (0, 0) => response[4] = 0x22,
+            // Root lookup: `0x1b04` and a version 0 `0x1814`; nothing else.
+            (0, 0) => {
+                response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                    0x1b04 => 0x22,
+                    0x1814 => 0x04,
+                    _ => 0,
+                };
+            }
+            // ChangeHost getHostInfo: three hosts, currently on host 0.
+            (0x04, 0) => response[4..6].copy_from_slice(&[3, 0]),
             (0x22, 0) => response[4] = if fail_second_control { 2 } else { 1 },
             (0x22, 1) => {
                 if request[4] == 1 {
@@ -181,7 +245,14 @@ mod tests {
 
             let outcome = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
-                run_host_switch_session(route.clone(), stopped, &registry, gate),
+                run_host_switch_session(
+                    route.clone(),
+                    &[],
+                    stopped,
+                    &registry,
+                    &empty_pool(),
+                    gate,
+                ),
             )
             .await
             .expect("failed restoration must return ownership instead of looping");
@@ -203,6 +274,9 @@ mod tests {
                 }
                 Ok(HostSwitchSessionOutcome::Restored { .. }) => {
                     panic!("failed writes cannot be clean")
+                }
+                Ok(HostSwitchSessionOutcome::Departed { .. }) => {
+                    panic!("a graceful stop is not a departure")
                 }
             };
             let reporting: Vec<_> = writes
@@ -241,6 +315,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn offline_receiver_host_controls_restore_on_the_same_channel_before_rearm() {
+        for route in [
+            DeviceRoute::Bolt {
+                receiver_uid: "host-receiver".into(),
+                slot: 2,
+            },
+            DeviceRoute::Unifying {
+                receiver_uid: "host-receiver".into(),
+                slot: 2,
+            },
+        ] {
+            let armed = Arc::new(tokio::sync::Notify::new());
+            let armed_signal = armed.clone();
+            let (raw, writes) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+                if request[2] == 0x22 && request[3] >> 4 == 3 && request[6] & 1 != 0 {
+                    armed_signal.notify_one();
+                }
+                capture_keyboard(request, false)
+            });
+            let channel = scripted_channel(raw).await;
+            let registry = ChannelRegistry::default();
+            let node = NodeId::from("host-receiver".to_owned());
+            registry.replace_node(node.clone(), [route.clone()], channel.clone());
+            let (_stop, stopped) = tokio::sync::oneshot::channel();
+            let (_signal, gate) = crate::device_io_channel();
+            let pool = empty_pool();
+            let withdraw = async {
+                armed.notified().await;
+                registry.replace_node(node.clone(), [], channel.clone());
+            };
+            let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(
+                    run_host_switch_session(route.clone(), &[], stopped, &registry, &pool, gate),
+                    withdraw,
+                )
+            })
+            .await
+            .expect("withdrawing the slot must stop the armed host-switch session");
+            let (requested, pending) = outcome
+                .expect("the session armed successfully")
+                .into_parts();
+            assert_eq!(requested, super::HostSwitchFollowUp::Rearm);
+            let pending = pending.expect("the offline keyboard still owes reporting restoration");
+            let pending = match pending.retry(&registry).await {
+                HostSwitchRestoreOutcome::RestorePending(pending) => pending,
+                HostSwitchRestoreOutcome::Restored => panic!("an offline slot cannot restore"),
+            };
+            let reporting = || {
+                writes
+                    .written_reports()
+                    .into_iter()
+                    .filter(|request| request[2] == 0x22 && request[3] >> 4 == 3)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                reporting().len(),
+                1,
+                "no restore writes while the slot is offline"
+            );
+            registry.replace_node(node, [route.clone()], channel);
+            assert!(
+                matches!(
+                    pending.retry(&registry).await,
+                    HostSwitchRestoreOutcome::Restored
+                ),
+                "returning to the unchanged receiver must release host-switch cleanup"
+            );
+            assert_eq!(&reporting()[1][4..10], &[0, 0xd1, 0x32, 0, 0, 0]);
+
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            stop.send(HostSwitchStopReason::Graceful).unwrap();
+            let (_signal, gate) = crate::device_io_channel();
+            assert!(matches!(
+                run_host_switch_session(route, &[], stopped, &registry, &empty_pool(), gate).await,
+                Ok(HostSwitchSessionOutcome::Restored {
+                    requested_host: None
+                })
+            ));
+            assert_eq!(
+                reporting().len(),
+                4,
+                "the successor arms and restores after cleanup"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn retirement_before_listener_subscription_is_observed_without_another_event() {
         let route = DeviceRoute::Direct {
             vendor_id: 0x046d,
@@ -254,7 +415,15 @@ mod tests {
         let (_signal, gate) = crate::device_io_channel();
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(100),
-            monitor_host_switch(stopped, &mut presses, &registry, &retired, gate),
+            monitor_host_switch(
+                stopped,
+                &mut presses,
+                POSITION,
+                &registry,
+                &retired,
+                gate,
+                &mut KeyboardHosts::default(),
+            ),
         )
         .await
         .expect("a retired publication needs no further notification");
@@ -283,7 +452,15 @@ mod tests {
                 let (_signal, gate) = crate::device_io_channel();
                 tokio::time::timeout(
                     std::time::Duration::from_millis(100),
-                    monitor_host_switch(stopped, &mut presses, &registry, &current, gate),
+                    monitor_host_switch(
+                        stopped,
+                        &mut presses,
+                        POSITION,
+                        &registry,
+                        &current,
+                        gate,
+                        &mut KeyboardHosts::default(),
+                    ),
                 )
                 .await
                 .expect("a ready stop source needs no further event")
@@ -313,7 +490,7 @@ mod tests {
 
         let (_stop, stopped) = tokio::sync::oneshot::channel();
         let (press, presses) = tokio::sync::mpsc::unbounded_channel();
-        press.send(2).unwrap();
+        press.send(HostTrigger::Pressed(2)).unwrap();
         assert_eq!(
             monitored(stopped, presses).await,
             HostSwitchStop::Pressed(2)

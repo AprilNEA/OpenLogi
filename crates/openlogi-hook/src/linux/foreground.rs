@@ -23,7 +23,7 @@ use crate::ForegroundApp;
 mod gnome_shell;
 mod stop;
 mod wlr_foreign_toplevel;
-mod x11;
+pub(super) mod x11;
 
 use stop::{PollResult, StopControl, StopToken, poll_source_or_stop, stop_pair};
 pub(super) use x11::X11Source;
@@ -98,7 +98,7 @@ impl FrontmostSource for NullSource {
 /// Coarse classification of the graphical session, used to order the frontmost
 /// backend candidates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionKind {
+pub(super) enum SessionKind {
     X11,
     Wayland,
     Unknown,
@@ -107,7 +107,7 @@ enum SessionKind {
 /// Classify the session from the environment. `XDG_SESSION_TYPE` is
 /// authoritative when set to `x11` or `wayland`; otherwise fall back to the
 /// presence of `WAYLAND_DISPLAY` / `DISPLAY`.
-fn detect_session_kind() -> SessionKind {
+pub(super) fn detect_session_kind() -> SessionKind {
     if let Ok(kind) = std::env::var("XDG_SESSION_TYPE") {
         match kind.as_str() {
             "wayland" => return SessionKind::Wayland,

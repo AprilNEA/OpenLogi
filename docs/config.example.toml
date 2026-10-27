@@ -1,5 +1,5 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 7
+schema_version = 10
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
@@ -8,6 +8,8 @@ check_for_updates = false
 auto_install_updates = false
 show_in_menu_bar = true
 capture_mouse_events = true
+# Mouse button profiles: "pointer" (default) or "focused".
+mouse_profile_target = "pointer"
 smooth_scroll = false
 vertical_scroll_sensitivity = 14
 auto_download_assets = true
@@ -19,6 +21,9 @@ ui_scale = "normal"
 device_view_mode = "grid"
 # macOS only: "openlogi" (the signed icon) or "prism".
 app_icon = "openlogi"
+# macOS only: Previous / Next Desktop slide like a three-finger swipe (default
+# true); false switches at once.
+animate_desktop_switch = true
 
 [devices."receiver:aabbccdd:slot:1"]
 custom_name = "Office mouse"
@@ -27,14 +32,21 @@ dpi_presets = [800, 1600, 3200]
 thumbwheel_sensitivity = 20
 invert_scroll = false
 scroll_resolution = "high"
+# Ease this mouse's main wheel in software (needs Accessibility on macOS).
+smooth_wheel = true
 
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"
-Forward = "BrowserForward"
-# Hold the chord for exactly as long as the physical button is held.
+# Hold only the modifiers and tap the key once: the application switcher steps
+# one window forward and stays open until the button is released.
+Forward = { TapKeyHoldingModifiers = "Cmd+Tab" }
+# Hold the whole chord for exactly as long as the physical button is held.
 MiddleClick = { HoldShortcut = "Ctrl+Space" }
 # Release before 500 ms runs `short`; reaching 500 ms runs `long` once.
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
+# On a mouse without a thumb wheel, hold Back and turn the main wheel to scroll
+# sideways; a click that did not turn the wheel still runs `click`:
+# Back = { click = "BrowserBack", wheel = "HorizontalScroll" }
 # The thumb wheel's capacitive tap. Inert unless set here; the wheel also
 # reports taps from incidental thumb contact.
 Thumbwheel = "AppExpose"
@@ -51,6 +63,12 @@ Back = "Undo"
 
 [devices."receiver:aabbccdd:slot:1".per_app_bindings."exe:sharex.exe"]
 MiddleClick = { CustomShortcut = "F1" }
+# `app:<alias>` names an application in `[apps]` below, so this profile applies
+# to Chrome on every platform the alias lists. A key in the platform's own
+# namespace, like the two above, wins over an alias for the same application.
+[devices."receiver:aabbccdd:slot:1".per_app_bindings."app:chrome"]
+Back = "PrevTab"
+Forward = "NextTab"
 
 [devices."receiver:aabbccdd:slot:1".action_ring]
 enabled = true
@@ -76,9 +94,14 @@ tunable_torque = 50
 host_switch_targets = ["receiver:aabbccdd:slot:1"]
 fn_lock = false
 
+# Keyboard keys are named by their HID++ control: a catalog name such as
+# `KeyScreenCapture`, or `control:0x<cid>` for any control `openlogi diag
+# controls` lists as divertable. An unlisted key keeps its firmware function.
 [devices."receiver:aabbccdd:slot:2".bindings]
 KeySearch = "MissionControl"
 KeyScreenCapture = "Sleep"
+KeyCalculator = { OpenApplication = { path = "/System/Applications/Calculator.app", display_name = "Calculator" } }
+"control:0x01f3" = { CustomShortcut = "Cmd+Shift+4" }
 
 # Since schema 5 a device is keyed by what it *is* — `unit:<hex>` or
 # `serial:<s>` — rather than by the route it was reached on, so its settings
@@ -113,3 +136,11 @@ dpi = 800
 [keyboard.bindings]
 f1 = "MissionControl"
 "shift+command+f5" = "ShowDesktop"
+# Application aliases: one name for an application across platforms. Each
+# platform field takes the identifiers OpenLogi reports there, one string or an
+# array of them. Windows identifiers are lower-case paths or `exe:<filename>`.
+[apps.chrome]
+name = "Google Chrome"
+macos = "com.google.Chrome"
+linux = ["google-chrome", "Google-chrome"]
+windows = "exe:chrome.exe"

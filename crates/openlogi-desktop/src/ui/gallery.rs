@@ -2,7 +2,8 @@
 
 use gpui::{
     App, AppContext as _, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Render,
-    Role, SharedString, Size, Styled, Window, WindowBounds, WindowOptions, div, px, rems,
+    Role, SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowBounds,
+    WindowOptions, div, px, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -22,7 +23,8 @@ use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
 use super::commit_slider::{CommitSlider, SliderRange};
-use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle};
+use super::components::{MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, toggle_row};
+use super::status::{retry_line, status_line};
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
 
 const TITLE: &str = "OpenLogi Component Gallery";
@@ -95,6 +97,7 @@ struct ComponentGallery {
     menu_selected: usize,
     profile_selected: usize,
     preset_selected: bool,
+    pill_selected: usize,
     carousel_selected: usize,
     slider: CommitSlider<u8>,
     slider_committed: u8,
@@ -117,6 +120,7 @@ impl ComponentGallery {
             menu_selected: 0,
             profile_selected: 1,
             preset_selected: true,
+            pill_selected: 1,
             carousel_selected: 1,
             slider,
             slider_committed,
@@ -199,8 +203,22 @@ impl ComponentGallery {
             .child(self.menu_panel(pal, cx))
             .child(self.profile_panel(pal, cx))
             .child(self.preset_panel(pal, cx))
+            .child(self.pill_panel(pal, cx))
             .child(self.slider_panel(pal))
             .child(Self::battery_panel(pal))
+            .child(gallery_panel(
+                "Status and retry",
+                IconName::Settings,
+                v_flex()
+                    .gap_2()
+                    .child(status_line("Reading…", pal))
+                    .child(retry_line("gallery-retry", "Retry", |_| {}))
+                    .child(
+                        retry_line("gallery-retry-disabled", "Retry (offline)", |_| {})
+                            .disabled(true),
+                    ),
+                pal,
+            ))
     }
 
     fn choice_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
@@ -266,7 +284,22 @@ impl ComponentGallery {
                         .selected(true)
                         .label(Some(SharedString::from("Unavailable")))
                         .disabled(true),
-                ),
+                )
+                .child(toggle_row(
+                    "gallery-toggle-row",
+                    pal,
+                    SharedString::from("Setting"),
+                    SharedString::from(
+                        "The caption under the title says what the setting changes and wraps \
+                         instead of pushing the toggle out.",
+                    ),
+                    Toggle::new("gallery-toggle-row-control")
+                        .selected(self.toggle_selected)
+                        .on_change(cx.listener(|this, selected: &bool, _, cx| {
+                            this.toggle_selected = *selected;
+                            cx.notify();
+                        })),
+                )),
             pal,
         )
     }
@@ -280,6 +313,7 @@ impl ComponentGallery {
                 .child(
                     MenuRow::new("gallery-menu-primary")
                         .role(Role::MenuItem)
+                        .aria_label("Primary action")
                         .selected(self.menu_selected == 0)
                         .child("Primary action")
                         .child(Icon::new(IconName::ChevronRight).size_3())
@@ -291,6 +325,7 @@ impl ComponentGallery {
                 .child(
                     MenuRow::new("gallery-menu-secondary")
                         .role(Role::MenuItem)
+                        .aria_label("Secondary action")
                         .selected(self.menu_selected == 1)
                         .child("Secondary action")
                         .child(Icon::new(IconName::ChevronRight).size_3())
@@ -358,6 +393,40 @@ impl ComponentGallery {
         )
     }
 
+    fn pill_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        const STEPS: [&str; 3] = ["5 s", "10 s", "30 s"];
+        gallery_panel(
+            "Pill",
+            IconName::Sun,
+            v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .children(STEPS.into_iter().enumerate().map(|(index, label)| {
+                            Pill::new(("gallery-pill", index), label)
+                                .selected(self.pill_selected == index)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.pill_selected = index;
+                                    cx.notify();
+                                }))
+                        })),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .children(STEPS.into_iter().enumerate().map(|(index, label)| {
+                            Pill::new(("gallery-pill-disabled", index), label)
+                                .selected(self.pill_selected == index)
+                                .disabled(true)
+                        })),
+                ),
+            pal,
+        )
+    }
+
     fn slider_panel(&self, pal: Palette) -> gpui::Div {
         gallery_panel(
             "CommitSlider",
@@ -391,28 +460,32 @@ impl ComponentGallery {
             v_flex()
                 .gap_3()
                 .child(BatteryIndicator::summary(&battery(
-                    78,
+                    Some(78),
                     BatteryLevel::Good,
                     BatteryStatus::Discharging,
                 )))
                 .child(BatteryIndicator::status(
-                    &battery(100, BatteryLevel::Full, BatteryStatus::Full),
+                    &battery(Some(100), BatteryLevel::Full, BatteryStatus::Full),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(42, BatteryLevel::Good, BatteryStatus::Charging),
+                    &battery(Some(42), BatteryLevel::Good, BatteryStatus::Charging),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(0, BatteryLevel::Unknown, BatteryStatus::Charging),
+                    &battery(Some(0), BatteryLevel::Unknown, BatteryStatus::Charging),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(14, BatteryLevel::Low, BatteryStatus::Discharging),
+                    &battery(Some(14), BatteryLevel::Low, BatteryStatus::Discharging),
                     false,
                 ))
+                .child(BatteryIndicator::status(
+                    &battery(None, BatteryLevel::Good, BatteryStatus::Discharging),
+                    true,
+                ))
                 .child(BatteryIndicator::summary(&battery(
-                    35,
+                    Some(35),
                     BatteryLevel::Unknown,
                     BatteryStatus::Error,
                 ))),

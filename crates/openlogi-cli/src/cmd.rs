@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::Subcommand;
 
+pub mod api;
 pub mod assets;
 pub mod backlight;
 pub mod camera;
@@ -14,6 +15,8 @@ pub mod snapshot;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Versioned JSON automation through the running agent (no hardware fallback).
+    Api(api::ApiArgs),
     /// List connected Logitech HID++ devices.
     List(list::ListArgs),
     /// Read or persistently set the keyboard backlight (HID++ 0x1982).
@@ -39,10 +42,11 @@ pub enum Command {
 impl Command {
     /// Dispatch the parsed subcommand and report the process exit status.
     ///
-    /// Only `list` reports a status of its own (nothing connected); every
-    /// other subcommand either succeeds or fails outright.
+    /// `list` distinguishes nothing connected; `api` emits its own JSON errors.
+    /// Other subcommands either succeed or fail outright.
     pub async fn run(self) -> Result<ExitCode> {
         match self {
+            Self::Api(command) => return api::run(command).await,
             Self::List(args) => return list::run(args).await,
             Self::Backlight(args) => backlight::run(args).await?,
             // Camera capture is blocking AVFoundation — no need for the async runtime.

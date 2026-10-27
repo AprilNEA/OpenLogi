@@ -9,19 +9,34 @@
 //! HID stack.
 
 pub mod backlight;
+pub mod disable_keys;
 pub mod dpi;
+pub mod easy_switch;
 pub mod error;
+pub mod fn_lock;
+pub mod force_sensing;
 pub mod light;
 pub mod pairing;
+pub mod pointer_speed;
+pub mod report_rate;
 pub mod route;
 pub mod scroll;
 pub mod smartshift;
 
-pub use backlight::{BacklightMode, BacklightState, BacklightStatus};
+pub use backlight::{
+    BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
+    BacklightStatus,
+};
+pub use disable_keys::{DisableKeysMask, DisableKeysState};
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
+pub use easy_switch::{EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
+pub use fn_lock::FnLockState;
+pub use force_sensing::ForceSensingInfo;
 pub use light::{LightCommand, commands_for_light_settings};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
+pub use pointer_speed::PointerSpeed;
+pub use report_rate::{ReportRate, ReportRateInfo};
 pub use route::{
     DIRECT_DEVICE_INDEX, DeviceRoute, LOGITECH_VENDOR_ID, RECEIVERS, ReceiverBrand,
     ReceiverDescriptor, ReceiverProtocol, find_receiver, is_receiver_pid, receiver_display_name,

@@ -2,13 +2,14 @@
 
 use std::sync::Arc;
 
-use openlogi_core::device::StandaloneDevice;
+use openlogi_core::device::{LightState, StandaloneDevice};
 use openlogi_core::hid::{LightCommand, PairingError, WriteError};
 use openlogi_hid::backend::{HidBackend, HotplugStream};
 use openlogi_hid::inventory::persist::ProbeCacheStore;
+use openlogi_hid::pairing::ReceiverIdentityCache;
 use openlogi_hid::{
     ChannelPool, DeviceIoGate, DeviceRoute, Enumerator, FileProbeCacheStore, InventoryError,
-    LitraModel, PairingCommand, PairingEvent, ReceiverSelector,
+    LightWatch, LitraModel, PairingCommand, PairingEvent, ReceiverSelector,
 };
 use tokio::sync::mpsc;
 
@@ -23,6 +24,7 @@ pub struct HardwareContext {
     device_io: DeviceIoGate,
     channel_pool: ChannelPool,
     probe_cache: Option<Arc<dyn ProbeCacheStore>>,
+    receiver_identities: ReceiverIdentityCache,
 }
 
 impl HardwareContext {
@@ -87,7 +89,8 @@ impl HardwareContext {
     }
 
     pub(crate) fn enumerator(&self) -> Enumerator {
-        let enumerator = Enumerator::with_backend(Arc::clone(&self.backend));
+        let enumerator = Enumerator::with_backend(Arc::clone(&self.backend))
+            .with_receiver_identity_cache(self.receiver_identities.clone());
         match &self.probe_cache {
             Some(store) => enumerator.with_probe_cache(Arc::clone(store)),
             None => enumerator,
@@ -110,7 +113,19 @@ impl HardwareContext {
         commands: mpsc::UnboundedReceiver<PairingCommand>,
         events: mpsc::UnboundedSender<PairingEvent>,
     ) -> Result<(), PairingError> {
-        openlogi_hid::pairing::run_pairing(&*self.backend, target, commands, events).await
+        openlogi_hid::pairing::run_pairing_with_inventory(
+            &*self.backend,
+            target,
+            commands,
+            events,
+            Some(&self.receiver_identities),
+        )
+        .await
+    }
+
+    /// Remove the device `route` reaches from its receiver's pairing table.
+    pub async fn unpair(&self, route: &DeviceRoute) -> Result<(), PairingError> {
+        openlogi_hid::pairing::unpair(&*self.backend, route).await
     }
 
     pub(super) async fn apply_litra(
@@ -118,8 +133,18 @@ impl HardwareContext {
         route: &DeviceRoute,
         model: LitraModel,
         command: LightCommand,
-    ) -> Result<(), WriteError> {
+    ) -> Result<Option<LightState>, WriteError> {
         openlogi_hid::write::apply_litra(&*self.backend, route, model, command).await
+    }
+
+    /// Watch the Litra `route` reaches for changes made on the light itself
+    /// (`None` when only its raw report reaches it).
+    pub(crate) async fn watch_litra(
+        &self,
+        route: &DeviceRoute,
+        model: LitraModel,
+    ) -> Result<Option<LightWatch>, WriteError> {
+        openlogi_hid::write::watch_litra(&*self.backend, route, model).await
     }
 
     fn from_parts(
@@ -133,6 +158,11 @@ impl HardwareContext {
             device_io,
             channel_pool,
             probe_cache,
+            receiver_identities: ReceiverIdentityCache::default(),
         }
     }
 }
+
+#[cfg(test)]
+#[path = "context/corpus_tests.rs"]
+mod corpus_tests;

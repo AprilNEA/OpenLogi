@@ -42,7 +42,8 @@ use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 use self::images::{
-    buttons_image_for, load_manifest, metadata_for, read_png_dimensions, variant_image_for,
+    buttons_image_for, find_variant_in_manifest, load_manifest, metadata_for, read_png_dimensions,
+    variant_image_for,
 };
 pub(crate) use self::paths::user_cache_root;
 use self::paths::{bundle_assets_root, load_index};
@@ -235,13 +236,19 @@ impl AssetResolver {
         let index = self.index.as_ref()?;
         let (depot, entry) = resolve_in_index(index, model, codename)?;
         let extended_model_id = model.extended_model_id;
-        self.remembered(
+        let mut asset = self.remembered(
             AssetKey::Variant {
                 depot: depot.to_owned(),
                 extended_model_id,
             },
             || self.load_files(depot, entry, extended_model_id),
-        )
+        )?;
+        // Assets are shared by model variant; the firmware name belongs to
+        // this device and must never overwrite another device's cached name.
+        if let Some(name) = variant_display_name_override(&asset.display_name, codename) {
+            asset.display_name = name;
+        }
+        Some(asset)
     }
 
     /// Resolve a standalone device directly by its registry model id.
@@ -313,21 +320,26 @@ impl AssetResolver {
             // Parse the manifest once and consult it for every candidate.
             let manifest = load_manifest(&dir);
 
-            let Some((meta_name, meta_path)) =
-                resolve_metadata(&dir, entry, manifest.as_ref(), extended_model_id)
-            else {
+            // Hotspot metadata: the variant's manifest `image_metadata`, else
+            // `core_metadata.json` (newer) or `metadata.json` (older).
+            //
+            // Two different situations look the same on disk, and only the
+            // registry tells them apart. A depot that *publishes* hotspot
+            // metadata but has none in this root is a stale or half-synced
+            // cache: skip the root so the next one (or the synthetic fallback)
+            // serves the device, rather than a render with no hotspots. A depot
+            // that publishes none at all (cameras) legitimately resolves from
+            // its render alone.
+            let meta = resolve_metadata(&dir, entry, depot, manifest.as_ref(), extended_model_id);
+            if meta.is_none() && entry.preferred_file(&METADATA_FILES).is_some() {
                 continue;
-            };
+            }
 
             let buttons_name = manifest.as_ref().and_then(|m| {
-                entry
-                    .model_id_candidates()
-                    .find_map(|base| buttons_image_for(m, base, extended_model_id))
+                find_variant_in_manifest(m, entry, depot, extended_model_id, buttons_image_for)
             });
             let variant_front_name = manifest.as_ref().and_then(|m| {
-                entry
-                    .model_id_candidates()
-                    .find_map(|base| variant_image_for(m, base, extended_model_id))
+                find_variant_in_manifest(m, entry, depot, extended_model_id, variant_image_for)
             });
             // Front/hero render for the gallery: the colour variant's
             // `device_image`, falling back to the generic front renders. Resolved
@@ -359,12 +371,14 @@ impl AssetResolver {
                 continue;
             };
 
-            let metadata = match Metadata::load_from(&meta_path) {
-                Ok(m) => m,
-                Err(e) => {
+            let metadata = if let Some((meta_name, meta_path)) = &meta {
+                Metadata::load_from(meta_path).unwrap_or_else(|e| {
                     warn!(depot, root = %root.display(), file = meta_name.as_str(), error = ?e, "device metadata unparseable — rendering image without hotspots");
                     Metadata::default()
-                }
+                })
+            } else {
+                debug!(depot, root = %root.display(), "depot ships no hotspot metadata — rendering image without hotspots");
+                Metadata::default()
             };
             let (png_width, png_height) = match read_png_dimensions(&image_path) {
                 Ok(dims) => dims,
@@ -484,15 +498,12 @@ impl Default for AssetResolver {
 fn resolve_metadata(
     dir: &Path,
     entry: &DeviceEntry,
+    depot: &str,
     manifest: Option<&DepotManifest>,
     ext: u8,
 ) -> Option<(String, PathBuf)> {
     let mut candidates: Vec<String> = manifest
-        .and_then(|m| {
-            entry
-                .model_id_candidates()
-                .find_map(|base| metadata_for(m, base, ext))
-        })
+        .and_then(|m| find_variant_in_manifest(m, entry, depot, ext, metadata_for))
         .into_iter()
         .collect();
     candidates.extend(METADATA_FILES.map(str::to_string));
@@ -552,6 +563,57 @@ pub(crate) fn resolve_in_index<'a>(
         "asset matched via codename↔displayName fallback"
     );
     Some(hit)
+}
+
+/// Firmware type words ignored when matching model names, wherever they occur.
+const GENERIC_CODENAME_WORDS: [&str; 3] = ["mouse", "keyboard", "trackball"];
+
+/// Size/hand qualifiers, not model-generation words such as `3S` or `X`.
+const VARIANT_QUALIFIER_SUFFIXES: [&str; 2] = ["l", "left"];
+
+/// Correct a shared depot's variant name (M650 vs. M650 L, #1332).
+///
+/// Return an override only when the firmware name matches a nonempty catalog
+/// prefix and every remaining word is a recognized qualifier. Keep catalog
+/// spelling, joining matched words with single spaces. `None` leaves the
+/// caller's existing name untouched; only a correction allocates a string.
+fn variant_display_name_override(catalog_name: &str, codename: Option<&str>) -> Option<String> {
+    let codename_words = codename?.split_whitespace().filter(|word| {
+        !GENERIC_CODENAME_WORDS.iter().any(|generic| {
+            word.chars()
+                .flat_map(char::to_lowercase)
+                .eq(generic.chars())
+        })
+    });
+    let mut catalog_words = catalog_name.split_whitespace();
+    let mut matched_words = 0;
+    for word in codename_words {
+        if !catalog_words.next()?.eq_ignore_ascii_case(word) {
+            return None;
+        }
+        matched_words += 1;
+    }
+
+    let mut qualifiers = catalog_words.peekable();
+    if matched_words == 0
+        || qualifiers.peek().is_none()
+        || !qualifiers.all(|word| {
+            VARIANT_QUALIFIER_SUFFIXES
+                .iter()
+                .any(|qualifier| word.eq_ignore_ascii_case(qualifier))
+        })
+    {
+        return None;
+    }
+
+    let mut name = String::with_capacity(catalog_name.len());
+    for word in catalog_name.split_whitespace().take(matched_words) {
+        if !name.is_empty() {
+            name.push(' ');
+        }
+        name.push_str(word);
+    }
+    Some(name)
 }
 
 fn strict_candidates(model: &DeviceModelInfo) -> Vec<String> {

@@ -103,6 +103,13 @@ fn process_command(
         ButtonCommand::CancelHooks => {
             emit_canceled(state.cancel_hooks(), CancelReason::SourceEnded, emit);
         }
+        ButtonCommand::CancelPointerExcept(current) => {
+            emit_canceled(
+                state.cancel_pointer_except(current),
+                CancelReason::Invalidated,
+                emit,
+            );
+        }
     }
 }
 
@@ -295,6 +302,7 @@ pub(super) fn process_input(
                 emit(ButtonRuntimeEvent::Triggered { press, action });
             }
         }
+        ButtonInput::WheelWhilePressed { token } => state.wheel_moved(&token),
     }
 }
 

@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::{Action, ActionRingIcon, ActionRingLayout, ActionRingSlot};
@@ -17,6 +17,7 @@ use openlogi_ipc::{
     RingObservation,
 };
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 /// Slack between the window closing and the session expiring.
 ///
@@ -29,7 +30,13 @@ use tokio::sync::watch;
 /// round-trip back.
 const SESSION_GRACE: Duration = Duration::from_secs(3);
 
-const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_GRACE);
+/// How long a session lives after [`ActionRingManager::begin`] opens it.
+///
+/// No session outlives this: hover, activation, and cancel all find an older
+/// one expired. Work that must not outlast a session, but may never hear it
+/// close (the overlay can exit without cancelling), ends this long after the
+/// session opened.
+pub const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_GRACE);
 
 /// Immutable input used to open one ring session.
 pub struct ActionRingSessionSpec {
@@ -85,8 +92,11 @@ impl State {
         }
     }
 
+    fn showing(&self) -> bool {
+        matches!(&self.active, Some(session) if !session.actions.is_empty())
+    }
+
     fn active_session(&mut self, session_id: u64) -> Result<&mut Session, ActionRingCommandError> {
-        self.expire();
         match self.active.as_mut() {
             Some(session) if session.invocation.session_id == session_id => Ok(session),
             _ => Err(ActionRingCommandError::SessionNotFound),
@@ -157,24 +167,42 @@ impl ActionRingManager {
         invocation
     }
 
-    /// Dismiss the showing session, if any, and return whether one was
-    /// dismissed — which is what lets a second press of the ring trigger toggle
-    /// the ring closed.
+    /// Dismiss the showing session, if any, and return its session id —
+    /// which is what lets a second press of the ring trigger toggle the ring
+    /// closed, and tells the caller which session that press ended.
     ///
     /// Dismissing simply removes the session. The old wire format could only
     /// carry invocations, so a dismissal had to be encoded as an *empty*
     /// invocation for the overlay to acknowledge; observing state needs no such
     /// placeholder, and a trigger press racing the close now finds no session
     /// and opens a fresh ring.
-    pub fn dismiss_active(&self) -> bool {
+    pub fn dismiss_active(&self) -> Option<u64> {
         let mut state = self.state();
-        state.expire();
-        let dismissed = matches!(&state.active, Some(session) if !session.actions.is_empty());
-        if dismissed {
-            state.active = None;
-        }
+        self.expire_and_publish(&mut state);
+        let dismissed = if state.showing() {
+            state
+                .active
+                .take()
+                .map(|session| session.invocation.session_id)
+        } else {
+            None
+        };
         self.publish(&state);
         dismissed
+    }
+
+    /// Whether a ring is showing that a trigger press would dismiss — the
+    /// same test [`Self::dismiss_active`] makes, without dismissing.
+    pub fn is_showing(&self) -> bool {
+        let mut state = self.state();
+        self.expire_and_publish(&mut state);
+        state.showing()
+    }
+
+    /// Subscribe to the latest ring state. Every close path republishes the state.
+    /// Rapid updates may replace intermediate states before a subscriber reads them.
+    pub fn subscribe(&self) -> watch::Receiver<RingObservation> {
+        self.published.subscribe()
     }
 
     /// Serve one [`Agent::observe_action_ring`](openlogi_ipc::Agent::observe_action_ring).
@@ -214,15 +242,8 @@ impl ActionRingManager {
         slot: ActionRingSlot,
     ) -> Result<Option<ActionRingHover>, ActionRingCommandError> {
         let mut state = self.state();
-        // `active_session` expires a stale session, which the overlay must hear
-        // about even though the hover itself then fails.
-        let session = match state.active_session(session_id) {
-            Ok(session) => session,
-            Err(error) => {
-                self.publish(&state);
-                return Err(error);
-            }
-        };
+        self.expire_and_publish(&mut state);
+        let session = state.active_session(session_id)?;
         if !session.actions.contains_key(&slot) {
             return Err(ActionRingCommandError::SlotEmpty);
         }
@@ -242,6 +263,7 @@ impl ActionRingManager {
         slot: ActionRingSlot,
     ) -> Result<ActionRingActivation, ActionRingCommandError> {
         let mut state = self.state();
+        self.expire_and_publish(&mut state);
         if !state
             .active_session(session_id)?
             .actions
@@ -274,6 +296,12 @@ impl ActionRingManager {
             state.active = None;
         }
         self.publish(&state);
+    }
+
+    fn expire_and_publish(&self, state: &mut State) {
+        state.expire();
+        // Publish expiration before an interaction can return an error.
+        self.publish(state);
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -329,25 +357,25 @@ mod tests {
         let manager = ActionRingManager::default();
 
         // Nothing showing yet: the first press must open, not dismiss.
-        assert!(!manager.dismiss_active());
+        assert_eq!(manager.dismiss_active(), None);
         let opened = manager.begin(spec());
         let showing = manager.observe(0).await;
         assert_eq!(showing.invocation, Some(opened.clone()));
 
         // Second press: dismissed, and the overlay observes "no ring" rather
         // than a placeholder invocation it has to acknowledge.
-        assert!(manager.dismiss_active());
+        assert_eq!(manager.dismiss_active(), Some(opened.session_id));
         let dismissed = manager.observe(showing.generation).await;
         assert_eq!(dismissed.invocation, None);
 
         // Nothing is showing, so a third press opens again.
-        assert!(!manager.dismiss_active());
+        assert_eq!(manager.dismiss_active(), None);
         let reopened = manager.begin(spec());
         assert!(!reopened.slots.is_empty());
 
         // A stale Cancel for the dismissed session must not kill the new one.
         manager.cancel(opened.session_id);
-        assert!(manager.dismiss_active());
+        assert_eq!(manager.dismiss_active(), Some(reopened.session_id));
     }
 
     #[test]
@@ -402,6 +430,40 @@ mod tests {
     }
 
     #[test]
+    fn is_showing_tracks_the_session_without_dismissing_it() {
+        let manager = ActionRingManager::default();
+        assert!(!manager.is_showing());
+        let invocation = manager.begin(spec());
+        assert!(manager.is_showing());
+        assert!(manager.is_showing(), "asking must not dismiss the ring");
+        manager.cancel(invocation.session_id);
+        assert!(!manager.is_showing());
+    }
+
+    #[test]
+    fn a_subscriber_hears_every_way_a_ring_closes() {
+        let manager = ActionRingManager::default();
+        let mut ring = manager.subscribe();
+        let closes: [fn(&ActionRingManager, u64); 3] = [
+            |manager, session| assert_eq!(manager.dismiss_active(), Some(session)),
+            |manager, session| {
+                manager
+                    .activate(session, ActionRingSlot::Top)
+                    .expect("the open session must be activatable");
+            },
+            |manager, session| manager.cancel(session),
+        ];
+        for close in closes {
+            let invocation = manager.begin(spec());
+            assert!(ring.has_changed().unwrap(), "opening must notify");
+            ring.borrow_and_update();
+            close(&manager, invocation.session_id);
+            assert!(ring.has_changed().unwrap(), "closing must notify");
+            assert_eq!(ring.borrow_and_update().invocation, None);
+        }
+    }
+
+    #[test]
     fn replacement_invalidates_the_previous_session() {
         let manager = ActionRingManager::default();
         let first = manager.begin(spec());
@@ -427,20 +489,35 @@ mod tests {
         );
     }
 
-    #[test]
-    fn expired_session_rejects_interaction() {
+    #[tokio::test(start_paused = true)]
+    async fn expired_hover_publishes_the_closed_session() {
         let manager = ActionRingManager::default();
+        let mut ring = manager.subscribe();
         let invocation = manager.begin(spec());
-        let mut state = manager.state();
-        let session = state.active.as_mut().expect("begin creates a session");
-        session.opened_at = Instant::now()
-            .checked_sub(SESSION_LIFETIME + Duration::from_secs(1))
-            .expect("test instant has sufficient history");
-        drop(state);
+        ring.borrow_and_update();
+        tokio::time::advance(SESSION_LIFETIME + Duration::from_secs(1)).await;
+
+        assert_eq!(
+            manager.hover(invocation.session_id, ActionRingSlot::Top),
+            Err(ActionRingCommandError::SessionNotFound)
+        );
+        assert!(ring.has_changed().unwrap(), "expiration must notify");
+        assert_eq!(ring.borrow_and_update().invocation, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_activation_publishes_the_closed_session() {
+        let manager = ActionRingManager::default();
+        let mut ring = manager.subscribe();
+        let invocation = manager.begin(spec());
+        ring.borrow_and_update();
+        tokio::time::advance(SESSION_LIFETIME + Duration::from_secs(1)).await;
 
         assert!(matches!(
             manager.activate(invocation.session_id, ActionRingSlot::Top),
             Err(ActionRingCommandError::SessionNotFound)
         ));
+        assert!(ring.has_changed().unwrap(), "expiration must notify");
+        assert_eq!(ring.borrow_and_update().invocation, None);
     }
 }
