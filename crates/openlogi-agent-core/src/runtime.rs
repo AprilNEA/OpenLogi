@@ -561,13 +561,13 @@ impl ActionRuntime {
 }
 
 impl ActionDispatcher {
-    /// Route one action without blocking the input callback.
     /// Write `device_key`'s saved DPI again after its session entered host
     /// mode.
     pub(crate) fn host_mode_entered(&self, device_key: &str) {
         self.executor.host_mode_entered(device_key);
     }
 
+    /// Route one action without blocking the input callback.
     pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.executor.dispatch(action, device_key);
     }
