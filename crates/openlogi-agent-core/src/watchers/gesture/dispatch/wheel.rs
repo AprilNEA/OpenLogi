@@ -24,6 +24,11 @@ const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
 /// Bound synchronous action dispatch for one captured event.
 const MAX_REPEATS_PER_EVENT: i32 = 20;
 
+/// Fractional magnification scale change per native thumb-wheel notch (`0.15` =
+/// 15% zoom per ratchet, or 300% across a 20-ratchet revolution at default
+/// sensitivity).
+const MAGNIFY_PER_TICK: f64 = 0.15;
+
 /// Per-direction wheel state. Reversing the physical wheel must not cancel
 /// progress already earned in the other direction.
 #[derive(Default)]
@@ -103,12 +108,34 @@ impl WheelDirection {
         scale: ScrollScale,
         now: Instant,
     ) -> WheelOutput {
+        self.advance_with_zoom(
+            action,
+            magnitude,
+            scale,
+            openlogi_inject::SUPPORTS_CONTINUOUS_MAGNIFY,
+            now,
+        )
+    }
+
+    /// Advance this direction, choosing continuous magnification vs discrete
+    /// shortcut repetition for zoom actions according to `continuous_zoom`.
+    fn advance_with_zoom(
+        &mut self,
+        action: &Action,
+        magnitude: i32,
+        scale: ScrollScale,
+        continuous_zoom: bool,
+        now: Instant,
+    ) -> WheelOutput {
         if matches!(action, Action::None) {
             self.state = WheelState::Idle;
             return WheelOutput::Idle;
         }
         if let Some(binding) = ScrollBinding::from_action(action) {
             return self.advance_scroll(binding, magnitude, scale);
+        }
+        if continuous_zoom && let Some(binding) = ZoomBinding::from_action(action) {
+            return self.advance_zoom(binding, magnitude, scale);
         }
         self.advance_action(action, magnitude, scale.sensitivity, now)
     }
@@ -125,6 +152,27 @@ impl WheelDirection {
         let context = ScrollContext { binding, scale };
         if !matches!(&self.state, WheelState::Scroll(previous) if *previous == context) {
             self.state = WheelState::Scroll(context);
+        }
+        let distance = f64::from(magnitude) * scale.per_increment();
+        if distance == 0.0 {
+            WheelOutput::Idle
+        } else {
+            binding.output(distance)
+        }
+    }
+
+    /// Emit continuous trackpad-style magnification immediately as a fractional
+    /// scale delta. As with [`Self::advance_scroll`], the scroll runtime owns
+    /// smoothing and gesture phase balancing.
+    fn advance_zoom(
+        &mut self,
+        binding: ZoomBinding,
+        magnitude: i32,
+        scale: ScrollScale,
+    ) -> WheelOutput {
+        let context = ZoomContext { binding, scale };
+        if !matches!(&self.state, WheelState::Zoom(previous) if *previous == context) {
+            self.state = WheelState::Zoom(context);
         }
         let distance = f64::from(magnitude) * scale.per_increment();
         if distance == 0.0 {
@@ -199,9 +247,12 @@ impl WheelDirection {
     }
 }
 
-/// Only volume actions repeat with thumb-wheel distance.
+/// Volume and discrete-fallback zoom actions repeat with thumb-wheel distance.
 fn is_repeatable(action: &Action) -> bool {
-    matches!(action, Action::VolumeUp | Action::VolumeDown)
+    matches!(
+        action,
+        Action::VolumeUp | Action::VolumeDown | Action::ZoomIn | Action::ZoomOut
+    )
 }
 
 /// Mutually exclusive state for one physical wheel direction.
@@ -212,6 +263,8 @@ enum WheelState {
     Idle,
     /// Continuous scrolling under one exact axis, resolution, and sensitivity.
     Scroll(ScrollContext),
+    /// Continuous magnification under one exact zoom direction, resolution, and sensitivity.
+    Zoom(ZoomContext),
     /// Increment progress and timing retained for one exact discrete binding.
     Action {
         binding: DiscreteBinding,
@@ -225,6 +278,13 @@ enum WheelState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ScrollContext {
     binding: ScrollBinding,
+    scale: ScrollScale,
+}
+
+/// Identity of one continuous-zoom mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ZoomContext {
+    binding: ZoomBinding,
     scale: ScrollScale,
 }
 
@@ -267,6 +327,32 @@ impl ScrollBinding {
     }
 }
 
+/// Sign encoded by a continuous-zoom action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ZoomBinding {
+    In,
+    Out,
+}
+
+impl ZoomBinding {
+    fn from_action(action: &Action) -> Option<Self> {
+        match action {
+            Action::ZoomIn => Some(Self::In),
+            Action::ZoomOut => Some(Self::Out),
+            _ => None,
+        }
+    }
+
+    /// Convert positive wheel-tick distance into a signed magnification delta.
+    fn output(self, distance: f64) -> WheelOutput {
+        let magnification = distance * MAGNIFY_PER_TICK;
+        match self {
+            Self::In => WheelOutput::Magnify(magnification),
+            Self::Out => WheelOutput::Magnify(-magnification),
+        }
+    }
+}
+
 /// What advancing one direction should produce.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum WheelOutput {
@@ -274,7 +360,9 @@ pub(super) enum WheelOutput {
     Idle,
     /// Typed fractional distance for the smooth-scroll runtime or injector.
     Scroll(ScrollDelta),
-    /// Fire the bound action this many times; only volume actions may repeat.
+    /// Fractional magnification scale delta for the smooth-scroll runtime or injector.
+    Magnify(f64),
+    /// Fire the bound action this many times; volume and fallback zoom actions may repeat.
     FireAction(u32),
 }
 

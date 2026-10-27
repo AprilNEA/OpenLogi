@@ -219,6 +219,14 @@ pub enum Action {
     /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
     /// lit while the mode is on. Does nothing on other devices.
     TogglePrecisionMode,
+    /// Zoom in: continuous trackpad-style magnification on the macOS thumb
+    /// wheel (`NSEventTypeGesture` / `kIOHIDEventTypeZoom`), or a discrete
+    /// zoom-in shortcut (`Cmd+=` / `Ctrl+=`) when bound to a button.
+    ZoomIn,
+    /// Zoom out: continuous trackpad-style magnification on the macOS thumb
+    /// wheel (`NSEventTypeGesture` / `kIOHIDEventTypeZoom`), or a discrete
+    /// zoom-out shortcut (`Cmd+-` / `Ctrl+-`) when bound to a button.
+    ZoomOut,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -333,6 +341,8 @@ macro_rules! for_each_unit_action {
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" "actions.scroll_left" Scroll ScrollLeft,
             HorizontalScrollRight "Scroll Right" "actions.scroll_right" Scroll ScrollRight,
+            ZoomIn "Zoom In" "actions.zoom_in" Scroll Search,
+            ZoomOut "Zoom Out" "actions.zoom_out" Scroll Search,
         }
     };
 }

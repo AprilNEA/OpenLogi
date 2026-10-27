@@ -433,3 +433,61 @@ fn stale_custom_progress_decays() {
         WheelOutput::FireAction(1)
     );
 }
+
+#[test]
+fn continuous_zoom_scales_with_resolution_and_sensitivity_and_clears_discrete_progress() {
+    let now = Instant::now();
+    let traced = ScrollScale::new(TRACED, ThumbwheelSensitivity::DEFAULT);
+    let mut direction = WheelDirection::default();
+
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+    assert_eq!(
+        direction.advance_with_zoom(&Action::VolumeUp, threshold - 1, traced, true, now),
+        WheelOutput::Idle
+    );
+
+    let mut zoom = 0.0;
+    for _ in 0..120 {
+        let WheelOutput::Magnify(delta) =
+            direction.advance_with_zoom(&Action::ZoomIn, 1, traced, true, now)
+        else {
+            panic!("expected continuous magnification output");
+        };
+        zoom += delta;
+    }
+    assert_distance(zoom, 20.0 * MAGNIFY_PER_TICK);
+
+    let WheelOutput::Magnify(out_delta) = direction.advance_with_zoom(
+        &Action::ZoomOut,
+        1,
+        unscaled(ThumbwheelSensitivity::DEFAULT),
+        true,
+        now,
+    ) else {
+        panic!("expected continuous magnification output");
+    };
+    assert_distance(out_delta, -MAGNIFY_PER_TICK);
+
+    assert_eq!(
+        direction.advance_with_zoom(&Action::VolumeUp, 1, traced, true, now),
+        WheelOutput::Idle,
+        "switching to continuous zoom must discard previous discrete progress"
+    );
+}
+
+#[test]
+fn discrete_zoom_fallback_repeats_across_thresholds_without_cooldown() {
+    let mut direction = WheelDirection::default();
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+
+    assert_eq!(
+        direction.advance_with_zoom(&Action::ZoomIn, threshold * 2, scale, false, now),
+        WheelOutput::FireAction(2)
+    );
+    assert_eq!(
+        direction.advance_with_zoom(&Action::ZoomOut, threshold, scale, false, now),
+        WheelOutput::FireAction(1)
+    );
+}

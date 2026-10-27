@@ -382,6 +382,10 @@ fn all_catalog_variants_roundtrip_toml() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "pins the exhaustive list of every persisted Action variant name"
+)]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
     actions.extend([
@@ -479,6 +483,8 @@ fn persisted_action_variant_names_are_stable() {
         "VolumeDown",
         "VolumeUp",
         "Workflow",
+        "ZoomIn",
+        "ZoomOut",
     ];
     expected.sort_unstable();
     assert_eq!(actual, expected);
@@ -557,6 +563,8 @@ fn category_scroll_variants() {
     assert_eq!(Action::ScrollDown.category(), Category::Scroll);
     assert_eq!(Action::HorizontalScrollLeft.category(), Category::Scroll);
     assert_eq!(Action::HorizontalScrollRight.category(), Category::Scroll);
+    assert_eq!(Action::ZoomIn.category(), Category::Scroll);
+    assert_eq!(Action::ZoomOut.category(), Category::Scroll);
 }
 
 #[test]
