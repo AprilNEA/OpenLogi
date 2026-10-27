@@ -54,7 +54,7 @@ fn legacy_rate(interval_ms: u8) -> ReportRate {
 }
 
 /// The `0x8060` interval whose rate is `rate`, if there is one.
-pub(crate) fn legacy_interval(rate: ReportRate) -> Option<u8> {
+fn legacy_interval(rate: ReportRate) -> Option<u8> {
     legacy_intervals_ms().find(|&interval_ms| legacy_rate(interval_ms) == rate)
 }
 
@@ -274,7 +274,7 @@ pub async fn set_report_rate_on(
     set_report_rate_on_channel(shared.channel(), shared.device_index(), rate).await
 }
 
-async fn set_report_rate_on_channel(
+pub(crate) async fn set_report_rate_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
     rate: ReportRate,

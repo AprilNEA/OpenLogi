@@ -35,7 +35,7 @@ mod litra;
 mod onboard;
 mod os_layout;
 mod pointer_scaling;
-pub(crate) mod report_rate;
+mod report_rate;
 mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
@@ -93,6 +93,7 @@ pub use pointer_scaling::{
     PointerScaling, get_pointer_scaling, get_pointer_speed_on, set_pointer_scaling,
     set_pointer_speed_on,
 };
+pub(crate) use report_rate::set_report_rate_on_channel;
 pub use report_rate::{
     get_report_rate_info, get_report_rate_info_on, set_report_rate, set_report_rate_on,
 };

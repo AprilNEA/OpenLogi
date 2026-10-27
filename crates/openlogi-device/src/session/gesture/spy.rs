@@ -10,18 +10,17 @@ use hidpp::{
         CreatableFeature,
         mouse_button_spy::{MouseButtonSpyEvent, MouseButtonSpyFeature},
         onboard_profiles::{OnboardMode, OnboardProfilesFeature},
-        report_rate::ReportRateFeature,
     },
     protocol::v20::{self, Hidpp20Error},
 };
 use openlogi_core::binding::ButtonId;
-use openlogi_core::hid::ReportRate;
+use openlogi_core::hid::{ReportRate, WriteError};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::CapturedInput;
 use crate::session::capture_restore::CaptureError;
-use crate::write::report_rate::legacy_interval;
+use crate::write::set_report_rate_on_channel;
 
 /// Onboard state a capture session sets up.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +85,6 @@ pub(super) struct ArmedOnboard {
 enum ArmedMode {
     Host {
         spy_index: u8,
-        rate_index: Option<u8>,
         host: HostMode,
         captured: Vec<(u8, ButtonId)>,
     },
@@ -123,15 +121,11 @@ impl ArmedOnboard {
         let onboard = self.onboard();
         let result = match &self.mode {
             ArmedMode::Host {
-                spy_index,
-                rate_index,
-                host,
-                ..
-            } => {
-                self.apply_host(&onboard, *spy_index, *rate_index, host)
-                    .await
-            }
-            ArmedMode::Profile(index) => apply_profile(&onboard, *index).await,
+                spy_index, host, ..
+            } => self.apply_host(&onboard, *spy_index, host).await,
+            ArmedMode::Profile(index) => apply_profile(&onboard, *index)
+                .await
+                .map_err(CaptureError::from),
         };
         if let Err(error) = &result {
             warn!(?error, "onboard re-arm after wake failed");
@@ -151,20 +145,21 @@ impl ArmedOnboard {
         &self,
         onboard: &OnboardProfilesFeature,
         spy_index: u8,
-        rate_index: Option<u8>,
         host: &HostMode,
-    ) -> Result<(), Hidpp20Error> {
+    ) -> Result<(), CaptureError> {
         onboard.set_mode(OnboardMode::Host).await?;
         let spy = MouseButtonSpyFeature::new(Arc::clone(&self.chan), self.device_index, spy_index);
         spy.set_mapping(&host.mapping()).await?;
         spy.start_spy().await?;
-        if let (Some(index), Some(rate)) = (rate_index, host.report_rate) {
-            let feature = ReportRateFeature::new(Arc::clone(&self.chan), self.device_index, index);
-            // A rate `0x8060` has no interval for is refused like one the mouse
-            // does not list.
-            let ms = legacy_interval(rate)
-                .ok_or(Hidpp20Error::Feature(v20::ErrorType::InvalidArgument))?;
-            feature.set_report_rate(ms).await?;
+        if let Some(rate) = host.report_rate {
+            // The mouse takes a rate write only in host mode, so it goes here.
+            match set_report_rate_on_channel(&self.chan, self.device_index, rate).await {
+                Ok(_) => {}
+                Err(WriteError::FeatureUnsupported { .. }) => {
+                    debug!("report rate on a mouse without one — ignored");
+                }
+                Err(error) => return Err(CaptureError::Hidpp(format!("report rate: {error}"))),
+            }
         }
         Ok(())
     }
@@ -200,13 +195,8 @@ pub(super) async fn arm_onboard(
                 debug!("host mode requested on a device without 0x8110 — ignored");
                 return Ok(());
             };
-            let rate_index = root
-                .get_feature(ReportRateFeature::ID)
-                .await?
-                .map(|info| info.index);
             ArmedMode::Host {
                 spy_index: spy_info.index,
-                rate_index,
                 captured: host.captured().collect(),
                 host: host.clone(),
             }
@@ -222,13 +212,10 @@ pub(super) async fn arm_onboard(
     match &state.mode {
         ArmedMode::Host {
             spy_index,
-            rate_index,
             host,
             captured,
         } => {
-            state
-                .apply_host(&onboard, *spy_index, *rate_index, host)
-                .await?;
+            state.apply_host(&onboard, *spy_index, host).await?;
             info!(captured = captured.len(), "G-series host mode active");
         }
         ArmedMode::Profile(index) => apply_profile(&onboard, *index).await?,
