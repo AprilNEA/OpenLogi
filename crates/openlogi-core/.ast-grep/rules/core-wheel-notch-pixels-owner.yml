@@ -1,0 +1,14 @@
+# Owner: openlogi_core::scroll::WHEEL_PIXELS_PER_NOTCH — how many pixels one
+# wheel notch scrolls at unit gain. The speed model and the injector's
+# pixel-to-tick conversion both consume it; neither restates the geometry.
+id: core-wheel-notch-pixels-owner
+language: rust
+severity: error
+message: Use openlogi_core::scroll::WHEEL_PIXELS_PER_NOTCH instead of restating the pixels-per-notch geometry.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/scroll.rs
+rule:
+  kind: float_literal
+  regex: '^(?:7\.714|12\.96)'

@@ -467,14 +467,19 @@ pub fn start(
                     id,
                     pressed,
                     device,
-                } => handle_button(
-                    id,
-                    pressed,
-                    device.as_ref(),
-                    &hooks,
-                    &dispatcher,
-                    openlogi_hook::frontmost_safari_pid,
-                ),
+                } => {
+                    if id == ButtonId::MiddleClick && button_source_may_remap(device.as_ref()) {
+                        scroll.on_middle_button(pressed);
+                    }
+                    handle_button(
+                        id,
+                        pressed,
+                        device.as_ref(),
+                        &hooks,
+                        &dispatcher,
+                        openlogi_hook::frontmost_safari_pid,
+                    )
+                }
                 MouseEvent::Moved { delta_x, delta_y } => {
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }

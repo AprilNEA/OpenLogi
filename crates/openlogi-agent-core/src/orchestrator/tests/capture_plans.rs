@@ -184,7 +184,7 @@ fn published_plans_divert_the_main_wheel_only_while_the_hook_runs() {
     assert_eq!(
         main_wheel(&orch),
         Some(openlogi_hid::session::gesture::MainWheelDivert {
-            resolution: None,
+            resolution: Some(openlogi_core::config::ScrollResolution::High),
             inverted: None,
         })
     );
