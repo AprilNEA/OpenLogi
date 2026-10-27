@@ -35,7 +35,7 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
 };
-use crate::state::{AppState, DeviceRecord, Load, StateEvents};
+use crate::state::{AppState, BindingLayer, DeviceRecord, Load, StateEvents};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle, toggle_row};
 use crate::ui::theme::{
@@ -281,7 +281,7 @@ fn gshift_layer_bar(cx: &mut Context<AppView>) -> Option<impl IntoElement> {
     if state.current_gaming_layout().is_none() || !state.current_device_is_persistent() {
         return None;
     }
-    let gshift = state.editing_gshift();
+    let gshift = state.binding_layer() == BindingLayer::GShift;
     Some(
         h_flex()
             .w_full()
@@ -310,8 +310,12 @@ fn gshift_layer_bar(cx: &mut Context<AppView>) -> Option<impl IntoElement> {
                             .selected(gshift),
                     )
                     .on_click(|indices, _window, cx| {
-                        let gshift = indices.first() == Some(&1);
-                        AppState::apply(cx, |state| state.set_editing_gshift(gshift));
+                        let layer = if indices.first() == Some(&1) {
+                            BindingLayer::GShift
+                        } else {
+                            BindingLayer::Normal
+                        };
+                        AppState::apply(cx, |state| state.set_binding_layer(layer));
                     }),
             ),
     )

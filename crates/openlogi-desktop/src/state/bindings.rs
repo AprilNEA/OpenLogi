@@ -153,6 +153,15 @@ pub(super) fn apply_thumbwheel_pair(
     true
 }
 
+/// Which bindings the mouse editor edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingLayer {
+    /// The normal bindings, or an app profile's.
+    Normal,
+    /// The bindings used while G-Shift is held.
+    GShift,
+}
+
 impl AppState {
     /// The application whose profile the binding panels are editing, or `None`
     /// for the device's global profile.
@@ -171,16 +180,21 @@ impl AppState {
         self.set_editing_layer(app.map(Layer::App))
     }
 
+    /// Which bindings the mouse editor edits.
     #[must_use]
-    pub fn editing_gshift(&self) -> bool {
-        self.bindings.editing_gshift(
+    pub fn binding_layer(&self) -> BindingLayer {
+        if self.bindings.editing_gshift(
             self.current_record()
                 .and_then(DeviceRecord::persistent_config_key),
-        )
+        ) {
+            BindingLayer::GShift
+        } else {
+            BindingLayer::Normal
+        }
     }
 
-    pub fn set_editing_gshift(&mut self, gshift: bool) -> StateEvents {
-        self.set_editing_layer(gshift.then_some(Layer::GShift))
+    pub fn set_binding_layer(&mut self, layer: BindingLayer) -> StateEvents {
+        self.set_editing_layer((layer == BindingLayer::GShift).then_some(Layer::GShift))
     }
 
     fn set_editing_layer(&mut self, layer: Option<Layer>) -> StateEvents {
@@ -266,7 +280,7 @@ impl AppState {
             return events;
         };
         let app = self.editing_app().map(str::to_string);
-        let gshift = self.editing_gshift();
+        let gshift = self.binding_layer() == BindingLayer::GShift;
         self.config.edit(|config| {
             // A per-app entry is `Action`-valued, so an override always
             // replaces the whole button — which is exactly what picking one
@@ -342,7 +356,7 @@ impl AppState {
             return events;
         };
         let app = self.editing_app().map(str::to_string);
-        if app.is_none() && !self.editing_gshift() {
+        if app.is_none() && self.binding_layer() == BindingLayer::Normal {
             return events;
         }
         self.config.edit(|config| {
@@ -424,7 +438,7 @@ impl AppState {
         let key = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)?;
-        if self.editing_gshift() {
+        if self.binding_layer() == BindingLayer::GShift {
             return self.config.gshift_overrides(key);
         }
         self.editing_app()

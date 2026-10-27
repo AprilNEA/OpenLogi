@@ -72,6 +72,7 @@ mod action_ring;
 mod agent;
 mod backlight;
 mod bindings;
+pub use bindings::BindingLayer;
 mod camera;
 mod config;
 mod device_key;
