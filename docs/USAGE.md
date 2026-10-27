@@ -39,6 +39,7 @@ openlogi backlight --device "MX Keys" on
 openlogi backlight --device "MX Keys" auto on
 openlogi backlight --device "MX Keys" level 3
 openlogi backlight --device "MX Keys" battery-saving on
+openlogi backlight --device "MX Keys" effect breathing
 ```
 
 `--device NAME` is a case-insensitive name substring, not the automation API's
@@ -57,8 +58,10 @@ Bare invocation and `status` only read. Changes are saved in the keyboard's
 non-volatile memory, not `config.toml`, and survive reconnects, host switches,
 and power cycles. The agent confirms writes; the CLI prints that returned state
 as `read-back` and only then reports success. `status` lists which additional
-controls the firmware offers. The agent rejects unsupported modes or levels.
-This command does not add timer or effect settings.
+controls the firmware offers, including the names of the predefined effects
+(`static`, `none`, `breathing`, `contrast`, `reaction`, `random`, `waves`) the
+keyboard lists; `status` and `read-back` also show the running effect. The
+agent rejects unsupported modes, levels or effects.
 
 With the matching agent and GUI build, an already-open Backlight panel refreshes
 after a CLI write; reopening the device or restarting the app is unnecessary.

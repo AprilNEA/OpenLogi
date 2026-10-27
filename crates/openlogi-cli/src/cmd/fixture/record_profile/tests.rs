@@ -8,10 +8,11 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
-    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
-    DisableKeysMask, DisableKeysState, Dpi, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
-    ForceSensingInfo, HostConnection, LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    BacklightChange, BacklightControls, BacklightEffect, BacklightEffects, BacklightMode,
+    BacklightState, BacklightStatus, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
+    EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HostConnection, LightCommand,
+    PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -524,6 +525,8 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
         power_save: false,
         duration: None,
         controls: BacklightControls::default(),
+        effect: BacklightEffect::Static,
+        effects: BacklightEffects::default(),
     });
     profile.standalone[0].address.identity = RAW_STANDALONE_ID.to_string();
     profile.standalone[0].serial_number = Some("RAW-LIGHT-SERIAL".to_string());

@@ -6,8 +6,9 @@ use hidpp::{
     feature::{
         CreatableFeature,
         backlight::{
-            BacklightConfig, BacklightFeature, BacklightInfo, BacklightMode as FirmwareMode,
-            BacklightOptions, BacklightStatus as FirmwareStatus, SetBacklightConfig,
+            BacklightConfig, BacklightEffect as FirmwareEffect, BacklightEffectList,
+            BacklightFeature, BacklightInfo, BacklightMode as FirmwareMode, BacklightOptions,
+            BacklightStatus as FirmwareStatus, SetBacklightConfig,
         },
     },
 };
@@ -16,8 +17,8 @@ use tracing::debug;
 use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::backlight::{
-    BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
-    BacklightStatus,
+    BacklightChange, BacklightControls, BacklightDuration, BacklightEffect, BacklightEffects,
+    BacklightMode, BacklightState, BacklightStatus,
 };
 use crate::channel::route::DeviceRoute;
 
@@ -80,6 +81,51 @@ fn status_from_firmware(status: FirmwareStatus) -> BacklightStatus {
     }
 }
 
+/// Map the fork's `0x1982` effect onto OpenLogi's [`BacklightEffect`].
+///
+/// `get_backlight_info` already rejects a byte outside the seven effects with
+/// `UnsupportedResponse`, so only a variant added to the `#[non_exhaustive]`
+/// source enum but not here can miss; it is the same error, never a guess.
+fn effect_from_firmware(effect: FirmwareEffect) -> Result<BacklightEffect, WriteError> {
+    Ok(match effect {
+        FirmwareEffect::Static => BacklightEffect::Static,
+        FirmwareEffect::None => BacklightEffect::None,
+        FirmwareEffect::Breathing => BacklightEffect::Breathing,
+        FirmwareEffect::Contrast => BacklightEffect::Contrast,
+        FirmwareEffect::Reaction => BacklightEffect::Reaction,
+        FirmwareEffect::Random => BacklightEffect::Random,
+        FirmwareEffect::Waves => BacklightEffect::Waves,
+        _ => {
+            return Err(WriteError::UnsupportedResponse {
+                operation: HidppOperation::ReadBacklight,
+                feature_hex: BacklightFeature::ID,
+            });
+        }
+    })
+}
+
+/// The inverse of [`effect_from_firmware`].
+fn effect_to_firmware(effect: BacklightEffect) -> FirmwareEffect {
+    match effect {
+        BacklightEffect::Static => FirmwareEffect::Static,
+        BacklightEffect::None => FirmwareEffect::None,
+        BacklightEffect::Breathing => FirmwareEffect::Breathing,
+        BacklightEffect::Contrast => FirmwareEffect::Contrast,
+        BacklightEffect::Reaction => FirmwareEffect::Reaction,
+        BacklightEffect::Random => FirmwareEffect::Random,
+        BacklightEffect::Waves => FirmwareEffect::Waves,
+    }
+}
+
+/// The effects the `getBacklightConfig` effect list names. Bits beyond the
+/// seven modelled effects are not offered.
+fn effects_from(list: BacklightEffectList) -> BacklightEffects {
+    BacklightEffect::ALL
+        .into_iter()
+        .filter(|&effect| list.bits() & (1 << u8::from(effect_to_firmware(effect))) != 0)
+        .collect()
+}
+
 /// What software may change, from the `getBacklightConfig` capability bits,
 /// the runtime feature version and the level count.
 fn controls_from(options: BacklightOptions, version: u8, nb_levels: u8) -> BacklightControls {
@@ -115,8 +161,12 @@ async fn read_raw(
 }
 
 /// Merge the two replies into a [`BacklightState`].
-fn state_from(config: &BacklightConfig, info: &BacklightInfo, version: u8) -> BacklightState {
-    BacklightState {
+fn state_from(
+    config: &BacklightConfig,
+    info: &BacklightInfo,
+    version: u8,
+) -> Result<BacklightState, WriteError> {
+    Ok(BacklightState {
         enabled: config.enabled,
         mode: mode_from_firmware(config.mode),
         status: status_from_firmware(info.status),
@@ -132,7 +182,9 @@ fn state_from(config: &BacklightConfig, info: &BacklightInfo, version: u8) -> Ba
         } else {
             None
         },
-    }
+        effects: effects_from(config.effect_list),
+        effect: effect_from_firmware(info.effect)?,
+    })
 }
 
 /// The level `change` makes the keyboard hold, when software chooses it.
@@ -160,7 +212,7 @@ fn held_level(
 /// holding `held` (see [`held_level`]).
 ///
 /// Everything `change` does not touch is written back as read: the effect
-/// (sent as "do not change"), the level, the fade-out durations and the
+/// (sent as "do not change" unless `change` picks one), the level, the fade-out durations and the
 /// other options. A [`BacklightChange::Duration`] is the exception for the
 /// two inactivity fades: both become that timer, in 5-second units. The
 /// plugged-in timeout and the fourth duration are still written back as
@@ -203,13 +255,19 @@ fn request_for(
             request.duration_hands_out = units;
             request.duration_hands_in = units;
         }
+        BacklightChange::Effect(effect) => request.effect = Some(effect_to_firmware(effect)),
     }
     request
 }
 
-/// Whether the configuration read back after a write carries `change`,
-/// holding `held`.
-fn carries(config: &BacklightConfig, change: BacklightChange, held: Option<u8>) -> bool {
+/// Whether the configuration and info read back after a write carry
+/// `change`, holding `held`. The applied effect is only in the info.
+fn carries(
+    config: &BacklightConfig,
+    info: &BacklightInfo,
+    change: BacklightChange,
+    held: Option<u8>,
+) -> bool {
     let mode = mode_from_firmware(config.mode);
     match change {
         BacklightChange::Enabled(enabled) => config.enabled == enabled,
@@ -228,6 +286,7 @@ fn carries(config: &BacklightConfig, change: BacklightChange, held: Option<u8>) 
             let units = duration.units();
             config.duration_hands_out == units && config.duration_hands_in == units
         }
+        BacklightChange::Effect(effect) => info.effect == effect_to_firmware(effect),
     }
 }
 
@@ -260,7 +319,7 @@ async fn get_backlight_on_channel(
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let (feature, version) = open_feature_with_version::<BacklightFeature>(&mut device).await?;
     let (config, info) = read_raw(&feature).await?;
-    Ok(state_from(&config, &info, version))
+    state_from(&config, &info, version)
 }
 
 /// Apply one [`BacklightChange`] to the keyboard on `route`, and return the
@@ -324,7 +383,7 @@ async fn update_backlight_on_channel(
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let (feature, version) = open_feature_with_version::<BacklightFeature>(&mut device).await?;
     let (config, info) = read_raw(&feature).await?;
-    let before = state_from(&config, &info, version);
+    let before = state_from(&config, &info, version)?;
     if !before.accepts(change) {
         return Err(WriteError::BacklightChangeUnsupported { change });
     }
@@ -337,10 +396,10 @@ async fn update_backlight_on_channel(
         })?;
     debug!(index, %change, "wrote backlight config");
     let (config, info) = read_raw(&feature).await?;
-    if !carries(&config, change, held) {
+    if !carries(&config, &info, change, held) {
         return Err(WriteError::BacklightNotApplied { change });
     }
-    Ok(state_from(&config, &info, version))
+    state_from(&config, &info, version)
 }
 
 #[cfg(test)]
@@ -367,6 +426,11 @@ mod tests {
         short_config_reply: bool,
         /// Acknowledge `setBacklightConfig` but keep the old level.
         ignores_level: bool,
+        /// The effect `getBacklightInfo` reports; `setBacklightConfig`
+        /// stores a picked one into it.
+        effect: FirmwareEffect,
+        /// Acknowledge `setBacklightConfig` but keep the old effect.
+        ignores_effect: bool,
     }
 
     impl Keyboard {
@@ -382,6 +446,8 @@ mod tests {
                     | BacklightOptions::PERM_MANUAL_SUPPORTED
                     | BacklightOptions::PWR_SAVE_SUPPORTED,
             );
+            let effects = BacklightEffectList::STATIC | BacklightEffectList::BREATHING;
+            config[3..5].copy_from_slice(&effects.bits().to_le_bytes());
             config[5] = 4;
             config[6..14].copy_from_slice(&[0x01, 0, 0x02, 0, 0x03, 0, 0x05, 0x04]);
             Self {
@@ -389,6 +455,8 @@ mod tests {
                 version: 3,
                 short_config_reply: false,
                 ignores_level: false,
+                effect: FirmwareEffect::Static,
+                ignores_effect: false,
             }
         }
 
@@ -421,7 +489,7 @@ mod tests {
     fn stateful_backlight(
         keyboard: Keyboard,
     ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
-        let state = Mutex::new(keyboard.config);
+        let state = Mutex::new((keyboard.config, keyboard.effect));
         ScriptedRawHidChannel::with_dynamic_responder(move |request| {
             if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
                 return None;
@@ -440,11 +508,14 @@ mod tests {
                     false
                 }
                 (BACKLIGHT_INDEX, 0x00) => {
-                    payload = *state.lock().expect("backlight state");
+                    payload = state.lock().expect("backlight state").0;
                     !keyboard.short_config_reply
                 }
                 (BACKLIGHT_INDEX, 0x01) => {
-                    let mut current = state.lock().expect("backlight state");
+                    let (current, effect) = &mut *state.lock().expect("backlight state");
+                    if request[6] != 0xff && !keyboard.ignores_effect {
+                        *effect = FirmwareEffect::try_from(request[6]).ok()?;
+                    }
                     current[0] = request[4];
                     current[1] = request[5];
                     if !keyboard.ignores_level {
@@ -458,7 +529,7 @@ mod tests {
                         NB_LEVELS,
                         SHOWN_LEVEL,
                         u8::from(FirmwareStatus::AlsAutomatic),
-                        u8::from(hidpp::feature::backlight::BacklightEffect::Static),
+                        u8::from(state.lock().expect("backlight state").1),
                     ]);
                     true
                 }
@@ -796,5 +867,58 @@ mod tests {
             status_from_firmware(FirmwareStatus::AlsSaturated),
             BacklightStatus::AlsSaturated
         );
+    }
+
+    #[tokio::test]
+    async fn an_effect_is_written_and_everything_else_kept() -> Result<(), WriteError> {
+        let effect = BacklightChange::Effect(BacklightEffect::Breathing);
+        let (state, writes) = update(Keyboard::v3(), effect).await;
+        let state = state?;
+        assert_eq!(state.effect, BacklightEffect::Breathing);
+        assert!(state.enabled);
+        assert_eq!(state.mode, BacklightMode::Automatic);
+        let mut expected = written(1, AUTOMATIC, 4);
+        expected[2] = u8::from(FirmwareEffect::Breathing);
+        assert_eq!(writes, [expected]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_listed_effects_are_the_ones_offered() -> Result<(), WriteError> {
+        let (raw, _handle) = stateful_backlight(Keyboard::v3());
+        let channel = scripted_channel(raw).await;
+        let state = get_backlight_on_channel(&channel, 0xff).await?;
+        assert_eq!(state.effect, BacklightEffect::Static);
+        assert_eq!(
+            state.effects.iter().collect::<Vec<_>>(),
+            [BacklightEffect::Static, BacklightEffect::Breathing]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unlisted_effect_is_refused_before_anything_is_written() {
+        let change = BacklightChange::Effect(BacklightEffect::Waves);
+        let (state, writes) = update(Keyboard::v3(), change).await;
+        assert!(
+            matches!(state, Err(WriteError::BacklightChangeUnsupported { change: c }) if c == change),
+            "{state:?}"
+        );
+        assert!(writes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_effect_the_keyboard_does_not_keep_is_not_applied() {
+        let keyboard = Keyboard {
+            ignores_effect: true,
+            ..Keyboard::v3()
+        };
+        let change = BacklightChange::Effect(BacklightEffect::Breathing);
+        let (state, writes) = update(keyboard, change).await;
+        assert!(
+            matches!(state, Err(WriteError::BacklightNotApplied { change: c }) if c == change),
+            "{state:?}"
+        );
+        assert_eq!(writes.len(), 1);
     }
 }

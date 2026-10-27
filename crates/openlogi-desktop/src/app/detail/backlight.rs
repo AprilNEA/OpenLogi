@@ -296,7 +296,8 @@ mod tests {
         px, size,
     };
     use openlogi_core::hid::{
-        BacklightControls, BacklightDuration, BacklightMode, BacklightState, BacklightStatus,
+        BacklightControls, BacklightDuration, BacklightEffect, BacklightEffects, BacklightMode,
+        BacklightState, BacklightStatus,
     };
 
     /// A test duration; the type guarantees every constructed value is legal.
@@ -328,6 +329,8 @@ mod tests {
             power_save: true,
             duration: Some(duration(30)),
             controls,
+            effects: BacklightEffects::default(),
+            effect: BacklightEffect::Static,
         }
     }
 
