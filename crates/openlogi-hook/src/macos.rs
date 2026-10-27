@@ -416,8 +416,7 @@ fn spawn_callback_watchdog(
                 }
                 thread::sleep(CALLBACK_POLL_INTERVAL);
                 let entered = callback_activity.entered_at_ms();
-                let Some(stuck) =
-                    watchdog.evaluate(signals.now_millis(), entered, power_epoch())
+                let Some(stuck) = watchdog.evaluate(signals.now_millis(), entered, power_epoch)
                 else {
                     continue;
                 };
