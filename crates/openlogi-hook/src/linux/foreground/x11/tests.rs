@@ -155,7 +155,11 @@ fn x11_observer_republishes_a_class_rewritten_on_the_focused_window() {
     focus(&client, root, active, dolphin);
     assert_eq!(next().as_deref(), Some("dolphin"));
 
-    // The watch moved with focus: the old window's rewrite publishes nothing.
+    // The watch moved with focus: the newly focused window's rewrite publishes
+    // without another focus change, and the old window's rewrite publishes
+    // nothing.
+    set_class(&client, dolphin, b"dolphin\0org.kde.dolphin\0");
+    assert_eq!(next().as_deref(), Some("org.kde.dolphin"));
     set_class(&client, calc, b"soffice\0Soffice\0");
     thread::sleep(SETTLE);
     focus(&client, root, active, x11rb::NONE);
