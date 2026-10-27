@@ -247,6 +247,33 @@ fn tracked_save_preserves_comments_and_rejects_concurrent_edits() {
 }
 
 #[test]
+fn tracked_save_keeps_inline_bindings_inline_beside_their_comments() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let bindings = "[devices.2b042.bindings]\n\
+                    # keep this binding comment\n\
+                    Back = { CustomShortcut = \"F11\" }\n\
+                    Forward = { HoldShortcut = \"Shift+F19\" }\n";
+    fs::write(
+        &path,
+        format!("schema_version = {SCHEMA_VERSION}\n\n{bindings}"),
+    )
+    .expect("write");
+    let (mut config, mut file) = ConfigFile::load_from_path(&path).expect("load tracked");
+    config.set_keep_os_layout("2b042", false);
+    file.save(&config).expect("save tracked");
+
+    let saved = fs::read_to_string(&path).expect("read saved");
+    assert!(saved.contains(bindings), "got: {saved}");
+    let reloaded = Config::load_from_path(&path).expect("saved config must load");
+    assert!(!reloaded.keep_os_layout("2b042"));
+    assert_eq!(
+        reloaded.stored_bindings("2b042"),
+        config.stored_bindings("2b042")
+    );
+}
+
+#[test]
 fn tracked_save_respects_the_writer_lock_and_releases_it_after_errors() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");
