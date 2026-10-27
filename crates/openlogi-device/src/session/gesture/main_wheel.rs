@@ -41,6 +41,8 @@ pub(super) struct ArmedMainWheel {
     /// What arming wrote besides the target, already limited to what the
     /// wheel supports, so a wake re-arm writes the same mode.
     divert: MainWheelDivert,
+    /// The resolution the wheel had before arming, which teardown restores.
+    pub(super) original_resolution: WheelResolution,
     /// Units a high-resolution report carries per notch.
     pub(super) per_notch: NonZeroU8,
 }
@@ -56,14 +58,16 @@ impl ArmedMainWheel {
     ) -> Result<Self, Hidpp20Error> {
         let feature = HiResWheelFeature::new(Arc::clone(chan), slot, feature_index);
         let capabilities = feature.get_wheel_capabilities().await?;
+        let original_resolution = feature.get_wheel_mode().await?.resolution;
         let divert = MainWheelDivert {
-            resolution: requested.resolution,
+            resolution: requested.resolution.filter(|_| capabilities.multiplier > 1),
             inverted: requested.inverted.filter(|_| capabilities.has_invert),
         };
         Ok(Self {
             feature,
             feature_index,
             divert,
+            original_resolution,
             // A wheel reporting no multiplier cannot report in high
             // resolution; one unit per notch keeps its reports exact anyway.
             per_notch: NonZeroU8::new(capabilities.multiplier).unwrap_or(NonZeroU8::MIN),
@@ -93,15 +97,20 @@ pub(super) async fn divert(
 }
 
 /// Hand `feature`'s movement reports back to native HID: read-modify-write the
-/// target only, so the resolution and inversion arming left stay in place.
-/// A wheel already reporting natively is left untouched.
-pub(crate) async fn undivert(feature: &HiResWheelFeature) -> Result<(), Hidpp20Error> {
+/// target and the resolution (back to `resolution`, the one the wheel had
+/// before arming), so the native wheel is not left in the diverted
+/// resolution. A wheel already in that state is left untouched.
+pub(crate) async fn undivert(
+    feature: &HiResWheelFeature,
+    resolution: WheelResolution,
+) -> Result<(), Hidpp20Error> {
     let current = feature.get_wheel_mode().await?;
-    if current.target == WheelEventTarget::Native {
-        return Ok(());
-    }
     let mut request = current;
     request.target = WheelEventTarget::Native;
+    request.resolution = resolution;
+    if documented(current) == documented(request) {
+        return Ok(());
+    }
     let echo = feature.set_wheel_mode(request).await?;
     applied(echo, request)
 }
