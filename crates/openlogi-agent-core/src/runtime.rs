@@ -191,10 +191,21 @@ impl ActionExecutor {
         self.write_speed(write);
     }
 
-    /// Step `device_key`'s DPI presets one up or down, without wrapping.
-    fn step_dpi(&self, device_key: Option<&str>, up: bool) -> Option<(Dpi, Option<DeviceRoute>)> {
+    /// Step `device_key`'s DPI presets one up for [`Action::NextDpiPreset`],
+    /// else one down, without wrapping.
+    fn step_dpi(
+        &self,
+        device_key: Option<&str>,
+        action: &Action,
+    ) -> Option<(Dpi, Option<DeviceRoute>)> {
         match self.dpi_cycle.write() {
-            Ok(mut guard) => guard.state_for(device_key).and_then(|state| state.step(up)),
+            Ok(mut guard) => guard.state_for(device_key).and_then(|state| {
+                if matches!(action, Action::NextDpiPreset) {
+                    state.step_up()
+                } else {
+                    state.step_down()
+                }
+            }),
             Err(e) => {
                 warn!(error = %e, "dpi_cycle lock poisoned — step skipped");
                 None
@@ -243,9 +254,7 @@ impl ActionExecutor {
                     }
                 }
             }
-            Action::NextDpiPreset | Action::PreviousDpiPreset => {
-                self.step_dpi(device_key, matches!(action, Action::NextDpiPreset))
-            }
+            Action::NextDpiPreset | Action::PreviousDpiPreset => self.step_dpi(device_key, action),
             Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
                 Ok(mut guard) => guard
                     .state_for(device_key)
@@ -1047,7 +1056,7 @@ mod tests {
         held.before.set(Dpi::new(1200));
         assert_eq!(held.restore_to(&cycles), Some(Dpi::new(1200)));
         // A preset picked during the hold stays after release.
-        cycles.state_for(Some("mouse")).unwrap().step(true);
+        cycles.state_for(Some("mouse")).unwrap().step_up();
         assert_eq!(held.restore_to(&cycles), Some(Dpi::new(1600)));
     }
 

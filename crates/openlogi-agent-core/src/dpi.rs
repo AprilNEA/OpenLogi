@@ -120,14 +120,17 @@ impl DpiCycleState {
         Some(self.select())
     }
 
-    /// Steps one preset without wrapping.
-    pub fn step(&mut self, up: bool) -> Option<(Dpi, Option<DeviceRoute>)> {
+    /// Steps one preset up, stopping at the last.
+    pub fn step_up(&mut self) -> Option<(Dpi, Option<DeviceRoute>)> {
         let last = self.presets.len().checked_sub(1)?;
-        self.index = if up {
-            (self.index + 1).min(last)
-        } else {
-            self.index.saturating_sub(1)
-        };
+        self.index = (self.index + 1).min(last);
+        Some(self.select())
+    }
+
+    /// Steps one preset down, stopping at the first.
+    pub fn step_down(&mut self) -> Option<(Dpi, Option<DeviceRoute>)> {
+        self.presets.len().checked_sub(1)?;
+        self.index = self.index.saturating_sub(1);
         Some(self.select())
     }
 
@@ -203,9 +206,9 @@ mod tests {
     fn step_stops_at_both_ends_and_shift_drops_to_the_lowest_preset() {
         let mut cycles = cycles_with("a", 1);
         let state = cycles.state_for(Some("a")).unwrap();
-        assert_eq!(state.step(false).unwrap().0, Dpi::new(800));
-        assert_eq!(state.step(true).unwrap().0, Dpi::new(1600));
-        assert_eq!(state.step(true).unwrap().0, Dpi::new(1600));
+        assert_eq!(state.step_down().unwrap().0, Dpi::new(800));
+        assert_eq!(state.step_up().unwrap().0, Dpi::new(1600));
+        assert_eq!(state.step_up().unwrap().0, Dpi::new(1600));
         assert_eq!(state.lowest(), Some(Dpi::new(800)));
     }
 
@@ -217,7 +220,7 @@ mod tests {
         assert_eq!(cycles.current("a"), None);
         let (key, low, _) = cycles.target_for_shift(Some("a")).unwrap();
         assert_eq!((key, low), ("a", Dpi::new(800)));
-        cycles.state_for(Some("a")).unwrap().step(true);
+        cycles.state_for(Some("a")).unwrap().step_up();
         assert_eq!(cycles.current("a"), Some(Dpi::new(1600)));
     }
 
