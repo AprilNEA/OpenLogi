@@ -111,6 +111,13 @@ gpui-kit = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.8.1" }
 swr-core = "0.1"
 swr-gpui = { package = "swr-gpui-pre", version = "0.1" }
 
+# 0.4.1 drops Wayland protocol errors on the socket read and flush paths, so a
+# client the compositor disconnected spins on the dead socket instead of
+# exiting (#1989). Fixed upstream in c52f3fe, not yet released. Remove when a
+# release after 0.4.1 is on crates.io.
+[patch.crates-io]
+calloop-wayland-source = { git = "https://github.com/Smithay/calloop-wayland-source", rev = "cab67860c4e8fef8a92cb11f6f3a08dd3b05536a" }
+
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely
 # needs FFI can opt in locally with `#[expect(unsafe_code, reason = "…")]`.
