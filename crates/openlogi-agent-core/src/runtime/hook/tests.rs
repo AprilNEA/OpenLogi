@@ -8,21 +8,6 @@ fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
 }
 
-/// Discard the contact-kick sample, then feed real motion.
-fn after_kick(
-    hold: &mut HoldState,
-    dx: i32,
-    dy: i32,
-) -> Option<(PressToken, ButtonId, GestureDirection)> {
-    assert_eq!(hold.accumulate(0, 0), None, "contact kick discarded");
-    let first = hold.accumulate(dx, dy);
-    if first.is_some() {
-        return first;
-    }
-    // Confirm direction with a second kept sample when hold/bypass alone isn't enough.
-    hold.accumulate(0, 0)
-}
-
 #[test]
 fn senderless_buttons_follow_the_platform_source_policy() {
     assert_eq!(button_source_may_remap(None), !cfg!(target_os = "macos"));
@@ -59,11 +44,13 @@ fn test_dispatcher() -> (
     let dispatcher = ActionDispatcher {
         executor: super::super::ActionExecutor {
             dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
+            pointer_speeds: Arc::default(),
             access: crate::hardware::DeviceAccess {
                 channel: Arc::new(RwLock::new(None)),
                 registry: openlogi_hid::ChannelRegistry::default(),
                 receiver_access: crate::receiver_access::ReceiverAccess::default(),
                 device_io: openlogi_hid::device_io_channel().1,
+                transport_turns: crate::hardware::TransportTurns::default(),
             },
             action_ring,
         },
@@ -89,13 +76,13 @@ fn accumulate_tags_a_committed_swipe_with_the_held_press() {
     hold.swipe.backdate_hold_for_test();
 
     assert_eq!(
-        after_kick(&mut hold, GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
         Some((press.clone(), ButtonId::Back, GestureDirection::Right))
     );
     assert_eq!(
         hold.accumulate(50, 0),
         None,
-        "commits at most once per hold"
+        "continuing the same swipe does not repeat"
     );
     assert_eq!(hold.end(ButtonId::Back), Some((press, false)));
 }
@@ -128,7 +115,7 @@ fn a_same_button_repress_restarts_the_stale_hold() {
     );
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
-        after_kick(&mut hold, GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
         Some((replacement, ButtonId::Back, GestureDirection::Right))
     );
 }
@@ -157,7 +144,7 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
     );
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
-        after_kick(&mut hold, GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
         Some((replacement, ButtonId::Forward, GestureDirection::Right))
     );
 }
@@ -179,7 +166,7 @@ fn begin_is_first_wins_while_a_hold_is_active() {
     );
 
     assert_eq!(
-        after_kick(&mut hold, GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
         Some((first.clone(), ButtonId::Back, GestureDirection::Right))
     );
     assert_eq!(hold.end(ButtonId::Forward), None);
@@ -319,7 +306,10 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
     };
     assert_eq!(
         press.target(),
-        ActionDispatchTarget::Pointer(PointerTarget::Desktop)
+        ActionDispatchTarget::Pointer {
+            target: PointerTarget::Desktop,
+            fallback_safari_pid: None,
+        }
     );
     assert_eq!(press.start_action(), Some(&Action::PreviousDesktop));
     // Pointer movement can restore the native binding before release. The
@@ -355,7 +345,7 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
             Some(&mouse),
             &hooks,
             &dispatcher,
-            || { ActionDispatchTarget::Keyboard }
+            || None
         ),
         EventDisposition::PassThrough
     );
@@ -376,6 +366,94 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
         EventDisposition::PassThrough
     );
     assert!(owner.shutdown());
+}
+
+#[test]
+fn queued_unidentified_pointer_action_retains_its_press_time_target() {
+    use super::super::button::ButtonRuntimeEvent;
+    use openlogi_hook::PointerTarget;
+    use std::cell::Cell;
+
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+    let mut routes = Vec::new();
+    for (pressed_safari, later_safari, current_pointer) in [
+        (Some(417), None, PointerTarget::Unavailable),
+        (None, Some(518), PointerTarget::Unavailable),
+        (Some(417), Some(518), PointerTarget::Unavailable),
+        (Some(417), None, PointerTarget::Desktop),
+    ] {
+        let (dispatcher, mut owner, events) = test_dispatcher();
+        let hooks = Arc::new(RwLock::new(HookMaps {
+            bindings: BTreeMap::from([(ButtonId::Back, Action::BrowserBack.into())]),
+            pointer_target: Some(PointerTarget::Unavailable),
+            ..HookMaps::default()
+        }));
+        let focused_safari = Cell::new(pressed_safari);
+        assert_eq!(
+            handle_button(
+                ButtonId::Back,
+                true,
+                Some(&mouse),
+                &hooks,
+                &dispatcher,
+                || focused_safari.get(),
+            ),
+            EventDisposition::Suppress
+        );
+
+        focused_safari.set(later_safari);
+        let ButtonRuntimeEvent::Started(press) =
+            events.recv_timeout(Duration::from_secs(1)).expect("down")
+        else {
+            panic!("started");
+        };
+        let action = press.start_action().expect("browser binding");
+        let resolved = press.target().resolve_with(
+            action,
+            || current_pointer,
+            |_| panic!("an unidentified target has no window to check"),
+            || focused_safari.get(),
+        );
+        let mut navigation = (None, false);
+        if let Some(target) = resolved {
+            assert!(super::super::dispatch_browser_navigation(
+                action,
+                target,
+                |pid, forward| {
+                    assert!(!forward);
+                    navigation.0 = Some(pid);
+                    true
+                },
+                || navigation.1 = true,
+            ));
+        }
+        routes.push(navigation);
+        assert_eq!(
+            handle_button(
+                ButtonId::Back,
+                false,
+                Some(&mouse),
+                &hooks,
+                &dispatcher,
+                || panic!("release does not retarget"),
+            ),
+            EventDisposition::Suppress
+        );
+        assert!(owner.shutdown());
+    }
+    assert_eq!(
+        routes,
+        [
+            (Some(417), false),
+            (None, true),
+            (Some(417), false),
+            (None, false)
+        ]
+    );
 }
 
 #[test]
@@ -409,7 +487,7 @@ fn safari_target_never_relaxes_device_isolation() {
             for pressed in [true, false] {
                 assert_eq!(
                     handle_button(id, pressed, source.as_ref(), &hooks, &dispatcher, || {
-                        ActionDispatchTarget::SafariProcess(417)
+                        Some(417)
                     }),
                     EventDisposition::PassThrough
                 );

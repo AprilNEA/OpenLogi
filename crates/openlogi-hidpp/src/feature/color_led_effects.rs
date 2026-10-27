@@ -7,6 +7,15 @@
 //! parameter bytes have effect-specific meaning, and can be stored volatilely or
 //! in EEPROM via [`Persistence`].
 //!
+//! Feature version 1 adds non-volatile configuration, software control of the
+//! LEDs and effect synchronization (functions 4, 5, 7, 8 and 13). Those
+//! functions are on [`ColorLedEffectsV1Feature`], a second implementation of
+//! this feature that the registry creates only for a device reporting version
+//! 1 or later, so a version-0 device is never sent them. The version condition
+//! is reverse-engineered, not read from a specification: Logi Options+ 2.8
+//! checks for version 1 or later before it sends any of these functions
+//! (static analysis). No hardware capture confirms it.
+//!
 //! All multi-byte fields in this feature are big-endian.
 
 pub mod event;
@@ -28,10 +37,13 @@ pub use types::{
 use self::types::be16;
 use crate::{
     feature::{EventSource, FeatureEndpoint},
-    protocol::v20::{ErrorType, Hidpp20Error},
+    protocol::v20::{self, ErrorType, Hidpp20Error},
 };
 
 /// Implements the `ColorLedEffects` / `0x8070` feature.
+///
+/// The functions that require feature version 1 are on
+/// [`ColorLedEffectsV1Feature`].
 #[derive(Feature)]
 #[creatable(id = 0x8070, version = 0)]
 pub struct ColorLedEffectsFeature {
@@ -50,13 +62,20 @@ impl ColorLedEffectsFeature {
     }
 
     /// Retrieves information about `zone_index`.
+    ///
+    /// The reply must be long and must echo `zone_index` in byte 0; anything
+    /// else (a short reply that would zero-fill the fields, or the info of
+    /// another zone) is refused with [`Hidpp20Error::UnsupportedResponse`].
     pub async fn get_zone_info(&self, zone_index: u8) -> Result<ZoneInfo, Hidpp20Error> {
-        let payload = self
-            .endpoint
-            .call(1, [zone_index, 0, 0])
-            .await?
-            .extend_payload();
-        ZoneInfo::from_payload(&payload)
+        let v20::Message::Long(_, payload) = self.endpoint.call(1, [zone_index, 0, 0]).await?
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
+        let info = ZoneInfo::from_payload(&payload)?;
+        if info.zone_index != zone_index {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        }
+        Ok(info)
     }
 
     /// Retrieves information about effect `zone_effect_index` of `zone_index`.
@@ -96,45 +115,6 @@ impl ColorLedEffectsFeature {
         Ok(())
     }
 
-    /// Reads one non-volatile configuration `capability`.
-    ///
-    /// Exactly one [`NvCapabilities`] bit must be set.
-    pub async fn get_nv_config(
-        &self,
-        capability: NvCapabilities,
-    ) -> Result<NvConfig, Hidpp20Error> {
-        validate_single_nv_capability(capability)?;
-        let [cap_hi, cap_lo] = capability.bits().to_be_bytes();
-        let payload = self
-            .endpoint
-            .call(4, [cap_hi, cap_lo, 0])
-            .await?
-            .extend_payload();
-        Ok(NvConfig {
-            capability: NvCapabilities::from_bits_retain(be16(&payload, 0)),
-            state: NvCapabilityState::try_from(payload[2])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            param1: payload[3],
-            param2: payload[4],
-        })
-    }
-
-    /// Writes one non-volatile configuration entry (to EEPROM, so use sparingly).
-    pub async fn set_nv_config(
-        &self,
-        capability: NvCapabilities,
-        state: NvCapabilityState,
-        param1: u8,
-        param2: u8,
-    ) -> Result<(), Hidpp20Error> {
-        validate_single_nv_capability(capability)?;
-        let [cap_hi, cap_lo] = capability.bits().to_be_bytes();
-        let mut args = [0; 16];
-        args[..5].copy_from_slice(&[cap_hi, cap_lo, state.into(), param1, param2]);
-        self.endpoint.call_long(5, args).await?;
-        Ok(())
-    }
-
     /// Reads manufacturing LED bin information.
     pub async fn get_led_bin_info(
         &self,
@@ -147,31 +127,6 @@ impl ColorLedEffectsFeature {
             .await?
             .extend_payload();
         LedBinInfo::from_payload(&payload)
-    }
-
-    /// Retrieves whether firmware or software owns the LEDs.
-    pub async fn get_sw_control(&self) -> Result<SwControlState, Hidpp20Error> {
-        let payload = self.endpoint.call(7, [0; 3]).await?.extend_payload();
-        Ok(SwControlState {
-            control: SwControl::try_from(payload[0])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            sync_events: payload[1] != 0,
-        })
-    }
-
-    /// Takes or releases software control of the LEDs.
-    ///
-    /// `sync_events` enables the [`ColorLedEffectsEvent::SyncEffect`] event. This
-    /// is not stored in EEPROM.
-    pub async fn set_sw_control(
-        &self,
-        control: SwControl,
-        sync_events: bool,
-    ) -> Result<(), Hidpp20Error> {
-        self.endpoint
-            .call(8, [control.into(), u8::from(sync_events), 0])
-            .await?;
-        Ok(())
     }
 
     /// Reads the effect settings of `zone_index`.
@@ -220,23 +175,6 @@ impl ColorLedEffectsFeature {
         })
     }
 
-    /// Synchronizes effect timing across devices by applying a `drift_value`
-    /// correction (milliseconds).
-    ///
-    /// Valid only while sync events are enabled. A `zone_index` of `0xff` targets
-    /// all zones.
-    pub async fn synchronize_effect(
-        &self,
-        zone_index: u8,
-        drift_value: i16,
-    ) -> Result<(), Hidpp20Error> {
-        let [drift_hi, drift_lo] = drift_value.to_be_bytes();
-        let mut args = [0; 16];
-        args[..4].copy_from_slice(&[zone_index, 0, drift_hi, drift_lo]);
-        self.endpoint.call_long(13, args).await?;
-        Ok(())
-    }
-
     /// Retrieves the currently configured effect of `zone_index`.
     ///
     /// Requires [`ExtCapabilities::GET_ZONE_EFFECT`].
@@ -266,6 +204,105 @@ impl ColorLedEffectsFeature {
         args[8..10].copy_from_slice(&info.white.to_be_bytes());
         let payload = self.endpoint.call_long(15, args).await?.extend_payload();
         LedBinInfo::from_payload(&payload)
+    }
+}
+
+/// The `ColorLedEffects` / `0x8070` functions that require feature version 1
+/// or later: non-volatile configuration, software control and effect
+/// synchronization.
+///
+/// [`Device::enumerate_features`](crate::device::Device::enumerate_features)
+/// provides this handle only for a device that reports version 1 or later. A
+/// caller that adds it with [`Device::add_feature`](crate::device::Device::add_feature)
+/// must first compare the root-reported version with
+/// [`STARTING_VERSION`](crate::feature::CreatableFeature::STARTING_VERSION).
+#[derive(Feature)]
+#[creatable(id = 0x8070, version = 1)]
+pub struct ColorLedEffectsV1Feature {
+    /// The endpoint this feature talks to.
+    endpoint: FeatureEndpoint,
+}
+
+impl ColorLedEffectsV1Feature {
+    /// Reads one non-volatile configuration `capability`.
+    ///
+    /// Exactly one [`NvCapabilities`] bit must be set.
+    pub async fn get_nv_config(
+        &self,
+        capability: NvCapabilities,
+    ) -> Result<NvConfig, Hidpp20Error> {
+        validate_single_nv_capability(capability)?;
+        let [cap_hi, cap_lo] = capability.bits().to_be_bytes();
+        let payload = self
+            .endpoint
+            .call(4, [cap_hi, cap_lo, 0])
+            .await?
+            .extend_payload();
+        Ok(NvConfig {
+            capability: NvCapabilities::from_bits_retain(be16(&payload, 0)),
+            state: NvCapabilityState::try_from(payload[2])
+                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            param1: payload[3],
+            param2: payload[4],
+        })
+    }
+
+    /// Writes one non-volatile configuration entry (to EEPROM, so use sparingly).
+    pub async fn set_nv_config(
+        &self,
+        capability: NvCapabilities,
+        state: NvCapabilityState,
+        param1: u8,
+        param2: u8,
+    ) -> Result<(), Hidpp20Error> {
+        validate_single_nv_capability(capability)?;
+        let [cap_hi, cap_lo] = capability.bits().to_be_bytes();
+        let mut args = [0; 16];
+        args[..5].copy_from_slice(&[cap_hi, cap_lo, state.into(), param1, param2]);
+        self.endpoint.call_long(5, args).await?;
+        Ok(())
+    }
+
+    /// Retrieves whether firmware or software owns the LEDs.
+    pub async fn get_sw_control(&self) -> Result<SwControlState, Hidpp20Error> {
+        let payload = self.endpoint.call(7, [0; 3]).await?.extend_payload();
+        Ok(SwControlState {
+            control: SwControl::try_from(payload[0])
+                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            sync_events: payload[1] != 0,
+        })
+    }
+
+    /// Takes or releases software control of the LEDs.
+    ///
+    /// `sync_events` enables the [`ColorLedEffectsEvent::SyncEffect`] event,
+    /// which [`ColorLedEffectsFeature`] publishes. This is not stored in EEPROM.
+    pub async fn set_sw_control(
+        &self,
+        control: SwControl,
+        sync_events: bool,
+    ) -> Result<(), Hidpp20Error> {
+        self.endpoint
+            .call(8, [control.into(), u8::from(sync_events), 0])
+            .await?;
+        Ok(())
+    }
+
+    /// Synchronizes effect timing across devices by applying a `drift_value`
+    /// correction (milliseconds).
+    ///
+    /// Valid only while sync events are enabled. A `zone_index` of `0xff` targets
+    /// all zones.
+    pub async fn synchronize_effect(
+        &self,
+        zone_index: u8,
+        drift_value: i16,
+    ) -> Result<(), Hidpp20Error> {
+        let [drift_hi, drift_lo] = drift_value.to_be_bytes();
+        let mut args = [0; 16];
+        args[..4].copy_from_slice(&[zone_index, 0, drift_hi, drift_lo]);
+        self.endpoint.call_long(13, args).await?;
+        Ok(())
     }
 }
 

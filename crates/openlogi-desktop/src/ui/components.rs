@@ -11,7 +11,10 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Disableable, Icon, IconName, Selectable, Sizable, Size, h_flex,
+    Disableable, Icon, IconName, Selectable, Sizable, Size,
+    button::ButtonVariants as _,
+    dialog::{Cancel, Confirm, DialogFooter},
+    h_flex,
     input::{Input, InputState},
     searchable_list::SearchableListDelegate,
     select::{Select, SelectState},
@@ -40,6 +43,32 @@ pub(crate) fn control_button(id: impl Into<ElementId>) -> gpui_component::button
 /// Pins via `min_h` because the inherent `Input::h` is multi-line-only.
 pub(crate) fn control_input(state: &Entity<InputState>) -> Input {
     Input::new(state).small().min_h(px(theme::CONTROL_H))
+}
+
+/// Cancel and Save buttons for a form dialog opened with `open_dialog`.
+///
+/// A plain gpui-component dialog paints only the footer it is given: the
+/// buttons its `DialogButtonProps` describe are drawn by the alert dialog
+/// alone, so a form dialog that sets only `button_props` can be committed by
+/// nothing but the Enter key. Save confirms the dialog, so its `on_ok` still
+/// decides whether it closes; Cancel dismisses it.
+pub(crate) fn save_cancel_footer() -> DialogFooter {
+    DialogFooter::new()
+        .child(
+            control_button("dialog-cancel")
+                .debug_selector(|| "dialog-cancel".into())
+                .label(tr!("common.cancel"))
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(Cancel), cx)),
+        )
+        .child(
+            control_button("dialog-save")
+                .debug_selector(|| "dialog-save".into())
+                .primary()
+                .label(tr!("common.save"))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(Confirm { secondary: false }), cx);
+                }),
+        )
 }
 
 /// Re-derive an input's placeholder from the current locale.
@@ -176,6 +205,42 @@ impl RenderOnce for Toggle {
             .when_some(self.icon, |row, icon| row.child(Icon::new(icon).size_3()))
             .child(toggle)
     }
+}
+
+/// One setting: a title and a caption on the left, its toggle on the right.
+/// The caption column shrinks and wraps, so a long translation cannot push the
+/// toggle out of its card or panel. `selector` names the row for layout tests,
+/// and `{selector}-control` the toggle's slot.
+pub(crate) fn toggle_row(
+    selector: &'static str,
+    pal: theme::Palette,
+    title: SharedString,
+    description: SharedString,
+    toggle: Toggle,
+) -> impl IntoElement {
+    h_flex()
+        .debug_selector(move || selector.into())
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_body().text_color(pal.text_primary).child(title))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(
+            div()
+                .debug_selector(move || format!("{selector}-control"))
+                .flex_shrink_0()
+                .child(toggle),
+        )
 }
 
 /// A titled card used by device-detail panels.
@@ -552,6 +617,78 @@ impl RenderOnce for PresetChip {
                 })
             })
             .children(self.children)
+    }
+}
+
+/// One choice in a row of compact pills: a backlight level, a timer step, a
+/// report rate, a wheel mode.
+///
+/// A stock gpui-component `Button` paints its selected state with the theme's
+/// pressed fill, which on the light theme is about 1.07:1 from the resting
+/// fill, so the chosen value could not be told apart (#2046). A pill takes the
+/// house selected look from [`SelectableStyle`] instead: the accent border and
+/// faint accent fill that [`PresetChip`] and [`ProfileTab`] use. A disabled
+/// pill keeps the stock disabled look, because there is nothing to choose.
+#[derive(IntoElement)]
+pub(crate) struct Pill {
+    button: gpui_component::button::Button,
+    selected: bool,
+    disabled: bool,
+}
+
+impl Pill {
+    pub(crate) fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Self {
+            button: gpui_component::button::Button::new(id)
+                .compact()
+                .label(label),
+            selected: false,
+            disabled: false,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.button = self.button.on_click(handler);
+        self
+    }
+
+    /// The stock button, with the house selected look on an enabled selection.
+    fn into_button(self, pal: theme::Palette) -> gpui_component::button::Button {
+        let marked = self.selected && !self.disabled;
+        self.button
+            .selected(self.selected)
+            .disabled(self.disabled)
+            .when(marked, |pill| {
+                pill.selected_border(true, pal).selected_fill(true)
+            })
+    }
+}
+
+impl Selectable for Pill {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl Disableable for Pill {
+    fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+}
+
+impl RenderOnce for Pill {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.into_button(theme::palette(cx))
     }
 }
 

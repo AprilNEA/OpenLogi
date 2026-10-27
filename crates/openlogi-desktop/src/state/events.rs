@@ -13,6 +13,7 @@ use gpui::{App, Context, EventEmitter, Subscription};
 use super::AppState;
 use super::device_key::DeviceKey;
 use super::devices::DeviceRecord;
+use crate::services::ipc::UnpairFailure;
 
 /// Semantic changes emitted by the shared application-state entity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +30,19 @@ pub(crate) enum StateEvent {
     DiagnosticsChanged,
     /// The merged device inventory changed.
     InventoryChanged,
+    /// A device the user asked to forget stayed, because its receiver kept
+    /// the pairing.
+    DeviceRemovalFailed {
+        /// The device's display name.
+        name: String,
+        failure: UnpairFailure,
+    },
+    /// A leftover pairing the user asked to remove stayed on its receiver.
+    StalePairingRemovalFailed {
+        /// The device's display name.
+        name: String,
+        failure: UnpairFailure,
+    },
     /// The active device changed.
     DeviceSelected(DeviceKey),
     /// Mouse, keyboard, gesture, or Actions Ring bindings changed.
@@ -37,6 +51,20 @@ pub(crate) enum StateEvent {
     DpiChanged(DeviceKey),
     /// SmartShift data or write status changed.
     SmartShiftChanged(DeviceKey),
+    /// The keyboard's Fn-lock read landed or changed.
+    FnLockChanged(DeviceKey),
+    /// The mouse's report-rate read landed or changed.
+    ReportRateChanged(DeviceKey),
+    /// The mouse's pointer-speed read landed or changed.
+    PointerSpeedChanged(DeviceKey),
+    /// The device's press-force read landed or changed.
+    ForceSensingChanged(DeviceKey),
+    /// The keyboard's backlight read landed or changed.
+    BacklightChanged(DeviceKey),
+    /// The device's Easy-Switch host read landed or changed.
+    EasySwitchChanged(DeviceKey),
+    /// Disable Keys data, write, or persistence recovery changed.
+    DisableKeysChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -68,12 +96,21 @@ impl StateEvent {
             | Self::BindingsChanged(key)
             | Self::DpiChanged(key)
             | Self::SmartShiftChanged(key)
+            | Self::FnLockChanged(key)
+            | Self::ReportRateChanged(key)
+            | Self::PointerSpeedChanged(key)
+            | Self::ForceSensingChanged(key)
+            | Self::BacklightChanged(key)
+            | Self::EasySwitchChanged(key)
+            | Self::DisableKeysChanged(key)
             | Self::LightingChanged(key)
             | Self::DeviceConfigChanged(key) => Some(key),
             Self::AgentChanged
             | Self::ForegroundChanged
             | Self::DiagnosticsChanged
             | Self::InventoryChanged
+            | Self::DeviceRemovalFailed { .. }
+            | Self::StalePairingRemovalFailed { .. }
             | Self::CameraChanged
             | Self::CameraPermissionChanged
             | Self::SettingsChanged
@@ -202,12 +239,22 @@ impl AppState {
     ) -> bool {
         match event {
             StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+            // A dialog, not panel content.
+            StateEvent::DeviceRemovalFailed { .. }
+            | StateEvent::StalePairingRemovalFailed { .. } => false,
             StateEvent::AgentChanged
             | StateEvent::ForegroundChanged
             | StateEvent::DiagnosticsChanged
             | StateEvent::BindingsChanged(_)
             | StateEvent::DpiChanged(_)
             | StateEvent::SmartShiftChanged(_)
+            | StateEvent::FnLockChanged(_)
+            | StateEvent::ReportRateChanged(_)
+            | StateEvent::PointerSpeedChanged(_)
+            | StateEvent::ForceSensingChanged(_)
+            | StateEvent::BacklightChanged(_)
+            | StateEvent::EasySwitchChanged(_)
+            | StateEvent::DisableKeysChanged(_)
             | StateEvent::LightingChanged(_)
             | StateEvent::CameraChanged
             | StateEvent::CameraPermissionChanged

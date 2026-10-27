@@ -8,7 +8,7 @@ paths:
   - ".editorconfig"
   - "rust-toolchain.toml"
   - "prek.toml"
-  - ".ast-grep/**"
+  - "**/.ast-grep/**"
   - "sgconfig.yml"
 ---
 
@@ -116,7 +116,8 @@ backstop, not a substitute for running the gate yourself after a rebase.
 4. If cfg-gated files changed (any `#[cfg(target_os = …)]` block, in any crate):
    cross-lint or hand-audit against master — macOS-green proves nothing there; see
    `.agents/rules/cross-platform.md`.
-5. If wire types changed: `PROTOCOL_VERSION` bumped and
+5. If wire types changed: `PROTOCOL_VERSION` above the latest release's (moved once
+   per release, not once per change) and
    `cargo test -p openlogi-ipc --test wire_format` green — see
    `crates/openlogi-ipc/AGENTS.md`.
 6. If locales changed: every `crates/openlogi-ui/locales/*.toml` carries the same keys
@@ -147,7 +148,7 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 |---|---|---|
 | `rustfmt` | `cargo fmt --all -- --check` | any |
 | `typos` | `typos --config .config/typos.toml .` | any (needs `typos`; included in the devenv shell) |
-| `ast-grep` | `ast-grep scan` | any (needs `ast-grep`; included in the devenv shell). The single-source-of-truth guards in `.ast-grep/rules/`, configured by `sgconfig.yml` |
+| `ast-grep` | `ast-grep scan`, then `ast-grep scan .github` | any (needs `ast-grep`; included in the devenv shell). The single-source-of-truth guards stored with their owners and registered in root `sgconfig.yml` |
 | `publish closure` | `cargo xtask release check-publish` | any |
 | `shell` | `git ls-files -z \| xargs -0 shfmt -f` piped into `xargs shellcheck` and `xargs shfmt -d` | any (needs `shellcheck` + `shfmt`; both are in the devenv shell) |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | **Linux** is the CI job. Host clippy on macOS/Windows compiles a different `cfg` |
@@ -158,6 +159,7 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 | `tests (windows)` | `cargo test --workspace --exclude openlogi-desktop` | **Windows** only — the one place the `cfg(windows)` tests execute; nothing reproduces it elsewhere |
 | `cargo-deny` | `cargo deny --config .cargo/deny.toml --all-features --manifest-path crates/openlogi/Cargo.toml check` | any (needs `cargo-deny`; `nix run nixpkgs#cargo-deny -- …` also works) |
 | `clippy (windows)` | `cargo clippy --workspace --all-targets -- -D warnings` | **Windows**. Elsewhere: `devenv tasks run openlogi:check-windows` (ring-free subset, not the full workspace) |
+| `clippy (macos)` | `cargo clippy --workspace --all-targets -- -D warnings` | **macOS** only. CI runs it on `macos-latest` (arm64); it is the one job that lints the macOS `cfg` (`tests (macos)` compiles it, without clippy), and no other host can reproduce it |
 | `wasm (portable crates)` | `cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown` then `cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown` | any (needs the `wasm32-unknown-unknown` std; devenv installs it) |
 
 CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, and
@@ -166,6 +168,20 @@ CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, and
 job deliberately skips sccache setup. `rust-cache` stores only Cargo registry/git
 inputs (`cache-targets: false`); sccache owns compiler outputs. PRs read the
 default branch's sccache objects but do not write their isolated merge-ref cache.
+
+The `fmt` job selects all workspace test jobs with the path filter in `ci.yml`. Source, fixture, test-resource, dependency, toolchain, and CI changes run those jobs; pure Markdown and unrelated design assets skip them. The workflow still reports each skipped job, so required checks do not remain pending. PRs use the full PR diff; pushes use the full pushed range. Local test commands always run, regardless of changed paths.
+
+### ast-grep rules
+
+Load the [ast-grep skill](../skills/ast-grep/SKILL.md) for structural searches, rewrites, and rule authoring. The following constraints govern OpenLogi guards:
+
+- Store each rule in the owning crate's `.ast-grep/rules/`, or `xtask/.ast-grep/rules/` for an xtask owner. A workspace-wide policy that no crate owns, such as the lint table in the root `Cargo.toml`, goes in the root `.ast-grep/rules/`. Cross-crate guards live with the owner, even when they inspect other crates.
+- Register each rule directory in the root `sgconfig.yml`. Keep one project config. Rule `files` and `ignores` selectors are relative to that project root, not the YAML file.
+- Preserve unique rule IDs and name the owner in the diagnostic. For the consolidation trigger, follow [Single source of truth](../../AGENTS.md#single-source-of-truth).
+- Choose traversal depth for the intended relationship. Use `stopBy: end` only when the rule must search all ancestors or descendants.
+- `ast-grep scan` skips hidden directories. A rule over `.github` (workflows, `.github/scripts`) runs in CI and `cargo xtask ci ast-grep` only through their explicit `ast-grep scan .github`; the prek hook passes staged files by name, which ast-grep scans even under `.github`. Check such a rule with `ast-grep scan .github`.
+- Run `ast-grep scan` from the repository root after a rule or config change. The current tree must pass. Verify that the prohibited copy fails, the owner passes, and unrelated code passes. Use the pre-consolidation commit or a temporary fixture tree. Include a consumer in another crate when the guard applies across crates; `ast-grep test` snippets alone do not prove path selectors.
+- When moving rules, compare rule IDs and contents before and after. Confirm that `ast-grep scan --inspect summary` loads every rule, then repeat the path checks above. Keep rule-directory ownership in `.github/CODEOWNERS`.
 
 ### MSRV trap
 
@@ -196,7 +212,7 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | Diff | Run |
 |---|---|
 | anything Rust | the local-gate tier above; the pre-push hook always runs full-workspace Clippy and non-GUI rustdoc; `ast-grep` (the prek hook runs it over the staged files at commit) |
-| `.ast-grep/**`, `sgconfig.yml` | `ast-grep` — a new rule must flag nothing on the current tree and must flag the copy it was written against (check out the commit before the consolidation) |
+| `**/.ast-grep/**`, `sgconfig.yml` | Follow [ast-grep rules](#ast-grep-rules): full scan plus prohibited-copy, owner, and path checks |
 | crate publish flags, workspace path dependencies, `release-plz.toml` | `publish-closure` |
 | any `*.sh`, any file with a shell shebang, `.editorconfig` | `shell` (the prek hooks run the same two tools at commit) |
 | `#[cfg(target_os = …)]`, hook/inject/hid/camera platform files | `clippy-windows` proxy + the linux-musl recipe; say so if you cannot |
@@ -206,8 +222,9 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | rustdoc / moved trait impls / hidpp derive | `rustdoc` |
 | `crates/openlogi-ipc/**` or wire types | `cargo test -p openlogi-ipc --test wire_format` |
 | `crates/openlogi-ui/locales/**` | `cargo test -p openlogi-ui locale`; also `cargo test -p openlogi-desktop i18n` when binary wiring or desktop resolution changed |
-| `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `nix fmt -- --check devenv.nix` and `devenv --no-tui shell -- true` |
-| `flake.nix` / `flake.lock` / `packaging/linux/**` | Nix CI: `nix fmt -- --check flake.nix devenv.nix packaging/linux/package.nix packaging/linux/nixos-module.nix` and `nix flake check --all-systems --no-build --show-trace` |
+| `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `(cd packaging && nix fmt -- --check ../devenv.nix)` and `devenv --no-tui shell -- true` |
+| `flake.nix` / `packaging/flake.*` / `packaging/linux/**` | Nix CI: `(cd packaging && nix fmt -- --check flake.nix linux/package.nix linux/nixos-module.nix ../flake.nix ../devenv.nix)`, `nix flake check ./packaging --all-systems --no-build --show-trace`, and, for the deprecated root alias, `nix flake check --all-systems --no-build --no-write-lock-file` |
+| `xtask/src/commands/lint/**` | `cargo test -p xtask lint::` and `cargo xtask lint sweep-allows`; the PR runs Stale allows on all three hosts |
 | `xtask/**` / `packaging/**` | unsigned `cargo xtask` package for that platform; the Build workflow is not part of `cargo xtask ci` |
 
 ## Other PR workflows
@@ -216,10 +233,22 @@ Not part of `ci.yml`, not in the default run:
 
 - **Nix CI** (path-filtered): evaluate + format, then `nix build` the package on
   x86_64-linux and aarch64-linux. Local: the `nix fmt` / `nix flake check`
-  commands above; a full `nix build` matches the build job on Linux.
+  commands above; a full `nix build ./packaging#openlogi` matches the build job
+  on Linux. `nix fmt` takes no Flake argument, so it runs from `packaging/`.
 - **devenv CI** (path-filtered): format `devenv.nix` and `devenv --no-tui shell -- true`.
 - **Build**: unsigned installers on every PR. Run the matching `cargo xtask`
   package command only when the diff touches packaging.
+- **Build / Linux Flatpak**: gated behind the `needs: build` label like the rest
+  of that matrix, so a PR touching `packaging/linux/flatpak/**` gets no feedback
+  until someone labels it. Reproduce locally with
+  `flatpak-builder --user --disable-rofiles-fuse --force-clean --repo=repo
+  --default-branch=stable build packaging/linux/flatpak/org.openlogi.OpenLogi.yml`,
+  and keep the build tree off `/tmp` if it is a tmpfs: the workspace needs well
+  over 10 GB to compile inside the sandbox.
+- **Stale allows** (weekly, and path-filtered to the sweep itself): removes each
+  `#[allow]` in turn on Linux, Windows, and macOS, and fails on a lint that fires on
+  none of them. Local: `cargo xtask lint sweep-allows` for this host, then
+  `cargo xtask lint merge-allows <reports…>` over every host's report.
 
 ## When you add a CI job
 

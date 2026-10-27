@@ -12,16 +12,17 @@
 //! a single batched device-open.
 
 use gpui::{
-    App, Context, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window,
-    div,
+    App, AppContext as _, Context, IntoElement, ParentElement, Render, SharedString, Styled,
+    Subscription, Window, div, px,
 };
-use gpui_component::v_flex;
+use gpui_component::{WindowExt as _, dialog::DialogButtonProps, input::InputState, v_flex};
 use openlogi_camera::{AutoToggle, CameraControl, CameraState, ControlRange};
 use openlogi_core::config::CameraControls;
 use tracing::debug;
 
 use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
+use crate::ui::components::control_input;
 use crate::ui::section::section_label;
 use crate::ui::theme::{self, Typography as _};
 
@@ -338,7 +339,7 @@ impl CameraControlsPanel {
         key: &str,
         v: i32,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let takeover = control.auto_toggle().and_then(|toggle| {
             let ix = self.autos.iter().position(|a| a.toggle == toggle && a.on)?;
             Some((toggle, ix))
@@ -356,7 +357,7 @@ impl CameraControlsPanel {
             // before the value fails). Rebuild from live hardware so the panel
             // never shows a value the device didn't take.
             self.resync_after_failed_write(cx);
-            return;
+            return false;
         }
         if let Some((toggle, ix)) = takeover {
             self.autos[ix].on = false;
@@ -365,6 +366,95 @@ impl CameraControlsPanel {
         AppState::apply(cx, |state| state.commit_camera_control(key, control, v));
         self.sync_active_custom(cx);
         cx.notify();
+        true
+    }
+
+    /// Show an exact-value editor for a control whose slider is awkward to
+    /// position precisely. The device's reported range remains authoritative:
+    /// unsupported values leave the dialog open rather than being rounded.
+    pub(super) fn open_value_dialog(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slider) = self.sliders.get(ix) else {
+            return;
+        };
+        let control = slider.control;
+        let range = slider.range;
+        let current = slider.value(cx);
+        let label = slider.label.clone();
+        let input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_value(current.to_string(), window, cx);
+            input
+        });
+        let panel = cx.entity();
+
+        window.open_dialog(cx, move |dialog, window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
+            dialog
+                .w(px(320.))
+                .title(tr!("camera.set_value_title", label => label.clone()))
+                .child(
+                    v_flex().gap_2().child(control_input(&input)).child(
+                        div()
+                            .text_caption()
+                            .text_color(theme::palette(cx).text_muted)
+                            .child(tr!(
+                                "camera.supported_range",
+                                min => range.min.to_string(),
+                                max => range.max.to_string()
+                            )),
+                    ),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(tr!("common.save"))
+                        .cancel_text(tr!("common.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok({
+                    let input = input.clone();
+                    let panel = panel.clone();
+                    move |_, window, cx| {
+                        let Ok(value) = input.read(cx).value().trim().parse::<i32>() else {
+                            return false;
+                        };
+                        panel.update(cx, |panel, cx| {
+                            panel.set_exact_value(ix, control, value, window, cx)
+                        })
+                    }
+                })
+        });
+    }
+
+    /// Write a typed value through the same path as a slider release, then
+    /// seat the thumb on it. Rejects values outside the device's range, and a
+    /// stale `ix` if the panel rebuilt while the dialog was open.
+    fn set_exact_value(
+        &mut self,
+        ix: usize,
+        control: CameraControl,
+        value: i32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (Some(key), Some(uid)) = (self.key.clone(), self.uid.clone()) else {
+            return false;
+        };
+        match self.sliders.get(ix) {
+            Some(slider) if slider.control == control && slider.range.supports(value) => {}
+            _ => return false,
+        }
+        if !self.commit_release(control, &uid, &key, value, cx) {
+            return false;
+        }
+        if let Some(slider) = self.sliders.get(ix) {
+            slider.seat(value, window, cx);
+        }
+        true
     }
 
     /// The current auto state gating `control`, if the device has that toggle.

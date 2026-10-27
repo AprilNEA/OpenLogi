@@ -13,6 +13,11 @@
 //! The cell has more than one writer — [`Orchestrator`](crate::orchestrator::Orchestrator)
 //! for the device and config facts, the agent binary for the hook ones — so it
 //! is shared as an `Arc` and every setter takes `&self`.
+//!
+//! The overlay's notices ride beside the snapshot in a cell of their own,
+//! [`NoticeBoard`]: a notice comes and goes without moving the GUI's
+//! generation. The lock-key indicator has its own cell for the same reason,
+//! [`LockKeyIndicator`].
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::is_openlogi_foreground_id;
@@ -20,13 +25,19 @@ use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
-    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
+    OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
+    SecureInput, VirtualKeyboardStatus,
 };
 use tokio::sync::watch;
+
+use crate::lock_keys::LockKeyIndicator;
+use crate::notices::NoticeBoard;
 
 /// The agent's observable state, and the notification that it changed.
 pub struct ObservableState {
     tx: watch::Sender<Observation>,
+    notices: NoticeBoard,
+    lock_keys: LockKeyIndicator,
 }
 
 impl ObservableState {
@@ -54,15 +65,39 @@ impl ObservableState {
                     agent_version,
                     input_monitoring_granted: openlogi_hid::permissions::has_access(),
                     hid_open_failures: false,
+                    secure_input: SecureInput::Off,
+                    // macOS has no device until the agent arms.
+                    virtual_keyboard: if cfg!(target_os = "macos") {
+                        VirtualKeyboardStatus::Unavailable
+                    } else {
+                        VirtualKeyboardStatus::Unsupported
+                    },
                 },
                 inventory: Vec::new(),
                 standalone: Vec::new(),
                 camera_active: false,
                 pairing: None,
                 foreground: ForegroundApps::default(),
+                lights: Vec::new(),
             },
         });
-        Self { tx }
+        Self {
+            tx,
+            notices: NoticeBoard::default(),
+            lock_keys: LockKeyIndicator::default(),
+        }
+    }
+
+    /// The notices the overlay shows.
+    #[must_use]
+    pub fn notices(&self) -> &NoticeBoard {
+        &self.notices
+    }
+
+    /// The lock-key indicator the overlay shows.
+    #[must_use]
+    pub fn lock_keys(&self) -> &LockKeyIndicator {
+        &self.lock_keys
     }
 
     /// Clone the whole current state.
@@ -154,6 +189,18 @@ impl ObservableState {
         });
     }
 
+    /// Publish what the online standalone lights read back, and what was
+    /// changed on them. The same lights read the same way notify nobody.
+    pub fn set_lights(&self, lights: Vec<ObservedLight>) {
+        self.update(|snapshot| {
+            if snapshot.lights == lights {
+                return false;
+            }
+            snapshot.lights = lights;
+            true
+        });
+    }
+
     /// Publish the autostart state the current config asks for.
     pub fn set_launch_at_login(&self, enabled: bool) {
         self.update(|snapshot| {
@@ -191,6 +238,29 @@ impl ObservableState {
                 return false;
             }
             snapshot.status.input_monitoring_granted = granted;
+            true
+        });
+    }
+
+    /// Publish a Secure Event Input change, as observed by
+    /// [`watchers::secure_input`](crate::watchers::secure_input).
+    pub fn set_secure_input(&self, secure_input: SecureInput) {
+        self.update(|snapshot| {
+            if snapshot.status.secure_input == secure_input {
+                return false;
+            }
+            snapshot.status.secure_input = secure_input;
+            true
+        });
+    }
+
+    /// Publish whether synthesized keys type on the virtual HID keyboard.
+    pub fn set_virtual_keyboard(&self, status: VirtualKeyboardStatus) {
+        self.update(|snapshot| {
+            if snapshot.status.virtual_keyboard == status {
+                return false;
+            }
+            snapshot.status.virtual_keyboard = status;
             true
         });
     }
@@ -262,7 +332,7 @@ mod tests {
     use openlogi_core::brand::APP_ID;
     use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
     use openlogi_hid::DIRECT_DEVICE_INDEX;
-    use openlogi_ipc::{InventoryHealth, RECENT_APPS};
+    use openlogi_ipc::{InventoryHealth, RECENT_APPS, VirtualKeyboardStatus};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -288,6 +358,7 @@ mod tests {
                 battery: None,
                 model_info: None,
                 capabilities: None,
+                settings_revision: 0,
             }],
         }
     }
@@ -437,6 +508,23 @@ mod tests {
             after,
             before + 1,
             "no intermediate generation may claim the hook without its permission"
+        );
+    }
+
+    #[test]
+    fn only_a_virtual_keyboard_change_moves_the_generation() {
+        let state = state();
+        state.set_virtual_keyboard(VirtualKeyboardStatus::Active);
+        let before = state.subscribe().borrow().generation;
+
+        state.set_virtual_keyboard(VirtualKeyboardStatus::Active);
+        assert_eq!(state.subscribe().borrow().generation, before);
+
+        state.set_virtual_keyboard(VirtualKeyboardStatus::Unavailable);
+        assert_eq!(state.subscribe().borrow().generation, before + 1);
+        assert_eq!(
+            state.snapshot().status.virtual_keyboard,
+            VirtualKeyboardStatus::Unavailable
         );
     }
 

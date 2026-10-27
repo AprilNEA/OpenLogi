@@ -187,6 +187,53 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Hold the chord's modifiers for the lifetime of the physical press while
+    /// tapping its ordinary key exactly once, the way a hand does on a
+    /// keyboard.
+    ///
+    /// This is the shape an application switcher needs. Cmd+Tab steps one
+    /// window forward and leaves the switcher on screen for as long as Cmd is
+    /// down. Neither existing variant can express it:
+    /// [`Action::CustomShortcut`] releases Cmd immediately, so the switcher
+    /// closes again at once, and [`Action::HoldShortcut`] holds Tab down too,
+    /// so key repeat walks the switcher to its last window and parks there.
+    ///
+    /// Lifecycle-aware runtimes emit the modifier down edges plus one tap of
+    /// the ordinary key when the press starts, and the modifier up edges for
+    /// every terminal outcome. The tap is skipped while another held chord
+    /// keeps that same key down, so the other hold is never released early.
+    /// Dispatchers without a release context degrade
+    /// this to a balanced tap of the whole chord, exactly as they do for
+    /// [`Action::HoldShortcut`].
+    TapKeyHoldingModifiers(KeyCombo),
+    /// Turn precision mode on or off, as the precision button of an MX Ergo
+    /// does in Logi Options+: on, the mouse moves at its slowest speed; off,
+    /// it returns to its saved speed. On a mouse whose speed HID++ `0x2205`
+    /// scales
+    /// ([`Capabilities::pointer_scaling`](crate::device::Capabilities::pointer_scaling))
+    /// the slowest speed is the slowest
+    /// [`PointerSpeed`](crate::hid::PointerSpeed), and with none saved the
+    /// mouse returns to 1×. On a mouse with adjustable DPI
+    /// ([`Capabilities::pointer`](crate::device::Capabilities::pointer)) it
+    /// is the lowest DPI the sensor lists, and with none saved the mouse
+    /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
+    /// lit while the mode is on. Does nothing on other devices.
+    TogglePrecisionMode,
+}
+
+/// Which of a held chord's keys stay down for the lifetime of the press.
+///
+/// Both shapes hold the chord's modifiers; they differ in the ordinary key.
+/// See [`Action::held_chord`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldKeys {
+    /// Modifiers and ordinary key alike stay down
+    /// ([`Action::HoldShortcut`]).
+    WholeChord,
+    /// The modifiers stay down and the ordinary key is tapped once as the
+    /// hold starts, unless another hold already keeps that key down
+    /// ([`Action::TapKeyHoldingModifiers`]).
+    ModifiersOnly,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -280,6 +327,7 @@ macro_rules! for_each_unit_action {
             // DPI
             CycleDpiPresets "Cycle DPI Presets" "pointer.cycle_dpi_presets" Dpi Gauge,
             ToggleSmartShift "Toggle SmartShift" "pointer.toggle_smartshift" Dpi Refresh,
+            TogglePrecisionMode "Precision Mode" "pointer.precision_mode" Dpi Gauge,
             // Scroll
             ScrollUp "Scroll Up" "actions.scroll_up" Scroll ArrowUp,
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
@@ -314,6 +362,12 @@ macro_rules! derive_action_core {
                     Action::Workflow(steps) => format!("Workflow ({} steps)", steps.len()),
                     Action::OpenApplication(target) => format!("Open {}", target.display_name()),
                     Action::HoldShortcut(combo) => format!("Hold {}", combo.rendered_label()),
+                    Action::TapKeyHoldingModifiers(combo) => match combo.rendered_modifiers() {
+                        Some(modifiers) => {
+                            format!("Hold {modifiers}, tap {}", combo.rendered_key())
+                        }
+                        None => format!("Tap {}", combo.rendered_key()),
+                    },
                 }
             }
 
@@ -333,7 +387,8 @@ macro_rules! derive_action_core {
                     | Action::RunShellCommand(_)
                     | Action::Workflow(_)
                     | Action::OpenApplication(_)
-                    | Action::HoldShortcut(_) => None,
+                    | Action::HoldShortcut(_)
+                    | Action::TapKeyHoldingModifiers(_) => None,
                 }
             }
 
@@ -362,7 +417,8 @@ macro_rules! derive_action_core {
                     | Action::RunAppleScript(_)
                     | Action::RunShellCommand(_)
                     | Action::Workflow(_)
-                    | Action::HoldShortcut(_) => Category::Editing,
+                    | Action::HoldShortcut(_)
+                    | Action::TapKeyHoldingModifiers(_) => Category::Editing,
                     Action::SetDpiPreset(_) => Category::Dpi,
                     Action::OpenApplication(_) => Category::System,
                 }
@@ -394,11 +450,13 @@ for_each_unit_action!(derive_action_core);
 
 impl Action {
     /// The chord whose output must remain down until the originating press
-    /// ends, or `None` for an instantaneous action.
+    /// ends, together with which of its keys stay down. `None` for an
+    /// instantaneous action.
     #[must_use]
-    pub fn held_combo(&self) -> Option<&KeyCombo> {
+    pub fn held_chord(&self) -> Option<(&KeyCombo, HeldKeys)> {
         match self {
-            Self::HoldShortcut(combo) => Some(combo),
+            Self::HoldShortcut(combo) => Some((combo, HeldKeys::WholeChord)),
+            Self::TapKeyHoldingModifiers(combo) => Some((combo, HeldKeys::ModifiersOnly)),
             _ => None,
         }
     }

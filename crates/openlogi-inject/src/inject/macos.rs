@@ -6,20 +6,26 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, PoisonError};
+
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
+    Action, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction, Shortcut,
 };
-use openlogi_core::config::FunctionKey;
 
 use super::{HeldKey, HeldModifiers, KeyPhase};
 
-/// Shared resolver for private ApplicationServices SPI used by the Dock and
-/// symbolic-hotkey helpers.
+/// Shared resolver for private ApplicationServices and SkyLight SPI.
 #[expect(
     unsafe_code,
     reason = "private ApplicationServices SPI symbols are resolved via dlopen/dlsym FFI"
 )]
 mod app_services;
+#[expect(
+    unsafe_code,
+    reason = "AX attribute copies use an out-pointer and AXChildren's element type is unchecked"
+)]
+mod ax;
 mod browser;
 /// WindowServer window/space actions (Mission Control, App Exposé, Show
 /// Desktop, Launchpad).
@@ -38,13 +44,34 @@ mod browser;
     reason = "the private CoreDockSendNotification SPI is only reachable via dlopen/dlsym FFI"
 )]
 mod dock;
+#[expect(
+    unsafe_code,
+    reason = "Text Input Source Services and UCKeyTranslate have no objc2 bindings"
+)]
+mod keyboard_layout;
+mod keycode;
+mod main_thread;
+#[expect(
+    unsafe_code,
+    reason = "Accessibility element creation and actions are unsafe FFI calls"
+)]
+mod menu_shortcut;
 mod scroll;
-/// macOS Space switching actions.
+/// Space switches — DockSwipe events, instant or a timed slide, or the user's
+/// Space shortcut for a slide — with read-only, per-display Space
+/// confirmation.
+#[expect(
+    unsafe_code,
+    reason = "read-only SkyLight SPI and AppKit notification registration require FFI"
+)]
+mod spaces;
+/// Screenshots and Space switches, posted through their system symbolic
+/// hotkey records.
 ///
-/// Use the system symbolic hotkey records for "Move left a space" (79) and
-/// "Move right a space" (81). That respects the user's configured shortcut
-/// instead of assuming Ctrl+Left/Right, and temporarily enables the symbolic
-/// hotkey when the user has disabled it.
+/// That respects the user's configured shortcut instead of assuming one, and
+/// is independent of the keyboard layout because each record names a
+/// physical key. Screenshots temporarily enable a hotkey the user has
+/// disabled; Space switches only read theirs.
 #[expect(
     unsafe_code,
     reason = "CGS symbolic hotkey SPI is only reachable via dlopen/dlsym FFI"
@@ -52,13 +79,20 @@ mod scroll;
 mod symbolic_hotkey;
 #[cfg(test)]
 mod tests;
+mod virtual_keyboard;
 
 use app_services::symbol as app_services_symbol;
 pub(super) use browser::ax_browser_navigate;
 use dock::{app_expose, launchpad, mission_control, show_desktop};
+use keyboard_layout::layout_key;
+use keycode::hid_usage_to_macos;
+use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
-pub(super) use scroll::{post_scroll, post_smooth_scroll};
-use symbolic_hotkey::{next_desktop, previous_desktop};
+pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
+pub(super) use spaces::{natural_scrolling, set_desktop_switch};
+use spaces::{next_desktop, previous_desktop};
+use symbolic_hotkey::{capture_region, screenshot};
+pub use virtual_keyboard::{VirtualKeyboard, is_virtual_keyboard_product};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -78,6 +112,9 @@ pub(super) fn execute(action: &Action) {
         // MiddleClick). A button left on its own native click never reaches
         // this — the hook passes it straight through to the OS.
         Effect::Click(button) => dispatch_click(button),
+        Effect::Shortcut(shortcut) if MENU_SHORTCUTS.contains(&shortcut) => {
+            press_menu_shortcut(&combo(shortcut));
+        }
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
@@ -112,6 +149,80 @@ fn dispatch_click(button: MouseButton) {
     }
 }
 
+/// Shortcuts pressed as the frontmost app's menu item, so AppKit's remapping
+/// of a shortcut the layout cannot reach finds them (see [`menu_shortcut`]).
+const MENU_SHORTCUTS: [Shortcut; 2] = [Shortcut::BrowserBack, Shortcut::BrowserForward];
+
+/// Install the probes [`menu_shortcut`] reads. Must run on the main thread
+/// before the run loop starts.
+pub(super) fn prepare_menu_shortcuts(mtm: objc2::MainThreadMarker) {
+    menu_shortcut::prepare(mtm, MENU_SHORTCUTS.map(combo));
+}
+
+/// Press `combo` as the frontmost app's menu item. Without one, press the
+/// keys the menus show it as under the current layout, as the user would.
+fn press_menu_shortcut(combo: &KeyCombo) {
+    let localized = menu_shortcut::localized(combo);
+    match menu_shortcut::press_menu_item(combo, localized.as_ref()) {
+        MenuPress::Pressed => {
+            tracing::debug!(
+                ?localized,
+                "shortcut pressed as the frontmost app's menu item"
+            );
+            return;
+        }
+        MenuPress::TargetChanged => {
+            tracing::debug!(
+                ?localized,
+                "frontmost app changed during the menu search — shortcut dropped"
+            );
+            return;
+        }
+        MenuPress::NotPressed => {}
+    }
+    let Some(shortcut) =
+        localized.filter(|shortcut| MenuShortcut::written(combo).as_ref() != Some(shortcut))
+    else {
+        // Outside the agent, or a layout that keeps the shortcut as written.
+        press_combo(combo);
+        return;
+    };
+    // The layout remaps the shortcut, so its written keys are another
+    // shortcut here: press the remapped one, or nothing.
+    let mut chars = shortcut.key.chars();
+    let Some(vk) = chars
+        .next()
+        .filter(|_| chars.next().is_none())
+        .and_then(|key| layout_key(key, shortcut.modifiers.command))
+    else {
+        tracing::debug!(
+            ?shortcut,
+            "no key types the remapped shortcut — nothing pressed"
+        );
+        return;
+    };
+    tracing::debug!(
+        ?shortcut,
+        "no menu item shows the shortcut — pressing its remapped keys"
+    );
+    post_key(vk, modifier_flags(shortcut.modifiers));
+}
+
+fn modifier_flags(modifiers: menu_shortcut::Modifiers) -> CGEventFlags {
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    for (held, flag) in [
+        (modifiers.command, CGEventFlags::CGEventFlagCommand),
+        (modifiers.shift, CGEventFlags::CGEventFlagShift),
+        (modifiers.option, CGEventFlags::CGEventFlagAlternate),
+        (modifiers.control, CGEventFlags::CGEventFlagControl),
+    ] {
+        if held {
+            flags |= flag;
+        }
+    }
+    flags
+}
+
 /// The macOS chord for each named [`Shortcut`].
 ///
 /// Parsed through [`KeyCombo`]'s existing, tested `FromStr` rather than
@@ -141,15 +252,17 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
     super::parse_shortcut(text)
 }
 
+/// The Apple menu's Lock Screen chord. The menu item matches the character Q,
+/// so the chord goes through the layout like any shortcut.
+const LOCK_SCREEN_CHORD: &str = "Cmd+Ctrl+Q";
+
 /// Dispatch a window-manager or power [`NativeAction`].
 ///
-/// These are all posted straight to the Dock or WindowServer via private
-/// SPIs rather than a synthesised keyboard chord — see the module docs on
-/// [`mission_control`] and friends for why.
+/// Window-manager actions and screenshots go straight to the Dock or
+/// WindowServer through private SPIs rather than a synthesised keyboard chord
+/// — see the module docs on [`mission_control`] and friends for why. Lock
+/// Screen is an Apple menu item, reachable only by its chord.
 fn dispatch_native(native: NativeAction) {
-    let cmd = CGEventFlags::CGEventFlagCommand;
-    let shift = CGEventFlags::CGEventFlagShift;
-    let ctrl = CGEventFlags::CGEventFlagControl;
     match native {
         NativeAction::MissionControl => mission_control(),
         NativeAction::AppExpose => app_expose(),
@@ -157,12 +270,9 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::NextDesktop => next_desktop(),
         NativeAction::ShowDesktop => show_desktop(),
         NativeAction::LaunchpadShow => launchpad(),
-        // Lock screen = Cmd+Ctrl+Q (kVK_ANSI_Q = 0x0C)
-        NativeAction::LockScreen => post_key(0x0C, cmd | ctrl),
-        // Screenshot = Cmd+Shift+3 (kVK_ANSI_3 = 0x14)
-        NativeAction::Screenshot => post_key(0x14, cmd | shift),
-        // Capture region to clipboard = Cmd+Shift+Ctrl+4 (kVK_ANSI_4 = 0x15)
-        NativeAction::CaptureRegion => post_key(0x15, cmd | shift | ctrl),
+        NativeAction::LockScreen => press_combo(&super::parse_shortcut(LOCK_SCREEN_CHORD)),
+        NativeAction::Screenshot => screenshot(),
+        NativeAction::CaptureRegion => capture_region(),
         // Sleep has no CGEvent equivalent (the WindowServer ignores a
         // synthesised power key), so ask powermanagement directly. `pmset
         // sleepnow` works for the console user without privileges.
@@ -246,7 +356,8 @@ fn post_other_button(button_number: i64) {
 /// into the event's source user-data so OpenLogi's own event tap recognises
 /// and skips its own injections instead of treating them as fresh input
 /// (e.g. re-translating a synthesized button 4/5 into a Back/Forward press,
-/// or misreading a remapped click as a new gesture hold).
+/// misreading a remapped click as a new gesture hold, or firing a remapped
+/// key's binding from a shortcut that presses it).
 fn tag_synthetic(ev: &CGEvent) {
     ev.set_integer_value_field(
         EventField::EVENT_SOURCE_USER_DATA,
@@ -254,25 +365,47 @@ fn tag_synthetic(ev: &CGEvent) {
     );
 }
 
-/// Post one keyboard edge for `vk` with `flags` set.
+/// Post one keyboard edge for `vk`: through the virtual HID keyboard when it
+/// carries the edge, otherwise as a `CGEvent` with `flags` set. The virtual
+/// keyboard ignores `flags`, because it already holds the modifier keys
+/// whose edges preceded this one.
 fn post_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) {
+    if !virtual_keyboard::edge(vk, phase) {
+        post_cg_key_phase(vk, flags, phase);
+    }
+}
+
+/// Post one keyboard edge for `vk` with `flags` set as a `CGEvent`.
+fn post_cg_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) {
+    if let Some(event) = key_event(vk, flags, phase) {
+        event.post(CGEventTapLocation::HID);
+    }
+}
+
+/// One keyboard edge for `vk` with `flags` set, tagged as OpenLogi's own so
+/// the hook lets it through.
+fn key_event(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> Option<CGEvent> {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed");
-        return;
+        return None;
     };
     let down = phase == KeyPhase::Down;
     let Ok(event) = CGEvent::new_keyboard_event(src, vk, down) else {
         tracing::warn!(?phase, "CGEvent::new_keyboard_event failed");
-        return;
+        return None;
     };
     event.set_flags(flags);
-    event.post(CGEventTapLocation::HID);
+    tag_synthetic(&event);
+    Some(event)
 }
 
-/// Post a key-down + key-up pair for `vk` with `flags` set.
+/// Post a key-down + key-up pair for `vk` with `flags` set: through the
+/// virtual HID keyboard when it carries the pair, otherwise as `CGEvent`s.
 fn post_key(vk: u16, flags: CGEventFlags) {
-    post_key_phase(vk, flags, KeyPhase::Down);
-    post_key_phase(vk, flags, KeyPhase::Up);
+    if !virtual_keyboard::tap(vk, flags) {
+        post_cg_key_phase(vk, flags, KeyPhase::Down);
+        post_cg_key_phase(vk, flags, KeyPhase::Up);
+    }
 }
 
 /// Type an arbitrary unicode string by emitting one key event per character,
@@ -291,6 +424,7 @@ pub(super) fn type_text(text: &str) {
         };
         let s = ch.to_string();
         ev.set_string(&s);
+        tag_synthetic(&ev);
         ev.post(CGEventTapLocation::HID);
     }
 }
@@ -298,14 +432,25 @@ pub(super) fn type_text(text: &str) {
 /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
 /// keycode. Used by the workflow sequencer's `PressKey` step.
 pub(super) fn press_combo(combo: &KeyCombo) {
-    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
-        post_key(vk, combo_flags(combo));
-    } else {
+    // Super is Command on macOS, so it selects a layout's Command layer too.
+    let Some(vk) = key_for(combo.key(), combo.has_command() || combo.has_super()) else {
         tracing::warn!(
             usage = combo.key().code(),
             "shortcut usage has no macOS mapping"
         );
-    }
+        return;
+    };
+    post_key(vk, combo_flags(combo));
+}
+
+/// The key that types `usage`'s character under the user's keyboard layout;
+/// keys a layout never moves, and characters it types only with Shift or
+/// Option, keep their US ANSI position (see [`keyboard_layout`]).
+fn key_for(usage: KeyboardUsage, command: bool) -> Option<u16> {
+    usage
+        .ascii_char()
+        .and_then(|ch| layout_key(ch, command))
+        .or_else(|| hid_usage_to_macos(usage.code()))
 }
 
 /// Emit the physical-key edges whose shared ownership changed, preserving the
@@ -343,6 +488,11 @@ fn post_held_key(key: HeldKey, phase: KeyPhase, modifiers: &mut HeldModifiers) {
     post_key_phase(vk, flags, phase);
 }
 
+/// The key each held chord key went down on, so its release lifts the same
+/// key even if the keyboard layout changed while it was held.
+static HELD_KEY_PRESSES: LazyLock<Mutex<HashMap<KeyboardUsage, u16>>> =
+    LazyLock::new(Mutex::default);
+
 fn held_key_event(
     key: HeldKey,
     phase: KeyPhase,
@@ -350,13 +500,39 @@ fn held_key_event(
 ) -> Option<(u16, CGEventFlags)> {
     modifiers.set(key, phase == KeyPhase::Down);
     let vk = match key {
-        HeldKey::Command => Some(0x37),
-        HeldKey::Shift => Some(0x38),
-        HeldKey::Alt => Some(0x3a),
-        HeldKey::Control => Some(0x3b),
-        HeldKey::Key(usage) => hid_usage_to_macos(usage.code()),
-    }?;
+        HeldKey::Command => 0x37,
+        HeldKey::Shift => 0x38,
+        HeldKey::Alt => 0x3a,
+        HeldKey::Control => 0x3b,
+        HeldKey::Key(usage) => held_key(usage, phase, *modifiers)?,
+    };
     Some((vk, held_modifier_flags(*modifiers)))
+}
+
+fn held_key(usage: KeyboardUsage, phase: KeyPhase, modifiers: HeldModifiers) -> Option<u16> {
+    // The map only caches posted keys; a panic elsewhere leaves it consistent.
+    let mut presses = HELD_KEY_PRESSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let resolve = || key_for(usage, modifiers.contains(HeldKey::Command));
+    match phase {
+        KeyPhase::Down => {
+            let vk = resolve()?;
+            presses.insert(usage, vk);
+            Some(vk)
+        }
+        KeyPhase::Up => presses.remove(&usage).or_else(resolve),
+    }
+}
+
+/// Whether a held chord keeps the ordinary key `vk` down. Only meaningful
+/// under the held-chord lock, which orders every held-key edge.
+fn held_key_down(vk: u16) -> bool {
+    HELD_KEY_PRESSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .values()
+        .any(|&held| held == vk)
 }
 
 fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
@@ -378,7 +554,7 @@ fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
 
 fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
-    if combo.has_command() {
+    if combo.has_command() || combo.has_super() {
         flags |= CGEventFlags::CGEventFlagCommand;
     }
     if combo.has_shift() {
@@ -391,51 +567,6 @@ fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
         flags |= CGEventFlags::CGEventFlagAlternate;
     }
     flags
-}
-
-/// Map a platform-neutral USB HID keyboard usage to a macOS virtual key.
-fn hid_usage_to_macos(usage: u8) -> Option<u16> {
-    const LETTERS: [u16; 26] = [
-        0x00, 0x0b, 0x08, 0x02, 0x0e, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2e, 0x2d, 0x1f,
-        0x23, 0x0c, 0x0f, 0x01, 0x11, 0x20, 0x09, 0x0d, 0x07, 0x10, 0x06,
-    ];
-    const DIGITS: [u16; 10] = [0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1a, 0x1c, 0x19, 0x1d];
-    /// `kVK_F20`, one past the programmable row [`FunctionKey`] covers.
-    const F20: u16 = 0x5a;
-    let function = |n: u8| FunctionKey::nth_f(u16::from(n)).map(FunctionKey::keycode);
-    match usage {
-        0x04..=0x1d => LETTERS.get(usize::from(usage - 0x04)).copied(),
-        0x1e..=0x27 => DIGITS.get(usize::from(usage - 0x1e)).copied(),
-        0x3a..=0x45 => function(usage - 0x3a + 1),
-        0x68..=0x6e => function(usage - 0x68 + 13),
-        0x6f => Some(F20),
-        0x28 => Some(0x24),
-        0x29 => Some(FunctionKey::Esc.keycode()),
-        0x2a => Some(0x33),
-        0x2b => Some(0x30),
-        0x2c => Some(0x31),
-        0x2d => Some(0x1b),
-        0x2e => Some(0x18),
-        0x2f => Some(0x21),
-        0x30 => Some(0x1e),
-        0x31 => Some(0x2a),
-        0x33 => Some(0x29),
-        0x34 => Some(0x27),
-        0x35 => Some(0x32),
-        0x36 => Some(0x2b),
-        0x37 => Some(0x2f),
-        0x38 => Some(0x2c),
-        0x4a => Some(0x73),
-        0x4b => Some(0x74),
-        0x4c => Some(0x75),
-        0x4d => Some(0x77),
-        0x4e => Some(0x79),
-        0x4f => Some(0x7c),
-        0x50 => Some(0x7b),
-        0x51 => Some(0x7d),
-        0x52 => Some(0x7e),
-        _ => None,
-    }
 }
 
 pub(super) fn run_apple_script(src: &str) {
@@ -467,6 +598,11 @@ fn post_media_key(nx_key: i32) {
     const NX_KEY_UP: i32 = 0x0B;
 
     autoreleasepool(|_| {
+        // Carry the modifiers the user is holding, as the real key would: apps
+        // like Volume Control and macOS's own Option+Shift fine-step volume
+        // read them off the media key event.
+        let modifiers =
+            NSEvent::modifierFlags_class() & NSEventModifierFlags::DeviceIndependentFlagsMask;
         for (state, phase) in [(NX_KEY_DOWN, "down"), (NX_KEY_UP, "up")] {
             // data1 layout for subtype 8: high word is NX_KEYTYPE_*, next byte
             // is key state (0x0A down, 0x0B up), low bit is repeat (0 here).
@@ -474,7 +610,7 @@ fn post_media_key(nx_key: i32) {
             let Some(ns_event) = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
                 NSEventType::SystemDefined,
                 NSPoint::new(0.0, 0.0),
-                NSEventModifierFlags::empty(),
+                modifiers,
                 0.0,
                 0,
                 None,

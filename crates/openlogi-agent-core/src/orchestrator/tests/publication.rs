@@ -68,6 +68,60 @@ fn every_inventory_mutator_republishes_what_the_ipc_server_answers() {
 }
 
 #[test]
+fn settings_changes_only_publish_for_online_inventory_routes() {
+    let observable = Arc::new(ObservableState::new("test".to_string()));
+    let mut orch = Orchestrator::new(Config::default(), observable.clone());
+    let mut inventory = direct_inventory(Some("synthetic-keyboard"), [1, 2, 3, 4]);
+    let route = DeviceRoute::for_slot(&inventory, 0xff).unwrap();
+    let mut observation = observable.subscribe();
+
+    orch.announce_settings_changed(&route);
+    assert!(
+        !observation.has_changed().unwrap(),
+        "scanning does not invent a route"
+    );
+    orch.mark_inventory_unavailable();
+    observation.borrow_and_update();
+    orch.announce_settings_changed(&route);
+    assert!(
+        !observation.has_changed().unwrap(),
+        "unavailable is not ready"
+    );
+
+    inventory.paired[0].online = false;
+    orch.refresh_inventory(&[inventory.clone()], &[], false);
+    observation.borrow_and_update();
+    orch.announce_settings_changed(&route);
+    assert!(
+        !observation.has_changed().unwrap(),
+        "offline routes stay offline"
+    );
+
+    inventory.paired[0].online = true;
+    inventory.paired[0].settings_revision = 5;
+    orch.refresh_inventory(&[inventory.clone()], &[], false);
+    observation.borrow_and_update();
+    orch.announce_settings_changed(&route);
+    assert!(observation.has_changed().unwrap());
+    assert_eq!(
+        observable.snapshot().inventory[0].paired[0].settings_revision,
+        6
+    );
+    assert_eq!(
+        orch.inventory(),
+        &[inventory.clone()],
+        "publication never mutates device-reported revisions"
+    );
+
+    inventory.paired[0].settings_revision = 6;
+    orch.refresh_inventory(&[inventory], &[], false);
+    assert_eq!(
+        observable.snapshot().inventory[0].paired[0].settings_revision,
+        7
+    );
+}
+
+#[test]
 fn equal_runtime_projection_does_not_wake_managers() {
     let mut orch = orchestrator(Config::default());
     orch.devices = vec![dev("a", 1, true)];

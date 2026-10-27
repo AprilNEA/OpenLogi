@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
+use openlogi_core::device::{Capabilities, DeviceKind, RawDeviceAddress, StandaloneDevice};
+use openlogi_device_registry::g600::{G600_DRIVER_ID, G600_NAME, matches_g600};
+use openlogi_device_registry::headset::{GAMING_HEADSET_DRIVER_ID, find_gaming_headset};
 use openlogi_device_registry::litra::find_litra;
 
 use super::InventoryError;
@@ -20,37 +22,99 @@ pub async fn enumerate_standalone(
     let devices = backend.enumerate().await?;
     let devices: Vec<_> = devices
         .into_iter()
-        .filter_map(|device| {
-            let descriptor = find_litra(
-                device.vendor_id,
-                device.product_id,
-                device.usage_page,
-                device.usage_id,
-            )?;
-            let identity = device.identity();
-            Some(StandaloneDevice {
-                address: RawDeviceAddress {
-                    vendor_id: device.vendor_id,
-                    product_id: device.product_id,
-                    usage_page: device.usage_page,
-                    usage_id: device.usage_id,
-                    identity,
-                },
-                display_name: device.name.clone(),
-                manufacturer: device.manufacturer.clone(),
-                serial_number: device.serial_number.clone(),
-                unit_id: [0; 4],
-                kind: DeviceKind::Light,
-                online: true,
-                capabilities: None,
-                light_capabilities: Some(litra_capabilities(descriptor.model)),
-                driver_id: descriptor.driver_id.to_owned(),
-                registry_model_id: Some(descriptor.registry_model_id.to_owned()),
-            })
-        })
+        .filter_map(|device| standalone_device(&device))
         .collect();
     validate_no_ambiguous_nodes(&devices)?;
     Ok(devices)
+}
+
+/// Classifies one enumerated HID node against every standalone driver family
+/// OpenLogi recognizes, in precedence order. `None` when no family claims it.
+fn standalone_device(device: &crate::backend::NodeInfo) -> Option<StandaloneDevice> {
+    if let Some(descriptor) = find_litra(
+        device.vendor_id,
+        device.product_id,
+        device.usage_page,
+        device.usage_id,
+    ) {
+        return Some(StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: device.vendor_id,
+                product_id: device.product_id,
+                usage_page: device.usage_page,
+                usage_id: device.usage_id,
+                identity: device.identity(),
+            },
+            display_name: device.name.clone(),
+            manufacturer: device.manufacturer.clone(),
+            serial_number: device.serial_number.clone(),
+            unit_id: [0; 4],
+            kind: DeviceKind::Light,
+            online: true,
+            capabilities: None,
+            light_capabilities: Some(litra_capabilities(descriptor.model)),
+            driver_id: descriptor.driver_id.to_owned(),
+            registry_model_id: Some(descriptor.registry_model_id.to_owned()),
+        });
+    }
+
+    if let Some(descriptor) = find_gaming_headset(
+        device.vendor_id,
+        device.product_id,
+        device.usage_page,
+        device.usage_id,
+    ) {
+        return Some(StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: device.vendor_id,
+                product_id: device.product_id,
+                usage_page: device.usage_page,
+                usage_id: device.usage_id,
+                identity: device.identity(),
+            },
+            display_name: descriptor.name.to_owned(),
+            manufacturer: device.manufacturer.clone(),
+            serial_number: device.serial_number.clone(),
+            unit_id: [0; 4],
+            kind: DeviceKind::Headset,
+            online: true,
+            capabilities: None,
+            light_capabilities: None,
+            driver_id: GAMING_HEADSET_DRIVER_ID.to_owned(),
+            registry_model_id: Some(descriptor.registry_model_id.to_owned()),
+        });
+    }
+
+    if matches_g600(
+        device.vendor_id,
+        device.product_id,
+        device.usage_page,
+        device.usage_id,
+    ) {
+        return Some(StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: device.vendor_id,
+                product_id: device.product_id,
+                usage_page: device.usage_page,
+                usage_id: device.usage_id,
+                identity: device.identity(),
+            },
+            display_name: G600_NAME.to_owned(),
+            manufacturer: device.manufacturer.clone(),
+            serial_number: device.serial_number.clone(),
+            unit_id: [0; 4],
+            kind: DeviceKind::Mouse,
+            online: true,
+            // Measured, not unknown: `None` would make clients presume a
+            // mouse's HID++ button and pointer controls this device lacks.
+            capabilities: Some(Capabilities::default()),
+            light_capabilities: None,
+            driver_id: G600_DRIVER_ID.to_owned(),
+            registry_model_id: None,
+        });
+    }
+
+    None
 }
 
 /// Reject multiple nodes that the route cannot distinguish safely.
@@ -94,15 +158,47 @@ fn validate_no_ambiguous_nodes(devices: &[StandaloneDevice]) -> Result<(), Inven
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
+    use openlogi_core::device::{Capabilities, DeviceKind, RawDeviceAddress, StandaloneDevice};
 
+    use crate::backend::{NodeId, NodeInfo};
     use crate::write::matches_litra;
 
-    use super::{InventoryError, validate_no_ambiguous_nodes};
+    use super::{InventoryError, standalone_device, validate_no_ambiguous_nodes};
 
     #[test]
     fn glow_fixture_matches_standalone_driver() {
         assert!(matches_litra(0x046d, 0xc900, 0xff43, 0x0202));
+    }
+
+    fn g600_node(usage_page: u16, usage_id: u16) -> NodeInfo {
+        NodeInfo {
+            id: NodeId::from("g600-node".to_string()),
+            vendor_id: 0x046d,
+            product_id: 0xc24a,
+            usage_page,
+            usage_id,
+            name: "Logitech Gaming Mouse G600".into(),
+            manufacturer: Some("Logitech".into()),
+            serial_number: None,
+        }
+    }
+
+    #[test]
+    fn g600_vendor_collection_is_an_identity_only_mouse() {
+        let device = standalone_device(&g600_node(0xff80, 0x0080)).expect("G600 is recognized");
+
+        assert_eq!(device.kind, DeviceKind::Mouse);
+        assert_eq!(device.display_name, "G600 Gaming Mouse");
+        assert_eq!(device.driver_id, "logitech-g600");
+        assert_eq!(device.address.identity, "id:g600-node");
+        assert_eq!(device.capabilities, Some(Capabilities::default()));
+        assert!(device.light_capabilities.is_none());
+    }
+
+    #[test]
+    fn g600_mouse_and_keyboard_collections_are_ignored() {
+        assert!(standalone_device(&g600_node(0x0001, 0x0002)).is_none());
+        assert!(standalone_device(&g600_node(0x0001, 0x0006)).is_none());
     }
 
     fn raw(identity: &str) -> StandaloneDevice {

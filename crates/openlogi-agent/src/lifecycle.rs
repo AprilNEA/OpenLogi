@@ -18,6 +18,8 @@
 //! sunk launch-at-login switch makes an unwanted login start possible; Windows
 //! and Linux only ever start wanted, so their gate passes unconditionally.
 
+#[cfg(target_os = "macos")]
+pub(crate) mod armed_session;
 mod transition;
 
 use std::sync::Arc;
@@ -25,12 +27,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
+use openlogi_agent_core::watchers::input_monitoring::InputMonitoring;
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
+use openlogi_agent_core::watchers::light::LightEvent;
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
@@ -42,6 +47,7 @@ use openlogi_ipc::ClientKind;
 use self::transition::{Replacement, WatcherFleet};
 use crate::shutdown::{self, ShutdownRequest, ShutdownRequests, ShutdownSignals};
 use crate::startup::{self, Core, InputServices};
+use crate::virtual_keyboard::VirtualKeyboard;
 use crate::{autostart, overlay, server};
 
 /// How long a dormant agent waits before leaving — generous next to the
@@ -129,9 +135,19 @@ impl Booted {
     /// respawn. Demand is a [`ClientKind::Gui`] declaration, not a mere
     /// connection: other clients are served without waking anything, and the
     /// takeover probe never declares at all.
+    ///
+    /// The same trigger also fires after a crash, and that start was wanted:
+    /// an agent armed earlier in this login session that did not leave
+    /// through a final exit re-arms at once (see [`armed_session`]).
     #[cfg(target_os = "macos")]
     async fn gate(mut self) -> Option<Wanted> {
         if self.launch_at_login {
+            return Some(Wanted(self));
+        }
+        if armed_session::rearm() {
+            info!(
+                "launch_at_login is off, but this login armed an agent that did not quit — re-arming"
+            );
             return Some(Wanted(self));
         }
         info!("launch_at_login is off — dormant until a client demands arming");
@@ -208,8 +224,11 @@ impl Wanted {
         } = self.0;
         #[cfg(target_os = "macos")]
         let _ = armed_tx.send(());
+        #[cfg(target_os = "macos")]
+        armed_session::record();
         overlay::spawn();
         prompt_missing_accessibility(capture_mouse_events);
+        let virtual_keyboard = VirtualKeyboard::install();
 
         let Core {
             orchestrator,
@@ -217,9 +236,11 @@ impl Wanted {
             observable,
             event_monitor,
             inputs,
+            backlight_overlay,
             ring_haptics,
             demand,
         } = core;
+        observable.set_virtual_keyboard(virtual_keyboard.status());
         // Closing the channel turns post-arming declarations into no-ops in
         // the server's `declare_client` handler.
         drop(demand);
@@ -230,12 +251,15 @@ impl Wanted {
                 observable,
                 event_monitor,
                 inputs,
+                backlight_overlay,
                 ring_haptics,
                 signals,
                 shutdown_requests,
                 hidpp_watchers: WatcherFleet::Inactive,
                 hook: None,
                 capture_mouse_events,
+                held_pointer: None,
+                virtual_keyboard,
             },
         }
     }
@@ -255,6 +279,7 @@ struct Running {
     observable: Arc<ObservableState>,
     event_monitor: Arc<EventMonitor>,
     inputs: InputServices,
+    backlight_overlay: BacklightOverlayManager,
     ring_haptics: server::RingHapticPlayer,
     signals: ShutdownSignals,
     shutdown_requests: ShutdownRequests,
@@ -263,6 +288,15 @@ struct Running {
     /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
+    /// The pointer context held back while the ring was showing, applied when
+    /// it closes. The watcher publishes only transitions, so a pointer that
+    /// left the ring for another unidentifiable surface sends nothing more.
+    held_pointer: Option<openlogi_hook::PointerContext>,
+    /// The virtual HID keyboard synthesized keys type through, when this
+    /// platform and build have one; without it macOS posts them as
+    /// `CGEvent`s. The exit path releases it only after the action workers
+    /// that press keys stopped.
+    virtual_keyboard: VirtualKeyboard,
 }
 
 impl Armed {
@@ -273,19 +307,24 @@ impl Armed {
         #[cfg(target_os = "macos")]
         if request_input_monitoring_and_schedule_relaunch().await {
             running
-                .shut_down("Input Monitoring permission relaunch", None)
+                .hand_over("Input Monitoring permission relaunch")
                 .await;
         }
 
         // HID++ watchers need no Accessibility — start them up front.
         running.restart_hidpp_watchers();
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
+        let mut ring = running.inputs.ring.subscribe();
 
         info!("openlogi-agent started");
         loop {
             tokio::select! {
                 biased;
 
+                // Logout, a developer, or the stale-agent takeover — each
+                // means "stop". The takeover's successor would rather find
+                // the armed session, but it is GUI-started and armed by that
+                // GUI's declaration, so nothing is lost by treating it alike.
                 () = running.signals.recv() => {
                     running.shut_down("shutdown signal", None).await;
                 }
@@ -301,6 +340,17 @@ impl Armed {
                 Some(device_key) = running.inputs.triggers.recv() => {
                     running.begin_action_ring(device_key.as_deref()).await;
                 }
+                Ok(()) = ring.changed() => {
+                    running.apply_held_pointer().await;
+                }
+                () = running.virtual_keyboard.lost() => {
+                    info!("virtual HID keyboard is gone — reporting it unavailable");
+                    // Already removed: dropping the handle removes nothing.
+                    running.virtual_keyboard = VirtualKeyboard::default();
+                    running
+                        .observable
+                        .set_virtual_keyboard(running.virtual_keyboard.status());
+                }
                 else => break,
             }
         }
@@ -308,11 +358,11 @@ impl Armed {
 }
 
 impl Running {
-    /// Retire a terminal Windows hook worker and publish that input capture is
-    /// no longer installed. The native callbacks have already been cleared,
-    /// so the interval before this check remains pass-through rather than
+    /// Retire a terminal hook worker and publish that input capture is no
+    /// longer installed. The native callbacks have already been cleared, so
+    /// the interval before this check remains pass-through rather than
     /// suppressing input without a consumer.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     async fn apply_hook_health(&mut self) {
         let Some(hook) = self.hook.as_ref() else {
             return;
@@ -320,14 +370,32 @@ impl Running {
         if hook.is_running() {
             return;
         }
-        warn!("Windows hook worker exited — marking input capture unavailable");
+        warn!("input hook stopped — marking input capture unavailable");
         self.stop_hook();
+        self.publish_hook().await;
+    }
+
+    /// The Linux hook only grabs mice present at start, so retry on inventory changes.
+    #[cfg(target_os = "linux")]
+    async fn reinstall_hook(&mut self) {
+        if self.hook.is_some() || !self.capture_mouse_events {
+            return;
+        }
+        self.hook = self.start_hook();
+        if self.hook.is_some() {
+            self.publish_hook().await;
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    async fn publish_hook(&self) {
+        let installed = self.hook.is_some();
         self.orchestrator
             .lock()
             .await
-            .set_os_mouse_hook_available(false);
+            .set_os_mouse_hook_available(installed);
         self.observable
-            .set_accessibility_and_hook(Hook::has_accessibility(), false);
+            .set_accessibility_and_hook(Hook::has_accessibility(), installed);
     }
 
     /// Fold one watcher event into the agent's state.
@@ -340,21 +408,39 @@ impl Running {
 
         // Inventory and foreground-app samples make this a health
         // reconciliation without another timer in the control-plane loop.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         self.apply_hook_health().await;
 
         match event {
             WatcherEvent::Inventory(event) => {
+                #[cfg(target_os = "linux")]
+                let has_devices = matches!(
+                    &event,
+                    InventoryEvent::Snapshot { inventories, .. } if !inventories.is_empty()
+                );
                 self.apply_inventory(event, inventory_refresh).await;
+                #[cfg(target_os = "linux")]
+                if has_devices {
+                    self.reinstall_hook().await;
+                }
             }
             WatcherEvent::Camera(active) => {
                 self.orchestrator.lock().await.set_camera_active(active);
             }
             WatcherEvent::App(app) => self.apply_foreground(app).await,
+            WatcherEvent::Pointer(context) if self.pointer_is_over_the_ring(context.target) => {
+                debug!("pointer is over the Actions Ring — keeping the profile that opened it");
+                self.held_pointer = Some(context);
+            }
             WatcherEvent::Pointer(context) => self.apply_pointer_context(context).await,
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
-            WatcherEvent::InputMonitoring(granted) => {
-                self.observable.set_input_monitoring_granted(granted);
+            WatcherEvent::InputMonitoring(state) => self.apply_input_monitoring(state).await,
+            WatcherEvent::SecureInput(state) => self.observable.set_secure_input(state),
+            WatcherEvent::Light(LightEvent::Read { route, state }) => {
+                self.orchestrator.lock().await.light_read(&route, state);
+            }
+            WatcherEvent::Light(LightEvent::Changed { route, change }) => {
+                self.orchestrator.lock().await.light_changed(&route, change);
             }
             // Watcher thread death — without a snapshot the GUI would scan
             // forever.
@@ -366,8 +452,16 @@ impl Running {
                 #[cfg(target_os = "macos")]
                 warn!("camera watcher channel closed — disabling camera automation updates");
             }
+            // Off macOS the channel closes at once and this changes nothing. On
+            // macOS a dead watcher must not leave a stale notice up.
+            WatcherEvent::Lost(Watcher::SecureInput) => {
+                #[cfg(target_os = "macos")]
+                warn!("secure-input watcher channel closed — reporting Secure Event Input as off");
+                self.observable
+                    .set_secure_input(openlogi_ipc::SecureInput::Off);
+            }
             WatcherEvent::Lost(Watcher::Pointer) if openlogi_hook::pointer_context_supported() => {
-                warn!("pointer watcher channel closed — disabling pointer-scoped remaps");
+                warn!("pointer watcher channel closed — using an unidentified pointer context");
                 self.apply_pointer_context(openlogi_hook::PointerContext {
                     app: None,
                     target: openlogi_hook::PointerTarget::Unavailable,
@@ -385,9 +479,18 @@ impl Running {
                 inventories,
                 standalone,
                 hid_open_failures,
+                confirms_volatile_settings,
             } => {
                 let mut orchestrator = self.orchestrator.lock().await;
-                orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+                if confirms_volatile_settings {
+                    orchestrator.refresh_inventory_for_settings_confirmation(
+                        &inventories,
+                        &standalone,
+                        hid_open_failures,
+                    );
+                } else {
+                    orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+                }
                 let confirm_settings = orchestrator.needs_reapply_confirmation();
                 drop(orchestrator);
                 if confirm_settings {
@@ -400,10 +503,27 @@ impl Running {
             // Devices likely power-cycled during the sleep; the next snapshot
             // re-applies their volatile settings (#189).
             InventoryEvent::SystemWake => {
+                self.orchestrator.lock().await.reapply_after_system_resume();
+            }
+            InventoryEvent::BacklightChanged {
+                device_index: _,
+                current_level,
+                levels,
+                visible,
+            } => {
+                self.backlight_overlay.show(current_level, levels, visible);
+            }
+            InventoryEvent::LockKeyChanged(change) => {
+                self.orchestrator.lock().await.announce_lock_key(change);
+            }
+            // A device broadcast its own reconnection (`0x1d4b`): reconfigure
+            // it on the next snapshot even if no reconciliation ever saw it
+            // offline.
+            InventoryEvent::DeviceWake => {
                 self.orchestrator
                     .lock()
                     .await
-                    .reapply_volatile_on_next_refresh();
+                    .reapply_reconnected_on_next_refresh();
             }
         }
     }
@@ -416,7 +536,33 @@ impl Running {
         }
     }
 
-    async fn apply_pointer_context(&self, context: openlogi_hook::PointerContext) {
+    /// While the ring is showing, the pointer is over the ring's own floating
+    /// window, which classifies as `PointerTarget::Unavailable`. Publishing
+    /// that context would rebuild the bindings without the per-app profile, so
+    /// a ring bound only in that app's profile would hear its second trigger
+    /// press as the button's global action and never close. The ring belongs
+    /// to the app it was opened over; its window is not a profile change.
+    fn pointer_is_over_the_ring(&self, target: openlogi_hook::PointerTarget) -> bool {
+        target == openlogi_hook::PointerTarget::Unavailable && self.inputs.ring.is_showing()
+    }
+
+    /// Once the ring has closed, apply the pointer context held back while it
+    /// showed. An `Unavailable` surface is not always the ring: the pointer may
+    /// have moved onto another floating window and stayed there, and without
+    /// this the opening app's bindings would outlive the ring.
+    async fn apply_held_pointer(&mut self) {
+        if self.held_pointer.is_none() || self.inputs.ring.is_showing() {
+            return;
+        }
+        if let Some(context) = self.held_pointer.take() {
+            debug!("Actions Ring closed — applying the pointer context held while it showed");
+            self.apply_pointer_context(context).await;
+        }
+    }
+
+    async fn apply_pointer_context(&mut self, context: openlogi_hook::PointerContext) {
+        // Anything newer supersedes what the ring held back.
+        self.held_pointer = None;
         let current = context.target;
         if self.orchestrator.lock().await.set_pointer_context(context) {
             self.inputs
@@ -427,7 +573,8 @@ impl Running {
 
     async fn begin_action_ring(&self, device_key: Option<&str>) {
         // A second trigger press while the ring is showing closes it.
-        if self.inputs.ring.dismiss_active() {
+        if let Some(dismissed) = self.inputs.ring.dismiss_active() {
+            self.ring_haptics.end_session(dismissed);
             return;
         }
         if let Some(session) = self
@@ -436,10 +583,14 @@ impl Running {
             .await
             .action_ring_session(device_key)
         {
-            // Re-arm the firmware haptic engine first: power transitions can
-            // clear it, after which plays are accepted without feedback.
-            self.ring_haptics.arm(session.haptic_route.clone());
-            self.inputs.ring.begin(session);
+            let haptic_route = session.haptic_route.clone();
+            let invocation = self.inputs.ring.begin(session);
+            // Re-arm the firmware haptic engine before the first buzz: power
+            // transitions can clear it, after which plays are accepted
+            // without feedback. This still precedes every hover, because the
+            // overlay can only hover once it has observed the invocation.
+            self.ring_haptics
+                .begin_session(invocation.session_id, haptic_route);
         }
     }
 
@@ -460,6 +611,27 @@ impl Running {
             .set_os_mouse_hook_available(self.hook.is_some());
         self.observable
             .set_accessibility_and_hook(granted, self.hook.is_some());
+    }
+
+    /// Publish whether this process holds Input Monitoring, and relaunch when
+    /// the grant arrived after this process asked for it: macOS applies it
+    /// only to a process started after it.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            clippy::unused_async,
+            reason = "only the macOS relaunch awaits the handover"
+        )
+    )]
+    async fn apply_input_monitoring(&mut self, state: InputMonitoring) {
+        self.observable.set_input_monitoring_granted(state.held());
+        #[cfg(target_os = "macos")]
+        if state == InputMonitoring::NeedsRelaunch
+            && crate::input_monitoring::schedule_relaunch_for_late_grant()
+        {
+            self.hand_over("Input Monitoring granted after launch")
+                .await;
+        }
     }
 
     /// Install the OS mouse hook, or say why it stays off.
@@ -500,6 +672,12 @@ impl Running {
                 self.shut_down("the app was uninstalled", None).await;
             }
             ShutdownRequest::Restart { path, retry } => {
+                // A replacement ends the ring session as an exit does, and
+                // the successor knows nothing of an enable this agent owes:
+                // hand it back while inventory still publishes the channels.
+                // No session arms until the agent stays, see
+                // `restart_hidpp_watchers`.
+                self.ring_haptics.finish().await;
                 self.hidpp_watchers
                     .begin_replacement(Replacement { path, retry });
             }
@@ -519,6 +697,9 @@ impl Running {
     }
 
     fn restart_hidpp_watchers(&mut self) {
+        // The agent stays — at startup, or after a replacement that did not
+        // happen — so ring sessions arm the haptic engine again.
+        self.ring_haptics.resume();
         self.hidpp_watchers =
             WatcherFleet::Running(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
     }
@@ -547,22 +728,70 @@ impl Running {
         self.exit_after_replacement_teardown("binary update");
     }
 
+    /// Leave for good: nobody wants the agent until asked again, so the next
+    /// start in this login is a GUI demand, never a respawn to re-arm.
+    ///
+    /// Hands `0x8071` RGB control back first, as G HUB and Solaar do on exit,
+    /// while inventory still publishes the channels it needs. A handover or
+    /// replacement keeps it: the successor repaints on arrival.
     async fn shut_down(
         &mut self,
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> ! {
+        #[cfg(target_os = "macos")]
+        armed_session::clear();
+        self.shared.release_rgb_control().await;
+        self.leave(reason, tray_guard).await
+    }
+
+    /// Leave for a successor that is already scheduled and must start armed:
+    /// the armed-session record stays for it to find.
+    #[cfg(target_os = "macos")]
+    async fn hand_over(&mut self, reason: &str) -> ! {
+        self.leave(reason, None).await
+    }
+
+    /// Hand back the haptic enable an open Actions Ring session may owe,
+    /// drain the HID++ fleet, release the hook, and end the process.
+    ///
+    /// Leaving ends the ring session whether or not a successor follows, and
+    /// a successor knows nothing of the enable. The restore runs first, while
+    /// inventory still publishes the channels it needs.
+    async fn leave(
+        &mut self,
+        reason: &str,
+        tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> ! {
+        self.ring_haptics.finish().await;
         std::mem::replace(&mut self.hidpp_watchers, WatcherFleet::Inactive)
             .stop_for_exit()
             .await;
-        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, tray_guard)
+        self.release_and_exit(reason, tray_guard)
     }
 
     /// End after [`Self::complete_replacement`] resolved firmware
-    /// ownership, so a successor starts from native device state.
+    /// ownership, so a successor starts from native device state. A handover
+    /// like [`Self::hand_over`]: the successor finds the armed session.
     #[cfg(any(target_os = "macos", not(unix)))]
     fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
-        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None)
+        self.release_and_exit(reason, None)
+    }
+
+    /// Release the hook, the input workers and the virtual keyboard, then
+    /// end the process.
+    fn release_and_exit(
+        &mut self,
+        reason: &str,
+        tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> ! {
+        shutdown::release_hook_and_exit(
+            self.hook.take(),
+            &mut self.inputs,
+            std::mem::take(&mut self.virtual_keyboard),
+            reason,
+            tray_guard,
+        )
     }
 }
 

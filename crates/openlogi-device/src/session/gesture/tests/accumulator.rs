@@ -4,12 +4,69 @@ use super::*;
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 
+#[test]
+fn alternate_gesture_control_delivers_click_and_swipe() {
+    for swipe in [false, true] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = CaptureAccum::default();
+        let sources = &[0x00d0];
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::DivertedButtons([0x00d0, 0, 0, 0]),
+            sources,
+            &[],
+            &[],
+            &tx,
+        );
+        if swipe {
+            acc.backdate_hold_for_test();
+            stale_report(&mut acc, &tx);
+            handle_reprog(
+                &mut acc,
+                RawControlEvent::RawXy { dx: 120, dy: 5 },
+                sources,
+                &[],
+                &[],
+                &tx,
+            );
+        }
+        handle_reprog(&mut acc, release(), sources, &[], &[], &tx);
+        assert_eq!(
+            next_gesture(&mut rx),
+            Ok(CapturedInput::Gesture(
+                ButtonId::GestureButton,
+                if swipe {
+                    GestureDirection::Right
+                } else {
+                    GestureDirection::Click
+                },
+                None
+            ))
+        );
+        assert!(
+            next_gesture(&mut rx).is_err(),
+            "one hold must dispatch only once"
+        );
+    }
+}
+
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
 
 const BOTH: &[u16] = &[
     reprog_controls::GESTURE_BUTTON_CID,
     reprog_controls::HAPTIC_PANEL_CID,
 ];
+
+/// Feed the stale first report every fresh hold opens with: travel from
+/// before the press, far past every threshold and pointing away from any
+/// stroke these tests make.
+fn stale_report(acc: &mut CaptureAccum, tx: &mpsc::UnboundedSender<CapturedInput>) {
+    let stale = RawControlEvent::RawXy {
+        dx: -3000,
+        dy: 2400,
+    };
+    handle_reprog(acc, stale, &[], &[], &[], tx);
+}
 
 fn press() -> RawControlEvent {
     RawControlEvent::DivertedButtons([reprog_controls::GESTURE_BUTTON_CID, 0, 0, 0])
@@ -39,8 +96,9 @@ fn next_gesture(
 ) -> Result<CapturedInput, mpsc::error::TryRecvError> {
     loop {
         let input = rx.try_recv()?;
-        if matches!(input, CapturedInput::Gesture(..)) {
-            return Ok(input);
+        // The trace is diagnostic payload; compare the gesture itself.
+        if let CapturedInput::Gesture(button, direction, _) = input {
+            return Ok(CapturedInput::Gesture(button, direction, None));
         }
     }
 }
@@ -61,7 +119,8 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Click
+            GestureDirection::Click,
+            None
         )),
         "the released holder still clicks"
     );
@@ -79,7 +138,8 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         )),
         "the taken-over hold dispatches through the panel's own map"
     );
@@ -130,7 +190,8 @@ fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         )),
         "the original hold resumes once the overlap ends"
     );
@@ -150,7 +211,8 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Click
+            GestureDirection::Click,
+            None
         )),
         "the swapped-out holder still clicks"
     );
@@ -181,7 +243,8 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         ))
     );
 }
@@ -192,6 +255,9 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    // Past the stale report, so the travel below reaches the accumulator and
+    // only the hold-time gate stands between it and a swipe.
+    stale_report(&mut acc, &tx);
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -206,7 +272,8 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Click
+            GestureDirection::Click,
+            None
         ))
     );
     assert!(
@@ -221,6 +288,7 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    stale_report(&mut acc, &tx);
     // Pretend the button has been held well past the swipe gate.
     acc.backdate_hold_for_test();
     handle_reprog(
@@ -236,7 +304,8 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         ))
     );
 
@@ -280,7 +349,8 @@ fn the_haptic_panel_gestures_when_diverted_for_gestures() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
-            GestureDirection::Up
+            GestureDirection::Up,
+            None
         ))
     );
 
@@ -303,7 +373,8 @@ fn a_quick_panel_tap_is_a_click() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
-            GestureDirection::Click
+            GestureDirection::Click,
+            None
         ))
     );
     assert!(
@@ -349,36 +420,56 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         ))
     );
 }
 
 #[test]
-fn the_dedicated_buttons_first_sample_is_not_discarded() {
-    // The discard is a panel quirk: the dedicated button's raw-XY stream is
-    // relative from the first sample, which must keep committing as-is.
+fn the_dedicated_buttons_first_sample_is_discarded_as_stale() {
+    // Recorded on an MX Master 3S over Bluetooth: the first raw-XY report of
+    // each hold carried the travel since the previous hold's last report —
+    // here the hand's return stroke, leftward and far past every threshold —
+    // before the rightward swipe the hold was actually making.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
+    let xy = |dx, dy| RawControlEvent::RawXy { dx, dy };
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     acc.backdate_hold_for_test();
-    handle_reprog(
-        &mut acc,
-        RawControlEvent::RawXy { dx: 120, dy: 5 },
-        GESTURE,
-        &[],
-        &[],
-        &tx,
+    handle_reprog(&mut acc, xy(-2717, -105), GESTURE, &[], &[], &tx);
+    assert!(
+        next_gesture(&mut rx).is_err(),
+        "travel from before the press must not commit a direction"
     );
-
+    for dx in [115, 49, 76, 66] {
+        handle_reprog(&mut acc, xy(dx, 2), GESTURE, &[], &[], &tx);
+    }
     assert_eq!(
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         )),
-        "the dedicated button's very first sample still counts"
+        "the stroke made during the hold decides"
+    );
+
+    // Every press opens with its own stale report, not just the first.
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    acc.backdate_hold_for_test();
+    handle_reprog(&mut acc, xy(633, -1234), GESTURE, &[], &[], &tx);
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Click,
+            None
+        )),
+        "a hold with only its stale report is a click"
     );
 }
 
@@ -439,25 +530,41 @@ fn a_plain_diverted_gesture_button_presses_without_gesturing() {
     // single binding needs delivery) must dispatch as a button press only —
     // the swipe accumulator belongs to the raw-XY gesture diverts and must
     // not also emit a gesture click on release.
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut acc = CaptureAccum::default();
-    let buttons = [(reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton)];
+    for cid in [0x00c3, 0x00d0] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = CaptureAccum::default();
+        let buttons = [(cid, ButtonId::GestureButton)];
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+            &[],
+            &[],
+            &buttons,
+            &tx,
+        );
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy { dx: 120, dy: 5 },
+            &[],
+            &[],
+            &buttons,
+            &tx,
+        );
+        handle_reprog(&mut acc, release(), &[], &[], &buttons, &tx);
 
-    handle_reprog(&mut acc, press(), &[], &[], &buttons, &tx);
-    handle_reprog(&mut acc, release(), &[], &[], &buttons, &tx);
-
-    assert_eq!(
-        rx.try_recv(),
-        Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
-    );
-    assert_eq!(
-        rx.try_recv(),
-        Ok(CapturedInput::ButtonUp(ButtonId::GestureButton))
-    );
-    assert!(
-        rx.try_recv().is_err(),
-        "a plain-diverted gesture button must not also emit a gesture click"
-    );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
+        );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonUp(ButtonId::GestureButton))
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a plain-diverted gesture button must not also emit a gesture click"
+        );
+    }
 }
 
 #[test]
@@ -523,6 +630,7 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
     acc.on_event(down, &[], &[], &buttons, &[], &tx);
+    stale_report(&mut acc, &tx);
     acc.backdate_hold_for_test();
     acc.on_event(
         RawControlEvent::RawXy { dx: -120, dy: 5 },
@@ -539,10 +647,11 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
         Ok(CapturedInput::ButtonDown(ButtonId::Forward))
     );
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::Forward,
-            GestureDirection::Left
+            GestureDirection::Left,
+            None
         ))
     );
     assert_eq!(
@@ -571,10 +680,11 @@ fn a_side_gesture_button_tap_is_a_click() {
         Ok(CapturedInput::ButtonDown(ButtonId::Forward))
     );
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::Forward,
-            GestureDirection::Click
+            GestureDirection::Click,
+            None
         ))
     );
     assert_eq!(
@@ -593,6 +703,7 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
     acc.on_event(down, &[], &[], &buttons, &[], &tx);
+    stale_report(&mut acc, &tx);
     acc.backdate_hold_for_test();
     acc.on_event(
         RawControlEvent::RawXy { dx: 5, dy: -120 },
@@ -609,10 +720,11 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
         Ok(CapturedInput::ButtonDown(ButtonId::DpiToggle))
     );
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::DpiToggle,
-            GestureDirection::Up
+            GestureDirection::Up,
+            None
         ))
     );
     assert_eq!(
@@ -672,4 +784,139 @@ fn a_dpi_button_re_presses_after_a_release() {
         rx.try_recv().is_err(),
         "press → release → press emits exactly three lifecycle edges"
     );
+}
+
+const BACK: u16 = 0x0053;
+const FORWARD: u16 = 0x0056;
+const WHEEL_BUTTONS: &[(u16, ButtonId)] = &[(BACK, ButtonId::Back), (FORWARD, ButtonId::Forward)];
+
+fn hold(acc: &mut CaptureAccum, cids: [u16; 4], tx: &mpsc::UnboundedSender<CapturedInput>) {
+    handle_reprog(
+        acc,
+        RawControlEvent::DivertedButtons(cids),
+        &[],
+        &[],
+        WHEEL_BUTTONS,
+        tx,
+    );
+}
+
+fn raw_wheel(
+    resolution: reprog_controls::RawWheelResolution,
+    delta: i16,
+) -> reprog_controls::RawWheelEvent {
+    reprog_controls::RawWheelEvent { resolution, delta }
+}
+
+fn held_wheel(rx: &mut mpsc::UnboundedReceiver<CapturedInput>) -> Vec<CapturedInput> {
+    std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|input| matches!(input, CapturedInput::HeldWheel { .. }))
+        .collect()
+}
+
+#[test]
+fn raw_wheel_under_a_held_wheel_hold_button_scrolls_for_it() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold(&mut acc, [BACK, 0, 0, 0], &tx);
+    let eight = NonZeroU8::new(8);
+    acc.on_raw_wheel(
+        raw_wheel(reprog_controls::RawWheelResolution::Low, -2),
+        WHEEL_BUTTONS,
+        eight,
+        &tx,
+    );
+    acc.on_raw_wheel(
+        raw_wheel(reprog_controls::RawWheelResolution::High, 5),
+        WHEEL_BUTTONS,
+        eight,
+        &tx,
+    );
+    assert_eq!(
+        held_wheel(&mut rx),
+        [
+            CapturedInput::HeldWheel {
+                button: ButtonId::Back,
+                delta: -2,
+                per_notch: NonZeroU8::MIN
+            },
+            CapturedInput::HeldWheel {
+                button: ButtonId::Back,
+                delta: 5,
+                per_notch: NonZeroU8::new(8).expect("non-zero")
+            },
+        ]
+    );
+}
+
+#[test]
+fn raw_wheel_belongs_to_the_earliest_pressed_wheel_button() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold(&mut acc, [FORWARD, 0, 0, 0], &tx);
+    hold(&mut acc, [BACK, FORWARD, 0, 0], &tx);
+    acc.on_raw_wheel(
+        raw_wheel(reprog_controls::RawWheelResolution::Low, 1),
+        WHEEL_BUTTONS,
+        None,
+        &tx,
+    );
+    hold(&mut acc, [BACK, 0, 0, 0], &tx);
+    acc.on_raw_wheel(
+        raw_wheel(reprog_controls::RawWheelResolution::Low, 1),
+        WHEEL_BUTTONS,
+        None,
+        &tx,
+    );
+    let buttons: Vec<_> = held_wheel(&mut rx)
+        .into_iter()
+        .map(|input| match input {
+            CapturedInput::HeldWheel { button, .. } => button,
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    assert_eq!(buttons, [ButtonId::Forward, ButtonId::Back]);
+}
+
+#[test]
+fn raw_wheel_that_cannot_be_attributed_or_scaled_is_dropped() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    // Nothing held: a release crossed the report in flight.
+    acc.on_raw_wheel(
+        raw_wheel(reprog_controls::RawWheelResolution::Low, 3),
+        WHEEL_BUTTONS,
+        None,
+        &tx,
+    );
+    // Held, but a plain-diverted button is not a wheel-hold button.
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([0x0052, 0, 0, 0]),
+        &[],
+        &[],
+        &[(0x0052, ButtonId::MiddleClick)],
+        &tx,
+    );
+    acc.on_raw_wheel(
+        raw_wheel(reprog_controls::RawWheelResolution::Low, 3),
+        WHEEL_BUTTONS,
+        None,
+        &tx,
+    );
+    hold(&mut acc, [BACK, 0, 0, 0], &tx);
+    // No movement, and high resolution with no known multiplier.
+    acc.on_raw_wheel(
+        raw_wheel(reprog_controls::RawWheelResolution::Low, 0),
+        WHEEL_BUTTONS,
+        None,
+        &tx,
+    );
+    acc.on_raw_wheel(
+        raw_wheel(reprog_controls::RawWheelResolution::High, 8),
+        WHEEL_BUTTONS,
+        None,
+        &tx,
+    );
+    assert_eq!(held_wheel(&mut rx), []);
 }

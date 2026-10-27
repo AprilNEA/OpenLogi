@@ -1,6 +1,7 @@
 //! The `[app]` block: defaults, opt-ins, scale, gallery layout and asset source.
 
 use super::*;
+use crate::update_feed::UpdateChannel;
 
 #[test]
 fn mouse_profile_target_defaults_for_old_configs_and_roundtrips() {
@@ -155,4 +156,106 @@ fn config_without_asset_source_keeps_automatic_selection() {
         parsed.app_settings.asset_source,
         AssetSourcePreference::Automatic
     );
+}
+
+#[test]
+fn low_battery_notifications_stay_on_unless_turned_off() {
+    assert!(Config::default().app_settings.low_battery_notifications);
+
+    let predating: Config = toml::from_str(
+        r"
+            schema_version = 8
+            [app_settings]
+            auto_download_assets = false
+        ",
+    )
+    .expect("config predating the low-battery setting loads");
+    assert!(predating.app_settings.low_battery_notifications);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.low_battery_notifications = false;
+    assert!(!write_and_read(&cfg).app_settings.low_battery_notifications);
+}
+
+#[test]
+fn lock_key_notifications_stay_on_unless_turned_off() {
+    assert!(Config::default().app_settings.lock_key_notifications);
+
+    let predating: Config = toml::from_str(
+        r"
+            schema_version = 8
+            [app_settings]
+            low_battery_notifications = false
+        ",
+    )
+    .expect("config predating the lock-key setting loads");
+    assert!(predating.app_settings.lock_key_notifications);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.lock_key_notifications = false;
+    assert!(!write_and_read(&cfg).app_settings.lock_key_notifications);
+}
+
+#[test]
+fn desktop_switches_slide_unless_turned_off() {
+    assert!(Config::default().app_settings.animate_desktop_switch);
+
+    let predating: Config = toml::from_str(
+        r"
+            schema_version = 9
+            [app_settings]
+            lock_key_notifications = false
+        ",
+    )
+    .expect("config predating the desktop-switch setting loads");
+    assert!(predating.app_settings.animate_desktop_switch);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.animate_desktop_switch = false;
+    assert!(!write_and_read(&cfg).app_settings.animate_desktop_switch);
+}
+
+#[test]
+fn a_config_without_an_update_channel_writes_back_unchanged() {
+    let mut cfg = Config::default();
+    cfg.app_settings.check_for_updates = true;
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("update_channel"), "{body}");
+
+    let parsed: Config = toml::from_str(&body).expect("config predating the channel loads");
+    assert_eq!(parsed.app_settings.update_channel, None);
+    assert_eq!(toml::to_string_pretty(&parsed).expect("serialize"), body);
+}
+
+#[test]
+fn a_picked_update_channel_roundtrips() {
+    for (channel, spelling) in [
+        (UpdateChannel::Stable, "stable"),
+        (UpdateChannel::Beta, "beta"),
+    ] {
+        let mut cfg = Config::default();
+        cfg.app_settings.update_channel = Some(channel);
+        let body = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(
+            body.contains(&format!("update_channel = \"{spelling}\"")),
+            "{body}"
+        );
+        assert_eq!(
+            write_and_read(&cfg).app_settings.update_channel,
+            Some(channel)
+        );
+    }
+}
+
+#[test]
+fn an_unknown_update_channel_is_rejected() {
+    let error = toml::from_str::<Config>(
+        r#"
+            schema_version = 9
+            [app_settings]
+            update_channel = "nightly"
+        "#,
+    )
+    .expect_err("an unknown channel must not load as another one");
+    assert!(error.to_string().contains("nightly"), "{error}");
 }

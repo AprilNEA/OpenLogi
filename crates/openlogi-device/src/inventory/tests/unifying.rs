@@ -52,6 +52,7 @@ fn unifying_arrival_liveness_survives_missing_feature_data() {
         DeviceKind::Mouse,
         ProbedFeatures::default(),
         true,
+        0,
     );
     assert!(device.online);
     assert_eq!(device.wpid, Some(0x40b8));

@@ -4,6 +4,7 @@ use std::num::NonZeroU8;
 
 use anyhow::{Context, Result};
 use clap::Args;
+use openlogi_core::hid::WriteError;
 use openlogi_hid::{SmartShiftAutoDisengage, TunableTorque};
 
 use crate::cmd::diag::select_device;
@@ -12,7 +13,7 @@ use crate::cmd::diag::select_device;
 pub struct SmartshiftArgs {
     /// Leave the wheel in the toggled mode (skip the second toggle that
     /// restores the original). Useful for visually verifying the flip.
-    #[arg(long, conflicts_with = "sensitivity")]
+    #[arg(long, conflicts_with_all = ["sensitivity", "torque"])]
     pub leave_flipped: bool,
 
     /// Set the auto-disengage sensitivity instead of toggling, keeping the
@@ -20,8 +21,15 @@ pub struct SmartshiftArgs {
     /// free-spin): lower = more sensitive; typical 10-40; 255 = permanent
     /// ratchet (only meaningful while in Ratchet mode; the current mode is
     /// always preserved). `0` is rejected — the device treats it as "no change".
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", conflicts_with = "torque")]
     pub sensitivity: Option<NonZeroU8>,
+
+    /// Set the wheel feedback intensity (ratchet torque) as a percentage (1-100)
+    /// instead of toggling, keeping the current Free/Ratchet mode and sensitivity.
+    /// Only supported on devices with tunable torque (e.g. MX Anywhere 3 / 3S).
+    /// `0` is rejected.
+    #[arg(long, value_name = "PERCENT")]
+    pub torque: Option<NonZeroU8>,
 
     /// Run against the device whose name contains this string
     /// (case-insensitive) instead of auto-selecting. Useful when several
@@ -36,42 +44,11 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
     println!("device: {name} ({route})");
 
     if let Some(n) = args.sensitivity {
-        let requested = SmartShiftAutoDisengage::from(n);
-        let before = openlogi_hid::get_smartshift_status(&route)
-            .await
-            .context("read SmartShift status")?;
-        println!(
-            "  current: mode={:?} sensitivity={}",
-            before.mode, before.auto_disengage
-        );
+        return run_set_sensitivity(&route, n).await;
+    }
 
-        let after = openlogi_hid::set_smartshift_sensitivity(&route, requested)
-            .await
-            .context("set SmartShift sensitivity")?;
-        println!(
-            "  read-back: mode={:?} sensitivity={}",
-            after.mode, after.auto_disengage
-        );
-
-        if after.auto_disengage != requested {
-            anyhow::bail!(
-                "SmartShift sensitivity write not applied: requested {n}, device reports {}",
-                after.auto_disengage
-            );
-        }
-        if after.mode != before.mode {
-            anyhow::bail!(
-                "SmartShift mode changed unexpectedly: was {:?}, now {:?}",
-                before.mode,
-                after.mode
-            );
-        }
-
-        println!(
-            "✓ SmartShift sensitivity set to {n} (mode {:?} preserved)",
-            after.mode
-        );
-        return Ok(());
+    if let Some(n) = args.torque {
+        return run_set_torque(&route, &name, n.get()).await;
     }
 
     let before = openlogi_hid::get_smartshift_status(&route)
@@ -117,5 +94,108 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
         .context("restore SmartShift")?;
 
     println!("✓ SmartShift round-trip OK");
+    Ok(())
+}
+
+async fn run_set_sensitivity(
+    route: &openlogi_hid::DeviceRoute,
+    n: std::num::NonZeroU8,
+) -> Result<()> {
+    let requested = SmartShiftAutoDisengage::from(n);
+    let before = openlogi_hid::get_smartshift_status(route)
+        .await
+        .context("read SmartShift status")?;
+    println!(
+        "  current: mode={:?} sensitivity={}",
+        before.mode, before.auto_disengage
+    );
+
+    let after = openlogi_hid::set_smartshift_sensitivity(route, requested)
+        .await
+        .context("set SmartShift sensitivity")?;
+    println!(
+        "  read-back: mode={:?} sensitivity={}",
+        after.mode, after.auto_disengage
+    );
+
+    if after.auto_disengage != requested {
+        anyhow::bail!(
+            "SmartShift sensitivity write not applied: requested {n}, device reports {}",
+            after.auto_disengage
+        );
+    }
+    if after.mode != before.mode {
+        anyhow::bail!(
+            "SmartShift mode changed unexpectedly: was {:?}, now {:?}",
+            before.mode,
+            after.mode
+        );
+    }
+
+    println!(
+        "✓ SmartShift sensitivity set to {n} (mode {:?} preserved)",
+        after.mode
+    );
+    Ok(())
+}
+
+async fn run_set_torque(
+    route: &openlogi_hid::DeviceRoute,
+    name: &str,
+    percentage: u8,
+) -> Result<()> {
+    let requested = TunableTorque::try_new(percentage).map_err(|_| {
+        anyhow::anyhow!("SmartShift torque must be between 1 and 100% (got {percentage})")
+    })?;
+    let before = openlogi_hid::get_smartshift_status(route)
+        .await
+        .context("read SmartShift status")?;
+    println!(
+        "  current: mode={:?} sensitivity={} torque={}",
+        before.mode,
+        before.auto_disengage,
+        before.tunable_torque.map_or(0, TunableTorque::into_inner)
+    );
+
+    // The torque byte in the status above is no capability claim; the device
+    // layer checks the `0x2111` TUNABLE_TORQUE bit before it writes.
+    let after = match openlogi_hid::set_smartshift_torque(route, requested).await {
+        Err(WriteError::FeatureUnsupported { .. }) => anyhow::bail!(
+            "{name} does not advertise a tunable scrolling force (HID++ 0x2111 TUNABLE_TORQUE)"
+        ),
+        result => result.context("set SmartShift torque")?,
+    };
+    println!(
+        "  read-back: mode={:?} sensitivity={} torque={}",
+        after.mode,
+        after.auto_disengage,
+        after.tunable_torque.map_or(0, TunableTorque::into_inner)
+    );
+
+    if after.tunable_torque != Some(requested) {
+        anyhow::bail!(
+            "SmartShift torque write not applied: requested {percentage}, device reports {}",
+            after.tunable_torque.map_or(0, TunableTorque::into_inner)
+        );
+    }
+    if after.mode != before.mode {
+        anyhow::bail!(
+            "SmartShift mode changed unexpectedly: was {:?}, now {:?}",
+            before.mode,
+            after.mode
+        );
+    }
+    if after.auto_disengage != before.auto_disengage {
+        anyhow::bail!(
+            "SmartShift sensitivity changed unexpectedly: was {}, now {}",
+            before.auto_disengage,
+            after.auto_disengage
+        );
+    }
+
+    println!(
+        "✓ SmartShift torque set to {percentage}% (mode {:?} and sensitivity {} preserved)",
+        after.mode, after.auto_disengage
+    );
     Ok(())
 }

@@ -63,22 +63,28 @@ impl AppState {
         // Merge only completed enumerations. A scanning agent serves an empty
         // pre-enumeration list, which must not burn the GUI's miss grace or
         // replace the last known device set.
-        let inventory = if inventory_ready {
+        let mut inventory = if inventory_ready {
             self.refresh_inventories(&snapshot.inventory, &snapshot.standalone, resolver, cameras)
         } else {
             StateEvents::none()
         };
         if inventory_ready {
+            // An empty receiver still matters to Add Device even when the
+            // merged paired-device list has not changed.
+            if self.last_inventory() != snapshot.inventory {
+                inventory = inventory.and(StateEvent::InventoryChanged);
+            }
             self.store_inventory_snapshot(&snapshot.inventory);
         }
 
         let agent = self.set_agent_link(AgentLink::Ready(snapshot.status.clone()));
         let camera = self.set_camera_active(snapshot.camera_active);
         let foreground = self.set_foreground(snapshot.foreground.clone());
+        let lights = self.adopt_changes_on_lights(&snapshot.lights);
 
         SnapshotChanges {
             inventory_ready,
-            events: inventory.and(agent).and(camera).and(foreground),
+            events: inventory.and(agent).and(camera).and(foreground).and(lights),
         }
     }
 

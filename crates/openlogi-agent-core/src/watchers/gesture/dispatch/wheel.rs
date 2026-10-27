@@ -21,6 +21,9 @@ const ACTION_DECAY: Duration = Duration::from_millis(300);
 /// flick triggers once instead of repeating across a fast spin.
 const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
 
+/// Bound synchronous action dispatch for one captured event.
+const MAX_REPEATS_PER_EVENT: i32 = 20;
+
 /// Per-direction wheel state. Reversing the physical wheel must not cancel
 /// progress already earned in the other direction.
 #[derive(Default)]
@@ -158,17 +161,32 @@ impl WheelDirection {
             increments = 0;
         }
 
-        let cooling_down =
-            last_fired.is_some_and(|time| now.saturating_duration_since(time) < ACTION_COOLDOWN);
-        let (output, last_fired) = if cooling_down {
-            (WheelOutput::Idle, last_fired)
-        } else {
+        let threshold = next_binding.sensitivity.action_threshold();
+        let (output, last_fired) = if is_repeatable(action) {
+            // Volume actions track accumulated distance without the discrete-action cooldown.
             increments += magnitude;
-            if increments >= next_binding.sensitivity.action_threshold() {
-                increments = 0;
-                (WheelOutput::FireAction, Some(now))
+            // Bound synchronous work even when one report spans many thresholds.
+            let repeats = (increments / threshold).min(MAX_REPEATS_PER_EVENT);
+            // Discard whole thresholds above the cap; retain sub-threshold progress.
+            increments %= threshold;
+            if repeats > 0 {
+                (WheelOutput::FireAction(repeats.cast_unsigned()), Some(now))
             } else {
                 (WheelOutput::Idle, last_fired)
+            }
+        } else {
+            let cooling_down = last_fired
+                .is_some_and(|time| now.saturating_duration_since(time) < ACTION_COOLDOWN);
+            if cooling_down {
+                (WheelOutput::Idle, last_fired)
+            } else {
+                increments += magnitude;
+                if increments >= threshold {
+                    increments = 0;
+                    (WheelOutput::FireAction(1), Some(now))
+                } else {
+                    (WheelOutput::Idle, last_fired)
+                }
             }
         };
         self.state = WheelState::Action {
@@ -179,6 +197,11 @@ impl WheelDirection {
         };
         output
     }
+}
+
+/// Only volume actions repeat with thumb-wheel distance.
+fn is_repeatable(action: &Action) -> bool {
+    matches!(action, Action::VolumeUp | Action::VolumeDown)
 }
 
 /// Mutually exclusive state for one physical wheel direction.
@@ -251,8 +274,8 @@ pub(super) enum WheelOutput {
     Idle,
     /// Typed fractional distance for the smooth-scroll runtime or injector.
     Scroll(ScrollDelta),
-    /// Fire the direction's bound discrete action.
-    FireAction,
+    /// Fire the bound action this many times; only volume actions may repeat.
+    FireAction(u32),
 }
 
 /// Device-native scroll scale combined with the user's sensitivity.

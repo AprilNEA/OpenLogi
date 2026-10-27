@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::Action;
+use crate::app::{AppAliases, overlay_for, profile_key_for};
 
 mod icon;
 
@@ -324,10 +325,34 @@ impl ActionRingConfig {
     }
 
     /// Resolve the complete layout for the foreground application.
+    ///
+    /// `per_app` takes the same selectors as `per_app_bindings` and is matched
+    /// the same way ([`overlay_for`]): the exact key, then on Windows the
+    /// `exe:<filename>` fallback a versioned install path needs, then the
+    /// `app:<alias>` key of the alias in `aliases` that lists the application.
     #[must_use]
-    pub fn effective_layout(&self, app_id: Option<&str>) -> ActionRingLayout {
+    pub fn effective_layout(&self, aliases: &AppAliases, app_id: Option<&str>) -> ActionRingLayout {
         app_id
-            .and_then(|app| self.per_app.get(app))
+            .and_then(|app| overlay_for(&self.per_app, aliases, app))
+            .cloned()
+            .unwrap_or_else(|| self.default.clone())
+    }
+
+    /// The key of the `per_app` layout [`Self::effective_layout`] resolves
+    /// `app` to, or `None` when the default layout applies.
+    #[must_use]
+    pub fn profile_for<'a>(&'a self, aliases: &AppAliases, app: &str) -> Option<&'a str> {
+        profile_key_for(&self.per_app, aliases, app)
+    }
+
+    /// The complete layout saved under the profile key `key`, or the default
+    /// layout when `key` is `None` or has none: what an editor that addresses
+    /// `key` shows. Unlike [`Self::effective_layout`], no other key's layout
+    /// stands in, because the first edit creates `key`'s layout from the
+    /// default, and the editor must show the layout that edit changes.
+    #[must_use]
+    pub fn profile_layout(&self, key: Option<&str>) -> ActionRingLayout {
+        key.and_then(|key| self.per_app.get(key))
             .cloned()
             .unwrap_or_else(|| self.default.clone())
     }
@@ -490,7 +515,90 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
             .per_app
             .insert("com.apple.Safari".to_string(), safari.clone());
 
-        assert_eq!(config.effective_layout(Some("com.apple.Safari")), safari);
-        assert_eq!(config.effective_layout(Some("other")), config.default);
+        let aliases = AppAliases::default();
+        assert_eq!(
+            config.effective_layout(&aliases, Some("com.apple.Safari")),
+            safari
+        );
+        assert_eq!(
+            config.effective_layout(&aliases, Some("other")),
+            config.default
+        );
+        assert_eq!(
+            config.profile_for(&aliases, "com.apple.Safari"),
+            Some("com.apple.Safari")
+        );
+        assert_eq!(config.profile_for(&aliases, "other"), None);
+    }
+
+    #[test]
+    fn a_ring_layout_keyed_by_executable_survives_a_versioned_install_path() {
+        let mut config = ActionRingConfig::default();
+        let sharex = ActionRingLayout {
+            slots: BTreeMap::from([(
+                ActionRingSlot::Top,
+                ActionRingEntry::new(
+                    RingAction::new(Action::Copy).expect("copy must be a valid ring action"),
+                ),
+            )]),
+        };
+        config
+            .per_app
+            .insert("exe:sharex.exe".to_string(), sharex.clone());
+
+        // The same selector `per_app_bindings` honours: a Store app's path
+        // changes with every update, its executable name does not.
+        let aliases = AppAliases::default();
+        assert_eq!(
+            config.effective_layout(
+                &aliases,
+                Some(r"c:\program files\windowsapps\sharex_17.1_x64\sharex.exe")
+            ),
+            sharex
+        );
+        assert_eq!(
+            config.effective_layout(&aliases, Some("com.getsharex.exe")),
+            config.default,
+            "a bundle id is never reinterpreted as an executable"
+        );
+    }
+
+    #[test]
+    fn an_editor_sees_only_the_layout_saved_under_its_key() {
+        #[derive(Deserialize)]
+        struct Apps {
+            apps: AppAliases,
+        }
+        let Apps { apps } = toml::from_str(concat!(
+            "[apps.sharex]\n",
+            "macos = \"sharex-id\"\nlinux = \"sharex-id\"\nwindows = \"sharex-id\"\n",
+        ))
+        .expect("alias table");
+        let top = |action| ActionRingLayout {
+            slots: BTreeMap::from([(
+                ActionRingSlot::Top,
+                ActionRingEntry::new(RingAction::new(action).expect("a valid ring action")),
+            )]),
+        };
+        let (copy, paste) = (top(Action::Copy), top(Action::Paste));
+        let mut config = ActionRingConfig::default();
+        config
+            .per_app
+            .insert("exe:sharex.exe".to_string(), copy.clone());
+        config
+            .per_app
+            .insert("app:sharex".to_string(), paste.clone());
+        let path = r"c:\tools\sharex.exe";
+
+        // The application in front takes another key's layout when its own
+        // key has none ...
+        assert_eq!(config.effective_layout(&apps, Some(path)), copy);
+        assert_eq!(config.effective_layout(&apps, Some("sharex-id")), paste);
+        // ... but an editor shows what its first edit would start from.
+        assert_eq!(config.profile_layout(Some(path)), config.default);
+        assert_eq!(config.profile_layout(Some("sharex-id")), config.default);
+        assert_eq!(config.profile_layout(Some("exe:sharex.exe")), copy);
+        assert_eq!(config.profile_layout(Some("app:sharex")), paste);
+        assert_eq!(config.profile_layout(None), config.default);
     }
 }

@@ -1,0 +1,22 @@
+# Owner: openlogi-desktop's features::profiles::profile_name — what the UI
+# calls a per-app profile: an alias's name, the name the agent reported for the
+# application, or one derived from the identifier. The profile selector, the
+# canvas status, the mouse view, and the keyboard function row all ask it, so
+# one profile has one name everywhere.
+id: gui-profile-name-owner
+language: rust
+severity: error
+message: A per-app profile's name comes from features::profiles::profile_name. Call it instead of reading the agent's recent-app name here.
+note: |
+  "The recent name, else friendly_app_name" was copied into five call sites.
+  An `app:<alias>` key has no recent name and no readable last component, so
+  each copy would have shown the raw key. See "Single source of truth" in
+  AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/features/profiles.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  pattern: $STATE.recent_app_name($$$ARGS)

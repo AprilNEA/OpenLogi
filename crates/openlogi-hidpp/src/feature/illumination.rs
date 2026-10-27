@@ -15,18 +15,20 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
+use std::num::NonZeroU16;
+
 use openlogi_hidpp_derive::Feature;
 
 pub use event::IlluminationEvent;
 pub use types::{
-    BrightnessClampedSource, ControlCapabilities, ControlInfo, IlluminationState, LevelConfig,
-    SetLevels,
+    BrightnessClampedSource, BrightnessEffectiveMax, ControlCapabilities, ControlInfo,
+    IlluminationState, LevelConfig, SetLevels,
 };
 
 use self::types::{be16, illumination_state};
 use crate::{
     feature::{EventSource, FeatureEndpoint},
-    protocol::v20::{ErrorType, Hidpp20Error},
+    protocol::v20::{self, ErrorType, Hidpp20Error},
 };
 
 // Function ids. Color-temperature functions mirror the brightness ones offset by
@@ -44,6 +46,9 @@ const FN_SET_COLOR_TEMPERATURE: u8 = 9;
 const FN_GET_COLOR_TEMPERATURE_LEVELS: u8 = 10;
 const FN_SET_COLOR_TEMPERATURE_LEVELS: u8 = 11;
 const FN_GET_BRIGHTNESS_EFFECTIVE_MAX: u8 = 12;
+
+/// The first feature version with `getBrightnessEffectiveMax`.
+const EFFECTIVE_MAX_MIN_VERSION: u8 = 1;
 
 /// Implements the `Illumination` / `0x1990` feature.
 #[derive(Feature)]
@@ -110,10 +115,32 @@ impl IlluminationFeature {
         self.write_levels(FN_SET_BRIGHTNESS_LEVELS, levels).await
     }
 
-    /// Retrieves the current effective maximum brightness (in Lumens), or `0`
-    /// when none is in effect. Requires feature version 1.
-    pub async fn get_brightness_effective_max(&self) -> Result<u16, Hidpp20Error> {
-        self.read_value(FN_GET_BRIGHTNESS_EFFECTIVE_MAX).await
+    /// Retrieves the current effective maximum brightness (in Lumens).
+    ///
+    /// `version` is the feature version the device reports for `0x1990`, and
+    /// `brightness` is the reply of [`Self::get_brightness_info`].
+    /// `getBrightnessEffectiveMax` exists from feature version 1, and only on
+    /// a brightness control that flags
+    /// [`ControlCapabilities::HAS_DYNAMIC_MAXIMUM`]. Logi Options+ also reads
+    /// it only under that flag (reverse-engineered). For any other light this
+    /// returns [`BrightnessEffectiveMax::Unsupported`] and sends no request.
+    pub async fn get_brightness_effective_max(
+        &self,
+        version: u8,
+        brightness: ControlInfo,
+    ) -> Result<BrightnessEffectiveMax, Hidpp20Error> {
+        if version < EFFECTIVE_MAX_MIN_VERSION
+            || !brightness
+                .capabilities
+                .contains(ControlCapabilities::HAS_DYNAMIC_MAXIMUM)
+        {
+            return Ok(BrightnessEffectiveMax::Unsupported);
+        }
+        let value = self.read_value(FN_GET_BRIGHTNESS_EFFECTIVE_MAX).await?;
+        Ok(NonZeroU16::new(value).map_or(
+            BrightnessEffectiveMax::NoLimit,
+            BrightnessEffectiveMax::Limit,
+        ))
     }
 
     /// Retrieves the color-temperature capabilities and range (in Kelvin).
@@ -155,8 +182,15 @@ impl IlluminationFeature {
     }
 
     /// Shared `get<Control>Info` reader.
+    ///
+    /// The fields fill eight bytes, more than a short reply holds, so the
+    /// reply must be long: a short one would zero-fill the range and the
+    /// level count. Logi Options+ also refuses fewer than eight bytes
+    /// (reverse-engineered from its `getControlInfo`).
     async fn read_info(&self, function: u8) -> Result<ControlInfo, Hidpp20Error> {
-        let payload = self.endpoint.call(function, [0; 3]).await?.extend_payload();
+        let v20::Message::Long(_, payload) = self.endpoint.call(function, [0; 3]).await? else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
         Ok(ControlInfo::from_payload(&payload))
     }
 
@@ -174,6 +208,11 @@ impl IlluminationFeature {
     }
 
     /// Shared `get<Control>Levels` reader.
+    ///
+    /// A level page is the whole long payload, so a short reply is refused
+    /// rather than read as an empty or linear table. Logi Options+ refuses
+    /// fewer than sixteen bytes (reverse-engineered from its
+    /// `getControlLevels`).
     async fn read_levels(
         &self,
         function: u8,
@@ -183,19 +222,24 @@ impl IlluminationFeature {
             return Err(Hidpp20Error::Feature(ErrorType::InvalidArgument));
         }
         // The request carries the start index in the high nibble of byte 0.
-        let payload = self
+        let v20::Message::Long(_, payload) = self
             .endpoint
             .call(function, [start_index << 4, 0, 0])
             .await?
-            .extend_payload();
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
         Ok(LevelConfig::from_payload(&payload))
     }
 
     /// Shared `set<Control>Levels` writer.
+    ///
+    /// A non-linear table longer than one request goes out page by page. The
+    /// first rejected page stops the write, leaving the earlier pages applied.
     async fn write_levels(&self, function: u8, levels: &SetLevels) -> Result<(), Hidpp20Error> {
-        self.endpoint
-            .call_long(function, levels.to_payload()?)
-            .await?;
+        for payload in levels.to_payloads()? {
+            self.endpoint.call_long(function, payload).await?;
+        }
         Ok(())
     }
 }

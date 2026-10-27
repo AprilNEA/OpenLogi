@@ -101,8 +101,7 @@ impl Config {
     /// [`default_binding`] when the map has no explicit `Click` — a demoted
     /// button always keeps a meaningful press. A button gesturing only by
     /// default (no stored binding) stashes its seeded default map and is
-    /// pinned off with an explicit `Single` at its canonical default, which
-    /// the capture layer leaves native.
+    /// pinned off with an explicit `Single` at its canonical default.
     ///
     /// [`DeviceConfig::disabled_gestures`]: super::DeviceConfig::disabled_gestures
     pub fn set_gesture_mode(&mut self, device_key: &str, button: ButtonId, enabled: bool) {

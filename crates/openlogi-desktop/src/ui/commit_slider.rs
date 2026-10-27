@@ -12,8 +12,10 @@ use std::rc::Rc;
 
 use gpui::{App, AppContext as _, Context, Entity, Subscription, Window};
 use gpui_component::slider::{SliderEvent, SliderState};
-use openlogi_core::config::{GestureAxisBias, GestureSensitivity, ThumbwheelSensitivity, VerticalScrollSensitivity};
-use openlogi_core::hid::{Dpi, SmartShiftThreshold};
+use openlogi_core::config::{
+    GestureAxisBias, GestureSensitivity, ThumbwheelSensitivity, VerticalScrollSensitivity,
+};
+use openlogi_core::hid::{Dpi, PointerSpeed, SmartShiftThreshold, TunableTorque};
 
 /// A value a slider thumb can rest on.
 pub(crate) trait SliderUnit: Copy + PartialEq + 'static {
@@ -72,6 +74,18 @@ impl SliderUnit for i32 {
     }
 }
 
+/// A pointer speed rests on its position on the `0..=100` slider, which is
+/// geometric around 1× (see [`PointerSpeed::from_slider`]).
+impl SliderUnit for PointerSpeed {
+    fn to_slider(self) -> f32 {
+        self.slider_position()
+    }
+
+    fn from_slider(raw: f32) -> Self {
+        Self::from_slider(raw)
+    }
+}
+
 /// Domain values that already round a control position into their own range.
 macro_rules! rounded_slider_unit {
     ($($unit:ty),+ $(,)?) => {$(
@@ -91,6 +105,7 @@ rounded_slider_unit!(
     Dpi,
     SmartShiftThreshold,
     ThumbwheelSensitivity,
+    TunableTorque,
     VerticalScrollSensitivity,
     GestureSensitivity,
     GestureAxisBias,
