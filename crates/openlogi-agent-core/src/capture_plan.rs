@@ -303,9 +303,12 @@ pub fn plan_for_device(
     ]
     .iter()
     .any(|button| {
-        bindings
-            .get(button)
-            .is_some_and(|binding| binding.click_action() != default_binding(*button))
+        bindings.get(button).is_some_and(|binding| {
+            // A multi-click binding needs the runtime to see the first click
+            // even when its single-click action is the native default.
+            matches!(binding, Binding::MultiClick(_))
+                || binding.click_action() != default_binding(*button)
+        })
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
     DeviceCapturePlan {
@@ -519,6 +522,25 @@ mod tests {
                 .iter()
                 .any(|&(_, button)| button == ButtonId::Back),
             "the runtime must see the first click to wait for a second"
+        );
+    }
+
+    #[test]
+    fn a_thumbwheel_multi_click_captures_the_wheel_even_when_only_the_double_action_differs() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::Thumbwheel,
+            Binding::MultiClick(MultiClickBinding::new(
+                default_binding(ButtonId::Thumbwheel),
+                Action::MissionControl,
+            )),
+        );
+
+        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
+        assert!(
+            plan.target.spec.capture_thumbwheel,
+            "the double click can only run if the thumbwheel is captured"
         );
     }
 
