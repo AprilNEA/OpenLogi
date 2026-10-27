@@ -70,7 +70,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::Undo => "action-icons/undo-2.svg",
         Action::Redo => "action-icons/redo-2.svg",
         Action::SelectAll | Action::Workflow(_) => "action-icons/list-checks.svg",
-        Action::Find => "action-icons/search.svg",
+        Action::Find | Action::SmartZoom => "action-icons/search.svg",
         Action::Save => "action-icons/save.svg",
         Action::BrowserBack => "action-icons/arrow-left.svg",
         Action::BrowserForward => "action-icons/arrow-right.svg",

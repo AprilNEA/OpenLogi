@@ -57,6 +57,8 @@ mod main_thread;
 )]
 mod menu_shortcut;
 mod scroll;
+/// The trackpad's two-finger double-tap zoom gesture.
+mod smart_zoom;
 /// Space switches — DockSwipe events, instant or a timed slide, or the user's
 /// Space shortcut for a slide — with read-only, per-display Space
 /// confirmation.
@@ -89,6 +91,7 @@ use keycode::hid_usage_to_macos;
 use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
+use smart_zoom::smart_zoom;
 pub(super) use spaces::{natural_scrolling, set_desktop_switch};
 use spaces::{next_desktop, previous_desktop};
 use symbolic_hotkey::{capture_region, screenshot};
@@ -277,6 +280,7 @@ fn dispatch_native(native: NativeAction) {
         // synthesised power key), so ask powermanagement directly. `pmset
         // sleepnow` works for the console user without privileges.
         NativeAction::Sleep => sleep_system(),
+        NativeAction::SmartZoom => smart_zoom(),
     }
 }
 

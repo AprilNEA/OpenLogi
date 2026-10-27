@@ -471,6 +471,7 @@ fn persisted_action_variant_names_are_stable() {
         "ShowActionsRing",
         "ShowDesktop",
         "Sleep",
+        "SmartZoom",
         "TapKeyHoldingModifiers",
         "TogglePrecisionMode",
         "ToggleSmartShift",
@@ -567,6 +568,16 @@ fn category_navigation_variants() {
     assert_eq!(Action::NextDesktop.category(), Category::Navigation);
     assert_eq!(Action::ShowDesktop.category(), Category::Navigation);
     assert_eq!(Action::LaunchpadShow.category(), Category::Navigation);
+    assert_eq!(Action::SmartZoom.category(), Category::Navigation);
+}
+
+#[test]
+fn smart_zoom_is_a_catalog_native_action() {
+    assert!(Action::catalog().contains(&Action::SmartZoom));
+    assert_eq!(
+        Action::SmartZoom.effect(),
+        Effect::Native(NativeAction::SmartZoom)
+    );
 }
 
 #[test]
