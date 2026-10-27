@@ -740,7 +740,8 @@ async fn easy_switch_names_are_kept_and_rejected_renames_change_nothing() {
 }
 
 /// A switch publishes the device leaving this computer, so the GUI sees it
-/// go, and the reading it finds on return still names this computer.
+/// go, and the reading it finds on return still names this computer. A
+/// switch to the channel it is already on leaves it here.
 #[tokio::test]
 async fn easy_switch_takes_the_device_away_and_keeps_this_computers_channel() {
     use openlogi_core::hid::{EasySwitchHosts, EasySwitchSlot, HostConnection};
@@ -783,6 +784,16 @@ async fn easy_switch_takes_the_device_away_and_keeps_this_computers_channel() {
         agent.current().await.generation,
         before.generation,
         "a refused switch leaves the device here"
+    );
+    agent
+        .clone()
+        .switch_easy_switch_host(tarpc::context::current(), mouse_route(), 0)
+        .await
+        .expect("a switch to the current channel is accepted");
+    assert_eq!(
+        agent.current().await.generation,
+        before.generation,
+        "a switch to the current channel leaves the device here"
     );
 
     agent

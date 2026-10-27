@@ -1292,6 +1292,9 @@ impl Agent for MockAgent {
         if !stored.slot(slot).is_some_and(|host| host.paired) {
             return Err(WriteError::HostSlotEmpty { slot });
         }
+        if stored.current == Some(slot) {
+            return Ok(());
+        }
         if let Some(online) = state.online_mut(&route) {
             *online = false;
         }
