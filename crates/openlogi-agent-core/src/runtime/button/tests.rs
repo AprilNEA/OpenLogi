@@ -1591,7 +1591,7 @@ fn pointer_press(id: u64, binding: &Binding, at: Instant) -> ActivePress {
 }
 
 #[test]
-fn a_pointer_change_does_not_swallow_a_released_click_that_is_still_waiting() {
+fn a_pointer_change_cancels_a_released_click_that_is_still_waiting() {
     use openlogi_hook::PointerTarget;
     let binding = multi_click(Action::Copy, Action::Paste);
     let t0 = Instant::now();
@@ -1603,15 +1603,13 @@ fn a_pointer_change_does_not_swallow_a_released_click_that_is_still_waiting() {
     });
     process_input(&mut state, release_at(&press, t0), &mut |e| events.push(e));
 
-    assert!(
-        state
-            .cancel_pointer_except(PointerTarget::Desktop)
-            .is_empty()
-    );
+    // The settled click would be refused for the changed target anyway, so
+    // it is dropped here rather than lingering and then doing nothing.
+    assert_eq!(state.cancel_pointer_except(PointerTarget::Desktop).len(), 1);
     emit_due_long_presses(&mut state, t0 + DOUBLE_CLICK_WINDOW, &mut |e| {
         events.push(e);
     });
-    assert_eq!(triggered(&events), [&Action::Copy]);
+    assert!(triggered(&events).is_empty());
 }
 
 #[test]
