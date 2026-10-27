@@ -55,6 +55,7 @@ use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::watchers::light::{WatchedLight, WatchedLights};
+use crate::watchers::pointer::{PointerDemand, PointerDemands};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 mod devices;
@@ -166,6 +167,8 @@ pub struct SharedHandles {
     pub host_switch_links: HostSwitchLinks,
     /// The online lights to watch for changes made on the light itself.
     pub watched_lights: WatchedLights,
+    /// Whether the pointer-context watcher samples or parks.
+    pub pointer_demand: PointerDemands,
     /// Orders every path's Fn-lock writes per keyboard.
     fn_lock_order: WriteOrder,
     /// Orders the GUI's report-rate writes and the reconnect reapply's per
@@ -593,6 +596,7 @@ pub struct Orchestrator {
     keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
     host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
     watched_lights_tx: watch::Sender<Arc<Vec<WatchedLight>>>,
+    pointer_demand_tx: watch::Sender<PointerDemand>,
     shared: SharedHandles,
     /// The state the GUI observes. Every mutator below that changes one of its
     /// facts republishes here, so the cell cannot go stale behind a new code
@@ -642,6 +646,8 @@ impl Orchestrator {
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
+        let (pointer_demand_tx, pointer_demand) =
+            watch::channel(pointer_demand(&config.app_settings));
         openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
         let shared = SharedHandles {
             device_io: hardware.device_io(),
@@ -664,6 +670,7 @@ impl Orchestrator {
             transport_turns: crate::hardware::TransportTurns::default(),
             host_switch_links,
             watched_lights,
+            pointer_demand,
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
             pointer_speeds: Arc::default(),
@@ -704,6 +711,7 @@ impl Orchestrator {
             keyboard_spec_tx,
             host_switch_links_tx,
             watched_lights_tx,
+            pointer_demand_tx,
             shared,
             observable,
             low_battery: LowBatteryWatch::default(),
@@ -738,7 +746,7 @@ impl Orchestrator {
     /// apply, as focused mode applies them in the same state.
     fn mouse_context(&self) -> (Option<&str>, Option<openlogi_hook::PointerTarget>) {
         let target = self.pointer_context.target;
-        if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused
+        if pointer_demand(&self.config.app_settings) == PointerDemand::Idle
             || target == openlogi_hook::PointerTarget::Unsupported
         {
             return (self.current_app.as_deref(), None);
@@ -1768,7 +1776,7 @@ impl Orchestrator {
         }
         let previous = self.mouse_context().1;
         self.pointer_context = context;
-        if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused {
+        if pointer_demand(&self.config.app_settings) == PointerDemand::Idle {
             return false;
         }
         self.publish_hook_maps(self.hook_maps_for(self.current_key()));
@@ -1836,6 +1844,9 @@ impl Orchestrator {
             self.config.app_settings.vertical_scroll_sensitivity,
         );
         openlogi_inject::set_desktop_switch(desktop_switch(&self.config.app_settings));
+        let demand = pointer_demand(&self.config.app_settings);
+        self.pointer_demand_tx
+            .send_if_modified(|current| std::mem::replace(current, demand) != demand);
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self
@@ -2048,6 +2059,17 @@ fn desktop_switch(settings: &AppSettings) -> openlogi_inject::DesktopSwitch {
         openlogi_inject::DesktopSwitch::Animated
     } else {
         openlogi_inject::DesktopSwitch::Instant
+    }
+}
+
+/// Whether mouse profiles follow the pointer under `settings`: the one reading
+/// of `mouse_profile_target` behind both the effective mouse bindings and the
+/// pointer watcher's demand, so the watcher samples exactly while the bindings
+/// read what it samples.
+fn pointer_demand(settings: &AppSettings) -> PointerDemand {
+    match settings.mouse_profile_target {
+        MouseProfileTarget::Pointer => PointerDemand::Wanted,
+        MouseProfileTarget::Focused => PointerDemand::Idle,
     }
 }
 
