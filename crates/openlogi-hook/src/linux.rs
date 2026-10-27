@@ -30,6 +30,8 @@
 mod foreground;
 pub(crate) mod pointer;
 mod supervisor;
+#[cfg(test)]
+mod xvfb;
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};

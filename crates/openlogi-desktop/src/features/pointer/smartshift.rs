@@ -41,7 +41,8 @@ use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 /// Thresholds below the floor free-spin on everyday scrolling (#317), so the
 /// floor and default are shared with the `openlogi-core` config contract. A device
 /// reporting a value outside the band is normalised for display by
-/// [`clamp_threshold`]; it is only rewritten once the user drags the slider.
+/// [`clamp_threshold`]. The config cannot hold a value below the floor, so
+/// [`AppState::commit_smartshift`] also replaces one on the next write (#2079).
 const THRESHOLD_MIN: SmartShiftThreshold = SMARTSHIFT_MIN_AUTO_DISENGAGE;
 const THRESHOLD_MAX: SmartShiftThreshold = match SmartShiftThreshold::try_new(50) {
     Ok(value) => value,
