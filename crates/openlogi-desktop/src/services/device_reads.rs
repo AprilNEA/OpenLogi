@@ -86,9 +86,11 @@ pub(crate) struct DeviceReads {
     host_renames: BTreeMap<DeviceKey, HostRenames>,
     next_host_rename: u64,
     onboard_profiles: BTreeMap<DeviceKey, DeviceRead<OnboardMode>>,
-    /// Devices with an onboard-mode write in flight. Their reading is the
-    /// asked-for mode until the device answers; a re-read must not race it.
-    onboard_profiles_writes: BTreeSet<DeviceKey>,
+    /// The onboard-mode writes sent per device and not answered yet. Their
+    /// reading is the newest asked-for mode until its own answer lands; a
+    /// re-read must not race them.
+    onboard_mode_writes: BTreeMap<DeviceKey, OnboardModeWrites>,
+    next_onboard_mode_write: u64,
 }
 
 /// The Easy-Switch host renames sent to one device that have not been
@@ -161,6 +163,16 @@ impl BacklightWrites {
         });
         Arc::new(shown)
     }
+}
+
+/// The onboard-mode writes sent to one device that have no answer yet, and
+/// the newest one that has. The agent orders them per device, so the answer
+/// to one also covers every earlier write, and none of the later ones.
+#[derive(Default)]
+struct OnboardModeWrites {
+    /// Oldest first.
+    pending: Vec<(u64, OnboardMode)>,
+    answered: u64,
 }
 
 impl DeviceReads {
@@ -1242,32 +1254,66 @@ impl DeviceReads {
 
     /// An onboard-mode write to `key` is on its way: show the asked-for mode
     /// until [`Self::finish_onboard_profiles_write`] brings the device's
-    /// answer, and hold off re-reads that could land the pre-write mode.
-    pub(crate) fn begin_onboard_profiles_write(&mut self, key: &DeviceKey, mode: OnboardMode) {
-        self.onboard_profiles_writes.insert(key.clone());
+    /// answer, hold off re-reads that could land the pre-write mode, and
+    /// number the write so its answer can be told from an earlier one's.
+    pub(crate) fn begin_onboard_profiles_write(
+        &mut self,
+        key: &DeviceKey,
+        mode: OnboardMode,
+    ) -> u64 {
+        self.next_onboard_mode_write += 1;
+        let write = self.next_onboard_mode_write;
+        self.onboard_mode_writes
+            .entry(key.clone())
+            .or_default()
+            .pending
+            .push((write, mode));
         self.set_onboard_profiles_ready(key, mode);
+        write
     }
 
     /// The device's answer to an onboard-mode write: the mode it reports, or
     /// — when it refused or could not be reached — a re-read, so the
     /// asked-for mode does not stand in for its own.
+    ///
+    /// Like [`Self::finish_backlight_write`], an answer older than one
+    /// already taken is dropped: it says nothing the newer one did not. While
+    /// a newer write is still in flight, its asked-for mode stays shown over
+    /// this answer. Returns whether the answer was taken.
     pub(crate) fn finish_onboard_profiles_write(
         &mut self,
         key: &DeviceKey,
+        write: u64,
         result: Result<OnboardMode, &WriteError>,
-    ) {
-        self.onboard_profiles_writes.remove(key);
+    ) -> bool {
+        let writes = self.onboard_mode_writes.entry(key.clone()).or_default();
+        if write <= writes.answered {
+            return false;
+        }
+        writes.answered = write;
+        writes.pending.retain(|&(pending, _)| pending > write);
+        if let Some(&(_, newest)) = writes.pending.last() {
+            self.set_onboard_profiles_ready(key, newest);
+            return true;
+        }
         match result {
             Ok(mode) => self.set_onboard_profiles_ready(key, mode),
             Err(_) => self.refresh_onboard_profiles(key),
         }
+        true
     }
 
     /// Whether an onboard-mode write to `key` awaits the device's answer.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn onboard_profiles_write_pending(&self, key: &DeviceKey) -> bool {
-        self.onboard_profiles_writes.contains(key)
+        self.onboard_mode_write_pending(key)
+    }
+
+    fn onboard_mode_write_pending(&self, key: &DeviceKey) -> bool {
+        self.onboard_mode_writes
+            .get(key)
+            .is_some_and(|writes| !writes.pending.is_empty())
     }
 
     fn set_onboard_profiles_ready(&mut self, key: &DeviceKey, mode: OnboardMode) {
@@ -1288,7 +1334,7 @@ impl DeviceReads {
     /// write's own answer is the next word on the mode. The device falls back
     /// to onboard mode on a power cycle, so a reading taken once goes stale.
     pub(crate) fn refresh_onboard_profiles(&mut self, key: &DeviceKey) {
-        if self.onboard_profiles_writes.contains(key) {
+        if self.onboard_mode_write_pending(key) {
             return;
         }
         if let Some(read) = self.onboard_profiles.get_mut(key) {
@@ -1464,7 +1510,7 @@ impl DeviceReads {
     }
 
     fn remove_onboard_profiles(&mut self, key: &DeviceKey) {
-        self.onboard_profiles_writes.remove(key);
+        self.onboard_mode_writes.remove(key);
         if let Some(read) = self.onboard_profiles.remove(key) {
             drop(read);
             self.clear::<OnboardMode>(ONBOARD_PROFILES, key);

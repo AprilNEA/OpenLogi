@@ -3,7 +3,8 @@
 use super::*;
 use std::sync::Arc;
 
-use crate::services::ipc::{Command, SetOnboardMode};
+use crate::services::ipc::{Command, ReadOnboardMode, SetOnboardMode};
+use crate::state::events::StateEvents;
 use crate::state::load::OnboardProfilesLoad;
 use crate::state::onboard_profiles::shown_mode;
 use openlogi_core::hid::{Dpi, OnboardMode};
@@ -57,6 +58,77 @@ fn drain(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Vec<Co
     std::iter::from_fn(|| receiver.try_recv().ok()).collect()
 }
 
+/// The onboard-mode writes among the queued commands, with the numbers they
+/// were sent under, oldest first.
+fn sent(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Vec<(OnboardMode, u64)> {
+    drain(receiver)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::SetOnboardMode(SetOnboardMode { mode, write, .. }) => Some((mode, write)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Install `state` with live swr-backed reads, as the app does, have it read
+/// the selected mouse, and answer its onboard-mode read with `reading`.
+fn installed_and_read(
+    cx: &mut gpui::TestAppContext,
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    state: AppState,
+    reading: OnboardMode,
+) -> DeviceKey {
+    let key = state.current_record().expect("mouse").device_key();
+    cx.update(|cx| {
+        let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
+        let client = swr_core::SwrClient::builder().build(runtime.clone());
+        let state = cx.new(|_| {
+            let mut state = state;
+            state.connect_device_reads(client, runtime);
+            state
+        });
+        AppState::set_global(state, cx);
+        AppState::load_current_device_reads(cx);
+    });
+    cx.run_until_parked();
+    let mut answered = false;
+    for command in drain(receiver) {
+        if let Command::ReadOnboardMode(ReadOnboardMode { reply, .. }) = command {
+            let _ = reply.send(Ok(reading));
+            answered = true;
+        }
+    }
+    assert!(answered, "the state asked the mouse for its onboard mode");
+    cx.run_until_parked();
+    assert_eq!(shown(cx), reading);
+    key
+}
+
+fn commit(cx: &mut gpui::TestAppContext, mode: OnboardMode) -> StateEvents {
+    cx.update(|cx| AppState::update(cx, |state, _| state.commit_onboard_mode(mode)))
+}
+
+fn written(
+    cx: &mut gpui::TestAppContext,
+    key: &DeviceKey,
+    write: u64,
+    result: Result<OnboardMode, WriteError>,
+) -> StateEvents {
+    cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            state.apply_onboard_mode_written(key, write, result)
+        })
+    })
+}
+
+fn shown(cx: &gpui::TestAppContext) -> OnboardMode {
+    cx.read(|cx| {
+        AppState::try_read(cx)
+            .expect("state installed")
+            .current_onboard_mode()
+    })
+}
+
 fn config_key(state: &AppState) -> String {
     state
         .current_record()
@@ -98,6 +170,7 @@ fn onboard_toggle_persists_the_choice_and_writes_the_device_directly() {
             route: written_route,
             mode,
             key: written_key,
+            ..
         }),
     ] = commands.as_slice()
     else {
@@ -149,13 +222,16 @@ fn the_devices_reading_outranks_the_persisted_choice() {
 
 #[test]
 fn a_switch_holds_off_re_reads_until_the_device_answers() {
-    let (mut state, _receiver) = mouse_state(true);
+    let (mut state, mut receiver) = mouse_state(true);
     let key = state.current_record().expect("mouse").device_key();
 
     let _ = state.commit_onboard_mode(OnboardMode::Host);
     assert!(state.pointer.reads.onboard_profiles_write_pending(&key));
+    let [(OnboardMode::Host, write)] = sent(&mut receiver)[..] else {
+        panic!("the switch is written");
+    };
 
-    let _ = state.apply_onboard_mode_written(&key, Err(WriteError::AgentUnavailable));
+    let _ = state.apply_onboard_mode_written(&key, write, Err(WriteError::AgentUnavailable));
     assert!(
         !state.pointer.reads.onboard_profiles_write_pending(&key),
         "a refused switch re-reads the device instead of trusting the request"
@@ -172,7 +248,7 @@ fn handing_control_to_the_host_shows_the_users_own_dpi_again() {
         .edit(|config| config.set_dpi(&config_key, Dpi::new(3200)));
     state.pointer.dpi = Dpi::new(800);
 
-    let events = state.apply_onboard_mode_written(&key, Ok(OnboardMode::Host));
+    let events = state.apply_onboard_mode_written(&key, 1, Ok(OnboardMode::Host));
 
     assert_eq!(events, [StateEvent::OnboardProfilesChanged(key)]);
     assert_eq!(state.dpi(), Dpi::new(3200));
@@ -184,7 +260,58 @@ fn a_refused_onboard_write_still_repaints_the_device_tab() {
     let key = state.current_record().expect("mouse").device_key();
 
     assert_eq!(
-        state.apply_onboard_mode_written(&key, Err(WriteError::AgentUnavailable)),
+        state.apply_onboard_mode_written(&key, 1, Err(WriteError::AgentUnavailable)),
         [StateEvent::OnboardProfilesChanged(key)]
     );
+}
+
+/// A double toggle: the answer to the first switch lands while the second is
+/// still in flight. The second switch's mode stays shown until its own answer.
+#[gpui::test]
+fn the_newest_switch_stays_shown_while_an_older_answer_lands(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = mouse_state(true);
+    let key = installed_and_read(cx, &mut receiver, state, OnboardMode::Onboard);
+    let _ = commit(cx, OnboardMode::Host);
+    let _ = commit(cx, OnboardMode::Onboard);
+    let [(OnboardMode::Host, first), (OnboardMode::Onboard, second)] = sent(&mut receiver)[..]
+    else {
+        panic!("both switches are written");
+    };
+
+    assert_eq!(
+        written(cx, &key, first, Ok(OnboardMode::Host)),
+        [StateEvent::OnboardProfilesChanged(key.clone())]
+    );
+    cx.run_until_parked();
+    assert_eq!(shown(cx), OnboardMode::Onboard);
+    assert!(cx.read(|cx| {
+        AppState::try_read(cx)
+            .expect("state installed")
+            .pointer
+            .reads
+            .onboard_profiles_write_pending(&key)
+    }));
+
+    let _ = written(cx, &key, second, Ok(OnboardMode::Onboard));
+    cx.run_until_parked();
+    assert_eq!(shown(cx), OnboardMode::Onboard);
+}
+
+/// The agent answers switches in the order they were sent; one that arrives
+/// after a newer switch's answer anyway says nothing new and is dropped.
+#[gpui::test]
+fn an_onboard_answer_older_than_one_already_taken_is_dropped(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = mouse_state(true);
+    let key = installed_and_read(cx, &mut receiver, state, OnboardMode::Onboard);
+    let _ = commit(cx, OnboardMode::Host);
+    let _ = commit(cx, OnboardMode::Onboard);
+    let [(_, first), (_, second)] = sent(&mut receiver)[..] else {
+        panic!("both switches are written");
+    };
+
+    let _ = written(cx, &key, second, Ok(OnboardMode::Onboard));
+    assert!(written(cx, &key, first, Ok(OnboardMode::Host)).is_empty());
+    assert!(written(cx, &key, first, Err(WriteError::AgentUnavailable)).is_empty());
+    cx.run_until_parked();
+    assert_eq!(shown(cx), OnboardMode::Onboard);
 }

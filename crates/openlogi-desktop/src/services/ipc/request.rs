@@ -337,6 +337,9 @@ pub struct SetOnboardMode {
     pub route: DeviceRoute,
     pub mode: OnboardMode,
     pub key: DeviceKey,
+    /// The number [`crate::services::device_reads::DeviceReads::begin_onboard_profiles_write`]
+    /// gave this write, carried back with its answer.
+    pub write: u64,
 }
 
 impl Request for SetOnboardMode {
@@ -351,6 +354,7 @@ impl Request for SetOnboardMode {
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         let _ = updates.send(GuiUpdate::OnboardModeWritten {
             key: self.key,
+            write: self.write,
             result: or_unavailable(outcome),
         });
     }

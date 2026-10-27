@@ -89,28 +89,38 @@ impl AppState {
         let Some(route) = route else {
             return events;
         };
-        self.pointer
+        let write = self
+            .pointer
             .reads
             .begin_onboard_profiles_write(&device_key, mode);
         self.send_ipc(crate::services::ipc::SetOnboardMode {
             route,
             mode,
             key: device_key,
+            write,
         });
         events
     }
 
-    /// The device's answer to a [`Self::commit_onboard_mode`] write: show the
-    /// mode it reports, or — when it refused or could not be reached — ask it
-    /// again so the optimistic value does not stand in for its own.
+    /// The device's answer to [`Self::commit_onboard_mode`] write `write`:
+    /// show the mode it reports, or — when it refused or could not be
+    /// reached — ask it again so the optimistic value does not stand in for
+    /// its own. An answer older than one already taken changes nothing; while
+    /// a newer write is in flight its mode stays shown (see
+    /// `DeviceReads::finish_onboard_profiles_write`).
     pub fn apply_onboard_mode_written(
         &mut self,
         key: &DeviceKey,
+        write: u64,
         result: Result<OnboardMode, WriteError>,
     ) -> StateEvents {
-        self.pointer
+        if !self
+            .pointer
             .reads
-            .finish_onboard_profiles_write(key, result.as_ref().copied());
+            .finish_onboard_profiles_write(key, write, result.as_ref().copied())
+        {
+            return StateEvents::default();
+        }
         match result {
             Ok(mode) => {
                 // The switch changed which DPI the sensor uses — the onboard

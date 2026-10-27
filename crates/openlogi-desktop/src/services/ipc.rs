@@ -225,6 +225,8 @@ pub enum GuiUpdate {
     OnboardModeWritten {
         /// The device that was written.
         key: DeviceKey,
+        /// The write's number, from `SetOnboardMode`.
+        write: u64,
         /// The mode the device reports, or why the write did not land.
         result: Result<OnboardMode, WriteError>,
     },

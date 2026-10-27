@@ -377,9 +377,11 @@ impl Runtime {
                     });
                 });
             }
-            ipc::GuiUpdate::OnboardModeWritten { key, result } => {
+            ipc::GuiUpdate::OnboardModeWritten { key, write, result } => {
                 cx.update(|cx| {
-                    AppState::apply(cx, |state| state.apply_onboard_mode_written(&key, result));
+                    AppState::apply(cx, |state| {
+                        state.apply_onboard_mode_written(&key, write, result)
+                    });
                 });
             }
             ipc::GuiUpdate::EasySwitchHostRenamed {
