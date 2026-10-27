@@ -53,6 +53,7 @@ fn snapshot() -> AgentSnapshot {
             recent: Vec::new(),
         },
         lights: Vec::new(),
+        firmware_update: None,
     }
 }
 

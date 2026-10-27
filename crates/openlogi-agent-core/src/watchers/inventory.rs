@@ -25,6 +25,7 @@ use schedule::{
 };
 
 use crate::hardware::HardwareContext;
+use crate::receiver_access::ReceiverAccess;
 
 #[cfg(test)]
 mod replay_tests;
@@ -296,28 +297,42 @@ enum RefreshRequest {
 /// Spawn a watcher without publishing channels into a registry.
 #[must_use]
 pub fn spawn() -> InventoryWatcher {
-    spawn_inner(None, HardwareContext::production())
+    spawn_inner(
+        None,
+        HardwareContext::production(),
+        ReceiverAccess::default(),
+    )
 }
 
 /// Spawn the persistent watcher from `hardware`, publish its already-open
 /// HID++ channels into `registry`, and stop active reconciliation while its
-/// device-I/O gate is closed.
+/// device-I/O gate is closed or a firmware update holds `receiver_access`.
 #[must_use]
 pub fn spawn_with_hardware(
     hardware: HardwareContext,
     registry: ChannelRegistry,
+    receiver_access: ReceiverAccess,
 ) -> InventoryWatcher {
-    spawn_inner(Some(registry), hardware)
+    spawn_inner(Some(registry), hardware, receiver_access)
 }
 
-fn spawn_inner(registry: Option<ChannelRegistry>, hardware: HardwareContext) -> InventoryWatcher {
+fn spawn_inner(
+    registry: Option<ChannelRegistry>,
+    hardware: HardwareContext,
+    receiver_access: ReceiverAccess,
+) -> InventoryWatcher {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let worker_tx = event_tx.clone();
     let (refresh_tx, refresh_rx) = mpsc::channel(1);
     let (rescan_tx, rescan_rx) = mpsc::channel(1);
     let started = openlogi_core::worker::spawn("openlogi-inventory-watcher", move |runtime| {
         runtime.block_on(run_watcher(
-            worker_tx, refresh_rx, rescan_rx, registry, hardware,
+            worker_tx,
+            refresh_rx,
+            rescan_rx,
+            registry,
+            hardware,
+            receiver_access,
         ));
     });
     if let Err(error) = started {
@@ -343,6 +358,7 @@ async fn run_watcher(
     rescans: mpsc::Receiver<()>,
     registry: Option<ChannelRegistry>,
     hardware: HardwareContext,
+    receiver_access: ReceiverAccess,
 ) {
     // The listener is attached to each inventory-owned channel before its
     // first probe. Lifecycle hints use a bounded queue; backlight readings
@@ -381,6 +397,7 @@ async fn run_watcher(
         schedule: Schedule::new(now),
         wake_detector: WakeDetector::new(SystemTime::now(), now),
         device_io,
+        receiver_access,
         hardware,
         refresh_open: true,
         rescans_open: true,
@@ -467,6 +484,8 @@ struct InventoryWorker {
     schedule: Schedule,
     wake_detector: WakeDetector,
     device_io: DeviceIoGate,
+    /// A firmware update holds off passes for its whole transfer.
+    receiver_access: ReceiverAccess,
     refresh_open: bool,
     rescans_open: bool,
 }
@@ -540,6 +559,19 @@ impl InventoryWorker {
         // start, and the cache stays fresh through `PROBE_CACHE_FRESHNESS`.
         // Repair retries use completion, or a pass longer than
         // `FAST_RETRY_DELAY` would already be due when it returns (#1774).
+        // A pass talks to every paired device. A firmware update holds this
+        // for its transfer, so the pass waits rather than polling the device
+        // being written or retiring its channel.
+        let _pass = self.receiver_access.inventory_pass().await;
+        // A suspend can close the gate while the pass waits for a firmware
+        // update; enumerating then would open and probe every device.
+        if !self.device_io.allows_io() {
+            debug!(
+                ?trigger,
+                "device I/O suspended while inventory waited for firmware — pass skipped"
+            );
+            return true;
+        }
         let started = Instant::now();
         let result = self.enumerator.enumerate().await;
         self.complete_enumeration(trigger, result, started).await

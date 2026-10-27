@@ -13,6 +13,7 @@ pub mod disable_keys;
 pub mod dpi;
 pub mod easy_switch;
 pub mod error;
+pub mod firmware;
 pub mod fn_lock;
 pub mod force_sensing;
 pub mod light;
@@ -31,6 +32,11 @@ pub use disable_keys::{DisableKeysMask, DisableKeysState};
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use easy_switch::{EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
+pub use firmware::{
+    FirmwareBatteryCharge, FirmwareOffer, FirmwareRequest, FirmwareStatus, FirmwareUpdate,
+    FirmwareUpdateEvent, FirmwareUpdateFailure, FirmwareUpdatePhase, FirmwareUpdateRefusal,
+    FirmwareUpdateSource, FirmwareUpdateWarning, FirmwareVersion,
+};
 pub use fn_lock::FnLockState;
 pub use force_sensing::ForceSensingInfo;
 pub use light::{LightCommand, commands_for_light_settings};

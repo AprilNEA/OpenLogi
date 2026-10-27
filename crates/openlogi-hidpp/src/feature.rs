@@ -24,6 +24,7 @@ pub mod crown;
 pub mod device_friendly_name;
 pub mod device_information;
 pub mod device_type_and_name;
+pub mod dfu_resumable;
 pub mod disable_keys;
 pub mod disable_keys_by_usage;
 pub mod dual_platform;
@@ -340,6 +341,18 @@ impl FeatureEndpoint {
     pub(crate) async fn notify(&self, function: u8, args: [u8; 3]) -> Result<(), Hidpp20Error> {
         self.chan
             .send_and_forget(v20::Message::Short(self.header(function), args).into())
+            .await?;
+        Ok(())
+    }
+
+    /// [`Self::notify`] with a 16-byte long-report payload.
+    pub(crate) async fn notify_long(
+        &self,
+        function: u8,
+        args: [u8; 16],
+    ) -> Result<(), Hidpp20Error> {
+        self.chan
+            .send_and_forget(v20::Message::Long(self.header(function), args).into())
             .await?;
         Ok(())
     }

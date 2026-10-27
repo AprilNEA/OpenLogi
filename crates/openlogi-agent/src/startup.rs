@@ -38,6 +38,7 @@ pub(crate) struct Core {
     pub(crate) inputs: InputServices,
     pub(crate) backlight_overlay: BacklightOverlayManager,
     pub(crate) ring_haptics: server::RingHapticPlayer,
+    pub(crate) firmware: Arc<crate::firmware::FirmwareManager>,
     /// Client declarations forwarded by the IPC server — the dormancy gate's
     /// demand channel. It buffers, so a declaration that lands before the
     /// gate listens is not lost.
@@ -74,7 +75,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         Arc::clone(&observable),
     ));
 
-    let (ring_haptics, demand) = spawn_ipc_server(
+    let (ring_haptics, demand, firmware) = spawn_ipc_server(
         Arc::clone(&orchestrator),
         &shared,
         Arc::clone(&observable),
@@ -91,6 +92,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         inputs,
         backlight_overlay,
         ring_haptics,
+        firmware,
         demand,
     })
 }
@@ -106,6 +108,7 @@ fn spawn_ipc_server(
 ) -> (
     server::RingHapticPlayer,
     tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
+    Arc<crate::firmware::FirmwareManager>,
 ) {
     let (server, demand) = AgentServer::new(
         orchestrator,
@@ -117,9 +120,10 @@ fn spawn_ipc_server(
         inputs.dispatcher.clone(),
         backlight_overlay,
     );
+    let firmware = Arc::clone(&server.firmware);
     let ring_haptics = server.ring_haptics.clone();
     tokio::spawn(server::run(server));
-    (ring_haptics, demand)
+    (ring_haptics, demand, firmware)
 }
 
 /// The input-action runtimes — pure in-process workers that touch no device
@@ -295,6 +299,7 @@ pub(crate) fn spawn_state_watchers(
     let inventory = watchers::inventory::spawn_with_hardware(
         shared.hardware(),
         shared.channel_registry.clone(),
+        shared.receiver_access.clone(),
     );
     shared.publish_inventory_refresh(inventory.refresh.clone());
     let (light_events, lights) = tokio::sync::mpsc::unbounded_channel();

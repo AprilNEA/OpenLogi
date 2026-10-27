@@ -68,10 +68,11 @@ use request::LinkLost;
 pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDisableKeys, ReadDpi,
-    ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadPointerSpeed, ReadReportRate,
-    ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight,
-    SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
-    SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
+    ReadEasySwitchHosts, ReadFirmware, ReadFnLock, ReadForceSensing, ReadPointerSpeed,
+    ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
+    SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight,
+    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift,
+    StartFirmwareUpdate, StartPairing, UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.
@@ -101,8 +102,23 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 
 /// What the client thread tells the GPUI loop.
 pub enum GuiUpdate {
+    /// A fresh connection fences the previous agent's request/job identities.
+    Connected(openlogi_ipc::Identity),
+    FirmwareRead {
+        key: DeviceKey,
+        route: DeviceRoute,
+        flight: u64,
+        result: Result<openlogi_core::hid::FirmwareStatus, WriteError>,
+    },
+    FirmwareStarted {
+        key: DeviceKey,
+        route: DeviceRoute,
+        request: openlogi_core::hid::FirmwareRequest,
+        /// The admitted job's id, or why no job was admitted.
+        result: Result<u64, crate::state::FirmwareStartFailure>,
+    },
     /// The agent's state, as of a generation this client had not seen.
-    Snapshot(AgentSnapshot),
+    Snapshot(Box<AgentSnapshot>),
     /// No usable connection for `link::UNREACHABLE_AFTER`: the agent is
     /// genuinely unreachable (not just starting up). Never sent while a newer
     /// agent is the reason; a snapshot or [`Self::OutdatedGui`] supersedes it.
@@ -333,7 +349,7 @@ async fn observe_loop(
     let mut retry = ticker(RECONNECT_DELAY);
     loop {
         let woken = tokio::select! {
-            observed = link.observed() => Woken::Observed(observed),
+            observed = async { link.observed().await.map(|snapshot| snapshot.map(Box::new)) } => Woken::Observed(observed),
             cmd = cmd_rx.recv() => Woken::Command(cmd),
             _ = retry.tick(), if link.is_down() => Woken::Reconnect,
         };
@@ -355,9 +371,17 @@ async fn observe_loop(
             Woken::Command(Some(Command::ReloadConfig(reload))) => owed.save(reload),
             Woken::Command(Some(Command::LoadConfig(_))) => owed.load = true,
             Woken::Command(Some(cmd)) => {
-                let pairing_transition =
-                    matches!(cmd, Command::StartPairing(_) | Command::CancelPairing(_));
-                let client = link.ensure(effects, update_tx).await;
+                let pairing_transition = matches!(
+                    cmd,
+                    Command::StartPairing(_)
+                        | Command::CancelPairing(_)
+                        | Command::StartFirmwareUpdate(_)
+                );
+                link.ensure(effects, update_tx).await;
+                let client = match cmd.bound_agent() {
+                    Some(agent) => link.client_of(agent),
+                    None => link.client(),
+                };
                 if cmd.run(client, update_tx).await.is_err() {
                     link.lose(Instant::now());
                 } else if pairing_transition {
@@ -469,7 +493,7 @@ impl OwedReloads {
 /// Why [`observe_loop`] woke up.
 enum Woken {
     /// The observe call answered, or its connection dropped.
-    Observed(Result<Option<AgentSnapshot>, RpcError>),
+    Observed(Result<Option<Box<AgentSnapshot>>, RpcError>),
     /// A device command, or `None` once the GUI drops the sender.
     Command(Option<Command>),
     /// Time to try connecting again.
@@ -486,7 +510,7 @@ fn ticker(period: Duration) -> tokio::time::Interval {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -503,6 +527,11 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+
+    /// Stable run identities for in-memory agent fixtures.
+    pub(crate) fn agent_identity(run: u64) -> openlogi_ipc::Identity {
+        serde_json::from_value(serde_json::json!({"run": run, "compat": 1})).unwrap()
+    }
 
     /// How a scripted agent answers a reload.
     #[derive(Clone, Copy)]
@@ -530,6 +559,7 @@ mod tests {
                 let signal = signal.clone();
                 Box::pin(async move {
                     match request {
+                        AgentRequest::Identity {} => Ok(AgentResponse::Identity(agent_identity(1))),
                         AgentRequest::ReloadConfig {} => Ok(reload_answer(
                             on_reload,
                             &counted,
@@ -781,6 +811,7 @@ mod tests {
                 let recorded = recorded.clone();
                 Box::pin(async move {
                     match request {
+                        AgentRequest::Identity {} => Ok(AgentResponse::Identity(agent_identity(1))),
                         AgentRequest::ReloadSavedConfigWithVerdict { saved } => {
                             recorded.lock().unwrap().push(Some(saved));
                             Ok(AgentResponse::ReloadSavedConfigWithVerdict(Ok(
@@ -1118,7 +1149,7 @@ mod tests {
                 assert!(received.try_recv().is_err(), "one result per recipient");
             }
             let (updates, mut received) = mpsc::unbounded_channel();
-            request::Request::deliver(reload, Err(request::Unavailable), &updates);
+            request::Request::deliver(reload, Err(request::Unavailable::Lost), &updates);
             assert!(
                 received.try_recv().is_err(),
                 "transport failure must not acknowledge any save"
@@ -1257,6 +1288,7 @@ mod tests {
             pairing: None,
             foreground: ForegroundApps::default(),
             lights: Vec::new(),
+            firmware_update: None,
         }
     }
 
@@ -1275,6 +1307,7 @@ mod tests {
                 let answered = old_answered.clone();
                 Box::pin(async move {
                     match request {
+                        AgentRequest::Identity {} => Ok(AgentResponse::Identity(agent_identity(1))),
                         AgentRequest::Observe { .. } => {
                             let call = calls.fetch_add(1, Ordering::SeqCst);
                             if call > 2 {
@@ -1311,6 +1344,7 @@ mod tests {
         tokio::select! {
             () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => panic!("client stopped"),
             () = async {
+                assert!(matches!(updates.recv().await, Some(GuiUpdate::Connected(_))));
                 assert!(matches!(updates.recv().await, Some(GuiUpdate::Snapshot(_))));
                 old_started.notified().await;
                 commands.send(CancelPairing.into()).unwrap();
@@ -1335,6 +1369,9 @@ mod tests {
             move |request| {
                 let answers = answers.clone();
                 Box::pin(async move {
+                    if matches!(request, AgentRequest::Identity {}) {
+                        return Ok(AgentResponse::Identity(agent_identity(1)));
+                    }
                     let AgentRequest::Observe { .. } = request else {
                         panic!("the client loop sent an unexpected request: {request:?}");
                     };
@@ -1369,6 +1406,74 @@ mod tests {
             } => seen,
         };
 
-        assert_eq!(seen, [snapshot(false), snapshot(true)]);
+        assert_eq!(seen, [Box::new(snapshot(false)), Box::new(snapshot(true))]);
+    }
+
+    /// The start the GUI confirmed against agent run 1, answered by the loop
+    /// connected to `reached`, and how many starts that agent received.
+    async fn firmware_start_reaching(
+        reached: openlogi_ipc::Identity,
+    ) -> (Result<u64, crate::state::FirmwareStartFailure>, usize) {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let counted = starts.clone();
+        let agent = in_memory_agent(
+            move |request| {
+                let counted = counted.clone();
+                Box::pin(async move {
+                    match request {
+                        AgentRequest::Identity {} => Ok(AgentResponse::Identity(reached)),
+                        AgentRequest::StartFirmwareUpdate { .. } => {
+                            counted.fetch_add(1, Ordering::SeqCst);
+                            Ok(AgentResponse::StartFirmwareUpdate(Ok(7)))
+                        }
+                        AgentRequest::Observe { .. } => std::future::pending().await,
+                        other => panic!("the client loop sent an unexpected request: {other:?}"),
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+        let mut effects = ScriptedEffects::answering([Ok(agent)]);
+        let (update_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        // Queued before the loop runs: whether it connects on its reconnect
+        // tick or on demand for this command, the run it reaches is `reached`.
+        commands
+            .send(
+                StartFirmwareUpdate {
+                    route: some_route(),
+                    key: crate::state::DeviceKey::from("firmware-test"),
+                    request: openlogi_core::hid::FirmwareRequest(0x2a),
+                    agent: agent_identity(1),
+                }
+                .into(),
+            )
+            .unwrap();
+        let result = tokio::select! {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+                panic!("the loop ends only once the GUI hangs up")
+            }
+            result = async {
+                loop {
+                    match updates.recv().await {
+                        Some(GuiUpdate::FirmwareStarted { result, .. }) => return result,
+                        Some(_) => {}
+                        None => panic!("the loop dropped its update channel"),
+                    }
+                }
+            } => result,
+        };
+        (result, starts.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_firmware_start_never_reaches_an_agent_it_was_not_confirmed_against() {
+        // The GUI drops its admission once it hears of another agent run, so
+        // a job that run started would install without showing progress.
+        assert_eq!(
+            firmware_start_reaching(agent_identity(2)).await,
+            (Err(crate::state::FirmwareStartFailure::NotSent), 0)
+        );
+        assert_eq!(firmware_start_reaching(agent_identity(1)).await, (Ok(7), 1));
     }
 }

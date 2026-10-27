@@ -238,6 +238,7 @@ impl Wanted {
             inputs,
             backlight_overlay,
             ring_haptics,
+            firmware,
             demand,
         } = core;
         observable.set_virtual_keyboard(virtual_keyboard.status());
@@ -253,6 +254,7 @@ impl Wanted {
                 inputs,
                 backlight_overlay,
                 ring_haptics,
+                firmware,
                 signals,
                 shutdown_requests,
                 hidpp_watchers: WatcherFleet::Inactive,
@@ -281,6 +283,7 @@ struct Running {
     inputs: InputServices,
     backlight_overlay: BacklightOverlayManager,
     ring_haptics: server::RingHapticPlayer,
+    firmware: Arc<crate::firmware::FirmwareManager>,
     signals: ShutdownSignals,
     shutdown_requests: ShutdownRequests,
     hidpp_watchers: WatcherFleet,
@@ -672,6 +675,7 @@ impl Running {
                 self.shut_down("the app was uninstalled", None).await;
             }
             ShutdownRequest::Restart { path, retry } => {
+                self.firmware.stop().await;
                 // A replacement ends the ring session as an exit does, and
                 // the successor knows nothing of an enable this agent owes:
                 // hand it back while inventory still publishes the channels.
@@ -699,6 +703,7 @@ impl Running {
     fn restart_hidpp_watchers(&mut self) {
         // The agent stays — at startup, or after a replacement that did not
         // happen — so ring sessions arm the haptic engine again.
+        self.firmware.resume();
         self.ring_haptics.resume();
         self.hidpp_watchers =
             WatcherFleet::Running(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
@@ -763,6 +768,7 @@ impl Running {
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> ! {
+        self.firmware.stop().await;
         self.ring_haptics.finish().await;
         std::mem::replace(&mut self.hidpp_watchers, WatcherFleet::Inactive)
             .stop_for_exit()

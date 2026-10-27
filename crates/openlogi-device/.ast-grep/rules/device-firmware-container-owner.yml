@@ -1,0 +1,19 @@
+# Owner: firmware::FirmwarePackage bounds and validates decompressed RDFU images.
+id: device-firmware-container-owner
+language: rust
+severity: error
+message: Use openlogi_device::firmware::FirmwarePackage::read_from or parse; the package owner bounds and validates firmware containers.
+note: |
+  The downloader once duplicated the parser's image-size policy. It now
+  authenticates the archive, then streams the image through FirmwarePackage.
+files:
+  - crates/**/firmware.rs
+  - crates/**/firmware/**/*.rs
+ignores:
+  - crates/openlogi-device/src/firmware/package.rs
+  - crates/openlogi-device/src/firmware/package/**
+rule:
+  any:
+    - pattern: $READER.take($LIMIT)
+    - pattern: $READER.read_to_end($BYTES)
+    - pattern: serde_json::from_slice($BYTES)

@@ -29,9 +29,10 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+serde_json.workspace = true
+hex = "0.4.3"
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
 

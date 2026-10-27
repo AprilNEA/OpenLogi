@@ -25,7 +25,7 @@ pub mod events;
 mod features;
 pub mod hotplug;
 mod ledger;
-mod mappings;
+pub(crate) mod mappings;
 pub mod persist;
 mod probe;
 pub mod standalone;

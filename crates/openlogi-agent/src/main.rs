@@ -19,6 +19,7 @@
 mod activity_macos;
 mod autostart;
 mod binary_watch;
+mod firmware;
 #[cfg(target_os = "macos")]
 mod input_monitoring;
 mod lifecycle;
