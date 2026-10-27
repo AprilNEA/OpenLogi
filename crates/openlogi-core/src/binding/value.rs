@@ -1,4 +1,4 @@
-//! Single-action, long-press, wheel-hold and per-direction gesture bindings.
+//! Single-action, long-press, multi-click, wheel-hold and per-direction gesture bindings.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -12,6 +12,44 @@ use super::gesture::GestureDirection;
 /// How long a physical button must remain down before its independent long
 /// action fires.
 pub const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(500);
+
+/// How long after a release a [`MultiClickBinding`] waits for a second click
+/// before it settles for the single one. Every single click on such a button
+/// is delayed by this much, which is why it stays short.
+pub const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
+
+/// Independent single-click and double-click actions of one button.
+///
+/// A first click does not fire on press: the button waits
+/// [`DOUBLE_CLICK_WINDOW`] for a second press. A second press inside the
+/// window fires `double` on its release and `click` never runs; otherwise
+/// `click` fires when the window closes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MultiClickBinding {
+    click: Action,
+    double: Action,
+}
+
+impl MultiClickBinding {
+    /// Pair a single-click action with a double-click action.
+    #[must_use]
+    pub const fn new(click: Action, double: Action) -> Self {
+        Self { click, double }
+    }
+
+    /// Action fired when the window closes without a second click.
+    #[must_use]
+    pub const fn click(&self) -> &Action {
+        &self.click
+    }
+
+    /// Action fired by a second click inside the window.
+    #[must_use]
+    pub const fn double(&self) -> &Action {
+        &self.double
+    }
+}
 
 /// The mutually exclusive actions of a threshold-based button binding.
 ///
@@ -109,13 +147,15 @@ impl WheelHoldBinding {
 /// for the payload variants), [`Gesture`](Binding::Gesture) serializes as a
 /// table keyed by [`GestureDirection`] names (`Up`/`Down`/`Left`/`Right`/
 /// `Click`), [`LongPress`](Binding::LongPress) as the structurally distinct
-/// `{ short = ..., long = ... }` table, and [`WheelHold`](Binding::WheelHold)
+/// `{ short = ..., long = ... }` table, [`MultiClick`](Binding::MultiClick) as
+/// `{ click = ..., double = ... }`, and [`WheelHold`](Binding::WheelHold)
 /// as `{ click = ..., wheel = "HorizontalScroll" }`.
 ///
 /// The arms are disambiguated structurally: action variant names and gesture
 /// direction names have zero overlap, while a long press requires both
-/// lowercase `short` and `long` fields, a wheel hold both lowercase `click`
-/// and `wheel` fields, and each rejects unknown fields. The
+/// lowercase `short` and `long` fields, a multi-click both lowercase `click`
+/// and `double` fields, a wheel hold both lowercase `click` and `wheel`
+/// fields, and each rejects unknown fields. The
 /// `binding_untagged_*` tests guard these routing invariants.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -128,6 +168,8 @@ pub enum Binding {
     Gesture(BTreeMap<GestureDirection, Action>),
     /// Independent release-before-threshold and threshold actions.
     LongPress(LongPressBinding),
+    /// Independent single-click and double-click actions.
+    MultiClick(MultiClickBinding),
     /// The main wheel scrolls horizontally while the button is held; a click
     /// without wheel movement runs the click action.
     WheelHold(WheelHoldBinding),
@@ -137,7 +179,8 @@ impl Binding {
     /// The plain-click action for this binding: the [`Single`](Binding::Single)
     /// action, the [`Gesture`](Binding::Gesture) map's
     /// [`Click`](GestureDirection::Click) entry, a
-    /// [`LongPress`](Binding::LongPress) binding's short action, or a
+    /// [`LongPress`](Binding::LongPress) binding's short action, a
+    /// [`MultiClick`](Binding::MultiClick) binding's single-click action, or a
     /// [`WheelHold`](Binding::WheelHold) binding's click action. Falls back to
     /// [`Action::None`] when a gesture binding has no explicit `Click`.
     ///
@@ -151,6 +194,7 @@ impl Binding {
                 .cloned()
                 .unwrap_or(Action::None),
             Binding::LongPress(binding) => binding.short().clone(),
+            Binding::MultiClick(binding) => binding.click().clone(),
             Binding::WheelHold(binding) => binding.click().clone(),
         }
     }
@@ -160,7 +204,10 @@ impl Binding {
     #[must_use]
     pub fn direction_action(&self, direction: GestureDirection) -> Option<&Action> {
         match self {
-            Binding::Single(_) | Binding::LongPress(_) | Binding::WheelHold(_) => None,
+            Binding::Single(_)
+            | Binding::LongPress(_)
+            | Binding::MultiClick(_)
+            | Binding::WheelHold(_) => None,
             Binding::Gesture(map) => map.get(&direction),
         }
     }
@@ -184,12 +231,14 @@ impl Binding {
     /// [`GestureDirection::Click`] entry and leaving the swipe arms unbound.
     /// A long-press binding keeps its short action as `Click`; its long action
     /// is discarded because gesture and threshold modes are mutually exclusive.
+    /// A multi-click binding keeps its single-click action and drops its double.
     /// A wheel-hold binding keeps its click action the same way.
     /// A no-op when this is already a [`Gesture`](Binding::Gesture).
     pub fn upgrade_to_gesture(&mut self) {
         let click = match self {
             Binding::Single(action) => action.clone(),
             Binding::LongPress(binding) => binding.short().clone(),
+            Binding::MultiClick(binding) => binding.click().clone(),
             Binding::WheelHold(binding) => binding.click().clone(),
             Binding::Gesture(_) => return,
         };

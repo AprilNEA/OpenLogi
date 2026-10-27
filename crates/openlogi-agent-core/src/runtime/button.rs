@@ -205,7 +205,9 @@ impl PressBehavior {
         match binding {
             None => Self::LifecycleOnly,
             Some(Binding::Single(action)) => Self::Immediate(action.clone()),
-            Some(binding @ Binding::Gesture(_)) => Self::Immediate(binding.click_action()),
+            Some(binding @ (Binding::Gesture(_) | Binding::MultiClick(_))) => {
+                Self::Immediate(binding.click_action())
+            }
             Some(Binding::LongPress(binding)) => Self::LongPressPending {
                 short: binding.short().clone(),
                 long: binding.long().clone(),

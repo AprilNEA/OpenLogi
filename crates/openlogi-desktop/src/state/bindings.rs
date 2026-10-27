@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, LongPressBinding, WheelHoldBinding,
+    Action, Binding, ButtonId, GestureDirection, LongPressBinding, MultiClickBinding,
+    WheelHoldBinding,
 };
 use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, KeyTrigger};
@@ -246,6 +247,9 @@ impl AppState {
                     Some(Binding::LongPress(binding)) => {
                         Binding::LongPress(LongPressBinding::new(action, binding.long().clone()))
                     }
+                    Some(Binding::MultiClick(binding)) => Binding::MultiClick(
+                        MultiClickBinding::new(action, binding.double().clone()),
+                    ),
                     Some(Binding::WheelHold(_)) => {
                         Binding::WheelHold(WheelHoldBinding::horizontal_scroll(action))
                     }
