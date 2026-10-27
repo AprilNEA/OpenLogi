@@ -239,6 +239,37 @@ fn queued_key_action_retains_its_press_time_target() {
 }
 
 #[test]
+fn key_bound_to_easy_switch_passes_through_without_a_firing_device() {
+    // A function key carries no device, so dispatching an Easy-Switch action
+    // from it would move the selected device instead of the keyboard pressed.
+    let (dispatcher, mut owner, _events) = test_dispatcher();
+    let keycode = 0x7a;
+    let modifiers = KeyModifiers::default();
+    let bindings = Arc::new(RwLock::new(BTreeMap::from([(
+        KeyTrigger { keycode, modifiers },
+        Action::EasySwitchChannel2,
+    )])));
+    let (actions, queued) = mpsc::sync_channel(1);
+
+    assert_eq!(
+        handle_key(
+            KeyEvent {
+                keycode,
+                pressed: true,
+                modifiers,
+            },
+            &bindings,
+            &actions,
+            &dispatcher,
+            ActionDispatchTarget::capture,
+        ),
+        EventDisposition::PassThrough
+    );
+    queued.try_recv().expect_err("no action should be queued");
+    assert!(owner.shutdown());
+}
+
+#[test]
 fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari() {
     use super::super::button::ButtonRuntimeEvent;
     use openlogi_hook::PointerTarget;

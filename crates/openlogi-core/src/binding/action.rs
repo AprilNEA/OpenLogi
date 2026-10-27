@@ -472,6 +472,15 @@ impl Action {
         }
     }
 
+    /// Whether this action acts on the device that fired it, so a trigger
+    /// that cannot name its device — a global function-key binding, which
+    /// any keyboard may send — must not bind it: the selected device would
+    /// stand in for the keyboard that was pressed.
+    #[must_use]
+    pub fn needs_firing_device(&self) -> bool {
+        self.easy_switch_host().is_some()
+    }
+
     /// The chord whose output must remain down until the originating press
     /// ends, together with which of its keys stay down. `None` for an
     /// instantaneous action.

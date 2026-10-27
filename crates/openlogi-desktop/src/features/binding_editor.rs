@@ -114,21 +114,24 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
     }
 }
 
-/// Build every category-grouped action row.
+/// Build every category-grouped action row that `offered` keeps.
 pub(crate) fn action_rows(
     id_prefix: &'static str,
     current: Option<&Action>,
+    offered: impl Fn(&Action) -> bool,
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
-    action_rows_matching(id_prefix, current, "", on_pick, pal)
+    action_rows_matching(id_prefix, current, "", offered, on_pick, pal)
 }
 
-/// Build action rows filtered by localized action or category name.
+/// Build action rows that `offered` keeps, filtered by localized action or
+/// category name.
 pub(crate) fn action_rows_matching(
     id_prefix: &'static str,
     current: Option<&Action>,
     query: &str,
+    offered: impl Fn(&Action) -> bool,
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
@@ -148,12 +151,13 @@ pub(crate) fn action_rows_matching(
                 (key, action)
             })
             .filter(|(_, action)| {
-                query.is_empty()
-                    || category_matches
-                    || localized_action_label(action)
-                        .to_lowercase()
-                        .contains(&query)
-                    || action.label().to_lowercase().contains(&query)
+                offered(action)
+                    && (query.is_empty()
+                        || category_matches
+                        || localized_action_label(action)
+                            .to_lowercase()
+                            .contains(&query)
+                        || action.label().to_lowercase().contains(&query))
             })
             .collect();
         if actions.is_empty() {
