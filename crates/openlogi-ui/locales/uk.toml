@@ -663,6 +663,7 @@ theme_description = "Як виглядає кільце, коли відкрив
 theme_classic = "Класична"
 theme_in_motion = "У русі"
 theme_obsidian = "Obsidian"
+theme_porcelain = "Porcelain"
 clear_slot = "Очистити слот"
 empty_slot = "Порожній слот"
 haptic_sense_panel = "Панель Haptic Sense"

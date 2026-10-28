@@ -61,14 +61,15 @@ impl RingPlacement {
     )]
     fn bounds(&self, dpi: u32) -> Bounds<DevicePixels> {
         let full = (f64::from(design_edge(self.theme)) * f64::from(dpi) / 96.0).round() as i32;
-        // The physical half of `ring::panel_edge`: an In Motion ring on a
+        // The physical half of `ring::panel_edge`: an animated ring on a
         // display shorter than it takes the shorter side, and the skin scales
         // its layout to match. Classic keeps its size, as it always did.
         let edge = DevicePixels(match self.theme {
             ActionRingTheme::Classic => full,
-            ActionRingTheme::InMotion | ActionRingTheme::Obsidian => full
-                .min(self.display.size.width.0)
-                .min(self.display.size.height.0),
+            ActionRingTheme::InMotion | ActionRingTheme::Obsidian | ActionRingTheme::Porcelain => {
+                full.min(self.display.size.width.0)
+                    .min(self.display.size.height.0)
+            }
         });
         let half = DevicePixels(edge.0 / 2);
         let desired = self.cursor - point(half, half);
@@ -342,6 +343,22 @@ mod tests {
         assert_eq!(bounds.size, size(DevicePixels(440), DevicePixels(440)));
         // 1280×720 at 200%: 880 px would overhang, so it takes the 720 px height.
         let bounds = obsidian((640, 360), (0, 0, 1280, 720)).bounds(192);
+        assert_eq!(bounds.origin, point(DevicePixels(280), DevicePixels(0)));
+        assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
+    }
+
+    #[test]
+    fn a_porcelain_ring_is_placed_like_in_motion_at_its_own_size() {
+        let porcelain = |cursor, rect| RingPlacement {
+            theme: ActionRingTheme::Porcelain,
+            ..placement(cursor, rect)
+        };
+        // 420 px at 100%, centred on the cursor.
+        let bounds = porcelain((900, 600), (0, 0, 1920, 1080)).bounds(96);
+        assert_eq!(bounds.origin, point(DevicePixels(690), DevicePixels(390)));
+        assert_eq!(bounds.size, size(DevicePixels(420), DevicePixels(420)));
+        // 1280×720 at 200%: 840 px would overhang, so it takes the 720 px height.
+        let bounds = porcelain((640, 360), (0, 0, 1280, 720)).bounds(192);
         assert_eq!(bounds.origin, point(DevicePixels(280), DevicePixels(0)));
         assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
     }

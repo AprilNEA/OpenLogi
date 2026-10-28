@@ -663,6 +663,7 @@ theme_description = "Как выглядит кольцо при открыти�
 theme_classic = "Классическая"
 theme_in_motion = "В движении"
 theme_obsidian = "Obsidian"
+theme_porcelain = "Porcelain"
 clear_slot = "Очистить позицию"
 empty_slot = "Пустая позиция"
 haptic_sense_panel = "Панель Haptic Sense"

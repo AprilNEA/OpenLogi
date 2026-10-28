@@ -304,11 +304,19 @@ pub enum ActionRingTheme {
     /// Dark glass cards around a signal hub, with a pointer-lit halo on the
     /// hovered one and a sector that turns to face it.
     Obsidian,
+    /// Ceramic discs with their captions under them, on a light platter
+    /// around a hub, with a needle that turns to point at the hovered one.
+    Porcelain,
 }
 
 impl ActionRingTheme {
     /// Every theme, in picker order.
-    pub const ALL: [Self; 3] = [Self::Classic, Self::InMotion, Self::Obsidian];
+    pub const ALL: [Self; 4] = [
+        Self::Classic,
+        Self::InMotion,
+        Self::Obsidian,
+        Self::Porcelain,
+    ];
 }
 
 /// Per-device Actions Ring settings and application-specific layouts.
@@ -644,5 +652,8 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
         let config = toml::from_str::<ActionRingConfig>(r#"theme = "obsidian""#)
             .expect("the obsidian theme must load");
         assert_eq!(config.theme, ActionRingTheme::Obsidian);
+        let config = toml::from_str::<ActionRingConfig>(r#"theme = "porcelain""#)
+            .expect("the porcelain theme must load");
+        assert_eq!(config.theme, ActionRingTheme::Porcelain);
     }
 }

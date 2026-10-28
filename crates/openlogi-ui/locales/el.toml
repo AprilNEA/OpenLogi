@@ -663,6 +663,7 @@ theme_description = "Πώς εμφανίζεται ο δακτύλιος ότα�
 theme_classic = "Κλασικό"
 theme_in_motion = "Σε κίνηση"
 theme_obsidian = "Obsidian"
+theme_porcelain = "Porcelain"
 clear_slot = "Εκκαθάριση θέσης"
 empty_slot = "Κενή θέση"
 haptic_sense_panel = "Πίνακας Haptic Sense"
