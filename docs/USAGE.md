@@ -245,8 +245,12 @@ OpenLogi CLI and agent builds; it never triggers direct-hardware fallback.
 
 ## Asset synchronization
 
-Asset synchronization probes `assets.openlogi.org`, the versioned Cloudflare
-Pages release alias, and the pinned jsDelivr npm release concurrently. The first
-mirror with a valid catalog supplies every file for that synchronization run.
+Asset synchronization probes `assets.openlogi.org`, the Cloudflare Pages alias
+of the `0.1` asset release line, and the newest `0.1.x` npm release on jsDelivr
+concurrently. The first mirror with a valid catalog supplies every file for that
+synchronization run. On jsDelivr, OpenLogi also asks `data.jsdelivr.com` for the
+newest release and waits at most one second for the answer. With the answer,
+jsDelivr trails a new asset release by up to about an hour; without it, by up
+to 12 hours.
 Set `OPENLOGI_ASSETS` or pass `openlogi assets sync --base <URL>` to use one
 uniform asset origin instead of automatic mirror selection.

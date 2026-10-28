@@ -211,7 +211,13 @@ Veya dağıtımınıza uygun paketi tek bir komutla kurun. Komut minisign imzas�
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-Betiği çalıştırmadan önce okumak ve Flatpak, NixOS ile systemd olmayan dağıtımlar için [INSTALL-linux.md](INSTALL-linux.md)'ye bakın.
+Arch Linux'ta [`openlogi`](https://aur.archlinux.org/packages/openlogi) AUR paketi sürümü kaynak koddan derler:
+
+```sh
+yay -S openlogi
+```
+
+Betiği çalıştırmadan önce okumak ve AUR paketi, Flatpak, NixOS ile systemd olmayan dağıtımlar için [INSTALL-linux.md](INSTALL-linux.md)'ye bakın.
 
 ### Windows
 

@@ -184,7 +184,15 @@ pub(crate) fn action_rows_matching(
                                 .child(div().child(label)),
                         )
                         .when(selected, |row| {
-                            row.child(Icon::new(IconName::Check).size_3().text_color(pal.accent))
+                            row.child(
+                                div()
+                                    .debug_selector(|| format!("{id_prefix}-{action:?}-check"))
+                                    .flex_none()
+                                    .size_3()
+                                    .child(
+                                        Icon::new(IconName::Check).size_3().text_color(pal.accent),
+                                    ),
+                            )
                         })
                         .on_click(move |_event, window, cx| (on_pick)(action.clone(), window, cx))
                 })),

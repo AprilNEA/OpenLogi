@@ -212,7 +212,13 @@ brew install --cask openlogi
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-想先审阅脚本再运行，或使用 Flatpak、NixOS、无 systemd 的发行版，见 [INSTALL-linux.md](INSTALL-linux.md)。
+在 Arch Linux 上，AUR 软件包 [`openlogi`](https://aur.archlinux.org/packages/openlogi) 会从源码构建发布版本：
+
+```sh
+yay -S openlogi
+```
+
+想先审阅脚本再运行，或使用 AUR 软件包、Flatpak、NixOS、无 systemd 的发行版，见 [INSTALL-linux.md](INSTALL-linux.md)。
 
 ### Windows
 

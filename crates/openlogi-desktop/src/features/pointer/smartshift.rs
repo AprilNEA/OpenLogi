@@ -17,9 +17,7 @@ use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
     Subscription, Window, div, px,
 };
-use gpui_component::{
-    Disableable as _, Selectable as _, button::Button, h_flex, slider::Slider, v_flex,
-};
+use gpui_component::{Disableable as _, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::config::{
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ThumbwheelSensitivity,
 };
@@ -32,7 +30,7 @@ use crate::state::{
     StateEvents,
 };
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::components::Toggle;
+use crate::ui::components::{Pill, Toggle};
 use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -43,7 +41,8 @@ use crate::ui::theme::{self, Palette, Typography as _};
 /// Thresholds below the floor free-spin on everyday scrolling (#317), so the
 /// floor and default are shared with the `openlogi-core` config contract. A device
 /// reporting a value outside the band is normalised for display by
-/// [`clamp_threshold`]; it is only rewritten once the user drags the slider.
+/// [`clamp_threshold`]. The config cannot hold a value below the floor, so
+/// [`AppState::commit_smartshift`] also replaces one on the next write (#2079).
 const THRESHOLD_MIN: SmartShiftThreshold = SMARTSHIFT_MIN_AUTO_DISENGAGE;
 const THRESHOLD_MAX: SmartShiftThreshold = match SmartShiftThreshold::try_new(50) {
     Ok(value) => value,
@@ -440,9 +439,7 @@ fn mode_pill(label: SharedString, selected: bool, status: SmartShiftStatus) -> i
         SmartShiftMode::Free => "smartshift-mode-free",
         SmartShiftMode::Ratchet => "smartshift-mode-ratchet",
     };
-    Button::new(id)
-        .compact()
-        .label(label)
+    Pill::new(id, label)
         .selected(selected)
         .on_click(move |_event, _window, cx| {
             AppState::update_smartshift(cx, status);

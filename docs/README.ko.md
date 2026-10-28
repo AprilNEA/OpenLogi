@@ -212,7 +212,13 @@ OpenLogi를 열고 macOS가 요청하면 **손쉬운 사용**과 **입력 모니
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-실행 전에 스크립트를 확인하는 방법과 Flatpak, NixOS, systemd가 없는 배포판에 대해서는 [INSTALL-linux.md](INSTALL-linux.md)를 참고하세요.
+Arch Linux에서는 AUR 패키지 [`openlogi`](https://aur.archlinux.org/packages/openlogi)가 릴리스를 소스에서 빌드합니다:
+
+```sh
+yay -S openlogi
+```
+
+실행 전에 스크립트를 확인하는 방법과 AUR 패키지, Flatpak, NixOS, systemd가 없는 배포판에 대해서는 [INSTALL-linux.md](INSTALL-linux.md)를 참고하세요.
 
 ### Windows
 

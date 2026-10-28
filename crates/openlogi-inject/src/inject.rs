@@ -718,6 +718,7 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x36 => Some(0xbc),
         0x37 => Some(0xbe),
         0x38 => Some(0xbf),
+        0x49 => Some(0x2d),
         0x4a => Some(0x24),
         0x4b => Some(0x21),
         0x4c => Some(0x2e),
@@ -1171,6 +1172,25 @@ mod tests {
         assert_eq!(hid_usage_to_windows(0x50), Some(0x25)); // Left
         assert_eq!(hid_usage_to_windows(0x2c), Some(0x20)); // Space
         assert_eq!(hid_usage_to_windows(0x33), Some(0xba)); // Semicolon
+        assert_eq!(hid_usage_to_windows(0x49), Some(0x2d)); // Insert
         assert_eq!(hid_usage_to_windows(0xff), None);
+    }
+
+    /// Every key a custom shortcut can name has a Windows virtual key, or the
+    /// Windows backend drops the binding instead of pressing it.
+    #[test]
+    fn every_shortcut_usage_has_a_windows_virtual_key() {
+        use openlogi_core::binding::KeyboardUsage;
+
+        use super::hid_usage_to_windows;
+
+        for code in 0..=u8::MAX {
+            if KeyboardUsage::try_new(code).is_ok() {
+                assert!(
+                    hid_usage_to_windows(code).is_some(),
+                    "usage {code:#04x} has no Windows virtual key"
+                );
+            }
+        }
     }
 }

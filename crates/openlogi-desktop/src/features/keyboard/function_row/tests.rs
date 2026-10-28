@@ -6,6 +6,8 @@ use openlogi_core::config::FunctionKey;
 use openlogi_core::device::DeviceKind;
 use std::path::PathBuf;
 
+mod native_function;
+
 /// The F-row the fallback shows: Esc then F1–F19.
 const FUNCTION_KEYS: [FunctionKey; 20] = FunctionKey::ALL;
 

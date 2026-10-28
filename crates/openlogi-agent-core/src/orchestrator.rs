@@ -62,17 +62,16 @@ mod lights;
 
 pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 
-#[cfg(test)]
 use devices::reapply_targets;
 use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
-    VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, assignments_changed,
-    build_devices, bump_settings_epoch, carry_lifecycle_budgets, changed_follower_cookies,
-    changed_force_sensing, config_keeps_os_layout, configured_dpi, configured_force_sensing,
-    configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
-    keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
-    plan_disabled_keys_recovery, plan_reapply, published_inventories, reconnect_follower_cookies,
-    same_device_lifecycle, saved_speed, settings_moved, stable_id, wheel_inverted,
+    VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch,
+    carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
+    config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate,
+    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
+    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_disabled_keys_recovery,
+    plan_reapply, published_inventories, reconnect_follower_cookies, same_device_lifecycle,
+    saved_speed, settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -531,6 +530,12 @@ pub struct Orchestrator {
     /// budget the forced targets are queued with — a system wake keeps the
     /// boot-race ladder, a device reconnect needs only a link-race confirm.
     forced_reapply_budget: Option<u8>,
+    /// System resume must rearm every online capture; an identity-free device
+    /// wake only reapplies settings, since each armed listener owns its wake.
+    forced_capture_rearm: bool,
+    /// Rearm epochs belong to exact routes. Discovery or wake on one link
+    /// must not retire a still-running capture on another link.
+    capture_route_generations: HashMap<DeviceRoute, u64>,
     /// Whether the last enumeration pass failed to open HID++ nodes; published
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
@@ -680,6 +685,8 @@ impl Orchestrator {
             },
             inventory: InventoryState::Pending,
             forced_reapply_budget: None,
+            forced_capture_rearm: false,
+            capture_route_generations: HashMap::new(),
             hid_open_failures: false,
             reapply_followup: BTreeMap::new(),
             disabled_keys_recovery: BTreeMap::new(),
@@ -999,7 +1006,6 @@ impl Orchestrator {
     /// native. Their route is still published: a restore owed from an earlier
     /// handoff has to follow the mouse after capture stops.
     fn capture_publication(&self) -> CapturePublication {
-        let rearm_generation = self.shared.capture_rearm_generation.load(Ordering::Relaxed);
         let keyboard = self.keyboard_spec_for();
         let mut plans = Vec::new();
         let mut routes = BTreeMap::new();
@@ -1013,6 +1019,11 @@ impl Orchestrator {
             if !self.config.device_enabled(&dev.config_key) {
                 continue;
             }
+            let rearm_generation = self
+                .capture_route_generations
+                .get(&route)
+                .copied()
+                .unwrap_or(0);
             let (app, pointer_target) = if dev.kind == DeviceKind::Keyboard {
                 (self.current_app.as_deref(), None)
             } else {
@@ -1142,8 +1153,7 @@ impl Orchestrator {
         // transitions are observable.
         let forced = self.forced_reapply_budget.take();
         let next_current = pick_current(&devices, self.config.selected_device());
-        let rearm_capture =
-            any_device_needs_capture_rearm(&self.devices, &devices, forced.is_some());
+        self.rearm_capture_routes(&devices);
         // Manual cancellation can happen long after the boot/reconnect ladder
         // drained. Its owner requests only a Disable Keys recovery, and does
         // not consume a request while a successor still owns the setting.
@@ -1193,14 +1203,6 @@ impl Orchestrator {
                     || a.capabilities != b.capabilities
                     || a.light_capabilities != b.light_capabilities
             });
-        if rearm_capture {
-            let generation = self
-                .shared
-                .capture_rearm_generation
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1);
-            debug!(generation, "device(s) require capture re-arm");
-        }
         if !changed {
             // Same set, routes, and runtime selection — but keep the fresh
             // `online` flags, or a device that woke this tick would read as a
@@ -1303,13 +1305,43 @@ impl Orchestrator {
         }
     }
 
-    /// Force a volatile-settings re-apply for every online device on the next
-    /// inventory refresh. Called on a detected system wake: the devices were
-    /// likely power-cycled during the sleep, but the first post-wake snapshot
-    /// can look identical to the last pre-sleep one (same set, same routes,
-    /// already online), so the per-device transition triggers never fire.
+    /// Advance only the captures whose own online transition requires it.
+    /// Keep a resume request latched until an authoritative snapshot arrives.
+    fn rearm_capture_routes(&mut self, devices: &[AgentDevice]) {
+        let all = std::mem::take(&mut self.forced_capture_rearm);
+        self.capture_route_generations
+            .retain(|route, _| devices.iter().any(|dev| dev.route.as_ref() == Some(route)));
+        let targets = reapply_targets(&self.devices, devices, all);
+        if targets.is_empty() {
+            return;
+        }
+        let generation = self
+            .shared
+            .capture_rearm_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        for idx in targets {
+            if let Some(route) = &devices[idx].route {
+                self.capture_route_generations
+                    .insert(route.clone(), generation);
+            }
+        }
+        debug!(generation, "device route(s) require capture re-arm");
+    }
+
+    /// Reapply settings with the full confirmation budget after a node change
+    /// or recovery. Capture follows its own route and listener transitions;
+    /// a general settings request must not cycle unrelated capture epochs.
     pub fn reapply_volatile_on_next_refresh(&mut self) {
         self.force_reapply(VOLATILE_REAPPLY_CONFIRM_RETRIES);
+    }
+
+    /// After system resume, reapply settings and rearm every online capture.
+    /// Devices may have lost volatile diversion even when the snapshot looks
+    /// identical; retain this intent until an authoritative refresh arrives.
+    pub fn reapply_after_system_resume(&mut self) {
+        self.forced_capture_rearm = true;
+        self.reapply_volatile_on_next_refresh();
     }
 
     /// Force a volatile-settings re-apply on the next inventory refresh

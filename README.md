@@ -211,7 +211,13 @@ Or install the right package for your distribution with one command. It verifies
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-To read the script before running it, and for Flatpak, NixOS, and distributions without systemd, see [INSTALL-linux.md](docs/INSTALL-linux.md).
+On Arch Linux, the [`openlogi`](https://aur.archlinux.org/packages/openlogi) AUR package builds the release from source:
+
+```sh
+yay -S openlogi
+```
+
+To read the script before running it, and for the AUR package, Flatpak, NixOS, and distributions without systemd, see [INSTALL-linux.md](docs/INSTALL-linux.md).
 
 ### Windows
 

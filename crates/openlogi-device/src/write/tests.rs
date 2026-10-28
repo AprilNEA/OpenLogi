@@ -8,7 +8,7 @@ use hidpp::feature::smartshift::WheelMode;
 
 use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
-use crate::write::diagnostics::dump_firmware_entities_on_channel;
+use crate::write::diagnostics::{dump_firmware_entities_on_channel, read_battery_raw_on_channel};
 use crate::write::dpi::expand_dpi_ranges;
 use crate::write::lighting::{collect_present_zones, per_key_commit, per_key_frames};
 use crate::write::smartshift::{
@@ -1105,6 +1105,78 @@ async fn a_channel_failure_aborts_the_dump_instead_of_blaming_the_firmware() {
     assert!(
         !written.iter().any(|report| is_fw_info_for(report, 2)),
         "the dump stops at the failure rather than timing out per entity"
+    );
+}
+
+const BATTERY_VOLTAGE_INDEX: u8 = 0x06;
+
+/// A G502 LIGHTSPEED's battery surface: `0x1001 BatteryVoltage` at index
+/// 0x06 and none of the other battery features, reading 3912 mV on battery.
+/// With `voltage` false the device exposes no battery feature at all.
+fn voltage_only_battery(request: &[u8], voltage: bool) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let mut payload = [0u8; 16];
+    let long = match (request[2], request[3] >> 4) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        // Root feature lookup.
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(voltage && feature_id == 0x1001) * BATTERY_VOLTAGE_INDEX;
+            false
+        }
+        // getBatteryInfo: 0x0f48 mV, flags clear (discharging, not critical).
+        (BATTERY_VOLTAGE_INDEX, 0x00) if voltage => {
+            payload[..3].copy_from_slice(&[0x0f, 0x48, 0x00]);
+            true
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+#[tokio::test]
+async fn the_raw_battery_read_reports_a_voltage_only_device() {
+    // The inventory reads these devices through 0x1001; the diagnostic must
+    // too, and print the measured voltage rather than an estimated percentage.
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(|request| voltage_only_battery(request, true));
+    let channel = scripted_channel(raw).await;
+
+    let line = read_battery_raw_on_channel(&channel, 1)
+        .await
+        .expect("a 0x1001 device has a readable battery");
+    assert_eq!(
+        line,
+        "0x1001 BatteryVoltage: voltage_mv=3912 critical=false status=Discharging"
+    );
+}
+
+#[tokio::test]
+async fn the_raw_battery_read_fails_only_without_any_battery_feature() {
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(|request| voltage_only_battery(request, false));
+    let channel = scripted_channel(raw).await;
+
+    let error = read_battery_raw_on_channel(&channel, 1)
+        .await
+        .expect_err("no battery feature to read");
+    assert_eq!(
+        error,
+        WriteError::FeatureUnsupported {
+            feature_hex: 0x1004
+        }
     );
 }
 

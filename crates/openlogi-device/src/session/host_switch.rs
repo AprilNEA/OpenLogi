@@ -65,6 +65,7 @@ pub use restore::{
 use crate::{
     ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, IoSuspended, SharedChannel,
     backend::BackendError,
+    channel::registry::PublicationState,
     reprog_controls::{self, ReprogControlsV4},
 };
 
@@ -346,10 +347,13 @@ async fn depart(
     // A restore write now would wait for a keyboard that is leaving. The
     // owner retries it once inventory publishes the keyboard again.
     let restore = pending.map(|pending| {
-        if registry.is_current(shared) {
-            pending.allow_current_channel()
-        } else {
+        if matches!(
+            HostSwitchStop::for_current_publication(registry, shared),
+            HostSwitchStop::ChannelChanged
+        ) {
             pending
+        } else {
+            pending.allow_current_channel()
         }
     });
     HostSwitchSessionOutcome::Departed { restore }
@@ -431,8 +435,13 @@ async fn restore_after(
     let reuse_armed_channel = match stop {
         // A press does not retire the channel: teardown may write through it
         // for as long as inventory still publishes it.
-        HostSwitchStop::Pressed(_) => registry.is_current(shared),
-        HostSwitchStop::Shutdown => true,
+        HostSwitchStop::Pressed(_) => !matches!(
+            HostSwitchStop::for_current_publication(registry, shared),
+            HostSwitchStop::ChannelChanged
+        ),
+        // A withdrawn receiver slot may return on the same USB connection.
+        // The token still requires a live exact-route publication before writes.
+        HostSwitchStop::Shutdown | HostSwitchStop::ReceiverSlotGone => true,
         HostSwitchStop::ChannelChanged | HostSwitchStop::Departed(_) => false,
     };
     if reuse_armed_channel {
@@ -562,6 +571,9 @@ enum HostSwitchStop {
     /// Teardown was requested while inventory still published the channel
     /// that armed the session.
     Shutdown,
+    /// The keyboard's receiver slot went offline, but inventory still owns
+    /// the USB transport. Restoration may reuse it once the slot returns.
+    ReceiverSlotGone,
     /// The channel that armed the session must not be written through again:
     /// inventory removed or replaced it, or the owner reported the keyboard
     /// lost.
@@ -572,17 +584,28 @@ impl HostSwitchStop {
     fn requested_host(self) -> Option<u8> {
         match self {
             Self::Pressed(host) => Some(host),
-            Self::Departed(_) | Self::Shutdown | Self::ChannelChanged => None,
+            Self::Departed(_) | Self::Shutdown | Self::ReceiverSlotGone | Self::ChannelChanged => {
+                None
+            }
         }
     }
 
     /// A stop that did not itself retire the channel. Re-checking inventory
     /// keeps a simultaneously ready replacement from being written underneath.
     fn for_current_publication(registry: &ChannelRegistry, shared: &SharedChannel) -> Self {
-        if registry.is_current(shared) {
-            Self::Shutdown
-        } else {
-            Self::ChannelChanged
+        match registry.publication(shared) {
+            PublicationState::Current => Self::Shutdown,
+            PublicationState::SlotOffline => Self::ReceiverSlotGone,
+            PublicationState::Retired => Self::ChannelChanged,
+        }
+    }
+
+    /// Losing a receiver slot does not retire its still-published transport.
+    /// A lost owner on an otherwise current route remains conservative.
+    fn for_lost_publication(registry: &ChannelRegistry, shared: &SharedChannel) -> Self {
+        match registry.publication(shared) {
+            PublicationState::SlotOffline => Self::ReceiverSlotGone,
+            PublicationState::Current | PublicationState::Retired => Self::ChannelChanged,
         }
     }
 }
@@ -600,7 +623,10 @@ async fn monitor_host_switch(
         shutdown, triggers, position, registry, shared, device_io, hosts,
     )
     .await;
-    if stop == HostSwitchStop::ChannelChanged {
+    if matches!(
+        stop,
+        HostSwitchStop::ChannelChanged | HostSwitchStop::ReceiverSlotGone
+    ) {
         queued_departure(triggers, position, hosts).unwrap_or(stop)
     } else {
         stop
@@ -661,7 +687,7 @@ async fn watch_host_switch(
     loop {
         if !registry.is_current(shared) {
             info!(route = %shared.route(), "inventory replaced or removed host-switch channel");
-            return HostSwitchStop::ChannelChanged;
+            return HostSwitchStop::for_current_publication(registry, shared);
         }
         tokio::select! {
             biased;
@@ -676,7 +702,9 @@ async fn watch_host_switch(
                     HostSwitchStopReason::Graceful => {
                         HostSwitchStop::for_current_publication(registry, shared)
                     }
-                    HostSwitchStopReason::DeviceLost => HostSwitchStop::ChannelChanged,
+                    HostSwitchStopReason::DeviceLost => {
+                        HostSwitchStop::for_lost_publication(registry, shared)
+                    }
                 };
             }
             trigger = triggers.recv() => {

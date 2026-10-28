@@ -12,7 +12,7 @@ pub(super) const CALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// leaves the lifecycle watchdog unscheduled leaves this thread unscheduled
 /// too, and a callback that was entered when it began is not stuck for having
 /// been frozen with the rest of the process. Every other gap is charged in
-/// full.
+/// full; [`CallbackWatchdog`] documents which epoch read a gap is judged by.
 pub(super) const CALLBACK_OBSERVATION_GAP: Duration = CALLBACK_POLL_INTERVAL.saturating_mul(5);
 pub(super) const TAP_SHUTDOWN_BUDGET: Duration = Duration::from_millis(1_500);
 /// How long the tap thread may stay inside one between-slice capability probe
@@ -200,11 +200,12 @@ impl Drop for TapThreadExitGuard {
 
 /// The kernel's last sleep and wake instants — `kern.sleeptime` and
 /// `kern.waketime`, as microseconds since the epoch — compared for equality
-/// only. A change between two evaluations means the gap contained a system
-/// sleep or wake, the one kind of gap the watchdogs discount: both late #952
-/// exits on the reporting host straddled one (5 ms after `System Wake`, and
-/// within the second of a DarkWake). `kern.waketime` moves on every wake from
-/// sleep, dark or full, not on a DarkWake's promotion to a full wake.
+/// only. A change between two readings means the time between them contained
+/// a system sleep or wake, the one kind of gap the watchdogs discount: both
+/// late #952 exits on the reporting host straddled one (5 ms after
+/// `System Wake`, and within the second of a DarkWake). `kern.waketime` moves
+/// on every wake from sleep, dark or full, not on a DarkWake's promotion to a
+/// full wake.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct PowerEpoch {
     pub slept_us: i64,
@@ -387,10 +388,22 @@ pub(super) struct StuckCallback {
 /// The callback watchdog's decision state: the same watched-time rule as
 /// [`LifecycleWatchdog`], over the callback's entry time instead of the tap
 /// thread's progress mark.
+///
+/// Unlike the lifecycle watchdog it reads the [`PowerEpoch`] only on a poll
+/// that finds a callback entered: an idle poll charges nothing, so the two
+/// `sysctlbyname` calls it would make on each of 50 polls a second judge
+/// nothing (#2096). The first entered poll after idle ones therefore compares
+/// against the epoch it read last, not the previous poll's, so a sleep or wake
+/// anywhere since that read discounts its gap. That charges no gap more than
+/// a read on every poll would — a transition inside the gap still moves the
+/// epoch — and costs at most one capped [`CALLBACK_OBSERVATION_GAP`] on a
+/// callback first seen after a transition.
 #[derive(Debug, Default)]
 pub(super) struct CallbackWatchdog {
-    /// When the previous poll ran, and the power epoch it saw.
-    last_polled: Option<(u64, PowerEpoch)>,
+    /// When the previous poll ran.
+    last_polled_ms: Option<u64>,
+    /// The power epoch the newest entered poll (or the spawn) read.
+    power: Option<PowerEpoch>,
     /// The entry being timed and how much of it the watchdog was awake to see.
     entry: Option<(u64, Duration)>,
 }
@@ -402,31 +415,34 @@ impl CallbackWatchdog {
     /// a first poll with no predecessor crediting nothing.
     pub fn watching_since(now_ms: u64, power: PowerEpoch) -> Self {
         Self {
-            last_polled: Some((now_ms, power)),
+            last_polled_ms: Some(now_ms),
+            power: Some(power),
             entry: None,
         }
     }
 
     /// Fold one poll at `now_ms`; `entered_at_ms` is the callback's entry time
-    /// while it is inside the callback, `None` while it is idle.
+    /// while it is inside the callback, `None` while it is idle. `read_power`
+    /// runs only when a callback is entered.
     pub fn evaluate(
         &mut self,
         now_ms: u64,
         entered_at_ms: Option<u64>,
-        power: PowerEpoch,
+        read_power: impl FnOnce() -> PowerEpoch,
     ) -> Option<StuckCallback> {
-        let credit = self.last_polled.map_or(Duration::ZERO, |(last, seen)| {
-            let gap = Duration::from_millis(now_ms.saturating_sub(last));
-            if seen == power {
-                gap
-            } else {
-                gap.min(CALLBACK_OBSERVATION_GAP)
-            }
+        let gap = self.last_polled_ms.map_or(Duration::ZERO, |last| {
+            Duration::from_millis(now_ms.saturating_sub(last))
         });
-        self.last_polled = Some((now_ms, power));
+        self.last_polled_ms = Some(now_ms);
         let Some(entered_at_ms) = entered_at_ms else {
             self.entry = None;
             return None;
+        };
+        let power = read_power();
+        let credit = if self.power.replace(power) == Some(power) {
+            gap
+        } else {
+            gap.min(CALLBACK_OBSERVATION_GAP)
         };
         let stalled = Duration::from_millis(now_ms.saturating_sub(entered_at_ms));
         // An entry seen for the first time is charged at most one credit: a
@@ -1022,7 +1038,7 @@ mod tests {
         // that poll rather than being granted a second budget.
         let mut watchdog = CallbackWatchdog::watching_since(0, epoch(0));
         assert_eq!(
-            watchdog.evaluate(300, Some(5), epoch(0)),
+            watchdog.evaluate(300, Some(5), || epoch(0)),
             Some(StuckCallback {
                 watched: Duration::from_millis(295),
                 stalled: Duration::from_millis(295),
@@ -1030,7 +1046,7 @@ mod tests {
         );
         // Unless the kernel slept and woke inside that first gap.
         let mut slept = CallbackWatchdog::watching_since(0, epoch(0));
-        assert_eq!(slept.evaluate(300, Some(5), epoch(1)), None);
+        assert_eq!(slept.evaluate(300, Some(5), || epoch(1)), None);
     }
 
     #[test]
@@ -1040,13 +1056,13 @@ mod tests {
         let mut watchdog = CallbackWatchdog::default();
         let poll = u64::try_from(CALLBACK_POLL_INTERVAL.as_millis()).unwrap();
         for tick in 0..=50 {
-            assert_eq!(watchdog.evaluate(tick * poll, None, epoch(0)), None);
+            assert_eq!(watchdog.evaluate(tick * poll, None, || epoch(0)), None);
         }
         let entered = 50 * poll + 15;
         let mut now = 51 * poll;
         while now.saturating_sub(entered) < 200 {
             assert_eq!(
-                watchdog.evaluate(now, Some(entered), epoch(0)),
+                watchdog.evaluate(now, Some(entered), || epoch(0)),
                 None,
                 "{} ms inside the callback is within budget",
                 now - entered
@@ -1054,7 +1070,7 @@ mod tests {
             now += poll;
         }
         assert_eq!(
-            watchdog.evaluate(now, Some(entered), epoch(0)),
+            watchdog.evaluate(now, Some(entered), || epoch(0)),
             Some(StuckCallback {
                 watched: Duration::from_millis(now - entered),
                 stalled: Duration::from_millis(now - entered),
@@ -1064,8 +1080,8 @@ mod tests {
 
         // A fresh high-frequency event must not inherit an older entry time.
         let mut fresh = CallbackWatchdog::default();
-        assert_eq!(fresh.evaluate(9_800, Some(9_600), epoch(0)), None);
-        assert_eq!(fresh.evaluate(9_820, Some(9_801), epoch(0)), None);
+        assert_eq!(fresh.evaluate(9_800, Some(9_600), || epoch(0)), None);
+        assert_eq!(fresh.evaluate(9_820, Some(9_801), || epoch(0)), None);
     }
 
     #[test]
@@ -1077,39 +1093,42 @@ mod tests {
         let mut watchdog = CallbackWatchdog::default();
         let poll = u64::try_from(CALLBACK_POLL_INTERVAL.as_millis()).unwrap();
         for tick in 0..=50 {
-            assert_eq!(watchdog.evaluate(tick * poll, None, epoch(0)), None);
+            assert_eq!(watchdog.evaluate(tick * poll, None, || epoch(0)), None);
         }
         let entered = 50 * poll + 15;
-        assert_eq!(watchdog.evaluate(51 * poll, Some(entered), epoch(0)), None);
+        assert_eq!(
+            watchdog.evaluate(51 * poll, Some(entered), || epoch(0)),
+            None
+        );
         let thawed = 51 * poll + 2_500;
         assert_eq!(
-            watchdog.evaluate(thawed, Some(entered), epoch(1)),
+            watchdog.evaluate(thawed, Some(entered), || epoch(1)),
             None,
             "5 ms watched + one capped gap is under budget"
         );
         // The thawed callback returns; the next entry starts over.
-        assert_eq!(watchdog.evaluate(thawed + poll, None, epoch(1)), None);
+        assert_eq!(watchdog.evaluate(thawed + poll, None, || epoch(1)), None);
         assert_eq!(
-            watchdog.evaluate(thawed + 2 * poll, Some(thawed + poll + 3), epoch(1)),
+            watchdog.evaluate(thawed + 2 * poll, Some(thawed + poll + 3), || epoch(1)),
             None
         );
 
         // A callback that stays entered after the thaw is still stuck.
         let mut wedged = CallbackWatchdog::default();
         for tick in 0..=50 {
-            assert_eq!(wedged.evaluate(tick * poll, None, epoch(0)), None);
+            assert_eq!(wedged.evaluate(tick * poll, None, || epoch(0)), None);
         }
-        assert_eq!(wedged.evaluate(51 * poll, Some(entered), epoch(0)), None);
-        assert_eq!(wedged.evaluate(thawed, Some(entered), epoch(1)), None);
+        assert_eq!(wedged.evaluate(51 * poll, Some(entered), || epoch(0)), None);
+        assert_eq!(wedged.evaluate(thawed, Some(entered), || epoch(1)), None);
         // 200 ms budget, less the 5 ms watched and the 100 ms capped gap.
         let mut now = thawed;
         for _ in 0..4 {
             now += poll;
-            assert_eq!(wedged.evaluate(now, Some(entered), epoch(1)), None);
+            assert_eq!(wedged.evaluate(now, Some(entered), || epoch(1)), None);
         }
         now += poll;
         assert_eq!(
-            wedged.evaluate(now, Some(entered), epoch(1)),
+            wedged.evaluate(now, Some(entered), || epoch(1)),
             Some(StuckCallback {
                 watched: Duration::from_millis(205),
                 stalled: Duration::from_millis(now - entered),
@@ -1122,9 +1141,9 @@ mod tests {
         // A poll delayed by scheduling alone, with the callback stuck the whole
         // time, is not a freeze: the exit lands on that poll.
         let mut watchdog = CallbackWatchdog::default();
-        assert_eq!(watchdog.evaluate(0, Some(0), epoch(0)), None);
+        assert_eq!(watchdog.evaluate(0, Some(0), || epoch(0)), None);
         assert_eq!(
-            watchdog.evaluate(3_000, Some(0), epoch(0)),
+            watchdog.evaluate(3_000, Some(0), || epoch(0)),
             Some(StuckCallback {
                 watched: Duration::from_millis(3_000),
                 stalled: Duration::from_millis(3_000),
@@ -1135,13 +1154,83 @@ mod tests {
     #[test]
     fn repeated_sleep_cycles_still_accumulate_a_stuck_callback() {
         let mut watchdog = CallbackWatchdog::default();
-        assert_eq!(watchdog.evaluate(0, Some(0), epoch(0)), None);
-        assert_eq!(watchdog.evaluate(3_000, Some(0), epoch(1)), None);
+        assert_eq!(watchdog.evaluate(0, Some(0), || epoch(0)), None);
+        assert_eq!(watchdog.evaluate(3_000, Some(0), || epoch(1)), None);
         assert_eq!(
-            watchdog.evaluate(6_000, Some(0), epoch(2)),
+            watchdog.evaluate(6_000, Some(0), || epoch(2)),
             Some(StuckCallback {
                 watched: CALLBACK_OBSERVATION_GAP * 2,
                 stalled: Duration::from_millis(6_000),
+            })
+        );
+    }
+
+    #[test]
+    fn an_idle_poll_does_not_read_the_power_epoch() {
+        // Two sysctls on every 20 ms poll judged nothing while no callback
+        // was entered (#2096): only a poll that finds one entered reads them.
+        let reads = std::cell::Cell::new(0_u32);
+        let read = || {
+            reads.set(reads.get() + 1);
+            epoch(0)
+        };
+        let mut watchdog = CallbackWatchdog::watching_since(0, epoch(0));
+        let poll = u64::try_from(CALLBACK_POLL_INTERVAL.as_millis()).unwrap();
+        for tick in 1..=50 {
+            assert_eq!(watchdog.evaluate(tick * poll, None, read), None);
+        }
+        assert_eq!(reads.get(), 0, "idle polls read no epoch");
+        assert_eq!(
+            watchdog.evaluate(51 * poll, Some(51 * poll - 5), read),
+            None
+        );
+        assert_eq!(reads.get(), 1, "an entered poll reads it once");
+    }
+
+    #[test]
+    fn a_sleep_while_idle_still_discounts_the_next_entry() {
+        // Idle polls keep the spawn's epoch as the reference. The kernel
+        // slept and woke during them, unread; a callback entered 5 ms after
+        // the last one and a poll delayed 300 ms then sees epoch 1.
+        let poll = u64::try_from(CALLBACK_POLL_INTERVAL.as_millis()).unwrap();
+        let idle_until = 50 * poll;
+        let entered = idle_until + 5;
+        let first_sighting = idle_until + 300;
+        let mut slept = CallbackWatchdog::watching_since(0, epoch(0));
+        for tick in 1..=50 {
+            assert_eq!(slept.evaluate(tick * poll, None, || epoch(1)), None);
+        }
+        assert_eq!(
+            slept.evaluate(first_sighting, Some(entered), || epoch(1)),
+            None,
+            "a transition since the last read caps the first sighting"
+        );
+        // Later polls compare consecutive reads and charge in full again, so
+        // a callback that stays entered is still caught.
+        let mut now = first_sighting;
+        for _ in 0..4 {
+            now += poll;
+            assert_eq!(slept.evaluate(now, Some(entered), || epoch(1)), None);
+        }
+        now += poll;
+        assert_eq!(
+            slept.evaluate(now, Some(entered), || epoch(1)),
+            Some(StuckCallback {
+                watched: CALLBACK_OBSERVATION_GAP + CALLBACK_POLL_INTERVAL * 5,
+                stalled: Duration::from_millis(now - entered),
+            })
+        );
+        // With no transition at all, the same delayed sighting is charged in
+        // full, as before the epoch read became lazy.
+        let mut awake = CallbackWatchdog::watching_since(0, epoch(0));
+        for tick in 1..=50 {
+            assert_eq!(awake.evaluate(tick * poll, None, || epoch(0)), None);
+        }
+        assert_eq!(
+            awake.evaluate(first_sighting, Some(entered), || epoch(0)),
+            Some(StuckCallback {
+                watched: Duration::from_millis(295),
+                stalled: Duration::from_millis(295),
             })
         );
     }

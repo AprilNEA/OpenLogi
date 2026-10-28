@@ -211,7 +211,13 @@ brew install --cask openlogi
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-Как просмотреть скрипт перед запуском, а также Flatpak, NixOS и дистрибутивы без systemd — в [INSTALL-linux.md](INSTALL-linux.md).
+В Arch Linux пакет AUR [`openlogi`](https://aur.archlinux.org/packages/openlogi) собирает релиз из исходного кода:
+
+```sh
+yay -S openlogi
+```
+
+Как просмотреть скрипт перед запуском, а также пакет AUR, Flatpak, NixOS и дистрибутивы без systemd — в [INSTALL-linux.md](INSTALL-linux.md).
 
 ### Windows
 

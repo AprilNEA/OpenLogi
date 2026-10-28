@@ -212,7 +212,13 @@ OpenLogi を開き、macOS に求められたら **アクセシビリティ** �
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-実行前にスクリプトを確認する方法や、Flatpak、NixOS、systemd のないディストリビューションについては [INSTALL-linux.md](INSTALL-linux.md) を参照してください。
+Arch Linux では、AUR パッケージ [`openlogi`](https://aur.archlinux.org/packages/openlogi) がリリースをソースからビルドします:
+
+```sh
+yay -S openlogi
+```
+
+実行前にスクリプトを確認する方法や、AUR パッケージ、Flatpak、NixOS、systemd のないディストリビューションについては [INSTALL-linux.md](INSTALL-linux.md) を参照してください。
 
 ### Windows
 
