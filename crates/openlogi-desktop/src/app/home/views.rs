@@ -219,7 +219,7 @@ fn device_card_element(
     let light_enabled =
         record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key());
     let light_settings = state.light_for(&record.device_key());
-    let glow = keyboard_glow(state, record);
+    let glow = keyboard_glow(state, record, super::GlowImage::Gallery);
 
     device_card(
         record,
@@ -257,7 +257,7 @@ fn device_list_row(
     let light_enabled =
         record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key());
     let light_settings = state.light_for(&record.device_key());
-    let glow = keyboard_glow(state, record);
+    let glow = keyboard_glow(state, record, super::GlowImage::Gallery);
     let record_key = record.record_key();
 
     BaseButton::new((ElementId::from("device-list-row"), record_key.clone()))

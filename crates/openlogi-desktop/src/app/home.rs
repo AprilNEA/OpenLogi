@@ -90,13 +90,24 @@ pub(super) fn home_header(cx: &mut Context<AppView>) -> impl IntoElement {
 /// home gallery and the device-detail model.
 const GLOW_OPACITY: f32 = 0.6;
 
+/// Which render the glow has to sit on. The holes are measured on that file,
+/// so a colour variant does not reuse another picture's mask.
+#[derive(Clone, Copy)]
+pub(crate) enum GlowImage {
+    /// Home grid, list, and carousel. They draw the hero render.
+    Gallery,
+    /// Device detail. It draws [`crate::services::assets::ResolvedAsset::image_path`].
+    Detail,
+}
+
 /// The inter-key glow geometry and tinted colour for `record`, or `None` unless
-/// it's a keyboard with lighting enabled and a depot that ships a baked mask.
+/// it's a keyboard with lighting enabled and a render that has enclosed holes.
 /// The geometry is painted live by [`glow_canvas`] — no pre-rendered PNG, so a
 /// colour change costs no new texture.
 pub(crate) fn keyboard_glow(
     state: &AppState,
     record: &DeviceRecord,
+    image: GlowImage,
 ) -> Option<(Arc<GlowGeometry>, Hsla)> {
     if record.kind != DeviceKind::Keyboard {
         return None;
@@ -104,7 +115,12 @@ pub(crate) fn keyboard_glow(
     let lighting = state
         .lighting_for(&record.config_key, &record.route_key)
         .filter(|l| l.enabled)?;
-    let geom = record.asset.as_ref()?.glow.clone()?;
+    let asset = record.asset.as_ref()?;
+    let geom = match image {
+        GlowImage::Gallery => asset.hero_glow.as_ref().or(asset.glow.as_ref()),
+        GlowImage::Detail => asset.glow.as_ref(),
+    }?
+    .clone();
     let (r, g, b) = lighting.color.components();
     let color = gpui::Rgba {
         r: f32::from(r) / 255.,

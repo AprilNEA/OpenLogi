@@ -131,10 +131,15 @@ pub struct ResolvedAsset {
     /// the side/buttons view the mouse model aligns hotspots against. `None`
     /// when the depot ships no front render.
     pub hero_image_path: Option<PathBuf>,
-    /// Precomputed inter-key lighting holes for a light-up keyboard, decoded
-    /// from the depot's baked RLE mask and painted live over the device image
-    /// (see [`crate::app::glow_canvas`]). `None` for depots without a mask.
+    /// Inter-key holes measured on [`Self::image_path`]. The device-detail
+    /// model draws that file. `None` when it has no enclosed holes.
     pub glow: Option<Arc<GlowGeometry>>,
+    /// Holes measured on [`Self::hero_image_path`] when that file is not
+    /// [`Self::image_path`]. The home grid, list, and carousel draw the hero,
+    /// and a colour variant's hero is not the picture a depot-wide mask was
+    /// measured on. `None` when the gallery shows `image_path`, in which case
+    /// [`Self::glow`] is the geometry for both.
+    pub hero_glow: Option<Arc<GlowGeometry>>,
     pub metadata: Metadata,
     /// Actual pixel dimensions of `image_path`. Logi's
     /// `core_metadata.json` `origin` field tracks the *bbox of the mouse
@@ -405,12 +410,21 @@ impl AssetResolver {
                 "asset hit"
             );
             let kind = DeviceKind::from_registry_type(&entry.kind);
-            // Only keyboards paint the inter-key glow, and the runtime
-            // fallback decodes the full render — don't pay that for mice.
-            let glow = (kind == Some(DeviceKind::Keyboard))
-                .then(|| self::glow::resolve_glow_geometry(&dir, &image_path))
-                .flatten()
-                .map(Arc::new);
+            // Only keyboards paint the inter-key glow. Each render is measured
+            // on its own: the detail model draws `image_path`, and the grid,
+            // list, and carousel draw the hero. A shared depot mask does not
+            // survive a colour variant whose artwork sits somewhere else.
+            let glow_for = |path: &Path| {
+                (kind == Some(DeviceKind::Keyboard))
+                    .then(|| self::glow::resolve_glow_geometry(&dir, path))
+                    .flatten()
+                    .map(Arc::new)
+            };
+            let glow = glow_for(&image_path);
+            let hero_glow = hero_image_path
+                .as_ref()
+                .filter(|hero| *hero != &image_path)
+                .and_then(|hero| glow_for(hero));
             return Some(ResolvedAsset {
                 depot: depot.to_string(),
                 display_name: entry.display_name.clone(),
@@ -418,6 +432,7 @@ impl AssetResolver {
                 image_path,
                 hero_image_path,
                 glow,
+                hero_glow,
                 metadata,
                 png_width,
                 png_height,
@@ -467,6 +482,7 @@ impl AssetResolver {
                 image_path: image_path.clone(),
                 hero_image_path: Some(image_path),
                 glow: None,
+                hero_glow: None,
                 // Standalone-light rendering intentionally consumes only the
                 // verified front image; shared metadata remains for HID++
                 // button hotspots in `load_files`.

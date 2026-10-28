@@ -68,12 +68,19 @@ pub(crate) struct GlowGeometry {
     pub segments: Vec<GlowSeg>,
 }
 
-/// The inter-key hole geometry for a depot: the pipeline-baked mask when the
-/// metadata ships one, otherwise derived at resolve time from the render's own
-/// alpha channel — so any keyboard with a transparent render glows, not just
-/// the depots the asset pipeline has processed.
+/// Holes for the keyboard render at `image_path`.
+///
+/// A depot-wide mask in `metadata.json` is one measurement shared by every
+/// colour variant. Those renders are not the same picture — the G513 family
+/// shifts the keyboard on the canvas between `front.png` and `front_ext*.png`
+/// — so painting the shared mask puts the lights off the keys in the grid,
+/// the list, and the carousel. When the file is on disk, measure that file.
+/// The baked mask is only a fallback when the render itself cannot be read.
 pub(crate) fn resolve_glow_geometry(dir: &Path, image_path: &Path) -> Option<GlowGeometry> {
-    load_glow_geometry(dir).or_else(|| compute_glow_geometry(image_path))
+    if image_path.is_file() {
+        return compute_glow_geometry(image_path);
+    }
+    load_glow_geometry(dir)
 }
 
 /// Load and decode the precomputed glow mask from a depot directory's metadata.
@@ -135,11 +142,14 @@ fn compute_glow_geometry(image_path: &Path) -> Option<GlowGeometry> {
         }
     }
 
+    // Normalize to the source image, not the binned grid. The gallery slots
+    // (grid card, list thumbnail, carousel card) contain-fit the PNG by its
+    // own aspect; a bin-rounded aspect shifts the lights off the keys.
     #[expect(
         clippy::cast_precision_loss,
-        reason = "mask coords are < 8192 px — well within f32 mantissa"
+        reason = "image coords are < 8192 px — well within f32 mantissa"
     )]
-    let (wf, hf) = (w as f32, h as f32);
+    let (image_width, image_height) = (src_w as f32, src_h as f32);
     let mut segments = Vec::new();
     for y in 0..h {
         let mut x = 0;
@@ -149,15 +159,22 @@ fn compute_glow_geometry(image_path: &Path) -> Option<GlowGeometry> {
                 while x < w && cells[(y * w + x) as usize] == 1 {
                     x += 1;
                 }
+                let x0 = start.saturating_mul(scale).min(src_w);
+                let x1 = x.saturating_mul(scale).min(src_w);
+                let y0 = y.saturating_mul(scale).min(src_h);
+                let y1 = y.saturating_add(1).saturating_mul(scale).min(src_h);
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
                 #[expect(
                     clippy::cast_precision_loss,
-                    reason = "mask coords are < 8192 px — well within f32 mantissa"
+                    reason = "image coords are < 8192 px — well within f32 mantissa"
                 )]
                 segments.push(GlowSeg {
-                    x: start as f32 / wf,
-                    y: y as f32 / hf,
-                    w: (x - start) as f32 / wf,
-                    h: 1.0 / hf,
+                    x: x0 as f32 / image_width,
+                    y: y0 as f32 / image_height,
+                    w: (x1 - x0) as f32 / image_width,
+                    h: (y1 - y0) as f32 / image_height,
                 });
             } else {
                 x += 1;
@@ -168,7 +185,7 @@ fn compute_glow_geometry(image_path: &Path) -> Option<GlowGeometry> {
         return None;
     }
     Some(GlowGeometry {
-        aspect: wf / hf,
+        aspect: image_width / image_height,
         segments,
     })
 }
@@ -333,5 +350,86 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_png(dir.path(), "solid.png", &[&[1, 1], &[1, 1]]);
         assert!(compute_glow_geometry(&path).is_none());
+    }
+
+    /// Colour variants share one `metadata.json` glow. On the G513 that mask
+    /// was measured on a different render than the file on screen, so the
+    /// lights sit off the keys in every gallery layout. The holes have to
+    /// come from the PNG being drawn.
+    #[test]
+    fn resolve_uses_the_rendered_image_not_a_shifted_depot_mask() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Hole at column 2. A depot mask that lights column 1 instead is the
+        // shape of a variant render shifted relative to `metadata.json`.
+        let path = write_png(
+            dir.path(),
+            "front.png",
+            &[
+                &[0, 0, 0, 0, 0],
+                &[0, 1, 1, 1, 0],
+                &[0, 1, 0, 1, 0],
+                &[0, 1, 1, 1, 0],
+                &[0, 0, 0, 0, 0],
+            ],
+        );
+        // 5×5, on only at row 2 col 1 (index 11). Runs start transparent.
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            r#"{"glow":{"width":5,"height":5,"runs":[11,1,13]}}"#,
+        )
+        .expect("write metadata");
+
+        let geom = resolve_glow_geometry(dir.path(), &path).expect("geometry");
+        assert_eq!(geom.segments.len(), 1);
+        let seg = geom.segments[0];
+        assert!(
+            (seg.x - 0.4).abs() < 1e-6,
+            "hole follows the rendered image (x={}), not the depot mask",
+            seg.x
+        );
+    }
+
+    /// Two colour variants in one depot do not share a mask. Each file's
+    /// holes stay on that file, which is what the grid, list, carousel, and
+    /// detail view each draw.
+    #[test]
+    fn resolve_measures_each_variant_on_its_own_render() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let left = write_png(
+            dir.path(),
+            "front.png",
+            &[
+                &[0, 0, 0, 0, 0, 0, 0],
+                &[0, 1, 1, 1, 1, 1, 0],
+                &[0, 1, 0, 1, 1, 1, 0],
+                &[0, 1, 1, 1, 1, 1, 0],
+                &[0, 0, 0, 0, 0, 0, 0],
+            ],
+        );
+        let right = write_png(
+            dir.path(),
+            "front_ext5.png",
+            &[
+                &[0, 0, 0, 0, 0, 0, 0],
+                &[0, 1, 1, 1, 1, 1, 0],
+                &[0, 1, 1, 1, 0, 1, 0],
+                &[0, 1, 1, 1, 1, 1, 0],
+                &[0, 0, 0, 0, 0, 0, 0],
+            ],
+        );
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            r#"{"glow":{"width":7,"height":5,"runs":[35]}}"#,
+        )
+        .expect("write metadata");
+
+        let left_geom = resolve_glow_geometry(dir.path(), &left).expect("left");
+        let right_geom = resolve_glow_geometry(dir.path(), &right).expect("right");
+        assert_eq!(left_geom.segments.len(), 1);
+        assert_eq!(right_geom.segments.len(), 1);
+        assert!((left_geom.segments[0].x - 2.0 / 7.0).abs() < 1e-6);
+        assert!((right_geom.segments[0].x - 4.0 / 7.0).abs() < 1e-6);
+        assert!((left_geom.aspect - 7.0 / 5.0).abs() < 1e-6);
+        assert!((right_geom.aspect - left_geom.aspect).abs() < 1e-6);
     }
 }
