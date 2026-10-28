@@ -466,6 +466,20 @@ fn a_touch_below_the_dead_zone_does_not_scroll() {
 }
 
 #[test]
+fn a_touch_after_a_finished_roll_does_not_scroll() {
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let mut direction = rolling(&Action::HorizontalScrollRight, scale, now);
+    let later = now + ACTION_DECAY + Duration::from_millis(1);
+
+    assert_eq!(
+        direction.advance(&Action::HorizontalScrollRight, 1, scale, later),
+        WheelOutput::Idle,
+        "a pause must end the roll, so the next touch meets the dead zone again"
+    );
+}
+
+#[test]
 fn a_roll_crossing_the_dead_zone_scrolls_its_full_distance() {
     let mut direction = WheelDirection::default();
     let now = Instant::now();
