@@ -346,7 +346,6 @@ impl ActionExecutor {
 struct HeldDpiShifts {
     by_press: HashMap<PressToken, String>,
     by_device: HashMap<String, HeldDpiShift>,
-    before: HashMap<String, DpiBeforeShift>,
 }
 
 struct HeldDpiShift {
@@ -371,9 +370,10 @@ impl HeldDpiShifts {
         }
         let shift = executor.dpi_cycle.read().ok().and_then(|cycles| {
             let (key, low, route) = cycles.target_for_shift(device_key)?;
-            Some((key.to_owned(), low, route, cycles.current(key)))
+            let before = cycles.by_key[key].before_shift.clone();
+            Some((key.to_owned(), low, route, cycles.current(key), before))
         });
-        let Some((key, low, route, current)) = shift else {
+        let Some((key, low, route, current, before)) = shift else {
             debug!("no DPI presets or target — DPI shift ignored");
             return;
         };
@@ -384,7 +384,6 @@ impl HeldDpiShifts {
             return;
         }
         info!(%low, "DPI shift held");
-        let before = self.before.entry(device.clone()).or_default().clone();
         let write = executor.pointer_speeds.preset_write(&route, low);
         let own_restore = write.restore.clone();
         executor.write_speed_reading(write, current.is_none().then(|| before.clone()));
@@ -1029,6 +1028,22 @@ mod tests {
         assert_eq!(again.get(), Some(Dpi::new(1200)));
         before.clear();
         assert_eq!(again.get(), None, "a written restore forgets the reading");
+    }
+
+    /// A failed restore keeps the reading, but a reconnect puts the mouse at
+    /// its onboard DPI, so the next hold must read it again.
+    #[test]
+    fn a_dpi_shift_after_a_reconnect_reads_the_mouse_again() {
+        let executor = dpi_shift_executor(None);
+        let press = PressToken::hook_for_test(1, ButtonId::G6);
+        executor.dpi_cycle.read().unwrap().by_key["mouse"]
+            .before_shift
+            .set(Dpi::new(1200));
+        executor.dpi_cycle.write().unwrap().reconnected("mouse");
+
+        let mut held = HeldDpiShifts::default();
+        held.start(&executor, &press, Some("mouse"));
+        assert_eq!(held.by_device.values().next().unwrap().before.get(), None);
     }
 
     #[test]

@@ -1006,6 +1006,11 @@ impl Orchestrator {
                 .get(&dev.config_key)
                 .filter(|state| state.committed == committed);
             let current = previous.map_or(committed, |state| state.current);
+            let before_shift = guard
+                .by_key
+                .get(&dev.config_key)
+                .map(|state| state.before_shift.clone())
+                .unwrap_or_default();
             let nearest = current.and_then(|dpi| crate::dpi::nearest_preset(&presets, dpi));
             let same_presets = previous.filter(|state| state.presets == presets);
             by_key.insert(
@@ -1017,6 +1022,7 @@ impl Orchestrator {
                     target: Some(route),
                     current,
                     committed,
+                    before_shift,
                 },
             );
         }
@@ -1465,10 +1471,11 @@ impl Orchestrator {
         let written_dpi = settings
             .dpi
             .or_else(|| speed_write.as_ref().and_then(SpeedWrite::dpi));
-        if let Some(dpi) = written_dpi
-            && let Ok(mut cycles) = self.shared.dpi_cycle.write()
-        {
-            cycles.reapplied(key, dpi);
+        if let Ok(mut cycles) = self.shared.dpi_cycle.write() {
+            cycles.reconnected(key);
+            if let Some(dpi) = written_dpi {
+                cycles.reapplied(key, dpi);
+            }
         }
         if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(

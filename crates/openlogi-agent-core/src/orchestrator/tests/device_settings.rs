@@ -813,6 +813,30 @@ async fn a_rejected_panel_dpi_write_keeps_a_preset_picked_meanwhile() {
     assert_eq!(dpi.by_key["mouse"].current, Some(Dpi::new(800)));
 }
 
+/// A mouse that reconnects is back at its onboard DPI, so a DPI shift reads
+/// it again instead of returning to a reading from before. A reload keeps
+/// the reading, since the mouse did not change.
+#[test]
+fn a_reconnect_forgets_the_dpi_read_before_a_shift() {
+    let mouse = || dev("mouse", 1, true);
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![mouse()];
+    orch.rebuild();
+    let reading = |orch: &Orchestrator| {
+        orch.shared.dpi_cycle.read().unwrap().by_key["mouse"]
+            .before_shift
+            .get()
+    };
+    orch.shared.dpi_cycle.read().unwrap().by_key["mouse"]
+        .before_shift
+        .set(Dpi::new(1200));
+
+    orch.rebuild();
+    assert_eq!(reading(&orch), Some(Dpi::new(1200)));
+    orch.reapply_volatile_settings(&mouse(), &[mouse()]);
+    assert_eq!(reading(&orch), None);
+}
+
 #[test]
 fn a_reconnect_resets_the_dpi_a_shift_returns_to() {
     // A mouse with adjustable DPI gets it through the pointer-speed write.

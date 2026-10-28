@@ -49,6 +49,14 @@ impl DpiCycles {
         }
     }
 
+    /// `key`'s mouse reconnected at its onboard DPI, so a reading taken
+    /// before is stale.
+    pub(crate) fn reconnected(&mut self, key: &str) {
+        if let Some(state) = self.by_key.get_mut(key) {
+            state.before_shift = DpiBeforeShift::default();
+        }
+    }
+
     /// [`Self::reapplied`] for every mouse at `route`: the settings app
     /// writes by route, not by key. Returns what it replaced, for
     /// [`Self::revert`].
@@ -142,6 +150,10 @@ pub struct DpiCycleState {
     pub current: Option<Dpi>,
     /// The configured DPI this state was built from.
     pub committed: Option<Dpi>,
+    /// The DPI the mouse had before a held DPI shift. It goes with this
+    /// state when the mouse goes offline, and [`DpiCycles::reconnected`]
+    /// replaces it.
+    pub(crate) before_shift: DpiBeforeShift,
 }
 
 impl DpiCycleState {
@@ -231,8 +243,7 @@ mod tests {
                     slot,
                 }),
                 capabilities: None,
-                current: None,
-                committed: None,
+                ..DpiCycleState::default()
             },
         );
         cycles
