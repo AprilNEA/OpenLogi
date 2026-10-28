@@ -17,7 +17,7 @@ use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
     GamingLayout, KeypadPage, RingAction, default_binding_on,
 };
-use crate::hid::{Dpi, PointerSpeed, ReportRate};
+use crate::hid::{Dpi, HapticStrength, PointerSpeed, ReportRate};
 
 impl Config {
     /// The bindings stored for `device_key` as they were committed, or an
@@ -531,6 +531,22 @@ impl Config {
                 .flatten()
                 .any(|(b, action)| customized(b, &Binding::Single(action.clone())));
         needs_host.then_some(OnboardMemory::Off)
+    }
+
+    /// The persisted haptic strength for `device_key`, or `None` when the
+    /// user never chose one (the device keeps its own).
+    #[must_use]
+    pub fn haptic_strength(&self, device_key: &str) -> Option<HapticStrength> {
+        self.devices.get(device_key).and_then(|d| d.haptic_strength)
+    }
+
+    /// Record the haptic strength for `device_key`; the agent writes it now
+    /// and whenever the device reconnects.
+    pub fn set_haptic_strength(&mut self, device_key: &str, strength: HapticStrength) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .haptic_strength = Some(strength);
     }
 
     /// Record the SmartShift wheel config for `device_key`, so the agent can
