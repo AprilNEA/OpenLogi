@@ -296,7 +296,8 @@ fn text_action_editor(
 }
 
 /// Build the [`Action`] a Power User editor's text commits as, or `None` for
-/// empty input or [`PowerUserKind::Workflow`] (no single-field editor here).
+/// empty input, [`PowerUserKind::Workflow`] (no single-field editor here), or
+/// [`PowerUserKind::OpenApplication`] (the ring has its own path editor).
 fn power_user_action(kind: PowerUserKind, text: String) -> Option<Action> {
     if text.is_empty() {
         return None;
@@ -305,7 +306,7 @@ fn power_user_action(kind: PowerUserKind, text: String) -> Option<Action> {
         PowerUserKind::TypeText => Some(Action::TypeText(text)),
         PowerUserKind::RunAppleScript => Some(Action::RunAppleScript(text)),
         PowerUserKind::RunShellCommand => Some(Action::RunShellCommand(text)),
-        PowerUserKind::Workflow => None,
+        PowerUserKind::OpenApplication | PowerUserKind::Workflow => None,
     }
 }
 

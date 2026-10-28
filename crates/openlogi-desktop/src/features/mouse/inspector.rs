@@ -19,8 +19,8 @@ use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::features::binding_editor::{
-    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
-    gesture_direction_icon,
+    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, application_editor,
+    editor_section, gesture_direction_icon,
 };
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
@@ -782,11 +782,19 @@ fn action_library(
             on_pick,
             pal,
         ))
-        .child(custom_application_editor(
+        .child(application_editor(
             id_prefix,
             picker.application_input,
             picker.application_invalid,
-            picker.view,
+            Rc::new({
+                let view = picker.view.clone();
+                move |cx| {
+                    view.update(cx, |view, cx| {
+                        view.custom_application_invalid = true;
+                        cx.notify();
+                    });
+                }
+            }),
             on_pick,
             pal,
         ))
@@ -877,65 +885,6 @@ fn custom_shortcut_editor(
             editor.child(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
-                    .text_caption()
-                    .text_color(pal.danger)
-                    .child(tr!("action_ring.custom_action_invalid_input")),
-            )
-        })
-}
-
-/// A single-field "Open Application or Folder" editor, matching the Action
-/// Ring editor's `path_editor`.
-fn custom_application_editor(
-    id_prefix: &'static str,
-    input: &Entity<InputState>,
-    invalid: bool,
-    view: &Entity<MouseModelView>,
-    on_pick: &PickFn,
-    pal: Palette,
-) -> impl IntoElement {
-    let submit_input = input.clone();
-    let on_pick = on_pick.clone();
-    let view = view.clone();
-    v_flex()
-        .gap_1()
-        .child(editor_section(
-            tr!("action_ring.open_application_or_folder"),
-            pal,
-        ))
-        .child(
-            h_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .debug_selector(move || format!("{id_prefix}-custom-application-input"))
-                        .child(control_input(input).cleanable(true)),
-                )
-                .child(
-                    Button::new(format!("{id_prefix}-custom-application-add"))
-                        .debug_selector(move || format!("{id_prefix}-custom-application-add"))
-                        .compact()
-                        .label(tr!("common.add"))
-                        .on_click(move |_, window, cx| {
-                            let path = submit_input.read(cx).value().to_string();
-                            match openlogi_core::binding::ApplicationTarget::new(path, "") {
-                                Ok(target) => {
-                                    (on_pick)(Action::OpenApplication(target), window, cx);
-                                }
-                                Err(_) => view.update(cx, |view, cx| {
-                                    view.custom_application_invalid = true;
-                                    cx.notify();
-                                }),
-                            }
-                        }),
-                ),
-        )
-        .when(invalid, |editor| {
-            editor.child(
-                div()
-                    .debug_selector(move || format!("{id_prefix}-custom-application-error"))
                     .text_caption()
                     .text_color(pal.danger)
                     .child(tr!("action_ring.custom_action_invalid_input")),

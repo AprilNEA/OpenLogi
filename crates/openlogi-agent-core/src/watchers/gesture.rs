@@ -37,7 +37,9 @@ use tracing::{debug, warn};
 
 use self::dispatch::InputDispatcher;
 use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore};
-use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
+use super::capture_session::{
+    CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction, settle_capture_task,
+};
 use super::retry::RETRY_DELAY;
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::capture_plan::{
@@ -187,6 +189,31 @@ async fn report_done_after_inputs(
         debug!(%error, "capture input forwarder ended unexpectedly");
     }
     let _ = events.send(SessionEvent::Done(done));
+}
+
+/// Settle the session task, then report its completion once every input it
+/// accepted has been forwarded. Apart from [`spawn_session`] so the path a
+/// panicking body takes can be driven in a test without a device.
+async fn complete_session(
+    session_task: tokio::task::JoinHandle<Option<PendingCaptureRestore>>,
+    forward_task: tokio::task::JoinHandle<()>,
+    events: mpsc::UnboundedSender<SessionEvent>,
+    physical_key: PhysicalDeviceKey,
+    session: HidppSessionId,
+) {
+    let pending_restore = settle_capture_task(session_task, "gesture").await;
+    // Use the same channel as input so completion follows every diverted
+    // report accepted before the listener was dropped.
+    report_done_after_inputs(
+        forward_task,
+        events,
+        SessionDone {
+            physical_key,
+            session,
+            pending_restore,
+        },
+    )
+    .await;
 }
 
 /// Return the plan that owns an input from the currently tracked session. An
@@ -742,9 +769,11 @@ fn spawn_session(
     let slot = Arc::clone(&channels.access.channel);
     let registry = channels.access.registry.clone();
     let device_io = channels.access.device_io.clone();
-    tokio::spawn(async move {
+    // The session body runs in a task of its own so that even a panic in it
+    // still reaches the completion report below (`settle_capture_task`).
+    let session_task = tokio::spawn(async move {
         let _lease = lease;
-        let pending_restore = match run_capture_session(
+        match run_capture_session(
             session_route,
             session_spec,
             CaptureHost {
@@ -764,20 +793,15 @@ fn spawn_session(
                 debug!(%error, "capture session ended");
                 pending
             }
-        };
-        // Use the same channel as input so completion follows every diverted
-        // report accepted before the listener was dropped.
-        report_done_after_inputs(
-            forward_task,
-            events,
-            SessionDone {
-                physical_key: done_key,
-                session: done_id,
-                pending_restore,
-            },
-        )
-        .await;
+        }
     });
+    tokio::spawn(complete_session(
+        session_task,
+        forward_task,
+        events,
+        done_key,
+        done_id,
+    ));
     CaptureSession::active(id, target, dispatch, stop_tx)
 }
 

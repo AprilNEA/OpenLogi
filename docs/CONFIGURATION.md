@@ -120,16 +120,19 @@ Common device fields are:
   mouse's main wheel in software, as Logi Options+ "Smooth scrolling" does,
   whatever `smooth_scroll` says. The agent switches the wheel to diverted
   reporting and posts eased scrolling for each report, applying the mouse's
-  scroll inversion and `vertical_scroll_sensitivity`. It needs the input access
-  the mouse hook needs (Accessibility on macOS) and `capture_mouse_events` on;
-  without them the wheel stays native. The agent hands the wheel back to native
-  reporting when the switch goes off, the mouse is disabled, or the agent
-  exits. If the agent crashes first, the wheel does not scroll until the agent
-  runs again (the launch-at-login service restarts it) or the mouse reconnects,
-  which drops the diversion. The desktop's Scrolling card offers it as
-  **Smooth wheel** when the current connection has `0x2121`; a smooth wheel
-  turned on over another connection can still be turned off there. Absent or
-  `false` leaves the wheel native
+  scroll inversion and `vertical_scroll_sensitivity`. While it is on,
+  `scroll_resolution` only sets how finely the wheel reports: each report is
+  converted back to notches, so a notch scrolls the same distance at either
+  resolution, and `vertical_scroll_sensitivity` is what makes it faster. It
+  needs the input access the mouse hook needs (Accessibility on macOS) and
+  `capture_mouse_events` on; without them the wheel stays native. The agent
+  hands the wheel back to native reporting when the switch goes off, the mouse
+  is disabled, or the agent exits. If the agent crashes first, the wheel does
+  not scroll until the agent runs again (the launch-at-login service restarts
+  it) or the mouse reconnects, which drops the diversion. The desktop's
+  Scrolling card offers it as **Smooth wheel** when the current connection has
+  `0x2121`; a smooth wheel turned on over another connection can still be turned
+  off there. Absent or `false` leaves the wheel native
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and

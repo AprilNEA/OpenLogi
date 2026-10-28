@@ -13,7 +13,7 @@ use openlogi_core::scroll::ScrollDelta;
 use tracing::warn;
 
 use super::{ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
-use crate::runtime::HidppSessionId;
+use crate::runtime::{HidppSessionId, receive_command};
 
 /// OS-hook callbacks must fail open rather than wait for the worker.
 const INPUT_QUEUE_CAPACITY: usize = 128;
@@ -482,20 +482,6 @@ impl Drop for ScrollRuntime {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-fn receive_command(
-    commands: &mpsc::Receiver<ScrollCommand>,
-    deadline: Option<Instant>,
-) -> Result<ScrollCommand, mpsc::RecvTimeoutError> {
-    deadline.map_or_else(
-        || {
-            commands
-                .recv()
-                .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-        },
-        |deadline| commands.recv_timeout(deadline.saturating_duration_since(Instant::now())),
-    )
 }
 
 fn run_worker(

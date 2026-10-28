@@ -12,7 +12,7 @@ pub mod scroll;
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
@@ -27,6 +27,26 @@ use crate::hardware::{
 };
 use crate::pointer_speed::{PrecisionPress, SpeedWrite};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
+
+/// Wait for a runtime worker's next command, or until its earliest deadline.
+///
+/// `None` blocks without a timeout, so an idle worker never wakes on its own:
+/// whoever changes its state out of band (shutdown, generation invalidation)
+/// sends an explicit wake command after publishing that change. A deadline
+/// that has already passed returns without blocking.
+fn receive_command<T>(
+    commands: &mpsc::Receiver<T>,
+    deadline: Option<Instant>,
+) -> Result<T, mpsc::RecvTimeoutError> {
+    deadline.map_or_else(
+        || {
+            commands
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+        },
+        |deadline| commands.recv_timeout(deadline.saturating_duration_since(Instant::now())),
+    )
+}
 
 /// Application identity captured with a physical press and retained through
 /// asynchronous button dispatch.

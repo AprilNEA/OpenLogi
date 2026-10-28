@@ -3,14 +3,16 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, InteractiveElement, IntoElement, ParentElement, Role, StatefulInteractiveElement as _,
-    Styled, Window, div, prelude::FluentBuilder as _, px, svg,
+    App, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, svg,
 };
-use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
-use openlogi_core::binding::{Action, Category, GestureDirection};
+use gpui_component::{
+    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, v_flex,
+};
+use openlogi_core::binding::{Action, ApplicationTarget, Category, GestureDirection};
 
 use crate::ui::action::localized_action_label;
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, control_input};
 use crate::ui::section::section_label;
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -242,6 +244,63 @@ pub(crate) fn editor_scroll_list(
         .max_h(px(EDITOR_LIST_MAX_H))
         .overflow_y_scroll()
         .children(rows)
+}
+
+/// A single-field "Open Application or Folder" editor, matching the Action
+/// Ring editor's `path_editor`. Shared by the mouse inspector and the keyboard
+/// key panel: `on_pick` receives the validated target, `on_invalid` runs when
+/// Add is pressed on a blank path so the owner can set `invalid`.
+pub(crate) fn application_editor(
+    id_prefix: &'static str,
+    input: &Entity<InputState>,
+    invalid: bool,
+    on_invalid: Rc<dyn Fn(&mut App)>,
+    on_pick: &PickFn,
+    pal: Palette,
+) -> impl IntoElement {
+    let submit_input = input.clone();
+    let on_pick = on_pick.clone();
+    v_flex()
+        .gap_1()
+        .child(editor_section(
+            tr!("action_ring.open_application_or_folder"),
+            pal,
+        ))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .debug_selector(move || format!("{id_prefix}-custom-application-input"))
+                        .child(control_input(input).cleanable(true)),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-custom-application-add"))
+                        .debug_selector(move || format!("{id_prefix}-custom-application-add"))
+                        .compact()
+                        .label(tr!("common.add"))
+                        .on_click(move |_, window, cx| {
+                            let path = submit_input.read(cx).value().to_string();
+                            match ApplicationTarget::new(path, "") {
+                                Ok(target) => {
+                                    (on_pick)(Action::OpenApplication(target), window, cx);
+                                }
+                                Err(_) => (on_invalid)(cx),
+                            }
+                        }),
+                ),
+        )
+        .when(invalid, |editor| {
+            editor.child(
+                div()
+                    .debug_selector(move || format!("{id_prefix}-custom-application-error"))
+                    .text_caption()
+                    .text_color(pal.danger)
+                    .child(tr!("action_ring.custom_action_invalid_input")),
+            )
+        })
 }
 
 #[cfg(test)]
