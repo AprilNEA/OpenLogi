@@ -1212,6 +1212,7 @@ impl Orchestrator {
         let forced = self.forced_reapply_budget.take();
         let next_current = pick_current(&devices, self.config.selected_device());
         self.rearm_capture_routes(&devices);
+        self.forget_stale_dpi_readings(&devices);
         // Manual cancellation can happen long after the boot/reconnect ladder
         // drained. Its owner requests only a Disable Keys recovery, and does
         // not consume a request while a successor still owns the setting.
@@ -1363,6 +1364,21 @@ impl Orchestrator {
         }
     }
 
+    /// A mouse whose session starts again (first seen, replugged or back
+    /// online) is at its onboard DPI, so a reading taken before a DPI shift
+    /// is stale. A confirmation pass changes no session and keeps it.
+    fn forget_stale_dpi_readings(&self, devices: &[AgentDevice]) {
+        let started = reapply_targets(&self.devices, devices, false);
+        if started.is_empty() {
+            return;
+        }
+        if let Ok(mut cycles) = self.shared.dpi_cycle.write() {
+            for idx in started {
+                cycles.reconnected(&devices[idx].config_key);
+            }
+        }
+    }
+
     /// Advance only the captures whose own online transition requires it.
     /// Keep a resume request latched until an authoritative snapshot arrives.
     fn rearm_capture_routes(&mut self, devices: &[AgentDevice]) {
@@ -1467,11 +1483,10 @@ impl Orchestrator {
         let written_dpi = settings
             .dpi
             .or_else(|| speed_write.as_ref().and_then(SpeedWrite::dpi));
-        if let Ok(mut cycles) = self.shared.dpi_cycle.write() {
-            cycles.reconnected(key);
-            if let Some(dpi) = written_dpi {
-                cycles.reapplied(key, dpi);
-            }
+        if let Some(dpi) = written_dpi
+            && let Ok(mut cycles) = self.shared.dpi_cycle.write()
+        {
+            cycles.reapplied(key, dpi);
         }
         if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(
