@@ -37,6 +37,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::haptic_strength::HapticStrengthPanel;
 use crate::features::pointer::momentum::{MomentumPanel, confirm_turning_off_with_smooth_wheel};
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
@@ -108,6 +109,7 @@ pub(super) struct DetailPanels<'a> {
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
     pub momentum_panel: &'a gpui::Entity<MomentumPanel>,
+    pub haptic_strength_panel: &'a gpui::Entity<HapticStrengthPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
@@ -140,13 +142,7 @@ pub(super) fn detail_content(
         DetailTab::Keys => {
             keys_tab(panels.keyboard_model, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::Pointer => pointer_tab(
-            panels.dpi_panel,
-            panels.smartshift_panel,
-            panels.momentum_panel,
-            cx,
-        )
-        .into_any_element(),
+        DetailTab::Pointer => pointer_tab(panels, cx).into_any_element(),
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
@@ -410,12 +406,7 @@ fn action_ring_tab(
 /// across the bottom. Use a responsive two-column grid that still fits the
 /// window's 720 px minimum width, so these short controls don't force a
 /// vertical scroll.
-fn pointer_tab(
-    dpi_panel: &gpui::Entity<DpiPanel>,
-    smartshift_panel: &gpui::Entity<SmartShiftPanel>,
-    momentum_panel: &gpui::Entity<MomentumPanel>,
-    cx: &mut Context<AppView>,
-) -> impl IntoElement {
+fn pointer_tab(panels: &DetailPanels<'_>, cx: &mut Context<AppView>) -> impl IntoElement {
     let pal = theme::palette(cx);
     tab_body(
         DetailTab::Pointer,
@@ -429,7 +420,7 @@ fn pointer_tab(
                 PanelCard::new(
                     tr!("device.pointer_tuning"),
                     Icon::empty().path("action-icons/gauge.svg"),
-                    dpi_panel.clone().into_any_element(),
+                    panels.dpi_panel.clone().into_any_element(),
                 )
                 .fill(),
             ))
@@ -437,7 +428,7 @@ fn pointer_tab(
                 PanelCard::new(
                     tr!("pointer.smartshift"),
                     Icon::empty().path("action-icons/refresh-cw.svg"),
-                    smartshift_panel.clone().into_any_element(),
+                    panels.smartshift_panel.clone().into_any_element(),
                 )
                 .fill(),
             ))
@@ -449,7 +440,7 @@ fn pointer_tab(
             )
             .children(onboard_card(pal, cx).map(pointer_grid_card))
             .children(
-                haptics_card(pal, cx)
+                haptics_card(pal, panels.haptic_strength_panel, cx)
                     .map(|card| div().min_w(POINTER_CARD_MIN_W).flex_1().child(card)),
             )
             // Full width, so it always starts its own row at the bottom.
@@ -458,7 +449,7 @@ fn pointer_tab(
                     PanelCard::new(
                         tr!("pointer.momentum_title"),
                         Icon::empty().path("action-icons/mouse.svg"),
-                        momentum_panel.clone().into_any_element(),
+                        panels.momentum_panel.clone().into_any_element(),
                     )
                     .title_suffix(
                         Tag::secondary()
@@ -577,7 +568,11 @@ fn onboard_memory_control(
 /// Haptics card: whether the device's own haptic engine taps for its
 /// buttons and wheel detents, and what each of them plays. Only for a device
 /// that has one.
-fn haptics_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElement> {
+fn haptics_card(
+    pal: Palette,
+    strength: &gpui::Entity<HapticStrengthPanel>,
+    cx: &mut Context<AppView>,
+) -> Option<impl IntoElement> {
     let (supported, config) = AppState::try_read(cx).map_or_else(
         || (false, EventHapticsConfig::default()),
         |state| {
@@ -611,6 +606,7 @@ fn haptics_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
             Icon::empty().path("action-icons/mouse-pointer-click.svg"),
             v_flex()
                 .gap_3()
+                .child(strength.clone())
                 .child(toggle_row(
                     "event-haptics-row",
                     pal,
