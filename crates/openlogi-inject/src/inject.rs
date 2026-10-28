@@ -68,6 +68,18 @@ enum HeldKey {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl HeldKey {
+    /// The output a chord's ordinary key `usage` holds. A usage the platform
+    /// presses as another key shares that key's owner, as Cmd shares
+    /// Control's on Linux and Windows: macOS presses F13 for Print Screen.
+    fn key(usage: KeyboardUsage) -> Self {
+        #[cfg(target_os = "macos")]
+        let usage = macos::pressed_usage(usage);
+        Self::Key(usage)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Debug, Default, PartialEq, Eq)]
 struct HoldTransition {
     up: Vec<HeldKey>,
@@ -126,7 +138,7 @@ impl HeldOutput {
         pressed: Option<(&KeyCombo, HeldKeys)>,
     ) -> HoldTransition {
         let tapped = pressed.and_then(|(combo, keys)| {
-            (keys == HeldKeys::ModifiersOnly).then(|| HeldKey::Key(combo.key()))
+            (keys == HeldKeys::ModifiersOnly).then(|| HeldKey::key(combo.key()))
         });
         let released = released.map_or_else(Vec::new, |(combo, keys)| held_keys(combo, keys));
         let pressed = pressed.map_or_else(Vec::new, |(combo, keys)| held_keys(combo, keys));
@@ -205,7 +217,7 @@ fn held_keys(combo: &KeyCombo, held: HeldKeys) -> Vec<HeldKey> {
         keys.push(HeldKey::Super);
     }
     if held == HeldKeys::WholeChord {
-        keys.push(HeldKey::Key(combo.key()));
+        keys.push(HeldKey::key(combo.key()));
     }
     keys
 }
@@ -809,6 +821,41 @@ mod tests {
             output.transition(Some((&control_b, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Control, HeldKey::Key(control_b.key())],
+                down: vec![],
+                tap: None,
+            }
+        );
+    }
+
+    /// macOS presses F13 for Print Screen, so a Print Screen hold and an F13
+    /// hold own one key: the first release leaves F13 down for the other.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn print_screen_and_f13_holds_share_one_key() {
+        let print_screen = combo("PrintScreen");
+        let f13 = combo("F13");
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition(None, Some((&print_screen, HeldKeys::WholeChord))),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(f13.key())],
+                tap: None,
+            }
+        );
+        assert_eq!(
+            output.transition(None, Some((&f13, HeldKeys::WholeChord))),
+            HoldTransition::default()
+        );
+        assert_eq!(
+            output.transition(Some((&print_screen, HeldKeys::WholeChord)), None),
+            HoldTransition::default()
+        );
+        assert_eq!(
+            output.transition(Some((&f13, HeldKeys::WholeChord)), None),
+            HoldTransition {
+                up: vec![HeldKey::Key(f13.key())],
                 down: vec![],
                 tap: None,
             }

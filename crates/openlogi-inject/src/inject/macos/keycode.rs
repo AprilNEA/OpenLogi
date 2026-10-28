@@ -12,6 +12,7 @@
 //! Screen key, and macOS reads a PC keyboard's Print Screen as F13, so
 //! [`hid_usage_to_macos`] presses F13 for it and F13 reads back as F13.
 
+use openlogi_core::binding::KeyboardUsage;
 use openlogi_core::config::FunctionKey;
 
 /// `Keyboard Escape`, the usage of [`FunctionKey::Esc`].
@@ -114,6 +115,13 @@ const fn read_by_macos(usage: u8) -> u8 {
     }
 }
 
+/// The usage of the key macOS presses for `usage`, so held chords count
+/// their owners by the key that goes down: Print Screen holds F13.
+pub(in crate::inject) fn pressed_usage(usage: KeyboardUsage) -> KeyboardUsage {
+    // `read_by_macos` returns `usage` itself or F13, both valid usages.
+    KeyboardUsage::try_new(read_by_macos(usage.code())).unwrap_or(usage)
+}
+
 /// The macOS virtual keycode of the key with HID usage `usage`.
 pub(super) fn hid_usage_to_macos(usage: u8) -> Option<u16> {
     let usage = read_by_macos(usage);
@@ -165,7 +173,7 @@ mod tests {
     use openlogi_core::binding::KeyboardUsage;
     use openlogi_core::config::FunctionKey;
 
-    use super::{hid_usage_to_macos, keys, macos_to_hid_usage, read_by_macos};
+    use super::{hid_usage_to_macos, keys, macos_to_hid_usage, pressed_usage, read_by_macos};
     use crate::inject::macos::keyboard_layout::typing_keys;
 
     #[test]
@@ -190,6 +198,10 @@ mod tests {
     fn print_screen_presses_f13() {
         assert_eq!(hid_usage_to_macos(0x46), Some(FunctionKey::F13.keycode()));
         assert_eq!(macos_to_hid_usage(FunctionKey::F13.keycode()), Some(0x68));
+        let usage = |code| KeyboardUsage::try_new(code).expect("valid usage");
+        assert_eq!(pressed_usage(usage(0x46)), usage(0x68));
+        assert_eq!(pressed_usage(usage(0x68)), usage(0x68));
+        assert_eq!(pressed_usage(usage(0x04)), usage(0x04));
     }
 
     /// A key a layout can put a shortcut's character on must have a usage,
