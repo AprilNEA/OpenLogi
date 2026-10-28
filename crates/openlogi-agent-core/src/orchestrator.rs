@@ -360,6 +360,8 @@ impl SharedHandles {
             .pointer_speeds
             .app_write(route, SavedSpeed::Dpi(Some(dpi)));
         let speeds = Arc::clone(&self.pointer_speeds);
+        let cycles = Arc::clone(&self.dpi_cycle);
+        let written_at = route.clone();
         self.device(route)
             .run_in_turn(
                 HidppOperation::WriteDpi,
@@ -367,6 +369,10 @@ impl SharedHandles {
                 |c| async move {
                     let started = tokio::time::Instant::now();
                     openlogi_hid::set_dpi_on(&c, dpi).await?;
+                    // A DPI shift returns here, not to the last preset picked.
+                    if let Ok(mut cycles) = cycles.write() {
+                        cycles.reapplied_at(&written_at, dpi);
+                    }
                     if let Some(restore) = restore {
                         show_precision_led(&c, false, started).await;
                         speeds.restored(&restore);

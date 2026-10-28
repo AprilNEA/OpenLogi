@@ -49,6 +49,16 @@ impl DpiCycles {
         }
     }
 
+    /// [`Self::reapplied`] for every mouse at `route`: the settings app
+    /// writes by route, not by key.
+    pub fn reapplied_at(&mut self, route: &DeviceRoute, dpi: Dpi) {
+        for state in self.by_key.values_mut() {
+            if state.target.as_ref() == Some(route) {
+                state.reapplied(dpi);
+            }
+        }
+    }
+
     /// The write target for `key` (same fallback as [`Self::state_for`])
     /// without a mutable borrow — for dispatch that only needs the route, like
     /// the SmartShift toggle.

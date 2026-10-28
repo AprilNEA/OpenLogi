@@ -682,6 +682,69 @@ fn dpi_shift_returns_to_the_dpi_saved_for_the_current_link() {
     assert_eq!(state.current, Some(Dpi::new(800)));
 }
 
+/// A `0x2201` mouse at `route` that lists 800 and 1600 DPI and keeps the
+/// last DPI written.
+async fn publish_dpi_mouse(shared: &crate::orchestrator::SharedHandles, route: DeviceRoute) {
+    const DPI: u8 = 4;
+    let current = std::sync::Mutex::new(800u16);
+    openlogi_device::test_support::publish_scripted_channel(
+        &shared.channel_registry,
+        "dpi-mouse",
+        route,
+        move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(request.get(..4)?);
+            response[0] = 0x11;
+            let mut current = current.lock().unwrap();
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => {
+                    response[4] = if request[4..6] == [0x22, 0x01] {
+                        DPI
+                    } else {
+                        0
+                    }
+                }
+                (DPI, 1) => response[5..9].copy_from_slice(&[0x03, 0x20, 0x06, 0x40]),
+                (DPI, 2) => response[5..7].copy_from_slice(&current.to_be_bytes()),
+                (DPI, 3) => *current = u16::from_be_bytes([request[5], request[6]]),
+                _ => return None,
+            }
+            Some(response)
+        },
+    )
+    .await;
+}
+
+/// A DPI written from the Pointer panel is where a DPI shift returns, even
+/// when it equals the saved DPI and a reload therefore changes nothing.
+#[tokio::test]
+async fn a_panel_dpi_write_is_where_a_dpi_shift_returns() {
+    let mut config = Config::default();
+    config.set_dpi("mouse", Dpi::new(1600));
+    config.set_dpi_presets("mouse", vec![Dpi::new(800), Dpi::new(1600)]);
+    let mouse = dev("mouse", 1, true);
+    let route = mouse.route.clone().unwrap();
+    let mut orch = orchestrator(config);
+    orch.devices = vec![mouse];
+    orch.rebuild();
+    publish_dpi_mouse(&orch.shared, route.clone()).await;
+    // A preset action picks 800.
+    if let Ok(mut cycles) = orch.shared.dpi_cycle.write() {
+        cycles.by_key.get_mut("mouse").unwrap().set(0);
+    }
+
+    orch.shared.set_dpi(&route, Dpi::new(1600)).await.unwrap();
+    // The panel saves the same 1600, so the reload keeps the cached state.
+    orch.rebuild();
+
+    let Ok(dpi) = orch.shared.dpi_cycle.read() else {
+        panic!("DPI cycle lock should not be poisoned");
+    };
+    assert_eq!(dpi.by_key["mouse"].current, Some(Dpi::new(1600)));
+    assert_eq!(dpi.by_key["mouse"].index, 1);
+}
+
 #[test]
 fn a_reconnect_resets_the_dpi_a_shift_returns_to() {
     // A mouse with adjustable DPI gets it through the pointer-speed write.
