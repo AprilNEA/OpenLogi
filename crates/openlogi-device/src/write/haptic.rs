@@ -8,11 +8,12 @@ use hidpp::{
         CreatableFeature,
         device_information::DeviceInformationFeature,
         haptic_feedback::{
-            HapticConfigFlags, HapticConfiguration, HapticFeedbackFeature, HapticStatus,
-            HapticWaveform, SupportedWaveforms,
+            HapticConfigFlags, HapticConfiguration, HapticFeedbackFeature, HapticIntensity,
+            HapticStatus, HapticWaveform, SupportedWaveforms,
         },
     },
 };
+use openlogi_core::hid::HapticStrength;
 use tracing::debug;
 
 use crate::SharedChannel;
@@ -390,6 +391,57 @@ pub async fn restore_haptics_on(
         });
     }
     Ok(HapticRestoreOutcome::Restored)
+}
+
+/// Set the device-wide haptic strength, writing the flags back as read.
+/// Nothing is written while the device already plays at `strength`.
+///
+/// `owed` is the restore an earlier arming owes this device, if any. It
+/// proves the configuration arming left, and [`restore_haptics_on`] leaves a
+/// configuration that differs from it alone — so a strength change on its
+/// own would keep the engine on for good. While the configuration is still
+/// the one `owed` proves, the returned restore proves the one this write
+/// left instead. Otherwise another writer changed it first, and `owed` comes
+/// back as it was.
+pub async fn set_haptic_strength_on(
+    shared: &SharedChannel,
+    strength: HapticStrength,
+    owed: Option<HapticRestore>,
+) -> Result<Option<HapticRestore>, WriteError> {
+    let classify =
+        |error| classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID);
+    let Some(intensity) = HapticIntensity::new(strength.into_inner()) else {
+        unreachable!("a haptic strength is a valid intensity");
+    };
+    let haptics = open_haptics(shared.channel(), shared.device_index()).await?;
+    let config = haptics
+        .feature
+        .get_configuration()
+        .await
+        .map_err(classify)?;
+    if config.intensity == intensity {
+        return Ok(owed);
+    }
+    let applied = haptics
+        .feature
+        .set_configuration(config.flags, intensity)
+        .await
+        .map_err(classify)?;
+    debug!(
+        requested = strength.into_inner(),
+        applied = applied.intensity.get(),
+        "haptic strength written"
+    );
+    Ok(owed.map(|owed| {
+        if owed.armed == config {
+            HapticRestore {
+                armed: applied,
+                ..owed
+            }
+        } else {
+            owed
+        }
+    }))
 }
 
 /// Play a waveform immediately on an open capture channel.
@@ -841,6 +893,69 @@ mod tests {
                 "the restore wrote nothing after {flags:#04x}/{intensity}"
             );
         }
+        clear_cached_location();
+    }
+
+    fn strength(percent: u8) -> HapticStrength {
+        HapticStrength::try_new(percent).expect("a valid strength")
+    }
+
+    #[tokio::test]
+    async fn a_strength_change_keeps_the_flags_and_the_restore_it_owes() {
+        let _slot = CACHE_SLOT.lock().await;
+        let (raw, handle) = stateful_haptics([0x82, 60, 0x34], |_| {}, RING_WAVEFORMS);
+        let shared = shared_channel(raw).await;
+        let restore = ensure_haptics_armed_on(&shared)
+            .await
+            .expect("arming succeeds")
+            .expect("arming turned the engine on");
+        let restore = set_haptic_strength_on(&shared, strength(80), Some(restore))
+            .await
+            .expect("the scripted device accepts the write")
+            .expect("the restore is still owed");
+        assert_matches!(
+            restore_haptics_on(&shared, restore).await,
+            Ok(HapticRestoreOutcome::Restored),
+            "the engine still goes back off at the new strength"
+        );
+        assert_eq!(
+            config_writes(&handle),
+            vec![[0x83, 60, 0], [0x83, 80, 0], [0x82, 80, 0]]
+        );
+        clear_cached_location();
+    }
+
+    #[tokio::test]
+    async fn a_strength_already_set_writes_nothing() {
+        let _slot = CACHE_SLOT.lock().await;
+        let (raw, handle) = stateful_haptics([0x03, 60, 0x34], |_| {}, RING_WAVEFORMS);
+        let shared = shared_channel(raw).await;
+        assert_matches!(
+            set_haptic_strength_on(&shared, strength(60), None).await,
+            Ok(None)
+        );
+        assert_eq!(config_writes(&handle), Vec::<[u8; 3]>::new());
+    }
+
+    #[tokio::test]
+    async fn a_strength_change_after_another_writer_leaves_the_restore_superseded() {
+        let _slot = CACHE_SLOT.lock().await;
+        let (raw, _handle) = stateful_haptics([0x82, 60, 0x34], |_| {}, RING_WAVEFORMS);
+        let shared = shared_channel(raw).await;
+        let restore = ensure_haptics_armed_on(&shared)
+            .await
+            .expect("arming succeeds")
+            .expect("arming turned the engine on");
+        // Another app turned the engine off and on again at its own strength.
+        write_elsewhere(&shared, 0x83, 40).await;
+        let kept = set_haptic_strength_on(&shared, strength(80), Some(restore))
+            .await
+            .expect("the scripted device accepts the write");
+        assert_eq!(kept, Some(restore), "not OpenLogi's state to re-prove");
+        assert_matches!(
+            restore_haptics_on(&shared, restore).await,
+            Ok(HapticRestoreOutcome::Superseded)
+        );
         clear_cached_location();
     }
 

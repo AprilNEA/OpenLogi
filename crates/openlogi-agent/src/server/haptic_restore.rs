@@ -150,6 +150,23 @@ impl<R> RestoreLedger<R> {
         }
     }
 
+    /// The proof of the enable owed on `route`, if any.
+    pub(super) fn proof(&self, route: &DeviceRoute) -> Option<&R> {
+        self.owed
+            .iter()
+            .find(|owed| owed.route == *route)
+            .map(|owed| &owed.restore)
+    }
+
+    /// A write changed the configuration on `route` that its owed enable
+    /// proves: `restore` proves the new one. A device that owes nothing is
+    /// left owing nothing.
+    pub(super) fn reprove(&mut self, route: &DeviceRoute, restore: R) {
+        if let Some(owed) = self.owed.iter_mut().find(|owed| owed.route == *route) {
+            owed.restore = restore;
+        }
+    }
+
     /// Event haptics stopped playing on `route`. What it owes is due as it
     /// would have been without the hold: at once for an enable the hold
     /// made, and after its session for one a ring session made.
@@ -431,6 +448,19 @@ mod tests {
         assert_eq!(due(&mut ledger, start + SESSION_LIFETIME), vec![]);
         ledger.release(&mouse());
         assert_eq!(due(&mut ledger, start), vec![(mouse(), 7)]);
+    }
+
+    #[test]
+    fn a_reproved_restore_hands_back_the_new_proof_when_it_is_due() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.reprove(&mouse(), 9);
+        assert_eq!(ledger.proof(&mouse()), None, "owes nothing, gains nothing");
+        ledger.opened(1, mouse(), Some(7), start);
+        ledger.reprove(&mouse(), 8);
+        assert_eq!(ledger.proof(&mouse()), Some(&8));
+        ledger.closed(1, start);
+        assert_eq!(due(&mut ledger, start), vec![(mouse(), 8)]);
     }
 
     #[test]
