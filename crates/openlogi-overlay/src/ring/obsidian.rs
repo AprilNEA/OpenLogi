@@ -147,10 +147,14 @@ impl Motion {
             ),
             (false, None) => self.light,
         };
-        if let Some(slot) = hovered
-            && self.rim_born.is_none_or(|(born, _)| born != slot)
-        {
-            self.rim_born = Some((slot, now));
+        // The rim turns into place on every arrival, so leaving a card forgets
+        // it: coming back to the same card is an arrival again.
+        match hovered {
+            Some(slot) if self.rim_born.is_none_or(|(born, _)| born != slot) => {
+                self.rim_born = Some((slot, now));
+            }
+            Some(_) => {}
+            None => self.rim_born = None,
         }
         let heading = hovered.map(slot_heading);
         self.aim_angle = if reduce {
@@ -299,11 +303,11 @@ impl RingView {
         let flash = motion.flash(now, reduce);
         let committed = motion.committed.map(|(slot, _)| slot);
         let (aim_angle, aim_t) = (motion.aim_angle, motion.aim_t);
-        let hovered_icon = self
+        let hovered = self
             .hovered
-            .and_then(|slot| self.invocation.slots.get(&slot))
-            .map(|presentation| presentation.icon.asset_path());
-        let hovered_caption = self.hovered_caption();
+            .and_then(|slot| self.invocation.slots.get(&slot));
+        let hovered_icon = hovered.map(|presentation| presentation.icon.asset_path());
+        let hovered_caption = hovered.map(super::slot_caption);
         let halos = ActionRingSlot::ALL
             .into_iter()
             .zip(hover_t)
@@ -833,6 +837,33 @@ mod tests {
         assert!(
             motion.wave(later, true).is_none(),
             "reduced motion plays no wave"
+        );
+    }
+
+    #[test]
+    fn the_rim_arrives_on_every_visit_to_a_card() {
+        let mut motion = Motion::default();
+        let mut now = motion.born;
+        let step = std::time::Duration::from_millis(16);
+        motion.advance(Some(ActionRingSlot::Top), None, now, false);
+        let first = motion.rim_born.expect("a hover starts the rim's arrival");
+        now += step;
+        motion.advance(None, None, now, false);
+        assert!(
+            motion.rim_born.is_none(),
+            "leaving the card forgets the arrival"
+        );
+        now += step;
+        motion.advance(Some(ActionRingSlot::Top), None, now, false);
+        let again = motion.rim_born.expect("coming back is an arrival again");
+        assert!(again.1 > first.1);
+        assert!(
+            motion.rim_angle(now, false) < -0.5,
+            "the rim is mid-turn right after arriving"
+        );
+        assert!(
+            motion.rim_angle(now, true).abs() < f32::EPSILON,
+            "reduced motion skips the turn"
         );
     }
 

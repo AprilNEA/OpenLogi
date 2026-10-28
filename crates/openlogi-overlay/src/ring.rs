@@ -573,6 +573,33 @@ mod tests {
         assert_eq!(pointer.center_in(below), Some(point(px(10.0), px(20.0))));
     }
 
+    #[test]
+    fn every_look_decides_its_own_closing_once() {
+        let now = Instant::now();
+        for theme in [ActionRingTheme::InMotion, ActionRingTheme::Obsidian] {
+            let mut look = RingLook::from(theme);
+            assert!(!look.is_closing(), "{theme:?} opens with no exit playing");
+            assert_eq!(
+                look.begin_close(now),
+                Some(true),
+                "{theme:?} plays its exit"
+            );
+            assert!(look.is_closing());
+            assert_eq!(
+                look.begin_close(now),
+                Some(false),
+                "{theme:?} does not restart an exit that is playing"
+            );
+        }
+        let mut classic = RingLook::from(ActionRingTheme::Classic);
+        assert_eq!(
+            classic.begin_close(now),
+            None,
+            "the classic disc goes at once"
+        );
+        assert!(!classic.is_closing());
+    }
+
     fn invocation(theme: ActionRingTheme) -> ActionRingInvocation {
         ActionRingInvocation {
             session_id: 7,
