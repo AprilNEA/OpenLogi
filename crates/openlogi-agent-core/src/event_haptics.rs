@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use openlogi_core::config::{EventHapticFeedback, EventHapticInput, EventHapticsConfig};
+use openlogi_core::hid::HapticStrength;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{DeviceRoute, HapticWaveform};
 use openlogi_hook::{ButtonId, EventDevice, KeyEvent, MouseEvent};
@@ -152,6 +153,19 @@ pub struct EngineHold {
     /// The target's route, or `None` while event haptics play nowhere.
     pub route: Option<DeviceRoute>,
     /// Which arming is current; only ever grows.
+    pub generation: u64,
+}
+
+/// The haptic strength each device should play at, for the player to write.
+///
+/// Like [`EngineHold`], the generation changes whenever the strengths must be
+/// written again: the plan changed, or a device in it may have come back
+/// from a power transition at another strength ([`EventHaptics::rearm`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StrengthPlan {
+    /// Each online device the user chose a strength for.
+    pub wanted: Vec<(DeviceRoute, HapticStrength)>,
+    /// Which writing of the plan is current; only ever grows.
     pub generation: u64,
 }
 
@@ -422,6 +436,8 @@ struct Inner {
     target: RwLock<Option<EventHapticsTarget>>,
     /// The target's route, for the player's arming lifecycle.
     hold: watch::Sender<EngineHold>,
+    /// The strengths to write, for the player.
+    strengths: watch::Sender<StrengthPlan>,
     queue: Mutex<CueQueue>,
     /// Diverted-wheel distance, in hi-res units, short of a whole detent.
     partial_units: Mutex<u32>,
@@ -439,6 +455,7 @@ impl Default for EventHaptics {
             inner: Arc::new(Inner {
                 target: RwLock::new(None),
                 hold: watch::Sender::new(EngineHold::default()),
+                strengths: watch::Sender::new(StrengthPlan::default()),
                 queue: Mutex::new(CueQueue::default()),
                 partial_units: Mutex::new(0),
                 partial_thumb_increments: Mutex::new(0),
@@ -501,6 +518,32 @@ impl EventHaptics {
             hold.generation += 1;
             true
         });
+        self.inner.strengths.send_if_modified(|plan| {
+            if !plan.wanted.iter().any(|(wanted, _)| wanted == route) {
+                return false;
+            }
+            plan.generation += 1;
+            true
+        });
+    }
+
+    /// Publish the strength each online device should play at. Only the
+    /// orchestrator calls this.
+    pub fn publish_strengths(&self, wanted: Vec<(DeviceRoute, HapticStrength)>) {
+        self.inner.strengths.send_if_modified(|plan| {
+            if plan.wanted == wanted {
+                return false;
+            }
+            plan.wanted = wanted;
+            plan.generation += 1;
+            true
+        });
+    }
+
+    /// The strengths to write, for the player.
+    #[must_use]
+    pub fn strengths(&self) -> watch::Receiver<StrengthPlan> {
+        self.inner.strengths.subscribe()
     }
 
     /// Record the cue an OS-hook mouse event makes, if any. Runs on the hook
@@ -1404,6 +1447,27 @@ mod tests {
         haptics.publish(None);
         assert_eq!(played(&haptics), None);
         assert_eq!(holds.borrow().route, None);
+    }
+
+    #[test]
+    fn a_changed_plan_or_a_rearm_of_a_device_in_it_writes_the_strengths_again() {
+        let haptics = EventHaptics::default();
+        let mut plans = haptics.strengths();
+        let strong = HapticStrength::try_new(90).expect("valid");
+        let mut generation = || {
+            assert!(plans.has_changed().expect("sender alive"), "no new plan");
+            plans.borrow_and_update().generation
+        };
+        haptics.publish_strengths(vec![(direct(0xb042), strong)]);
+        let first = generation();
+        haptics.publish_strengths(vec![(direct(0xb042), strong)]);
+        haptics.rearm(&direct(0xb034));
+        haptics.rearm(&direct(0xb042));
+        assert!(generation() > first);
+        assert!(
+            !plans.has_changed().expect("sender alive"),
+            "the same plan and another device's rearm add no writing of their own"
+        );
     }
 
     #[test]

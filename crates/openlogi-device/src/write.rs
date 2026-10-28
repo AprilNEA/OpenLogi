@@ -61,7 +61,8 @@ pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use force_sensing::{get_force_sensing_on, set_force_sensing_on};
 pub use haptic::{
     HapticReport, HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic,
-    play_haptic_on, read_haptic_report, restore_haptics_on, time_haptic_plays,
+    play_haptic_on, read_haptic_report, restore_haptics_on, set_haptic_strength_on,
+    time_haptic_plays,
 };
 pub use hidpp::feature::haptic_feedback::{
     HapticConfigFlags, HapticConfiguration, HapticStatus, HapticWaveform, SupportedWaveforms,

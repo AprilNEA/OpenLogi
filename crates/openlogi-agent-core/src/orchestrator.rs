@@ -932,6 +932,9 @@ impl Orchestrator {
         self.shared
             .event_haptics
             .publish(self.event_haptics_target());
+        self.shared
+            .event_haptics
+            .publish_strengths(self.haptic_strengths());
         publish_arc_if_changed(&self.watched_lights_tx, self.watched_lights());
         self.publish_lights();
     }
@@ -955,6 +958,27 @@ impl Orchestrator {
             .filter(has_engine)
             .or_else(|| self.devices.iter().find(has_engine))
             .and_then(|device| device.route.clone())
+    }
+
+    /// The strength each online, enabled device with a haptic engine plays
+    /// at, for those the user chose one for.
+    fn haptic_strengths(&self) -> Vec<(DeviceRoute, openlogi_core::hid::HapticStrength)> {
+        self.devices
+            .iter()
+            .filter(|device| {
+                device.online
+                    && self.config.device_enabled(&device.config_key)
+                    && device
+                        .capabilities
+                        .is_some_and(|capabilities| capabilities.haptic_feedback)
+            })
+            .filter_map(|device| {
+                Some((
+                    device.route.clone()?,
+                    self.config.haptic_strength(&device.config_key)?,
+                ))
+            })
+            .collect()
     }
 
     /// The device click and wheel haptics play on: the selected device when
@@ -1252,7 +1276,8 @@ impl Orchestrator {
         }
         for &idx in &targets {
             self.reapply_volatile_settings(&devices[idx], &devices);
-            // The haptic engine's enable flag is volatile too.
+            // The haptic engine's enable flag is volatile too, and so may be
+            // its strength.
             if let Some(route) = &devices[idx].route {
                 self.shared.event_haptics.rearm(route);
             }

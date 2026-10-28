@@ -89,12 +89,12 @@ pub use write::{
     read_litra_state, rename_easy_switch_host, rename_easy_switch_host_on, restore_haptics_on,
     set_disable_keys, set_disable_keys_on, set_disable_keys_write_through_on, set_dpi,
     set_dpi_led_on, set_dpi_on, set_dpi_target_on, set_fn_lock, set_fn_lock_on,
-    set_force_sensing_on, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
-    set_keyboard_color_with_on, set_pointer_speed_on, set_report_rate, set_report_rate_on,
-    set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
-    set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
-    set_smartshift_sensitivity, set_smartshift_torque, time_haptic_plays, toggle_smartshift,
-    toggle_smartshift_on, update_backlight, update_backlight_on, watch_litra,
+    set_force_sensing_on, set_haptic_strength_on, set_keyboard_color, set_keyboard_color_on,
+    set_keyboard_color_with, set_keyboard_color_with_on, set_pointer_speed_on, set_report_rate,
+    set_report_rate_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
+    set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift,
+    set_smartshift_on, set_smartshift_sensitivity, set_smartshift_torque, time_haptic_plays,
+    toggle_smartshift, toggle_smartshift_on, update_backlight, update_backlight_on, watch_litra,
 };
 
 /// Scripted transport helpers for tests in higher layers.

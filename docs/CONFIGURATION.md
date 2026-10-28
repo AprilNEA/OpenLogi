@@ -232,6 +232,14 @@ Common device fields are:
   own force, and the agent never writes one. The desktop app sets it with the
   Press force slider in the Haptic Sense Panel's inspector on the mouse page,
   which saves the force the device reads back
+- `haptic_strength` for devices with a haptic engine (HID++ `0x19b0`, the
+  MX Master 4), in percent from `1` to `100`: how strongly every haptic
+  plays — the Actions Ring, event haptics, and `openlogi api haptic` —
+  whether event haptics are on or not. The device may round it (the
+  MX Master 4 keeps tens). The agent writes it when the device connects and
+  when a reload changes it; absent leaves the device's own strength. The
+  desktop app sets it with the Strength slider on the pointer tab's Haptics
+  card
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or

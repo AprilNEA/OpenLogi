@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
-use openlogi_agent_core::event_haptics::{EngineHold, EventHaptics, EventPlay, NextPlay};
+use openlogi_agent_core::event_haptics::{
+    EngineHold, EventHaptics, EventPlay, NextPlay, StrengthPlan,
+};
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
@@ -882,6 +884,18 @@ async fn play_within_budget(
     PlayOutcome::Failed
 }
 
+/// Hand back every enable that is due, owing again each the device did not
+/// answer.
+async fn hand_back_due(shared: &SharedHandles, ledger: &mut RestoreLedger<HapticRestore>) {
+    while let Some(owed) = ledger.take_due(Instant::now()) {
+        if restore_firmware_haptics(shared, &owed.route, owed.restore).await
+            == RestoreAttempt::Unreached
+        {
+            ledger.retry(owed, Instant::now());
+        }
+    }
+}
+
 /// Play `request`, arming the engine first when the play arms it itself —
 /// but not while the agent leaves (`paused`): that enable could not be
 /// handed back.
@@ -1032,6 +1046,75 @@ impl EventPlayer {
     }
 }
 
+/// The worker's haptic-strength state: the plan to follow, and which
+/// generation of it was last written.
+struct StrengthWriter {
+    plans: tokio::sync::watch::Receiver<StrengthPlan>,
+    /// The [`StrengthPlan`] generation last written.
+    written: Option<u64>,
+}
+
+impl StrengthWriter {
+    fn new(plans: tokio::sync::watch::Receiver<StrengthPlan>) -> Self {
+        Self {
+            plans,
+            written: None,
+        }
+    }
+
+    /// Resolve once the plan changed, or fail once nothing can change it.
+    async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        self.plans.changed().await
+    }
+
+    /// Note the plan seen without writing it: nothing is written while the
+    /// agent leaves, and an unseen plan would spin the worker.
+    fn skip(&mut self) {
+        self.plans.borrow_and_update();
+    }
+
+    /// Write the plan once per generation. A device that does not answer
+    /// keeps the strength it has until a reconnect or a wake writes the plan
+    /// again.
+    async fn follow(&mut self, shared: &SharedHandles, ledger: &mut RestoreLedger<HapticRestore>) {
+        let plan = self.plans.borrow_and_update().clone();
+        if self.written == Some(plan.generation) {
+            return;
+        }
+        self.written = Some(plan.generation);
+        for (route, strength) in &plan.wanted {
+            write_strength(shared, ledger, route, *strength).await;
+        }
+    }
+}
+
+/// Set the haptic strength on `route` within [`ARM_BUDGET`], and keep the
+/// enable owed there provable: the restore compares the device against the
+/// configuration it proves, which the write changes.
+async fn write_strength(
+    shared: &SharedHandles,
+    ledger: &mut RestoreLedger<HapticRestore>,
+    route: &DeviceRoute,
+    strength: openlogi_core::hid::HapticStrength,
+) {
+    let owed = ledger.proof(route).copied();
+    match tokio::time::timeout(
+        ARM_BUDGET,
+        shared
+            .device(route)
+            .run(HidppOperation::PlayHaptic, |c| async move {
+                openlogi_hid::set_haptic_strength_on(&c, strength, owed).await
+            }),
+    )
+    .await
+    {
+        Ok(Ok(Some(restore))) => ledger.reprove(route, restore),
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => warn!(%error, "could not set the haptic strength"),
+        Err(_elapsed) => warn!("setting the haptic strength ran out of time"),
+    }
+}
+
 /// What one interaction's play came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlayOutcome {
@@ -1140,6 +1223,7 @@ impl HapticPlayer {
         let worker_sessions = Arc::clone(&sessions);
         let events = shared.event_haptics.clone();
         let mut holds = events.holds();
+        let mut strength_writer = StrengthWriter::new(events.strengths());
         tokio::spawn(async move {
             let mut breaker = HapticBreaker::default();
             let mut event_player = EventPlayer::default();
@@ -1161,6 +1245,10 @@ impl HapticPlayer {
                         due.map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
                     ), if due.is_some() => false,
                     changed = holds.changed() => match changed {
+                        Ok(()) => false,
+                        Err(_) => break,
+                    },
+                    changed = strength_writer.changed() => match changed {
                         Ok(()) => false,
                         Err(_) => break,
                     },
@@ -1218,8 +1306,10 @@ impl HapticPlayer {
                     // target seen and drop the wake-up, or either would spin
                     // the loop; `resume` looks at the target afresh.
                     holds.borrow_and_update();
+                    strength_writer.skip();
                     event_player.pause();
                 } else {
+                    strength_writer.follow(&shared, &mut ledger).await;
                     let wanted = holds.borrow_and_update().clone();
                     event_player.follow(&shared, &mut ledger, &wanted).await;
                     event_player.play_next(&shared, &events).await;
@@ -1232,13 +1322,7 @@ impl HapticPlayer {
                     ledger.leaving(Instant::now());
                     event_player.let_go();
                 }
-                while let Some(owed) = ledger.take_due(Instant::now()) {
-                    if restore_firmware_haptics(&shared, &owed.route, owed.restore).await
-                        == RestoreAttempt::Unreached
-                    {
-                        ledger.retry(owed, Instant::now());
-                    }
-                }
+                hand_back_due(&shared, &mut ledger).await;
                 if let Some(done) = news.hand_back {
                     let _ = done.send(());
                 }
