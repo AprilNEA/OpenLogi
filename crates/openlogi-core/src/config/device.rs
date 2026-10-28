@@ -14,7 +14,7 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::{DisableKeysMask, Dpi, PointerSpeed, ReportRate};
+use crate::hid::{DisableKeysMask, Dpi, HapticStrength, PointerSpeed, ReportRate};
 
 /// A known key controlled by HID++ `0x4521 DisableKeys`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -365,6 +365,13 @@ pub struct DeviceConfig {
     /// device's force alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_sensing: Option<u16>,
+    /// How strongly the device's haptic engine plays everything — the
+    /// Actions Ring, event haptics, `openlogi api haptic` — whether event
+    /// haptics are on or not. The agent writes it when the device
+    /// reconnects and when a reload changes it. `None` means "never set —
+    /// leave the device's strength alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub haptic_strength: Option<HapticStrength>,
     /// Known keys OpenLogi should disable on reconnect. `None` leaves the
     /// firmware unmanaged; an explicit empty set re-enables every known key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -475,6 +482,7 @@ impl Default for DeviceConfig {
             report_rate: None,
             pointer_speed: None,
             force_sensing: None,
+            haptic_strength: None,
             disabled_keys: None,
         }
     }
@@ -608,6 +616,8 @@ struct RawDeviceConfig {
     pointer_speed: Option<PointerSpeed>,
     #[serde(default)]
     force_sensing: Option<u16>,
+    #[serde(default)]
+    haptic_strength: Option<HapticStrength>,
     disabled_keys: Option<BTreeSet<DisableKey>>,
     #[serde(default = "default_true")]
     enabled: bool,
@@ -675,6 +685,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             report_rate: raw.report_rate,
             pointer_speed: raw.pointer_speed,
             force_sensing: raw.force_sensing,
+            haptic_strength: raw.haptic_strength,
             disabled_keys: raw.disabled_keys,
         }
     }
