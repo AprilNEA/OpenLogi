@@ -278,6 +278,21 @@ impl ActionExecutor {
     }
 }
 
+/// Log a bound action the OS input hook captured, from the worker that
+/// dispatches it. The hook's callback logs nothing on this path: the file
+/// appender's lock and its daily rollover must not run inside the callback
+/// the hook watchdog guards (#2096).
+fn log_bound_action(control: &PressControl, action: &Action) {
+    match control {
+        PressControl::Button(button) => {
+            info!(button = %button, action = %action.label(), "button → executing bound action");
+        }
+        PressControl::Key(keycode) => {
+            info!(keycode, action = %action.label(), "key → executing bound action");
+        }
+    }
+}
+
 struct ButtonEventHandler {
     executor: ActionExecutor,
     held: HeldShortcuts,
@@ -295,10 +310,16 @@ impl ButtonEventHandler {
         match event {
             ButtonRuntimeEvent::Started(press) => {
                 if let Some(action) = press.start_action() {
+                    if press.captured_by_os_hook() {
+                        log_bound_action(press.control(), action);
+                    }
                     self.start_action(press.token(), action, press.device_key(), press.target());
                 }
             }
             ButtonRuntimeEvent::Triggered { press, action } => {
+                if press.captured_by_os_hook() {
+                    log_bound_action(press.control(), &action);
+                }
                 self.start_action(press.token(), &action, press.device_key(), press.target());
             }
             ButtonRuntimeEvent::Ended { press, reason } => {

@@ -1295,3 +1295,40 @@ fn shutdown_deadline_includes_a_blocked_terminal_handler() {
     assert!(started.elapsed() < Duration::from_millis(200));
     let _ = release_tx.send(());
 }
+
+/// The worker logs the actions the OS hook captured, which no longer log on
+/// the hook's own callback; HID++ presses keep logging in their watchers.
+#[test]
+fn a_press_says_whether_the_os_hook_captured_it() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let copy = Binding::Single(Action::Copy);
+
+    assert!(input.try_hook_down(ButtonId::Back, Some(&copy)).is_some());
+    let ButtonRuntimeEvent::Started(hook) = recv_event(&received) else {
+        panic!("the hook press must start");
+    };
+    let session = HidppSessionId::with_epoch("mouse-a", 7);
+    assert!(
+        input
+            .try_hidpp_down(
+                &session,
+                ButtonId::Forward,
+                Some(&copy),
+                ActionDispatchTarget::Keyboard,
+            )
+            .is_some()
+    );
+    let ButtonRuntimeEvent::Started(hidpp) = recv_event(&received) else {
+        panic!("the HID++ press must start");
+    };
+
+    assert!(hook.captured_by_os_hook());
+    assert!(!hidpp.captured_by_os_hook());
+    assert!(owner.shutdown());
+}

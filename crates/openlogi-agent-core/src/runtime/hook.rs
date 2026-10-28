@@ -17,10 +17,11 @@ use openlogi_core::config::KeyTrigger;
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
+use super::button::PressControl;
 use super::scroll::ScrollInputHandle;
-use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
+use super::{ActionDispatchTarget, ActionDispatcher, PressToken, log_bound_action};
 use crate::event_monitor::SharedEventMonitor;
 
 /// The button maps and selected-device thumb-wheel polarity the OS-hook callback
@@ -206,15 +207,17 @@ fn scroll_source_may_intercept(from_trackpad: bool, device: Option<&EventDevice>
     !from_trackpad && button_source_may_remap(device)
 }
 
-/// Off-thread worker for bound actions so the tap callback never injects input.
-type QueuedAction = (Action, ActionDispatchTarget);
+/// Off-thread worker for bound actions so the tap callback never injects input
+/// or writes a log line. The control is carried only for that log line.
+type QueuedAction = (Action, ActionDispatchTarget, PressControl);
 
 fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<QueuedAction> {
     let (tx, rx) = mpsc::sync_channel::<QueuedAction>(64);
     let _ = thread::Builder::new()
         .name("openlogi-action".into())
         .spawn(move || {
-            while let Ok((action, target)) = rx.recv() {
+            while let Ok((action, target, control)) = rx.recv() {
+                log_bound_action(&control, &action);
                 dispatcher.executor.dispatch_to(&action, None, target);
             }
         });
@@ -227,8 +230,9 @@ fn try_queue_action(
     tx: &mpsc::SyncSender<QueuedAction>,
     action: Action,
     target: ActionDispatchTarget,
+    control: PressControl,
 ) -> bool {
-    if tx.try_send((action, target)).is_err() {
+    if tx.try_send((action, target, control)).is_err() {
         warn!("action queue full — dropping bound action to keep the input hook live");
         false
     } else {
@@ -290,7 +294,6 @@ fn handle_button(
                     .ok()
                     .map(|m| resolve_gesture_click(&m.gestures, id));
                 if let Some(action) = action {
-                    info!(button = %id, action = %action.label(), "gesture click → executing bound action");
                     dispatcher.try_dispatch_while_pressed(&press, &action);
                 }
             }
@@ -311,7 +314,6 @@ fn handle_button(
     if binding_is_native_click(id, &binding) {
         return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
     }
-    info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
     let queued = dispatcher
         .try_hook_button_down(id, Some(&binding), action_target)
         .is_some();
@@ -380,7 +382,7 @@ fn handle_moved(
                 .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
         });
         if let Some(action) = action {
-            info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
+            debug!(button = %button, ?dir, "gesture swipe committed");
             dispatcher.try_dispatch_while_pressed(&press, &action);
         }
     }
@@ -421,7 +423,6 @@ fn handle_key(
         return EventDisposition::PassThrough;
     };
 
-    info!(keycode, action = %action.label(), "key → executing bound action");
     let action_target = capture_target();
     let queued = if action.held_chord().is_some() {
         let queued = dispatcher.try_hook_key_down(keycode, &action, action_target);
@@ -432,7 +433,7 @@ fn handle_key(
         }
         queued
     } else {
-        try_queue_action(action_tx, action, action_target)
+        try_queue_action(action_tx, action, action_target, PressControl::Key(keycode))
     };
     queued_event_disposition(queued)
 }
@@ -498,7 +499,6 @@ pub fn start(
                                     .map(|(button, action)| (button, action, maps.pointer_target))
                             })
                     {
-                        info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
                         return queued_event_disposition(try_queue_action(
                             &action_tx,
                             action,
@@ -506,6 +506,7 @@ pub fn start(
                                 target,
                                 openlogi_hook::frontmost_safari_pid,
                             ),
+                            PressControl::Button(button),
                         ));
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
