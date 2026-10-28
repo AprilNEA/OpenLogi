@@ -12,10 +12,12 @@ pub mod scroll;
 
 use std::collections::HashMap;
 use std::io;
+use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::config::EventHapticInput;
 use tracing::{debug, info, warn};
 
 use self::button::{
@@ -146,13 +148,13 @@ impl ActionExecutor {
             return false;
         };
         info!(on, target = ?write.target, "precision mode toggled → writing pointer speed");
-        self.write_speed(write);
+        self.write_speed(write, || {});
         true
     }
 
     /// Write `write` in the background, and settle the restore it carries
-    /// once it lands.
-    fn write_speed(&self, write: SpeedWrite) {
+    /// once it lands, then call `applied`.
+    fn write_speed(&self, write: SpeedWrite, applied: impl FnOnce() + Send + 'static) {
         let speeds = Arc::clone(&self.pointer_speeds);
         let SpeedWrite {
             route,
@@ -165,21 +167,21 @@ impl ActionExecutor {
             if let Some(restore) = restore {
                 speeds.restored(&restore);
             }
+            applied();
         });
-    }
-
-    /// Cue `cue` for the device `device_key` names, or the target device
-    /// when no device is named.
-    fn cue(&self, device_key: Option<&str>, cue: EventCue) {
-        match device_key {
-            Some(key) => self.haptics.observe_on(key, cue),
-            None => self.haptics.observe_host(cue),
-        }
     }
 
     /// Cue a volume step, or the end of the range when the volume is already
     /// there and `action` pushes past it.
     fn cue_volume(&self, action: &Action) {
+        // Reading the volume is a CoreAudio round trip: skip it unless a
+        // volume cue plays.
+        if ![EventHapticInput::LevelSteps, EventHapticInput::LevelLimits]
+            .into_iter()
+            .any(|input| self.haptics.plays_host(input))
+        {
+            return;
+        }
         let at_limit = openlogi_inject::output_volume().is_some_and(|volume| match action {
             Action::VolumeUp => volume >= 1.0 - VOLUME_EPSILON,
             _ => volume <= VOLUME_EPSILON,
@@ -203,9 +205,8 @@ impl ActionExecutor {
             info!("SmartShift toggle → flipping wheel mode");
             let haptics = self.haptics.clone();
             let key = device_key.map(str::to_owned);
-            toggle_smartshift_in_background(self.access.op(&target), move || match key {
-                Some(key) => haptics.observe_on(&key, EventCue::WheelMode),
-                None => haptics.observe_host(EventCue::WheelMode),
+            toggle_smartshift_in_background(self.access.op(&target), move || {
+                haptics.observe_for(key.as_deref(), EventCue::WheelMode);
             });
         } else {
             debug!("no target device — SmartShift toggle skipped");
@@ -312,15 +313,20 @@ impl ActionExecutor {
             // No target: a dev environment without a real device.
             if let Some(target) = target {
                 info!(%dpi, "DPI action → writing to device");
-                // One tap per preset position, so the count tells which.
-                let count = u8::try_from(index + 1).unwrap_or(u8::MAX);
-                if let Some(count) = std::num::NonZeroU8::new(count) {
-                    self.cue(device_key, EventCue::ModeChange { count });
-                }
+                // One tap per preset position, so the count tells which;
+                // played once the write lands, so a rejected or superseded
+                // preset is not confirmed.
+                let count = NonZeroU8::new(u8::try_from(index + 1).unwrap_or(u8::MAX));
+                let haptics = self.haptics.clone();
+                let key = device_key.map(str::to_owned);
                 // Numbered with the pointer-speed writes: on a DPI mouse it
                 // ends precision mode, and an older precision write must not
                 // land after it.
-                self.write_speed(self.pointer_speeds.preset_write(&target, dpi));
+                self.write_speed(self.pointer_speeds.preset_write(&target, dpi), move || {
+                    if let Some(count) = count {
+                        haptics.observe_for(key.as_deref(), EventCue::ModeChange { count });
+                    }
+                });
             } else {
                 debug!(%dpi, "no target device — DPI write skipped");
             }

@@ -1252,6 +1252,10 @@ impl Orchestrator {
         }
         for &idx in &targets {
             self.reapply_volatile_settings(&devices[idx], &devices);
+            // The haptic engine's enable flag is volatile too.
+            if let Some(route) = &devices[idx].route {
+                self.shared.event_haptics.rearm(route);
+            }
         }
         self.drive_disabled_keys_recovery(&devices, &targets, &disabled_keys_targets);
         let changed = next_current != self.current
