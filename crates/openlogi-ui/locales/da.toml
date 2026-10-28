@@ -354,6 +354,7 @@ haptic_level_limits = "Lydstyrke på 0 eller 100 %"
 haptic_display_crossing = "Skift til en anden skærm"
 haptic_drag = "Træk og slip"
 haptic_copy = "Kopiér og klip"
+haptic_battery_note = "Hvert tryk kører motoren og bruger lidt batteri. Hjulene, træk og skift til en anden skærm spiller oftest."
 smartshift = "SmartShift"
 
 [actions]

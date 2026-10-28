@@ -354,6 +354,7 @@ haptic_level_limits = "Volym på 0 eller 100 %"
 haptic_display_crossing = "Byte till en annan skärm"
 haptic_drag = "Dra och släpp"
 haptic_copy = "Kopiera och klipp ut"
+haptic_battery_note = "Varje tryck kör motorn och drar lite batteri. Hjulen, dra och byte till en annan skärm spelar oftast."
 smartshift = "SmartShift"
 
 [actions]

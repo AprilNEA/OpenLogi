@@ -354,6 +354,7 @@ haptic_level_limits = "Гучність 0 або 100 %"
 haptic_display_crossing = "Перехід на інший дисплей"
 haptic_drag = "Перетягування"
 haptic_copy = "Копіювання та вирізання"
+haptic_battery_note = "Кожен дотик запускає мотор і трохи витрачає батарею. Найчастіше спрацьовують коліщата, перетягування та перехід на інший дисплей."
 smartshift = "SmartShift"
 
 [actions]

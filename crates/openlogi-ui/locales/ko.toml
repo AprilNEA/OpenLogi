@@ -354,6 +354,7 @@ haptic_level_limits = "볼륨 0 % 또는 100 %"
 haptic_display_crossing = "다른 디스플레이로 이동"
 haptic_drag = "드래그 앤 드롭"
 haptic_copy = "복사 및 잘라내기"
+haptic_battery_note = "진동할 때마다 모터가 작동해 배터리를 조금씩 사용합니다. 휠, 드래그, 다른 디스플레이로의 이동이 가장 자주 울립니다."
 smartshift = "SmartShift"
 
 [actions]

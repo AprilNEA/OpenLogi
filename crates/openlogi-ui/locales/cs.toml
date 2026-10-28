@@ -354,6 +354,7 @@ haptic_level_limits = "Hlasitost na 0 nebo 100 %"
 haptic_display_crossing = "Přechod na jiný displej"
 haptic_drag = "Přetažení"
 haptic_copy = "Kopírování a vyjmutí"
+haptic_battery_note = "Každé ťuknutí spustí motor a spotřebuje trochu baterie. Nejčastěji se ozývají kolečka, přetahování a přechod na jiný displej."
 smartshift = "SmartShift"
 
 [actions]

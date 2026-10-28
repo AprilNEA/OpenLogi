@@ -354,6 +354,7 @@ haptic_level_limits = "Głośność 0 lub 100 %"
 haptic_display_crossing = "Przejście na inny ekran"
 haptic_drag = "Przeciągnij i upuść"
 haptic_copy = "Kopiowanie i wycinanie"
+haptic_battery_note = "Każde stuknięcie uruchamia silnik i zużywa trochę baterii. Najczęściej odzywają się kółka, przeciąganie i przejście na inny ekran."
 smartshift = "SmartShift"
 
 [actions]

@@ -354,6 +354,7 @@ haptic_level_limits = "音量 0 % または 100 %"
 haptic_display_crossing = "別のディスプレイへの移動"
 haptic_drag = "ドラッグ&ドロップ"
 haptic_copy = "コピーとカット"
+haptic_battery_note = "タップのたびにモーターが動き、バッテリーを少し消費します。最も頻繁に鳴るのはホイール、ドラッグ、ディスプレイの移動です。"
 smartshift = "SmartShift"
 
 [actions]

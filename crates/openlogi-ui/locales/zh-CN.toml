@@ -354,6 +354,7 @@ haptic_level_limits = "音量为 0 或 100 %"
 haptic_display_crossing = "移到另一台显示器"
 haptic_drag = "拖放"
 haptic_copy = "复制和剪切"
+haptic_battery_note = "每次触感都会驱动马达并消耗少量电量。滚轮、拖放和切换显示器触发得最频繁。"
 smartshift = "SmartShift"
 
 [actions]

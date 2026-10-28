@@ -354,6 +354,7 @@ haptic_level_limits = "Volume at 0 or 100 %"
 haptic_display_crossing = "Moving to another display"
 haptic_drag = "Drag and drop"
 haptic_copy = "Copy and cut"
+haptic_battery_note = "Every tap runs the motor and uses some battery. The wheels, drags, and display crossings play most often."
 smartshift = "SmartShift"
 
 [actions]

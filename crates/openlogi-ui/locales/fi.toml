@@ -354,6 +354,7 @@ haptic_level_limits = "Äänenvoimakkuus 0 tai 100 %"
 haptic_display_crossing = "Siirtyminen toiselle näytölle"
 haptic_drag = "Vedä ja pudota"
 haptic_copy = "Kopioi ja leikkaa"
+haptic_battery_note = "Jokainen napautus käyttää moottoria ja kuluttaa hieman akkua. Rullat, vetäminen ja siirtyminen toiselle näytölle toistuvat useimmin."
 smartshift = "SmartShift"
 
 [actions]

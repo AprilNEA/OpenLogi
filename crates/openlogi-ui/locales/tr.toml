@@ -354,6 +354,7 @@ haptic_level_limits = "Ses %0 veya %100"
 haptic_display_crossing = "Başka bir ekrana geçiş"
 haptic_drag = "Sürükle ve bırak"
 haptic_copy = "Kopyala ve kes"
+haptic_battery_note = "Her dokunuş motoru çalıştırır ve biraz pil harcar. En sık tekerlekler, sürükleme ve başka bir ekrana geçiş çalar."
 smartshift = "SmartShift"
 
 [actions]

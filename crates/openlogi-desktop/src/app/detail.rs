@@ -415,7 +415,13 @@ fn haptics_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
                 .child(section(tr!("pointer.haptic_section_wheels")))
                 .children(wheels.into_iter().map(row))
                 .child(section(tr!("pointer.haptic_section_events")))
-                .children(events.into_iter().map(row)),
+                .children(events.into_iter().map(row))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("pointer.haptic_battery_note")),
+                ),
         )
     })
 }
