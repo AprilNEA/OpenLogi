@@ -819,34 +819,27 @@ async fn a_rejected_panel_dpi_write_keeps_a_preset_picked_meanwhile() {
     assert_eq!(dpi.by_key["mouse"].current, Some(Dpi::new(800)));
 }
 
-/// A mouse whose session starts again is back at its onboard DPI, so a DPI
-/// shift reads it again instead of returning to a reading from before. A
-/// confirmation pass or a reload starts no session and keeps the reading,
-/// since a failed restore may have left the mouse at the shifted DPI.
+/// A mouse that reconnects is back at its onboard DPI, so a DPI shift reads
+/// it again instead of returning to a reading from before. A reload keeps
+/// the reading, since the mouse did not change.
 #[test]
-fn only_a_new_session_forgets_the_dpi_read_before_a_shift() {
+fn a_reconnect_forgets_the_dpi_read_before_a_shift() {
+    let mouse = || dev("mouse", 1, true);
     let mut orch = orchestrator(Config::default());
-    let inventory = direct_inventory(Some("mouse"), [1, 2, 3, 4]);
-    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
-    let key = orch.devices[0].config_key.clone();
+    orch.devices = vec![mouse()];
+    orch.rebuild();
     let reading = |orch: &Orchestrator| {
-        orch.shared.dpi_cycle.read().unwrap().by_key[&key]
+        orch.shared.dpi_cycle.read().unwrap().by_key["mouse"]
             .before_shift
             .get()
     };
-    orch.shared.dpi_cycle.read().unwrap().by_key[&key]
+    orch.shared.dpi_cycle.read().unwrap().by_key["mouse"]
         .before_shift
         .set(Dpi::new(1200));
 
-    orch.refresh_inventory_for_settings_confirmation(std::slice::from_ref(&inventory), &[], false);
-    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
     orch.rebuild();
     assert_eq!(reading(&orch), Some(Dpi::new(1200)));
-
-    let mut replugged = inventory;
-    replugged.receiver.product_id = 0xb042;
-    orch.refresh_inventory(&[replugged], &[], false);
-    assert_eq!(orch.devices[0].config_key, key, "the same mouse");
+    orch.reapply_volatile_settings(&mouse(), &[mouse()]);
     assert_eq!(reading(&orch), None);
 }
 
