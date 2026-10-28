@@ -135,10 +135,11 @@ pub struct ResolvedAsset {
     /// model draws that file. `None` when it has no enclosed holes.
     pub glow: Option<Arc<GlowGeometry>>,
     /// Holes measured on [`Self::hero_image_path`] when that file is not
-    /// [`Self::image_path`]. The home grid, list, and carousel draw the hero,
-    /// and a colour variant's hero is not the picture a depot-wide mask was
-    /// measured on. `None` when the gallery shows `image_path`, in which case
-    /// [`Self::glow`] is the geometry for both.
+    /// [`Self::image_path`]. The home grid, list, and carousel draw the hero.
+    /// `None` when the gallery shows `image_path` (use [`Self::glow`]) or when
+    /// that distinct hero has no enclosed holes. A missing hero measurement
+    /// must not fall back to [`Self::glow`]: that geometry belongs to the
+    /// other file.
     pub hero_glow: Option<Arc<GlowGeometry>>,
     pub metadata: Metadata,
     /// Actual pixel dimensions of `image_path`. Logi's

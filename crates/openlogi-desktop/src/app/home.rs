@@ -8,6 +8,7 @@ pub(super) use views::device_gallery;
 #[cfg(test)]
 pub(super) use views::ordered_device_indices;
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -39,7 +40,7 @@ use super::widgets::{
     settings_button,
 };
 use crate::features::lighting::visual as light_visual;
-use crate::services::assets::GlowGeometry;
+use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::services::ipc::UnpairFailure;
 use crate::state::{AppState, DeviceRecord, ObservedConnection};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
@@ -123,7 +124,7 @@ pub(crate) fn keyboard_glow(
         .filter(|l| l.enabled)?;
     let asset = record.asset.as_ref()?;
     let geom = match image {
-        GlowImage::Gallery => asset.hero_glow.as_ref().or(asset.glow.as_ref()),
+        GlowImage::Gallery => gallery_geometry(asset),
         GlowImage::Detail => asset.glow.as_ref(),
     }?
     .clone();
@@ -135,6 +136,19 @@ pub(crate) fn keyboard_glow(
         a: GLOW_OPACITY,
     };
     Some((geom, color.into()))
+}
+
+/// Gallery geometry for the file the card actually draws.
+///
+/// `hero_glow` is empty both when the hero is `image_path` and when a
+/// different hero has no enclosed holes. Only the first case may reuse
+/// `glow`. The second would paint the detail file's holes on the hero.
+fn gallery_geometry(asset: &ResolvedAsset) -> Option<&Arc<GlowGeometry>> {
+    match asset.hero_image_path.as_deref() {
+        Some(hero) if hero == asset.image_path => asset.glow.as_ref(),
+        Some(_) => asset.hero_glow.as_ref(),
+        None => None,
+    }
 }
 
 /// Paint a keyboard's baked inter-key holes in its lighting colour, scaled with
@@ -169,7 +183,7 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
             // that coverage. A full-bright quad on a pixel that only clips the
             // character is the red dot on the key border in the list thumbnail.
             let px_size = 1. / scale;
-            for splat in glow_coverage(
+            for splat in cached_glow_coverage(
                 &geom.holes,
                 geom.image_width,
                 geom.image_height,
@@ -970,10 +984,70 @@ fn glow_coverage(
     merged
 }
 
+#[derive(Clone, Copy)]
 struct GlowSplat {
     x: i32,
     y: i32,
     fraction: f32,
+}
+
+/// Identity of one measured render at one snapped placement. Repaints that
+/// only change the lighting colour reuse the stored device pixels.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CoverageKey {
+    holes: usize,
+    len: usize,
+    image_width: u32,
+    image_height: u32,
+    ox: u32,
+    oy: u32,
+    rw: u32,
+    rh: u32,
+    scale: u32,
+}
+
+thread_local! {
+    static COVERAGE_CACHE: RefCell<Vec<(CoverageKey, Vec<GlowSplat>)>> =
+        const { RefCell::new(Vec::new()) };
+    static COVERAGE_MISSES: Cell<u32> = const { Cell::new(0) };
+}
+
+fn cached_glow_coverage(
+    holes: &[u32],
+    image_width: u32,
+    image_height: u32,
+    place: GlowPlacement,
+) -> Vec<GlowSplat> {
+    let key = CoverageKey {
+        holes: holes.as_ptr() as usize,
+        len: holes.len(),
+        image_width,
+        image_height,
+        ox: place.ox.to_bits(),
+        oy: place.oy.to_bits(),
+        rw: place.rw.to_bits(),
+        rh: place.rh.to_bits(),
+        scale: place.scale.to_bits(),
+    };
+    if let Some(hit) = COVERAGE_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .iter()
+            .find(|(cached, _)| *cached == key)
+            .map(|(_, splats)| splats.clone())
+    }) {
+        return hit;
+    }
+    COVERAGE_MISSES.with(|misses| misses.set(misses.get().saturating_add(1)));
+    let built = glow_coverage(holes, image_width, image_height, place);
+    COVERAGE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() == 8 {
+            cache.remove(0);
+        }
+        cache.push((key, built.clone()));
+    });
+    built
 }
 
 /// Rounds to the nearest integer with 0.5 ties toward zero. Matches gpui's
@@ -992,7 +1066,10 @@ fn device_pixel(value: f32) -> i32 {
 
 #[cfg(test)]
 mod glow_paint_tests {
-    use super::{GlowPlacement, fitted_frame, glow_coverage};
+    use super::{
+        Arc, COVERAGE_CACHE, COVERAGE_MISSES, DeviceKind, GlowGeometry, GlowPlacement,
+        ResolvedAsset, cached_glow_coverage, fitted_frame, gallery_geometry, glow_coverage,
+    };
 
     fn place(rw: f32, rh: f32, scale: f32) -> GlowPlacement {
         GlowPlacement {
@@ -1064,6 +1141,75 @@ mod glow_paint_tests {
             (1, 1),
             "the light leaves the gap pixel"
         );
+    }
+
+    #[test]
+    fn gallery_does_not_reuse_a_different_renders_holes() {
+        let detail = Arc::new(GlowGeometry {
+            aspect: 1.,
+            segments: Vec::new(),
+            image_width: 10,
+            image_height: 10,
+            holes: vec![1],
+        });
+        let hero = Arc::new(GlowGeometry {
+            aspect: 2.,
+            segments: Vec::new(),
+            image_width: 20,
+            image_height: 10,
+            holes: vec![2],
+        });
+        let mut asset = ResolvedAsset {
+            depot: "g513".to_string(),
+            display_name: "G513".to_string(),
+            kind: Some(DeviceKind::Keyboard),
+            image_path: std::path::PathBuf::from("/tmp/front.png"),
+            hero_image_path: Some(std::path::PathBuf::from("/tmp/front_ext5.png")),
+            glow: Some(detail.clone()),
+            hero_glow: Some(hero.clone()),
+            metadata: openlogi_assets::Metadata::default(),
+            png_width: 10,
+            png_height: 10,
+        };
+        assert!(std::ptr::eq(
+            gallery_geometry(&asset).unwrap().as_ref(),
+            hero.as_ref()
+        ));
+        asset.hero_glow = None;
+        assert!(gallery_geometry(&asset).is_none());
+        asset.hero_image_path = Some(asset.image_path.clone());
+        assert!(std::ptr::eq(
+            gallery_geometry(&asset).unwrap().as_ref(),
+            detail.as_ref()
+        ));
+        asset.hero_image_path = None;
+        assert!(gallery_geometry(&asset).is_none());
+    }
+
+    #[test]
+    fn repaint_reuses_coverage_until_the_placement_changes() {
+        COVERAGE_CACHE.with(|cache| cache.borrow_mut().clear());
+        COVERAGE_MISSES.with(|misses| misses.set(0));
+        let holes = vec![4 | (6 << 16)];
+        let first = cached_glow_coverage(&holes, 10, 10, place(10., 10., 1.));
+        let second = cached_glow_coverage(&holes, 10, 10, place(10., 10., 1.));
+        assert_eq!((first[0].x, first[0].y), (4, 6));
+        assert_eq!((second[0].x, second[0].y), (4, 6));
+        assert_eq!(COVERAGE_MISSES.with(std::cell::Cell::get), 1);
+        let moved = cached_glow_coverage(
+            &holes,
+            10,
+            10,
+            GlowPlacement {
+                ox: 3.,
+                oy: 2.,
+                rw: 10.,
+                rh: 10.,
+                scale: 1.,
+            },
+        );
+        assert_eq!((moved[0].x, moved[0].y), (7, 8));
+        assert_eq!(COVERAGE_MISSES.with(std::cell::Cell::get), 2);
     }
 
     #[test]
