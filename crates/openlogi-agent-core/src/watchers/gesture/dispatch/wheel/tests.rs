@@ -24,6 +24,13 @@ fn scroll_delta(output: WheelOutput) -> ScrollDelta {
     delta
 }
 
+/// A direction whose current roll already cleared the scroll dead zone.
+fn rolling(action: &Action, scale: ScrollScale, now: Instant) -> WheelDirection {
+    let mut direction = WheelDirection::default();
+    direction.advance(action, SCROLL_DEAD_ZONE, scale, now);
+    direction
+}
+
 fn assert_distance(actual: f64, expected: f64) {
     const EPSILON: f64 = 1.0e-12;
     assert!(
@@ -82,8 +89,11 @@ fn a_revolution_scrolls_its_native_amount_however_finely_the_wheel_reports() {
     let now = Instant::now();
     let mut distance = 0.0;
     for _ in 0..120 {
-        distance +=
-            scroll_delta(direction.advance(&Action::HorizontalScrollRight, 1, scale, now)).x();
+        if let WheelOutput::Scroll(delta) =
+            direction.advance(&Action::HorizontalScrollRight, 1, scale, now)
+        {
+            distance += delta.x();
+        }
     }
     assert_distance(distance, 20.0);
 }
@@ -95,19 +105,24 @@ fn sensitivity_multiplies_the_native_amount() {
     let now = Instant::now();
     let mut distance = 0.0;
     for _ in 0..120 {
-        distance +=
-            scroll_delta(direction.advance(&Action::HorizontalScrollRight, 1, scale, now)).x();
+        if let WheelOutput::Scroll(delta) =
+            direction.advance(&Action::HorizontalScrollRight, 1, scale, now)
+        {
+            distance += delta.x();
+        }
     }
     assert_distance(distance, 40.0);
 }
 
 #[test]
 fn sub_tick_distance_is_emitted_without_integer_accumulation() {
-    let output = WheelDirection::default().advance(
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::from_rounded(7.0));
+    let output = rolling(&Action::HorizontalScrollRight, scale, now).advance(
         &Action::HorizontalScrollRight,
         1,
-        unscaled(ThumbwheelSensitivity::from_rounded(7.0)),
-        Instant::now(),
+        scale,
+        now,
     );
     assert_eq!(
         output,
@@ -132,7 +147,7 @@ fn all_scroll_bindings_emit_on_their_configured_axis_and_sign() {
         ),
     ] {
         assert_eq!(
-            WheelDirection::default().advance(&action, 1, scale, now),
+            rolling(&action, scale, now).advance(&action, 1, scale, now),
             WheelOutput::Scroll(expected)
         );
     }
@@ -140,9 +155,9 @@ fn all_scroll_bindings_emit_on_their_configured_axis_and_sign() {
 
 #[test]
 fn scroll_scale_changes_apply_only_to_the_current_delta() {
-    let mut direction = WheelDirection::default();
     let now = Instant::now();
     let traced = ScrollScale::new(TRACED, ThumbwheelSensitivity::DEFAULT);
+    let mut direction = rolling(&Action::HorizontalScrollRight, traced, now);
 
     assert_distance(
         scroll_delta(direction.advance(&Action::HorizontalScrollRight, 1, traced, now)).x(),
@@ -151,11 +166,11 @@ fn scroll_scale_changes_apply_only_to_the_current_delta() {
     assert_eq!(
         direction.advance(
             &Action::HorizontalScrollRight,
-            1,
+            SCROLL_DEAD_ZONE,
             unscaled(ThumbwheelSensitivity::DEFAULT),
             now,
         ),
-        WheelOutput::Scroll(ScrollDelta::wheel_ticks(1.0, 0.0)),
+        WheelOutput::Scroll(ScrollDelta::wheel_ticks(f64::from(SCROLL_DEAD_ZONE), 0.0)),
         "the new resolution must not combine with hidden old-scale progress"
     );
 }
@@ -380,8 +395,8 @@ fn changing_modes_discards_discrete_progress() {
         WheelOutput::Idle
     );
     assert_eq!(
-        direction.advance(&Action::HorizontalScrollRight, 1, scale, now),
-        WheelOutput::Scroll(ScrollDelta::wheel_ticks(1.0, 0.0))
+        direction.advance(&Action::HorizontalScrollRight, SCROLL_DEAD_ZONE, scale, now),
+        WheelOutput::Scroll(ScrollDelta::wheel_ticks(f64::from(SCROLL_DEAD_ZONE), 0.0))
     );
     assert_eq!(
         direction.advance(&Action::VolumeUp, 1, scale, now),
@@ -431,5 +446,44 @@ fn stale_custom_progress_decays() {
     assert_eq!(
         direction.advance(&Action::VolumeUp, threshold - 1, scale, after_decay),
         WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn a_touch_below_the_dead_zone_does_not_scroll() {
+    let mut direction = WheelDirection::default();
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let later = now + ACTION_DECAY + Duration::from_millis(1);
+
+    for (magnitude, at) in [(SCROLL_DEAD_ZONE - 1, now), (SCROLL_DEAD_ZONE - 1, later)] {
+        assert_eq!(
+            direction.advance(&Action::HorizontalScrollRight, magnitude, scale, at),
+            WheelOutput::Idle,
+            "touches separated by a pause must not add up to a scroll"
+        );
+    }
+}
+
+#[test]
+fn a_roll_crossing_the_dead_zone_scrolls_its_full_distance() {
+    let mut direction = WheelDirection::default();
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+
+    for _ in 1..SCROLL_DEAD_ZONE {
+        assert_eq!(
+            direction.advance(&Action::HorizontalScrollLeft, 1, scale, now),
+            WheelOutput::Idle
+        );
+    }
+    assert_eq!(
+        direction.advance(&Action::HorizontalScrollLeft, 1, scale, now),
+        WheelOutput::Scroll(ScrollDelta::wheel_ticks(-f64::from(SCROLL_DEAD_ZONE), 0.0)),
+        "the crossing report releases the held increments"
+    );
+    assert_eq!(
+        direction.advance(&Action::HorizontalScrollLeft, 1, scale, now),
+        WheelOutput::Scroll(ScrollDelta::wheel_ticks(-1.0, 0.0))
     );
 }
