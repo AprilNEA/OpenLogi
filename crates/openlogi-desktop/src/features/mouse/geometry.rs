@@ -467,11 +467,13 @@ mod tests {
     fn a_correct_origin_still_applies_the_horizontal_crop() {
         // A depot whose `origin.height` genuinely matches the PNG (Logi pads
         // transparent strips on the sides only) must still get the crop
-        // correction — the fallback must not fire on valid data.
+        // correction — the fallback must not fire on valid data. The marker
+        // sits off-centre: a centred one lands on the same pixel with or
+        // without the crop, so it could not catch a broken correction.
         let asset = mouse_asset(
             (900, 1920),
             (1228, 1920),
-            &[("SLOT_NAME_MIDDLE_BUTTON", 50., 14.)],
+            &[("SLOT_NAME_MIDDLE_BUTTON", 25., 14.)],
         );
 
         let hotspots = asset_hotspots_for_png(&asset, 300., 470.);
@@ -479,7 +481,7 @@ mod tests {
         assert_eq!(hotspots.len(), 1);
         let (cx, _) = hotspots[0].center();
         let bbox_w = 300. * 900. / 1228.;
-        let expected = (300. - bbox_w) / 2. + 0.5 * bbox_w;
+        let expected = (300. - bbox_w) / 2. + 0.25 * bbox_w;
         assert!((cx - expected).abs() < 1., "cx={cx}");
     }
 }
