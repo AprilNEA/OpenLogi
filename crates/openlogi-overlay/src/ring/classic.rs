@@ -2,7 +2,7 @@
 //! slot's label under the cancel button. It opens and closes without motion.
 
 use gpui::{
-    Context, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels,
+    Context, Div, Hsla, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::ActionRingSlot;
@@ -10,12 +10,10 @@ use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
 
 use super::RingView;
-use super::skin::slot_caption;
 use crate::ipc::OverlayCommand;
-use crate::session;
 
-/// The disc's designed edge, drawn centred in the ring's window.
-const PANEL_SIZE: f32 = 360.0;
+/// The disc's edge, which is the ring window's edge for this theme.
+pub(super) const PANEL_SIZE: f32 = 360.0;
 const SLOT_SIZE: f32 = 54.0;
 const RADIUS: f32 = 122.0;
 
@@ -46,27 +44,10 @@ const SELECTED_FILL_L: f32 = 0.48;
 const SELECTED_BORDER_L: f32 = 0.78;
 
 impl RingView {
-    /// The disc, centred in an `edge`-pixel square (see [`super::panel_edge`]).
-    // shortcut: below 360 px the disc overhangs its square instead of scaling;
-    // scale it like the motion skin if displays that short ever matter.
-    pub(super) fn classic_panel(&self, edge: Pixels, cx: &mut Context<Self>) -> Div {
-        let inset = (f32::from(edge) - PANEL_SIZE) / 2.0;
-        div().relative().size(edge).child(
-            div()
-                .absolute()
-                .left(px(inset))
-                .top(px(inset))
-                .child(self.disc(cx)),
-        )
-    }
-
-    fn disc(&self, cx: &mut Context<Self>) -> Div {
+    /// The disc, which fills its [`PANEL_SIZE`] window.
+    pub(super) fn classic_panel(&self, cx: &mut Context<Self>) -> Div {
         let session_id = self.invocation.session_id;
-        let center_commands = self.commands.clone();
-        let hovered_label = self
-            .hovered
-            .and_then(|slot| self.invocation.slots.get(&slot))
-            .map(slot_caption);
+        let hovered_label = self.hovered_caption();
         let slots = ActionRingSlot::ALL
             .into_iter()
             .filter_map(|slot| self.slot_element(slot, cx))
@@ -101,11 +82,10 @@ impl RingView {
                     .text_color(CANCEL_GLYPH)
                     .cursor_pointer()
                     .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
-                    .on_click(move |_, window, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        let _ = center_commands.send(OverlayCommand::Cancel { session_id });
-                        session::dismiss_from_window(cx, window, session_id);
-                    }),
+                        this.close(OverlayCommand::Cancel { session_id }, window, cx);
+                    })),
             )
             .when_some(hovered_label, |ring, label| {
                 ring.child(
@@ -132,7 +112,6 @@ impl RingView {
         let selected = self.hovered == Some(slot);
         let (left, top) = slot.placement(PANEL_SIZE, RADIUS, SLOT_SIZE);
         let session_id = self.invocation.session_id;
-        let activate = self.commands.clone();
         Some(
             div()
                 .id(("ring-slot", slot.index()))
@@ -158,35 +137,21 @@ impl RingView {
                 .cursor_pointer()
                 .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
                 .on_hover(cx.listener(move |this, hovered, _, cx| {
-                    if *hovered && this.hovered != Some(slot) {
-                        this.hovered = Some(slot);
-                        let _ = this
-                            .commands
-                            .send(OverlayCommand::Hover { session_id, slot });
-                        cx.notify();
-                    } else if !*hovered && this.hovered == Some(slot) {
-                        this.hovered = None;
-                        cx.notify();
-                    }
+                    this.hover(slot, *hovered, cx);
                 }))
-                .on_click(move |_, window, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    let _ = activate.send(OverlayCommand::Activate { session_id, slot });
-                    session::dismiss_from_window(cx, window, session_id);
-                })
+                    this.close(OverlayCommand::Activate { session_id, slot }, window, cx);
+                }))
                 .into_any_element(),
         )
     }
 }
 
-/// Centre of `slot` within a full-size ring window, for tests that aim the
-/// pointer at it.
+/// Centre of `slot` within the ring window, for tests that aim the pointer
+/// at it.
 #[cfg(test)]
 pub(super) fn slot_center(slot: ActionRingSlot) -> (f32, f32) {
-    let inset = (super::WINDOW_SIZE - PANEL_SIZE) / 2.0;
     let (left, top) = slot.placement(PANEL_SIZE, RADIUS, SLOT_SIZE);
-    (
-        inset + left + SLOT_SIZE / 2.0,
-        inset + top + SLOT_SIZE / 2.0,
-    )
+    (left + SLOT_SIZE / 2.0, top + SLOT_SIZE / 2.0)
 }

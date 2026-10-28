@@ -23,12 +23,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_POPUP, WS_THICKFRAME,
 };
 
+use openlogi_core::binding::ActionRingTheme;
+
 use super::{NoticePlacement, RingPlacement};
 
 impl RingPlacement {
-    pub(crate) fn capture(_cx: &mut App) -> Result<Self> {
+    pub(crate) fn capture(_cx: &mut App, theme: ActionRingTheme) -> Result<Self> {
         let sample = sample_monitor()?;
         Ok(Self {
+            theme,
             display_id: sample.display_id,
             cursor: sample.cursor,
             display: sample.display,

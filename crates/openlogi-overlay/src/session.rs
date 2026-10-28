@@ -88,7 +88,7 @@ pub(crate) const fn click_away_targets(observed: u64, open: u64) -> bool {
 /// Dismiss a showing ring when the user clicks anywhere off it, the way a
 /// transient popup closes on click-away — without swallowing that click.
 ///
-/// The ring window only covers its own 360×360 bounds, so an outside click
+/// The ring window only covers its own panel, so an outside click
 /// never reaches the window's handlers. A global monitor closes the gap:
 /// macOS only delivers it events routed to *other* applications, so clicks on
 /// the ring itself can't race the slot/cancel handlers, and monitors can't

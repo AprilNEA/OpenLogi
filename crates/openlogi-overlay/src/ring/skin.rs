@@ -12,14 +12,16 @@ use gpui::{
     Point, SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, div,
     linear_color_stop, linear_gradient, point, prelude::FluentBuilder as _, px, svg,
 };
-use openlogi_core::binding::{Action, ActionRingSlot};
-use openlogi_ipc::ActionRingPresentation;
+use openlogi_core::binding::ActionRingSlot;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
 
-use super::{RingView, WINDOW_SIZE};
+use super::{RingLook, RingView};
 use crate::ipc::OverlayCommand;
-use crate::session;
+
+/// The designed edge of the panel, and of its window on a display that fits
+/// it: wide enough for the captions, small enough for 1080p at 200%.
+pub(super) const DESIGN_EDGE: f32 = 480.0;
 
 const PILL_W: f32 = 132.0;
 const PILL_H: f32 = 34.0;
@@ -33,13 +35,15 @@ const HUB_TAU: f32 = 0.12;
 const HOVER_RING: f32 = 64.0;
 const RADIUS: f32 = 160.0;
 const ENTER_SECS: f32 = 0.294;
-const EXIT_SECS: f32 = 0.196;
 const HOVER_TAU: f32 = 0.09;
 const ARC_SPAN: f32 = 0.70;
 const ARC_SPIN: f32 = 0.55;
 const ARC_TAU: f32 = 0.13;
 const ARC_PIECES: u8 = 8;
-const EXIT: Duration = Duration::from_millis(196);
+/// How long the exit plays before the window goes; [`RingView::close`] waits
+/// this long.
+pub(super) const EXIT: Duration = Duration::from_millis(196);
+const EXIT_SECS: f32 = EXIT.as_secs_f32();
 
 const GLYPH: Hsla = neutral(0.98, 1.0);
 const INK: Hsla = neutral(0.08, 1.0);
@@ -55,7 +59,7 @@ const fn neutral(lightness: f32, alpha: f32) -> Hsla {
 }
 
 /// Hover, arc, and enter/exit clocks for one open ring.
-pub(crate) struct Motion {
+pub(super) struct Motion {
     hover_t: [f32; 8],
     /// 0 with the hub at rest, 1 fully open around a caption.
     hub_t: f32,
@@ -80,8 +84,13 @@ impl Default for Motion {
 }
 
 impl Motion {
+    /// Whether the exit is already playing.
+    pub(super) const fn is_closing(&self) -> bool {
+        self.close_started.is_some()
+    }
+
     /// Start the exit. Returns false when the exit is already playing.
-    fn begin_close(&mut self, now: Instant) -> bool {
+    pub(super) fn begin_close(&mut self, now: Instant) -> bool {
         if self.close_started.is_some() {
             return false;
         }
@@ -127,38 +136,10 @@ impl Motion {
 }
 
 impl RingView {
-    /// Whether the exit animation is already playing.
-    pub(crate) const fn is_closing(&self) -> bool {
-        self.skin.close_started.is_some()
-    }
-
-    /// Send the ring's final command once, play the bubble-out, then close
-    /// this window. Other windows of the session close right away.
-    pub(super) fn close(&mut self, command: OverlayCommand, cx: &mut Context<Self>) {
-        if !self.skin.begin_close(Instant::now()) {
-            return;
-        }
-        let _ = self.commands.send(command);
-        let session_id = self.invocation.session_id;
-        session::close_ring_windows(cx, session_id);
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(EXIT).await;
-            let _ = this.update(cx, |_, cx| {
-                let id = cx.entity_id();
-                cx.with_window(id, |window, cx| {
-                    session::dismiss_from_window(cx, window, session_id);
-                });
-            });
-        })
-        .detach();
-    }
-
-    /// The fixed square panel both placements anchor. It takes the background
-    /// click itself so the stock root handler never closes without the exit.
     /// The panel, `edge` pixels square (see [`super::panel_edge`]). Below
-    /// [`WINDOW_SIZE`] the whole layout scales down with it: slot radius,
-    /// pills, hub and the ambient field alike.
+    /// [`DESIGN_EDGE`] the whole layout scales down with it: slot radius,
+    /// pills, hub and the ambient field alike. It takes the background click
+    /// itself so the stock root handler never closes without the exit.
     pub(super) fn skinned_panel(
         &mut self,
         edge: Pixels,
@@ -166,44 +147,45 @@ impl RingView {
     ) -> impl IntoElement {
         let now = Instant::now();
         let reduce = cx.reduce_motion();
-        self.skin.advance(self.hovered, now, reduce);
-        let presence = self.skin.presence(now, reduce);
-        let elapsed = self.skin.elapsed(now);
+        let RingLook::InMotion(motion) = &mut self.look else {
+            unreachable!("skinned_panel is only drawn for an In Motion ring");
+        };
+        motion.advance(self.hovered, now, reduce);
+        let presence = motion.presence(now, reduce);
+        let elapsed = motion.elapsed(now);
+        let (hover_t, arc_angle, hub_t) = (motion.hover_t, motion.arc_angle, motion.hub_t);
         let layout = Layout::fitting(edge);
         let slots = ActionRingSlot::ALL
             .into_iter()
-            .zip(self.skin.hover_t)
+            .zip(hover_t)
             .filter_map(|(slot, hover_t)| slot_element(self, slot, hover_t, layout, cx))
             .collect::<Vec<_>>();
-        let hovered_caption = self
-            .hovered
-            .and_then(|slot| self.invocation.slots.get(&slot))
-            .map(slot_caption);
+        let hovered_caption = self.hovered_caption();
 
         div()
             .id("ring-skin")
             .relative()
             .size(px(layout.edge))
             .opacity(presence.opacity)
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(|this, _, window, cx| {
                 cx.stop_propagation();
                 let session_id = this.invocation.session_id;
-                this.close(OverlayCommand::Cancel { session_id }, cx);
+                this.close(OverlayCommand::Cancel { session_id }, window, cx);
             }))
             .child(ambient_field(
                 elapsed,
                 presence.scale * layout.fit,
-                self.skin.hover_t,
-                self.skin.arc_angle,
+                hover_t,
+                arc_angle,
                 reduce,
             ))
             .children(slots)
-            .child(cancel_control(hovered_caption, self.skin.hub_t, layout, cx))
+            .child(cancel_control(hovered_caption, hub_t, layout, cx))
     }
 }
 
 /// The panel's edge and how far the layout is scaled down to fit it. `fit`
-/// is 1 on every display at least [`WINDOW_SIZE`] tall and wide, so the
+/// is 1 on every display at least [`DESIGN_EDGE`] tall and wide, so the
 /// geometry below is exactly the designed one there.
 #[derive(Clone, Copy)]
 struct Layout {
@@ -213,10 +195,10 @@ struct Layout {
 
 impl Layout {
     fn fitting(edge: Pixels) -> Self {
-        let edge = f32::from(edge).min(WINDOW_SIZE);
+        let edge = f32::from(edge).min(DESIGN_EDGE);
         Self {
             edge,
-            fit: edge / WINDOW_SIZE,
+            fit: edge / DESIGN_EDGE,
         }
     }
 
@@ -224,7 +206,7 @@ impl Layout {
     #[cfg(test)]
     const fn full() -> Self {
         Self {
-            edge: WINDOW_SIZE,
+            edge: DESIGN_EDGE,
             fit: 1.0,
         }
     }
@@ -252,7 +234,7 @@ fn slot_element(
 ) -> Option<gpui::AnyElement> {
     let presentation = view.invocation.slots.get(&slot)?;
     let icon_path = presentation.icon.asset_path();
-    let caption = slot_caption(presentation);
+    let caption = super::slot_caption(presentation);
     // Pills sit at their final radius from the first frame: the ambient field
     // bubbles in and out around them, but a target the user is already moving
     // towards must not shift under the pointer, and a pointer that lands on a
@@ -292,23 +274,11 @@ fn slot_element(
                     .child(caption),
             )
             .on_hover(cx.listener(move |this, hovered, _, cx| {
-                if this.is_closing() {
-                    return;
-                }
-                if *hovered && this.hovered != Some(slot) {
-                    this.hovered = Some(slot);
-                    let _ = this
-                        .commands
-                        .send(OverlayCommand::Hover { session_id, slot });
-                    cx.notify();
-                } else if !*hovered && this.hovered == Some(slot) {
-                    this.hovered = None;
-                    cx.notify();
-                }
+                this.hover(slot, *hovered, cx);
             }))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
-                this.close(OverlayCommand::Activate { session_id, slot }, cx);
+                this.close(OverlayCommand::Activate { session_id, slot }, window, cx);
             }))
             .into_any_element(),
     )
@@ -373,10 +343,10 @@ fn cancel_control(
                     .opacity(1.0 - open),
             ),
         })
-        .on_click(cx.listener(move |this, _, _, cx| {
+        .on_click(cx.listener(move |this, _, window, cx| {
             cx.stop_propagation();
             let session_id = this.invocation.session_id;
-            this.close(OverlayCommand::Cancel { session_id }, cx);
+            this.close(OverlayCommand::Cancel { session_id }, window, cx);
         }))
 }
 
@@ -449,20 +419,6 @@ const fn lerp_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
         l: a.l + (b.l - a.l) * t,
         a: a.a + (b.a - a.a) * t,
     }
-}
-
-pub(super) fn slot_caption(presentation: &ActionRingPresentation) -> SharedString {
-    // User-authored labels render verbatim: passing them through the
-    // localization table would translate any label that happens to collide
-    // with a known key ("Copy" would become "Copier" under fr).
-    let label = if presentation.literal {
-        presentation.label.clone()
-    } else if let Some(key) = Action::translation_key_for_label(&presentation.label) {
-        rust_i18n::t!(key).into_owned()
-    } else {
-        presentation.label.clone()
-    };
-    SharedString::from(label)
 }
 
 /// Centre of `slot`'s pill within a full-size panel, for tests that aim the
@@ -862,8 +818,8 @@ mod tests {
         const { assert!(PILL_H < HOVER_RING) };
         let origin = Layout::full().slot_origin(ActionRingSlot::Right);
         let (cx, cy) = (origin.0 + PILL_W / 2.0, origin.1 + PILL_H / 2.0);
-        assert!((cx - (WINDOW_SIZE / 2.0 + RADIUS)).abs() < 0.01);
-        assert!((cy - WINDOW_SIZE / 2.0).abs() < 0.01);
+        assert!((cx - (DESIGN_EDGE / 2.0 + RADIUS)).abs() < 0.01);
+        assert!((cy - DESIGN_EDGE / 2.0).abs() < 0.01);
     }
 
     #[test]

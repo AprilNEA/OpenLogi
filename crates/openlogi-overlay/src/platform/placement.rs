@@ -3,10 +3,11 @@
 use gpui::{
     Bounds, DisplayId, Pixels, PlatformDisplay, Point, Size, WindowBounds, WindowOptions, point, px,
 };
+use openlogi_core::binding::ActionRingTheme;
 use tracing::warn;
 
 use crate::notice::{bottom_centre, notice_window_options};
-use crate::ring::{Placement, clamp_window_origin, panel_edge, ring_window_options};
+use crate::ring::{Placement, clamp_window_origin, design_edge, panel_edge, ring_window_options};
 
 /// Captured placement for one invocation, before its windows are opened.
 pub(crate) struct RingPlacement {
@@ -18,7 +19,7 @@ impl RingPlacement {
         clippy::unnecessary_wraps,
         reason = "the Windows placement capture is fallible"
     )]
-    pub(crate) fn capture(cx: &mut gpui::App) -> anyhow::Result<Self> {
+    pub(crate) fn capture(cx: &mut gpui::App, theme: ActionRingTheme) -> anyhow::Result<Self> {
         if on_wayland() {
             let displays = cx.displays();
             if !displays.is_empty() {
@@ -49,7 +50,7 @@ impl RingPlacement {
             warn!("no displays reported; falling back to a positioned Actions Ring window");
         }
         Ok(Self {
-            alternatives: vec![vec![positioned_window(cx)]],
+            alternatives: vec![vec![positioned_window(cx, theme)]],
         })
     }
 
@@ -161,11 +162,11 @@ fn cursor_screen(cx: &gpui::App) -> CursorScreen {
     }
 }
 
-fn positioned_window(cx: &gpui::App) -> (WindowOptions, Placement) {
+fn positioned_window(cx: &gpui::App, theme: ActionRingTheme) -> (WindowOptions, Placement) {
     let screen = cursor_screen(cx);
     let edge = screen.bounds.map_or_else(
-        || px(crate::ring::WINDOW_SIZE),
-        |bounds| panel_edge(bounds.size),
+        || px(design_edge(theme)),
+        |bounds| panel_edge(theme, bounds.size),
     );
     let size = Size::new(edge, edge);
     let center = screen

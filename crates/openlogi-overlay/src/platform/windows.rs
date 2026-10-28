@@ -5,15 +5,18 @@
 use gpui::{
     Bounds, DevicePixels, DisplayId, Pixels, Point, Size, WindowBounds, WindowOptions, point, size,
 };
+use openlogi_core::binding::ActionRingTheme;
 
 use crate::notice::{BOTTOM_MARGIN, notice_window_options};
-use crate::ring::{Placement, WINDOW_SIZE, ring_window_options};
+use crate::ring::{Placement, design_edge, ring_window_options};
 
 #[cfg(target_os = "windows")]
 mod native;
 
 /// One native cursor/monitor snapshot, kept through bootstrap-window creation.
 pub(crate) struct RingPlacement {
+    /// The theme to size the window for.
+    theme: ActionRingTheme,
     display_id: DisplayId,
     cursor: Point<DevicePixels>,
     display: Bounds<DevicePixels>,
@@ -54,17 +57,19 @@ impl RingPlacement {
 
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "360 DIP scaled by a native display DPI fits in screen-sized i32 pixels"
+        reason = "a few hundred DIP scaled by a native display DPI fits in screen-sized i32 pixels"
     )]
     fn bounds(&self, dpi: u32) -> Bounds<DevicePixels> {
-        let full = (f64::from(WINDOW_SIZE) * f64::from(dpi) / 96.0).round() as i32;
-        // The physical half of `ring::panel_edge`: a display shorter than the
-        // ring gets a ring the size of its shorter side, and the skin scales
-        // its layout to match.
-        let edge = DevicePixels(
-            full.min(self.display.size.width.0)
+        let full = (f64::from(design_edge(self.theme)) * f64::from(dpi) / 96.0).round() as i32;
+        // The physical half of `ring::panel_edge`: an In Motion ring on a
+        // display shorter than it takes the shorter side, and the skin scales
+        // its layout to match. Classic keeps its size, as it always did.
+        let edge = DevicePixels(match self.theme {
+            ActionRingTheme::Classic => full,
+            ActionRingTheme::InMotion => full
+                .min(self.display.size.width.0)
                 .min(self.display.size.height.0),
-        );
+        });
         let half = DevicePixels(edge.0 / 2);
         let desired = self.cursor - point(half, half);
         // If the display is smaller than the ring, anchor to its top-left
@@ -155,8 +160,10 @@ mod tests {
     use super::*;
     use crate::notice::stack_size;
 
+    /// An In Motion placement; [`classic`] is the same spot for the other theme.
     fn placement(cursor: (i32, i32), rect: (i32, i32, i32, i32)) -> RingPlacement {
         RingPlacement {
+            theme: ActionRingTheme::InMotion,
             display_id: DisplayId::from(42),
             cursor: point(DevicePixels(cursor.0), DevicePixels(cursor.1)),
             display: Bounds::new(
@@ -164,6 +171,13 @@ mod tests {
                 size(DevicePixels(rect.2 - rect.0), DevicePixels(rect.3 - rect.1)),
             ),
             dpi: 96,
+        }
+    }
+
+    fn classic(cursor: (i32, i32), rect: (i32, i32, i32, i32)) -> RingPlacement {
+        RingPlacement {
+            theme: ActionRingTheme::Classic,
+            ..placement(cursor, rect)
         }
     }
 
@@ -298,6 +312,22 @@ mod tests {
         let bounds = placement((-100, -50), (-200, -100, 0, 0)).bounds(192);
         assert_eq!(bounds.origin, point(DevicePixels(-150), DevicePixels(-100)));
         assert_eq!(bounds.size, size(DevicePixels(100), DevicePixels(100)));
+    }
+
+    #[test]
+    fn a_classic_ring_is_placed_exactly_as_before_themes() {
+        // The 360 px disc, scaled and clamped as it was on every release
+        // before the In Motion theme: 720 px at 200%, cursor-centred.
+        let bounds = classic((3000, 850), (1920, 0, 4480, 1440)).bounds(192);
+        assert_eq!(bounds.origin, point(DevicePixels(2640), DevicePixels(490)));
+        assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
+        // Near an edge it clamps 60 px nearer to the edge than In Motion does.
+        let bounds = classic((1919, 600), (0, 0, 1920, 1080)).bounds(96);
+        assert_eq!(bounds.origin, point(DevicePixels(1560), DevicePixels(420)));
+        // A display shorter than the disc anchors it top-left; it never shrinks.
+        let bounds = classic((-100, -50), (-200, -100, 0, 0)).bounds(192);
+        assert_eq!(bounds.origin, point(DevicePixels(-200), DevicePixels(-100)));
+        assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
     }
 
     fn rect_bounds(rect: (i32, i32, i32, i32)) -> Bounds<DevicePixels> {

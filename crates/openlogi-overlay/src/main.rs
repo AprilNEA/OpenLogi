@@ -120,7 +120,7 @@ fn main() -> Result<()> {
                             reason = "only the Wayland placement drains its openings"
                         )
                     )]
-                    let mut placement = match RingPlacement::capture(cx) {
+                    let mut placement = match RingPlacement::capture(cx, invocation.theme) {
                         Ok(placement) => placement,
                         Err(error) => {
                             warn!(%error, "could not locate Actions Ring display");
