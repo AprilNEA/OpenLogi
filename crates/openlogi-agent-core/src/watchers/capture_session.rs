@@ -88,10 +88,8 @@ impl<Restore> CaptureRecovery<Restore> {
 /// A panic inside the session is folded into "ended with nothing to restore".
 /// The slot stays `Running` until its ordered completion arrives, so a task
 /// that dies without reporting one would leave the device unarmed for the
-/// rest of the agent's life — the Actions Ring stayed dead after every resume
-/// from sleep on Windows, where a HID write into the disconnected device
-/// panicked the session. Whatever restoration the task held is lost with it;
-/// the re-arm its completion unlocks re-diverts the controls regardless.
+/// rest of the agent's life. Whatever restoration the task held is lost with
+/// it; the re-arm its completion unlocks re-diverts the controls regardless.
 pub(super) async fn settle_capture_task<Restore>(
     task: JoinHandle<Option<Restore>>,
     kind: &'static str,
