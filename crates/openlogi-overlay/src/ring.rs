@@ -9,6 +9,7 @@
 //! placement, hover state, closing, and the window.
 
 mod classic;
+mod motion;
 mod skin;
 
 use gpui::{
@@ -209,7 +210,7 @@ impl RingView {
                 session::close_ring_windows(cx, session_id);
                 cx.notify();
                 cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(skin::EXIT).await;
+                    cx.background_executor().timer(motion::EXIT).await;
                     let _ = this.update(cx, |_, cx| {
                         let id = cx.entity_id();
                         cx.with_window(id, |window, cx| {
