@@ -295,14 +295,75 @@ pub(crate) fn application_editor(
     on_pick: &PickFn,
     pal: Palette,
 ) -> impl IntoElement {
-    let submit_input = input.clone();
     let on_pick = on_pick.clone();
+    add_field_editor(
+        id_prefix,
+        "application",
+        tr!("action_ring.open_application_or_folder"),
+        input,
+        invalid,
+        move |path, window, cx| match ApplicationTarget::new(path, "") {
+            Ok(target) => (on_pick)(Action::OpenApplication(target), window, cx),
+            Err(_) => (on_invalid)(cx),
+        },
+        pal,
+    )
+}
+
+/// A single-field "Run Shell Command" editor, matching the Action Ring
+/// editor's Power User text field. Shared the same way as
+/// [`application_editor`]: `on_pick` receives the command, `on_invalid` runs
+/// when Add is pressed on a blank command so the owner can set `invalid`.
+pub(crate) fn command_editor(
+    id_prefix: &'static str,
+    input: &Entity<InputState>,
+    invalid: bool,
+    on_invalid: Rc<dyn Fn(&mut App)>,
+    on_pick: &PickFn,
+    pal: Palette,
+) -> impl IntoElement {
+    let on_pick = on_pick.clone();
+    add_field_editor(
+        id_prefix,
+        "command",
+        tr!("actions.run_shell_command_heading"),
+        input,
+        invalid,
+        move |command, window, cx| match run_command_action(command) {
+            Some(action) => (on_pick)(action, window, cx),
+            None => (on_invalid)(cx),
+        },
+        pal,
+    )
+}
+
+/// The action a Run Command field commits, or `None` for a blank command,
+/// which would run nothing.
+fn run_command_action(command: String) -> Option<Action> {
+    if command.trim().is_empty() {
+        None
+    } else {
+        Some(Action::RunShellCommand(command))
+    }
+}
+
+/// The heading, text field, Add button and inline error every single-field
+/// custom-action editor shares. `on_add` receives the field's text when Add
+/// is pressed. `field` names the debug selectors
+/// `{id_prefix}-custom-{field}-input`, `-add` and `-error`.
+fn add_field_editor(
+    id_prefix: &'static str,
+    field: &'static str,
+    heading: gpui::SharedString,
+    input: &Entity<InputState>,
+    invalid: bool,
+    on_add: impl Fn(String, &mut Window, &mut App) + 'static,
+    pal: Palette,
+) -> impl IntoElement {
+    let submit_input = input.clone();
     v_flex()
         .gap_1()
-        .child(editor_section(
-            tr!("action_ring.open_application_or_folder"),
-            pal,
-        ))
+        .child(editor_section(heading, pal))
         .child(
             h_flex()
                 .gap_2()
@@ -310,29 +371,24 @@ pub(crate) fn application_editor(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .debug_selector(move || format!("{id_prefix}-custom-application-input"))
+                        .debug_selector(move || format!("{id_prefix}-custom-{field}-input"))
                         .child(control_input(input).cleanable(true)),
                 )
                 .child(
-                    Button::new(format!("{id_prefix}-custom-application-add"))
-                        .debug_selector(move || format!("{id_prefix}-custom-application-add"))
+                    Button::new(format!("{id_prefix}-custom-{field}-add"))
+                        .debug_selector(move || format!("{id_prefix}-custom-{field}-add"))
                         .compact()
                         .label(tr!("common.add"))
                         .on_click(move |_, window, cx| {
-                            let path = submit_input.read(cx).value().to_string();
-                            match ApplicationTarget::new(path, "") {
-                                Ok(target) => {
-                                    (on_pick)(Action::OpenApplication(target), window, cx);
-                                }
-                                Err(_) => (on_invalid)(cx),
-                            }
+                            let text = submit_input.read(cx).value().to_string();
+                            on_add(text, window, cx);
                         }),
                 ),
         )
         .when(invalid, |editor| {
             editor.child(
                 div()
-                    .debug_selector(move || format!("{id_prefix}-custom-application-error"))
+                    .debug_selector(move || format!("{id_prefix}-custom-{field}-error"))
                     .text_caption()
                     .text_color(rgb(0x00ef_4444))
                     .child(tr!("action_ring.custom_action_invalid_input")),
@@ -351,6 +407,16 @@ mod tests {
             .flat_map(|(_, actions)| actions)
             .collect::<Vec<_>>();
         assert!(actions.contains(&Action::ShowActionsRing));
+    }
+
+    #[test]
+    fn run_command_field_commits_its_text_and_rejects_a_blank_command() {
+        assert_eq!(
+            run_command_action("snipaste snip".to_string()),
+            Some(Action::RunShellCommand("snipaste snip".to_string()))
+        );
+        assert_eq!(run_command_action(String::new()), None);
+        assert_eq!(run_command_action("  \t".to_string()), None);
     }
 
     /// [`action_icon_path`] is exhaustive over [`Action`], so the compiler

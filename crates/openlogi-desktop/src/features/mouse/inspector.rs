@@ -20,7 +20,7 @@ use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::features::binding_editor::{
     ActionOffer, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_with,
-    application_editor, editor_section, gesture_direction_icon,
+    application_editor, command_editor, editor_section, gesture_direction_icon,
 };
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
@@ -58,10 +58,19 @@ pub(super) struct ActionPickerContext<'a> {
     pub search: &'a Entity<InputState>,
     pub shortcut_input: &'a Entity<InputState>,
     pub application_input: &'a Entity<InputState>,
-    pub shortcut_invalid: bool,
+    pub command_input: &'a Entity<InputState>,
     pub shortcut_mode: ShortcutMode,
-    pub application_invalid: bool,
+    pub invalid: InvalidDrafts,
     pub view: &'a Entity<MouseModelView>,
+}
+
+/// Which custom-action editors rejected their last Add, so each shows an
+/// inline error until its text changes or the picker reopens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct InvalidDrafts {
+    pub shortcut: bool,
+    pub application: bool,
+    pub command: bool,
 }
 
 /// Whether the custom shortcut editor records a tapped or a held chord.
@@ -801,7 +810,7 @@ fn action_library(
         .child(custom_shortcut_editor(
             id_prefix,
             picker.shortcut_input,
-            picker.shortcut_invalid,
+            picker.invalid.shortcut,
             picker.shortcut_mode,
             picker.view,
             on_pick,
@@ -810,12 +819,28 @@ fn action_library(
         .child(application_editor(
             id_prefix,
             picker.application_input,
-            picker.application_invalid,
+            picker.invalid.application,
             Rc::new({
                 let view = picker.view.clone();
                 move |cx| {
                     view.update(cx, |view, cx| {
-                        view.custom_application_invalid = true;
+                        view.invalid_drafts.application = true;
+                        cx.notify();
+                    });
+                }
+            }),
+            on_pick,
+            pal,
+        ))
+        .child(command_editor(
+            id_prefix,
+            picker.command_input,
+            picker.invalid.command,
+            Rc::new({
+                let view = picker.view.clone();
+                move |cx| {
+                    view.update(cx, |view, cx| {
+                        view.invalid_drafts.command = true;
                         cx.notify();
                     });
                 }
@@ -899,7 +924,7 @@ fn custom_shortcut_editor(
                             match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
                                 Ok(combo) => (on_pick)(mode.action(combo), window, cx),
                                 Err(_) => view.update(cx, |view, cx| {
-                                    view.custom_shortcut_invalid = true;
+                                    view.invalid_drafts.shortcut = true;
                                     cx.notify();
                                 }),
                             }
