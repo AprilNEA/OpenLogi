@@ -23,6 +23,7 @@ use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::haptic_strength::HapticStrengthPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::user_cache_root;
@@ -203,6 +204,7 @@ pub struct AppView {
     disable_keys_panel: Entity<DisableKeysPanel>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
+    haptic_strength_panel: Entity<HapticStrengthPanel>,
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
@@ -286,6 +288,7 @@ impl AppView {
         let disable_keys_panel = cx.new(DisableKeysPanel::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
+        let haptic_strength_panel = cx.new(HapticStrengthPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
@@ -308,6 +311,7 @@ impl AppView {
             disable_keys_panel,
             dpi_panel,
             smartshift_panel,
+            haptic_strength_panel,
             lighting_panel,
             camera_preview,
             camera_controls,
@@ -694,6 +698,7 @@ impl AppView {
                         disable_keys_panel: &self.disable_keys_panel,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
+                        haptic_strength_panel: &self.haptic_strength_panel,
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,

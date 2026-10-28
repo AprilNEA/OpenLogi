@@ -206,6 +206,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             Arc::default(),
             device_access.clone(),
             ring,
+            crate::event_haptics::EventHaptics::default(),
         )
         .unwrap();
         let (shutdown_tx, shutdown) = oneshot::channel();

@@ -57,6 +57,7 @@ pub struct GestureOutputs {
     actions: ActionDispatcher,
     scroll: ScrollInputHandle,
     hook_maps: SharedHookMaps,
+    haptics: crate::event_haptics::EventHaptics,
 }
 
 impl GestureOutputs {
@@ -66,11 +67,13 @@ impl GestureOutputs {
         actions: ActionDispatcher,
         scroll: ScrollInputHandle,
         hook_maps: SharedHookMaps,
+        haptics: crate::event_haptics::EventHaptics,
     ) -> Self {
         Self {
             actions,
             scroll,
             hook_maps,
+            haptics,
         }
     }
 

@@ -15,6 +15,7 @@ pub mod easy_switch;
 pub mod error;
 pub mod fn_lock;
 pub mod force_sensing;
+pub mod haptic_strength;
 pub mod light;
 pub mod pairing;
 pub mod pointer_speed;
@@ -33,6 +34,7 @@ pub use easy_switch::{EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInf
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::FnLockState;
 pub use force_sensing::ForceSensingInfo;
+pub use haptic_strength::HapticStrength;
 pub use light::{LightCommand, commands_for_light_settings};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use pointer_speed::PointerSpeed;

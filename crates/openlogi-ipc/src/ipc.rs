@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
-use openlogi_core::config::{ConfigRevision, Lighting};
+use openlogi_core::config::{ConfigRevision, EventHapticFeedback, Lighting};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
 };
@@ -153,7 +153,9 @@ pub use succession::Identity;
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
 ///      timer, five-second steps up to two hours.
 /// v42: `KeyboardUsage` accepts Insert (`0x49`), so a `KeyCombo` can carry
-///      a usage a v41 agent rejects.
+///      a usage a v41 agent rejects. `Agent::play_haptic` appended — a
+///      waveform played on the haptic mouse now, for the settings app's
+///      preview and for scripts; it carries [`EventHapticFeedback`].
 pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -955,4 +957,13 @@ pub trait Agent {
     async fn reload_saved_config_with_verdict(
         saved: SavedConfig,
     ) -> Result<SavedConfigVerdict, ConfigReloadError>;
+    /// Play `feedback` once on the haptic mouse on `route`, or, without a
+    /// route, on the mouse event haptics play on, else the first online one
+    /// with a haptic engine. Fails with [`WriteError::DeviceNotFound`] when
+    /// there is none; `Off` plays nothing. Answers once the play is queued,
+    /// not played: a preview is feedback, and a later one replaces it.
+    async fn play_haptic(
+        route: Option<DeviceRoute>,
+        feedback: EventHapticFeedback,
+    ) -> Result<(), WriteError>;
 }

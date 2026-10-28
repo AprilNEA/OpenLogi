@@ -7,13 +7,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
+use super::event_haptics::EventHapticsConfig;
 use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::{DisableKeysMask, Dpi, PointerSpeed, ReportRate};
+use crate::hid::{DisableKeysMask, Dpi, HapticStrength, PointerSpeed, ReportRate};
 
 /// A known key controlled by HID++ `0x4521 DisableKeys`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -248,6 +249,9 @@ pub struct DeviceConfig {
     /// Host-rendered Actions Ring settings and complete per-application layouts.
     #[serde(default, skip_serializing_if = "ActionRingConfig::is_default")]
     pub action_ring: ActionRingConfig,
+    /// Haptics for this device's clicks and wheel detents. Off by default.
+    #[serde(default, skip_serializing_if = "EventHapticsConfig::is_default")]
+    pub event_haptics: EventHapticsConfig,
     /// Ordered list of DPI presets cycled through by
     /// [`Action::CycleDpiPresets`] and indexed by
     /// [`Action::SetDpiPreset`]. Empty means "no presets configured" —
@@ -361,6 +365,13 @@ pub struct DeviceConfig {
     /// device's force alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_sensing: Option<u16>,
+    /// How strongly the device's haptic engine plays everything — the
+    /// Actions Ring, event haptics, `openlogi api haptic` — whether event
+    /// haptics are on or not. The agent writes it when the device
+    /// reconnects and when a reload changes it. `None` means "never set —
+    /// leave the device's strength alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub haptic_strength: Option<HapticStrength>,
     /// Known keys OpenLogi should disable on reconnect. `None` leaves the
     /// firmware unmanaged; an explicit empty set re-enables every known key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -452,6 +463,7 @@ impl Default for DeviceConfig {
             disabled_gestures: BTreeMap::new(),
             per_app_bindings: BTreeMap::new(),
             action_ring: ActionRingConfig::default(),
+            event_haptics: EventHapticsConfig::default(),
             dpi_presets: Vec::new(),
             dpi: None,
             lighting: None,
@@ -470,6 +482,7 @@ impl Default for DeviceConfig {
             report_rate: None,
             pointer_speed: None,
             force_sensing: None,
+            haptic_strength: None,
             disabled_keys: None,
         }
     }
@@ -565,6 +578,8 @@ struct RawDeviceConfig {
     per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
     #[serde(default)]
     action_ring: ActionRingConfig,
+    #[serde(default)]
+    event_haptics: EventHapticsConfig,
     #[serde(default, deserialize_with = "deserialize_dpi_presets")]
     dpi_presets: Vec<Dpi>,
     #[serde(default, deserialize_with = "deserialize_optional_dpi")]
@@ -601,6 +616,8 @@ struct RawDeviceConfig {
     pointer_speed: Option<PointerSpeed>,
     #[serde(default)]
     force_sensing: Option<u16>,
+    #[serde(default)]
+    haptic_strength: Option<HapticStrength>,
     disabled_keys: Option<BTreeSet<DisableKey>>,
     #[serde(default = "default_true")]
     enabled: bool,
@@ -649,6 +666,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             disabled_gestures: raw.disabled_gestures,
             per_app_bindings: raw.per_app_bindings,
             action_ring: raw.action_ring,
+            event_haptics: raw.event_haptics,
             dpi_presets: raw.dpi_presets,
             dpi: raw.dpi,
             lighting: raw.lighting,
@@ -667,6 +685,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             report_rate: raw.report_rate,
             pointer_speed: raw.pointer_speed,
             force_sensing: raw.force_sensing,
+            haptic_strength: raw.haptic_strength,
             disabled_keys: raw.disabled_keys,
         }
     }

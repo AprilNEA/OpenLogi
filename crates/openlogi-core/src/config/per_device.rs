@@ -9,13 +9,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, Config, DeviceIdentity, DisableKey, LightSettings, Lighting, ScrollResolution,
-    SmartShift, ThumbwheelSensitivity,
+    CameraControls, Config, DeviceIdentity, DisableKey, EventHapticFeedback, EventHapticInput,
+    EventHapticsConfig, LightSettings, Lighting, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity,
 };
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
 };
-use crate::hid::{Dpi, PointerSpeed, ReportRate};
+use crate::hid::{Dpi, HapticStrength, PointerSpeed, ReportRate};
 
 impl Config {
     /// The bindings stored for `device_key` as they were committed, or an
@@ -68,6 +69,39 @@ impl Config {
             .or_default()
             .action_ring
             .haptics = enabled;
+    }
+
+    /// Event haptics settings for `device_key`, falling back to defaults (off)
+    /// when the device has none saved.
+    #[must_use]
+    pub fn event_haptics(&self, device_key: &str) -> EventHapticsConfig {
+        self.devices
+            .get(device_key)
+            .map(|device| device.event_haptics.clone())
+            .unwrap_or_default()
+    }
+
+    /// Choose what `input` plays on `device_key`.
+    pub fn set_event_haptic_feedback(
+        &mut self,
+        device_key: &str,
+        input: EventHapticInput,
+        feedback: EventHapticFeedback,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .event_haptics
+            .set_feedback(input, feedback);
+    }
+
+    /// Turn `device_key`'s event haptics on or off.
+    pub fn set_event_haptics_enabled(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .event_haptics
+            .enabled = enabled;
     }
 
     /// Replace or clear one slot in the default Actions Ring layout.
@@ -383,6 +417,22 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .force_sensing = Some(force);
+    }
+
+    /// The persisted haptic strength for `device_key`, or `None` when the
+    /// user never chose one (the device keeps its own).
+    #[must_use]
+    pub fn haptic_strength(&self, device_key: &str) -> Option<HapticStrength> {
+        self.devices.get(device_key).and_then(|d| d.haptic_strength)
+    }
+
+    /// Record the haptic strength for `device_key`; the agent writes it now
+    /// and whenever the device reconnects.
+    pub fn set_haptic_strength(&mut self, device_key: &str, strength: HapticStrength) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .haptic_strength = Some(strength);
     }
 
     /// Record the SmartShift wheel config for `device_key`, so the agent can

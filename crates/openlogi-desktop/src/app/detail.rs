@@ -2,7 +2,7 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
+    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role, SharedString,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::Button as BaseButton;
@@ -11,11 +11,15 @@ use gpui_component::{
     button::{Button, ButtonGroup},
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
+    menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     switch::Switch,
     v_flex,
 };
-use openlogi_core::config::ScrollResolution;
+use openlogi_core::config::{
+    EVENT_HAPTIC_BUTTONS, EventHapticFeedback, EventHapticInput, EventHapticsConfig,
+    ScrollResolution,
+};
 use openlogi_core::device::DeviceKind;
 
 use super::widgets::{back_button, connection_summary, kind_label, sidebar_action, status_badge};
@@ -31,13 +35,14 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::haptic_strength::HapticStrengthPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
 };
 use crate::state::{AppState, DeviceRecord, StateEvents};
 use crate::ui::battery::BatteryIndicator;
-use crate::ui::components::{PanelCard, Toggle, toggle_row};
+use crate::ui::components::{PanelCard, Toggle, control_button, toggle_row};
 use crate::ui::theme::{
     self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
 };
@@ -100,6 +105,7 @@ pub(super) struct DetailPanels<'a> {
     pub disable_keys_panel: &'a gpui::Entity<DisableKeysPanel>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
+    pub haptic_strength_panel: &'a gpui::Entity<HapticStrengthPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
@@ -129,9 +135,7 @@ pub(super) fn detail_content(
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
-        DetailTab::Pointer => {
-            pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
-        }
+        DetailTab::Pointer => pointer_tab(panels, cx).into_any_element(),
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
@@ -312,11 +316,7 @@ fn action_ring_tab(
 /// scroll-wheel preferences, each in a titled card. Use a responsive two-column
 /// grid that still fits the window's 720 px minimum width, so these short
 /// controls don't force a vertical scroll.
-fn pointer_tab(
-    dpi_panel: &gpui::Entity<DpiPanel>,
-    smartshift_panel: &gpui::Entity<SmartShiftPanel>,
-    cx: &mut Context<AppView>,
-) -> impl IntoElement {
+fn pointer_tab(panels: &DetailPanels<'_>, cx: &mut Context<AppView>) -> impl IntoElement {
     let pal = theme::palette(cx);
     tab_body(
         ContentWidth::Large,
@@ -329,7 +329,7 @@ fn pointer_tab(
                 PanelCard::new(
                     tr!("device.pointer_tuning"),
                     Icon::empty().path("action-icons/gauge.svg"),
-                    dpi_panel.clone().into_any_element(),
+                    panels.dpi_panel.clone().into_any_element(),
                 )
                 .fill(),
             ))
@@ -337,7 +337,7 @@ fn pointer_tab(
                 PanelCard::new(
                     tr!("pointer.smartshift"),
                     Icon::empty().path("action-icons/refresh-cw.svg"),
-                    smartshift_panel.clone().into_any_element(),
+                    panels.smartshift_panel.clone().into_any_element(),
                 )
                 .fill(),
             ))
@@ -346,8 +346,176 @@ fn pointer_tab(
                     .min_w(POINTER_CARD_MIN_W)
                     .flex_1()
                     .child(scrolling_card(pal, cx)),
+            )
+            .children(
+                haptics_card(pal, panels.haptic_strength_panel, cx)
+                    .map(|card| div().min_w(POINTER_CARD_MIN_W).flex_1().child(card)),
             ),
     )
+}
+
+/// Haptics card: whether the device's own haptic engine taps for its
+/// buttons and wheel detents, and what each of them plays. Only for a device
+/// that has one.
+fn haptics_card(
+    pal: Palette,
+    strength: &gpui::Entity<HapticStrengthPanel>,
+    cx: &mut Context<AppView>,
+) -> Option<impl IntoElement> {
+    let (supported, config) = AppState::try_read(cx).map_or_else(
+        || (false, EventHapticsConfig::default()),
+        |state| {
+            (
+                state.current_haptic_feedback_supported(),
+                state.current_event_haptics_config(),
+            )
+        },
+    );
+    supported.then(|| {
+        let enabled = config.enabled;
+        let row =
+            |input: EventHapticInput| feedback_row(pal, input, config.feedback(input), enabled);
+        let section = |title: SharedString| {
+            div()
+                .pt_1()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(title)
+        };
+        let (wheels, events): (Vec<_>, Vec<_>) = EventHapticInput::NON_BUTTONS
+            .into_iter()
+            .partition(|input| {
+                matches!(
+                    input,
+                    EventHapticInput::Wheel | EventHapticInput::Thumbwheel
+                )
+            });
+        PanelCard::new(
+            tr!("pointer.haptics"),
+            Icon::empty().path("action-icons/mouse-pointer-click.svg"),
+            v_flex()
+                .gap_3()
+                .child(strength.clone())
+                .child(toggle_row(
+                    "event-haptics-row",
+                    pal,
+                    tr!("pointer.event_haptics"),
+                    tr!("pointer.event_haptics_description"),
+                    Toggle::new("event-haptics-toggle")
+                        .selected(enabled)
+                        .on_change(|enabled, _window, cx| {
+                            AppState::apply(cx, |state| state.commit_event_haptics(*enabled));
+                        }),
+                ))
+                .child(section(tr!("pointer.haptic_section_buttons")))
+                .children(
+                    EVENT_HAPTIC_BUTTONS
+                        .into_iter()
+                        .map(|button| row(EventHapticInput::Button(button))),
+                )
+                .child(section(tr!("pointer.haptic_section_wheels")))
+                .children(wheels.into_iter().map(row))
+                .child(section(tr!("pointer.haptic_section_events")))
+                .children(events.into_iter().map(row))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("pointer.haptic_battery_note")),
+                ),
+        )
+    })
+}
+
+/// One input's row in the haptics card: its name, and a menu of what it
+/// plays. Disabled while event haptics are off for the device.
+fn feedback_row(
+    pal: Palette,
+    input: EventHapticInput,
+    selected: EventHapticFeedback,
+    enabled: bool,
+) -> impl IntoElement {
+    h_flex()
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            div()
+                .text_body()
+                .text_color(if enabled {
+                    pal.text_primary
+                } else {
+                    pal.text_muted
+                })
+                .child(input_label(input)),
+        )
+        .child(
+            control_button(SharedString::from(format!(
+                "event-haptics-{}",
+                input_id(input)
+            )))
+            .outline()
+            .disabled(!enabled)
+            .label(feedback_label(selected))
+            .icon(IconName::ChevronDown)
+            .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+                EventHapticFeedback::ALL
+                    .into_iter()
+                    .fold(menu, |menu, feedback| {
+                        menu.item(
+                            PopupMenuItem::new(feedback_label(feedback))
+                                .checked(feedback == selected)
+                                .on_click(move |_, _, cx| {
+                                    AppState::apply(cx, |state| {
+                                        state.commit_event_haptic(input, feedback)
+                                    });
+                                }),
+                        )
+                    })
+            }),
+        )
+}
+
+/// What the haptics card calls `input`.
+fn input_label(input: EventHapticInput) -> SharedString {
+    match input {
+        EventHapticInput::Button(button) => tr!(button.translation_key()),
+        EventHapticInput::Wheel => tr!("pointer.haptic_scroll_wheel"),
+        EventHapticInput::Thumbwheel => tr!("pointer.thumb_wheel"),
+        EventHapticInput::Gestures => tr!("pointer.haptic_gestures"),
+        EventHapticInput::ModeChanges => tr!("pointer.haptic_mode_changes"),
+        EventHapticInput::LevelSteps => tr!("pointer.haptic_level_steps"),
+        EventHapticInput::LevelLimits => tr!("pointer.haptic_level_limits"),
+        EventHapticInput::DisplayCrossing => tr!("pointer.haptic_display_crossing"),
+        EventHapticInput::Drag => tr!("pointer.haptic_drag"),
+        EventHapticInput::Copy => tr!("pointer.haptic_copy"),
+    }
+}
+
+/// A stable element id for `input`'s menu.
+fn input_id(input: EventHapticInput) -> std::borrow::Cow<'static, str> {
+    match input {
+        EventHapticInput::Button(button) => button.config_name(),
+        EventHapticInput::Wheel => "wheel".into(),
+        EventHapticInput::Thumbwheel => "thumbwheel".into(),
+        EventHapticInput::Gestures => "gestures".into(),
+        EventHapticInput::ModeChanges => "mode-changes".into(),
+        EventHapticInput::LevelSteps => "level-steps".into(),
+        EventHapticInput::LevelLimits => "level-limits".into(),
+        EventHapticInput::DisplayCrossing => "display-crossing".into(),
+        EventHapticInput::Drag => "drag".into(),
+        EventHapticInput::Copy => "copy".into(),
+    }
+}
+
+fn feedback_label(feedback: EventHapticFeedback) -> SharedString {
+    match feedback {
+        EventHapticFeedback::Off => tr!("common.off"),
+        EventHapticFeedback::WhisperCollision => tr!("pointer.haptic_whisper"),
+        EventHapticFeedback::SubtleCollision => tr!("pointer.haptic_subtle"),
+        EventHapticFeedback::DampCollision => tr!("pointer.haptic_damp"),
+        EventHapticFeedback::SharpCollision => tr!("pointer.haptic_sharp"),
+    }
 }
 
 fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {

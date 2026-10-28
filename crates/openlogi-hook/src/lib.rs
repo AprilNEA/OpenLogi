@@ -27,7 +27,7 @@
 
 use std::cfg_select;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use thiserror::Error;
 
@@ -140,6 +140,46 @@ pub fn set_scroll_inversion(inverted: bool) {
 #[must_use]
 pub fn scroll_inversion() -> bool {
     INVERT_SCROLL.load(Ordering::Relaxed)
+}
+
+/// Whether the hook notes which display the pointer is on.
+static TRACK_POINTER_DISPLAY: AtomicBool = AtomicBool::new(false);
+
+/// The display the pointer was last seen on, [`NO_DISPLAY`] when unknown.
+static POINTER_DISPLAY: AtomicU32 = AtomicU32::new(NO_DISPLAY);
+
+const NO_DISPLAY: u32 = u32::MAX;
+
+/// Start or stop noting which display the pointer moves on, for
+/// [`pointer_display`]. Off by default: it costs a display lookup per
+/// pointer move. Only macOS notes it.
+pub fn track_pointer_display(on: bool) {
+    TRACK_POINTER_DISPLAY.store(on, Ordering::Relaxed);
+    if !on {
+        POINTER_DISPLAY.store(NO_DISPLAY, Ordering::Relaxed);
+    }
+}
+
+/// The display the pointer was on at its last move, while
+/// [`track_pointer_display`] is on; `None` before the first move, while
+/// tracking is off, and off macOS. On macOS this is the `CGDirectDisplayID`,
+/// and the hook updates it before the callback sees the move.
+#[must_use]
+pub fn pointer_display() -> Option<u32> {
+    let display = POINTER_DISPLAY.load(Ordering::Relaxed);
+    (display != NO_DISPLAY).then_some(display)
+}
+
+/// Whether the platform hook should note the pointer's display.
+#[cfg(target_os = "macos")]
+fn tracks_pointer_display() -> bool {
+    TRACK_POINTER_DISPLAY.load(Ordering::Relaxed)
+}
+
+/// Note that the pointer moved on `display`.
+#[cfg(target_os = "macos")]
+fn record_pointer_display(display: u32) {
+    POINTER_DISPLAY.store(display, Ordering::Relaxed);
 }
 
 /// Flip the vertical delta of a scroll [`MouseEvent`], leaving every other

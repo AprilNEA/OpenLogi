@@ -26,6 +26,7 @@ files; **keep this table in sync when you add or move one**:
 
 | File | What it carries |
 |---|---|
+| `openlogi-agent/src/clipboard_macos.rs` | the `NSPasteboard` change-count read that confirms a copy for event haptics |
 | `openlogi-agent/src/activity_macos.rs` | the device-I/O gate's levels: the `IOPMConnection` powerd subscription (hand-declared SPI, see below) and the `CGSessionCopyCurrentDictionary` console read |
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
 | `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `SessionTarget` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` session (fast-user-switch) notifications |
@@ -42,6 +43,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent key and click synthesis, media-key `NSEvent`s |
 | `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields |
+| `openlogi-inject/src/inject/macos/volume.rs` | the CoreAudio (`objc2-core-audio`) read of the default output device's volume |
 | `openlogi-inject/src/inject/macos/ax.rs` | the shared `AXUIElement` attribute reads (`CFRetained` adoption of the Copy-rule out-pointer) and `AXChildren` iteration |
 | `openlogi-inject/src/inject/macos/browser.rs` | Safari's toolbar-button navigation over `ax.rs`, and the off-thread `NSWorkspace` Safari validation |
 | `openlogi-inject/src/inject/macos/menu_shortcut.rs` | the hidden probe `NSMenu` AppKit remaps for the keyboard layout, and pressing the frontmost app's matching menu item through AX |
@@ -273,6 +275,8 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `hook/macos/secure_input.rs` — the `CGSession` dictionary cast.
 - `hook/macos/sender.rs` — the sender-id `extern` calls and the IOKit registry
   walk, including the Create-rule `CFString` / `CFNumber` wraps.
+- `inject/macos/volume.rs` — `AudioObjectGetPropertyData` out-pointer reads of the
+  default output device and its volume scalar.
 - `inject/macos/ax.rs` — AX attribute-copy out-pointers and the unchecked
   `AXChildren` element type; each child is downcast before use.
 - `inject/macos/browser.rs` — typed AX creation, `AXPress`, and
@@ -337,6 +341,8 @@ temporaries. The call sites that keep an explicit
   Safari process.
 - `openlogi-inject`'s menu-shortcut press — the action worker, where the
   `NSWorkspace` frontmost-app reads autorelease temporaries.
+- `openlogi-agent`'s clipboard watch — a tokio worker thread, where the
+  `NSPasteboard` read may autorelease temporaries.
 - `openlogi-camera`'s device enumeration — every `AVCaptureDevice` string is
   copied out before the pool drains, so no `Retained<T>` escapes it.
 
@@ -350,7 +356,7 @@ framework crates, then verify that `Cargo.lock` still carries one version-aligne
 Every ObjC / Core-framework crate is declared **once** in the workspace table —
 `objc2`, `objc2-app-kit`, `objc2-foundation`, `objc2-core-foundation`,
 `objc2-core-graphics`, `objc2-application-services`, `objc2-io-kit`,
-`objc2-service-management`, `objc2-security`, `block2`, `core-graphics`, `core-foundation`. The header-gated ones carry
+`objc2-service-management`, `objc2-security`, `objc2-core-audio`, `block2`, `core-graphics`, `core-foundation`. The header-gated ones carry
 `default-features = false` there, and each member inherits with
 `workspace = true` and adds only the feature modules it uses. A new one belongs
 in that table too, never inline in a member manifest: the unified version is what

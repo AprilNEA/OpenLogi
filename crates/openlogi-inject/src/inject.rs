@@ -575,6 +575,21 @@ pub fn natural_scrolling() -> bool {
     }
 }
 
+/// The system output volume, from 0.0 to 1.0, read fresh on every call so a
+/// volume action can tell whether it hits the end of the range. `None` when
+/// the default output has no volume control, and on Windows and Linux.
+#[must_use]
+pub fn output_volume() -> Option<f32> {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::output_volume()
+        }
+        _ => {
+            None
+        }
+    }
+}
+
 /// Synthesise a typed scroll distance at the current focus.
 ///
 /// Fractional wheel ticks are retained until the platform can represent them,
