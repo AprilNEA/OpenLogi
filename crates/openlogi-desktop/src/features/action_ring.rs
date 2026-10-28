@@ -200,7 +200,13 @@ impl Render for ActionRingPanel {
                     .items_start()
                     .justify_center()
                     .gap_4()
-                    .child(ring_preview(&layout, self.selected_slot, &view, pal))
+                    .child(ring_preview(
+                        ring.theme,
+                        &layout,
+                        self.selected_slot,
+                        &view,
+                        pal,
+                    ))
                     .child(action_library(
                         self.selected_slot,
                         layout.slots.get(&self.selected_slot),
@@ -350,13 +356,63 @@ fn toggle_button(
 const PREVIEW_SIZE: f32 = 320.0;
 const PREVIEW_RADIUS: f32 = 106.0;
 const PREVIEW_SLOT_SIZE: f32 = 50.0;
+/// The In Motion pill, at the preview's scale of the overlay's 132×34.
+const PREVIEW_PILL_W: f32 = 96.0;
+const PREVIEW_PILL_H: f32 = 28.0;
 
+/// How the preview draws a slot: the theme's shape, at the preview's scale.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SlotShape {
+    /// Classic: a round icon button, the caption in a tooltip.
+    Round,
+    /// In Motion: a pill carrying icon and caption.
+    Pill,
+}
+
+impl SlotShape {
+    const fn of(theme: ActionRingTheme) -> Self {
+        match theme {
+            ActionRingTheme::Classic => Self::Round,
+            ActionRingTheme::InMotion => Self::Pill,
+        }
+    }
+
+    const fn size(self) -> (f32, f32) {
+        match self {
+            Self::Round => (PREVIEW_SLOT_SIZE, PREVIEW_SLOT_SIZE),
+            Self::Pill => (PREVIEW_PILL_W, PREVIEW_PILL_H),
+        }
+    }
+
+    /// Top-left of `slot`, with its centre on the preview's slot circle.
+    fn origin(self, slot: ActionRingSlot) -> (f32, f32) {
+        let (x, y) = slot.unit_offset();
+        let (width, height) = self.size();
+        (
+            PREVIEW_SIZE / 2.0 + x * PREVIEW_RADIUS - width / 2.0,
+            PREVIEW_SIZE / 2.0 + y * PREVIEW_RADIUS - height / 2.0,
+        )
+    }
+
+    const fn debug_selector(self) -> &'static str {
+        match self {
+            Self::Round => "action-ring-preview-round",
+            Self::Pill => "action-ring-preview-pill",
+        }
+    }
+}
+
+/// The ring as `theme` draws it, still: no motion, and the app's palette in
+/// place of the overlay's dark panel, so it reads as a preview and not a
+/// second ring on the desktop.
 fn ring_preview(
+    theme: ActionRingTheme,
     layout: &ActionRingLayout,
     selected_slot: ActionRingSlot,
     view: &Entity<ActionRingPanel>,
     pal: Palette,
 ) -> impl IntoElement {
+    let shape = SlotShape::of(theme);
     div()
         .relative()
         .flex_none()
@@ -388,6 +444,7 @@ fn ring_preview(
         )
         .children(ActionRingSlot::ALL.into_iter().map(|slot| {
             slot_button(
+                shape,
                 slot,
                 layout.slots.get(&slot),
                 selected_slot == slot,
@@ -398,6 +455,7 @@ fn ring_preview(
 }
 
 fn slot_button(
+    shape: SlotShape,
     slot: ActionRingSlot,
     entry: Option<&ActionRingEntry>,
     selected: bool,
@@ -405,7 +463,8 @@ fn slot_button(
     pal: Palette,
 ) -> impl IntoElement {
     let index = slot.index();
-    let (left, top) = slot.placement(PREVIEW_SIZE, PREVIEW_RADIUS, PREVIEW_SLOT_SIZE);
+    let (left, top) = shape.origin(slot);
+    let (width, height) = shape.size();
     let label = entry.map_or_else(
         || tr!("action_ring.empty_slot").to_string(),
         |entry| localized_action_label(entry.action()).to_string(),
@@ -417,17 +476,26 @@ fn slot_button(
         )
     });
     let accessible_label = label.clone();
+    let caption = SharedString::from(label.clone());
     let selected_view = view.clone();
+    let ink = if selected {
+        pal.text_primary
+    } else {
+        pal.text_muted
+    };
 
     BaseButton::new(("action-ring-slot", index))
+        .debug_selector(move || shape.debug_selector().to_string())
         .selected(selected)
         .absolute()
         .left(px(left))
         .top(px(top))
-        .size(px(PREVIEW_SLOT_SIZE))
+        .w(px(width))
+        .h(px(height))
         .flex()
         .items_center()
         .justify_center()
+        .when(shape == SlotShape::Pill, |button| button.gap(px(6.0)).px(px(10.0)))
         .rounded_full()
         .border_2()
         .border_color(if selected {
@@ -440,23 +508,27 @@ fn slot_button(
         } else {
             pal.control
         })
-        .text_color(if selected {
-            pal.text_primary
-        } else {
-            pal.text_muted
-        })
+        .text_color(ink)
         .cursor_pointer()
         .accessibility_label(accessible_label)
         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
         .when_some(icon_path, |button, path| {
-            button.child(svg().path(path).size(px(20.0)).text_color(if selected {
-                pal.text_primary
-            } else {
-                pal.text_muted
-            }))
+            let glyph = if shape == SlotShape::Pill { 14.0 } else { 20.0 };
+            button.child(svg().path(path).size(px(glyph)).flex_none().text_color(ink))
         })
         .when(icon_path.is_none(), |button| {
             button.child(Icon::new(IconName::Plus).size_4())
+        })
+        // The pill carries its caption, as the overlay's does; the round slot
+        // leaves it to the tooltip.
+        .when(shape == SlotShape::Pill, |button| {
+            button.child(
+                div()
+                    .w(px(PREVIEW_PILL_W - 36.0))
+                    .text_xs()
+                    .truncate()
+                    .child(caption),
+            )
         })
         .hover(move |button| {
             button.bg(if selected {
@@ -480,4 +552,82 @@ fn slot_button(
                 cx.notify();
             });
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Context, Render, TestAppContext, Window};
+    use openlogi_core::config::Config;
+
+    use super::*;
+    use crate::services::assets::AssetResolver;
+    use crate::state::Sources;
+
+    /// A state with no device: enough for the panel entity the preview's slot
+    /// buttons report their selection to.
+    fn install_app_state(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let resolver = AssetResolver::new();
+            let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let state = cx.new(|_| {
+                AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands))
+            });
+            AppState::set_global(state, cx);
+        });
+    }
+
+    /// The preview on its own, for a theme: the panel needs a device-bearing
+    /// `AppState` to show In Motion, and the preview is what the theme changes.
+    struct PreviewOnly {
+        theme: ActionRingTheme,
+        panel: Entity<ActionRingPanel>,
+    }
+
+    impl Render for PreviewOnly {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let layout = ActionRingLayout::default();
+            ring_preview(
+                self.theme,
+                &layout,
+                ActionRingSlot::Top,
+                &self.panel,
+                theme::palette(cx),
+            )
+            .into_any_element()
+        }
+    }
+
+    #[gpui::test]
+    fn the_preview_follows_the_theme(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        install_app_state(cx);
+        for (theme, present, absent) in [
+            (
+                ActionRingTheme::Classic,
+                "action-ring-preview-round",
+                "action-ring-preview-pill",
+            ),
+            (
+                ActionRingTheme::InMotion,
+                "action-ring-preview-pill",
+                "action-ring-preview-round",
+            ),
+        ] {
+            let (_, cx) = cx.add_window_view(move |_, cx| PreviewOnly {
+                theme,
+                panel: cx.new(ActionRingPanel::new),
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| drop(window.draw(cx)));
+            let slot = cx
+                .debug_bounds(present)
+                .unwrap_or_else(|| panic!("{theme:?} draws {present}"));
+            let (width, height) = SlotShape::of(theme).size();
+            assert_eq!(slot.size, gpui::size(px(width), px(height)), "{theme:?}");
+            assert!(
+                cx.debug_bounds(absent).is_none(),
+                "{theme:?} draws no {absent}"
+            );
+        }
+    }
 }
