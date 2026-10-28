@@ -181,7 +181,7 @@ fn button_inspector(
         && !overridden
         && gesture_map.is_some()
     {
-        return inherited_gesture_inspector(button, app, picker, data.hidden_actions, pal, cx);
+        return inherited_gesture_inspector(button, app, data, picker, pal, cx);
     }
 
     let action = data
@@ -360,8 +360,8 @@ fn wheel_hold_row(
 fn inherited_gesture_inspector(
     button: ButtonId,
     app: &str,
+    data: &BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
-    hidden: &[Action],
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
@@ -404,7 +404,12 @@ fn inherited_gesture_inspector(
                 "inspector-gesture-override",
                 None,
                 picker,
-                ActionOffer { extra: &[], hidden },
+                // The pick replaces the gestures with a button binding,
+                // which gets a release, so held actions fit here.
+                ActionOffer {
+                    extra: data.extra_actions,
+                    hidden: data.hidden_actions,
+                },
                 &on_pick,
                 pal,
                 cx,

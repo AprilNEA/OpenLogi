@@ -620,3 +620,30 @@ fn a_gesture_button_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppConte
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
 }
+
+/// An app profile replaces a gesture button's gestures with a button binding,
+/// which gets a release, so its picker offers the held actions too.
+#[gpui::test]
+fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_gesture_mode(crate::state::tests::KNOWN_MOUSE_KEY, ButtonId::Back, true);
+    let (view, cx) = wheel_hold_view(cx, true, config, ButtonId::Back);
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_editing_app(Some("com.apple.Safari".into()))
+        });
+    });
+    view.update(cx, |view, _| view.action_picker_open = true);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(cx.debug_bounds("inspector-gesture-override-Copy").is_some());
+    assert!(
+        cx.debug_bounds("inspector-gesture-override-DpiShift")
+            .is_some()
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
