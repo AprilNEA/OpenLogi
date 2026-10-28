@@ -13,6 +13,11 @@ use crate::services::assets::ResolvedAsset;
 /// marker point per button, not a rectangle, so we size by hand.
 const ASSET_HOTSPOT: f32 = 56.;
 
+/// How far, as a fraction of the PNG's height, the metadata `origin.height`
+/// may drift from the real PNG before [`asset_hotspots_for_png`] treats the
+/// whole `origin` block as a stale placeholder and stops cropping by it.
+const ORIGIN_HEIGHT_TOLERANCE: f32 = 0.05;
+
 /// Height of a side-label card. The layout needs it to group related cards
 /// without allowing them to overlap at the minimum model height.
 pub(super) const LABEL_H: f32 = 56.;
@@ -85,10 +90,10 @@ pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
 /// stale `396×396` placeholder reused across every image entry, against a
 /// real `1228×1920` PNG) violate that, and trusting `origin.width` there
 /// crushes every hotspot into a narrow sliver instead of spreading them
-/// across the render. When `origin.height` doesn't roughly match the PNG,
-/// the whole `origin` block is untrustworthy, so we fall back to treating
-/// it as the full PNG (no crop) rather than compressing hotspots with a
-/// bogus width.
+/// across the render. When `origin.height` is not within
+/// [`ORIGIN_HEIGHT_TOLERANCE`] of the PNG's height, the whole `origin` block
+/// is untrustworthy, so we fall back to treating it as the full PNG (no
+/// crop) rather than compressing hotspots with a bogus width.
 ///
 /// Primary left/right clicks deliberately have no entry — Logi never
 /// exposes them as remappable (and Options+ doesn't either), so we don't
@@ -103,7 +108,9 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
     let origin_w = asset
         .metadata
         .origin()
-        .filter(|o| png_h > 0. && (o.height as f32 - png_h).abs() <= png_h * 0.05)
+        .filter(|o| {
+            png_h > 0. && (o.height as f32 - png_h).abs() <= png_h * ORIGIN_HEIGHT_TOLERANCE
+        })
         .map_or(png_w, |o| o.width as f32)
         .min(png_w);
     let bbox_w_rendered = if png_w > 0. {
