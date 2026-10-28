@@ -126,7 +126,16 @@ impl WheelDirection {
         if !matches!(&self.state, WheelState::Scroll(previous) if *previous == context) {
             self.state = WheelState::Scroll(context);
         }
-        let distance = f64::from(magnitude) * scale.per_increment();
+        // Zoom lines are not native scroll lines: magnification follows the
+        // wheel's rotation increments directly (only the user sensitivity
+        // applies), exactly like the pre-refactor zoom path. Scaling by
+        // native/diverted resolution would under-drive zoom on wheels whose
+        // diverted resolution is finer than their native ratchet (e.g. 20/120).
+        let distance = if binding.is_zoom() {
+            f64::from(magnitude) * scale.zoom_per_increment()
+        } else {
+            f64::from(magnitude) * scale.per_increment()
+        };
         if distance == 0.0 {
             WheelOutput::Idle
         } else {
@@ -247,6 +256,11 @@ enum ScrollBinding {
 }
 
 impl ScrollBinding {
+    /// Whether this binding drives pinch zoom rather than native scrolling.
+    const fn is_zoom(self) -> bool {
+        matches!(self, Self::ZoomIn | Self::ZoomOut)
+    }
+
     fn from_action(action: &Action) -> Option<Self> {
         match action {
             Action::ScrollUp => Some(Self::Up),
@@ -311,6 +325,12 @@ impl ScrollScale {
     /// Native scroll ticks one diverted increment contributes.
     fn per_increment(self) -> f64 {
         self.resolution.native_per_increment() * self.sensitivity.scroll_multiplier()
+    }
+
+    /// Zoom lines one diverted increment contributes. Zoom is not measured in
+    /// native scroll ticks, so the resolution ratio stays out of this path.
+    fn zoom_per_increment(self) -> f64 {
+        self.sensitivity.scroll_multiplier()
     }
 }
 
