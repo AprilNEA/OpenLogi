@@ -4,9 +4,10 @@ mod action_icons;
 mod editor;
 
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    App, AppContext as _, Context, Div, Entity, FocusHandle, Focusable, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -23,6 +24,8 @@ use openlogi_core::binding::{
     ActionRingTheme,
 };
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
+use openlogi_ui::color;
+use openlogi_ui::ring_style::{classic, in_motion};
 
 use self::action_icons::action_icon_path;
 use self::editor::{PowerUserInputs, action_library};
@@ -200,13 +203,7 @@ impl Render for ActionRingPanel {
                     .items_start()
                     .justify_center()
                     .gap_4()
-                    .child(ring_preview(
-                        ring.theme,
-                        &layout,
-                        self.selected_slot,
-                        &view,
-                        pal,
-                    ))
+                    .child(ring_preview(ring.theme, &layout, self.selected_slot, &view))
                     .child(action_library(
                         self.selected_slot,
                         layout.slots.get(&self.selected_slot),
@@ -354,16 +351,20 @@ fn toggle_button(
 }
 
 const PREVIEW_SIZE: f32 = 320.0;
-const PREVIEW_RADIUS: f32 = 106.0;
-const PREVIEW_SLOT_SIZE: f32 = 50.0;
-/// The In Motion pill, at the preview's scale of the overlay's 132×34.
-const PREVIEW_PILL_W: f32 = 96.0;
-const PREVIEW_PILL_H: f32 = 28.0;
+/// What the ring floats over in the preview: a mid grey, so both the classic
+/// dark disc and In Motion's dark and white pills read against it, as they do
+/// over a desktop.
+const PREVIEW_STAGE: Hsla = Hsla {
+    h: 0.0,
+    s: 0.0,
+    l: 0.32,
+    a: 1.0,
+};
 
 /// How the preview draws a slot: the theme's shape, at the preview's scale.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SlotShape {
-    /// Classic: a round icon button, the caption in a tooltip.
+    /// Classic: a round icon button.
     Round,
     /// In Motion: a pill carrying icon and caption.
     Pill,
@@ -377,20 +378,43 @@ impl SlotShape {
         }
     }
 
-    const fn size(self) -> (f32, f32) {
+    /// The theme's panel shrunk to the preview: every size the ring style
+    /// gives is multiplied by this.
+    const fn scale(self) -> f32 {
         match self {
-            Self::Round => (PREVIEW_SLOT_SIZE, PREVIEW_SLOT_SIZE),
-            Self::Pill => (PREVIEW_PILL_W, PREVIEW_PILL_H),
+            Self::Round => PREVIEW_SIZE / classic::PANEL_SIZE,
+            Self::Pill => PREVIEW_SIZE / in_motion::DESIGN_EDGE,
         }
     }
 
-    /// Top-left of `slot`, with its centre on the preview's slot circle.
+    /// Distance from the preview's centre to each slot's centre.
+    const fn radius(self) -> f32 {
+        match self {
+            Self::Round => classic::RADIUS * self.scale(),
+            Self::Pill => in_motion::RADIUS * self.scale(),
+        }
+    }
+
+    const fn size(self) -> (f32, f32) {
+        match self {
+            Self::Round => (
+                classic::SLOT_SIZE * self.scale(),
+                classic::SLOT_SIZE * self.scale(),
+            ),
+            Self::Pill => (
+                in_motion::PILL_W * self.scale(),
+                in_motion::PILL_H * self.scale(),
+            ),
+        }
+    }
+
+    /// Top-left of `slot`, with its centre on the slot circle.
     fn origin(self, slot: ActionRingSlot) -> (f32, f32) {
         let (x, y) = slot.unit_offset();
         let (width, height) = self.size();
         (
-            PREVIEW_SIZE / 2.0 + x * PREVIEW_RADIUS - width / 2.0,
-            PREVIEW_SIZE / 2.0 + y * PREVIEW_RADIUS - height / 2.0,
+            PREVIEW_SIZE / 2.0 + x * self.radius() - width / 2.0,
+            PREVIEW_SIZE / 2.0 + y * self.radius() - height / 2.0,
         )
     }
 
@@ -402,46 +426,33 @@ impl SlotShape {
     }
 }
 
-/// The ring as `theme` draws it, still: no motion, and the app's palette in
-/// place of the overlay's dark panel, so it reads as a preview and not a
-/// second ring on the desktop.
+/// A still frame of the ring as `theme` draws it, with the selected slot in
+/// its hovered state. Sizes, colours and fills come from
+/// [`openlogi_ui::ring_style`], which the overlay draws from too; only the
+/// motion is missing. The slots are the editor's slot picker as well.
 fn ring_preview(
     theme: ActionRingTheme,
     layout: &ActionRingLayout,
     selected_slot: ActionRingSlot,
     view: &Entity<ActionRingPanel>,
-    pal: Palette,
 ) -> impl IntoElement {
     let shape = SlotShape::of(theme);
+    let selected_caption = layout
+        .slots
+        .get(&selected_slot)
+        .map(|entry| localized_action_label(entry.action()));
+    let backdrop = match shape {
+        SlotShape::Round => classic_backdrop(selected_caption).into_any_element(),
+        SlotShape::Pill => in_motion_backdrop().into_any_element(),
+    };
     div()
         .relative()
         .flex_none()
         .size(px(PREVIEW_SIZE))
-        .child(
-            div()
-                .absolute()
-                .left(px(24.0))
-                .top(px(24.0))
-                .size(px(PREVIEW_SIZE - 48.0))
-                .rounded_full()
-                .border_1()
-                .border_color(pal.border)
-                .bg(pal.panel),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(PREVIEW_SIZE / 2.0 - 24.0))
-                .top(px(PREVIEW_SIZE / 2.0 - 24.0))
-                .size(px(48.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(pal.muted)
-                .text_color(pal.text_muted)
-                .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none()),
-        )
+        .rounded_lg()
+        .overflow_hidden()
+        .bg(PREVIEW_STAGE)
+        .child(backdrop)
         .children(ActionRingSlot::ALL.into_iter().map(|slot| {
             slot_button(
                 shape,
@@ -449,9 +460,95 @@ fn ring_preview(
                 layout.slots.get(&slot),
                 selected_slot == slot,
                 view,
-                pal,
             )
         }))
+}
+
+/// A centred circle of `diameter`, for the backdrops.
+fn centred_circle(diameter: f32) -> Div {
+    div()
+        .absolute()
+        .left(px(PREVIEW_SIZE / 2.0 - diameter / 2.0))
+        .top(px(PREVIEW_SIZE / 2.0 - diameter / 2.0))
+        .size(px(diameter))
+        .rounded_full()
+}
+
+/// The classic dark disc, its cancel button, and under it the selected
+/// slot's label, where the ring shows the hovered one.
+fn classic_backdrop(caption: Option<SharedString>) -> Div {
+    let scale = SlotShape::Round.scale();
+    div()
+        .absolute()
+        .size_full()
+        .child(
+            centred_circle((classic::PANEL_SIZE - 2.0 * classic::DISC_INSET) * scale)
+                .bg(classic::PANEL)
+                .shadow_lg(),
+        )
+        .child(
+            centred_circle(classic::CANCEL_SIZE * scale)
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(classic::CANCEL_RESTING)
+                .text_color(classic::CANCEL_GLYPH)
+                .child(
+                    svg()
+                        .path(RING_CANCEL_ICON)
+                        .size(px(classic::CANCEL_GLYPH_SIZE * scale))
+                        .flex_none(),
+                ),
+        )
+        .when_some(caption, |backdrop, caption| {
+            let width = classic::LABEL_WIDTH * scale;
+            backdrop.child(
+                div()
+                    .absolute()
+                    .left(px(PREVIEW_SIZE / 2.0 - width / 2.0))
+                    .top(px(PREVIEW_SIZE / 2.0 + classic::LABEL_OFFSET * scale))
+                    .w(px(width))
+                    .text_center()
+                    .text_sm()
+                    .text_color(classic::LABEL)
+                    .truncate()
+                    .child(caption),
+            )
+        })
+}
+
+/// In Motion's hub glow, HUD tracks and hub, still: the glow and tracks at
+/// the middle of their breath, the arcs that travel them left out.
+fn in_motion_backdrop() -> Div {
+    let scale = SlotShape::Pill.scale();
+    let track = in_motion::RADIUS * scale;
+    div()
+        .absolute()
+        .size_full()
+        .children(in_motion::HUB_GLOW.map(|(radius, alpha, swing)| {
+            centred_circle(2.0 * radius * scale).bg(color::accent().alpha(alpha + swing / 2.0))
+        }))
+        .children(
+            [in_motion::TRACK_INNER, 1.0, in_motion::TRACK_OUTER].map(|fraction| {
+                centred_circle(2.0 * track * fraction)
+                    .border_1()
+                    .border_color(in_motion::track(0.5))
+            }),
+        )
+        .child(
+            centred_circle(in_motion::HUB * scale)
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(in_motion::hub_fill())
+                .text_color(in_motion::CANCEL_GLYPH)
+                .child(
+                    svg()
+                        .path(RING_CANCEL_ICON)
+                        .size(px(in_motion::HUB_GLYPH * scale))
+                        .flex_none(),
+                ),
+        )
 }
 
 fn slot_button(
@@ -460,11 +557,11 @@ fn slot_button(
     entry: Option<&ActionRingEntry>,
     selected: bool,
     view: &Entity<ActionRingPanel>,
-    pal: Palette,
 ) -> impl IntoElement {
     let index = slot.index();
     let (left, top) = shape.origin(slot);
     let (width, height) = shape.size();
+    let scale = shape.scale();
     let label = entry.map_or_else(
         || tr!("action_ring.empty_slot").to_string(),
         |entry| localized_action_label(entry.action()).to_string(),
@@ -478,11 +575,18 @@ fn slot_button(
     let accessible_label = label.clone();
     let caption = SharedString::from(label.clone());
     let selected_view = view.clone();
-    let ink = if selected {
-        pal.text_primary
-    } else {
-        pal.text_muted
+    // The ring hides an empty slot; the editor shows it as an outline so it
+    // can still be picked.
+    let empty = entry.is_none();
+    let hover = if selected { 1.0 } else { 0.0 };
+    let ink = match shape {
+        SlotShape::Round => classic::GLYPH,
+        SlotShape::Pill => in_motion::slot_ink(hover),
     };
+    let glyph = match shape {
+        SlotShape::Round => classic::SLOT_GLYPH,
+        SlotShape::Pill => in_motion::PILL_GLYPH,
+    } * scale;
 
     BaseButton::new(("action-ring-slot", index))
         .debug_selector(move || shape.debug_selector().to_string())
@@ -495,57 +599,45 @@ fn slot_button(
         .flex()
         .items_center()
         .justify_center()
-        .when(shape == SlotShape::Pill, |button| button.gap(px(6.0)).px(px(10.0)))
         .rounded_full()
-        .border_2()
-        .border_color(if selected {
-            rgb(theme::ACCENT_BLUE).into()
-        } else {
-            pal.border
-        })
-        .bg(if selected {
-            theme::accent_tint()
-        } else {
-            pal.control
-        })
         .text_color(ink)
         .cursor_pointer()
+        .map(|button| match (shape, empty) {
+            (_, true) => button.border_1().border_color(in_motion::track(1.0)),
+            (SlotShape::Round, false) if selected => button
+                .bg(classic::selected_fill())
+                .border_2()
+                .border_color(classic::selected_border()),
+            (SlotShape::Round, false) => button.bg(classic::SLOT_RESTING).shadow_md(),
+            (SlotShape::Pill, false) => button.bg(in_motion::slot_fill(hover)),
+        })
+        .when(shape == SlotShape::Pill && !empty, |button| {
+            button
+                .justify_start()
+                .gap(px(6.0 * scale))
+                .px(px(12.0 * scale))
+        })
         .accessibility_label(accessible_label)
         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
         .when_some(icon_path, |button, path| {
-            let glyph = if shape == SlotShape::Pill { 14.0 } else { 20.0 };
             button.child(svg().path(path).size(px(glyph)).flex_none().text_color(ink))
         })
-        .when(icon_path.is_none(), |button| {
+        .when(empty, |button| {
             button.child(Icon::new(IconName::Plus).size_4())
         })
-        // The pill carries its caption, as the overlay's does; the round slot
-        // leaves it to the tooltip.
-        .when(shape == SlotShape::Pill, |button| {
+        // The pill carries its caption, as the ring's does; the round slot
+        // leaves it to the label under the hub and the tooltip.
+        .when(shape == SlotShape::Pill && !empty, |button| {
             button.child(
                 div()
-                    .w(px(PREVIEW_PILL_W - 36.0))
+                    .w(px((in_motion::PILL_W - 40.0) * scale))
                     .text_xs()
                     .truncate()
                     .child(caption),
             )
         })
-        .hover(move |button| {
-            button.bg(if selected {
-                theme::accent_tint_hover()
-            } else {
-                pal.control_hover
-            })
-        })
-        .focus_visible(move |button| {
-            button
-                .border_color(rgb(theme::ACCENT_BLUE))
-                .bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-        })
+        .hover(|button| button.opacity(0.85))
+        .focus_visible(|button| button.border_2().border_color(rgb(theme::ACCENT_BLUE)))
         .on_click(move |_, _, cx| {
             selected_view.update(cx, |panel, cx| {
                 panel.selected_slot = slot;
@@ -584,16 +676,9 @@ mod tests {
     }
 
     impl Render for PreviewOnly {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let layout = ActionRingLayout::default();
-            ring_preview(
-                self.theme,
-                &layout,
-                ActionRingSlot::Top,
-                &self.panel,
-                theme::palette(cx),
-            )
-            .into_any_element()
+            ring_preview(self.theme, &layout, ActionRingSlot::Top, &self.panel).into_any_element()
         }
     }
 
@@ -622,8 +707,14 @@ mod tests {
             let slot = cx
                 .debug_bounds(present)
                 .unwrap_or_else(|| panic!("{theme:?} draws {present}"));
+            // At the theme's own scale, give or take GPUI's pixel snapping.
             let (width, height) = SlotShape::of(theme).size();
-            assert_eq!(slot.size, gpui::size(px(width), px(height)), "{theme:?}");
+            assert!(
+                (f32::from(slot.size.width) - width).abs() <= 1.0
+                    && (f32::from(slot.size.height) - height).abs() <= 1.0,
+                "{theme:?}: {:?} is not {width}×{height}",
+                slot.size
+            );
             assert!(
                 cx.debug_bounds(absent).is_none(),
                 "{theme:?} draws no {absent}"

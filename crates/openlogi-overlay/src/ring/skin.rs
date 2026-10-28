@@ -8,32 +8,28 @@ use std::f32::consts::PI;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Background, Context, Hsla, InteractiveElement, IntoElement, ParentElement, PathBuilder, Pixels,
+    Background, Context, InteractiveElement, IntoElement, ParentElement, PathBuilder, Pixels,
     Point, SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, div,
     linear_color_stop, linear_gradient, point, prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
+pub(super) use openlogi_ui::ring_style::in_motion::DESIGN_EDGE;
+use openlogi_ui::ring_style::in_motion::{
+    CANCEL_GLYPH, GLYPH, HUB, HUB_GLOW, HUB_GLYPH, PILL_GLYPH, PILL_H, PILL_W, RADIUS, TRACK_INNER,
+    TRACK_OUTER, hub_fill, hub_fill_hovered, slot_fill, slot_ink, track,
+};
 
 use super::{RingLook, RingView};
 use crate::ipc::OverlayCommand;
 
-/// The designed edge of the panel, and of its window on a display that fits
-/// it: wide enough for the captions, small enough for 1080p at 200%.
-pub(super) const DESIGN_EDGE: f32 = 480.0;
-
-const PILL_W: f32 = 132.0;
-const PILL_H: f32 = 34.0;
-/// The hub at rest: the cancel button.
-const HUB: f32 = 48.0;
 /// The hub open: the circle that carries the hovered slot's full caption.
 /// Clears every pill at the 160 px slot radius.
 const HUB_OPEN: f32 = 136.0;
 /// How fast the hub opens and closes.
 const HUB_TAU: f32 = 0.12;
 const HOVER_RING: f32 = 64.0;
-const RADIUS: f32 = 160.0;
 const ENTER_SECS: f32 = 0.294;
 const HOVER_TAU: f32 = 0.09;
 const ARC_SPAN: f32 = 0.70;
@@ -44,19 +40,6 @@ const ARC_PIECES: u8 = 8;
 /// this long.
 pub(super) const EXIT: Duration = Duration::from_millis(196);
 const EXIT_SECS: f32 = EXIT.as_secs_f32();
-
-const GLYPH: Hsla = neutral(0.98, 1.0);
-const INK: Hsla = neutral(0.08, 1.0);
-const CANCEL_GLYPH: Hsla = neutral(0.84, 1.0);
-
-const fn neutral(lightness: f32, alpha: f32) -> Hsla {
-    Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: lightness,
-        a: alpha,
-    }
-}
 
 /// Hover, arc, and enter/exit clocks for one open ring.
 pub(super) struct Motion {
@@ -241,7 +224,7 @@ fn slot_element(
     // slot while the ring is still opening must hover it.
     let (left, top) = layout.slot_origin(slot);
     let session_id = view.invocation.session_id;
-    let ink = lerp_hsla(GLYPH, INK, hover_t);
+    let ink = slot_ink(hover_t);
     Some(
         div()
             .id(("ring-slot", slot.index()))
@@ -262,7 +245,7 @@ fn slot_element(
             .child(
                 svg()
                     .path(icon_path)
-                    .size(px(16.0))
+                    .size(px(PILL_GLYPH))
                     .flex_none()
                     .text_color(ink),
             )
@@ -307,22 +290,10 @@ fn cancel_control(
         .items_center()
         .justify_center()
         .rounded_full()
-        .bg(linear_gradient(
-            145.0,
-            linear_color_stop(color::accent().alpha(0.28), 0.0),
-            linear_color_stop(color::accent().alpha(0.06), 1.0),
-        ))
+        .bg(hub_fill())
         .text_color(CANCEL_GLYPH)
         .cursor_pointer()
-        .hover(|cancel| {
-            cancel
-                .bg(linear_gradient(
-                    145.0,
-                    linear_color_stop(color::accent_at_lightness(0.52), 0.0),
-                    linear_color_stop(color::accent_at_lightness(0.28), 1.0),
-                ))
-                .text_color(GLYPH)
-        })
+        .hover(|cancel| cancel.bg(hub_fill_hovered()).text_color(GLYPH))
         .map(|hub| match caption {
             // The caption fades in as the circle opens; the cross fades back
             // as it closes, so neither shows at a size it does not fit.
@@ -338,7 +309,7 @@ fn cancel_control(
             None => hub.child(
                 svg()
                     .path(RING_CANCEL_ICON)
-                    .size(px(20.0))
+                    .size(px(HUB_GLYPH))
                     .flex_none()
                     .opacity(1.0 - open),
             ),
@@ -377,47 +348,6 @@ fn presence_at(
     Presence {
         scale: (0.62 + 0.38 * enter) * exit_scale,
         opacity: ease_out_cubic((enter * 1.6).min(1.0)) * exit_opacity,
-    }
-}
-
-fn slot_fill(hover_t: f32) -> Background {
-    let rest_top = Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: 0.18,
-        a: 0.92,
-    };
-    let rest_bot = Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: 0.10,
-        a: 0.92,
-    };
-    let hot_top = Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: 1.0,
-        a: 1.0,
-    };
-    let hot_bot = Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: 0.86,
-        a: 1.0,
-    };
-    linear_gradient(
-        160.0,
-        linear_color_stop(lerp_hsla(rest_top, hot_top, hover_t), 0.0),
-        linear_color_stop(lerp_hsla(rest_bot, hot_bot, hover_t), 1.0),
-    )
-}
-
-const fn lerp_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
-    Hsla {
-        h: a.h + (b.h - a.h) * t,
-        s: a.s + (b.s - a.s) * t,
-        l: a.l + (b.l - a.l) * t,
-        a: a.a + (b.a - a.a) * t,
     }
 }
 
@@ -501,11 +431,8 @@ fn paint_ambient(window: &mut Window, bounds: gpui::Bounds<Pixels>, ambient: &Am
 }
 
 fn paint_hub_glow(window: &mut Window, center: Point<Pixels>, scale: f32, breath: f32) {
-    for (radius, alpha) in [
-        (72.0 * scale, 0.12 + 0.05 * breath),
-        (48.0 * scale, 0.16 + 0.06 * breath),
-        (28.0 * scale, 0.22),
-    ] {
+    for (radius, alpha, swing) in HUB_GLOW {
+        let (radius, alpha) = (radius * scale, alpha + swing * breath);
         if let Some(path) = ellipse_path(center, radius, None) {
             window.paint_path(path, accent_wash(145.0, alpha));
         }
@@ -520,14 +447,9 @@ fn paint_hud_tracks(
     motion: HudMotion,
 ) {
     let track = RADIUS * scale;
-    let inner = track * 0.62;
-    let outer = track * 1.16;
-    let grid = Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: 0.58,
-        a: 0.10 + 0.04 * breath,
-    };
+    let inner = track * TRACK_INNER;
+    let outer = track * TRACK_OUTER;
+    let grid = self::track(breath);
     for radius in [inner, track, outer] {
         if let Some(path) = ellipse_path(center, radius, Some(1.0)) {
             window.paint_path(path, grid);

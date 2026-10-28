@@ -2,46 +2,20 @@
 //! slot's label under the cancel button. It opens and closes without motion.
 
 use gpui::{
-    Context, Div, Hsla, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, svg,
+    Context, Div, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement as _,
+    Styled, div, prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
-use openlogi_ui::color;
+pub(super) use openlogi_ui::ring_style::classic::PANEL_SIZE;
+use openlogi_ui::ring_style::classic::{
+    CANCEL_GLYPH, CANCEL_GLYPH_SIZE, CANCEL_RESTING, CANCEL_SIZE, DISC_INSET, GLYPH, LABEL,
+    LABEL_OFFSET, LABEL_WIDTH, PANEL, RADIUS, SLOT_GLYPH, SLOT_RESTING, SLOT_SIZE, selected_border,
+    selected_fill,
+};
 
 use super::RingView;
 use crate::ipc::OverlayCommand;
-
-/// The disc's edge, which is the ring window's edge for this theme.
-pub(super) const PANEL_SIZE: f32 = 360.0;
-const SLOT_SIZE: f32 = 54.0;
-const RADIUS: f32 = 122.0;
-
-/// The ring's own neutral scale. It floats over whatever is on the desktop, so
-/// unlike the settings app it cannot take its surfaces from the OS appearance —
-/// it commits to a dark panel and rides its own contrast. Only the accent is
-/// shared (`openlogi_ui::color`); these greys are local by nature.
-const PANEL: Hsla = neutral(0.06, 0.82);
-const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
-const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
-const GLYPH: Hsla = neutral(0.98, 1.0);
-const LABEL: Hsla = neutral(0.94, 1.0);
-const CANCEL_GLYPH: Hsla = neutral(0.82, 1.0);
-
-const fn neutral(lightness: f32, alpha: f32) -> Hsla {
-    Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: lightness,
-        a: alpha,
-    }
-}
-
-/// The accent deepened for the dark panel: the brand lightness sits too close to
-/// the white glyph a selected slot carries, so the fill drops to `0.48` and the
-/// ring around it rises to `0.78`. Both keep the brand hue and saturation.
-const SELECTED_FILL_L: f32 = 0.48;
-const SELECTED_BORDER_L: f32 = 0.78;
 
 impl RingView {
     /// The disc, which fills its [`PANEL_SIZE`] window.
@@ -59,9 +33,9 @@ impl RingView {
             .child(
                 div()
                     .absolute()
-                    .left(px(18.0))
-                    .top(px(18.0))
-                    .size(px(PANEL_SIZE - 36.0))
+                    .left(px(DISC_INSET))
+                    .top(px(DISC_INSET))
+                    .size(px(PANEL_SIZE - 2.0 * DISC_INSET))
                     .rounded_full()
                     .bg(PANEL)
                     .shadow_lg(),
@@ -71,9 +45,9 @@ impl RingView {
                 div()
                     .id("ring-cancel")
                     .absolute()
-                    .left(px(PANEL_SIZE / 2.0 - 24.0))
-                    .top(px(PANEL_SIZE / 2.0 - 24.0))
-                    .size(px(48.0))
+                    .left(px(PANEL_SIZE / 2.0 - CANCEL_SIZE / 2.0))
+                    .top(px(PANEL_SIZE / 2.0 - CANCEL_SIZE / 2.0))
+                    .size(px(CANCEL_SIZE))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -81,7 +55,12 @@ impl RingView {
                     .bg(CANCEL_RESTING)
                     .text_color(CANCEL_GLYPH)
                     .cursor_pointer()
-                    .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
+                    .child(
+                        svg()
+                            .path(RING_CANCEL_ICON)
+                            .size(px(CANCEL_GLYPH_SIZE))
+                            .flex_none(),
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.close(OverlayCommand::Cancel { session_id }, window, cx);
@@ -91,9 +70,9 @@ impl RingView {
                 ring.child(
                     div()
                         .absolute()
-                        .left(px(PANEL_SIZE / 2.0 - 80.0))
-                        .top(px(PANEL_SIZE / 2.0 + 34.0))
-                        .w(px(160.0))
+                        .left(px(PANEL_SIZE / 2.0 - LABEL_WIDTH / 2.0))
+                        .top(px(PANEL_SIZE / 2.0 + LABEL_OFFSET))
+                        .w(px(LABEL_WIDTH))
                         .text_center()
                         .text_sm()
                         .text_color(LABEL)
@@ -124,18 +103,17 @@ impl RingView {
                 .justify_center()
                 .rounded_full()
                 .bg(if selected {
-                    color::accent_at_lightness(SELECTED_FILL_L)
+                    selected_fill()
                 } else {
                     SLOT_RESTING
                 })
                 .when(selected, |slot| {
-                    slot.border_2()
-                        .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
+                    slot.border_2().border_color(selected_border())
                 })
                 .shadow_md()
                 .text_color(GLYPH)
                 .cursor_pointer()
-                .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
+                .child(svg().path(icon_path).size(px(SLOT_GLYPH)).text_color(GLYPH))
                 .on_hover(cx.listener(move |this, hovered, _, cx| {
                     this.hover(slot, *hovered, cx);
                 }))
