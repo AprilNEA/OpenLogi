@@ -186,8 +186,6 @@ impl ActionRingIcon {
             Self::Ban => "action-icons/ban.svg",
             Self::ZoomIn => "action-icons/zoom-in.svg",
             Self::ZoomOut => "action-icons/zoom-out.svg",
-            Self::ZoomIn => "action-icons/zoom-in.svg",
-            Self::ZoomOut => "action-icons/zoom-out.svg",
         }
     }
 

@@ -113,7 +113,7 @@ fn post_gesture_event(src: &CGEventSource, subtype: i64, phase: i64, value: i64)
 /// (apps ignore it; zoom freezes until the idle closer resets us). So while a
 /// session is open the step folds in as one more `changed` delta; with none,
 /// it posts the standalone began→ended micro-gesture.
-pub(super) fn post_zoom(delta: i32) {
+pub(crate) fn post_zoom(delta: i32) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for zoom");
         return;
@@ -199,7 +199,7 @@ fn close_zoom_session_if_idle() {
 /// the zoom read as continuous instead of stepping per detent. Aggregate gain
 /// is unchanged: `lines` arrives sensitivity-scaled from the watcher and
 /// [`ZOOM_MAGNIFICATION_PER_STEP`] converts lines to magnification.
-pub(super) fn post_zoom_continuous(lines: f32) {
+pub(crate) fn post_zoom_continuous(lines: f32) {
     std::sync::LazyLock::force(&ZOOM_SESSION_CLOSER);
 
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
@@ -220,4 +220,3 @@ pub(super) fn post_zoom_continuous(lines: f32) {
     session.open = true;
     session.last_activity = Some(std::time::Instant::now());
 }
-

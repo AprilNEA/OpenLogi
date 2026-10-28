@@ -3,7 +3,6 @@
 
 use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
-use std::sync::Mutex;
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
@@ -274,6 +273,17 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
 
 pub(super) fn press_combo(combo: &KeyCombo) {
     let Some(key) = Key::for_usage(combo.key(), ForegroundLayout::current()) else {
+        tracing::warn!(
+            usage = combo.key().code(),
+            chord = %combo.rendered_label(),
+            "CustomShortcut key has no Windows mapping yet; press ignored"
+        );
+        return;
+    };
+
+    post_key(key, &combo_modifiers(combo));
+}
+
 /// Post a vertical wheel scroll of `delta` notches with Ctrl held — the
 /// native wheel-zoom gesture on Windows. One `SendInput` batch keeps
 /// Ctrl-down, the wheel notch(es), and Ctrl-up atomically ordered so the
@@ -283,9 +293,9 @@ pub(super) fn post_zoom(delta: i32) {
         return;
     }
     send_inputs(&[
-        key_input(VK_CONTROL, false),
+        key_input(Key::from(VK_CONTROL), false),
         mouse_input(MOUSEEVENTF_WHEEL, delta.saturating_mul(WHEEL_DELTA)),
-        key_input(VK_CONTROL, true),
+        key_input(Key::from(VK_CONTROL), true),
     ]);
 }
 

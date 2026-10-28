@@ -166,6 +166,8 @@ mod tests {
             (Action::ScrollUp, Action::ScrollDown),
             (Action::HorizontalScrollRight, Action::HorizontalScrollLeft),
             (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
+            (Action::ZoomOut, Action::ZoomIn),
+            (Action::ZoomIn, Action::ZoomOut),
         ];
 
         assert_eq!(expected.len(), ThumbwheelPreset::ALL.len());

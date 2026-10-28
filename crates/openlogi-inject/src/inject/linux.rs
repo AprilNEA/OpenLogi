@@ -488,6 +488,8 @@ fn dispatch_scroll(dx: i8, dy: i8) {
 
 fn action_scroll(dx: i8, dy: i8) -> ScrollDelta {
     ScrollDelta::wheel_ticks(f64::from(dx) * 3.0, f64::from(dy) * 3.0)
+}
+
 /// Inject a vertical wheel step of `delta` detents with Ctrl held — the
 /// native wheel-zoom gesture on Linux (Ctrl + wheel). Ctrl-down lands in its
 /// own SYN frame before the wheel event so the compositor already sees the
@@ -528,10 +530,6 @@ pub(super) fn post_zoom_continuous(delta_lines: f32) {
     *pending -= whole as f32;
     drop(pending);
     post_zoom(whole);
-}
-
-fn run_shell_command_async(cmd: String) {
-    std::thread::spawn(move || run_shell_command(&cmd));
 }
 
 /// Not implemented yet: unicode text has no uinput encoding without a keymap.
