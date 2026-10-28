@@ -1,9 +1,11 @@
 //! Switchable grid, list, and carousel layouts for the Home device gallery.
 
+use std::sync::Arc;
+
 use gpui::{
-    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Rems,
-    SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
-    rems, rgb,
+    AnyElement, Context, Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement,
+    Rems, SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _,
+    px, rems, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -14,8 +16,10 @@ use gpui_component::{
     scroll::ScrollableElement as _,
     v_flex,
 };
-use openlogi_core::config::DeviceViewMode;
+use openlogi_core::config::{DeviceViewMode, LightSettings};
 use openlogi_core::device::DeviceKind;
+
+use crate::services::assets::GlowGeometry;
 
 use super::{
     AppView, connection_summary, connection_view, custom_model_subtitle, device_card, device_image,
@@ -244,6 +248,56 @@ fn device_card_element(
     })
 }
 
+/// 120×68 list thumbnail. When the keyboard glows, the photo and the lights
+/// share one box the size of the render, so contain-fit lands on the same pixels.
+///
+/// The lights paint on top of this thumbnail. A letter here is about one device
+/// pixel, and the shrunk photo turns that pixel opaque, so a glow behind the
+/// photo only survives on the edge of the stroke. Grid, carousel, and detail
+/// stay behind the photo, where the cutout is large enough to mask it.
+fn list_thumb(
+    record: &DeviceRecord,
+    light_enabled: bool,
+    light_settings: LightSettings,
+    pal: Palette,
+    glow: Option<(Arc<GlowGeometry>, Hsla)>,
+) -> Div {
+    let image = device_image(record, light_enabled, light_settings, pal);
+    let thumb = div()
+        .relative()
+        .w(px(120.))
+        .h(px(68.))
+        .flex_none()
+        .overflow_hidden()
+        .opacity(if record.online { 1. } else { 0.38 });
+    if let Some((geom, color)) = glow {
+        let (frame_w, frame_h) = super::fitted_frame(120., 68., geom.aspect);
+        thumb.child(
+            div()
+                .absolute()
+                .top(px((68. - frame_h) / 2.))
+                .left(px((120. - frame_w) / 2.))
+                .w(px(frame_w))
+                .h(px(frame_h))
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .overflow_hidden()
+                        .child(image),
+                )
+                .child(super::glow_canvas(geom, color)),
+        )
+    } else {
+        thumb.flex().items_center().justify_center().child(image)
+    }
+}
+
 fn device_list_row(
     state: &AppState,
     idx: usize,
@@ -273,22 +327,7 @@ fn device_list_row(
         .border_color(device_ring(enabled))
         .bg(pal.panel)
         .shadow_xs()
-        .child(
-            div()
-                .relative()
-                .w(px(120.))
-                .h(px(68.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .overflow_hidden()
-                .opacity(if record.online { 1. } else { 0.38 })
-                .when_some(glow, |this, (geom, color)| {
-                    this.child(super::glow_canvas(geom, color))
-                })
-                .child(device_image(record, light_enabled, light_settings, pal)),
-        )
+        .child(list_thumb(record, light_enabled, light_settings, pal, glow))
         .child(
             v_flex()
                 .flex_1()

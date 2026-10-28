@@ -60,12 +60,17 @@ pub(crate) struct GlowSeg {
 
 /// The baked inter-key holes as normalized segments plus the mask's aspect
 /// ratio, ready to paint over the device image at any size. Decoded once per
-/// asset resolve; the segment list is the entire runtime footprint — there is
-/// no recoloured texture, so a session that cycles colours costs nothing extra.
+/// asset resolve. `holes` is the enclosed legend pixels themselves (not the
+/// bin they sit in), packed `x | (y << 16)` in the same space as
+/// `image_width` / `image_height`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct GlowGeometry {
     pub aspect: f32,
     pub segments: Vec<GlowSeg>,
+    pub image_width: u32,
+    pub image_height: u32,
+    /// Enclosed legend pixels. Empty only when nothing was see-through.
+    pub holes: Vec<u32>,
 }
 
 /// Holes for the keyboard render at `image_path`.
@@ -181,12 +186,25 @@ fn compute_glow_geometry(image_path: &Path) -> Option<GlowGeometry> {
             }
         }
     }
-    if segments.is_empty() {
+    // The bin is see-through when *any* source pixel is, so a segment is a
+    // few pixels taller than the legend. Painting that rectangle at list size
+    // (a whole character is under one device pixel) lights the key border.
+    // Keep the pixels that are actually clear.
+    let mut holes = Vec::new();
+    for (x, y, pixel) in img.enumerate_pixels() {
+        if pixel.0[3] < HOLE_ALPHA && cells[((y / scale) * w + (x / scale)) as usize] == 1 {
+            holes.push(x | (y << 16));
+        }
+    }
+    if holes.is_empty() {
         return None;
     }
     Some(GlowGeometry {
         aspect: image_width / image_height,
         segments,
+        image_width: src_w,
+        image_height: src_h,
+        holes,
     })
 }
 
@@ -212,6 +230,7 @@ impl GlowGeometry {
         }
         let (wf, hf) = (w as f32, h as f32);
         let mut segments = Vec::new();
+        let mut holes = Vec::new();
         let mut idx: u64 = 0;
         let mut on = false;
         for &run in &mask.runs {
@@ -228,15 +247,27 @@ impl GlowGeometry {
                         w: (seg_end - start) as f32 / wf,
                         h: 1.0 / hf,
                     });
+                    let row_u = u32::try_from(row).ok()?;
+                    let col_start = u32::try_from(col).ok()?;
+                    let seg_len = usize::try_from(seg_end - start).ok()?;
+                    for col_u in (col_start..).take(seg_len) {
+                        holes.push(col_u | (row_u << 16));
+                    }
                     start = seg_end;
                 }
             }
             idx += u64::from(run);
             on = !on;
         }
+        if holes.is_empty() {
+            return None;
+        }
         Some(Self {
             aspect: wf / hf,
             segments,
+            image_width: w,
+            image_height: h,
+            holes,
         })
     }
 }
@@ -331,6 +362,8 @@ mod tests {
         assert!((seg.x - 0.4).abs() < 1e-6, "hole at col 2 of 5");
         assert!((seg.y - 0.4).abs() < 1e-6, "hole at row 2 of 5");
         assert!((geom.aspect - 1.0).abs() < 1e-6);
+        // The border-connected clear pixels are not legend holes.
+        assert_eq!(geom.holes, vec![2 | (2 << 16)]);
     }
 
     #[test]
